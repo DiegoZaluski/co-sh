@@ -7,5 +7,6 @@ pub mod mismatch;
 pub mod normalize;
 pub mod parser;
 pub mod prefixes;
+pub mod snapshots;
 pub mod tokenizer;
 pub mod types;
