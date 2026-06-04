@@ -3,6 +3,7 @@ pub mod block;
 pub mod diff;
 pub mod diff_preview;
 pub mod format;
+pub mod recovery;
 pub mod messages;
 pub mod mismatch;
 pub mod normalize;
