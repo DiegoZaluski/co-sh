@@ -3,6 +3,7 @@ pub mod block;
 pub mod diff_preview;
 pub mod format;
 pub mod messages;
+pub mod mismatch;
 pub mod normalize;
 pub mod parser;
 pub mod prefixes;
