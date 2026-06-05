@@ -9,6 +9,7 @@ pub mod messages;
 pub mod mismatch;
 pub mod normalize;
 pub mod parser;
+pub mod patcher;
 pub mod prefixes;
 pub mod recovery;
 pub mod snapshots;
