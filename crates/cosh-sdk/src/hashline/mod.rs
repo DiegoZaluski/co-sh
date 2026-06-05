@@ -13,5 +13,6 @@ pub mod patcher;
 pub mod prefixes;
 pub mod recovery;
 pub mod snapshots;
+pub mod stream;
 pub mod tokenizer;
 pub mod types;
