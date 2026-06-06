@@ -16,3 +16,6 @@ pub mod snapshots;
 pub mod stream;
 pub mod tokenizer;
 pub mod types;
+
+#[cfg(test)]
+pub mod test;

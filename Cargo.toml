@@ -1,10 +1,13 @@
-workspace = { members = ["crates/cosh-sdk"] }
+[workspace] 
+members = ["crates/cosh-sdk"] 
+
 [package]
-name = "cosh"
-version = "0.1.0"
+description = "Coding agent for the terminal. No UI, no noise."
 edition = "2021"
 license = "Apache-2.0"
-
+name = "cosh"
+repository = "https://github.com/DiegoZaluski/cosh"
+version = "0.0.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

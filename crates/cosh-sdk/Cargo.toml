@@ -1,12 +1,12 @@
 [package]
+edition = "2021"
 name = "cosh-sdk"
 version = "0.1.0"
-edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 lru = "0.12"
 regex = "1"
-xxhash-rust = { version = "0.8", features = ["xxh32"] }
 similar = "3.1.1"
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
