@@ -39,6 +39,37 @@ pub(crate) fn resolve_block(tree: &Tree, text: &str, line: u32) -> Option<BlockS
     })
 }
 
+/// Returns the `BlockSpan` of the first definition node whose `name` field matches `name`.
+///
+/// Walks the tree in pre-order so the outermost matching definition is found first
+/// (e.g. a module before a nested symbol).
+pub(crate) fn resolve_symbol_name(tree: &Tree, source: &[u8], name: &str) -> Option<BlockSpan> {
+    let mut cursor = tree.root_node().walk();
+    loop {
+        let node = cursor.node();
+
+        if node
+            .child_by_field_name("name")
+            .and_then(|n| n.utf8_text(source).ok())
+            == Some(name)
+        {
+            return Some(BlockSpan {
+                start: node.start_position().row as u32 + 1,
+                end: node.end_position().row as u32 + 1,
+            });
+        }
+
+        if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return None;
+            }
+        }
+    }
+}
+
 fn byte_of_row(text: &str, target_row: usize) -> Option<usize> {
     if target_row == 0 {
         return Some(0);

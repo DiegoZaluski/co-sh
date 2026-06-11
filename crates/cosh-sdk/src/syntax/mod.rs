@@ -35,15 +35,22 @@ impl TreeSitter {
         }
     }
 
-    pub fn resolve_block(&self, path: &str, text: &str, line: u32) -> Option<BlockSpan> {
+    /// Acquires the cache entry for `path`, re-parsing if `text` changed.
+    ///
+    /// `f` receives the entry (which holds the parsed tree) plus `text`.
+    /// Returns `None` if the language is unsupported or parsing fails.
+    fn with_entry<R>(
+        &self,
+        path: &str,
+        text: &str,
+        f: impl FnOnce(&CachedEntry, &str) -> R,
+    ) -> Option<R> {
         let mut guard = self.inner.lock().unwrap();
 
         // `Tree` is not `Clone`, so we must pop to gain ownership even on a cache hit.
         let entry = match guard.pop(path) {
             Some(old) if old.text == text => old,
             Some(old) => {
-                // Text changed — incremental re-parse with old tree avoids
-                // re-scanning unaffected regions.
                 let mut parser = Parser::new();
                 if parser.set_language(&old.language).is_err() {
                     guard.put(path.to_string(), old);
@@ -74,10 +81,29 @@ impl TreeSitter {
                 }
             }
         };
-
-        let span = block::resolve_block(&entry.tree, text, line);
+        let result = f(&entry, &entry.text);
         guard.put(path.to_string(), entry);
-        span
+        Some(result)
+    }
+
+    pub fn resolve_block(&self, path: &str, text: &str, line: u32) -> Option<BlockSpan> {
+        self.with_entry(path, text, |entry, _| {
+            block::resolve_block(&entry.tree, text, line)
+        })
+        .flatten()
+    }
+
+    /// Resolves the syntactic block of the first definition whose declared `name`
+    /// matches `name` (e.g. a symbol, struct, or module).
+    ///
+    /// Uses the same cache and parsing lifecycle as [`resolve_block`].
+    /// Returns `None` when the language is unsupported, parsing fails, or no
+    /// matching definition is found.
+    pub fn resolve_symbol(&self, path: &str, text: &str, name: &str) -> Option<BlockSpan> {
+        self.with_entry(path, text, |entry, _| {
+            block::resolve_symbol_name(&entry.tree, text.as_bytes(), name)
+        })
+        .flatten()
     }
 
     pub fn invalidate(&self, path: &str) {
