@@ -1,5 +1,5 @@
-[workspace] 
-members = ["crates/cosh-sdk"] 
+[workspace]
+members = ["crates/cosh-sdk", "crates/cosh-tools"]
 
 [package]
 description = "Coding agent for the terminal. No UI, no noise."
