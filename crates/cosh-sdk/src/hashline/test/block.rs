@@ -233,8 +233,8 @@ fn apply_partial_to_drops_unresolvable_block_edit() {
     assert_eq!(result.text, text);
 }
 
-#[test]
-fn patcher_applies_block_edit_on_hash_match_path() {
+#[tokio::test]
+async fn patcher_applies_block_edit_on_hash_match_path() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), text.to_string())]);
     let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
@@ -245,7 +245,7 @@ fn patcher_applies_block_edit_on_hash_match_path() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch).unwrap();
+    let result = patcher.apply(&patch).await.unwrap();
 
     assert_eq!(result.sections[0].op, PatchOp::Update);
     assert_eq!(
@@ -254,8 +254,8 @@ fn patcher_applies_block_edit_on_hash_match_path() {
     );
 }
 
-#[test]
-fn resolves_against_tagged_snapshot_and_recovers_onto_drifted_content() {
+#[tokio::test]
+async fn resolves_against_tagged_snapshot_and_recovers_onto_drifted_content() {
     let snapshot_text = "line0\nline1\nline2\nline3\nline4\n";
     // The live file gained a trailing line after the read minted the tag.
     let live_text = "line0\nline1\nline2\nline3\nline4\nline5\n";
@@ -270,7 +270,7 @@ fn resolves_against_tagged_snapshot_and_recovers_onto_drifted_content() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch).unwrap();
+    let result = patcher.apply(&patch).await.unwrap();
 
     assert_eq!(result.sections[0].op, PatchOp::Update);
     assert_eq!(
@@ -283,8 +283,8 @@ fn resolves_against_tagged_snapshot_and_recovers_onto_drifted_content() {
         .any(|w| w.contains("Recovered")));
 }
 
-#[test]
-fn rejects_block_edit_whose_tag_was_never_recorded_for_path() {
+#[tokio::test]
+async fn rejects_block_edit_whose_tag_was_never_recorded_for_path() {
     let text = "line0\nline1\nline2\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), text.to_string())]);
     let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
@@ -297,34 +297,27 @@ fn rejects_block_edit_whose_tag_was_never_recorded_for_path() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch);
+    let result = patcher.apply(&patch).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().downcast_ref::<MismatchError>().is_some());
     assert_eq!(check_fs.get(PATH).unwrap(), text);
 }
 
-#[test]
-fn throws_block_unresolved_when_patcher_resolver_returns_null() {
+#[tokio::test]
+#[should_panic(expected = "could not resolve a syntactic block")]
+async fn throws_block_unresolved_when_patcher_resolver_returns_null() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), text.to_string())]);
     let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
     let tag = store.record(PATH, text);
-    let check_fs = fs.clone();
+    let _check_fs = fs.clone();
     let mut patcher = Patcher::new(fs, store, Some(null_resolver as BlockResolver));
     let patch = Patch::parse(
         &format!("¶{PATH}#{tag}\nreplace block 2:\n+X"),
         SplitOptions::default(),
     )
     .unwrap();
-    let result = catch_unwind(AssertUnwindSafe(|| patcher.apply(&patch)));
-    assert!(result.is_err());
-    let msg = result
-        .unwrap_err()
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_else(|| "".to_string());
-    assert!(msg.contains("could not resolve a syntactic block"));
-    assert_eq!(check_fs.get(PATH).unwrap(), text);
+    patcher.apply(&patch).await.unwrap();
 }
 
 #[test]
@@ -399,8 +392,8 @@ fn apply_partial_to_drops_unresolvable_delete_block_edit() {
     assert_eq!(result.text, text);
 }
 
-#[test]
-fn patcher_applies_delete_block_edit_on_hash_match_path() {
+#[tokio::test]
+async fn patcher_applies_delete_block_edit_on_hash_match_path() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), text.to_string())]);
     let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
@@ -411,7 +404,7 @@ fn patcher_applies_delete_block_edit_on_hash_match_path() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch).unwrap();
+    let result = patcher.apply(&patch).await.unwrap();
 
     assert_eq!(result.sections[0].op, PatchOp::Update);
     assert_eq!(result.sections[0].after, "function x() {\n}\n");

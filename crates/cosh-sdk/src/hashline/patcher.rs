@@ -20,8 +20,7 @@
 //!
 //! The patcher itself is stateless across calls; reuse one instance per
 //! filesystem configuration.
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use super::apply::apply_edits;
 use super::block::{has_block_edit, resolve_block_edits, ResolveBlockEditsOptions};
@@ -127,11 +126,14 @@ fn has_anchor_scoped_edit(edits: &[Edit]) -> bool {
     })
 }
 
-fn assert_section_hash_present(section_path: &str, file_hash: Option<&str>) {
+fn assert_section_hash_present(
+    section_path: &str,
+    file_hash: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if file_hash.is_some() {
-        return;
+        return Ok(());
     }
-    panic!("{}", missing_snapshot_tag_message(section_path));
+    Err(missing_snapshot_tag_message(section_path).into())
 }
 
 fn recovery_to_apply_result(result: RecoveryResult) -> ApplyResult {
@@ -171,8 +173,8 @@ fn assert_unique_canonical_paths(prepared: &[PreparedSection]) -> Result<(), Str
 /// Construct once per FS configuration; reuse across patches.
 pub struct Patcher<F: Filesystem, S: SnapshotStore> {
     fs: F,
-    snapshots: Rc<RefCell<S>>,
-    recovery: Recovery<Rc<RefCell<S>>>,
+    snapshots: Arc<Mutex<S>>,
+    recovery: Recovery<Arc<Mutex<S>>>,
     block_resolver: Option<BlockResolver>,
 }
 
@@ -182,8 +184,8 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     /// `snapshots` is required — section tags are opaque store pointers and
     /// without a store the patcher cannot validate or recover them.
     pub fn new(fs: F, snapshots: S, block_resolver: Option<BlockResolver>) -> Self {
-        let snapshots = Rc::new(RefCell::new(snapshots));
-        let recovery = Recovery::new(Rc::clone(&snapshots));
+        let snapshots = Arc::new(Mutex::new(snapshots));
+        let recovery = Recovery::new(Arc::clone(&snapshots));
         Self {
             fs,
             snapshots,
@@ -196,15 +198,15 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     /// section in memory before any write hits the filesystem, so a
     /// multi-section batch is naturally all-or-nothing. Returns one
     /// [`PatchSectionResult`] per section in the original patch order.
-    pub fn apply(
+    pub async fn apply(
         &mut self,
         patch: &Patch,
     ) -> Result<PatcherApplyResult, Box<dyn std::error::Error + Send + Sync>> {
         // Single-section fast path.
         if patch.sections.len() == 1 {
-            let prepared = self.prepare(&patch.sections[0])?;
+            let prepared = self.prepare(&patch.sections[0]).await?;
             return Ok(PatcherApplyResult {
-                sections: vec![self.commit(prepared)?],
+                sections: vec![self.commit(prepared).await?],
             });
         }
 
@@ -212,7 +214,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         // file, parse error, in-memory no-op) surfaces before any write.
         let mut prepared: Vec<PreparedSection> = Vec::new();
         for section in &patch.sections {
-            prepared.push(self.prepare(section)?);
+            prepared.push(self.prepare(section).await?);
         }
         assert_unique_canonical_paths(&prepared)
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
@@ -226,20 +228,20 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
 
         let mut results: Vec<PatchSectionResult> = Vec::new();
         for entry in prepared {
-            results.push(self.commit(entry)?);
+            results.push(self.commit(entry).await?);
         }
         Ok(PatcherApplyResult { sections: results })
     }
 
     /// Run the preflight pass only: read, parse, validate, apply-in-memory.
     /// No writes hit the filesystem. Use for CI checks and dry runs.
-    pub fn preflight(
+    pub async fn preflight(
         &mut self,
         patch: &Patch,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut prepared: Vec<PreparedSection> = Vec::new();
         for section in &patch.sections {
-            prepared.push(self.prepare(section)?);
+            prepared.push(self.prepare(section).await?);
         }
         assert_unique_canonical_paths(&prepared)
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
@@ -260,18 +262,18 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     ///
     /// Returns an error on parse error, missing-file-for-anchored-edit, or
     /// unrecovered tag mismatch ([`MismatchError`]).
-    pub fn prepare(
+    pub async fn prepare(
         &mut self,
         section: &PatchSection,
     ) -> Result<PreparedSection, Box<dyn std::error::Error + Send + Sync>> {
         let parsed = section.parse();
         let edits = &parsed.0;
         let parse_warnings = parsed.1.clone();
-        assert_section_hash_present(&section.path, section.file_hash.as_deref());
+        assert_section_hash_present(&section.path, section.file_hash.as_deref())?;
 
-        let canonical_path = self.fs.canonical_path(&section.path);
-        self.fs.preflight_write(&section.path)?;
-        let (exists, raw_content) = self.try_read(&section.path)?;
+        let canonical_path = self.fs.canonical_path(&section.path).await;
+        self.fs.preflight_write(&section.path).await?;
+        let (exists, raw_content) = self.try_read(&section.path).await?;
         if !exists {
             return Err(format!(
                 "File not found: {}. Use the write tool to create new files.",
@@ -309,7 +311,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     /// filesystem. Restores line endings and BOM, writes via the
     /// [`Filesystem`], and records a fresh snapshot in the
     /// [`SnapshotStore`] keyed by the filesystem-canonical path.
-    pub fn commit(
+    pub async fn commit(
         &mut self,
         prepared: PreparedSection,
     ) -> Result<PatchSectionResult, Box<dyn std::error::Error + Send + Sync>> {
@@ -346,7 +348,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         }
 
         let persisted = bom + &restore_line_endings(&after, line_ending);
-        let write: WriteResult = self.fs.write_text(&path, &persisted)?;
+        let write: WriteResult = self.fs.write_text(&path, &persisted).await?;
         let file_hash = self.record_full_snapshot(&canonical_path, &after);
         let op = if exists {
             PatchOp::Update
@@ -369,11 +371,11 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         })
     }
 
-    fn try_read(
+    async fn try_read(
         &self,
         path: &str,
     ) -> Result<(bool, String), Box<dyn std::error::Error + Send + Sync>> {
-        match self.fs.read_text(path) {
+        match self.fs.read_text(path).await {
             Ok(content) => Ok((true, content)),
             Err(err) => {
                 if is_not_found(err.as_ref()) {
@@ -387,7 +389,8 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
 
     fn record_full_snapshot(&mut self, canonical_path: &str, normalized: &str) -> String {
         self.snapshots
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .record(canonical_path, normalized)
     }
 }
@@ -435,9 +438,9 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
                 None => normalized.to_string(),
                 Some(_) if live_matches => normalized.to_string(),
                 Some(exp) => {
-                    // Pre-fetch snapshot outside the block so the RefCell borrow is
+                    // Pre-fetch snapshot outside the block so the Mutex lock is
                     // released before we call any &mut self methods (e.g. mismatch_error).
-                    let snapshot = self.snapshots.borrow_mut().by_hash(canonical_path, exp);
+                    let snapshot = self.snapshots.lock().unwrap().by_hash(canonical_path, exp);
                     match snapshot {
                         Some(s) => s.text,
                         None => {
@@ -500,7 +503,8 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         }
         let hash_recognized = self
             .snapshots
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .by_hash(canonical_path, expected.unwrap())
             .is_some();
         Err(Box::new(self.mismatch_error(

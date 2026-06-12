@@ -6,10 +6,10 @@
 //! The patcher does its own BOM stripping and LF normalization between
 //! [`Filesystem::read_text`] and [`Filesystem::write_text`]; the FS deals
 //! only in raw text strings.
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::Mutex;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -94,21 +94,22 @@ pub fn is_not_found(error: &(dyn std::error::Error + 'static)) -> bool {
 /// [`NotFoundError`] (or any error for which [`is_not_found`] returns true)
 /// when the path doesn't exist; that's how the patcher detects a create-vs-
 /// update.
+#[allow(async_fn_in_trait)]
 pub trait Filesystem {
     /// Read the file's full text content. Returns an error on missing file.
-    fn read_text(&self, path: &str) -> Result<String>;
+    async fn read_text(&self, path: &str) -> Result<String>;
 
     /// Validate that `path` is writable before a prepared batch starts committing.
-    fn preflight_write(&self, _path: &str) -> Result<()> {
+    async fn preflight_write(&self, _path: &str) -> Result<()> {
         Ok(())
     }
 
     /// Persist `content` at `path`. Returns the actual final text that was written.
-    fn write_text(&self, path: &str, content: &str) -> Result<WriteResult>;
+    async fn write_text(&self, path: &str, content: &str) -> Result<WriteResult>;
 
     /// Return true when the path exists and can be read. Default: probe via [`read_text`].
-    fn exists(&self, path: &str) -> Result<bool> {
-        match self.read_text(path) {
+    async fn exists(&self, path: &str) -> Result<bool> {
+        match self.read_text(path).await {
             Ok(_) => Ok(true),
             Err(err) => {
                 if is_not_found(err.as_ref()) {
@@ -124,49 +125,58 @@ pub trait Filesystem {
     /// stores). The default is identity; override to return an absolute or
     /// otherwise canonicalised path so producers and consumers of cached
     /// snapshots agree on the key without each having to redo the resolution.
-    fn canonical_path(&self, path: &str) -> String {
+    async fn canonical_path(&self, path: &str) -> String {
         path.to_string()
     }
 }
 
 /// In-memory [`Filesystem`]. Useful for tests, sandboxes, dry-runs, and as
 /// a building block for stacked adapters (e.g. an LRU layer on top).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct InMemoryFilesystem {
-    files: RefCell<HashMap<String, String>>,
+    files: Mutex<HashMap<String, String>>,
+}
+
+impl Clone for InMemoryFilesystem {
+    fn clone(&self) -> Self {
+        Self {
+            files: Mutex::new(self.files.lock().unwrap().clone()),
+        }
+    }
 }
 
 impl InMemoryFilesystem {
     pub fn new(initial: impl IntoIterator<Item = (String, String)>) -> Self {
         Self {
-            files: RefCell::new(initial.into_iter().collect()),
+            files: Mutex::new(initial.into_iter().collect()),
         }
     }
 
     /// Synchronous helper for setting up fixtures.
     pub fn set(&self, path: impl Into<String>, content: impl Into<String>) {
-        self.files.borrow_mut().insert(path.into(), content.into());
+        self.files.lock().unwrap().insert(path.into(), content.into());
     }
 
     /// Synchronous helper for inspecting state.
     pub fn get(&self, path: &str) -> Option<String> {
-        self.files.borrow().get(path).cloned()
+        self.files.lock().unwrap().get(path).cloned()
     }
 
     /// Remove a single entry. Returns true when something was removed.
     pub fn delete(&self, path: &str) -> bool {
-        self.files.borrow_mut().remove(path).is_some()
+        self.files.lock().unwrap().remove(path).is_some()
     }
 
     /// Wipe all entries.
     pub fn clear(&self) {
-        self.files.borrow_mut().clear();
+        self.files.lock().unwrap().clear();
     }
 
     /// Iterate `(path, content)` pairs.
     pub fn entries(&self) -> Vec<(String, String)> {
         self.files
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
@@ -174,25 +184,27 @@ impl InMemoryFilesystem {
 }
 
 impl Filesystem for InMemoryFilesystem {
-    fn read_text(&self, path: &str) -> Result<String> {
+    async fn read_text(&self, path: &str) -> Result<String> {
         self.files
-            .borrow()
+            .lock()
+            .unwrap()
             .get(path)
             .cloned()
             .ok_or_else(|| NotFoundError::new(path).into())
     }
 
-    fn write_text(&self, path: &str, content: &str) -> Result<WriteResult> {
+    async fn write_text(&self, path: &str, content: &str) -> Result<WriteResult> {
         self.files
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert(path.to_string(), content.to_string());
         Ok(WriteResult {
             text: content.to_string(),
         })
     }
 
-    fn exists(&self, path: &str) -> Result<bool> {
-        Ok(self.files.borrow().contains_key(path))
+    async fn exists(&self, path: &str) -> Result<bool> {
+        Ok(self.files.lock().unwrap().contains_key(path))
     }
 }
 
@@ -209,8 +221,8 @@ impl DiskFilesystem {
 }
 
 impl Filesystem for DiskFilesystem {
-    fn read_text(&self, path: &str) -> Result<String> {
-        match std::fs::read_to_string(path) {
+    async fn read_text(&self, path: &str) -> Result<String> {
+        match tokio::fs::read_to_string(path).await {
             Ok(text) => Ok(text),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 Err(NotFoundError::with_cause(path, err).into())
@@ -219,24 +231,22 @@ impl Filesystem for DiskFilesystem {
         }
     }
 
-    fn write_text(&self, path: &str, content: &str) -> Result<WriteResult> {
-        std::fs::write(path, content)?;
+    async fn write_text(&self, path: &str, content: &str) -> Result<WriteResult> {
+        tokio::fs::write(path, content).await?;
         Ok(WriteResult {
             text: content.to_string(),
         })
     }
 
-    /// NOTE: `std::fs::canonicalize` requires the path to exist on disk, unlike the
-    /// TS `path.resolve` which is purely lexical. Falls back to the raw path when
-    /// canonicalization fails (e.g. file not yet created).
-    fn canonical_path(&self, path: &str) -> String {
-        std::fs::canonicalize(path)
+    async fn canonical_path(&self, path: &str) -> String {
+        tokio::fs::canonicalize(path)
+            .await
             .unwrap_or_else(|_| Path::new(path).to_path_buf())
             .to_string_lossy()
             .to_string()
     }
 
-    fn exists(&self, path: &str) -> Result<bool> {
-        Ok(Path::new(path).exists())
+    async fn exists(&self, path: &str) -> Result<bool> {
+        Ok(tokio::fs::try_exists(path).await.unwrap_or(false))
     }
 }

@@ -139,26 +139,27 @@ impl SnapshotStore for InMemorySnapshotStore {
     }
 }
 
-// Shared ownership via Rc<RefCell<S>> so both Patcher and Recovery
+// Shared ownership via Arc<Mutex<S>> so both Patcher and Recovery
 // can reference the same SnapshotStore without duplicating state.
-use std::cell::RefCell;
-use std::rc::Rc;
+// A std::sync::Mutex is appropriate here — critical sections are
+// short (HashMap/LRU ops) and never held across .await points.
+use std::sync::{Arc, Mutex};
 
-impl<S: SnapshotStore> SnapshotStore for Rc<RefCell<S>> {
+impl<S: SnapshotStore> SnapshotStore for Arc<Mutex<S>> {
     fn head(&mut self, path: &str) -> Option<Snapshot> {
-        self.borrow_mut().head(path)
+        self.lock().unwrap().head(path)
     }
     fn by_hash(&mut self, path: &str, hash: &str) -> Option<Snapshot> {
-        self.borrow_mut().by_hash(path, hash)
+        self.lock().unwrap().by_hash(path, hash)
     }
     fn record(&mut self, path: &str, full_text: &str) -> String {
-        self.borrow_mut().record(path, full_text)
+        self.lock().unwrap().record(path, full_text)
     }
     fn invalidate(&mut self, path: &str) {
-        self.borrow_mut().invalidate(path)
+        self.lock().unwrap().invalidate(path)
     }
     fn clear(&mut self) {
-        self.borrow_mut().clear()
+        self.lock().unwrap().clear()
     }
 }
 

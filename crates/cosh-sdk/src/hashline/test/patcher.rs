@@ -1,6 +1,3 @@
-use std::panic::catch_unwind;
-use std::panic::AssertUnwindSafe;
-
 use regex::Regex;
 
 use super::super::format::compute_file_hash;
@@ -14,8 +11,8 @@ use super::super::types::SplitOptions;
 
 const PATH: &str = "a.ts";
 
-#[test]
-fn applies_when_section_tag_is_live_files_content_hash() {
+#[tokio::test]
+async fn applies_when_section_tag_is_live_files_content_hash() {
     let fs = InMemoryFilesystem::new([(PATH.to_string(), "before\n".to_string())]);
     let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
     let tag = store.record(PATH, "before\n");
@@ -25,7 +22,7 @@ fn applies_when_section_tag_is_live_files_content_hash() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch).unwrap();
+    let result = patcher.apply(&patch).await.unwrap();
 
     assert_eq!(result.sections[0].op, PatchOp::Update);
     assert_eq!(result.sections[0].file_hash.len(), 4);
@@ -33,8 +30,8 @@ fn applies_when_section_tag_is_live_files_content_hash() {
     assert_eq!(result.sections[0].after, "after\n");
 }
 
-#[test]
-fn validates_anchor_from_content_hash_even_with_no_recorded_snapshot() {
+#[tokio::test]
+async fn validates_anchor_from_content_hash_even_with_no_recorded_snapshot() {
     // The core fix: the tag fingerprints the WHOLE file. An edit anchored at
     // a line the model never saw recorded applies whenever the live file
     // still hashes to the tag — no stored snapshot is consulted.
@@ -50,7 +47,7 @@ fn validates_anchor_from_content_hash_even_with_no_recorded_snapshot() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch).unwrap();
+    let result = patcher.apply(&patch).await.unwrap();
 
     assert_eq!(result.sections[0].op, PatchOp::Update);
     assert_eq!(result.sections[0].after, "l1\nl2\nL3\nl4\nl5\n");
@@ -67,8 +64,8 @@ fn normalizes_lowercase_section_tags_while_parsing() {
     assert_eq!(section.file_hash.unwrap(), "1A2B");
 }
 
-#[test]
-fn refuses_with_mismatch_when_recorded_version_no_longer_matches_live() {
+#[tokio::test]
+async fn refuses_with_mismatch_when_recorded_version_no_longer_matches_live() {
     let fs = InMemoryFilesystem::new([(PATH.to_string(), "drifted\n".to_string())]);
     let check_fs = fs.clone();
     let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
@@ -80,7 +77,7 @@ fn refuses_with_mismatch_when_recorded_version_no_longer_matches_live() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch);
+    let result = patcher.apply(&patch).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -93,8 +90,8 @@ fn refuses_with_mismatch_when_recorded_version_no_longer_matches_live() {
     assert_eq!(check_fs.get(PATH).unwrap(), "drifted\n");
 }
 
-#[test]
-fn refuses_with_not_from_this_session_when_tag_never_recorded_for_path() {
+#[tokio::test]
+async fn refuses_with_not_from_this_session_when_tag_never_recorded_for_path() {
     let fs = InMemoryFilesystem::new([(PATH.to_string(), "current\n".to_string())]);
     let check_fs = fs.clone();
     let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
@@ -109,7 +106,7 @@ fn refuses_with_not_from_this_session_when_tag_never_recorded_for_path() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch);
+    let result = patcher.apply(&patch).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -119,12 +116,12 @@ fn refuses_with_not_from_this_session_when_tag_never_recorded_for_path() {
     assert!(message.contains("never invent the tag"));
     // Still surfaces the current hash so the model can pivot to a re-read.
     let hash_re = Regex::new(r"current file hashes to #[0-9A-F]{4}").unwrap();
-    assert!(hash_re.is_match(&message));
+    assert!(hash_re.is_match(message));
     assert_eq!(check_fs.get(PATH).unwrap(), "current\n");
 }
 
-#[test]
-fn rejects_hashless_head_tail_insert_tag_required_on_every_section() {
+#[tokio::test]
+async fn rejects_hashless_head_tail_insert_tag_required_on_every_section() {
     let fs = InMemoryFilesystem::new([(PATH.to_string(), "a\nb\n".to_string())]);
     let check_fs = fs.clone();
     let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
@@ -134,20 +131,16 @@ fn rejects_hashless_head_tail_insert_tag_required_on_every_section() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = catch_unwind(AssertUnwindSafe(|| patcher.apply(&patch)));
+    let result = patcher.apply(&patch).await;
     assert!(result.is_err());
-    let msg = result
-        .unwrap_err()
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_else(|| "".to_string());
+    let msg = format!("{}", result.unwrap_err());
     assert!(msg.contains("Missing hashline snapshot tag"));
     assert!(msg.contains("use the write tool"));
     assert_eq!(check_fs.get(PATH).unwrap(), "a\nb\n");
 }
 
-#[test]
-fn still_hard_rejects_anchored_edit_that_omits_snapshot_tag() {
+#[tokio::test]
+async fn still_hard_rejects_anchored_edit_that_omits_snapshot_tag() {
     let fs = InMemoryFilesystem::new([(PATH.to_string(), "a\nb\n".to_string())]);
     let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
     let mut patcher = Patcher::new(fs, store, None);
@@ -156,18 +149,14 @@ fn still_hard_rejects_anchored_edit_that_omits_snapshot_tag() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = catch_unwind(AssertUnwindSafe(|| patcher.apply(&patch)));
+    let result = patcher.apply(&patch).await;
     assert!(result.is_err());
-    let msg = result
-        .unwrap_err()
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_else(|| "".to_string());
+    let msg = format!("{}", result.unwrap_err());
     assert!(msg.contains("Missing hashline snapshot tag"));
 }
 
-#[test]
-fn rejects_tagged_edit_whose_target_file_does_not_exist() {
+#[tokio::test]
+async fn rejects_tagged_edit_whose_target_file_does_not_exist() {
     let fs = InMemoryFilesystem::new([]);
     let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
     let mut patcher = Patcher::new(fs, store, None);
@@ -176,15 +165,15 @@ fn rejects_tagged_edit_whose_target_file_does_not_exist() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch);
+    let result = patcher.apply(&patch).await;
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(err_msg.contains("File not found"));
     assert!(err_msg.contains("Use the write tool"));
 }
 
-#[test]
-fn applies_head_tail_insert_with_stale_tag_and_warns_instead_of_hard_failing() {
+#[tokio::test]
+async fn applies_head_tail_insert_with_stale_tag_and_warns_instead_of_hard_failing() {
     let content = "a\nb\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), content.to_string())]);
     let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
@@ -196,7 +185,7 @@ fn applies_head_tail_insert_with_stale_tag_and_warns_instead_of_hard_failing() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch).unwrap();
+    let result = patcher.apply(&patch).await.unwrap();
 
     let section = &result.sections[0];
     assert_eq!(section.op, PatchOp::Update);
@@ -204,8 +193,8 @@ fn applies_head_tail_insert_with_stale_tag_and_warns_instead_of_hard_failing() {
     assert!(section.warnings.contains(&HEADTAIL_DRIFT_WARNING.to_string()));
 }
 
-#[test]
-fn does_not_warn_when_head_tail_insert_carries_live_tag() {
+#[tokio::test]
+async fn does_not_warn_when_head_tail_insert_carries_live_tag() {
     let content = "a\nb\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), content.to_string())]);
     let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
@@ -216,7 +205,7 @@ fn does_not_warn_when_head_tail_insert_carries_live_tag() {
         SplitOptions::default(),
     )
     .unwrap();
-    let result = patcher.apply(&patch).unwrap();
+    let result = patcher.apply(&patch).await.unwrap();
 
     let section = &result.sections[0];
     assert_eq!(section.op, PatchOp::Update);
