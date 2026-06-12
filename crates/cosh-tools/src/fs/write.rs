@@ -19,23 +19,48 @@ use super::types::{FsMetadata, WriteAllFile};
 use cosh_sdk::hashline::fs::Filesystem;
 use cosh_sdk::hashline::{format, fs::DiskFilesystem};
 
-pub fn write(wtarget: WriteAllFile, metadata: FsMetadata) -> Result<String, String> {
-    let mut result = vec![];
+#[derive(Debug)]
+pub struct WriteResult {
+    pub path: String,
+    pub file_hash: String,
+    pub header: String,
+    pub warnings: Option<String>,
+}
+
+pub async fn write(
+    wtarget: WriteAllFile<'_>,
+    metadata: FsMetadata<'_>,
+) -> Result<Vec<WriteResult>, String> {
+    let mut result: Vec<WriteResult> = vec![];
     let fs = DiskFilesystem::new();
 
     for target in &wtarget.write {
         if target.text.trim().is_empty() {
-            result.push(format!(
+            let warning = format!(
                 "text is empty for `{path}`. Nothing was sent to add to the file.",
                 path = target.path
-            ));
+            );
+            let res = WriteResult {
+                file_hash: "".to_string(),
+                header: "".to_string(),
+                path: target.path.to_string(),
+                warnings: Some(warning),
+            };
+            result.push(res);
             continue;
         }
 
         match fs_guard(metadata.clone(), target.path) {
             FsGuard::Allowed => {
-                if let Err(err) = fs.write_text(target.path, target.text) {
-                    result.push(format!("failed to write `{}`: {}", target.path, err));
+                if let Err(err) = fs.write_text(target.path, target.text).await {
+                    let warning = format!("failed to write `{}`: {}", target.path, err);
+                    let res = WriteResult {
+                        file_hash: "".to_string(),
+                        header: "".to_string(),
+                        path: target.path.to_string(),
+                        warnings: Some(warning),
+                    };
+                    result.push(res);
                     continue;
                 }
 
@@ -43,20 +68,36 @@ pub fn write(wtarget: WriteAllFile, metadata: FsMetadata) -> Result<String, Stri
 
                 let hash = format::compute_file_hash(target.text);
                 let header = format::format_hashline_header(target.path, &hash);
-                result.push(header);
+
+                let res = WriteResult {
+                    file_hash: hash,
+                    header: header.to_string(),
+                    path: target.path.to_string(),
+                    warnings: None,
+                };
+
+                result.push(res);
             }
             FsGuard::Denied => {
-                result.push(format!(
+                let warning = format!(
                     "write permission denied for `{}`. \
                      Files under `{:?}` are writable by default. \
                      Use the allowlist to grant access to paths outside this directory.",
                     target.path, metadata.root
-                ));
+                );
+
+                let res = WriteResult {
+                    file_hash: "".to_string(),
+                    header: "".to_string(),
+                    path: target.path.to_string(),
+                    warnings: Some(warning),
+                };
+                result.push(res);
             }
             FsGuard::Mismatch(message) => {
                 return Err(message);
             }
         }
     }
-    Ok(result.join("\n"))
+    Ok(result)
 }

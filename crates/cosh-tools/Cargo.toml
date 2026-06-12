@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies.cosh-sdk]
 path = "../cosh-sdk"
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["rt", "macros"] }

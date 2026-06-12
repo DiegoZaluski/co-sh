@@ -28,9 +28,21 @@ pub struct WriteAllFile<'a> {
     pub write: Vec<TargetFile<'a>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct FsMetadata<'a> {
     pub root: &'a Path,
     pub write_path_allowlist: Option<Vec<&'a Path>>,
     pub write_path_blocklist: Option<Vec<&'a Path>>,
+}
+
+// ___
+#[derive(Debug, Clone, Default)]
+pub struct EditTarget<'a> {
+    pub path: &'a str,
+    pub file_hash: &'a str,
+    pub ops: &'a str,
+}
+#[derive(Debug, Clone, Default)]
+pub struct EditFile<'a> {
+    pub edit: Vec<EditTarget<'a>>,
 }

@@ -1,0 +1,121 @@
+use cosh_sdk::hashline::{
+    format::{HL_FILE_HASH_SEP, HL_FILE_PREFIX, compute_file_hash, format_hashline_header},
+    fs::{DiskFilesystem, Filesystem},
+    input::Patch,
+    normalize,
+    types::{BlockResolver, BlockResolverRequest, BlockSpan, SplitOptions},
+};
+
+use super::fs_guard::{FsGuard, fs_guard};
+use super::types::{EditFile, EditTarget, FsMetadata};
+
+#[derive(Debug)]
+pub struct EditResult {
+    pub path: String,
+    pub file_hash: String,
+    pub header: String,
+    pub first_changed_line: Option<u32>,
+    pub warnings: Vec<String>,
+}
+
+fn resolve_block_fn(req: BlockResolverRequest) -> Option<BlockSpan> {
+    cosh_sdk::syntax::syntax().resolve_block(&req.path, &req.text, req.line)
+}
+
+pub async fn edit(
+    config: EditFile<'_>,
+    metadata: FsMetadata<'_>,
+) -> Result<Vec<EditResult>, String> {
+    let fs = DiskFilesystem::new();
+    let mut results = Vec::new();
+
+    for target in config.edit.clone() {
+        let result = edit_target(fs.clone(), target, metadata.clone()).await?;
+        results.push(result);
+    }
+
+    Ok(results)
+}
+
+async fn edit_target(
+    fs: DiskFilesystem,
+    target: EditTarget<'_>,
+    metadata: FsMetadata<'_>,
+) -> Result<EditResult, String> {
+    match fs_guard(metadata.clone(), target.path) {
+        FsGuard::Allowed => {}
+        FsGuard::Denied => {
+            return Err(format!("write permissions denied for `{}`", target.path));
+        }
+        FsGuard::Mismatch(msg) => {
+            return Err(msg);
+        }
+    }
+
+    let raw = fs.read_text(target.path).await.map_err(|_| {
+        format!(
+            "file `{}` not found. Use the write tool to create new files.",
+            target.path
+        )
+    })?;
+
+    let bom_result = normalize::strip_bom(&raw);
+    let normalized = normalize::normalize_to_lf(&bom_result.text);
+
+    let actual_hash = compute_file_hash(&normalized);
+    if actual_hash != target.file_hash {
+        return Err(format!(
+            "hash mismatch for `{path}`: expected `{expected}` but current file hashes to `{actual}`. \
+             The file has changed since it was last read. Re-read the file and retry the edit.",
+            path = target.path,
+            expected = target.file_hash,
+            actual = actual_hash
+        ));
+    }
+
+    let hashline_input = format!(
+        "{prefix}{path}{sep}{hash}\n{ops}",
+        prefix = HL_FILE_PREFIX,
+        sep = HL_FILE_HASH_SEP,
+        path = target.path,
+        hash = target.file_hash,
+        ops = target.ops
+    );
+
+    let patch = Patch::parse(&hashline_input, SplitOptions::default()).map_err(|e| {
+        format!(
+            "failed to parse edit operations for `{}`: {}",
+            target.path, e
+        )
+    })?;
+
+    let section = patch.sections.into_iter().next().ok_or_else(|| {
+        format!(
+            "no edit operations found for `{}`. The ops field must contain hashline operations \
+             such as `replace N..M:`, `delete N..M`, `insert before|after|head|tail:`.",
+            target.path
+        )
+    })?;
+
+    let apply_result = section.apply_to(&normalized, Some(resolve_block_fn as BlockResolver));
+
+    let after = apply_result.text;
+    let new_hash = compute_file_hash(&after);
+    let header = format_hashline_header(target.path, &new_hash);
+
+    let persisted = bom_result.bom + &after;
+
+    fs.write_text(target.path, &persisted)
+        .await
+        .map_err(|e| format!("failed to write `{}`: {}", target.path, e))?;
+
+    cosh_sdk::syntax::syntax().invalidate(target.path);
+
+    Ok(EditResult {
+        path: target.path.to_string(),
+        file_hash: new_hash,
+        header,
+        first_changed_line: apply_result.first_changed_line,
+        warnings: apply_result.warnings,
+    })
+}
