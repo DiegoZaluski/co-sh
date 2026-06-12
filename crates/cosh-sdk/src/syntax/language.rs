@@ -1,7 +1,7 @@
 //! Map file paths to tree-sitter [`Language`] objects.
 use tree_sitter::Language;
 
-pub(crate) fn detect_language(path: &str) -> Option<Language> {
+pub fn detect_language(path: &str) -> Option<Language> {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
