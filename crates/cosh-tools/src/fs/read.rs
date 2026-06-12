@@ -4,7 +4,7 @@
 //! request the whole file, a syntactic block at a given line, or a definition
 //! block matching a name (symbol, struct, class, …).  When the name search
 //! targets a directory the entire tree is walked recursively.
-use std::path::Path;
+use super::types::{ReadFile, Target};
 
 use cosh_sdk::hashline::{
     format,
@@ -12,25 +12,7 @@ use cosh_sdk::hashline::{
     normalize,
     types::BlockSpan,
 };
-
-/// A single read specification.
-pub struct Target<'a> {
-    pub path: &'a str,
-    pub line: Option<usize>,
-    pub symbol: Option<&'a str>,
-}
-
-/// One or more file read operations.
-///
-/// ```ignore
-/// ReadFile { read: vec![
-///     Target { path: "src/main.rs", line: Some(5), symbol: None },
-///     Target { path: "src/lib.rs", line: None, symbol: Some("run") },
-/// ] }
-/// ```
-pub struct ReadFile<'a> {
-    pub read: Vec<Target<'a>>,
-}
+use std::path::Path;
 
 /// Run every target in `config` and return hashline-formatted output.
 ///
@@ -57,8 +39,13 @@ fn read_target(fs: &DiskFilesystem, target: &Target) -> Result<String, String> {
 
     if Path::new(target.path).is_dir() {
         return Err(format!(
-            "cannot read directory `{}` without a symbol filter",
-            target.path
+            "cannot read directory `{path}` without a `symbol` filter. \
+             When `path` is a directory, a `symbol` (e.g., a function or struct name) must be \
+             provided so the tool searches for matching definitions across all supported source \
+             files in that tree. \
+             To read entire files, list each file path explicitly in the `read` array with no \
+             `line` or `symbol` fields.",
+            path = target.path
         ));
     }
 
@@ -72,9 +59,16 @@ fn read_target(fs: &DiskFilesystem, target: &Target) -> Result<String, String> {
         let ln = line
             .try_into()
             .map_err(|e| format!("cannot convert line {}: {}", line, e))?;
-        let span = ts
-            .resolve_block(target.path, &body, ln)
-            .ok_or_else(|| format!("could not resolve block at line {}", line))?;
+        let span = ts.resolve_block(target.path, &body, ln).ok_or_else(|| {
+            format!(
+                "could not resolve a syntactic block starting at line {line} in `{path}`. \
+                     Possible causes: the line does not begin a valid block (e.g. fn, struct, \
+                     impl, enum, trait, mod), the line number exceeds the file length, or the \
+                     line falls inside a string or comment. \
+                     Try a different line number or read the whole file instead.",
+                path = target.path
+            )
+        })?;
         let block = extract_block(&body, &span);
         return Ok(format!("{}\n{}", header, block));
     }
@@ -108,7 +102,14 @@ fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Result<String, 
     }
 
     if results.is_empty() {
-        return Err(format!("symbol `{name}` not found in `{path}`"));
+        return Err(format!(
+            "symbol `{name}` not found in `{path}`. \
+             Verify the symbol name is spelled exactly as defined in source code. \
+             If `{path}` is a directory, it may contain no files with a supported \
+             tree-sitter grammar. \
+             Try using `line` targeting to read specific sections, or read the whole \
+             file to inspect its contents.",
+        ));
     }
 
     Ok(results.join("\n"))
