@@ -22,7 +22,7 @@ impl SearchArgs {
     /// Returns an error prompt if the query is empty or num_results is zero,
     /// so the LLM can self-correct before the network call is made.
     fn validate(&self) -> Result<(), String> {
-        if self.query == None && self.url == None {
+        if self.query.is_none() && self.url.is_none() {
             return Err("Invalid argument: `query` must not be empty. \
                  Provide a non-empty search string."
                 .into());

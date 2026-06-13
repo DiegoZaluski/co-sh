@@ -7,9 +7,7 @@ use cosh_sdk::hashline::{
     types::{BlockResolver, BlockResolverRequest, BlockSpan, SplitOptions},
 };
 
-use super::fs_guard::{FsGuard, fs_guard};
 use super::types::{EditFile, EditTarget, FsMetadata};
-
 #[derive(Debug)]
 pub struct EditResult {
     pub path: String,
@@ -39,18 +37,19 @@ pub async fn edit(
     Ok(results)
 }
 
+use super::types;
 async fn edit_target(
     fs: DiskFilesystem,
     target: EditTarget<'_>,
     metadata: FsMetadata<'_>,
     store: &mut InMemorySnapshotStore,
 ) -> Result<EditResult, String> {
-    match fs_guard(metadata.clone(), target.path) {
-        FsGuard::Allowed => {}
-        FsGuard::Denied => {
+    match metadata.fs_guard(target.path) {
+        types::FsGuard::Allowed => {}
+        types::FsGuard::Denied => {
             return Err(format!("write permissions denied for `{}`", target.path));
         }
-        FsGuard::Mismatch(msg) => {
+        types::FsGuard::Mismatch(msg) => {
             return Err(msg);
         }
     }

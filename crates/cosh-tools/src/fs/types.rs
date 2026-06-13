@@ -46,3 +46,43 @@ pub struct EditTarget<'a> {
 pub struct EditFile<'a> {
     pub edit: Vec<EditTarget<'a>>,
 }
+
+//___
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+pub(crate) enum FsGuard {
+    Allowed,
+    Denied,
+    Mismatch(String),
+}
+
+impl<'a> FsMetadata<'a> {
+    #[allow(dead_code)]
+    pub(crate) fn fs_guard(&self, path: &str) -> FsGuard {
+        let path = Path::new(path);
+
+        let blocked = self
+            .write_path_blocklist
+            .as_ref()
+            .is_some_and(|list| list.iter().any(|&fs| fs == path || path.starts_with(fs)));
+        let allowed = self
+            .write_path_allowlist
+            .as_ref()
+            .is_some_and(|list| list.contains(&path));
+        let in_cwd = path.starts_with(self.root);
+
+        if blocked && allowed {
+            return FsGuard::Mismatch(
+                "Security Alert: path is in both blocklist and allowlist.".to_string(),
+            );
+        }
+        if blocked {
+            return FsGuard::Denied;
+        }
+        if !in_cwd && !allowed {
+            return FsGuard::Denied;
+        }
+
+        FsGuard::Allowed
+    }
+}

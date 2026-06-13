@@ -13,7 +13,6 @@
 //! Returns `Err` if the [`FsMetadata`] has inconsistent allowlist/blocklist entries.
 //! Individual file write failures are reported inline in the returned string
 //! rather than aborting the batch.
-use super::fs_guard::{FsGuard, fs_guard};
 use super::types::{FsMetadata, WriteAllFile};
 
 use cosh_sdk::hashline::{
@@ -30,6 +29,7 @@ pub struct WriteResult {
     pub warnings: Option<String>,
 }
 
+use super::types;
 pub async fn write(
     wtarget: WriteAllFile<'_>,
     metadata: FsMetadata<'_>,
@@ -53,8 +53,8 @@ pub async fn write(
             continue;
         }
 
-        match fs_guard(metadata.clone(), target.path) {
-            FsGuard::Allowed => {
+        match metadata.fs_guard(target.path) {
+            types::FsGuard::Allowed => {
                 if let Err(err) = fs.write_text(target.path, target.text).await {
                     let warning = format!("failed to write `{}`: {}", target.path, err);
                     let res = WriteResult {
@@ -84,7 +84,7 @@ pub async fn write(
 
                 result.push(res);
             }
-            FsGuard::Denied => {
+            types::FsGuard::Denied => {
                 let warning = format!(
                     "write permission denied for `{}`. \
                      Files under `{:?}` are writable by default. \
@@ -100,7 +100,7 @@ pub async fn write(
                 };
                 result.push(res);
             }
-            FsGuard::Mismatch(message) => {
+            types::FsGuard::Mismatch(message) => {
                 return Err(message);
             }
         }
