@@ -3,8 +3,25 @@ name = "cosh-tools"
 version = "0.1.0"
 edition = "2024"
 
+[dependencies]
+serde_json = "1"
+
 [dependencies.cosh-sdk]
 path = "../cosh-sdk"
 
-[dev-dependencies]
-tokio = { version = "1.52.3", features = ["rt", "macros"] }
+[dev-dependencies.tokio]
+version = "1.52.3"
+features = ["rt", "macros"]
+
+
+[dependencies.tokio]
+version = "1.52.3"
+features = ["full"]
+
+[dependencies.reqwest]
+version = "0.13"
+features = ["json"]
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
