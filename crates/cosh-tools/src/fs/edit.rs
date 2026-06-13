@@ -3,6 +3,7 @@ use cosh_sdk::hashline::{
     fs::{DiskFilesystem, Filesystem},
     input::Patch,
     normalize,
+    snapshots::{InMemorySnapshotStore, InMemorySnapshotStoreOptions, SnapshotStore},
     types::{BlockResolver, BlockResolverRequest, BlockSpan, SplitOptions},
 };
 
@@ -27,10 +28,11 @@ pub async fn edit(
     metadata: FsMetadata<'_>,
 ) -> Result<Vec<EditResult>, String> {
     let fs = DiskFilesystem::new();
+    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
     let mut results = Vec::new();
 
     for target in config.edit.clone() {
-        let result = edit_target(fs.clone(), target, metadata.clone()).await?;
+        let result = edit_target(fs.clone(), target, metadata.clone(), &mut store).await?;
         results.push(result);
     }
 
@@ -41,6 +43,7 @@ async fn edit_target(
     fs: DiskFilesystem,
     target: EditTarget<'_>,
     metadata: FsMetadata<'_>,
+    store: &mut InMemorySnapshotStore,
 ) -> Result<EditResult, String> {
     match fs_guard(metadata.clone(), target.path) {
         FsGuard::Allowed => {}
@@ -109,6 +112,7 @@ async fn edit_target(
         .await
         .map_err(|e| format!("failed to write `{}`: {}", target.path, e))?;
 
+    store.record(target.path, &after);
     cosh_sdk::syntax::syntax().invalidate(target.path);
 
     Ok(EditResult {

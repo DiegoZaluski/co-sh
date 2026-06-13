@@ -16,8 +16,11 @@
 use super::fs_guard::{FsGuard, fs_guard};
 use super::types::{FsMetadata, WriteAllFile};
 
-use cosh_sdk::hashline::fs::Filesystem;
-use cosh_sdk::hashline::{format, fs::DiskFilesystem};
+use cosh_sdk::hashline::{
+    format,
+    fs::{DiskFilesystem, Filesystem},
+    snapshots::{InMemorySnapshotStore, InMemorySnapshotStoreOptions, SnapshotStore},
+};
 
 #[derive(Debug)]
 pub struct WriteResult {
@@ -33,7 +36,7 @@ pub async fn write(
 ) -> Result<Vec<WriteResult>, String> {
     let mut result: Vec<WriteResult> = vec![];
     let fs = DiskFilesystem::new();
-
+    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
     for target in &wtarget.write {
         if target.text.trim().is_empty() {
             let warning = format!(
@@ -65,6 +68,9 @@ pub async fn write(
                 }
 
                 cosh_sdk::syntax::syntax().invalidate(target.path);
+
+                // Retained as a backup for a potential rollback.
+                store.record(target.path, target.text);
 
                 let hash = format::compute_file_hash(target.text);
                 let header = format::format_hashline_header(target.path, &hash);
