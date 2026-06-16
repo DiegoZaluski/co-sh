@@ -12,3 +12,6 @@ version = "0.0.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+
+[patch.crates-io]
+tree-sitter-kotlin = { git = "https://github.com/fwcd/tree-sitter-kotlin", rev = "c8ac3d2627240160b999a2c100de3babbdb8f419" }

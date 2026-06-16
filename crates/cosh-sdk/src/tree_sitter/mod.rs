@@ -136,7 +136,7 @@ static CACHE: OnceLock<TreeSitter> = OnceLock::new();
 ///
 /// # Supported languages
 ///
-/// `Rust`, `Python`, `JavaScript`, `C#`, `Go`, `Java`, `Haskell`, `Swift`, `Zig`
+/// `Rust`, `Python`, `JavaScript`, `C#`, `Go`, `Java`, `Haskell`, `Swift`, `Zig`, `Kotlin`
 pub fn tree_sitter() -> &'static TreeSitter {
     CACHE.get_or_init(|| TreeSitter::new(DEFAULT_CAPACITY))
 }

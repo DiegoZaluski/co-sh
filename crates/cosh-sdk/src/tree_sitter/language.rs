@@ -18,6 +18,7 @@ pub fn detect_language(path: &str) -> Option<Language> {
         "hs" | "lhs" => tree_sitter_haskell::LANGUAGE.into(),
         "swift" => tree_sitter_swift::LANGUAGE.into(),
         "zig" | "zon" => tree_sitter_zig::LANGUAGE.into(),
+        "kt" | "kts" => tree_sitter_kotlin::LANGUAGE.into(),
         _ => return None,
     })
 }
