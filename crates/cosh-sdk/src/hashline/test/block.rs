@@ -183,12 +183,12 @@ fn apply_to_resolves_block_and_matches_replace() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let block_section = Patch::parse_single(
         &format!("¶{PATH}#1A2B\nreplace block 2:\n+  if (y || z) {{\n+  }}"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let replace_section = Patch::parse_single(
         &format!("¶{PATH}#1A2B\nreplace 2..3:\n+  if (y || z) {{\n+  }}"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
 
@@ -207,7 +207,7 @@ fn apply_to_throws_when_block_edit_has_no_resolver() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let section = Patch::parse_single(
         &format!("¶{PATH}#1A2B\nreplace block 2:\n+X"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = catch_unwind(AssertUnwindSafe(|| section.apply_to(text, None)));
@@ -225,7 +225,7 @@ fn apply_partial_to_drops_unresolvable_block_edit() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let section = Patch::parse_single(
         &format!("¶{PATH}#1A2B\nreplace block 2:\n+X"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     // No resolver → drop. The lone block edit vanishes, so the text is unchanged.
@@ -237,12 +237,12 @@ fn apply_partial_to_drops_unresolvable_block_edit() {
 async fn patcher_applies_block_edit_on_hash_match_path() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), text.to_string())]);
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let tag = store.record(PATH, text);
     let mut patcher = Patcher::new(fs, store, Some(stub_resolver as BlockResolver));
     let patch = Patch::parse(
         &format!("¶{PATH}#{tag}\nreplace block 2:\n+  if (y || z) {{\n+  }}"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await.unwrap();
@@ -260,14 +260,14 @@ async fn resolves_against_tagged_snapshot_and_recovers_onto_drifted_content() {
     // The live file gained a trailing line after the read minted the tag.
     let live_text = "line0\nline1\nline2\nline3\nline4\nline5\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), live_text.to_string())]);
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let tag = store.record(PATH, snapshot_text);
     let mut patcher = Patcher::new(fs, store, Some(stub_resolver as BlockResolver));
     // `block 2` resolves against the SNAPSHOT → span [2,3] → replace
     // "line1","line2"; recovery 3-way-merges the change onto the live file.
     let patch = Patch::parse(
         &format!("¶{PATH}#{tag}\nreplace block 2:\n+NEW"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await.unwrap();
@@ -287,14 +287,14 @@ async fn resolves_against_tagged_snapshot_and_recovers_onto_drifted_content() {
 async fn rejects_block_edit_whose_tag_was_never_recorded_for_path() {
     let text = "line0\nline1\nline2\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), text.to_string())]);
-    let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let live = compute_file_hash(text);
     let bogus = if live == "FFFF" { "0000" } else { "FFFF" };
     let check_fs = fs.clone();
     let mut patcher = Patcher::new(fs, store, Some(stub_resolver as BlockResolver));
     let patch = Patch::parse(
         &format!("¶{PATH}#{bogus}\nreplace block 2:\n+NEW"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await;
@@ -308,13 +308,13 @@ async fn rejects_block_edit_whose_tag_was_never_recorded_for_path() {
 async fn throws_block_unresolved_when_patcher_resolver_returns_null() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), text.to_string())]);
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let tag = store.record(PATH, text);
     let _check_fs = fs.clone();
     let mut patcher = Patcher::new(fs, store, Some(null_resolver as BlockResolver));
     let patch = Patch::parse(
         &format!("¶{PATH}#{tag}\nreplace block 2:\n+X"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     patcher.apply(&patch).await.unwrap();
@@ -372,7 +372,7 @@ fn apply_to_deletes_resolved_block_span() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let section = Patch::parse_single(
         &format!("¶{PATH}#1A2B\ndelete block 2"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     // stub span [2,3] → drop "  if (y) {" and "  }".
@@ -385,7 +385,7 @@ fn apply_partial_to_drops_unresolvable_delete_block_edit() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let section = Patch::parse_single(
         &format!("¶{PATH}#1A2B\ndelete block 2"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = section.apply_partial_to(text, None);
@@ -396,12 +396,12 @@ fn apply_partial_to_drops_unresolvable_delete_block_edit() {
 async fn patcher_applies_delete_block_edit_on_hash_match_path() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), text.to_string())]);
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let tag = store.record(PATH, text);
     let mut patcher = Patcher::new(fs, store, Some(stub_resolver as BlockResolver));
     let patch = Patch::parse(
         &format!("¶{PATH}#{tag}\ndelete block 2"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await.unwrap();

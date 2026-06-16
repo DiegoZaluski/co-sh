@@ -56,7 +56,7 @@ fn strip_apply_patch_path_noise(path_text: &str) -> String {
 }
 
 /// Best-effort recovery for `¶`-prefixed lines the strict tokenizer
-/// rejects. Strips apply_patch keyword noise (`Update File:`, `Update:`,
+/// rejects. Strips `apply_patch` keyword noise (`Update File:`, `Update:`,
 /// etc.) and an extra leading `***` (some models emit a hybrid `¶***foo.ts`
 /// shape), then expects `PATH(#HASH)?` with no embedded whitespace.
 /// Returns `None` when no clean path can be salvaged.
@@ -69,7 +69,7 @@ fn try_parse_recovery_header(line: &str, cwd: Option<&str>) -> Option<RawSection
     if body.is_empty() {
         return None;
     }
-    let pattern = format!(r"^(\S+?)(?:#([0-9A-Fa-f]{{{}}}))?\s*$", HL_FILE_HASH_LENGTH);
+    let pattern = format!(r"^(\S+?)(?:#([0-9A-Fa-f]{{{HL_FILE_HASH_LENGTH}}}))?\s*$");
     let re = Regex::new(&pattern).ok()?;
     let caps = re.captures(body)?;
     let raw_path = caps.get(1)?.as_str().to_string();
@@ -123,32 +123,22 @@ fn parse_hashline_header_line(line: &str, cwd: Option<&str>) -> Result<Option<Ra
         return Ok(None);
     }
     let token = TOKENIZER.tokenize(trimmed, 0);
-    let (path, file_hash) = match token {
-        Token::Header {
-            path, file_hash, ..
-        } => (path, file_hash),
-        _ => {
-            // Recovery: try to extract a path from the raw line after stripping
-            // apply_patch noise. This handles `*** Update File:foo.ts#CB5` and
-            // the half-dozen variants models actually emit.
-            if let Some(recovered) = try_parse_recovery_header(trimmed, cwd) {
-                return Ok(Some(recovered));
-            }
-            return Err(format!(
-                "Input header must be {prefix}PATH or {prefix}PATH{sep}TAG \
-                 with a {len}-hex content-hash tag; got {line:?}.",
-                prefix = HL_FILE_PREFIX,
-                sep = HL_FILE_HASH_SEP,
-                len = HL_FILE_HASH_LENGTH,
-                line = trimmed,
-            ));
+    let Token::Header { path, file_hash, .. } = token else {
+        // Recovery: try to extract a path from the raw line after stripping
+        // apply_patch noise. This handles `*** Update File:foo.ts#CB5` and
+        // the half-dozen variants models actually emit.
+        if let Some(recovered) = try_parse_recovery_header(trimmed, cwd) {
+            return Ok(Some(recovered));
         }
+            return Err(format!(
+                "Input header must be {HL_FILE_PREFIX}PATH or {HL_FILE_PREFIX}PATH{HL_FILE_HASH_SEP}TAG \
+                 with a {HL_FILE_HASH_LENGTH}-hex content-hash tag; got {trimmed:?}.",
+            ));
     };
     let parsed_path = normalize_hashline_path(&path, cwd);
     if parsed_path.is_empty() {
         return Err(format!(
-            "Input header \"{prefix}\" is empty; provide a file path.",
-            prefix = HL_FILE_PREFIX,
+            "Input header \"{HL_FILE_PREFIX}\" is empty; provide a file path.",
         ));
     }
     Ok(Some(RawSection {
@@ -178,6 +168,7 @@ fn strip_leading_blank_lines(input: &str) -> String {
 /// Returns true when the input contains at least one line that the tokenizer
 /// recognizes as a hashline op. Used by streaming previews to decide whether
 /// the partial input is worth treating as a hashline patch yet.
+#[must_use]
 pub fn contains_recognizable_hashline_operations(input: &str) -> bool {
     input.lines().any(|line| TOKENIZER.is_op(line))
 }
@@ -203,7 +194,7 @@ fn normalize_fallback_input(input: &str, options: &SplitOptions) -> String {
     if fallback_path.is_empty() {
         return input.to_string();
     }
-    format!("{}{}\n{}", HL_FILE_PREFIX, fallback_path, input)
+    format!("{HL_FILE_PREFIX}{fallback_path}\n{input}")
 }
 
 fn split_raw_sections(input: &str, options: &SplitOptions) -> Result<Vec<RawSection>, String> {
@@ -227,14 +218,11 @@ fn split_raw_sections(input: &str, options: &SplitOptions) -> Result<Vec<RawSect
                 );
             }
             let truncated: String = first_line.chars().take(120).collect();
-            let preview = format!("\"{}\"", truncated);
+            let preview = format!("\"{truncated}\"");
             return Err(format!(
-                "input must begin with \"{prefix}PATH{sep}HASH\" on the first non-blank line \
+                "input must begin with \"{HL_FILE_PREFIX}PATH{HL_FILE_HASH_SEP}HASH\" on the first non-blank line \
                  for anchored edits; got: {preview}. \
-                 Example: \"{prefix}src/foo.ts{sep}0A3\" then edit ops.",
-                prefix = HL_FILE_PREFIX,
-                sep = HL_FILE_HASH_SEP,
-                preview = preview,
+                 Example: \"{HL_FILE_PREFIX}src/foo.ts{HL_FILE_HASH_SEP}0A3\" then edit ops.",
             ));
         }
         Ok(Some(_)) => {} // first line is a valid header, proceed
@@ -347,9 +335,7 @@ impl PatchSection {
     /// safe to apply to files that don't yet exist.
     pub fn has_anchor_scoped_edit(&self) -> bool {
         self.edits().iter().any(|edit| match edit {
-            Edit::Delete { .. } => true,
-            // A `replace block N:` edit is anchored to concrete content on line N.
-            Edit::Block { .. } => true,
+            Edit::Delete { .. } | Edit::Block { .. } => true,
             Edit::Insert { cursor, .. } => {
                 matches!(
                     cursor,
@@ -479,8 +465,12 @@ impl Patch {
     /// same file snapshot must be applied as one batch; otherwise the first
     /// sub-edit shifts line numbers out from under the second's anchors and
     /// validation fails.
-    pub fn parse(input: &str, options: SplitOptions) -> Result<Patch, String> {
-        let raw = merge_same_path_sections(split_raw_sections(input, &options)?);
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input is malformed or parsing fails.
+    pub fn parse(input: &str, options: &SplitOptions) -> Result<Patch, String> {
+        let raw = merge_same_path_sections(split_raw_sections(input, options)?);
         let sections: Vec<PatchSection> = raw.into_iter().map(PatchSection::new).collect();
         Ok(Patch::new(sections))
     }
@@ -488,7 +478,11 @@ impl Patch {
     /// Parse `input` and return only the first section. Returns an error if the
     /// input has zero sections. Convenience for the single-section case where
     /// the caller already knows the patch is one hunk.
-    pub fn parse_single(input: &str, options: SplitOptions) -> Result<PatchSection, String> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input is malformed or parsing fails.
+    pub fn parse_single(input: &str, options: &SplitOptions) -> Result<PatchSection, String> {
         let patch = Patch::parse(input, options)?;
         let first = patch
             .sections
@@ -518,13 +512,11 @@ fn merge_same_path_sections(sections: Vec<RawSection>) -> Vec<RawSection> {
         if let (Some(existing), Some(incoming)) =
             (existing_hash.as_ref(), section.file_hash.as_ref())
         {
-            if existing != incoming {
-                panic!(
-                    "Conflicting hashline snapshot tags for {}: #{} and #{}. \
-                     Re-read the file and retry with one current header.",
-                    section.path, existing, incoming,
-                );
-            }
+            assert_eq!(
+                existing, incoming,
+                "Conflicting hashline snapshot tags for {}. Re-read the file and retry with one current header.",
+                section.path,
+            );
         }
         if existing_hash.is_none() && section.file_hash.is_some() {
             *existing_hash = section.file_hash;

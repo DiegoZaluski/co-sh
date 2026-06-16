@@ -36,7 +36,7 @@ pub const HL_FILE_HASH_SEP: &str = "#";
 pub const HL_RANGE_SEP: &str = "..";
 
 /// Separator between a line number and displayed line content in hashline mode.
-pub const HL_LINE_BODY_SEP: &str = ":";
+pub const HL_LINE_BODY_SEP: &str = "| ";
 
 fn regex_escape(s: &str) -> String {
     let mut escaped = String::new();
@@ -62,16 +62,19 @@ pub const HL_LINE_CAPTURE_RE_RAW: &str = r"([1-9]\d*)";
 pub const HL_FILE_HASH_LENGTH: usize = 4;
 
 /// Canonical uppercase hexadecimal content-hash tag carried by a hashline section header.
+#[must_use]
 pub fn hl_file_hash_re_raw() -> String {
-    format!("[0-9A-F]{{{}}}", HL_FILE_HASH_LENGTH)
+    format!("[0-9A-F]{{{HL_FILE_HASH_LENGTH}}}")
 }
 
 /// Capture-group form of [`hl_file_hash_re_raw`].
+#[must_use]
 pub fn hl_file_hash_capture_re_raw() -> String {
-    format!("([0-9A-F]{{{}}})", HL_FILE_HASH_LENGTH)
+    format!("([0-9A-F]{{{HL_FILE_HASH_LENGTH}}})")
 }
 
 /// Regex-escaped form of [`HL_LINE_BODY_SEP`], safe for embedding inside a regex.
+#[must_use]
 pub fn hl_line_body_sep_re_raw() -> String {
     regex_escape(HL_LINE_BODY_SEP)
 }
@@ -105,31 +108,34 @@ fn normalize_file_hash_text(text: &str) -> String {
 /// The tag is a 4-hex fingerprint of the whole file's normalized text: any read
 /// of byte-identical content mints the same tag, and a follow-up edit anchored
 /// at any line validates whenever the live file still hashes to it.
+#[must_use]
 pub fn compute_file_hash(text: &str) -> String {
     let normalized = normalize_file_hash_text(text);
     let hash = xxh32(normalized.as_bytes(), 0);
     let low16 = hash & 0xffff;
-    format!("{:04X}", low16)
+    format!("{low16:04X}")
 }
 
 /// Format a concrete replacement hunk header.
+#[must_use]
 pub fn format_replace_header(start: u32, end: u32) -> String {
     format!(
-        "{} {}{}{}{}",
-        HL_REPLACE_KEYWORD, start, HL_RANGE_SEP, end, HL_HEADER_COLON
+        "{HL_REPLACE_KEYWORD} {start}{HL_RANGE_SEP}{end}{HL_HEADER_COLON}"
     )
 }
 
 /// Format a concrete deletion hunk header.
+#[must_use]
 pub fn format_delete_header(start: u32, end: u32) -> String {
     if start == end {
-        format!("{} {}", HL_DELETE_KEYWORD, start)
+        format!("{HL_DELETE_KEYWORD} {start}")
     } else {
-        format!("{} {}{}{}", HL_DELETE_KEYWORD, start, HL_RANGE_SEP, end)
+        format!("{HL_DELETE_KEYWORD} {start}{HL_RANGE_SEP}{end}")
     }
 }
 
 /// Format an insertion hunk header for a cursor position.
+#[must_use]
 pub fn format_insert_header(cursor: &Cursor) -> String {
     match cursor {
         Cursor::BeforeAnchor(anchor) => {
@@ -146,14 +152,12 @@ pub fn format_insert_header(cursor: &Cursor) -> String {
         }
         Cursor::Bof => {
             format!(
-                "{} {}{}",
-                HL_INSERT_KEYWORD, HL_INSERT_HEAD, HL_HEADER_COLON
+                "{HL_INSERT_KEYWORD} {HL_INSERT_HEAD}{HL_HEADER_COLON}"
             )
         }
         Cursor::Eof => {
             format!(
-                "{} {}{}",
-                HL_INSERT_KEYWORD, HL_INSERT_TAIL, HL_HEADER_COLON
+                "{HL_INSERT_KEYWORD} {HL_INSERT_TAIL}{HL_HEADER_COLON}"
             )
         }
     }
@@ -161,6 +165,7 @@ pub fn format_insert_header(cursor: &Cursor) -> String {
 
 /// Format a comma-separated list of example anchors with an optional line-number
 /// prefix, quoted for inclusion in error messages: `"160", "42", "7"`.
+#[must_use]
 pub fn describe_anchor_examples(line_prefix: Option<&str>) -> String {
     let examples: Vec<String> = match line_prefix {
         Option::Some(prefix) => {
@@ -169,7 +174,7 @@ pub fn describe_anchor_examples(line_prefix: Option<&str>) -> String {
                 if trimmed.is_empty() {
                     "42".to_string()
                 } else {
-                    format!("{}2", trimmed)
+                    format!("{trimmed}2")
                 }
             } else {
                 "42".to_string()
@@ -180,31 +185,37 @@ pub fn describe_anchor_examples(line_prefix: Option<&str>) -> String {
     };
     examples
         .iter()
-        .map(|e| format!("\"{}\"", e))
+        .map(|e| format!("\"{e}\""))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
 /// Format a hashline section header for a file path and snapshot tag.
+#[must_use]
 pub fn format_hashline_header(file_path: &str, file_hash: &str) -> String {
     format!(
-        "{}{}{}{}",
-        HL_FILE_PREFIX, file_path, HL_FILE_HASH_SEP, file_hash
+        "{HL_FILE_PREFIX}{file_path}{HL_FILE_HASH_SEP}{file_hash}"
     )
 }
 
 /// Formats a single numbered line as `LINE:TEXT`.
+#[must_use]
 pub fn format_numbered_line(line_number: u32, line: &str) -> String {
-    format!("{}{}{}", line_number, HL_LINE_BODY_SEP, line)
+    format!("{line_number}{HL_LINE_BODY_SEP}{line}")
 }
 
 /// Format file text with hashline-mode line-number prefixes for display.
+///
+/// # Panics
+///
+/// Panics if `start_line` plus the line index overflows a `u32`.
+#[must_use]
 pub fn format_numbered_lines(text: &str, start_line: u32) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     lines
         .iter()
         .enumerate()
-        .map(|(i, line)| format_numbered_line(start_line + i as u32, line))
+        .map(|(i, line)| format_numbered_line(start_line + u32::try_from(i).unwrap(), line))
         .collect::<Vec<_>>()
         .join("\n")
 }

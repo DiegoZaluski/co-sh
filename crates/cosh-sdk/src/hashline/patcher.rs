@@ -108,6 +108,7 @@ pub struct PreparedSection {
 
 impl PreparedSection {
     /// Convenience: returns true when the apply produced no change.
+    #[must_use]
     pub fn is_noop(&self) -> bool {
         self.apply_result.text == self.normalized
     }
@@ -115,8 +116,7 @@ impl PreparedSection {
 
 fn has_anchor_scoped_edit(edits: &[Edit]) -> bool {
     edits.iter().any(|edit| match edit {
-        Edit::Delete { .. } => true,
-        Edit::Block { .. } => true,
+        Edit::Delete { .. } | Edit::Block { .. } => true,
         Edit::Insert { cursor, .. } => {
             matches!(
                 cursor,
@@ -139,7 +139,7 @@ fn assert_section_hash_present(
 fn recovery_to_apply_result(result: RecoveryResult) -> ApplyResult {
     ApplyResult {
         text: result.text,
-        first_changed_line: result.first_changed_line.map(|l| l as u32),
+        first_changed_line: result.first_changed_line.map(|l| u32::try_from(l).unwrap()),
         warnings: result.warnings,
     }
 }
@@ -198,6 +198,10 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     /// section in memory before any write hits the filesystem, so a
     /// multi-section batch is naturally all-or-nothing. Returns one
     /// [`PatchSectionResult`] per section in the original patch order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any section fails to parse, validate, or apply.
     pub async fn apply(
         &mut self,
         patch: &Patch,
@@ -235,6 +239,10 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
 
     /// Run the preflight pass only: read, parse, validate, apply-in-memory.
     /// No writes hit the filesystem. Use for CI checks and dry runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any section fails to parse, validate, or apply.
     pub async fn preflight(
         &mut self,
         patch: &Patch,
@@ -262,6 +270,10 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     ///
     /// Returns an error on parse error, missing-file-for-anchored-edit, or
     /// unrecovered tag mismatch ([`MismatchError`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the section fails to parse, the file is missing, or the tag does not match.
     pub async fn prepare(
         &mut self,
         section: &PatchSection,
@@ -286,7 +298,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         let line_ending = detect_line_ending(&text);
         let normalized = normalize_to_lf(&text);
 
-        let apply_result = self.apply_with_recovery(ApplyWithRecoveryArgs {
+        let apply_result = self.apply_with_recovery(&ApplyWithRecoveryArgs {
             section,
             canonical_path: &canonical_path,
             exists,
@@ -311,6 +323,10 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     /// filesystem. Restores line endings and BOM, writes via the
     /// [`Filesystem`], and records a fresh snapshot in the
     /// [`SnapshotStore`] keyed by the filesystem-canonical path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the filesystem write fails.
     pub async fn commit(
         &mut self,
         prepared: PreparedSection,
@@ -406,7 +422,7 @@ struct ApplyWithRecoveryArgs<'a> {
 impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     fn apply_with_recovery(
         &mut self,
-        args: ApplyWithRecoveryArgs,
+        args: &ApplyWithRecoveryArgs,
     ) -> Result<ApplyResult, Box<dyn std::error::Error + Send + Sync>> {
         let ApplyWithRecoveryArgs {
             section,
@@ -415,14 +431,13 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
             normalized,
             edits,
         } = args;
-        let expected: Option<&str> = if exists {
+        let expected: Option<&str> = if *exists {
             section.file_hash.as_deref()
         } else {
             None
         };
         let live_matches = expected
-            .map(|exp| compute_file_hash(normalized) == exp)
-            .unwrap_or(true);
+            .is_none_or(|exp| compute_file_hash(normalized) == exp);
 
         // Resolve `replace block N:` edits to concrete ranges before recovery
         // runs. Block anchors are expressed against the snapshot the section tag
@@ -441,20 +456,19 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
                     // Pre-fetch snapshot outside the block so the Mutex lock is
                     // released before we call any &mut self methods (e.g. mismatch_error).
                     let snapshot = self.snapshots.lock().unwrap().by_hash(canonical_path, exp);
-                    match snapshot {
-                        Some(s) => s.text,
-                        None => {
-                            let actual_file_hash =
-                                self.record_full_snapshot(canonical_path, normalized);
-                            return Err(Box::new(MismatchError::new(MismatchDetails {
-                                path: Some(section.path.clone()),
-                                expected_file_hash: exp.to_string(),
-                                actual_file_hash,
-                                file_lines: normalized.split('\n').map(|s| s.to_string()).collect(),
-                                anchor_lines: section.collect_anchor_lines(),
-                                hash_recognized: false,
-                            })));
-                        }
+                    if let Some(s) = snapshot {
+                        s.text
+                    } else {
+                        let actual_file_hash =
+                            self.record_full_snapshot(canonical_path, normalized);
+                        return Err(Box::new(MismatchError::new(MismatchDetails {
+                            path: Some(section.path.clone()),
+                            expected_file_hash: exp.to_string(),
+                            actual_file_hash,
+                            file_lines: normalized.split('\n').map(ToString::to_string).collect(),
+                            anchor_lines: section.collect_anchor_lines(),
+                            hash_recognized: false,
+                        })));
                     }
                 }
             };
@@ -492,7 +506,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         }
         // File drifted: try to replay the edit against the version the tag
         // names and 3-way-merge it onto the live content.
-        let recovered = self.recovery.try_recover(RecoveryArgs {
+        let recovered = self.recovery.try_recover(&RecoveryArgs {
             path: canonical_path.to_string(),
             current_text: normalized.to_string(),
             file_hash: expected.unwrap().to_string(),
@@ -529,7 +543,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
             path: Some(section.path.clone()),
             expected_file_hash: expected.to_string(),
             actual_file_hash,
-            file_lines: normalized.split('\n').map(|s| s.to_string()).collect(),
+            file_lines: normalized.split('\n').map(ToString::to_string).collect(),
             anchor_lines: section.collect_anchor_lines(),
             hash_recognized,
         })

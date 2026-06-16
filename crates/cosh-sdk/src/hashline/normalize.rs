@@ -10,23 +10,24 @@ pub enum LineEnding {
 }
 
 /// Detect the first line ending style in `content`. Defaults to LF when neither is present.
+#[must_use]
 pub fn detect_line_ending(content: &str) -> LineEnding {
     let crlf_idx = content.find("\r\n");
     let lf_idx = content.find('\n');
     match (crlf_idx, lf_idx) {
-        (Option::None, _) => LineEnding::Lf,
-        (_, Option::None) => LineEnding::Lf,
         (Option::Some(crlf), Option::Some(lf)) if crlf < lf => LineEnding::Crlf,
         _ => LineEnding::Lf,
     }
 }
 
 /// Normalize every line ending to LF.
+#[must_use]
 pub fn normalize_to_lf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// Re-encode LF text with the requested line ending.
+#[must_use]
 pub fn restore_line_endings(text: &str, ending: LineEnding) -> String {
     match ending {
         LineEnding::Crlf => text.replace('\n', "\r\n"),
@@ -44,6 +45,7 @@ pub struct BomResult {
 }
 
 /// Strip a UTF-8 BOM if present and return both the BOM and the trailing text.
+#[must_use]
 pub fn strip_bom(content: &str) -> BomResult {
     if let Some(rest) = content.strip_prefix('\u{FEFF}') {
         BomResult {

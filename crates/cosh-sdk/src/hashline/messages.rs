@@ -57,6 +57,7 @@ pub const EMPTY_BLOCK: &str =
 /// begins on line N such as a lone closing delimiter, or the resolved block has
 /// a syntax error). Names the offending line and steers back to an explicit
 /// `replace N..M:` range.
+#[must_use]
 pub fn block_unresolved_message(line: u32) -> String {
     format!(
         "`replace block {line}:` could not resolve a syntactic block beginning \
@@ -131,6 +132,7 @@ pub const HEADTAIL_DRIFT_WARNING: &str =
 /// The tag is REQUIRED on every section, enforced identically by the apply path
 /// and the preview/diff path, so both surfaces reuse this single builder to
 /// stay in lockstep.
+#[must_use]
 pub fn missing_snapshot_tag_message(section_path: &str) -> String {
     format!(
         "Missing hashline snapshot tag for edit to {section_path}; use \

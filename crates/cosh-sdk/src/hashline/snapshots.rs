@@ -14,7 +14,7 @@
 //! the live content.
 //!
 //! The [`SnapshotStore`] trait lets callers plug in whatever storage they like
-//! (LRU, persistent SQLite, etc.). [`InMemorySnapshotStore`] ships as a
+//! (LRU, persistent `SQLite`, etc.). [`InMemorySnapshotStore`] ships as a
 //! sensible default backed by `lru`: a bounded set of paths, each with a
 //! short history of full-file versions so in-session edit chains can still
 //! recover against the version a stale tag names.
@@ -80,7 +80,13 @@ pub struct InMemorySnapshotStore {
 }
 
 impl InMemorySnapshotStore {
-    pub fn new(options: InMemorySnapshotStoreOptions) -> Self {
+    /// Creates a new `InMemorySnapshotStore`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_paths` is zero.
+    #[must_use]
+    pub fn new(options: &InMemorySnapshotStoreOptions) -> Self {
         let max_paths = options
             .max_paths
             .unwrap_or(NonZeroUsize::new(DEFAULT_MAX_PATHS).unwrap());
@@ -156,16 +162,15 @@ impl<S: SnapshotStore> SnapshotStore for Arc<Mutex<S>> {
         self.lock().unwrap().record(path, full_text)
     }
     fn invalidate(&mut self, path: &str) {
-        self.lock().unwrap().invalidate(path)
+        self.lock().unwrap().invalidate(path);
     }
     fn clear(&mut self) {
-        self.lock().unwrap().clear()
+        self.lock().unwrap().clear();
     }
 }
 
 fn now() -> u64 {
     std::time::UNIX_EPOCH
         .elapsed()
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }

@@ -11,7 +11,7 @@ const TAG_RE: &str = r"^[0-9A-F]{4}$";
 
 #[test]
 fn derives_tag_from_whole_file_content_matches_compute_file_hash() {
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let text = "L1\nL2\nL3\n";
     let tag = store.record(PATH, text);
     let tag_re = Regex::new(TAG_RE).unwrap();
@@ -21,7 +21,7 @@ fn derives_tag_from_whole_file_content_matches_compute_file_hash() {
 
 #[test]
 fn fuses_repeated_reads_of_identical_content_onto_one_tag() {
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let text = "alpha\nbeta\ngamma\n";
     let first = store.record(PATH, text);
     let second = store.record(PATH, text);
@@ -33,7 +33,7 @@ fn fuses_repeated_reads_of_identical_content_onto_one_tag() {
 
 #[test]
 fn mints_new_tag_when_content_changes_and_retains_prior_version() {
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let v1 = "one\ntwo\n";
     let v2 = "one\ntwo\nthree\n";
     let tag1 = store.record(PATH, v1);
@@ -47,7 +47,7 @@ fn mints_new_tag_when_content_changes_and_retains_prior_version() {
 
 #[test]
 fn promotes_re_observed_older_version_back_to_head() {
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let v1 = "x\n";
     let v2 = "y\n";
     let tag1 = store.record(PATH, v1);
@@ -59,7 +59,7 @@ fn promotes_re_observed_older_version_back_to_head() {
 
 #[test]
 fn bounds_per_path_history_to_max_versions_per_path() {
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions {
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions {
         max_versions_per_path: Some(2),
         ..Default::default()
     });
@@ -74,7 +74,7 @@ fn bounds_per_path_history_to_max_versions_per_path() {
 
 #[test]
 fn bounds_tracked_paths_to_max_paths() {
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions {
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions {
         max_paths: NonZeroUsize::new(1),
         ..Default::default()
     });
@@ -87,14 +87,14 @@ fn bounds_tracked_paths_to_max_paths() {
 
 #[test]
 fn rejects_cross_path_lookups() {
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let tag = store.record(PATH, "shared\n");
     assert!(store.by_hash(OTHER, &tag).is_none());
 }
 
 #[test]
 fn invalidate_drops_one_path_clear_drops_everything() {
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let tag_a = store.record(PATH, "A\n");
     let tag_b = store.record(OTHER, "B\n");
     store.invalidate(PATH);

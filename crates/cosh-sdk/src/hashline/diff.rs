@@ -23,6 +23,7 @@ pub struct Hunk {
 /// with `context` lines of surrounding context per hunk.
 ///
 /// Equivalent to `Diff.structuredPatch("file", "file", old, new, "", "", { context })`.
+#[must_use]
 pub fn structured_patch(old: &str, new: &str, context: usize) -> Patch {
     let diff = TextDiff::from_lines(old, new);
     let groups = diff.grouped_ops(context);
@@ -32,12 +33,10 @@ pub fn structured_patch(old: &str, new: &str, context: usize) -> Patch {
     for group in &groups {
         let old_start = group
             .first()
-            .map(|op| op.old_range().start + 1)
-            .unwrap_or(1);
+            .map_or(1, |op| op.old_range().start + 1);
         let new_start = group
             .first()
-            .map(|op| op.new_range().start + 1)
-            .unwrap_or(1);
+            .map_or(1, |op| op.new_range().start + 1);
 
         let mut lines = Vec::new();
         let mut old_count = 0usize;
@@ -78,6 +77,7 @@ pub fn structured_patch(old: &str, new: &str, context: usize) -> Patch {
 /// exactly (fuzz factor = 0).
 ///
 /// Equivalent to `Diff.applyPatch(target, patch, { fuzzFactor: 0 })`.
+#[must_use]
 pub fn apply_patch(target: &str, patch: &Patch) -> Option<String> {
     let target_lines: Vec<&str> = target.split('\n').collect();
     let mut output: Vec<String> = Vec::new();

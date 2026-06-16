@@ -17,9 +17,10 @@ static LINE_REF_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*[>+\-*]*\s*(\d+)(?::.*)?\s*$").unwrap());
 
 /// Format the required-shape diagnostic shown when a line reference is malformed.
+#[must_use]
 pub fn format_full_anchor_requirement(raw: Option<&str>) -> String {
     let received = match raw {
-        Some(s) => format!(" Received {:?}.", s),
+        Some(s) => format!(" Received {s:?}."),
         None => String::new(),
     };
     format!(
@@ -30,6 +31,10 @@ pub fn format_full_anchor_requirement(raw: Option<&str>) -> String {
 }
 
 /// Parse a decorated bare line-number anchor like `42`, `*42:foo`, ` > 7`.
+///
+/// # Errors
+///
+/// Returns an error if the reference is not a valid line number.
 pub fn parse_tag(reference: &str) -> Result<u32, String> {
     let captures = LINE_REF_RE.captures(reference).ok_or_else(|| {
         format!(
@@ -45,8 +50,7 @@ pub fn parse_tag(reference: &str) -> Result<u32, String> {
     })?;
     if line < 1 {
         return Err(format!(
-            "Line number must be >= 1, got {} in \"{}\".",
-            line, reference
+            "Line number must be >= 1, got {line} in \"{reference}\".",
         ));
     }
     Ok(line)
@@ -86,7 +90,7 @@ fn get_mismatch_display_lines(anchor_lines: &[u32], file_lines: &[String]) -> Ve
             continue;
         }
         let lo = 1.max(line.saturating_sub(MISMATCH_CONTEXT));
-        let hi = (file_lines.len() as u32).min(line + MISMATCH_CONTEXT);
+        let hi = u32::try_from(file_lines.len()).unwrap_or(u32::MAX).min(line + MISMATCH_CONTEXT);
         for line_num in lo..=hi {
             display.insert(line_num);
         }
@@ -110,6 +114,7 @@ pub struct MismatchError {
 }
 
 impl MismatchError {
+    #[must_use]
     pub fn new(details: MismatchDetails) -> Self {
         let message = Self::format_message_inner(&details);
         Self {
@@ -124,41 +129,28 @@ impl MismatchError {
     }
 
     // Replicated to maintain consistency with the original API.
+    #[must_use]
     pub fn display_message(&self) -> &str {
         &self.message
     }
 
+    #[must_use]
     pub fn format_message(&self) -> &str {
         &self.message
     }
 
+    #[must_use]
     pub fn format_display_message(&self) -> &str {
         &self.message
     }
 
+    #[must_use]
     pub fn rejection_header(details: &MismatchDetails) -> Vec<String> {
         let path_text = match &details.path {
-            Some(p) => format!(" for {}", p),
+            Some(p) => format!(" for {p}"),
             None => String::new(),
         };
-        if !details.hash_recognized {
-            vec![
-                format!(
-                    "Edit rejected{}: hash {}{} is not from this session.",
-                    path_text, HL_FILE_HASH_SEP, details.expected_file_hash,
-                ),
-                format!(
-                    "The current file hashes to {}{}. Re-read the file with `read` \
-                     to copy a current {}{}{}tag header — never invent the tag and never \
-                     reuse one from a prior session.",
-                    HL_FILE_HASH_SEP,
-                    details.actual_file_hash,
-                    HL_FILE_PREFIX,
-                    "path",
-                    HL_FILE_HASH_SEP,
-                ),
-            ]
-        } else {
+        if details.hash_recognized {
             vec![
                 format!(
                     "Edit rejected{}: file changed between read and edit.",
@@ -178,10 +170,28 @@ impl MismatchError {
                     HL_FILE_HASH_SEP,
                 ),
             ]
+        } else {
+            vec![
+                format!(
+                    "Edit rejected{}: hash {}{} is not from this session.",
+                    path_text, HL_FILE_HASH_SEP, details.expected_file_hash,
+                ),
+                format!(
+                    "The current file hashes to {}{}. Re-read the file with `read` \
+                     to copy a current {}{}{}tag header — never invent the tag and never \
+                     reuse one from a prior session.",
+                    HL_FILE_HASH_SEP,
+                    details.actual_file_hash,
+                    HL_FILE_PREFIX,
+                    "path",
+                    HL_FILE_HASH_SEP,
+                ),
+            ]
         }
     }
 
     fn format_message_inner(details: &MismatchDetails) -> String {
+        #[allow(clippy::if_not_else)]
         let anchor_set: BTreeSet<u32> = details.anchor_lines.iter().copied().collect();
         let mut lines = Self::rejection_header(details);
         let display_lines = get_mismatch_display_lines(&details.anchor_lines, &details.file_lines);
@@ -191,23 +201,21 @@ impl MismatchError {
         lines.push(String::new());
         let mut previous: i64 = -1;
         for line_num in display_lines {
-            if previous != -1 && line_num as i64 > previous + 1 {
+            if previous != -1 && i64::from(line_num) > previous + 1 {
                 lines.push("...".to_string());
             }
-            previous = line_num as i64;
+            previous = i64::from(line_num);
             let text = details
                 .file_lines
                 .get((line_num - 1) as usize)
-                .map(|s| s.as_str())
-                .unwrap_or("");
+                .map_or("", String::as_str);
             let marker = if anchor_set.contains(&line_num) {
                 "*"
             } else {
                 " "
             };
             lines.push(format!(
-                "{}{}",
-                marker,
+                "{marker}{}",
                 format_numbered_line(line_num, text)
             ));
         }
@@ -221,6 +229,7 @@ impl fmt::Debug for MismatchError {
             .field("path", &self.path)
             .field("expected_file_hash", &self.expected_file_hash)
             .field("actual_file_hash", &self.actual_file_hash)
+            .field("file_lines", &self.file_lines)
             .field("anchor_lines", &self.anchor_lines)
             .field("hash_recognized", &self.hash_recognized)
             .field("message", &self.message)
@@ -237,11 +246,14 @@ impl fmt::Display for MismatchError {
 impl std::error::Error for MismatchError {}
 
 /// Returns an error when the line reference is out of bounds for the given file.
+///
+/// # Errors
+///
+/// Returns an error if `line` is less than 1 or greater than the number of lines in `file_lines`.
 pub fn validate_line_ref(line: u32, file_lines: &[String]) -> Result<(), String> {
     if line < 1 || line as usize > file_lines.len() {
         return Err(format!(
-            "Line {} does not exist (file has {} lines)",
-            line,
+            "Line {line} does not exist (file has {} lines)",
             file_lines.len()
         ));
     }

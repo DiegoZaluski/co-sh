@@ -48,10 +48,10 @@ impl ChunkEmitter {
         self.line_number += 1;
 
         let mut chunks: Vec<String> = Vec::new();
-        let sep_bytes = if self.out_lines.is_empty() { 0 } else { 1 };
+        let sep_bytes = usize::from(!self.out_lines.is_empty());
         let line_bytes = formatted.len();
 
-        let would_overflow = self.out_lines.len() as u32 >= self.max_chunk_lines
+        let would_overflow = u32::try_from(self.out_lines.len()).unwrap_or(u32::MAX) >= self.max_chunk_lines
             || self.out_bytes + sep_bytes + line_bytes > self.max_chunk_bytes as usize;
         
         if !self.out_lines.is_empty() && would_overflow {
@@ -63,9 +63,9 @@ impl ChunkEmitter {
         let is_first = self.out_lines.is_empty();
         self.out_lines.push(formatted);
         
-        self.out_bytes += (if is_first { 0 } else { 1 }) + line_bytes;
+        self.out_bytes += usize::from(!is_first) + line_bytes;
 
-        if self.out_lines.len() as u32 >= self.max_chunk_lines
+        if u32::try_from(self.out_lines.len()).unwrap_or(u32::MAX) >= self.max_chunk_lines
             || self.out_bytes >= self.max_chunk_bytes as usize
         {
             if let Some(flushed) = self.flush() {
@@ -96,6 +96,7 @@ impl ChunkEmitter {
 /// When the source is empty or contains only blank lines, a single chunk
 /// with a numbered empty line is yielded so the consumer always sees at
 /// least one numbered line.
+#[must_use]
 pub fn stream_hash_lines(source: &str, options: StreamOptions) -> Vec<String> {
     let resolved = ResolvedStreamOptions::from(options);
     let mut emitter = ChunkEmitter::new(&resolved);

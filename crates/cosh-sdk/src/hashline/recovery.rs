@@ -202,7 +202,7 @@ impl<S: SnapshotStore> Recovery<S> {
 
     /// Attempt recovery. Returns `None` when no path forward is found — the
     /// caller should then surface a [`MismatchError`].
-    pub fn try_recover(&mut self, args: RecoveryArgs) -> Option<RecoveryResult> {
+    pub fn try_recover(&mut self, args: &RecoveryArgs) -> Option<RecoveryResult> {
         let snapshot = self.store.by_hash(&args.path, &args.file_hash)?;
 
         let head = self.store.head(&args.path);

@@ -48,10 +48,9 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
             trimmed.to_string()
         };
         return Some(format!(
-            "apply_patch sentinel {:?} is not valid in hashline. \
+            "apply_patch sentinel {preview:?} is not valid in hashline. \
              File sections start with `¶path#HASH` (no `Update File:` / `Add File:` keyword). \
              Use `replace N..M:`, `delete N..M`, or `insert before|after|head|tail:` ops.",
-            preview
         ));
     }
 
@@ -71,9 +70,8 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
             trimmed.to_string()
         };
         return Some(format!(
-            "`@@`-bracketed hunk header {:?} is not valid in hashline. \
+            "`@@`-bracketed hunk header {preview:?} is not valid in hashline. \
              Drop the `@@ ... @@` brackets and write a verb header such as `replace N..M:`.",
-            preview
         ));
     }
 
@@ -89,8 +87,7 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
     if bare_line_re.is_match(trimmed) {
         let num = trimmed.trim();
         return Some(format!(
-            "hunk headers need a verb. Use `replace {n}..{n}:` to replace, or `delete {n}` to delete.",
-            n = num
+            "hunk headers need a verb. Use `replace {num}..{num}:` to replace, or `delete {num}` to delete.",
         ));
     }
 
@@ -99,11 +96,8 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
         let s = &caps[1];
         let e = &caps[2];
         return Some(format!(
-            "bare range hunk header {:?} is not valid. \
+            "bare range hunk header {trimmed:?} is not valid. \
              Hunk headers need a verb: write `replace {s}..{e}:` or `delete {s}..{e}`.",
-            trimmed,
-            s = s,
-            e = e
         ));
     }
 
@@ -135,6 +129,7 @@ pub struct Executor {
 }
 
 impl Executor {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             edits: Vec::new(),
@@ -161,17 +156,19 @@ impl Executor {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the token causes a parse error.
     pub fn feed(&mut self, token: Token) -> Result<(), String> {
         if self.terminated {
             return Ok(());
         }
         match token {
-            Token::EnvelopeBegin { .. } => {
+            Token::EnvelopeBegin { .. } | Token::EnvelopeEnd { .. } => {
                 self.consume_pending_skippable_comments()?;
-            }
-            Token::EnvelopeEnd { .. } => {
-                self.consume_pending_skippable_comments()?;
-                self.terminated = true;
+                if matches!(token, Token::EnvelopeEnd { .. }) {
+                    self.terminated = true;
+                }
             }
             Token::Abort { .. } => {
                 self.terminated = true;
@@ -190,7 +187,7 @@ impl Executor {
             Token::Raw { text, line_num } => {
                 if self.pending.is_none() && is_skippable_comment_line(&text) {
                     self.skippable_comments
-                        .push(PendingComment { text, line_num });
+                        .push(PendingComment { line_num, text });
                     return Ok(());
                 }
                 self.consume_pending_skippable_comments()?;
@@ -203,8 +200,8 @@ impl Executor {
                     BlockTarget::Replace { .. } | BlockTarget::Delete { .. }
                 ) {
                     let range = match &target {
-                        BlockTarget::Replace { range } => *range,
-                        BlockTarget::Delete { range } => *range,
+                        BlockTarget::Replace { range }
+                        | BlockTarget::Delete { range } => *range,
                         _ => unreachable!(),
                     };
                     validate_range_order(range, line_num)?;
@@ -220,6 +217,9 @@ impl Executor {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if there are overlapping deletes or pending comments fail to process.
     pub fn end(&mut self) -> Result<(Vec<Edit>, Vec<String>), String> {
         self.consume_pending_skippable_comments()?;
         self.flush_pending()?;
@@ -288,12 +288,11 @@ impl Executor {
                 continue;
             }
             let mut sorted = source_lines.clone();
-            sorted.sort();
+            sorted.sort_unstable();
             let (first_block, second_block) = (sorted[0], sorted[1]);
             return Err(format!(
-                "line {}: anchor line {} is already targeted by another hunk on line {}. \
+                "line {second_block}: anchor line {anchor_line} is already targeted by another hunk on line {first_block}. \
                  Issue ONE hunk per range; payload is only the final desired content, never a before/after pair.",
-                second_block, anchor_line, first_block,
             ));
         }
         Ok(())
@@ -302,18 +301,17 @@ impl Executor {
     fn handle_literal_payload(&mut self, text: &str, line_num: u32) -> Result<(), String> {
         let pending = self.pending.as_ref().ok_or_else(|| {
             format!(
-                "line {}: payload line has no preceding hunk header. \
+                "line {line_num}: payload line has no preceding hunk header. \
                  Got {:?}.",
-                line_num,
                 format!("{}{}", HL_PAYLOAD_REPLACE, text),
             )
         })?;
         match pending.target {
             BlockTarget::Delete { .. } => {
-                return Err(format!("line {}: {}", line_num, DELETE_TAKES_NO_BODY));
+                return Err(format!("line {line_num}: {DELETE_TAKES_NO_BODY}"));
             }
             BlockTarget::DeleteBlock { .. } => {
-                return Err(format!("line {}: {}", line_num, DELETE_BLOCK_TAKES_NO_BODY));
+                return Err(format!("line {line_num}: {DELETE_BLOCK_TAKES_NO_BODY}"));
             }
             _ => {}
         }
@@ -328,7 +326,7 @@ impl Executor {
     fn handle_raw(&mut self, text: &str, line_num: u32) -> Result<(), String> {
         let contamination = detect_apply_patch_contamination(text);
         if let Some(msg) = contamination {
-            return Err(format!("line {}: {}", line_num, msg));
+            return Err(format!("line {line_num}: {msg}"));
         }
         if let Some(pending) = &self.pending {
             if text.trim().is_empty() {
@@ -336,16 +334,16 @@ impl Executor {
             }
             match pending.target {
                 BlockTarget::Delete { .. } => {
-                    return Err(format!("line {}: {}", line_num, DELETE_TAKES_NO_BODY));
+                    return Err(format!("line {line_num}: {DELETE_TAKES_NO_BODY}"));
                 }
                 BlockTarget::DeleteBlock { .. } => {
-                    return Err(format!("line {}: {}", line_num, DELETE_BLOCK_TAKES_NO_BODY));
+                    return Err(format!("line {line_num}: {DELETE_BLOCK_TAKES_NO_BODY}"));
                 }
                 _ => {}
             }
             let first = text.trim_start().as_bytes().first();
             if first == Some(&b'-') {
-                return Err(format!("line {}: {}", line_num, MINUS_ROW_REJECTED));
+                return Err(format!("line {line_num}: {MINUS_ROW_REJECTED}"));
             }
             if !self
                 .warnings
@@ -364,9 +362,8 @@ impl Executor {
             return Ok(());
         }
         Err(format!(
-            "line {}: payload line has no preceding hunk header. \
-             Use `replace N..M:`, `delete N..M`, or `insert before|after|head|tail:` above the body. Got {:?}.",
-            line_num, text
+            "line {line_num}: payload line has no preceding hunk header. \
+             Use `replace N..M:`, `delete N..M`, or `insert before|after|head|tail:` above the body. Got {text:?}.",
         ))
     }
 
@@ -430,9 +427,8 @@ impl Executor {
     }
 
     fn flush_pending(&mut self) -> Result<(), String> {
-        let pending = match self.pending.take() {
-            Some(p) => p,
-            None => return Ok(()),
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
         };
         let line_num = pending.line_num;
         let payloads = pending.payloads;
@@ -447,13 +443,13 @@ impl Executor {
             }
             BlockTarget::Block { anchor } => {
                 if payloads.is_empty() {
-                    return Err(format!("line {}: {}", line_num, EMPTY_BLOCK));
+                    return Err(format!("line {line_num}: {EMPTY_BLOCK}"));
                 }
                 self.push_block(anchor, &payloads, line_num);
             }
             BlockTarget::Replace { range } => {
                 if payloads.is_empty() {
-                    return Err(format!("line {}: {}", line_num, EMPTY_REPLACE));
+                    return Err(format!("line {line_num}: {EMPTY_REPLACE}"));
                 }
                 let cursor = Cursor::BeforeAnchor(Anchor {
                     line: range.start.line,
@@ -465,7 +461,7 @@ impl Executor {
             }
             BlockTarget::InsertBefore { anchor } => {
                 if payloads.is_empty() {
-                    return Err(format!("line {}: {}", line_num, EMPTY_INSERT));
+                    return Err(format!("line {line_num}: {EMPTY_INSERT}"));
                 }
                 self.emit_payload_rows(
                     &Cursor::BeforeAnchor(Anchor { line: anchor.line }),
@@ -476,7 +472,7 @@ impl Executor {
             }
             BlockTarget::InsertAfter { anchor } => {
                 if payloads.is_empty() {
-                    return Err(format!("line {}: {}", line_num, EMPTY_INSERT));
+                    return Err(format!("line {line_num}: {EMPTY_INSERT}"));
                 }
                 self.emit_payload_rows(
                     &Cursor::AfterAnchor(Anchor { line: anchor.line }),
@@ -487,13 +483,13 @@ impl Executor {
             }
             BlockTarget::Bof => {
                 if payloads.is_empty() {
-                    return Err(format!("line {}: {}", line_num, EMPTY_INSERT));
+                    return Err(format!("line {line_num}: {EMPTY_INSERT}"));
                 }
                 self.emit_payload_rows(&Cursor::Bof, &payloads, line_num, None);
             }
             BlockTarget::Eof => {
                 if payloads.is_empty() {
-                    return Err(format!("line {}: {}", line_num, EMPTY_INSERT));
+                    return Err(format!("line {line_num}: {EMPTY_INSERT}"));
                 }
                 self.emit_payload_rows(&Cursor::Eof, &payloads, line_num, None);
             }
@@ -508,6 +504,11 @@ impl Default for Executor {
     }
 }
 
+/// Parse a diff string into a list of edits and warnings.
+///
+/// # Errors
+///
+/// Returns an error if the diff text is malformed.
 pub fn parse_patch(diff: &str) -> Result<(Vec<Edit>, Vec<String>), String> {
     let mut tokenizer = Tokenizer::new();
     let mut executor = Executor::new();
@@ -520,6 +521,7 @@ pub fn parse_patch(diff: &str) -> Result<(Vec<Edit>, Vec<String>), String> {
     executor.end()
 }
 
+#[must_use]
 pub fn parse_patch_streaming(diff: &str) -> (Vec<Edit>, Vec<String>) {
     let mut tokenizer = Tokenizer::new();
     let mut executor = Executor::new();

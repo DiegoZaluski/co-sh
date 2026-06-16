@@ -27,6 +27,12 @@ pub struct TreeSitter {
 }
 
 impl TreeSitter {
+    /// Creates a new `TreeSitter` with the given capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is zero.
+    #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(LruCache::new(
@@ -56,12 +62,9 @@ impl TreeSitter {
                     guard.put(path.to_string(), old);
                     return None;
                 }
-                let tree = match parser.parse(text, Some(&old.tree)) {
-                    Some(t) => t,
-                    None => {
-                        guard.put(path.to_string(), old);
-                        return None;
-                    }
+                let Some(tree) = parser.parse(text, Some(&old.tree)) else {
+                    guard.put(path.to_string(), old);
+                    return None;
                 };
                 CachedEntry {
                     language: old.language,

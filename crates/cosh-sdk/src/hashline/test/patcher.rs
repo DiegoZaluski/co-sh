@@ -14,12 +14,12 @@ const PATH: &str = "a.ts";
 #[tokio::test]
 async fn applies_when_section_tag_is_live_files_content_hash() {
     let fs = InMemoryFilesystem::new([(PATH.to_string(), "before\n".to_string())]);
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let tag = store.record(PATH, "before\n");
     let mut patcher = Patcher::new(fs, store, None);
     let patch = Patch::parse(
         &format!("¶{PATH}#{tag}\nreplace 1..1:\n+after"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await.unwrap();
@@ -37,14 +37,14 @@ async fn validates_anchor_from_content_hash_even_with_no_recorded_snapshot() {
     // still hashes to the tag — no stored snapshot is consulted.
     let content = "l1\nl2\nl3\nl4\nl5\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), content.to_string())]);
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let tag = compute_file_hash(content);
     // Store is intentionally empty: byHash(tag) === null.
     assert!(store.by_hash(PATH, &tag).is_none());
     let mut patcher = Patcher::new(fs, store, None);
     let patch = Patch::parse(
         &format!("¶{PATH}#{tag}\nreplace 3..3:\n+L3"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await.unwrap();
@@ -57,7 +57,7 @@ async fn validates_anchor_from_content_hash_even_with_no_recorded_snapshot() {
 fn normalizes_lowercase_section_tags_while_parsing() {
     let section = Patch::parse_single(
         &format!("¶{PATH}#1a2b\nreplace 1..1:\n+after"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
 
@@ -68,13 +68,13 @@ fn normalizes_lowercase_section_tags_while_parsing() {
 async fn refuses_with_mismatch_when_recorded_version_no_longer_matches_live() {
     let fs = InMemoryFilesystem::new([(PATH.to_string(), "drifted\n".to_string())]);
     let check_fs = fs.clone();
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     // Tag was minted from "before\n" but the live file is "drifted\n".
     let tag = store.record(PATH, "before\n");
     let mut patcher = Patcher::new(fs, store, None);
     let patch = Patch::parse(
         &format!("¶{PATH}#{tag}\nreplace 1..1:\n+after"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await;
@@ -94,7 +94,7 @@ async fn refuses_with_mismatch_when_recorded_version_no_longer_matches_live() {
 async fn refuses_with_not_from_this_session_when_tag_never_recorded_for_path() {
     let fs = InMemoryFilesystem::new([(PATH.to_string(), "current\n".to_string())]);
     let check_fs = fs.clone();
-    let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let mut patcher = Patcher::new(fs, store, None);
     // A 4-hex tag that is neither the live content hash nor a recorded
     // version — equivalent to the model fabricating it or carrying it over
@@ -103,7 +103,7 @@ async fn refuses_with_not_from_this_session_when_tag_never_recorded_for_path() {
     let bogus = if live == "FFFF" { "0000" } else { "FFFF" };
     let patch = Patch::parse(
         &format!("¶{PATH}#{bogus}\nreplace 1..1:\n+after"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await;
@@ -124,11 +124,11 @@ async fn refuses_with_not_from_this_session_when_tag_never_recorded_for_path() {
 async fn rejects_hashless_head_tail_insert_tag_required_on_every_section() {
     let fs = InMemoryFilesystem::new([(PATH.to_string(), "a\nb\n".to_string())]);
     let check_fs = fs.clone();
-    let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let mut patcher = Patcher::new(fs, store, None);
     let patch = Patch::parse(
         &format!("¶{PATH}\ninsert tail:\n+c"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await;
@@ -142,11 +142,11 @@ async fn rejects_hashless_head_tail_insert_tag_required_on_every_section() {
 #[tokio::test]
 async fn still_hard_rejects_anchored_edit_that_omits_snapshot_tag() {
     let fs = InMemoryFilesystem::new([(PATH.to_string(), "a\nb\n".to_string())]);
-    let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let mut patcher = Patcher::new(fs, store, None);
     let patch = Patch::parse(
         &format!("¶{PATH}\nreplace 1..1:\n+X"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await;
@@ -158,11 +158,11 @@ async fn still_hard_rejects_anchored_edit_that_omits_snapshot_tag() {
 #[tokio::test]
 async fn rejects_tagged_edit_whose_target_file_does_not_exist() {
     let fs = InMemoryFilesystem::new([]);
-    let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let mut patcher = Patcher::new(fs, store, None);
     let patch = Patch::parse(
         "¶ghost.ts#1A2B\ninsert tail:\n+c",
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await;
@@ -176,13 +176,13 @@ async fn rejects_tagged_edit_whose_target_file_does_not_exist() {
 async fn applies_head_tail_insert_with_stale_tag_and_warns_instead_of_hard_failing() {
     let content = "a\nb\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), content.to_string())]);
-    let store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let live = compute_file_hash(content);
     let stale = if live == "0000" { "FFFF" } else { "0000" };
     let mut patcher = Patcher::new(fs, store, None);
     let patch = Patch::parse(
         &format!("¶{PATH}#{stale}\ninsert tail:\n+c"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await.unwrap();
@@ -197,12 +197,12 @@ async fn applies_head_tail_insert_with_stale_tag_and_warns_instead_of_hard_faili
 async fn does_not_warn_when_head_tail_insert_carries_live_tag() {
     let content = "a\nb\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), content.to_string())]);
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let tag = store.record(PATH, content);
     let mut patcher = Patcher::new(fs, store, None);
     let patch = Patch::parse(
         &format!("¶{PATH}#{tag}\ninsert tail:\n+c"),
-        SplitOptions::default(),
+        &SplitOptions::default(),
     )
     .unwrap();
     let result = patcher.apply(&patch).await.unwrap();

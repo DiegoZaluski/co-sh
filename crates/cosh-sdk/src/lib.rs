@@ -1,2 +1,2 @@
 pub mod hashline;
-pub mod syntax;
+pub mod tree_sitter;

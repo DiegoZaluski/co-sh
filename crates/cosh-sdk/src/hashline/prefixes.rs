@@ -101,6 +101,7 @@ fn collect_line_prefix_stats(lines: &[String]) -> LinePrefixStats {
 /// - mixed `+<n>:` form when present
 ///
 /// Returns the lines untouched if no scheme is recognized.
+#[must_use]
 pub fn strip_new_line_prefixes(lines: &[String]) -> Vec<String> {
     let stats = collect_line_prefix_stats(lines);
     if stats.non_empty == 0 {
@@ -109,6 +110,7 @@ pub fn strip_new_line_prefixes(lines: &[String]) -> Vec<String> {
 
     let content_line_count = stats.non_empty - stats.header_count;
     let strip_hash = content_line_count > 0 && stats.hash_prefix_count == content_line_count;
+    #[allow(clippy::cast_precision_loss)]
     let strip_plus = !strip_hash
         && stats.diff_plus_hash_prefix_count == 0
         && stats.diff_plus_count > 0
@@ -143,6 +145,7 @@ pub fn strip_new_line_prefixes(lines: &[String]) -> Vec<String> {
 
 /// Strict variant: strip hashline prefixes only when every content line is
 /// hashline-prefixed. Returns the lines unchanged otherwise.
+#[must_use]
 pub fn strip_hashline_prefixes(lines: &[String]) -> Vec<String> {
     let stats = collect_line_prefix_stats(lines);
     if stats.non_empty == 0 {

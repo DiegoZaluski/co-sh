@@ -50,6 +50,7 @@ impl NotFoundError {
         }
     }
 
+    #[must_use]
     pub fn path(&self) -> &str {
         &self.path
     }
@@ -153,26 +154,46 @@ impl InMemoryFilesystem {
     }
 
     /// Synchronous helper for setting up fixtures.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn set(&self, path: impl Into<String>, content: impl Into<String>) {
         self.files.lock().unwrap().insert(path.into(), content.into());
     }
 
     /// Synchronous helper for inspecting state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn get(&self, path: &str) -> Option<String> {
         self.files.lock().unwrap().get(path).cloned()
     }
 
     /// Remove a single entry. Returns true when something was removed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn delete(&self, path: &str) -> bool {
         self.files.lock().unwrap().remove(path).is_some()
     }
 
     /// Wipe all entries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn clear(&self) {
         self.files.lock().unwrap().clear();
     }
 
     /// Iterate `(path, content)` pairs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn entries(&self) -> Vec<(String, String)> {
         self.files
             .lock()
@@ -215,6 +236,7 @@ impl Filesystem for InMemoryFilesystem {
 pub struct DiskFilesystem;
 
 impl DiskFilesystem {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }

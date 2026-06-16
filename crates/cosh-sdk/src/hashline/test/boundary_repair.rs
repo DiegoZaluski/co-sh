@@ -57,10 +57,7 @@ fn drops_duplicated_multi_line_closing_block() {
     .join("\n");
     let (text, warnings) = apply_with_warnings(&file, &diff);
     // Exactly one `</>` and one `);` survive — no doubling.
-    assert_eq!(
-        text.split('\n').filter(|l| l.trim() == "</>").count(),
-        1
-    );
+    assert_eq!(text.split('\n').filter(|l| l.trim() == "</>").count(), 1);
     assert_eq!(text.split('\n').filter(|l| l.trim() == ");").count(), 1);
     assert!(text.ends_with("\t\t</>\n\t);\n};"));
     assert!(warnings.iter().any(|w| w.contains("delimiter-balance")));
@@ -70,20 +67,28 @@ fn drops_duplicated_multi_line_closing_block() {
 fn drops_single_duplicated_structural_closer() {
     // Single structural-closer duplication: the range ends one line short and
     // the payload restates the `});` that survives just below it.
-    let file = ["it('a', () => {", "\tsetup();", "\trun();", "});", "after();"].join("\n");
-    // `replace 2..3:` replaces the two body lines but the payload also restates the
-    // `});` at line 4, which survives — a duplicate close.
-    let diff = [
-        "replace 2..3:",
-        "+\tsetup2();",
-        "+\trun2();",
-        "+});",
+    let file = [
+        "it('a', () => {",
+        "\tsetup();",
+        "\trun();",
+        "});",
+        "after();",
     ]
     .join("\n");
+    // `replace 2..3:` replaces the two body lines but the payload also restates the
+    // `});` at line 4, which survives — a duplicate close.
+    let diff = ["replace 2..3:", "+\tsetup2();", "+\trun2();", "+});"].join("\n");
     let (text, warnings) = apply_with_warnings(&file, &diff);
     assert_eq!(
         text,
-        ["it('a', () => {", "\tsetup2();", "\trun2();", "});", "after();"].join("\n")
+        [
+            "it('a', () => {",
+            "\tsetup2();",
+            "\trun2();",
+            "});",
+            "after();"
+        ]
+        .join("\n")
     );
     assert!(warnings.iter().any(|w| w.contains("delimiter-balance")));
 }
@@ -91,16 +96,17 @@ fn drops_single_duplicated_structural_closer() {
 #[test]
 fn spares_deleted_closing_line_when_payload_omits_it() {
     // Genuine missing-closer: payload omits the trailing `});`.
-    let file = ["const handlers = {", "\ta() {", "\t\treturn 1;", "\t},", "};"].join("\n");
-    // `replace 5..5:` is the final `};`. Model inserts a new method but forgets to
-    // restate `};`; sparing it keeps the object literal balanced.
-    let diff = [
-        "replace 5..5:",
-        "+\tb() {",
-        "+\t\treturn 2;",
-        "+\t},",
+    let file = [
+        "const handlers = {",
+        "\ta() {",
+        "\t\treturn 1;",
+        "\t},",
+        "};",
     ]
     .join("\n");
+    // `replace 5..5:` is the final `};`. Model inserts a new method but forgets to
+    // restate `};`; sparing it keeps the object literal balanced.
+    let diff = ["replace 5..5:", "+\tb() {", "+\t\treturn 2;", "+\t},"].join("\n");
     let (text, warnings) = apply_with_warnings(&file, &diff);
     assert_eq!(
         text,
@@ -142,22 +148,29 @@ fn does_not_drop_balance_neutral_duplicated_statement() {
     let file = ["a = 1;", "b = 2;", "c = 3;"].join("\n");
     let diff = ["replace 1..1:", "+a = 1;", "+b = 2;"].join("\n");
     let (text, warnings) = apply_with_warnings(&file, &diff);
-    assert_eq!(
-        text,
-        ["a = 1;", "b = 2;", "b = 2;", "c = 3;"].join("\n")
-    );
+    assert_eq!(text, ["a = 1;", "b = 2;", "b = 2;", "c = 3;"].join("\n"));
     assert!(warnings.is_empty());
 }
 
 #[test]
 fn ignores_brackets_inside_string_literals() {
     // Brackets inside strings must not trigger a spurious balance mismatch.
-    let file = [r#"const a = "}";"#, r#"const b = "x";"#, r#"const c = "y";"#].join("\n");
+    let file = [
+        r#"const a = "}";"#,
+        r#"const b = "x";"#,
+        r#"const c = "y";"#,
+    ]
+    .join("\n");
     let diff = [r#"replace 2..2:"#, r#"+const b = "}}}";"#].join("\n");
     let (text, warnings) = apply_with_warnings(&file, &diff);
     assert_eq!(
         text,
-        [r#"const a = "}";"#, r#"const b = "}}}";"#, r#"const c = "y";"#].join("\n")
+        [
+            r#"const a = "}";"#,
+            r#"const b = "}}}";"#,
+            r#"const c = "y";"#
+        ]
+        .join("\n")
     );
     assert!(warnings.is_empty());
 }
@@ -190,17 +203,15 @@ fn de_duplicates_closer_while_recovering_from_drifted_file() {
     // region (lines 4-6), so the 3-way merge applies cleanly.
     let current_text = snapshot_text.replace("const tail = 0;", "const tail = 99;");
 
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let file_hash = store.record(PATH, &snapshot_text);
 
     // `replace 4..5:` replaces the body lines but the payload also restates the `});`
     // that survives at line 6 — the duplicate-closer mistake.
-    let (edits, _) = parse_patch(
-        &["replace 4..5:", "+\tsetup2();", "+\trun2();", "+});"].join("\n"),
-    )
-    .unwrap();
+    let (edits, _) =
+        parse_patch(&["replace 4..5:", "+\tsetup2();", "+\trun2();", "+});"].join("\n")).unwrap();
     let mut recovery = Recovery::new(store);
-    let recovered = recovery.try_recover(RecoveryArgs {
+    let recovered = recovery.try_recover(&RecoveryArgs {
         path: PATH.to_string(),
         current_text: current_text.clone(),
         file_hash,
@@ -211,11 +222,7 @@ fn de_duplicates_closer_while_recovering_from_drifted_file() {
     let recovered = recovered.unwrap();
     // Exactly one `});` — the duplicate was absorbed during recovery.
     assert_eq!(
-        recovered
-            .text
-            .split('\n')
-            .filter(|l| *l == "});")
-            .count(),
+        recovered.text.split('\n').filter(|l| *l == "});").count(),
         1
     );
     assert!(recovered.text.contains("setup2();"));
@@ -223,5 +230,8 @@ fn de_duplicates_closer_while_recovering_from_drifted_file() {
     // The unrelated drift on the live file survives the merge.
     assert!(recovered.text.contains("const tail = 99;"));
     // The repair warning propagates out through the recovery result.
-    assert!(recovered.warnings.iter().any(|w| w.contains("delimiter-balance")));
+    assert!(recovered
+        .warnings
+        .iter()
+        .any(|w| w.contains("delimiter-balance")));
 }

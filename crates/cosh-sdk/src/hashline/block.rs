@@ -32,6 +32,7 @@ impl Default for ResolveBlockEditsOptions {
 }
 
 /// True when at least one edit is an unresolved `replace block N:` edit.
+#[must_use]
 pub fn has_block_edit(edits: &[Edit]) -> bool {
     edits.iter().any(|edit| matches!(edit, Edit::Block { .. }))
 }
@@ -44,6 +45,12 @@ pub fn has_block_edit(edits: &[Edit]) -> bool {
 /// Synthesized inserts/deletes carry sequential `index` values for readability
 /// only — [`apply_edits`] re-derives every edit's index from array order, so
 /// the passthrough edits keeping their original indices is harmless.
+///
+/// # Panics
+///
+/// Panics if an unresolvable block edit is encountered and `on_unresolved` is set to `Throw`.
+#[allow(clippy::similar_names)]
+#[must_use]
 pub fn resolve_block_edits(
     edits: &[Edit],
     text: &str,
@@ -89,7 +96,7 @@ pub fn resolve_block_edits(
                     } else {
                         BLOCK_RESOLVER_UNAVAILABLE.to_string()
                     };
-                    panic!("line {}: {}", line_num, msg);
+                    panic!("line {line_num}: {msg}");
                 }
             }
         };

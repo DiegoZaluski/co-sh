@@ -52,6 +52,7 @@ fn marker_line_equals(line: &str, marker: &str) -> bool {
     end == marker.len() && line.starts_with(marker)
 }
 
+#[must_use]
 pub fn split_hashline_lines(text: &str) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
@@ -107,6 +108,10 @@ fn scan_line_number(text: &str, index: usize, end: usize) -> Option<NumberScan> 
 }
 
 /// Parse a bare line-number anchor. Returns an error on malformed input.
+///
+/// # Errors
+///
+/// Returns an error if `raw` is not a valid line number.
 pub fn parse_lid(raw: &str, line_num: u32) -> Result<Anchor, String> {
     let bytes = raw.as_bytes();
     let end = trim_end_index(bytes);
@@ -350,6 +355,7 @@ fn scan_hunk_anchor(line: &str, start: usize, end: usize) -> Option<TargetScan> 
     None
 }
 
+#[must_use]
 pub fn try_parse_hunk_header(line: &str) -> Option<BlockTarget> {
     let bytes = line.as_bytes();
     let end = trim_end_index(bytes);
@@ -370,6 +376,7 @@ pub struct HeaderInfo {
     pub file_hash: Option<String>,
 }
 
+#[must_use]
 pub fn try_parse_header(line: &str) -> Option<HeaderInfo> {
     if !line.starts_with(HL_FILE_PREFIX) {
         return None;
@@ -399,7 +406,7 @@ pub fn try_parse_header(line: &str) -> Option<HeaderInfo> {
         if hash_end > end {
             return None;
         }
-        for &b in bytes[hash_start..hash_end].iter() {
+        for &b in &bytes[hash_start..hash_end] {
             if !is_hex_digit_code(b) {
                 return None;
             }
@@ -446,6 +453,7 @@ pub enum Token {
     },
 }
 
+#[must_use]
 pub fn classify_line(line: &str, line_num: u32) -> Token {
     if line.is_empty() {
         return Token::Blank { line_num };
@@ -499,6 +507,7 @@ pub struct Tokenizer {
 
 impl Tokenizer {
     /// Create a new tokenizer starting at line number 1.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             buffer: String::new(),
@@ -508,10 +517,12 @@ impl Tokenizer {
     }
 
     /// Feed a chunk of text and drain complete lines into tokens.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tokenizer is closed and has not been reset.
     pub fn feed(&mut self, chunk: &str) -> Vec<Token> {
-        if self.closed {
-            panic!("Tokenizer is closed; call reset() before reusing.");
-        }
+        assert!(!self.closed, "Tokenizer is closed; call reset() before reusing.");
         if chunk.is_empty() {
             return vec![];
         }
@@ -562,21 +573,25 @@ impl Tokenizer {
     }
 
     /// Classify a single line (stateless).
+    #[must_use]
     pub fn tokenize(&self, line: &str, line_num: u32) -> Token {
         classify_line(line, line_num)
     }
 
     /// Check if a line is a recognized hunk header.
+    #[must_use]
     pub fn is_op(&self, line: &str) -> bool {
         try_parse_hunk_header(line).is_some()
     }
 
     /// Check if a line is a recognized header.
+    #[must_use]
     pub fn is_header(&self, line: &str) -> bool {
         try_parse_header(line).is_some()
     }
 
     /// Check if a line is an envelope marker.
+    #[must_use]
     pub fn is_envelope_marker(&self, line: &str) -> bool {
         marker_line_equals(line, BEGIN_PATCH_MARKER)
             || marker_line_equals(line, END_PATCH_MARKER)

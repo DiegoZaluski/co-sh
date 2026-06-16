@@ -8,6 +8,10 @@
 //! emits the `<sign><lineNum>|<content>` shape works.
 use super::types::{CompactDiffOptions, CompactDiffPreview};
 
+/// # Panics
+///
+/// Panics if a diff line with a context marker (` `) cannot be parsed as a valid line number.
+#[must_use]
 pub fn build_compact_diff_preview(
     diff: &str,
     _options: Option<CompactDiffOptions>,
@@ -31,15 +35,14 @@ pub fn build_compact_diff_preview(
         .map(|line| {
             let kind = line.chars().next();
             match kind {
-                Some('+') | Some('-') | Some(' ') => {}
+                Some('+' | '-' | ' ') => {}
                 _ => return line.to_string(),
             }
             let kind = kind.unwrap();
 
             let body = &line[1..];
-            let sep = match body.find('|') {
-                Some(pos) => pos,
-                None => return line.to_string(),
+            let Some(sep) = body.find('|') else {
+                return line.to_string();
             };
 
             let content = &body[sep + 1..];
@@ -55,9 +58,10 @@ pub fn build_compact_diff_preview(
                 }
                 _ => {
                     let line_number: u32 = body[..sep].parse().unwrap_or(0);
-                    let offset = added_lines as i64 - removed_lines as i64;
-                    let new_line_number = (line_number as i64 + offset) as u32;
-                    format!(" {}:{}", new_line_number, content)
+                    let offset = i64::from(added_lines) - i64::from(removed_lines);
+                    #[allow(clippy::cast_sign_loss)]
+                    let new_line_number = u32::try_from(i64::from(line_number) + offset).unwrap_or(0);
+                    format!(" {new_line_number}:{content}")
                 }
             }
         })

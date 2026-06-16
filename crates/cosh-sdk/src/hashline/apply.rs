@@ -93,7 +93,7 @@ fn clone_applied_edit(edit: &Edit, index: u32) -> Edit {
             index,
             old_assertion: old_assertion.clone(),
         },
-        _ => unreachable!(),
+        Edit::Block { .. } => unreachable!(),
     }
 }
 
@@ -138,7 +138,7 @@ fn insert_at_end(
     };
     file_lines.splice(insert_index..insert_index, lines.iter().cloned());
     line_origins.splice(insert_index..insert_index, origins);
-    Some(insert_index as u32 + 1)
+    Some(u32::try_from(insert_index).ok()? + 1)
 }
 
 fn bucket_anchor_edits_by_line(
@@ -432,14 +432,10 @@ fn repair_boundary_balance(edits: &[Edit], file_lines: &[String]) -> (Vec<Edit>,
     let mut warnings: Vec<String> = Vec::new();
     let mut i = 0;
     while i < edits.len() {
-        let group = find_replacement_group(edits, i);
-        let group = match group {
-            Some(g) => g,
-            None => {
-                out.push(edits[i].clone());
-                i += 1;
-                continue;
-            }
+        let Some(group) = find_replacement_group(edits, i) else {
+            out.push(edits[i].clone());
+            i += 1;
+            continue;
         };
         let inserts: Vec<&Edit> = group
             .insert_indices
@@ -470,8 +466,7 @@ fn repair_boundary_balance(edits: &[Edit], file_lines: &[String]) -> (Vec<Edit>,
             warnings.push(describe_boundary_repair(
                 &group,
                 &format!(
-                    "dropped {} duplicated trailing payload line(s) already present below the range",
-                    dup_suffix
+                    "dropped {dup_suffix} duplicated trailing payload line(s) already present below the range",
                 ),
             ));
             let keep = group.insert_indices.len() - dup_suffix;
@@ -487,8 +482,7 @@ fn repair_boundary_balance(edits: &[Edit], file_lines: &[String]) -> (Vec<Edit>,
             warnings.push(describe_boundary_repair(
                 &group,
                 &format!(
-                    "dropped {} duplicated leading payload line(s) already present above the range",
-                    dup_prefix
+                    "dropped {dup_prefix} duplicated leading payload line(s) already present above the range",
                 ),
             ));
             for idx in &group.insert_indices[dup_prefix..] {
@@ -503,8 +497,7 @@ fn repair_boundary_balance(edits: &[Edit], file_lines: &[String]) -> (Vec<Edit>,
             warnings.push(describe_boundary_repair(
                 &group,
                 &format!(
-                    "kept {} structural closing line(s) the range deleted without restating",
-                    dropped_closers
+                    "kept {dropped_closers} structural closing line(s) the range deleted without restating",
                 ),
             ));
             out.extend(inserts.into_iter().cloned());
@@ -525,6 +518,12 @@ fn repair_boundary_balance(edits: &[Edit], file_lines: &[String]) -> (Vec<Edit>,
 ///
 /// Returns the post-edit text and the first changed line number (1-indexed).
 /// Returns an error if an anchor is out of bounds.
+///
+/// # Panics
+///
+/// Panics if any edit is an unresolved `Edit::Block` variant or an anchor is out of bounds.
+#[allow(clippy::too_many_lines)]
+#[must_use]
 pub fn apply_edits(text: &str, edits: &[Edit]) -> ApplyResult {
     if edits.is_empty() {
         return ApplyResult {
@@ -540,7 +539,7 @@ pub fn apply_edits(text: &str, edits: &[Edit]) -> ApplyResult {
         }
     }
 
-    let mut file_lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+    let mut file_lines: Vec<String> = text.split('\n').map(ToString::to_string).collect();
     let mut line_origins: Vec<LineOrigin> = (0..file_lines.len())
         .map(|_| LineOrigin::Original)
         .collect();
@@ -555,7 +554,7 @@ pub fn apply_edits(text: &str, edits: &[Edit]) -> ApplyResult {
     let target_edits: Vec<Edit> = edits
         .iter()
         .enumerate()
-        .map(|(i, e)| clone_applied_edit(e, i as u32))
+        .map(|(i, e)| clone_applied_edit(e, u32::try_from(i).unwrap()))
         .collect();
     if let Err(msg) = validate_line_bounds(&target_edits, &file_lines) {
         panic!("{}", msg);
@@ -675,8 +674,8 @@ pub fn apply_edits(text: &str, edits: &[Edit]) -> ApplyResult {
             origins.push(LineOrigin::Insert);
         }
 
-        file_lines.splice(idx..idx + 1, replacement);
-        line_origins.splice(idx..idx + 1, origins);
+        file_lines.splice(idx..=idx, replacement);
+        line_origins.splice(idx..=idx, origins);
         track_first_changed(&mut first_changed_line, line);
     }
 
