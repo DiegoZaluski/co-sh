@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-serde_json     = "1"
+serde_json = "1"
 rs-trafilatura = "0.2.2"
-log            = "0.4"
+log = "0.4"
 
 [dependencies.cosh-sdk]
 path = "../cosh-sdk"

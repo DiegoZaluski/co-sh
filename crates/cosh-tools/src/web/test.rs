@@ -2,17 +2,25 @@ use super::search::SearchArgs;
 
 #[tokio::test]
 async fn reject_empty_args() {
-    let e = super::search(SearchArgs { query: None, url: None, num_results: 1 })
-        .await
-        .unwrap_err();
+    let e = super::search(SearchArgs {
+        query: None,
+        url: None,
+        num_results: 1,
+    })
+    .await
+    .unwrap_err();
     assert!(e.contains("query") || e.contains("url"), "{e}");
 }
 
 #[tokio::test]
 async fn reject_zero_results() {
-    let e = super::search(SearchArgs { query: Some("x".into()), url: None, num_results: 0 })
-        .await
-        .unwrap_err();
+    let e = super::search(SearchArgs {
+        query: Some("x".into()),
+        url: None,
+        num_results: 0,
+    })
+    .await
+    .unwrap_err();
     assert!(e.contains("num_results"), "{e}");
 }
 
@@ -67,7 +75,10 @@ async fn search_url_beats_query() {
     .await
     .unwrap();
     assert!(r.contains("Rust"));
-    assert!(!r.contains("\nURL:"), "should not contain search URLs:\n{r}");
+    assert!(
+        !r.contains("\nURL:"),
+        "should not contain search URLs:\n{r}"
+    );
 }
 
 #[tokio::test]
