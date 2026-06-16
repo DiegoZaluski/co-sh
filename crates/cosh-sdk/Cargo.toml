@@ -1,25 +1,40 @@
 [package]
-edition = "2021"
+edition = "2024"
 name = "cosh-sdk"
 version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lru = "0.12"
-regex = "1"
-similar = "3.1.1"
-log = "0.4"
-xxhash-rust = { version = "0.8", features = ["xxh32"] }
-tokio = { version = "1.52.3", features = ["full"] }
-tree-sitter = "0.26.9"
-tree-sitter-rust = "0.24"
-tree-sitter-python = "0.25"
+globset                = "0.4.18"
+grep-matcher           = "0.1.8"
+grep-regex             = "0.1.14"
+grep-searcher          = "0.1.16"
+ignore                 = "0.4.25"
+libc                   = "0.2"
+log                    = "0.4"
+lru                    = "0.12"
+memmap2                = "0.9.9"
+rayon                  = "1"
+regex                  = "1"
+similar                = "3.1.1"
+smallvec               = "1"
+tree-sitter            = "0.26.9"
+tree-sitter-c-sharp    = "0.23"
+tree-sitter-go         = "0.25"
+tree-sitter-haskell    = "0.23"
+tree-sitter-java       = "0.23"
 tree-sitter-javascript = "0.25"
-tree-sitter-c-sharp = "0.23"
-tree-sitter-go = "0.25"
-tree-sitter-java = "0.23"
-tree-sitter-haskell = "0.23"
-tree-sitter-swift = "0.7"
-tree-sitter-zig = "1.1"
-# tree-sitter-kotlin = "0.3.8"
+tree-sitter-python     = "0.25"
+tree-sitter-rust       = "0.24"
+tree-sitter-swift      = "0.7"
+tree-sitter-zig        = "1.1"
+# tree-sitter-kotlin   = "0.3.8"
+
+[dependencies.xxhash-rust]
+version = "0.8"
+features = ["xxh32"]
+
+[dependencies.tokio]
+version = "1.52.3"
+features = ["full"]
