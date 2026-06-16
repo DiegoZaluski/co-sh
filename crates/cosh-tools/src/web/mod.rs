@@ -1,4 +1,5 @@
 pub mod search;
-pub mod test;
+#[cfg(test)]
+mod test;
 
 pub use search::{SearchArgs, search};
