@@ -67,7 +67,7 @@ pub async fn write(
                     continue;
                 }
 
-                cosh_sdk::syntax::syntax().invalidate(target.path);
+                cosh_sdk::tree_sitter::tree_sitter().invalidate(target.path);
 
                 // Retained as a backup for a potential rollback.
                 store.record(target.path, target.text);

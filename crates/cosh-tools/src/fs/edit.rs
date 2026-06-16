@@ -18,7 +18,7 @@ pub struct EditResult {
 }
 
 fn resolve_block_fn(req: BlockResolverRequest) -> Option<BlockSpan> {
-    cosh_sdk::syntax::syntax().resolve_block(&req.path, &req.text, req.line)
+    cosh_sdk::tree_sitter::tree_sitter().resolve_block(&req.path, &req.text, req.line)
 }
 
 pub async fn edit(
@@ -112,7 +112,7 @@ async fn edit_target(
         .map_err(|e| format!("failed to write `{}`: {}", target.path, e))?;
 
     store.record(target.path, &after);
-    cosh_sdk::syntax::syntax().invalidate(target.path);
+    cosh_sdk::tree_sitter::tree_sitter().invalidate(target.path);
 
     Ok(EditResult {
         path: target.path.to_string(),

@@ -80,7 +80,7 @@ async fn read_target(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadResult> 
     let body = format::format_numbered_lines(&text, 1);
 
     if let Some(line) = target.line {
-        let ts = cosh_sdk::syntax::syntax();
+        let ts = cosh_sdk::tree_sitter::tree_sitter();
         let ln: u32 = match line.try_into() {
             Ok(l) => l,
             Err(e) => {
@@ -133,7 +133,7 @@ async fn read_target(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadResult> 
 async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadResult> {
     let paths = match if Path::new(path).is_dir() {
         Ok(collect_source_files(Path::new(path)))
-    } else if cosh_sdk::syntax::language::detect_language(path).is_some() {
+    } else if cosh_sdk::tree_sitter::language::detect_language(path).is_some() {
         Ok(vec![path.to_string()])
     } else {
         Err(format!(
@@ -152,7 +152,7 @@ async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadR
         }
     };
 
-    let ts = cosh_sdk::syntax::syntax();
+    let ts = cosh_sdk::tree_sitter::tree_sitter();
     let mut results: Vec<ReadResult> = Vec::new();
 
     for p in &paths {
@@ -216,7 +216,7 @@ fn collect_source_files(path: &Path) -> Vec<String> {
                 files.extend(collect_source_files(&p));
             } else if p.is_file() {
                 let s = p.to_string_lossy().to_string();
-                if cosh_sdk::syntax::language::detect_language(&s).is_some() {
+                if cosh_sdk::tree_sitter::language::detect_language(&s).is_some() {
                     files.push(s);
                 }
             }
