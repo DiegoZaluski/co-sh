@@ -1,4 +1,4 @@
-//! Ripgrep-backed search engine exported via N-API.
+//! Ripgrep-backed search engine.
 //!
 //! Provides two layers:
 //! - `search()` for in-memory content search.
@@ -1097,8 +1097,11 @@ mod tests {
         write_file(&root.path().join("regular.txt"), "needle\n");
         make_fifo(&root.path().join("skip-me.fifo"));
 
-        let result = grep_sync(&base_grep_config(root.path()), &task::CancelToken::default())
-            .expect("directory grep should succeed");
+        let result = grep_sync(
+            &base_grep_config(root.path()),
+            &task::CancelToken::default(),
+        )
+        .expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 1);
         assert_eq!(result.files_with_matches, 1);
@@ -1119,8 +1122,8 @@ mod tests {
         config.max_count = Some(2);
         config.offset = Some(1);
 
-        let result =
-            grep_sync(&config, &task::CancelToken::default()).expect("directory grep should succeed");
+        let result = grep_sync(&config, &task::CancelToken::default())
+            .expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 3);
         assert_eq!(result.files_with_matches, 2);
@@ -1143,8 +1146,8 @@ mod tests {
         config.mode = Some(GrepOutputMode::Count);
         config.max_count = Some(2);
 
-        let result =
-            grep_sync(&config, &task::CancelToken::default()).expect("directory grep should succeed");
+        let result = grep_sync(&config, &task::CancelToken::default())
+            .expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 3);
         assert_eq!(result.files_with_matches, 2);
@@ -1203,8 +1206,8 @@ mod tests {
         config.pattern = r"foo\(\) \{\n  return".to_string();
         config.multiline = Some(true);
 
-        let result =
-            grep_sync(&config, &task::CancelToken::default()).expect("multiline grep should succeed");
+        let result = grep_sync(&config, &task::CancelToken::default())
+            .expect("multiline grep should succeed");
 
         assert_eq!(
             result.total_matches, 1,
@@ -1229,8 +1232,8 @@ mod tests {
         config.max_count = Some(4);
         config.max_count_per_file = Some(2);
 
-        let result =
-            grep_sync(&config, &task::CancelToken::default()).expect("directory grep should succeed");
+        let result = grep_sync(&config, &task::CancelToken::default())
+            .expect("directory grep should succeed");
 
         let paths: Vec<&str> = result
             .matches
@@ -1476,7 +1479,11 @@ impl<'a> ParallelVisitorBuilder<'a> for StreamingGrepVisitorBuilder<'a> {
     }
 }
 
-#[allow(dead_code, clippy::too_many_arguments, reason = "matches GrepOptions field count")]
+#[allow(
+    dead_code,
+    clippy::too_many_arguments,
+    reason = "matches GrepOptions field count"
+)]
 fn run_streaming_grep(
     search_path: &Path,
     matcher: &grep_regex::RegexMatcher,
@@ -1558,7 +1565,11 @@ fn push_file_match(matches: &mut Vec<GrepMatch>, path: String) {
     });
 }
 
-#[allow(dead_code, clippy::too_many_lines, reason = "complex match on output modes")]
+#[allow(
+    dead_code,
+    clippy::too_many_lines,
+    reason = "complex match on output modes"
+)]
 fn aggregate_parallel_results(
     results: Vec<FileSearchResult>,
     params: SearchParams,
@@ -1716,7 +1727,11 @@ fn search_sync(content: &[u8], options: &SearchOptions) -> SearchResult {
     }
 }
 
-#[allow(dead_code, clippy::too_many_lines, reason = "handles file + dir + cache + streaming paths")]
+#[allow(
+    dead_code,
+    clippy::too_many_lines,
+    reason = "handles file + dir + cache + streaming paths"
+)]
 fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult, String> {
     let search_path = resolve_search_path(&options.path)?;
     let metadata =
@@ -1886,7 +1901,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
         let limit_reached =
             search.limit_reached || max_count.is_some_and(|max| search.collected >= max);
 
-        return Ok(            GrepResult {
+        return Ok(GrepResult {
             matches: matched_vec,
             total_matches: clamp_u32(search.match_count),
             files_with_matches: 1,
@@ -1974,4 +1989,37 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
             None
         },
     })
+}
+
+/// Search file content for lines matching a regex pattern.
+///
+/// Resolves `options.path`, applies optional glob and language-type filters,
+/// and searches with the ripgrep engine. Directories are walked in parallel;
+/// single files are searched in memory.
+///
+/// # Errors
+/// Returns an error when `options.path` cannot be resolved, `options.pattern`
+/// is an invalid regex, or the operation times out.
+pub fn grep(options: GrepOptions) -> Result<GrepResult, String> {
+    let ct = task::CancelToken::new(options.timeout_ms);
+    let config = GrepConfig {
+        pattern: options.pattern,
+        path: options.path,
+        glob: options.glob,
+        type_filter: options.r#type,
+        ignore_case: options.ignore_case,
+        multiline: options.multiline,
+        hidden: options.hidden,
+        gitignore: options.gitignore,
+        cache: options.cache,
+        max_count: options.max_count,
+        offset: options.offset,
+        context_before: options.context_before,
+        context_after: options.context_after,
+        context: options.context,
+        max_columns: options.max_columns,
+        mode: options.mode,
+        max_count_per_file: options.max_count_per_file,
+    };
+    grep_sync(&config, &ct)
 }

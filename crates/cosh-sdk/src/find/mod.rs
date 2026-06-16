@@ -15,6 +15,6 @@ pub use glob::{GlobOptions, GlobResult, glob};
 pub use glob_util::{build_glob_pattern, compile_glob, try_compile_glob};
 pub use grep::{
     ContextLine, GrepMatch, GrepOptions, GrepOutputMode, GrepResult, Match, SearchOptions,
-    SearchResult,
+    SearchResult, grep,
 };
 pub use task::{AbortReason, AbortToken, CancelToken, CancelledError};
