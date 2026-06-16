@@ -92,7 +92,9 @@ fn replays_edits_onto_current_when_every_anchor_line_is_unchanged() {
     // insert+delete pair earlier in the chain could leave indices
     // pointing at duplicated rows even with both guards satisfied), so
     // the dedicated REPLAY warning surfaces a "verify the diff" hedge.
-    assert!(recovered
-        .warnings
-        .contains(&RECOVERY_SESSION_REPLAY_WARNING.to_string()));
+    assert!(
+        recovered
+            .warnings
+            .contains(&RECOVERY_SESSION_REPLAY_WARNING.to_string())
+    );
 }

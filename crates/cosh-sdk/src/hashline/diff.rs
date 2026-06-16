@@ -31,12 +31,8 @@ pub fn structured_patch(old: &str, new: &str, context: usize) -> Patch {
     let mut hunks = Vec::with_capacity(groups.len());
 
     for group in &groups {
-        let old_start = group
-            .first()
-            .map_or(1, |op| op.old_range().start + 1);
-        let new_start = group
-            .first()
-            .map_or(1, |op| op.new_range().start + 1);
+        let old_start = group.first().map_or(1, |op| op.old_range().start + 1);
+        let new_start = group.first().map_or(1, |op| op.new_range().start + 1);
 
         let mut lines = Vec::new();
         let mut old_count = 0usize;

@@ -230,8 +230,10 @@ fn de_duplicates_closer_while_recovering_from_drifted_file() {
     // The unrelated drift on the live file survives the merge.
     assert!(recovered.text.contains("const tail = 99;"));
     // The repair warning propagates out through the recovery result.
-    assert!(recovered
-        .warnings
-        .iter()
-        .any(|w| w.contains("delimiter-balance")));
+    assert!(
+        recovered
+            .warnings
+            .iter()
+            .any(|w| w.contains("delimiter-balance"))
+    );
 }

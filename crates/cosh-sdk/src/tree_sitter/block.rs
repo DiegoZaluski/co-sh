@@ -34,8 +34,8 @@ pub(crate) fn resolve_block(tree: &Tree, text: &str, line: u32) -> Option<BlockS
     }
 
     Some(BlockSpan {
-        start: node.start_position().row as u32 + 1,
-        end: node.end_position().row as u32 + 1,
+        start: u32::try_from(node.start_position().row).unwrap_or(u32::MAX) + 1,
+        end: u32::try_from(node.end_position().row).unwrap_or(u32::MAX) + 1,
     })
 }
 
@@ -54,8 +54,8 @@ pub(crate) fn resolve_symbol_name(tree: &Tree, source: &[u8], name: &str) -> Opt
             == Some(name)
         {
             return Some(BlockSpan {
-                start: node.start_position().row as u32 + 1,
-                end: node.end_position().row as u32 + 1,
+                start: u32::try_from(node.start_position().row).unwrap_or(u32::MAX) + 1,
+                end: u32::try_from(node.end_position().row).unwrap_or(u32::MAX) + 1,
             });
         }
 

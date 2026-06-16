@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use super::apply::apply_edits;
-use super::block::{resolve_block_edits, ResolveBlockEditsOptions};
+use super::block::{ResolveBlockEditsOptions, resolve_block_edits};
 use super::format::{HL_FILE_HASH_LENGTH, HL_FILE_HASH_SEP, HL_FILE_PREFIX};
 use super::parser::{parse_patch, parse_patch_streaming};
 use super::tokenizer::{Token, Tokenizer};
@@ -97,11 +97,7 @@ fn normalize_hashline_path(raw_path: &str, cwd: Option<&str>) -> String {
     }
     if let Ok(relative) = path.strip_prefix(cwd_path) {
         let s = relative.to_string_lossy().to_string();
-        if s.is_empty() {
-            ".".to_string()
-        } else {
-            s
-        }
+        if s.is_empty() { ".".to_string() } else { s }
     } else {
         unquoted
     }
@@ -123,17 +119,20 @@ fn parse_hashline_header_line(line: &str, cwd: Option<&str>) -> Result<Option<Ra
         return Ok(None);
     }
     let token = TOKENIZER.tokenize(trimmed, 0);
-    let Token::Header { path, file_hash, .. } = token else {
+    let Token::Header {
+        path, file_hash, ..
+    } = token
+    else {
         // Recovery: try to extract a path from the raw line after stripping
         // apply_patch noise. This handles `*** Update File:foo.ts#CB5` and
         // the half-dozen variants models actually emit.
         if let Some(recovered) = try_parse_recovery_header(trimmed, cwd) {
             return Ok(Some(recovered));
         }
-            return Err(format!(
-                "Input header must be {HL_FILE_PREFIX}PATH or {HL_FILE_PREFIX}PATH{HL_FILE_HASH_SEP}TAG \
+        return Err(format!(
+            "Input header must be {HL_FILE_PREFIX}PATH or {HL_FILE_PREFIX}PATH{HL_FILE_HASH_SEP}TAG \
                  with a {HL_FILE_HASH_LENGTH}-hex content-hash tag; got {trimmed:?}.",
-            ));
+        ));
     };
     let parsed_path = normalize_hashline_path(&path, cwd);
     if parsed_path.is_empty() {
@@ -358,10 +357,9 @@ impl PatchSection {
                 Edit::Insert { cursor, .. } => {
                     if let super::types::Cursor::BeforeAnchor(anchor)
                     | super::types::Cursor::AfterAnchor(anchor) = cursor
+                        && !lines.contains(&anchor.line)
                     {
-                        if !lines.contains(&anchor.line) {
-                            lines.push(anchor.line);
-                        }
+                        lines.push(anchor.line);
                     }
                 }
             }

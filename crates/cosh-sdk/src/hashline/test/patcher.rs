@@ -5,7 +5,7 @@ use super::super::fs::InMemoryFilesystem;
 use super::super::input::Patch;
 use super::super::messages::HEADTAIL_DRIFT_WARNING;
 use super::super::mismatch::MismatchError;
-use super::super::patcher::{Patcher, PatchOp};
+use super::super::patcher::{PatchOp, Patcher};
 use super::super::snapshots::{InMemorySnapshotStore, InMemorySnapshotStoreOptions, SnapshotStore};
 use super::super::types::SplitOptions;
 
@@ -160,11 +160,7 @@ async fn rejects_tagged_edit_whose_target_file_does_not_exist() {
     let fs = InMemoryFilesystem::new([]);
     let store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let mut patcher = Patcher::new(fs, store, None);
-    let patch = Patch::parse(
-        "¶ghost.ts#1A2B\ninsert tail:\n+c",
-        &SplitOptions::default(),
-    )
-    .unwrap();
+    let patch = Patch::parse("¶ghost.ts#1A2B\ninsert tail:\n+c", &SplitOptions::default()).unwrap();
     let result = patcher.apply(&patch).await;
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
@@ -190,7 +186,11 @@ async fn applies_head_tail_insert_with_stale_tag_and_warns_instead_of_hard_faili
     let section = &result.sections[0];
     assert_eq!(section.op, PatchOp::Update);
     assert_eq!(section.after, "a\nb\nc\n");
-    assert!(section.warnings.contains(&HEADTAIL_DRIFT_WARNING.to_string()));
+    assert!(
+        section
+            .warnings
+            .contains(&HEADTAIL_DRIFT_WARNING.to_string())
+    );
 }
 
 #[tokio::test]
@@ -209,5 +209,9 @@ async fn does_not_warn_when_head_tail_insert_carries_live_tag() {
 
     let section = &result.sections[0];
     assert_eq!(section.op, PatchOp::Update);
-    assert!(!section.warnings.contains(&HEADTAIL_DRIFT_WARNING.to_string()));
+    assert!(
+        !section
+            .warnings
+            .contains(&HEADTAIL_DRIFT_WARNING.to_string())
+    );
 }

@@ -23,14 +23,14 @@
 use std::sync::{Arc, Mutex};
 
 use super::apply::apply_edits;
-use super::block::{has_block_edit, resolve_block_edits, ResolveBlockEditsOptions};
+use super::block::{ResolveBlockEditsOptions, has_block_edit, resolve_block_edits};
 use super::format::{compute_file_hash, format_hashline_header};
-use super::fs::{is_not_found, Filesystem, WriteResult};
+use super::fs::{Filesystem, WriteResult, is_not_found};
 use super::input::{Patch, PatchSection};
-use super::messages::{missing_snapshot_tag_message, HEADTAIL_DRIFT_WARNING};
+use super::messages::{HEADTAIL_DRIFT_WARNING, missing_snapshot_tag_message};
 use super::mismatch::{MismatchDetails, MismatchError};
 use super::normalize::{
-    detect_line_ending, normalize_to_lf, restore_line_endings, strip_bom, BomResult, LineEnding,
+    BomResult, LineEnding, detect_line_ending, normalize_to_lf, restore_line_endings, strip_bom,
 };
 use super::recovery::{Recovery, RecoveryArgs, RecoveryResult};
 use super::snapshots::SnapshotStore;
@@ -436,8 +436,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         } else {
             None
         };
-        let live_matches = expected
-            .is_none_or(|exp| compute_file_hash(normalized) == exp);
+        let live_matches = expected.is_none_or(|exp| compute_file_hash(normalized) == exp);
 
         // Resolve `replace block N:` edits to concrete ranges before recovery
         // runs. Block anchors are expressed against the snapshot the section tag

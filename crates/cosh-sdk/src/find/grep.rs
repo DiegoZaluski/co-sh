@@ -30,7 +30,7 @@ use smallvec::SmallVec;
 use crate::find::{fs_cache, glob_util, task};
 #[allow(dead_code)]
 fn clamp_u32(value: u64) -> u32 {
-    value.min(u32::MAX as u64) as u32
+    u32::try_from(value.min(u64::from(u32::MAX))).unwrap_or(u32::MAX)
 }
 
 #[allow(dead_code)]
@@ -272,7 +272,6 @@ enum FileBytes {
 }
 
 /// Outcome of attempting to read a file for searching.
-
 #[allow(dead_code)]
 enum ReadFile {
     Bytes(FileBytes),
@@ -378,10 +377,10 @@ impl Sink for MatchCollector {
 
         self.collected_count += 1;
 
-        if let Some(max) = self.max_count {
-            if self.collected_count >= max {
-                self.limit_reached = true;
-            }
+        if let Some(max) = self.max_count
+            && self.collected_count >= max
+        {
+            self.limit_reached = true;
         }
 
         Ok(true)
@@ -592,7 +591,6 @@ fn build_searcher(context_before: u32, context_after: u32, multiline: bool) -> S
 }
 
 /// Read file bytes, distinguishing oversized files from other skips.
-
 #[allow(dead_code)]
 fn read_file_bytes(path: &Path) -> io::Result<ReadFile> {
     let file = match File::open(path) {
@@ -618,7 +616,7 @@ fn read_file_bytes(path: &Path) -> io::Result<ReadFile> {
         return Ok(ReadFile::Bytes(FileBytes::Owned(Vec::new())));
     }
     if size <= SMALL_FILE_READ_BYTES {
-        let mut buffer = Vec::with_capacity(size as usize);
+        let mut buffer = Vec::with_capacity(usize::try_from(size).unwrap_or(usize::MAX));
         let mut handle = file;
         handle.read_to_end(&mut buffer)?;
         return Ok(ReadFile::Bytes(FileBytes::Owned(buffer)));
@@ -634,7 +632,7 @@ fn read_file_bytes(path: &Path) -> io::Result<ReadFile> {
     let bytes = if let Ok(mapped) = mapping {
         FileBytes::Mapped(mapped)
     } else {
-        let mut buffer = Vec::with_capacity(size as usize);
+        let mut buffer = Vec::with_capacity(usize::try_from(size).unwrap_or(usize::MAX));
         let mut handle = file;
         handle.read_to_end(&mut buffer)?;
         FileBytes::Owned(buffer)
@@ -753,16 +751,16 @@ fn collect_files(
         if entry.file_type != fs_cache::FileType::File {
             continue;
         }
-        if let Some(glob_set) = glob_set {
-            if !glob_set.is_match(Path::new(&entry.path)) {
-                continue;
-            }
+        if let Some(glob_set) = glob_set
+            && !glob_set.is_match(Path::new(&entry.path))
+        {
+            continue;
         }
         let path = root.join(&entry.path);
-        if let Some(filter) = type_filter {
-            if !matches_type_filter(&path, filter) {
-                continue;
-            }
+        if let Some(filter) = type_filter
+            && !matches_type_filter(&path, filter)
+        {
+            continue;
         }
         entries.push(FileEntry {
             path,
@@ -830,7 +828,6 @@ fn find_braced_escape_end(bytes: &[u8], start: usize) -> Option<usize> {
 /// regex syntax, turning them into `\{` / `\}` is semantics-preserving
 /// and avoids confusing error messages for callers who pass literal text
 /// fragments (e.g. JS template strings).
-
 #[allow(dead_code)]
 fn sanitize_braces(pattern: &str) -> Cow<'_, str> {
     let bytes = pattern.as_bytes();
@@ -1100,7 +1097,7 @@ mod tests {
         write_file(&root.path().join("regular.txt"), "needle\n");
         make_fifo(&root.path().join("skip-me.fifo"));
 
-        let result = grep_sync(base_grep_config(root.path()), task::CancelToken::default())
+        let result = grep_sync(&base_grep_config(root.path()), &task::CancelToken::default())
             .expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 1);
@@ -1123,7 +1120,7 @@ mod tests {
         config.offset = Some(1);
 
         let result =
-            grep_sync(config, task::CancelToken::default()).expect("directory grep should succeed");
+            grep_sync(&config, &task::CancelToken::default()).expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 3);
         assert_eq!(result.files_with_matches, 2);
@@ -1147,7 +1144,7 @@ mod tests {
         config.max_count = Some(2);
 
         let result =
-            grep_sync(config, task::CancelToken::default()).expect("directory grep should succeed");
+            grep_sync(&config, &task::CancelToken::default()).expect("directory grep should succeed");
 
         assert_eq!(result.total_matches, 3);
         assert_eq!(result.files_with_matches, 2);
@@ -1165,7 +1162,7 @@ mod tests {
 
         let ct = task::CancelToken::new(Some(0));
         std::thread::sleep(Duration::from_millis(1));
-        let result = grep_sync(base_grep_config(root.path()), ct);
+        let result = grep_sync(&base_grep_config(root.path()), &ct);
 
         let Err(err) = result else {
             panic!("pre-cancelled grep should fail before returning matches");
@@ -1183,7 +1180,7 @@ mod tests {
         let fifo = root.path().join("direct.fifo");
         make_fifo(&fifo);
 
-        let result = grep_sync(base_grep_config(&fifo), task::CancelToken::default())
+        let result = grep_sync(&base_grep_config(&fifo), &task::CancelToken::default())
             .expect("special-file grep should return an empty result");
 
         assert!(result.matches.is_empty());
@@ -1207,7 +1204,7 @@ mod tests {
         config.multiline = Some(true);
 
         let result =
-            grep_sync(config, task::CancelToken::default()).expect("multiline grep should succeed");
+            grep_sync(&config, &task::CancelToken::default()).expect("multiline grep should succeed");
 
         assert_eq!(
             result.total_matches, 1,
@@ -1233,7 +1230,7 @@ mod tests {
         config.max_count_per_file = Some(2);
 
         let result =
-            grep_sync(config, task::CancelToken::default()).expect("directory grep should succeed");
+            grep_sync(&config, &task::CancelToken::default()).expect("directory grep should succeed");
 
         let paths: Vec<&str> = result
             .matches
@@ -1319,11 +1316,11 @@ fn run_parallel_search(
                     ReadFile::Skipped => return None,
                 };
                 let search = if file_params.mode == OutputMode::FilesWithMatches {
-                    let matched = matcher.is_match(bytes.as_slice()).ok()?;
+                    let is_match_result = matcher.is_match(bytes.as_slice()).ok()?;
                     SearchResultInternal {
                         matches: Vec::new(),
-                        match_count: u64::from(matched),
-                        collected: u64::from(matched),
+                        match_count: u64::from(is_match_result),
+                        collected: u64::from(is_match_result),
                         limit_reached: false,
                     }
                 } else {
@@ -1376,7 +1373,7 @@ impl ParallelVisitor for StreamingGrepVisitor<'_> {
         if self.visited == 0 || self.visited >= 128 {
             self.visited = 0;
             if let Err(err) = self.ct.heartbeat() {
-                *self.error.lock().expect("error lock poisoned") = Some(err.to_string());
+                *self.error.lock().expect("error lock poisoned") = Some(err.clone());
                 return WalkState::Quit;
             }
         }
@@ -1396,15 +1393,15 @@ impl ParallelVisitor for StreamingGrepVisitor<'_> {
         if relative.is_empty() {
             return WalkState::Continue;
         }
-        if let Some(glob_set) = self.glob_set {
-            if !glob_set.is_match(Path::new(relative.as_ref())) {
-                return WalkState::Continue;
-            }
+        if let Some(glob_set) = self.glob_set
+            && !glob_set.is_match(Path::new(relative.as_ref()))
+        {
+            return WalkState::Continue;
         }
-        if let Some(filter) = self.type_filter {
-            if !matches_type_filter(entry.path(), filter) {
-                return WalkState::Continue;
-            }
+        if let Some(filter) = self.type_filter
+            && !matches_type_filter(entry.path(), filter)
+        {
+            return WalkState::Continue;
         }
 
         let bytes = match read_file_bytes(entry.path()) {
@@ -1479,7 +1476,7 @@ impl<'a> ParallelVisitorBuilder<'a> for StreamingGrepVisitorBuilder<'a> {
     }
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments, reason = "matches GrepOptions field count")]
 fn run_streaming_grep(
     search_path: &Path,
     matcher: &grep_regex::RegexMatcher,
@@ -1561,7 +1558,7 @@ fn push_file_match(matches: &mut Vec<GrepMatch>, path: String) {
     });
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_lines, reason = "complex match on output modes")]
 fn aggregate_parallel_results(
     results: Vec<FileSearchResult>,
     params: SearchParams,
@@ -1598,11 +1595,11 @@ fn aggregate_parallel_results(
                         skipped += 1;
                         continue;
                     }
-                    if let Some(max) = max_count {
-                        if emitted >= max {
-                            limit_reached = true;
-                            break;
-                        }
+                    if let Some(max) = max_count
+                        && emitted >= max
+                    {
+                        limit_reached = true;
+                        break;
                     }
                     selected_matches.push(matched);
                     emitted += 1;
@@ -1622,11 +1619,11 @@ fn aggregate_parallel_results(
                 if available == 0 {
                     continue;
                 }
-                if let Some(max) = max_count {
-                    if emitted >= max {
-                        limit_reached = true;
-                        continue;
-                    }
+                if let Some(max) = max_count
+                    && emitted >= max
+                {
+                    limit_reached = true;
+                    continue;
                 }
                 let remaining = max_count.map_or(available, |max| max.saturating_sub(emitted));
                 if remaining == 0 {
@@ -1645,11 +1642,11 @@ fn aggregate_parallel_results(
                     skipped += 1;
                     continue;
                 }
-                if let Some(max) = max_count {
-                    if emitted >= max {
-                        limit_reached = true;
-                        continue;
-                    }
+                if let Some(max) = max_count
+                    && emitted >= max
+                {
+                    limit_reached = true;
+                    continue;
                 }
                 push_file_match(&mut matches, result.relative_path);
                 emitted += 1;
@@ -1657,10 +1654,10 @@ fn aggregate_parallel_results(
         }
     }
 
-    if let Some(max) = max_count {
-        if emitted >= max {
-            limit_reached = true;
-        }
+    if let Some(max) = max_count
+        && emitted >= max
+    {
+        limit_reached = true;
     }
 
     if max_count == Some(0) {
@@ -1679,13 +1676,13 @@ fn aggregate_parallel_results(
 // Sync entry points
 
 #[allow(dead_code)]
-fn search_sync(content: &[u8], options: SearchOptions) -> SearchResult {
+fn search_sync(content: &[u8], options: &SearchOptions) -> SearchResult {
     let ignore_case = options.ignore_case.unwrap_or(false);
     let multiline = options.multiline.unwrap_or(false);
     let mode = parse_output_mode(options.mode);
     let matcher = match build_matcher(&options.pattern, ignore_case, multiline) {
         Ok(matcher) => matcher,
-        Err(err) => return empty_search_result(Some(err.to_string())),
+        Err(err) => return empty_search_result(Some(err.clone())),
     };
 
     let (context_before, context_after) = resolve_context(
@@ -1695,7 +1692,7 @@ fn search_sync(content: &[u8], options: SearchOptions) -> SearchResult {
     );
     let max_columns = options.max_columns;
     let max_count = options.max_count.map(u64::from);
-    let offset = options.offset.unwrap_or(0) as u64;
+    let offset = u64::from(options.offset.unwrap_or(0));
     let params = SearchParams {
         context_before,
         context_after,
@@ -1719,8 +1716,8 @@ fn search_sync(content: &[u8], options: SearchOptions) -> SearchResult {
     }
 }
 
-#[allow(dead_code)]
-fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult, String> {
+#[allow(dead_code, clippy::too_many_lines, reason = "handles file + dir + cache + streaming paths")]
+fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult, String> {
     let search_path = resolve_search_path(&options.path)?;
     let metadata =
         std::fs::metadata(&search_path).map_err(|err| format!("Path not found: {err}"))?;
@@ -1741,7 +1738,7 @@ fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult, S
     };
     let max_columns = options.max_columns;
     let max_count = options.max_count.map(u64::from);
-    let offset = options.offset.unwrap_or(0) as u64;
+    let offset = u64::from(options.offset.unwrap_or(0));
     let include_hidden = options.hidden.unwrap_or(true);
     let use_gitignore = options.gitignore.unwrap_or(true);
     let use_cache = options.cache.unwrap_or(false);
@@ -1771,17 +1768,17 @@ fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult, S
     }
 
     if metadata.is_file() {
-        if let Some(filter) = type_filter.as_ref() {
-            if !matches_type_filter(&search_path, filter) {
-                return Ok(GrepResult {
-                    matches: Vec::new(),
-                    total_matches: 0,
-                    files_with_matches: 0,
-                    files_searched: 0,
-                    limit_reached: None,
-                    skipped_oversized: None,
-                });
-            }
+        if let Some(filter) = type_filter.as_ref()
+            && !matches_type_filter(&search_path, filter)
+        {
+            return Ok(GrepResult {
+                matches: Vec::new(),
+                total_matches: 0,
+                files_with_matches: 0,
+                files_searched: 0,
+                limit_reached: None,
+                skipped_oversized: None,
+            });
         }
 
         let bytes = match read_file_bytes(&search_path) {
@@ -1809,10 +1806,10 @@ fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult, S
         };
 
         if output_mode == OutputMode::FilesWithMatches && max_count.is_none() && offset == 0 {
-            let matched = matcher
+            let is_match_result = matcher
                 .is_match(bytes.as_slice())
                 .map_err(|err| format!("Search failed: {err}"))?;
-            if !matched {
+            if !is_match_result {
                 return Ok(GrepResult {
                     matches: Vec::new(),
                     total_matches: 0,
@@ -1857,13 +1854,13 @@ fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult, S
         }
 
         let path_string = search_path.to_string_lossy().into_owned();
-        let mut matches = Vec::new();
+        let mut matched_vec = Vec::new();
         match output_mode {
             OutputMode::Content => {
-                push_content_matches(&mut matches, path_string, search.matches);
+                push_content_matches(&mut matched_vec, path_string, search.matches);
             }
             OutputMode::Count => {
-                matches.push(GrepMatch {
+                matched_vec.push(GrepMatch {
                     path: path_string,
                     line_number: 0,
                     line: String::new(),
@@ -1874,7 +1871,7 @@ fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult, S
                 });
             }
             OutputMode::FilesWithMatches => {
-                matches.push(GrepMatch {
+                matched_vec.push(GrepMatch {
                     path: path_string,
                     line_number: 0,
                     line: String::new(),
@@ -1889,8 +1886,8 @@ fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult, S
         let limit_reached =
             search.limit_reached || max_count.is_some_and(|max| search.collected >= max);
 
-        return Ok(GrepResult {
-            matches,
+        return Ok(            GrepResult {
+            matches: matched_vec,
             total_matches: clamp_u32(search.match_count),
             files_with_matches: 1,
             files_searched: 1,
@@ -1911,7 +1908,7 @@ fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult, S
         detail: fs_cache::ScanDetail::Minimal,
     };
     let entries = if use_cache {
-        let scan = fs_cache::get_or_scan(&search_path, scan_options, &ct)?;
+        let scan = fs_cache::get_or_scan(&search_path, scan_options, ct)?;
         let mut entries = collect_files(
             &search_path,
             &scan.entries,
@@ -1919,7 +1916,7 @@ fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult, S
             type_filter.as_ref(),
         );
         if entries.is_empty() && scan.cache_age_ms >= fs_cache::empty_recheck_ms() {
-            let fresh = fs_cache::force_rescan(&search_path, scan_options, true, &ct)?;
+            let fresh = fs_cache::force_rescan(&search_path, scan_options, true, ct)?;
             entries = collect_files(
                 &search_path,
                 &fresh,
@@ -1958,15 +1955,15 @@ fn grep_sync(options: GrepConfig, ct: task::CancelToken) -> Result<GrepResult, S
             include_hidden,
             use_gitignore,
             !mentions_node_modules,
-            &ct,
+            ct,
         )?
     };
     let (results, skipped_oversized) = results;
-    let (matches, total_matches, files_with_matches, files_searched, limit_reached) =
+    let (aggregated_matches, total_matches, files_with_matches, files_searched, limit_reached) =
         aggregate_parallel_results(results, params);
 
     Ok(GrepResult {
-        matches,
+        matches: aggregated_matches,
         total_matches: clamp_u32(total_matches),
         files_with_matches,
         files_searched,

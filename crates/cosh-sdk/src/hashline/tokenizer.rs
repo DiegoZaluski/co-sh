@@ -7,9 +7,9 @@
 //! +literal new line
 //! ```
 use super::format::{
-    describe_anchor_examples, HL_BLOCK_KEYWORD, HL_DELETE_KEYWORD, HL_FILE_HASH_LENGTH,
-    HL_FILE_HASH_SEP, HL_FILE_PREFIX, HL_INSERT_AFTER, HL_INSERT_BEFORE, HL_INSERT_HEAD,
-    HL_INSERT_KEYWORD, HL_INSERT_TAIL, HL_PAYLOAD_REPLACE, HL_REPLACE_KEYWORD,
+    HL_BLOCK_KEYWORD, HL_DELETE_KEYWORD, HL_FILE_HASH_LENGTH, HL_FILE_HASH_SEP, HL_FILE_PREFIX,
+    HL_INSERT_AFTER, HL_INSERT_BEFORE, HL_INSERT_HEAD, HL_INSERT_KEYWORD, HL_INSERT_TAIL,
+    HL_PAYLOAD_REPLACE, HL_REPLACE_KEYWORD, describe_anchor_examples,
 };
 use crate::hashline::messages::{ABORT_MARKER, BEGIN_PATCH_MARKER, END_PATCH_MARKER};
 use crate::hashline::types::{Anchor, ParsedRange};
@@ -467,24 +467,22 @@ pub fn classify_line(line: &str, line_num: u32) -> Token {
     if marker_line_equals(line, ABORT_MARKER) {
         return Token::Abort { line_num };
     }
-    if line.starts_with(HL_FILE_PREFIX) {
-        if let Some(header) = try_parse_header(line) {
-            return Token::Header {
-                line_num,
-                path: header.path,
-                file_hash: header.file_hash,
-            };
-        }
+    if line.starts_with(HL_FILE_PREFIX)
+        && let Some(header) = try_parse_header(line)
+    {
+        return Token::Header {
+            line_num,
+            path: header.path,
+            file_hash: header.file_hash,
+        };
     }
     let bytes = line.as_bytes();
     let lead = skip_whitespace(bytes, 0, line.len());
     let is_hunk_lead = line[lead..].starts_with(HL_REPLACE_KEYWORD)
         || line[lead..].starts_with(HL_DELETE_KEYWORD)
         || line[lead..].starts_with(HL_INSERT_KEYWORD);
-    if is_hunk_lead {
-        if let Some(target) = try_parse_hunk_header(line) {
-            return Token::OpBlock { line_num, target };
-        }
+    if is_hunk_lead && let Some(target) = try_parse_hunk_header(line) {
+        return Token::OpBlock { line_num, target };
     }
     if !bytes.is_empty() && bytes[0] == HL_PAYLOAD_REPLACE.as_bytes()[0] {
         return Token::PayloadLiteral {
@@ -522,7 +520,10 @@ impl Tokenizer {
     ///
     /// Panics if the tokenizer is closed and has not been reset.
     pub fn feed(&mut self, chunk: &str) -> Vec<Token> {
-        assert!(!self.closed, "Tokenizer is closed; call reset() before reusing.");
+        assert!(
+            !self.closed,
+            "Tokenizer is closed; call reset() before reusing."
+        );
         if chunk.is_empty() {
             return vec![];
         }

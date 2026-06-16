@@ -26,7 +26,7 @@ pub async fn edit(
     metadata: FsMetadata<'_>,
 ) -> Result<Vec<EditResult>, String> {
     let fs = DiskFilesystem::new();
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let mut results = Vec::new();
 
     for target in config.edit.clone() {
@@ -84,7 +84,7 @@ async fn edit_target(
         ops = target.ops
     );
 
-    let patch = Patch::parse(&hashline_input, SplitOptions::default()).map_err(|e| {
+    let patch = Patch::parse(&hashline_input, &SplitOptions::default()).map_err(|e| {
         format!(
             "failed to parse edit operations for `{}`: {}",
             target.path, e

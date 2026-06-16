@@ -1,13 +1,13 @@
-use std::panic::catch_unwind;
 use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 
-use super::super::block::{resolve_block_edits, ResolveBlockEditsOptions};
+use super::super::block::{ResolveBlockEditsOptions, resolve_block_edits};
 use super::super::format::compute_file_hash;
 use super::super::fs::InMemoryFilesystem;
 use super::super::input::Patch;
 use super::super::mismatch::MismatchError;
 use super::super::parser::parse_patch;
-use super::super::patcher::{Patcher, PatchOp};
+use super::super::patcher::{PatchOp, Patcher};
 use super::super::snapshots::{InMemorySnapshotStore, InMemorySnapshotStoreOptions, SnapshotStore};
 use super::super::types::{
     Anchor, BlockResolver, BlockResolverRequest, BlockSpan, Cursor, Edit, Replacement,
@@ -51,10 +51,7 @@ enum NormalizedEdit {
 fn normalize(edit: &Edit) -> NormalizedEdit {
     match edit {
         Edit::Insert {
-            cursor,
-            text,
-            mode,
-            ..
+            cursor, text, mode, ..
         } => NormalizedEdit::Insert {
             cursor: cursor.clone(),
             text: text.clone(),
@@ -62,9 +59,7 @@ fn normalize(edit: &Edit) -> NormalizedEdit {
         },
         Edit::Delete { anchor, .. } => NormalizedEdit::Delete { anchor: *anchor },
         Edit::Block {
-            anchor,
-            payloads,
-            ..
+            anchor, payloads, ..
         } => NormalizedEdit::Block {
             anchor: *anchor,
             payloads: payloads.clone(),
@@ -110,8 +105,13 @@ fn rejects_empty_block_hunk() {
 #[test]
 fn expands_block_edit_like_equivalent_range_replace() {
     let (block_edits, _) = parse_patch("replace block 2:\n+A\n+B").unwrap();
-    let resolved =
-        resolve_block_edits(&block_edits, "ignored", PATH, Some(stub_resolver as BlockResolver), None);
+    let resolved = resolve_block_edits(
+        &block_edits,
+        "ignored",
+        PATH,
+        Some(stub_resolver as BlockResolver),
+        None,
+    );
     let (replace_edits, _) = parse_patch("replace 2..3:\n+A\n+B").unwrap();
 
     assert!(!resolved.iter().any(|e| matches!(e, Edit::Block { .. })));
@@ -122,8 +122,13 @@ fn expands_block_edit_like_equivalent_range_replace() {
 fn fast_path_returns_input_untouched_when_no_block_edits() {
     let (edits, _) = parse_patch("replace 1..1:\n+X").unwrap();
     let original = edits.clone();
-    let resolved =
-        resolve_block_edits(&edits, "ignored", PATH, Some(stub_resolver as BlockResolver), None);
+    let resolved = resolve_block_edits(
+        &edits,
+        "ignored",
+        PATH,
+        Some(stub_resolver as BlockResolver),
+        None,
+    );
     assert_eq!(resolved, original);
 }
 
@@ -277,10 +282,12 @@ async fn resolves_against_tagged_snapshot_and_recovers_onto_drifted_content() {
         result.sections[0].after,
         "line0\nNEW\nline3\nline4\nline5\n"
     );
-    assert!(result.sections[0]
-        .warnings
-        .iter()
-        .any(|w| w.contains("Recovered")));
+    assert!(
+        result.sections[0]
+            .warnings
+            .iter()
+            .any(|w| w.contains("Recovered"))
+    );
 }
 
 #[tokio::test]
@@ -299,7 +306,12 @@ async fn rejects_block_edit_whose_tag_was_never_recorded_for_path() {
     .unwrap();
     let result = patcher.apply(&patch).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().downcast_ref::<MismatchError>().is_some());
+    assert!(
+        result
+            .unwrap_err()
+            .downcast_ref::<MismatchError>()
+            .is_some()
+    );
     assert_eq!(check_fs.get(PATH).unwrap(), text);
 }
 
@@ -328,9 +340,7 @@ fn parses_delete_block_into_block_edit_with_no_payloads() {
     let edit = &edits[0];
     assert!(matches!(edit, Edit::Block { .. }));
     if let Edit::Block {
-        anchor,
-        payloads,
-        ..
+        anchor, payloads, ..
     } = edit
     {
         assert_eq!(anchor.line, 2);
@@ -342,16 +352,23 @@ fn parses_delete_block_into_block_edit_with_no_payloads() {
 fn rejects_body_rows_under_delete_block() {
     let result = parse_patch("delete block 2\n+X");
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .contains("delete block N` does not take body rows"));
+    assert!(
+        result
+            .unwrap_err()
+            .contains("delete block N` does not take body rows")
+    );
 }
 
 #[test]
 fn resolve_block_edits_expands_delete_block_into_pure_deletes() {
     let (edits, _) = parse_patch("delete block 2").unwrap();
-    let resolved =
-        resolve_block_edits(&edits, "ignored", PATH, Some(stub_resolver as BlockResolver), None);
+    let resolved = resolve_block_edits(
+        &edits,
+        "ignored",
+        PATH,
+        Some(stub_resolver as BlockResolver),
+        None,
+    );
 
     assert!(resolved.iter().all(|e| matches!(e, Edit::Delete { .. })));
     let delete_lines: Vec<u32> = resolved

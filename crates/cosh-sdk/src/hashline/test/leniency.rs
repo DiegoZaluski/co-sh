@@ -26,7 +26,10 @@ fn rejects_bare_numeric_range() {
 fn accepts_canonical_replace_delete_insert_forms() {
     assert_eq!(apply_patch(FILE, "replace 2..3:\n+X"), "a\nX\nd\ne");
     assert_eq!(apply_patch(FILE, "delete 2..3"), "a\nd\ne");
-    assert_eq!(apply_patch(FILE, "insert before 2:\n+X"), "a\nX\nb\nc\nd\ne");
+    assert_eq!(
+        apply_patch(FILE, "insert before 2:\n+X"),
+        "a\nX\nb\nc\nd\ne"
+    );
     assert_eq!(apply_patch(FILE, "insert after 2:\n+X"), "a\nb\nX\nc\nd\ne");
     assert_eq!(apply_patch(FILE, "insert head:\n+X"), "X\na\nb\nc\nd\ne");
     assert_eq!(apply_patch(FILE, "insert tail:\n+X"), "a\nb\nc\nd\ne\nX");
@@ -55,14 +58,13 @@ fn accepts_missing_colon_on_insert_headers() {
 #[test]
 fn auto_pipes_bare_body_row_while_warning() {
     let result = parse_patch("replace 2..2:\n  hello").unwrap();
-    assert_eq!(
-        apply_edits(FILE, &result.0).text,
-        "a\n  hello\nc\nd\ne"
+    assert_eq!(apply_edits(FILE, &result.0).text, "a\n  hello\nc\nd\ne");
+    assert!(
+        result
+            .1
+            .iter()
+            .any(|w| w.contains("Auto-prefixed bare body row"))
     );
-    assert!(result
-        .1
-        .iter()
-        .any(|w| w.contains("Auto-prefixed bare body row")));
 }
 
 #[test]
@@ -109,9 +111,7 @@ fn rejects_delete_with_colon() {
 fn rejects_apply_patch_sentinels_as_contamination() {
     let result = parse_patch("*** Update File: a.ts\nreplace 2..2:\n+X");
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .contains("apply_patch sentinel"));
+    assert!(result.unwrap_err().contains("apply_patch sentinel"));
 
     let result = parse_patch("*** Add File: a.ts\nreplace 2..2:\n+X");
     assert!(result.is_err());
@@ -122,18 +122,18 @@ fn rejects_apply_patch_sentinels_as_contamination() {
 fn rejects_unified_diff_hunk_headers_as_contamination() {
     let result = parse_patch("@@ -1,3 +1,3 @@\nreplace 2..2:\n+X");
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .contains("unified-diff hunk header"));
+    assert!(result.unwrap_err().contains("unified-diff hunk header"));
 }
 
 #[test]
 fn treats_top_level_plus_text_as_orphan_literal_payload() {
     let result = parse_patch("+const X = 1;\nreplace 2..2:");
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .contains("payload line has no preceding hunk header"));
+    assert!(
+        result
+            .unwrap_err()
+            .contains("payload line has no preceding hunk header")
+    );
 }
 
 #[test]

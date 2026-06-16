@@ -27,6 +27,11 @@ pub struct TreeSitter {
 }
 
 impl TreeSitter {
+    /// Create a new LRU-cached tree-sitter parser pool.
+    ///
+    /// # Panics
+    /// Panics if `capacity` is zero.
+    #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(LruCache::new(
@@ -39,6 +44,9 @@ impl TreeSitter {
     ///
     /// `f` receives the entry (which holds the parsed tree) plus `text`.
     /// Returns `None` if the language is unsupported or parsing fails.
+    ///
+    /// # Panics
+    /// Panics if the inner mutex is poisoned.
     fn with_entry<R>(
         &self,
         path: &str,
@@ -56,12 +64,9 @@ impl TreeSitter {
                     guard.put(path.to_string(), old);
                     return None;
                 }
-                let tree = match parser.parse(text, Some(&old.tree)) {
-                    Some(t) => t,
-                    None => {
-                        guard.put(path.to_string(), old);
-                        return None;
-                    }
+                let Some(tree) = parser.parse(text, Some(&old.tree)) else {
+                    guard.put(path.to_string(), old);
+                    return None;
                 };
                 CachedEntry {
                     language: old.language,

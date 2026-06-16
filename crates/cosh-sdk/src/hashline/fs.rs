@@ -76,10 +76,10 @@ pub fn is_not_found(error: &(dyn std::error::Error + 'static)) -> bool {
         if e.downcast_ref::<NotFoundError>().is_some() {
             return true;
         }
-        if let Some(io) = e.downcast_ref::<std::io::Error>() {
-            if io.kind() == std::io::ErrorKind::NotFound {
-                return true;
-            }
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::NotFound
+        {
+            return true;
         }
         err = e.source();
     }
@@ -159,7 +159,10 @@ impl InMemoryFilesystem {
     ///
     /// Panics if the internal mutex is poisoned.
     pub fn set(&self, path: impl Into<String>, content: impl Into<String>) {
-        self.files.lock().unwrap().insert(path.into(), content.into());
+        self.files
+            .lock()
+            .unwrap()
+            .insert(path.into(), content.into());
     }
 
     /// Synchronous helper for inspecting state.

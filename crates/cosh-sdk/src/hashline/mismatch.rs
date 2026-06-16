@@ -5,7 +5,7 @@
 //! plus a couple of lines of surrounding context. The [`MismatchError`]
 //! formats this into a message at construction time.
 use super::format::{
-    format_numbered_line, HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_SEP, HL_FILE_PREFIX,
+    HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_SEP, HL_FILE_PREFIX, format_numbered_line,
 };
 use super::messages::MISMATCH_CONTEXT;
 use regex::Regex;
@@ -90,7 +90,9 @@ fn get_mismatch_display_lines(anchor_lines: &[u32], file_lines: &[String]) -> Ve
             continue;
         }
         let lo = 1.max(line.saturating_sub(MISMATCH_CONTEXT));
-        let hi = u32::try_from(file_lines.len()).unwrap_or(u32::MAX).min(line + MISMATCH_CONTEXT);
+        let hi = u32::try_from(file_lines.len())
+            .unwrap_or(u32::MAX)
+            .min(line + MISMATCH_CONTEXT);
         for line_num in lo..=hi {
             display.insert(line_num);
         }
@@ -214,10 +216,7 @@ impl MismatchError {
             } else {
                 " "
             };
-            lines.push(format!(
-                "{marker}{}",
-                format_numbered_line(line_num, text)
-            ));
+            lines.push(format!("{marker}{}", format_numbered_line(line_num, text)));
         }
         lines.join("\n")
     }

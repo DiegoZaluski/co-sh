@@ -1,5 +1,5 @@
-use std::panic::catch_unwind;
 use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 
 use super::super::apply::apply_edits;
 use super::super::parser::{parse_patch, parse_patch_streaming};
@@ -65,9 +65,11 @@ fn auto_pipes_bare_body_rows_as_literal_text() {
     let text = "a\nb\nc";
     assert_eq!(apply_patch(text, "replace 2..2:\nraw"), "a\nraw\nc");
     let (_, warnings) = parse_patch("replace 2..2:\nraw").unwrap();
-    assert!(warnings
-        .iter()
-        .any(|w| w.contains("Auto-prefixed bare body row")));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("Auto-prefixed bare body row"))
+    );
 }
 
 #[test]

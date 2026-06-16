@@ -119,9 +119,7 @@ pub fn compute_file_hash(text: &str) -> String {
 /// Format a concrete replacement hunk header.
 #[must_use]
 pub fn format_replace_header(start: u32, end: u32) -> String {
-    format!(
-        "{HL_REPLACE_KEYWORD} {start}{HL_RANGE_SEP}{end}{HL_HEADER_COLON}"
-    )
+    format!("{HL_REPLACE_KEYWORD} {start}{HL_RANGE_SEP}{end}{HL_HEADER_COLON}")
 }
 
 /// Format a concrete deletion hunk header.
@@ -151,14 +149,10 @@ pub fn format_insert_header(cursor: &Cursor) -> String {
             )
         }
         Cursor::Bof => {
-            format!(
-                "{HL_INSERT_KEYWORD} {HL_INSERT_HEAD}{HL_HEADER_COLON}"
-            )
+            format!("{HL_INSERT_KEYWORD} {HL_INSERT_HEAD}{HL_HEADER_COLON}")
         }
         Cursor::Eof => {
-            format!(
-                "{HL_INSERT_KEYWORD} {HL_INSERT_TAIL}{HL_HEADER_COLON}"
-            )
+            format!("{HL_INSERT_KEYWORD} {HL_INSERT_TAIL}{HL_HEADER_COLON}")
         }
     }
 }
@@ -193,9 +187,7 @@ pub fn describe_anchor_examples(line_prefix: Option<&str>) -> String {
 /// Format a hashline section header for a file path and snapshot tag.
 #[must_use]
 pub fn format_hashline_header(file_path: &str, file_hash: &str) -> String {
-    format!(
-        "{HL_FILE_PREFIX}{file_path}{HL_FILE_HASH_SEP}{file_hash}"
-    )
+    format!("{HL_FILE_PREFIX}{file_path}{HL_FILE_HASH_SEP}{file_hash}")
 }
 
 /// Formats a single numbered line as `LINE:TEXT`.

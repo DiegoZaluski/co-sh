@@ -200,8 +200,7 @@ impl Executor {
                     BlockTarget::Replace { .. } | BlockTarget::Delete { .. }
                 ) {
                     let range = match &target {
-                        BlockTarget::Replace { range }
-                        | BlockTarget::Delete { range } => *range,
+                        BlockTarget::Replace { range } | BlockTarget::Delete { range } => *range,
                         _ => unreachable!(),
                     };
                     validate_range_order(range, line_num)?;

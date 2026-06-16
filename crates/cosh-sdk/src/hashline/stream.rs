@@ -51,26 +51,27 @@ impl ChunkEmitter {
         let sep_bytes = usize::from(!self.out_lines.is_empty());
         let line_bytes = formatted.len();
 
-        let would_overflow = u32::try_from(self.out_lines.len()).unwrap_or(u32::MAX) >= self.max_chunk_lines
+        let would_overflow = u32::try_from(self.out_lines.len()).unwrap_or(u32::MAX)
+            >= self.max_chunk_lines
             || self.out_bytes + sep_bytes + line_bytes > self.max_chunk_bytes as usize;
-        
-        if !self.out_lines.is_empty() && would_overflow {
-            if let Some(flushed) = self.flush() {
-                chunks.push(flushed);
-            }
+
+        if !self.out_lines.is_empty()
+            && would_overflow
+            && let Some(flushed) = self.flush()
+        {
+            chunks.push(flushed);
         }
 
         let is_first = self.out_lines.is_empty();
         self.out_lines.push(formatted);
-        
+
         self.out_bytes += usize::from(!is_first) + line_bytes;
 
-        if u32::try_from(self.out_lines.len()).unwrap_or(u32::MAX) >= self.max_chunk_lines
-            || self.out_bytes >= self.max_chunk_bytes as usize
+        if (u32::try_from(self.out_lines.len()).unwrap_or(u32::MAX) >= self.max_chunk_lines
+            || self.out_bytes >= self.max_chunk_bytes as usize)
+            && let Some(flushed) = self.flush()
         {
-            if let Some(flushed) = self.flush() {
-                chunks.push(flushed);
-            }
+            chunks.push(flushed);
         }
 
         chunks
@@ -136,4 +137,3 @@ pub fn stream_hash_lines(source: &str, options: StreamOptions) -> Vec<String> {
 
     chunks
 }
-

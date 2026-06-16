@@ -7,7 +7,7 @@
 //! the exact same `before_anchor` replacement inserts + range deletes that
 //! `replace start..end:` produces in the parser. After it runs, no `block`
 //! edits remain, so [`apply_edits`] (and recovery) only ever see resolved edits.
-use super::messages::{block_unresolved_message, BLOCK_RESOLVER_UNAVAILABLE};
+use super::messages::{BLOCK_RESOLVER_UNAVAILABLE, block_unresolved_message};
 use super::types::{
     Anchor, BlockResolver, BlockResolverRequest, BlockSpan, Cursor, Edit, Replacement,
     ResolveAction,

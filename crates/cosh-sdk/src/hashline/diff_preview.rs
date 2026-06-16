@@ -60,7 +60,8 @@ pub fn build_compact_diff_preview(
                     let line_number: u32 = body[..sep].parse().unwrap_or(0);
                     let offset = i64::from(added_lines) - i64::from(removed_lines);
                     #[allow(clippy::cast_sign_loss)]
-                    let new_line_number = u32::try_from(i64::from(line_number) + offset).unwrap_or(0);
+                    let new_line_number =
+                        u32::try_from(i64::from(line_number) + offset).unwrap_or(0);
                     format!(" {new_line_number}:{content}")
                 }
             }

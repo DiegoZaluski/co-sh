@@ -36,7 +36,7 @@ pub async fn write(
 ) -> Result<Vec<WriteResult>, String> {
     let mut result: Vec<WriteResult> = vec![];
     let fs = DiskFilesystem::new();
-    let mut store = InMemorySnapshotStore::new(InMemorySnapshotStoreOptions::default());
+    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     for target in &wtarget.write {
         if target.text.trim().is_empty() {
             let warning = format!(
