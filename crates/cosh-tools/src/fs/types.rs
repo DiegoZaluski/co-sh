@@ -47,6 +47,26 @@ pub struct EditFile<'a> {
     pub edit: Vec<EditTarget<'a>>,
 }
 
+/// Input for a single rollback operation.
+///
+/// Provide `path` and optionally `hash`. If `hash` is empty the engine
+/// restores the version immediately before the current file content.
+///
+/// The hash comes from a `¶path#HASH` header previously returned by any
+/// read, write, or edit operation in this session.
+///
+/// ```ignore
+/// RollbackInput { path: "src/main.rs", hash: "A3B2" } // restore to A3B2
+/// RollbackInput { path: "src/main.rs", hash: "" }    // restore previous
+/// ```
+pub struct RollbackInput<'a> {
+    /// Path of the file to restore.
+    pub path: &'a str,
+    /// Hash of the target version from a `¶path#HASH` header.
+    /// Pass an empty string to restore the immediately preceding version.
+    pub hash: &'a str,
+}
+
 //___
 #[allow(dead_code)]
 #[derive(Debug, PartialEq)]
