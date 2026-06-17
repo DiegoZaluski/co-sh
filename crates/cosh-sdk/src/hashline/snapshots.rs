@@ -43,6 +43,11 @@ pub trait SnapshotStore {
     /// Most-recently recorded version for `path`, or `None` if none.
     fn head(&mut self, path: &str) -> Option<Snapshot>;
 
+    /// All recorded versions for `path`, newest first. Returns an empty vec when unknown.
+    fn history(&mut self, path: &str) -> Vec<Snapshot> {
+        self.head(path).into_iter().collect()
+    }
+
     /// Recorded version for `path` whose tag equals `hash`, or `None`.
     fn by_hash(&mut self, path: &str, hash: &str) -> Option<Snapshot>;
 
@@ -104,6 +109,10 @@ impl SnapshotStore for InMemorySnapshotStore {
         self.versions.get(path)?.first().cloned()
     }
 
+    fn history(&mut self, path: &str) -> Vec<Snapshot> {
+        self.versions.get(path).cloned().unwrap_or_default()
+    }
+
     fn by_hash(&mut self, path: &str, hash: &str) -> Option<Snapshot> {
         self.versions
             .get(path)?
@@ -154,6 +163,9 @@ use std::sync::{Arc, Mutex};
 impl<S: SnapshotStore> SnapshotStore for Arc<Mutex<S>> {
     fn head(&mut self, path: &str) -> Option<Snapshot> {
         self.lock().unwrap().head(path)
+    }
+    fn history(&mut self, path: &str) -> Vec<Snapshot> {
+        self.lock().unwrap().history(path)
     }
     fn by_hash(&mut self, path: &str, hash: &str) -> Option<Snapshot> {
         self.lock().unwrap().by_hash(path, hash)

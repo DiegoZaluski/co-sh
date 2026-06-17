@@ -1,3 +1,4 @@
 pub mod find;
 pub mod hashline;
+pub mod rollback;
 pub mod tree_sitter;
