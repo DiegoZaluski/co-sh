@@ -76,7 +76,7 @@ pub(crate) enum FsGuard {
     Mismatch(String),
 }
 
-impl<'a> FsMetadata<'a> {
+impl FsMetadata<'_> {
     #[allow(dead_code)]
     pub(crate) fn fs_guard(&self, path: &str) -> FsGuard {
         let path = Path::new(path);

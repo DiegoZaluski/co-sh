@@ -141,6 +141,11 @@ struct McpErr {
 ///
 /// When `query` is provided, Exa search is used (REST API if
 /// `EXA_API_KEY` is set, otherwise MCP `web_search_exa`).
+///
+/// # Errors
+///
+/// Returns `Err` if validation fails, the search/fetch fails, or all
+/// fallback methods are exhausted.
 pub async fn search(args: SearchArgs) -> Result<String, String> {
     args.validate()?;
 
@@ -151,12 +156,11 @@ pub async fn search(args: SearchArgs) -> Result<String, String> {
     let q = args.query.as_deref().unwrap_or("");
     let n = args.num();
 
-    if let Ok(key) = std::env::var("EXA_API_KEY") {
-        if !key.trim().is_empty() {
-            if let Ok(res) = rest_search(q, n, &key).await {
-                return Ok(res);
-            }
-        }
+    if let Ok(key) = std::env::var("EXA_API_KEY")
+        && !key.trim().is_empty()
+        && let Ok(res) = rest_search(q, n, &key).await
+    {
+        return Ok(res);
     }
 
     mcp_call(
@@ -172,10 +176,10 @@ pub async fn search(args: SearchArgs) -> Result<String, String> {
 
 async fn fetch_url(url: &str) -> Result<String, String> {
     let try_exa = || async {
-        if let Ok(key) = std::env::var("EXA_API_KEY") {
-            if !key.trim().is_empty() {
-                return rest_contents(url, &key).await;
-            }
+        if let Ok(key) = std::env::var("EXA_API_KEY")
+            && !key.trim().is_empty()
+        {
+            return rest_contents(url, &key).await;
         }
         mcp_call("web_fetch_exa", serde_json::json!({ "url": url })).await
     };
@@ -199,12 +203,12 @@ async fn fetch_url(url: &str) -> Result<String, String> {
 
     if EXA_FIRST {
         match try_exa().await {
-            Ok(r) => return Ok(r),
+            Ok(r) => Ok(r),
             Err(_) => try_local().await,
         }
     } else {
         match try_local().await {
-            Ok(r) => return Ok(r),
+            Ok(r) => Ok(r),
             Err(_) => try_exa().await,
         }
     }
@@ -230,7 +234,7 @@ async fn rest_search(query: &str, num: u32, key: &str) -> Result<String, String>
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("api {}: {}", status, text));
+        return Err(format!("api {status}: {text}"));
     }
 
     let data: ApiRes = resp.json().await.map_err(|e| format!("parse: {e}"))?;
@@ -278,7 +282,7 @@ async fn rest_contents(url: &str, key: &str) -> Result<String, String> {
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("contents {}: {}", status, text));
+        return Err(format!("contents {status}: {text}"));
     }
 
     let data: ContentsRes = resp.json().await.map_err(|e| format!("parse: {e}"))?;

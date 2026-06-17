@@ -30,6 +30,12 @@ pub struct WriteResult {
 }
 
 use super::types;
+/// Write content to one or more files.
+///
+/// # Errors
+///
+/// Returns `Err` if the [`FsMetadata`] has inconsistent allowlist/blocklist entries,
+/// or a path is both blocked and allowed simultaneously.
 pub async fn write(
     wtarget: WriteAllFile<'_>,
     metadata: FsMetadata<'_>,
@@ -44,8 +50,8 @@ pub async fn write(
                 path = target.path
             );
             let res = WriteResult {
-                file_hash: "".to_string(),
-                header: "".to_string(),
+                file_hash: String::new(),
+                header: String::new(),
                 path: target.path.to_string(),
                 warnings: Some(warning),
             };
@@ -58,8 +64,8 @@ pub async fn write(
                 if let Err(err) = fs.write_text(target.path, target.text).await {
                     let warning = format!("failed to write `{}`: {}", target.path, err);
                     let res = WriteResult {
-                        file_hash: "".to_string(),
-                        header: "".to_string(),
+                        file_hash: String::new(),
+                        header: String::new(),
                         path: target.path.to_string(),
                         warnings: Some(warning),
                     };
@@ -77,7 +83,7 @@ pub async fn write(
 
                 let res = WriteResult {
                     file_hash: hash,
-                    header: header.to_string(),
+                    header: header.clone(),
                     path: target.path.to_string(),
                     warnings: None,
                 };
@@ -89,12 +95,12 @@ pub async fn write(
                     "write permission denied for `{}`. \
                      Files under `{:?}` are writable by default. \
                      Use the allowlist to grant access to paths outside this directory.",
-                    target.path, metadata.root
+                    target.path, metadata.root.display()
                 );
 
                 let res = WriteResult {
-                    file_hash: "".to_string(),
-                    header: "".to_string(),
+                    file_hash: String::new(),
+                    header: String::new(),
                     path: target.path.to_string(),
                     warnings: Some(warning),
                 };

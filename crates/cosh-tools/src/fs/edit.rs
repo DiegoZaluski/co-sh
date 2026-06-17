@@ -17,10 +17,17 @@ pub struct EditResult {
     pub warnings: Vec<String>,
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn resolve_block_fn(req: BlockResolverRequest) -> Option<BlockSpan> {
     cosh_sdk::tree_sitter::tree_sitter().resolve_block(&req.path, &req.text, req.line)
 }
 
+/// Apply edits to one or more files.
+///
+/// # Errors
+///
+/// Returns `Err` if a file hash doesn't match, edit operations fail to parse,
+/// or the underlying filesystem returns an error.
 pub async fn edit(
     config: EditFile<'_>,
     metadata: FsMetadata<'_>,

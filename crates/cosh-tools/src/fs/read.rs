@@ -89,13 +89,13 @@ async fn read_target(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadResult> 
                     file_hash: hash,
                     header,
                     content: body,
-                    warnings: Some(format!("cannot convert line {}: {}", line, e)),
+                    warnings: Some(format!("cannot convert line {line}: {e}")),
                 }];
             }
         };
         match ts.resolve_block(target.path, &body, ln) {
             Some(span) => {
-                let block = extract_block(&body, &span);
+                let block = extract_block(&body, span);
                 vec![ReadResult {
                     path: target.path.to_string(),
                     file_hash: hash,
@@ -124,7 +124,7 @@ async fn read_target(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadResult> 
             path: target.path.to_string(),
             file_hash: hash,
             header: header.clone(),
-            content: format!("{}\n{}", header, body),
+            content: format!("{header}\n{body}"),
             warnings: None,
         }]
     }
@@ -160,7 +160,7 @@ async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadR
             Ok(t) => t,
             Err(e) => {
                 results.push(ReadResult {
-                    path: p.to_string(),
+                    path: p.clone(),
                     file_hash: String::new(),
                     header: String::new(),
                     content: String::new(),
@@ -173,12 +173,12 @@ async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadR
             let hash = format::compute_file_hash(&text);
             let header = format::format_hashline_header(p, &hash);
             let body = format::format_numbered_lines(&text, 1);
-            let block = extract_block(&body, &span);
+            let block = extract_block(&body, span);
             results.push(ReadResult {
-                path: p.to_string(),
+                path: p.clone(),
                 file_hash: hash,
                 header: header.clone(),
-                content: format!("{}\n{}", header, block),
+                content: format!("{header}\n{block}"),
                 warnings: None,
             });
         }
@@ -231,7 +231,7 @@ async fn read_normalized(fs: &DiskFilesystem, path: &str) -> Result<String, Stri
     Ok(normalize::normalize_to_lf(&bom_result.text))
 }
 
-fn extract_block(text: &str, span: &BlockSpan) -> String {
+fn extract_block(text: &str, span: BlockSpan) -> String {
     let mut line_num = 1u32;
     let mut block = String::new();
 
