@@ -3,11 +3,11 @@ use cosh_sdk::hashline::{
     fs::{DiskFilesystem, Filesystem},
     input::Patch,
     normalize,
-    snapshots::{InMemorySnapshotStore, InMemorySnapshotStoreOptions, SnapshotStore},
     types::{BlockResolver, BlockResolverRequest, BlockSpan, SplitOptions},
 };
 
 use super::types::{EditFile, EditTarget, FsMetadata};
+use cosh_sdk::rollback;
 #[derive(Debug)]
 pub struct EditResult {
     pub path: String,
@@ -33,11 +33,10 @@ pub async fn edit(
     metadata: FsMetadata<'_>,
 ) -> Result<Vec<EditResult>, String> {
     let fs = DiskFilesystem::new();
-    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let mut results = Vec::new();
 
     for target in config.edit.clone() {
-        let result = edit_target(fs.clone(), target, metadata.clone(), &mut store).await?;
+        let result = edit_target(fs.clone(), target, metadata.clone()).await?;
         results.push(result);
     }
 
@@ -49,7 +48,6 @@ async fn edit_target(
     fs: DiskFilesystem,
     target: EditTarget<'_>,
     metadata: FsMetadata<'_>,
-    store: &mut InMemorySnapshotStore,
 ) -> Result<EditResult, String> {
     match metadata.fs_guard(target.path) {
         types::FsGuard::Allowed => {}
@@ -70,6 +68,7 @@ async fn edit_target(
 
     let bom_result = normalize::strip_bom(&raw);
     let normalized = normalize::normalize_to_lf(&bom_result.text);
+    let _ = rollback::record(target.path, &normalized);
 
     let actual_hash = compute_file_hash(&normalized);
     if actual_hash != target.file_hash {
@@ -118,8 +117,8 @@ async fn edit_target(
         .await
         .map_err(|e| format!("failed to write `{}`: {}", target.path, e))?;
 
-    store.record(target.path, &after);
     cosh_sdk::tree_sitter::tree_sitter().invalidate(target.path);
+    let _ = rollback::record(target.path, &after);
 
     Ok(EditResult {
         path: target.path.to_string(),

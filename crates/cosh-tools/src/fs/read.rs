@@ -12,6 +12,7 @@ use cosh_sdk::hashline::{
     normalize,
     types::BlockSpan,
 };
+use cosh_sdk::rollback;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -74,6 +75,8 @@ async fn read_target(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadResult> 
             }];
         }
     };
+
+    let _ = rollback::record(target.path, &text);
 
     let hash = format::compute_file_hash(&text);
     let header = format::format_hashline_header(target.path, &hash);
@@ -170,6 +173,7 @@ async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadR
             }
         };
         if let Some(span) = ts.resolve_symbol(p, &text, name) {
+            let _ = rollback::record(p, &text);
             let hash = format::compute_file_hash(&text);
             let header = format::format_hashline_header(p, &hash);
             let body = format::format_numbered_lines(&text, 1);

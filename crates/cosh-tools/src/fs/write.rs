@@ -18,8 +18,8 @@ use super::types::{FsMetadata, WriteAllFile};
 use cosh_sdk::hashline::{
     format,
     fs::{DiskFilesystem, Filesystem},
-    snapshots::{InMemorySnapshotStore, InMemorySnapshotStoreOptions, SnapshotStore},
 };
+use cosh_sdk::rollback;
 
 #[derive(Debug)]
 pub struct WriteResult {
@@ -42,7 +42,6 @@ pub async fn write(
 ) -> Result<Vec<WriteResult>, String> {
     let mut result: Vec<WriteResult> = vec![];
     let fs = DiskFilesystem::new();
-    let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     for target in &wtarget.write {
         if target.text.trim().is_empty() {
             let warning = format!(
@@ -61,6 +60,11 @@ pub async fn write(
 
         match metadata.fs_guard(target.path) {
             types::FsGuard::Allowed => {
+                // Snapshot pre-write state so rollback can undo this write
+                if let Ok(current) = fs.read_text(target.path).await {
+                    let _ = rollback::record(target.path, &current);
+                }
+
                 if let Err(err) = fs.write_text(target.path, target.text).await {
                     let warning = format!("failed to write `{}`: {}", target.path, err);
                     let res = WriteResult {
@@ -74,9 +78,7 @@ pub async fn write(
                 }
 
                 cosh_sdk::tree_sitter::tree_sitter().invalidate(target.path);
-
-                // Retained as a backup for a potential rollback.
-                store.record(target.path, target.text);
+                let _ = rollback::record(target.path, target.text);
 
                 let hash = format::compute_file_hash(target.text);
                 let header = format::format_hashline_header(target.path, &hash);
@@ -95,7 +97,8 @@ pub async fn write(
                     "write permission denied for `{}`. \
                      Files under `{:?}` are writable by default. \
                      Use the allowlist to grant access to paths outside this directory.",
-                    target.path, metadata.root.display()
+                    target.path,
+                    metadata.root.display()
                 );
 
                 let res = WriteResult {
