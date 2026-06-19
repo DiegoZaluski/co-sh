@@ -14,6 +14,12 @@ use tokio::io::AsyncReadExt;
 use tokio::io::{Error, ErrorKind};
 use tokio_stream::StreamExt;
 
+/// Returns the list of critical bash patterns that are checked before execution.
+///
+/// # Panics
+///
+/// Panics if any of the internal regular expressions fail to compile (they are
+/// static and guaranteed valid at compile time).
 pub fn critical_bash_patterns() -> &'static [Regex] {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -65,7 +71,7 @@ pub struct BashInput {
     pub timeout: Option<u64>,
     pub env: Option<Vec<(String, String)>>,
     pub cwd: Option<String>,
-    pub pty: bool,
+    pub pty: bool, // TODO
 }
 
 pub struct BashOutput {
@@ -78,6 +84,7 @@ pub struct SpawnOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
     pub truncated: bool,
 }
 
@@ -99,6 +106,7 @@ enum StreamState {
 // Public API
 
 impl BashInput {
+    #[must_use]
     pub fn new(command: String) -> Self {
         Self {
             command: Some(command),
@@ -125,7 +133,17 @@ impl BashInput {
 /// Validates the command against dangerous patterns, ensures a working
 /// directory is provided, and spawns `bash -c <command>` as a child
 /// process. Returns a stream of [`SpawnOutput`] items.
-pub async fn run(
+///
+/// # Errors
+///
+/// Returns [`BashError`] if `cwd` is not provided, the command is an
+/// absolute path, or the command matches a dangerous security pattern.
+///
+/// # Panics
+///
+/// Panics if `bash_input.command` is `None` after passing the earlier
+/// validations (this path is unreachable in practice).
+pub fn run(
     bash_input: BashInput,
 ) -> Result<impl tokio_stream::Stream<Item = SpawnOutput>, BashError> {
     // Guards
@@ -166,13 +184,20 @@ pub async fn run(
     })
 }
 
+/// Spawn a bash process and return its output as an async stream.
+///
+/// # Panics
+///
+/// Panics if the child process stdout or stderr pipe cannot be taken (this
+/// only happens if [`std::process::Stdio::piped`] was not set).
+#[allow(clippy::too_many_lines)]
 pub fn spawn_bash(
     env: Option<Vec<(String, String)>>,
     cwd: &str,
     command: &str,
 ) -> impl tokio_stream::Stream<Item = Result<SpawnOutput, Error>> {
-    let mut _buffer_stdout = [0u8; BUFFER_SIZE];
-    let mut _buffer_stderr = [0u8; BUFFER_SIZE];
+    let mut buffer_stdout = [0u8; BUFFER_SIZE];
+    let mut buffer_stderr = [0u8; BUFFER_SIZE];
     let mut cmd = tokio::process::Command::new("bash");
 
     let mut state = StreamState::Off;
@@ -180,8 +205,8 @@ pub fn spawn_bash(
     stream! {
         if state == StreamState::Off {state = StreamState::On;}
         if state == StreamState::On {
-            _buffer_stdout.fill(0);
-            _buffer_stderr.fill(0);
+            buffer_stdout.fill(0);
+            buffer_stderr.fill(0);
         }
         if let Some(env) = env {
             let valid_pattern = env_var_pattern();
@@ -199,6 +224,7 @@ pub fn spawn_bash(
 
         cmd.current_dir(cwd);
         cmd.arg("-c").arg(command);
+        cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = match cmd.spawn() {
@@ -211,44 +237,79 @@ pub fn spawn_bash(
 
         let mut stream_stdout = child.stdout.take().unwrap();
         let mut stream_stderr = child.stderr.take().unwrap();
+        let mut stdout_done = false;
+        let mut stderr_done = false;
         loop {
             tokio::select! {
-                result_stdout = stream_stdout.read(&mut _buffer_stdout) => {
-                    let stdout = match result_stdout {
-                        Ok(0) => break,
-                        Ok(n) => _buffer_stdout[..n].to_vec(),
+                result_stdout = stream_stdout.read(&mut buffer_stdout), if !stdout_done => {
+                    match result_stdout {
+                        Ok(0) => stdout_done = true,
+                        Ok(n) => {
+                            let stdout = buffer_stdout[..n].to_vec();
+                            yield Ok(SpawnOutput {
+                                stdout,
+                                stderr: vec![],
+                                exit_code: None,
+                                signal: None,
+                                truncated: n == BUFFER_SIZE,
+                            });
+                        }
                         Err(e) => {
                             yield Err(Error::other(format!("stdout read error: {e}")));
-                            break;
+                            stdout_done = true;
                         }
-                    };
-
-                    yield Ok(SpawnOutput {
-                        stdout,
-                        stderr: vec![],
-                        exit_code: None,
-                        truncated: false,
-                    });
+                    }
                 }
 
-                result_stderr = stream_stderr.read(&mut _buffer_stderr) => {
-                    let stderr = match result_stderr {
-                        Ok(0) => break,
-                        Ok(n) => _buffer_stderr[..n].to_vec(),
+                result_stderr = stream_stderr.read(&mut buffer_stderr), if !stderr_done => {
+                    match result_stderr {
+                        Ok(0) => stderr_done = true,
+                        Ok(n) => {
+                            let stderr = buffer_stderr[..n].to_vec();
+                            yield Ok(SpawnOutput {
+                                stdout: vec![],
+                                stderr,
+                                exit_code: None,
+                                signal: None,
+                                truncated: n == BUFFER_SIZE,
+                            });
+                        }
                         Err(e) => {
                             yield Err(Error::other(format!("stderr read error: {e}")));
-                            break;
+                            stderr_done = true;
                         }
-                    };
-
-                    yield Ok(SpawnOutput {
-                        stdout: vec![],
-                        stderr,
-                        exit_code: None,
-                        truncated: false,
-                    });
+                    }
                 }
             }
+            if stdout_done && stderr_done { break; }
         }
+
+        let status = match child.wait().await {
+            Ok(s) => s,
+            Err(e) => {
+                yield Err(Error::other(format!("failed to wait for child: {e}")));
+                return;
+            }
+        };
+
+        let signal = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                status.signal()
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        };
+
+        yield Ok(SpawnOutput {
+            stdout: vec![],
+            stderr: vec![],
+            exit_code: status.code(),
+            signal,
+            truncated: false,
+        });
     }
 }

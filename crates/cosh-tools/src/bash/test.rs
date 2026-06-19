@@ -120,15 +120,18 @@ async fn test_spawn_bash_large_output() {
 }
 
 #[tokio::test]
-async fn test_spawn_bash_exit_code_not_yet_reported() {
+async fn test_spawn_bash_exit_code() {
     let stream = spawn_bash(None, ".", "exit 42");
     tokio::pin!(stream);
 
+    let mut exit_code = None;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
-        // spawn_bash doesn't report exit codes yet
-        assert!(output.exit_code.is_none());
+        if output.exit_code.is_some() {
+            exit_code = output.exit_code;
+        }
     }
+    assert_eq!(exit_code, Some(42));
 }
 
 #[tokio::test]
@@ -168,4 +171,62 @@ async fn test_spawn_bash_empty_command() {
     }
     // bash with empty -c produces no output
     assert!(!got_output);
+}
+
+#[tokio::test]
+async fn test_spawn_bash_exit_code_zero() {
+    let stream = spawn_bash(None, ".", "exit 0");
+    tokio::pin!(stream);
+
+    let mut exit_code = None;
+    while let Some(result) = stream.next().await {
+        let output = result.unwrap();
+        if output.exit_code.is_some() {
+            assert_eq!(output.signal, None);
+            exit_code = output.exit_code;
+        }
+    }
+    assert_eq!(exit_code, Some(0));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_spawn_bash_signal() {
+    let stream = spawn_bash(None, ".", "kill -KILL $$");
+    tokio::pin!(stream);
+
+    let mut got_signal = false;
+    while let Some(result) = stream.next().await {
+        let output = result.unwrap();
+        if output.signal.is_some() {
+            assert_eq!(output.exit_code, None);
+            assert_eq!(output.signal, Some(9));
+            got_signal = true;
+        }
+    }
+    assert!(got_signal);
+}
+
+#[tokio::test]
+async fn test_spawn_bash_exit_code_after_output() {
+    let stream = spawn_bash(None, ".", "echo hello && echo world && exit 10");
+    tokio::pin!(stream);
+
+    let mut saw_data = false;
+    let mut exit_code = None;
+    while let Some(result) = stream.next().await {
+        let output = result.unwrap();
+        if !output.stdout.is_empty() {
+            assert_eq!(output.exit_code, None);
+            assert_eq!(output.signal, None);
+            saw_data = true;
+        }
+        if output.exit_code.is_some() || output.signal.is_some() {
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.is_empty());
+            exit_code = output.exit_code;
+        }
+    }
+    assert!(saw_data);
+    assert_eq!(exit_code, Some(10));
 }
