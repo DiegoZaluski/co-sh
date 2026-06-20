@@ -4,6 +4,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Family {
     OpenAICompatible,
+    Gemini,
 }
 
 #[derive(Debug)]
@@ -246,6 +247,16 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             needs_extra_headers: false,
         },
     ),
+    (
+        "gemini",
+        ProviderConfig {
+            name: "gemini",
+            family: Family::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta",
+            default_model: "gemini-2.0-flash",
+            needs_extra_headers: false,
+        },
+    ),
 ];
 
 const API_KEY_ENVS: &[(&str, &str)] = &[
@@ -270,6 +281,7 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     ("anyscale", "ANYSCALE_API_KEY"),
     ("vercel", "VERCEL_API_KEY"),
     ("azure", "AZURE_OPENAI_KEY"),
+    ("gemini", "GEMINI_API_KEY"),
 ];
 
 pub(crate) fn get_provider(name: &str) -> Option<&'static ProviderConfig> {

@@ -7,6 +7,7 @@
 //! All providers share the same interface — swap the name passed to
 //! [`Connector::new`] to switch backends.
 
+pub(crate) mod gemini;
 pub(crate) mod openai_compatible;
 
 mod client;

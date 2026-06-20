@@ -2,7 +2,9 @@ use super::error::ConnectorError;
 use super::params::{Parameters, ResponseFormat, ToolDefinition};
 use super::provider::{Family, ProviderConfig, get_provider};
 
+use super::gemini;
 use super::openai_compatible;
+use std::pin::Pin;
 use tokio_stream::Stream;
 
 /// A unified client for any LLM provider.
@@ -40,7 +42,7 @@ impl Connector {
     /// Supported providers: `openai`, `groq`, `mistral`, `together`, `openrouter`,
     /// `xai`, `deepseek`, `perplexity`, `fireworks`, `cohere`, `huggingface`,
     /// `sambanova`, `poe`, `cerebras`, `nvidia`, `anyscale`, `vercel`, `cloudflare`,
-    /// `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`.
+    /// `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `gemini`.
     ///
     /// # Errors
     ///
@@ -165,6 +167,7 @@ impl Connector {
             Family::OpenAICompatible => {
                 openai_compatible::chat(provider, &self.params, prompt, None).await
             }
+            Family::Gemini => gemini::chat(provider, &self.params, prompt, None).await,
         }
     }
 
@@ -184,6 +187,7 @@ impl Connector {
             Family::OpenAICompatible => {
                 openai_compatible::chat(provider, &self.params, prompt, Some(system)).await
             }
+            Family::Gemini => gemini::chat(provider, &self.params, prompt, Some(system)).await,
         }
     }
 
@@ -199,6 +203,7 @@ impl Connector {
             Family::OpenAICompatible => {
                 openai_compatible::embed(provider, &self.params, input).await
             }
+            Family::Gemini => gemini::embed(provider, &self.params, input).await,
         }
     }
 
@@ -213,12 +218,13 @@ impl Connector {
     pub async fn stream_chat(
         &self,
         prompt: &str,
-    ) -> Result<impl Stream<Item = Result<String, ConnectorError>>, ConnectorError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String, ConnectorError>> + Send>>, ConnectorError> {
         let provider = self.provider()?;
         match provider.family {
             Family::OpenAICompatible => {
                 openai_compatible::chat_stream(provider, &self.params, prompt, None).await
             }
+            Family::Gemini => gemini::chat_stream(provider, &self.params, prompt, None).await,
         }
     }
 
@@ -232,11 +238,14 @@ impl Connector {
         &self,
         prompt: &str,
         system: &str,
-    ) -> Result<impl Stream<Item = Result<String, ConnectorError>>, ConnectorError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String, ConnectorError>> + Send>>, ConnectorError> {
         let provider = self.provider()?;
         match provider.family {
             Family::OpenAICompatible => {
                 openai_compatible::chat_stream(provider, &self.params, prompt, Some(system)).await
+            }
+            Family::Gemini => {
+                gemini::chat_stream(provider, &self.params, prompt, Some(system)).await
             }
         }
     }

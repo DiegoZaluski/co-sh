@@ -11,7 +11,7 @@
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ResponseFormat {
     #[serde(rename = "type")]
-    kind: String,
+    pub(crate) kind: String,
 }
 
 impl ResponseFormat {
@@ -48,11 +48,11 @@ impl ResponseFormat {
 /// ```
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ToolFunction {
-    name: String,
+    pub(crate) name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
+    pub(crate) description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    parameters: Option<serde_json::Value>,
+    pub(crate) parameters: Option<serde_json::Value>,
 }
 
 impl ToolFunction {
@@ -88,7 +88,7 @@ impl ToolFunction {
 pub struct ToolDefinition {
     #[serde(rename = "type")]
     kind: String,
-    function: ToolFunction,
+    pub(crate) function: ToolFunction,
 }
 
 impl ToolDefinition {

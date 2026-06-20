@@ -3,6 +3,7 @@ use super::super::params::{Parameters, ResponseFormat, ToolDefinition};
 use super::super::provider::{ProviderConfig, get_api_key};
 
 use async_stream::stream;
+use std::pin::Pin;
 use tokio_stream::Stream;
 
 #[derive(serde::Serialize)]
@@ -247,7 +248,7 @@ pub(crate) async fn chat_stream(
     params: &Parameters,
     prompt: &str,
     system_prompt: Option<&str>,
-) -> Result<impl Stream<Item = Result<String, ConnectorError>>, ConnectorError> {
+) -> Result<Pin<Box<dyn Stream<Item = Result<String, ConnectorError>> + Send>>, ConnectorError> {
     let api_key = params
         .api_key
         .clone()
@@ -267,7 +268,7 @@ pub(crate) async fn chat_stream(
 
     let buf = SseBuffer::new();
 
-    Ok(stream! {
+    Ok(Box::pin(stream! {
         let mut response = response;
         let mut buf = buf;
         loop {
@@ -301,7 +302,7 @@ pub(crate) async fn chat_stream(
         }
         // Stream ended without [DONE]
         yield Err(ConnectorError::StreamTerminated);
-    })
+    }))
 }
 
 /// Send an embedding request and return the embedding vector.
