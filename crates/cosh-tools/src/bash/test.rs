@@ -1,6 +1,8 @@
 #[allow(unused_imports)]
 use super::bsh::spawn_bash;
 #[allow(unused_imports)]
+use super::bsh::spawn_bash_pty;
+#[allow(unused_imports)]
 use tokio_stream::StreamExt;
 #[allow(dead_code)]
 const BUFFER_SIZE: usize = 4096;
@@ -229,4 +231,109 @@ async fn test_spawn_bash_exit_code_after_output() {
     }
     assert!(saw_data);
     assert_eq!(exit_code, Some(10));
+}
+
+// ── PTY path tests ────────────────────────────────────────────────────
+// With a PTY the terminal line discipline translates `\n` to `\r\n`, so
+// output bytes differ from the non-PTY path.  We trim whitespace before
+// comparing text content.
+
+#[tokio::test]
+async fn test_spawn_bash_pty_simple_echo() {
+    let stream = spawn_bash_pty(None, ".", "echo hello");
+    tokio::pin!(stream);
+
+    let mut output = vec![];
+    while let Some(result) = stream.next().await {
+        let item = result.unwrap();
+        output.extend_from_slice(&item.stdout);
+    }
+    assert!(!output.is_empty());
+    let text = String::from_utf8_lossy(&output);
+    assert!(text.contains("hello"));
+}
+
+#[tokio::test]
+async fn test_spawn_bash_pty_exit_code() {
+    let stream = spawn_bash_pty(None, ".", "exit 42");
+    tokio::pin!(stream);
+
+    let mut exit_code = None;
+    while let Some(result) = stream.next().await {
+        let output = result.unwrap();
+        if output.exit_code.is_some() {
+            exit_code = output.exit_code;
+        }
+    }
+    assert_eq!(exit_code, Some(42));
+}
+
+#[tokio::test]
+async fn test_spawn_bash_pty_env() {
+    let stream = spawn_bash_pty(
+        Some(vec![("MY_VAR".to_string(), "world".to_string())]),
+        ".",
+        "echo hello $MY_VAR",
+    );
+    tokio::pin!(stream);
+
+    let mut output = vec![];
+    while let Some(result) = stream.next().await {
+        let item = result.unwrap();
+        output.extend_from_slice(&item.stdout);
+    }
+    let text = String::from_utf8_lossy(&output);
+    assert!(text.contains("hello world"));
+}
+
+#[tokio::test]
+async fn test_spawn_bash_pty_invalid_env_var_name() {
+    let stream = spawn_bash_pty(
+        Some(vec![("INVALID-KEY".to_string(), "value".to_string())]),
+        ".",
+        "echo hello",
+    );
+    tokio::pin!(stream);
+
+    let mut got_error = false;
+    while let Some(result) = stream.next().await {
+        if result.is_err() {
+            got_error = true;
+            break;
+        }
+    }
+    assert!(got_error);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_spawn_bash_pty_signal() {
+    let stream = spawn_bash_pty(None, ".", "kill -KILL $$");
+    tokio::pin!(stream);
+
+    let mut got_signal = false;
+    while let Some(result) = stream.next().await {
+        let output = result.unwrap();
+        if output.signal.is_some() {
+            assert_eq!(output.exit_code, None);
+            assert_eq!(output.signal, Some(9)); // SIGKILL
+            got_signal = true;
+        }
+    }
+    assert!(got_signal);
+}
+
+#[tokio::test]
+async fn test_spawn_bash_pty_large_output() {
+    let n = BUFFER_SIZE * 2 + 100;
+    let cmd = format!("printf 'a%.0s' $(seq 1 {n})", n = n);
+    let stream = spawn_bash_pty(None, ".", &cmd);
+    tokio::pin!(stream);
+
+    let mut total = 0usize;
+    while let Some(result) = stream.next().await {
+        let output = result.unwrap();
+        total += output.stdout.len();
+    }
+    assert_eq!(total, n);
 }

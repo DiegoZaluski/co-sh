@@ -6,12 +6,15 @@
 //! disk destruction, etc.) before execution.
 
 use async_stream::stream;
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use regex::Regex;
+use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::OnceLock;
 use tokio::io::AsyncReadExt;
 use tokio::io::{Error, ErrorKind};
+use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
 /// Returns the list of critical bash patterns that are checked before execution.
@@ -64,6 +67,50 @@ fn env_var_pattern() -> &'static Regex {
     ENV_VAR_PATTERN.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap())
 }
 
+/// Maps a Unix signal *description* (from `strsignal(3)`) to its numeric value.
+///
+/// `portable_pty::ExitStatus::signal()` returns the description string
+/// produced by the libc `strsignal()` function (e.g. `"Killed"` for
+/// SIGKILL), not the `"SIGKILL"` constant name.  We map back to the
+/// numeric value to match `SpawnOutput::signal` in the non-PTY path
+/// (which uses `std::os::unix::process::ExitStatusExt`).
+fn signal_name_to_number(name: &str) -> Option<i32> {
+    match name {
+        "Hangup" => Some(1),
+        "Interrupt" => Some(2),
+        "Quit" => Some(3),
+        "Illegal instruction" => Some(4),
+        "Trace/breakpoint trap" => Some(5),
+        "Aborted" => Some(6),
+        "Bus error" => Some(7),
+        "Arithmetic exception" | "Floating point exception" => Some(8),
+        "Killed" => Some(9),
+        "User defined signal 1" => Some(10),
+        "Segmentation fault" => Some(11),
+        "User defined signal 2" => Some(12),
+        "Broken pipe" => Some(13),
+        "Alarm clock" => Some(14),
+        "Terminated" => Some(15),
+        "Stack fault" => Some(16),
+        "Child exited" => Some(17),
+        "Continued" => Some(18),
+        "Stopped (signal)" => Some(19),
+        "Stopped" => Some(20),
+        "Stopped (tty input)" => Some(21),
+        "Stopped (tty output)" => Some(22),
+        "Urgent I/O condition" => Some(23),
+        "CPU time limit exceeded" => Some(24),
+        "File size limit exceeded" => Some(25),
+        "Virtual timer expired" => Some(26),
+        "Profiling timer expired" => Some(27),
+        "Window changed" => Some(28),
+        "I/O possible" => Some(29),
+        "Power failure" => Some(30),
+        "Bad system call" => Some(31),
+        _ => None,
+    }
+}
+
 // Types
 
 pub struct BashInput {
@@ -71,7 +118,7 @@ pub struct BashInput {
     pub timeout: Option<u64>,
     pub env: Option<Vec<(String, String)>>,
     pub cwd: Option<String>,
-    pub pty: bool, // TODO
+    pub pty: bool,
 }
 
 pub struct BashOutput {
@@ -96,12 +143,6 @@ pub struct ExecError {
 pub struct BashError {
     pub text_err: Option<String>,
     pub exec_err: Option<ExecError>,
-}
-// active stream state
-#[derive(PartialEq)]
-enum StreamState {
-    On,
-    Off,
 }
 // Public API
 
@@ -171,14 +212,25 @@ pub fn run(
     }
 
     let command = bash_input.command.unwrap();
+    let env = bash_input.env;
+    let use_pty = bash_input.pty;
 
     Ok(stream! {
-        // Execute
-        let stream = spawn_bash(bash_input.env, &cwd, &command);
-        tokio::pin!(stream);
-        while let Some(item) = stream.next().await {
-            if let Ok(output) = item {
-                yield output;
+        if use_pty {
+            let stream = spawn_bash_pty(env, &cwd, &command);
+            tokio::pin!(stream);
+            while let Some(item) = stream.next().await {
+                if let Ok(output) = item {
+                    yield output;
+                }
+            }
+        } else {
+            let stream = spawn_bash(env, &cwd, &command);
+            tokio::pin!(stream);
+            while let Some(item) = stream.next().await {
+                if let Ok(output) = item {
+                    yield output;
+                }
             }
         }
     })
@@ -191,7 +243,7 @@ pub fn run(
 /// Panics if the child process stdout or stderr pipe cannot be taken (this
 /// only happens if [`std::process::Stdio::piped`] was not set).
 #[allow(clippy::too_many_lines)]
-pub fn spawn_bash(
+pub(crate) fn spawn_bash(
     env: Option<Vec<(String, String)>>,
     cwd: &str,
     command: &str,
@@ -200,14 +252,7 @@ pub fn spawn_bash(
     let mut buffer_stderr = [0u8; BUFFER_SIZE];
     let mut cmd = tokio::process::Command::new("bash");
 
-    let mut state = StreamState::Off;
-
     stream! {
-        if state == StreamState::Off {state = StreamState::On;}
-        if state == StreamState::On {
-            buffer_stdout.fill(0);
-            buffer_stderr.fill(0);
-        }
         if let Some(env) = env {
             let valid_pattern = env_var_pattern();
             for (key, value) in env {
@@ -311,5 +356,149 @@ pub fn spawn_bash(
             signal,
             truncated: false,
         });
+    }
+}
+
+/// Spawn a bash process into a PTY and return its output as an async stream.
+///
+/// Unlike [`spawn_bash`], this uses a pseudo-terminal so the child process
+/// behaves as if connected to a terminal (colored output, prompts, etc.).
+/// stdout and stderr are multiplexed into the PTY; [`SpawnOutput::stderr`]
+/// is always empty in this path.
+///
+/// I/O is bridged from the synchronous `portable_pty` reader to the async
+/// stream via [`tokio::task::spawn_blocking`] and an `mpsc` channel, adding
+/// one buffer copy per chunk.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn spawn_bash_pty(
+    env: Option<Vec<(String, String)>>,
+    cwd: &str,
+    command: &str,
+) -> impl tokio_stream::Stream<Item = Result<SpawnOutput, Error>> {
+    let cwd = cwd.to_string();
+    let command = command.to_string();
+
+    stream! {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        tokio::task::spawn_blocking(move || {
+            // Validate environment variables (same rules as spawn_bash).
+            if let Some(ref env) = env {
+                let valid_pattern = env_var_pattern();
+                for (key, _) in env {
+                    if !valid_pattern.is_match(key) {
+                        let _ = tx.send(Err(Error::new(
+                            ErrorKind::InvalidInput,
+                            format!("invalid env variable name: {key}"),
+                        )));
+                        return;
+                    }
+                }
+            }
+
+            let pty_system = native_pty_system();
+            let pair = match pty_system.openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            }) {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tx.send(Err(Error::other(format!("failed to open pty: {e}"))));
+                    return;
+                }
+            };
+
+            let mut cmd_builder = CommandBuilder::new("bash");
+            cmd_builder.arg("-c");
+            cmd_builder.arg(&command);
+            cmd_builder.cwd(&cwd);
+
+            if let Some(env) = env {
+                for (key, value) in env {
+                    cmd_builder.env(key, value);
+                }
+            }
+
+            let mut child = match pair.slave.spawn_command(cmd_builder) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Err(Error::other(
+                        format!("failed to spawn command in pty: {e}"),
+                    )));
+                    return;
+                }
+            };
+
+            let mut reader = match pair.master.try_clone_reader() {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(Err(Error::other(
+                        format!("failed to clone pty reader: {e}"),
+                    )));
+                    return;
+                }
+            };
+
+            // Dropping the slave closes its end of the PTY, signalling
+            // EOF to the master reader once the child exits.
+            drop(pair.slave);
+
+            let mut buf = [0u8; BUFFER_SIZE];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx
+                            .send(Ok(SpawnOutput {
+                                stdout: buf[..n].to_vec(),
+                                stderr: vec![],
+                                exit_code: None,
+                                signal: None,
+                                truncated: n == BUFFER_SIZE,
+                            }))
+                            .is_err()
+                        {
+                            // Receiver dropped (stream consumer cancelled).
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(Error::other(format!("pty read error: {e}"))));
+                        return;
+                    }
+                }
+            }
+
+            match child.wait() {
+                Ok(status) => {
+                    let signal = status.signal().and_then(signal_name_to_number);
+                    // Match non-PTY semantics: exit_code is None when
+                    // killed by a signal; only Some when the process
+                    // exited normally.
+                    let exit_code = if signal.is_some() {
+                        None
+                    } else {
+                        #[allow(clippy::cast_possible_wrap)]
+                        Some(status.exit_code() as i32)
+                    };
+                    let _ = tx.send(Ok(SpawnOutput {
+                        stdout: vec![],
+                        stderr: vec![],
+                        exit_code,
+                        signal,
+                        truncated: false,
+                    }));
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(Error::other(format!("pty wait error: {e}"))));
+                }
+            }
+        });
+
+        while let Some(item) = rx.recv().await {
+            yield item;
+        }
     }
 }
