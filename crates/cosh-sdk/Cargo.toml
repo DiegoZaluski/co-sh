@@ -40,6 +40,12 @@ features = ["xxh32"]
 version = "1.52.3"
 features = ["full"]
 
+[dependencies.async-stream]
+version = "0.3"
+
+[dependencies.tokio-stream]
+version = "0.1"
+
 [dependencies.reqwest]
 version = "0.13"
 features = ["json"]

@@ -237,9 +237,14 @@ name = "cosh"
 version = "0.0.0"
 
 [[package]]
+name = "cosh-harness"
+version = "0.1.0"
+
+[[package]]
 name = "cosh-sdk"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "globset",
  "grep-matcher",
  "grep-regex",
@@ -257,6 +262,7 @@ dependencies = [
  "similar",
  "smallvec",
  "tokio",
+ "tokio-stream",
  "tree-sitter",
  "tree-sitter-c-sharp",
  "tree-sitter-go",
