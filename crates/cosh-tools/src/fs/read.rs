@@ -1,10 +1,10 @@
 //! Read file(s) and format the output as hashline sections.
 //!
-//! Each [`ReadFile`] carries one or more [`Target`] entries.  A target can
+//! Each call to [`read`] carries one or more [`Target`] entries.  A target can
 //! request the whole file, a syntactic block at a given line, or a definition
 //! block matching a name (symbol, struct, class, …).  When the name search
 //! targets a directory the entire tree is walked recursively.
-use super::types::{ReadFile, Target};
+use super::types::{FsRead, Target};
 
 use cosh_sdk::hashline::{
     format,
@@ -24,16 +24,17 @@ pub struct ReadResult {
     pub warnings: Option<String>,
 }
 
-/// Run every target in `config` and return hashline-formatted results.
+/// Run every target and return hashline-formatted results.
 ///
 /// Each target produces one or more [`ReadResult`] entries. Errors and
 /// incomplete reads are recorded as warnings inside each result instead of
 /// aborting the entire operation.
-pub async fn read(config: ReadFile<'_>) -> Vec<ReadResult> {
+pub async fn read(config: &FsRead, targets: Vec<Target<'_>>) -> Vec<ReadResult> {
+    let _ = config;
     let fs = DiskFilesystem::new();
     let mut results: Vec<ReadResult> = Vec::new();
 
-    for target in config.read {
+    for target in targets {
         results.extend(read_target(fs.clone(), target).await);
     }
 

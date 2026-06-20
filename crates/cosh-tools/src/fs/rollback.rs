@@ -5,7 +5,7 @@
 
 use cosh_sdk::rollback::{RestoreInput, restore};
 
-use super::types::{FsMetadata, RollbackInput};
+use super::types::{FsMetadata, FsRollback};
 
 /// Result of a successful rollback.
 #[derive(Debug)]
@@ -29,7 +29,7 @@ pub struct RollbackResult {
 /// Restore a file to a previously recorded version.
 ///
 /// Checks write permissions before delegating to the rollback engine. If
-/// `input.hash` is empty, the engine restores the version immediately
+/// `hash` is empty, the engine restores the version immediately
 /// preceding the current file content.
 ///
 /// # Errors
@@ -43,24 +43,26 @@ pub struct RollbackResult {
 /// - The file was modified externally and `hash` is empty.
 /// - A disk write error occurs.
 pub async fn rollback(
-    input: RollbackInput<'_>,
+    config: &FsRollback,
     metadata: FsMetadata<'_>,
+    path: &str,
+    hash: &str,
 ) -> Result<RollbackResult, String> {
     use super::types;
+    let _ = config;
 
-    match metadata.fs_guard(input.path) {
+    match metadata.fs_guard(path) {
         types::FsGuard::Allowed => {}
         types::FsGuard::Denied => {
             return Err(format!(
-                "restore permission denied for `{}`; \
+                "restore permission denied for `{path}`; \
                  the path is outside the project root or in the blocklist",
-                input.path
             ));
         }
         types::FsGuard::Mismatch(msg) => return Err(msg),
     }
 
-    let hash = input.hash.trim();
+    let hash = hash.trim();
     let hash = if hash.is_empty() {
         None
     } else {
@@ -68,7 +70,7 @@ pub async fn rollback(
     };
 
     let out = restore(RestoreInput {
-        path: input.path.to_owned(),
+        path: path.to_owned(),
         hash,
     })
     .await?;

@@ -10,6 +10,6 @@ pub use edit::edit;
 pub use read::{ReadResult, read};
 pub use rollback::{RollbackResult, rollback};
 pub use types::{
-    EditFile, EditTarget, FsMetadata, ReadFile, RollbackInput, Target, TargetFile, WriteAllFile,
+    EditTarget, FsEdit, FsMetadata, FsRead, FsRollback, FsWrite, Target, TargetFile,
 };
 pub use write::write;

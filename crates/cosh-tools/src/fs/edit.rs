@@ -6,7 +6,7 @@ use cosh_sdk::hashline::{
     types::{BlockResolver, BlockResolverRequest, BlockSpan, SplitOptions},
 };
 
-use super::types::{EditFile, EditTarget, FsMetadata};
+use super::types::{EditTarget, FsEdit, FsMetadata};
 use cosh_sdk::rollback;
 #[derive(Debug)]
 pub struct EditResult {
@@ -29,13 +29,15 @@ fn resolve_block_fn(req: BlockResolverRequest) -> Option<BlockSpan> {
 /// Returns `Err` if a file hash doesn't match, edit operations fail to parse,
 /// or the underlying filesystem returns an error.
 pub async fn edit(
-    config: EditFile<'_>,
+    config: &FsEdit,
     metadata: FsMetadata<'_>,
+    targets: Vec<EditTarget<'_>>,
 ) -> Result<Vec<EditResult>, String> {
+    let _ = config;
     let fs = DiskFilesystem::new();
     let mut results = Vec::new();
 
-    for target in config.edit.clone() {
+    for target in targets.clone() {
         let result = edit_target(fs.clone(), target, metadata.clone()).await?;
         results.push(result);
     }

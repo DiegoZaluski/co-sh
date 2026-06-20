@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cosh_sdk::rollback::record;
 
 use super::super::rollback::rollback;
-use super::super::types::{FsMetadata, RollbackInput};
+use super::super::types::{FsMetadata, FsRollback};
 
 static TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -40,11 +40,10 @@ async fn rollback_denied_when_path_is_outside_project_root() {
     let _ = record(outside, "content");
 
     let err = rollback(
-        RollbackInput {
-            path: outside,
-            hash: "",
-        },
+        &FsRollback,
         meta(),
+        outside,
+        "",
     )
     .await
     .unwrap_err();
@@ -71,11 +70,10 @@ async fn rollback_denied_when_path_is_in_blocklist() {
     };
 
     let err = rollback(
-        RollbackInput {
-            path: &path,
-            hash: "",
-        },
+        &FsRollback,
         blocked_meta,
+        &path,
+        "",
     )
     .await
     .unwrap_err();
@@ -100,11 +98,10 @@ async fn rollback_returns_error_on_blocklist_allowlist_mismatch() {
     };
 
     let result = rollback(
-        RollbackInput {
-            path: &path,
-            hash: "",
-        },
+        &FsRollback,
         mismatch_meta,
+        &path,
+        "",
     )
     .await;
     assert!(result.is_err(), "both-list mismatch must return an error");
@@ -129,11 +126,10 @@ async fn rollback_allowed_outside_root_when_path_in_allowlist() {
     };
 
     let result = rollback(
-        RollbackInput {
-            path: &outside,
-            hash: "",
-        },
+        &FsRollback,
         allowed_meta,
+        &outside,
+        "",
     )
     .await;
     assert!(
@@ -155,11 +151,10 @@ async fn rollback_empty_hash_restores_previous_version() {
     let _ = record(&path, "version two\n");
 
     let out = rollback(
-        RollbackInput {
-            path: &path,
-            hash: "",
-        },
+        &FsRollback,
         meta(),
+        &path,
+        "",
     )
     .await
     .expect("empty hash must trigger previous-version restore");
@@ -182,11 +177,10 @@ async fn rollback_whitespace_only_hash_treated_as_empty() {
     let _ = record(&path, "v2\n");
 
     let out = rollback(
-        RollbackInput {
-            path: &path,
-            hash: "   ",
-        },
+        &FsRollback,
         meta(),
+        &path,
+        "   ",
     )
     .await
     .expect("whitespace-only hash must be treated as empty");
@@ -210,11 +204,10 @@ async fn rollback_hash_with_surrounding_whitespace_is_trimmed() {
 
     let padded = format!("  {h}  ");
     let out = rollback(
-        RollbackInput {
-            path: &path,
-            hash: &padded,
-        },
+        &FsRollback,
         meta(),
+        &path,
+        &padded,
     )
     .await
     .expect("hash with surrounding whitespace must be trimmed and resolved");
@@ -237,11 +230,10 @@ async fn rollback_explicit_hash_restores_target_version() {
     let _ = record(&path, "state b\n");
 
     let out = rollback(
-        RollbackInput {
-            path: &path,
-            hash: &h_a,
-        },
+        &FsRollback,
         meta(),
+        &path,
+        &h_a,
     )
     .await
     .expect("explicit hash restore must succeed");
@@ -265,11 +257,10 @@ async fn rollback_header_has_hashline_format() {
     let _ = record(&path, "v2\n");
 
     let out = rollback(
-        RollbackInput {
-            path: &path,
-            hash: &h,
-        },
+        &FsRollback,
         meta(),
+        &path,
+        &h,
     )
     .await
     .unwrap();
@@ -298,11 +289,10 @@ async fn rollback_replaced_hash_reflects_content_before_restore() {
     let h_after = record(&path, "after\n").unwrap();
 
     let out = rollback(
-        RollbackInput {
-            path: &path,
-            hash: "",
-        },
+        &FsRollback,
         meta(),
+        &path,
+        "",
     )
     .await
     .unwrap();
@@ -322,11 +312,10 @@ async fn rollback_replaced_hash_is_empty_when_file_did_not_exist() {
     rm(&path);
 
     let out = rollback(
-        RollbackInput {
-            path: &path,
-            hash: &h,
-        },
+        &FsRollback,
         meta(),
+        &path,
+        &h,
     )
     .await
     .expect("restore of deleted file must succeed");
@@ -347,11 +336,10 @@ async fn rollback_warning_is_none_on_clean_restore() {
     let _ = record(&path, "v2\n");
 
     let out = rollback(
-        RollbackInput {
-            path: &path,
-            hash: "",
-        },
+        &FsRollback,
         meta(),
+        &path,
+        "",
     )
     .await
     .unwrap();
@@ -373,11 +361,10 @@ async fn rollback_warning_is_some_when_file_was_externally_modified() {
     write_file(&path, "externally changed\n");
 
     let out = rollback(
-        RollbackInput {
-            path: &path,
-            hash: &h,
-        },
+        &FsRollback,
         meta(),
+        &path,
+        &h,
     )
     .await
     .expect("restore over external modification must succeed");
@@ -403,11 +390,10 @@ async fn rollback_error_no_history_for_path() {
     write_file(&path, "fresh file\n");
 
     let err = rollback(
-        RollbackInput {
-            path: &path,
-            hash: "",
-        },
+        &FsRollback,
         meta(),
+        &path,
+        "",
     )
     .await
     .unwrap_err();
@@ -428,11 +414,10 @@ async fn rollback_error_hash_not_found_in_history() {
     let _ = record(&path, "updated\n");
 
     let err = rollback(
-        RollbackInput {
-            path: &path,
-            hash: "DEAD",
-        },
+        &FsRollback,
         meta(),
+        &path,
+        "DEAD",
     )
     .await
     .unwrap_err();
@@ -452,22 +437,20 @@ async fn rollback_error_already_at_requested_version() {
 
     // Restore to v1 first
     rollback(
-        RollbackInput {
-            path: &path,
-            hash: &h,
-        },
+        &FsRollback,
         meta(),
+        &path,
+        &h,
     )
     .await
     .unwrap();
 
     // Restore again — disk already has v1
     let err = rollback(
-        RollbackInput {
-            path: &path,
-            hash: &h,
-        },
+        &FsRollback,
         meta(),
+        &path,
+        &h,
     )
     .await
     .unwrap_err();
@@ -486,11 +469,10 @@ async fn rollback_error_no_previous_when_only_one_version() {
     let _ = record(&path, "only version\n");
 
     let err = rollback(
-        RollbackInput {
-            path: &path,
-            hash: "",
-        },
+        &FsRollback,
         meta(),
+        &path,
+        "",
     )
     .await
     .unwrap_err();

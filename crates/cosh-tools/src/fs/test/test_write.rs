@@ -1,23 +1,26 @@
-use super::super::types::{FsMetadata, TargetFile, WriteAllFile};
+use super::super::types::{FsMetadata, FsWrite, TargetFile};
 use super::super::write::write;
 use std::path::Path;
 
-#[tokio::test]
-async fn write_creates_file_and_returns_hash_header() {
-    let target = WriteAllFile {
-        write: vec![TargetFile {
-            path: "/home/inky/cosh/ftest.txt",
-            text: "hello world",
-        }],
-    };
-
-    let metadata = FsMetadata {
+fn meta() -> FsMetadata<'static> {
+    FsMetadata {
         root: Path::new("/home/inky/cosh"),
         write_path_allowlist: None,
         write_path_blocklist: None,
-    };
+    }
+}
 
-    let result = write(target, metadata).await;
+#[tokio::test]
+async fn write_creates_file_and_returns_hash_header() {
+    let result = write(
+        &FsWrite,
+        meta(),
+        vec![TargetFile {
+            path: "/home/inky/cosh/ftest.txt",
+            text: "hello world",
+        }],
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -28,8 +31,10 @@ async fn write_creates_file_and_returns_hash_header() {
 
 #[tokio::test]
 async fn write_creates_multiple_files_in_single_call() {
-    let target = WriteAllFile {
-        write: vec![
+    let result = write(
+        &FsWrite,
+        meta(),
+        vec![
             TargetFile {
                 path: "/home/inky/cosh/ftest.txt",
                 text: "hello world",
@@ -39,15 +44,8 @@ async fn write_creates_multiple_files_in_single_call() {
                 text: "test",
             },
         ],
-    };
-
-    let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
-    };
-
-    let result = write(target, metadata).await;
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 2);
@@ -61,20 +59,21 @@ async fn write_creates_multiple_files_in_single_call() {
 
 #[tokio::test]
 async fn write_denied_when_path_is_in_blocklist() {
-    let target = WriteAllFile {
-        write: vec![TargetFile {
-            path: "/home/inky/cosh/ftest.txt",
-            text: "should not be written",
-        }],
-    };
-
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
         write_path_allowlist: None,
         write_path_blocklist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
     };
 
-    let result = write(target, metadata).await;
+    let result = write(
+        &FsWrite,
+        metadata,
+        vec![TargetFile {
+            path: "/home/inky/cosh/ftest.txt",
+            text: "should not be written",
+        }],
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -90,20 +89,14 @@ async fn write_denied_when_path_is_in_blocklist() {
 #[tokio::test]
 async fn write_reports_empty_text_inline_and_skips_file() {
     let path = "/home/inky/cosh/cosh_test_empty.txt";
-    // guard: file must not exist before the test
     let _ = std::fs::remove_file(path);
 
-    let target = WriteAllFile {
-        write: vec![TargetFile { path, text: "" }],
-    };
-
-    let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
-    };
-
-    let result = write(target, metadata).await;
+    let result = write(
+        &FsWrite,
+        meta(),
+        vec![TargetFile { path, text: "" }],
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -120,20 +113,21 @@ async fn write_reports_empty_text_inline_and_skips_file() {
 #[tokio::test]
 async fn write_allowed_outside_root_when_path_in_allowlist() {
     let path = "/tmp/cosh_test_allowlist_write.txt";
-    let target = WriteAllFile {
-        write: vec![TargetFile {
-            path,
-            text: "outside root but explicitly allowed",
-        }],
-    };
-
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
         write_path_allowlist: Some(vec![Path::new(path)]),
         write_path_blocklist: None,
     };
 
-    let result = write(target, metadata).await;
+    let result = write(
+        &FsWrite,
+        metadata,
+        vec![TargetFile {
+            path,
+            text: "outside root but explicitly allowed",
+        }],
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -147,20 +141,21 @@ async fn write_allowed_outside_root_when_path_in_allowlist() {
 
 #[tokio::test]
 async fn write_errors_on_inconsistent_blocklist_and_allowlist() {
-    let target = WriteAllFile {
-        write: vec![TargetFile {
-            path: "/home/inky/cosh/ftest.txt",
-            text: "should never be written",
-        }],
-    };
-
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
         write_path_allowlist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
         write_path_blocklist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
     };
 
-    let result = write(target, metadata).await;
+    let result = write(
+        &FsWrite,
+        metadata,
+        vec![TargetFile {
+            path: "/home/inky/cosh/ftest.txt",
+            text: "should never be written",
+        }],
+    )
+    .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("both blocklist and allowlist"));
 }
@@ -170,19 +165,12 @@ async fn write_strips_hashline_prefixes_and_reports_warning() {
     let path = "/home/inky/cosh/cosh_test_strip_hashline.txt";
     let content = "[main.rs#ABCD]\n42: fn main() {\n43:     println!(\"hello\");\n44: }";
 
-    let target = WriteAllFile {
-        write: vec![TargetFile {
-            path,
-            text: content,
-        }],
-    };
-    let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
-    };
-
-    let result = write(target, metadata).await;
+    let result = write(
+        &FsWrite,
+        meta(),
+        vec![TargetFile { path, text: content }],
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -207,19 +195,12 @@ async fn write_strips_hashline_prefixes_without_bracket_header() {
     let path = "/home/inky/cosh/cosh_test_strip_line_prefixes.txt";
     let content = "42: fn main() {\n43:     println!(\"hello\");\n44: }";
 
-    let target = WriteAllFile {
-        write: vec![TargetFile {
-            path,
-            text: content,
-        }],
-    };
-    let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
-    };
-
-    let result = write(target, metadata).await;
+    let result = write(
+        &FsWrite,
+        meta(),
+        vec![TargetFile { path, text: content }],
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -242,19 +223,12 @@ async fn write_does_not_strip_normal_content() {
     let path = "/home/inky/cosh/cosh_test_no_strip.txt";
     let content = "fn main() {\n    println!(\"hello\");\n}";
 
-    let target = WriteAllFile {
-        write: vec![TargetFile {
-            path,
-            text: content,
-        }],
-    };
-    let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
-    };
-
-    let result = write(target, metadata).await;
+    let result = write(
+        &FsWrite,
+        meta(),
+        vec![TargetFile { path, text: content }],
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -273,19 +247,12 @@ async fn write_chmods_executable_for_shebang() {
     let path = "/home/inky/cosh/cosh_test_shebang.sh";
     let content = "#!/usr/bin/env bash\necho hello";
 
-    let target = WriteAllFile {
-        write: vec![TargetFile {
-            path,
-            text: content,
-        }],
-    };
-    let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
-    };
-
-    let result = write(target, metadata).await;
+    let result = write(
+        &FsWrite,
+        meta(),
+        vec![TargetFile { path, text: content }],
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -313,19 +280,12 @@ async fn write_does_not_chmod_without_shebang() {
     let path = "/home/inky/cosh/cosh_test_no_shebang.txt";
     let content = "plain text file";
 
-    let target = WriteAllFile {
-        write: vec![TargetFile {
-            path,
-            text: content,
-        }],
-    };
-    let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
-    };
-
-    let result = write(target, metadata).await;
+    let result = write(
+        &FsWrite,
+        meta(),
+        vec![TargetFile { path, text: content }],
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);

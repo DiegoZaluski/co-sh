@@ -1,5 +1,5 @@
 use super::super::edit::edit;
-use super::super::types::{EditFile, EditTarget, FsMetadata};
+use super::super::types::{EditTarget, FsEdit, FsMetadata};
 use cosh_sdk::hashline::format::compute_file_hash;
 use std::path::Path;
 
@@ -22,15 +22,16 @@ async fn edit_replaces_single_line_in_file() {
     std::fs::write(path, "line1\nline2\nline3\n").unwrap();
     let file_hash = hash_file(path);
 
-    let config = EditFile {
-        edit: vec![EditTarget {
+    let result = edit(
+        &FsEdit,
+        make_metadata(),
+        vec![EditTarget {
             path,
             file_hash: &file_hash,
             ops: "replace 2..2:\n+REPLACED",
         }],
-    };
-
-    let result = edit(config, make_metadata()).await;
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -47,15 +48,16 @@ async fn edit_replaces_multi_line_range() {
     std::fs::write(path, "a\nb\nc\nd\ne\n").unwrap();
     let file_hash = hash_file(path);
 
-    let config = EditFile {
-        edit: vec![EditTarget {
+    let result = edit(
+        &FsEdit,
+        make_metadata(),
+        vec![EditTarget {
             path,
             file_hash: &file_hash,
             ops: "replace 2..4:\n+X\n+Y",
         }],
-    };
-
-    let result = edit(config, make_metadata()).await;
+    )
+    .await;
     assert!(result.is_ok());
 
     let content = std::fs::read_to_string(path).unwrap();
@@ -71,15 +73,16 @@ async fn edit_inserts_before_and_after_anchor() {
 
     let ops = "insert before 2:\n+BEFORE\ninsert after 2:\n+AFTER";
 
-    let config = EditFile {
-        edit: vec![EditTarget {
+    let result = edit(
+        &FsEdit,
+        make_metadata(),
+        vec![EditTarget {
             path,
             file_hash: &file_hash,
             ops,
         }],
-    };
-
-    let result = edit(config, make_metadata()).await;
+    )
+    .await;
     assert!(result.is_ok());
 
     let content = std::fs::read_to_string(path).unwrap();
@@ -95,15 +98,16 @@ async fn edit_inserts_at_head_and_tail() {
 
     let ops = "insert head:\n+HEAD\ninsert tail:\n+TAIL";
 
-    let config = EditFile {
-        edit: vec![EditTarget {
+    let result = edit(
+        &FsEdit,
+        make_metadata(),
+        vec![EditTarget {
             path,
             file_hash: &file_hash,
             ops,
         }],
-    };
-
-    let result = edit(config, make_metadata()).await;
+    )
+    .await;
     assert!(result.is_ok());
 
     let content = std::fs::read_to_string(path).unwrap();
@@ -117,15 +121,16 @@ async fn edit_deletes_range_of_lines() {
     std::fs::write(path, "keep1\ndelete1\ndelete2\nkeep2\n").unwrap();
     let file_hash = hash_file(path);
 
-    let config = EditFile {
-        edit: vec![EditTarget {
+    let result = edit(
+        &FsEdit,
+        make_metadata(),
+        vec![EditTarget {
             path,
             file_hash: &file_hash,
             ops: "delete 2..3",
         }],
-    };
-
-    let result = edit(config, make_metadata()).await;
+    )
+    .await;
     assert!(result.is_ok());
 
     let content = std::fs::read_to_string(path).unwrap();
@@ -139,15 +144,16 @@ async fn edit_replaces_syntactic_block_in_rust_file() {
     std::fs::write(path, "fn main() {\n    let x = 1;\n    let y = 2;\n}\n").unwrap();
     let file_hash = hash_file(path);
 
-    let config = EditFile {
-        edit: vec![EditTarget {
+    let result = edit(
+        &FsEdit,
+        make_metadata(),
+        vec![EditTarget {
             path,
             file_hash: &file_hash,
             ops: "replace block 1:\n+fn main() {\n+    println!(\"hello\");\n+}",
         }],
-    };
-
-    let result = edit(config, make_metadata()).await;
+    )
+    .await;
     assert!(result.is_ok());
 
     let content = std::fs::read_to_string(path).unwrap();
@@ -164,8 +170,10 @@ async fn edit_processes_multiple_files_in_single_call() {
     let hash_a = hash_file(path_a);
     let hash_b = hash_file(path_b);
 
-    let config = EditFile {
-        edit: vec![
+    let result = edit(
+        &FsEdit,
+        make_metadata(),
+        vec![
             EditTarget {
                 path: path_a,
                 file_hash: &hash_a,
@@ -177,9 +185,8 @@ async fn edit_processes_multiple_files_in_single_call() {
                 ops: "replace 1..1:\n+BETA",
             },
         ],
-    };
-
-    let result = edit(config, make_metadata()).await;
+    )
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 2);
@@ -195,18 +202,18 @@ async fn edit_returns_error_on_hash_mismatch() {
     let path = "/home/inky/cosh/cosh_test_edit_hashfail.txt";
     std::fs::write(path, "original\n").unwrap();
 
-    let config = EditFile {
-        edit: vec![EditTarget {
+    let result = edit(
+        &FsEdit,
+        make_metadata(),
+        vec![EditTarget {
             path,
             file_hash: "BEEF",
             ops: "replace 1..1:\n+changed",
         }],
-    };
-
-    let result = edit(config, make_metadata()).await;
+    )
+    .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("hash mismatch"));
-    // file content must be unchanged
     assert_eq!(std::fs::read_to_string(path).unwrap(), "original\n");
     let _ = std::fs::remove_file(path);
 }
@@ -214,17 +221,18 @@ async fn edit_returns_error_on_hash_mismatch() {
 #[tokio::test]
 async fn edit_returns_error_when_file_not_found() {
     let path = "/home/inky/cosh/cosh_test_edit_nonexistent.txt";
-    let _ = std::fs::remove_file(path); // ensure it doesn't exist
+    let _ = std::fs::remove_file(path);
 
-    let config = EditFile {
-        edit: vec![EditTarget {
+    let result = edit(
+        &FsEdit,
+        make_metadata(),
+        vec![EditTarget {
             path,
             file_hash: "BEEF",
             ops: "replace 1..1:\n+anything",
         }],
-    };
-
-    let result = edit(config, make_metadata()).await;
+    )
+    .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("not found"));
 }

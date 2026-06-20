@@ -1,10 +1,11 @@
 use super::super::read::read;
-use super::super::types::{ReadFile, Target};
+use super::super::types::{FsRead, Target};
 
 #[tokio::test]
 async fn test_function_search() {
-    let config = ReadFile {
-        read: vec![
+    let results = read(
+        &FsRead,
+        vec![
             Target {
                 path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/tokenizer.rs",
                 line: None,
@@ -16,9 +17,8 @@ async fn test_function_search() {
                 symbol: None,
             },
         ],
-    };
-
-    let results = read(config).await;
+    )
+    .await;
     assert!(!results.is_empty(), "expected at least one result");
     for r in &results {
         assert!(r.warnings.is_none(), "unexpected warning: {:?}", r.warnings);
@@ -30,15 +30,15 @@ async fn test_function_search() {
 
 #[tokio::test]
 async fn test_line_block() {
-    let config = ReadFile {
-        read: vec![Target {
+    let results = read(
+        &FsRead,
+        vec![Target {
             path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/tokenizer.rs",
             line: Some(5),
             symbol: None,
         }],
-    };
-
-    let results = read(config).await;
+    )
+    .await;
     assert!(!results.is_empty(), "expected one result");
     let result = &results[0];
     assert!(

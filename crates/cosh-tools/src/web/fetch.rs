@@ -11,35 +11,19 @@ const EXA_MCP: &str = "https://mcp.exa.ai/mcp";
 
 const EXA_FIRST: bool = true;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct FetchArgs {
-    pub path: Option<String>,
-    pub url: Option<String>,
-}
-
-impl FetchArgs {
-    fn validate(&self) -> Result<(), &'static str> {
-        if self.path.is_none() && self.url.is_none() {
-            return Err("path or url required");
-        }
-        Ok(())
-    }
-}
+#[derive(Debug, Clone, Default)]
+pub struct WebFetch;
 
 /// Fetch a URL, returning clean markdown for LLM context.
 ///
-/// `url` takes priority over `path`. Content is extracted via Exa Contents
-/// API / MCP `web_fetch_exa`, falling back to `rs_trafilatura` (order
-/// controlled by `EXA_FIRST`).
+/// Content is extracted via Exa Contents API / MCP `web_fetch_exa`,
+/// falling back to `rs_trafilatura` (order controlled by `EXA_FIRST`).
 ///
 /// # Errors
 ///
-/// Returns `Err` if validation fails, the fetch fails, or all fallback
-/// methods are exhausted.
-pub async fn fetch(args: FetchArgs) -> Result<String, String> {
-    args.validate()?;
-
-    let url = args.url.as_deref().or(args.path.as_deref()).unwrap_or("");
+/// Returns `Err` if the fetch fails or all fallback methods are exhausted.
+pub async fn fetch(fetch: &WebFetch, url: &str) -> Result<String, String> {
+    let _ = fetch;
     fetch_url(url).await
 }
 

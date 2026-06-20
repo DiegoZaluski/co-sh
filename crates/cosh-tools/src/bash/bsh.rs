@@ -113,11 +113,10 @@ fn signal_name_to_number(name: &str) -> Option<i32> {
 
 // Types
 
-pub struct BashInput {
-    pub command: Option<String>,
+#[derive(Default)]
+pub struct Bash {
     pub timeout: Option<u64>,
     pub env: Option<Vec<(String, String)>>,
-    pub cwd: Option<String>,
     pub pty: bool,
 }
 
@@ -146,78 +145,52 @@ pub struct BashError {
 }
 // Public API
 
-impl BashInput {
-    #[must_use]
-    pub fn new(command: String) -> Self {
-        Self {
-            command: Some(command),
-            timeout: None,
-            env: None,
-            cwd: None,
-            pty: false,
+pub(super) fn validate_bash_patterns(command: &str) -> Result<(), String> {
+    let patterns = critical_bash_patterns();
+    for pattern in patterns {
+        if pattern.is_match(command) {
+            return Err(format!("Pattern match found: {}", pattern.as_str()));
         }
     }
-
-    pub(super) fn validate_patterns(&self) -> Result<(), String> {
-        let patterns = critical_bash_patterns();
-        for pattern in patterns {
-            if pattern.is_match(self.command.as_deref().unwrap_or("")) {
-                return Err(format!("Pattern match found: {}", pattern.as_str()));
-            }
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Execute a bash command and return its output as an async stream.
 ///
-/// Validates the command against dangerous patterns, ensures a working
-/// directory is provided, and spawns `bash -c <command>` as a child
-/// process. Returns a stream of [`SpawnOutput`] items.
+/// Validates the command against dangerous patterns and spawns
+/// `bash -c <command>` as a child process in the given `cwd`.
+/// Returns a stream of [`SpawnOutput`] items.
 ///
 /// # Errors
 ///
-/// Returns [`BashError`] if `cwd` is not provided, the command is an
-/// absolute path, or the command matches a dangerous security pattern.
-///
-/// # Panics
-///
-/// Panics if `bash_input.command` is `None` after passing the earlier
-/// validations (this path is unreachable in practice).
+/// Returns [`BashError`] if the command is an absolute path or matches a
+/// dangerous security pattern.
 pub fn run(
-    bash_input: BashInput,
+    bash: &Bash,
+    command: &str,
+    cwd: &str,
 ) -> Result<impl tokio_stream::Stream<Item = SpawnOutput>, BashError> {
     // Guards
-    let cwd = bash_input.cwd.clone().ok_or_else(|| BashError {
-        text_err: Some("cwd is required".to_string()),
-        exec_err: None,
-    })?;
-
-    if bash_input
-        .command
-        .as_deref()
-        .is_some_and(|c| Path::new(c).is_absolute())
-    {
+    if Path::new(command).is_absolute() {
         return Err(BashError {
             text_err: Some("absolute command not allowed, use relative path".to_string()),
             exec_err: None,
         });
     }
 
-    if let Err(err) = bash_input.validate_patterns() {
+    if let Err(err) = validate_bash_patterns(command) {
         return Err(BashError {
             text_err: Some(err),
             exec_err: None,
         });
     }
 
-    let command = bash_input.command.unwrap();
-    let env = bash_input.env;
-    let use_pty = bash_input.pty;
+    let env = bash.env.clone();
+    let use_pty = bash.pty;
 
     Ok(stream! {
         if use_pty {
-            let stream = spawn_bash_pty(env, &cwd, &command);
+            let stream = spawn_bash_pty(env, cwd, command);
             tokio::pin!(stream);
             while let Some(item) = stream.next().await {
                 if let Ok(output) = item {
@@ -225,7 +198,7 @@ pub fn run(
                 }
             }
         } else {
-            let stream = spawn_bash(env, &cwd, &command);
+            let stream = spawn_bash(env, cwd, command);
             tokio::pin!(stream);
             while let Some(item) = stream.next().await {
                 if let Ok(output) = item {

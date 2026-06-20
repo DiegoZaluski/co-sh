@@ -9,26 +9,18 @@ pub struct Target<'a> {
     pub symbol: Option<&'a str>,
 }
 
-/// One or more file read operations.
-///
-/// ```ignore
-/// ReadFile { read: vec![
-///     Target { path: "src/main.rs", line: Some(5), symbol: None },
-///     Target { path: "src/lib.rs", line: None, symbol: Some("run") },
-/// ] }
-/// ```
-pub struct ReadFile<'a> {
-    pub read: Vec<Target<'a>>,
-}
+/// Configuration for file read operations.
+#[derive(Default)]
+pub struct FsRead;
 
 pub struct TargetFile<'a> {
     pub text: &'a str,
     pub path: &'a str,
 }
 
-pub struct WriteAllFile<'a> {
-    pub write: Vec<TargetFile<'a>>,
-}
+/// Configuration for file write operations.
+#[derive(Default)]
+pub struct FsWrite;
 
 #[derive(Debug, Clone)]
 pub struct FsMetadata<'a> {
@@ -44,30 +36,14 @@ pub struct EditTarget<'a> {
     pub file_hash: &'a str,
     pub ops: &'a str,
 }
-#[derive(Debug, Clone, Default)]
-pub struct EditFile<'a> {
-    pub edit: Vec<EditTarget<'a>>,
-}
 
-/// Input for a single rollback operation.
-///
-/// Provide `path` and optionally `hash`. If `hash` is empty the engine
-/// restores the version immediately before the current file content.
-///
-/// The hash comes from a `¶path#HASH` header previously returned by any
-/// read, write, or edit operation in this session.
-///
-/// ```ignore
-/// RollbackInput { path: "src/main.rs", hash: "A3B2" } // restore to A3B2
-/// RollbackInput { path: "src/main.rs", hash: "" }    // restore previous
-/// ```
-pub struct RollbackInput<'a> {
-    /// Path of the file to restore.
-    pub path: &'a str,
-    /// Hash of the target version from a `¶path#HASH` header.
-    /// Pass an empty string to restore the immediately preceding version.
-    pub hash: &'a str,
-}
+/// Configuration for file edit operations.
+#[derive(Debug, Clone, Default)]
+pub struct FsEdit;
+
+/// Configuration for file rollback operations.
+#[derive(Default)]
+pub struct FsRollback;
 
 //___
 #[derive(Debug, PartialEq)]

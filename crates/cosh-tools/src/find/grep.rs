@@ -2,37 +2,37 @@
 
 use cosh_sdk::find::{GrepOptions, GrepOutputMode, grep as sdk_grep};
 
-use super::types::{ContextEntry, GrepInput, GrepMatchEntry, GrepOutput};
+use super::types::{ContextEntry, Grep, GrepMatchEntry, GrepOutput};
 
 /// Search file content for lines matching a regex pattern.
 ///
-/// Searches `input.path` (a file or directory tree) using the ripgrep engine.
+/// Searches `path` (a file or directory tree) using the ripgrep engine.
 /// Directory searches walk the tree in parallel and support optional glob and
 /// language-type filters. Single-file searches run in memory.
 ///
 /// # Errors
-/// Returns an error when the path cannot be resolved, `input.pattern` is an
+/// Returns an error when the path cannot be resolved, `pattern` is an
 /// invalid regex, or the operation is cancelled by a timeout.
-pub fn grep(input: GrepInput) -> Result<GrepOutput, String> {
+pub fn grep(grep: &Grep, pattern: &str, path: &str) -> Result<GrepOutput, String> {
     let result = sdk_grep(GrepOptions {
-        pattern: input.pattern,
-        path: input.path,
-        glob: input.glob,
-        r#type: input.file_type,
-        ignore_case: input.ignore_case,
+        pattern: pattern.to_owned(),
+        path: path.to_owned(),
+        glob: grep.glob.clone(),
+        r#type: grep.file_type.clone(),
+        ignore_case: grep.ignore_case,
         multiline: None,
-        hidden: input.hidden,
-        gitignore: input.gitignore,
+        hidden: grep.hidden,
+        gitignore: grep.gitignore,
         cache: None,
-        max_count: input.max_count,
+        max_count: grep.max_count,
         offset: None,
-        context_before: input.context_before,
-        context_after: input.context_after,
+        context_before: grep.context_before,
+        context_after: grep.context_after,
         context: None,
         max_columns: None,
         mode: Some(GrepOutputMode::Content),
         max_count_per_file: None,
-        timeout_ms: input.timeout_ms,
+        timeout_ms: grep.timeout_ms,
     })?;
 
     let matches = result

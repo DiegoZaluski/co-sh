@@ -2,11 +2,11 @@
 
 use cosh_sdk::find::{FileType, GlobOptions, glob as sdk_glob};
 
-use super::types::{GlobEntry, GlobInput, GlobOutput};
+use super::types::{Glob, GlobEntry, GlobOutput};
 
 /// Find filesystem entries matching a glob pattern.
 ///
-/// Searches `input.path` for entries matching `input.pattern`. Results can be
+/// Searches `path` for entries matching `pattern`. Results can be
 /// filtered by filesystem kind, sorted by modification time, and bounded by a
 /// result count or a timeout.
 ///
@@ -14,25 +14,25 @@ use super::types::{GlobEntry, GlobInput, GlobOutput};
 /// Returns an error when the search path does not exist or is not a directory,
 /// the glob pattern is invalid, an unknown `file_type` string is given, or the
 /// operation is cancelled by a timeout.
-pub fn glob(input: GlobInput) -> Result<GlobOutput, String> {
-    let file_type = input
+pub fn glob(glob: &Glob, pattern: &str, path: &str) -> Result<GlobOutput, String> {
+    let file_type = glob
         .file_type
         .as_deref()
         .map(parse_file_type)
         .transpose()?;
 
     let result = sdk_glob(GlobOptions {
-        pattern: input.pattern,
-        path: input.path,
+        pattern: pattern.to_owned(),
+        path: path.to_owned(),
         file_type,
-        recursive: input.recursive,
-        hidden: input.hidden,
-        max_results: input.max_results,
-        gitignore: input.gitignore,
-        sort_by_mtime: input.sort_by_mtime,
+        recursive: glob.recursive,
+        hidden: glob.hidden,
+        max_results: glob.max_results,
+        gitignore: glob.gitignore,
+        sort_by_mtime: glob.sort_by_mtime,
         cache: None,
         include_node_modules: None,
-        timeout_ms: input.timeout_ms,
+        timeout_ms: glob.timeout_ms,
     })?;
 
     let matches = result

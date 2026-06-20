@@ -1,23 +1,22 @@
 use super::glob::glob;
 use super::grep::grep;
-use super::types::{GlobInput, GrepInput};
+use super::types::{Glob, Grep};
 
 const FIND_DIR: &str = "/home/inky/cosh/crates/cosh-sdk/src/find";
 const GLOB_FILE: &str = "/home/inky/cosh/crates/cosh-sdk/src/find/glob.rs";
 
 #[test]
 fn glob_finds_rust_files() {
-    let out = glob(GlobInput {
-        pattern: "*.rs".to_string(),
-        path: FIND_DIR.to_string(),
-        file_type: None,
-        recursive: Some(true),
-        hidden: None,
-        max_results: Some(20),
-        gitignore: Some(true),
-        sort_by_mtime: None,
-        timeout_ms: None,
-    })
+    let out = glob(
+        &Glob {
+            recursive: Some(true),
+            max_results: Some(20),
+            gitignore: Some(true),
+            ..Default::default()
+        },
+        "*.rs",
+        FIND_DIR,
+    )
     .expect("glob should succeed");
 
     assert!(!out.matches.is_empty(), "expected at least one .rs file");
@@ -34,17 +33,16 @@ fn glob_finds_rust_files() {
 
 #[test]
 fn glob_dir_filter_returns_only_dirs() {
-    let out = glob(GlobInput {
-        pattern: "*".to_string(),
-        path: "/home/inky/cosh/crates".to_string(),
-        file_type: Some("dir".to_string()),
-        recursive: Some(true),
-        hidden: None,
-        max_results: None,
-        gitignore: Some(true),
-        sort_by_mtime: None,
-        timeout_ms: None,
-    })
+    let out = glob(
+        &Glob {
+            file_type: Some("dir".to_string()),
+            recursive: Some(true),
+            gitignore: Some(true),
+            ..Default::default()
+        },
+        "*",
+        "/home/inky/cosh/crates",
+    )
     .expect("glob with dir filter should succeed");
 
     for entry in &out.matches {
@@ -58,17 +56,16 @@ fn glob_dir_filter_returns_only_dirs() {
 
 #[test]
 fn glob_max_results_limits_output() {
-    let out = glob(GlobInput {
-        pattern: "*.rs".to_string(),
-        path: "/home/inky/cosh".to_string(),
-        file_type: None,
-        recursive: Some(true),
-        hidden: None,
-        max_results: Some(3),
-        gitignore: Some(true),
-        sort_by_mtime: None,
-        timeout_ms: None,
-    })
+    let out = glob(
+        &Glob {
+            recursive: Some(true),
+            max_results: Some(3),
+            gitignore: Some(true),
+            ..Default::default()
+        },
+        "*.rs",
+        "/home/inky/cosh",
+    )
     .expect("glob with max_results should succeed");
 
     assert!(
@@ -79,17 +76,14 @@ fn glob_max_results_limits_output() {
 
 #[test]
 fn glob_rejects_unknown_file_type() {
-    let err = glob(GlobInput {
-        pattern: "*".to_string(),
-        path: "/home/inky/cosh".to_string(),
-        file_type: Some("executable".to_string()),
-        recursive: None,
-        hidden: None,
-        max_results: None,
-        gitignore: None,
-        sort_by_mtime: None,
-        timeout_ms: None,
-    })
+    let err = glob(
+        &Glob {
+            file_type: Some("executable".to_string()),
+            ..Default::default()
+        },
+        "*",
+        "/home/inky/cosh",
+    )
     .err()
     .expect("glob with unknown file_type should return an error");
 
@@ -101,36 +95,27 @@ fn glob_rejects_unknown_file_type() {
 
 #[test]
 fn glob_nonexistent_path_returns_error() {
-    let result = glob(GlobInput {
-        pattern: "*".to_string(),
-        path: "/nonexistent/cosh_test_path".to_string(),
-        file_type: None,
-        recursive: None,
-        hidden: None,
-        max_results: None,
-        gitignore: None,
-        sort_by_mtime: None,
-        timeout_ms: None,
-    });
+    let result = glob(
+        &Glob::default(),
+        "*",
+        "/nonexistent/cosh_test_path",
+    );
 
     assert!(result.is_err(), "nonexistent path should return an error");
 }
 
 #[test]
 fn grep_finds_matches_in_directory() {
-    let out = grep(GrepInput {
-        pattern: "pub fn glob".to_string(),
-        path: FIND_DIR.to_string(),
-        glob: Some("*.rs".to_string()),
-        file_type: None,
-        ignore_case: None,
-        max_count: Some(10),
-        context_before: None,
-        context_after: None,
-        hidden: None,
-        gitignore: Some(true),
-        timeout_ms: None,
-    })
+    let out = grep(
+        &Grep {
+            glob: Some("*.rs".to_string()),
+            max_count: Some(10),
+            gitignore: Some(true),
+            ..Default::default()
+        },
+        "pub fn glob",
+        FIND_DIR,
+    )
     .expect("grep should succeed");
 
     assert!(!out.matches.is_empty(), "expected at least one match");
@@ -147,19 +132,11 @@ fn grep_finds_matches_in_directory() {
 
 #[test]
 fn grep_finds_matches_in_single_file() {
-    let out = grep(GrepInput {
-        pattern: "pub fn glob".to_string(),
-        path: GLOB_FILE.to_string(),
-        glob: None,
-        file_type: None,
-        ignore_case: None,
-        max_count: None,
-        context_before: None,
-        context_after: None,
-        hidden: None,
-        gitignore: None,
-        timeout_ms: None,
-    })
+    let out = grep(
+        &Grep::default(),
+        "pub fn glob",
+        GLOB_FILE,
+    )
     .expect("grep on a single file should succeed");
 
     assert!(
@@ -171,19 +148,16 @@ fn grep_finds_matches_in_single_file() {
 
 #[test]
 fn grep_returns_context_lines() {
-    let out = grep(GrepInput {
-        pattern: "pub fn glob".to_string(),
-        path: GLOB_FILE.to_string(),
-        glob: None,
-        file_type: None,
-        ignore_case: None,
-        max_count: Some(1),
-        context_before: Some(2),
-        context_after: Some(2),
-        hidden: None,
-        gitignore: None,
-        timeout_ms: None,
-    })
+    let out = grep(
+        &Grep {
+            max_count: Some(1),
+            context_before: Some(2),
+            context_after: Some(2),
+            ..Default::default()
+        },
+        "pub fn glob",
+        GLOB_FILE,
+    )
     .expect("grep with context should succeed");
 
     assert!(!out.matches.is_empty(), "expected at least one match");
@@ -196,34 +170,24 @@ fn grep_returns_context_lines() {
 
 #[test]
 fn grep_ignore_case_widens_results() {
-    let sensitive = grep(GrepInput {
-        pattern: "PUB FN GLOB".to_string(),
-        path: GLOB_FILE.to_string(),
-        glob: None,
-        file_type: None,
-        ignore_case: Some(false),
-        max_count: None,
-        context_before: None,
-        context_after: None,
-        hidden: None,
-        gitignore: None,
-        timeout_ms: None,
-    })
+    let sensitive = grep(
+        &Grep {
+            ignore_case: Some(false),
+            ..Default::default()
+        },
+        "PUB FN GLOB",
+        GLOB_FILE,
+    )
     .expect("case-sensitive grep should succeed");
 
-    let insensitive = grep(GrepInput {
-        pattern: "PUB FN GLOB".to_string(),
-        path: GLOB_FILE.to_string(),
-        glob: None,
-        file_type: None,
-        ignore_case: Some(true),
-        max_count: None,
-        context_before: None,
-        context_after: None,
-        hidden: None,
-        gitignore: None,
-        timeout_ms: None,
-    })
+    let insensitive = grep(
+        &Grep {
+            ignore_case: Some(true),
+            ..Default::default()
+        },
+        "PUB FN GLOB",
+        GLOB_FILE,
+    )
     .expect("case-insensitive grep should succeed");
 
     assert_eq!(
@@ -238,19 +202,11 @@ fn grep_ignore_case_widens_results() {
 
 #[test]
 fn grep_nonexistent_path_returns_error() {
-    let result = grep(GrepInput {
-        pattern: "fn".to_string(),
-        path: "/nonexistent/cosh_test_path".to_string(),
-        glob: None,
-        file_type: None,
-        ignore_case: None,
-        max_count: None,
-        context_before: None,
-        context_after: None,
-        hidden: None,
-        gitignore: None,
-        timeout_ms: None,
-    });
+    let result = grep(
+        &Grep::default(),
+        "fn",
+        "/nonexistent/cosh_test_path",
+    );
 
     assert!(result.is_err(), "nonexistent path should return an error");
 }

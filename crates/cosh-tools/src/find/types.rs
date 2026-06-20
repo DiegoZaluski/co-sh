@@ -1,11 +1,10 @@
 //! Input and output types shared by all `find` tools.
 
-/// Input for the [`glob`](super::glob::glob) tool.
-pub struct GlobInput {
-    /// Glob pattern to match (e.g., `"*.rs"`, `"src/**/*.ts"`).
-    pub pattern: String,
-    /// Directory to search.
-    pub path: String,
+/// Configuration for the [`glob`](super::glob::glob) tool.
+///
+/// Fields are optional — use `Glob::default()` for sensible defaults.
+#[derive(Default)]
+pub struct Glob {
     /// Restrict results to a filesystem kind: `"file"`, `"dir"`, or `"symlink"`.
     pub file_type: Option<String>,
     /// Search subdirectories recursively (default: `true`).
@@ -42,12 +41,11 @@ pub struct GlobOutput {
     pub total: u32,
 }
 
-/// Input for the [`grep`](super::grep::grep) tool.
-pub struct GrepInput {
-    /// Regex pattern to search for.
-    pub pattern: String,
-    /// File or directory to search.
-    pub path: String,
+/// Configuration for the [`grep`](super::grep::grep) tool.
+///
+/// Fields are optional — use `Grep::default()` for sensible defaults.
+#[derive(Default)]
+pub struct Grep {
     /// Restrict the search to files whose names match this glob (e.g., `"*.rs"`).
     pub glob: Option<String>,
     /// Restrict the search to files of a given language type (e.g., `"rust"`, `"py"`, `"js"`).

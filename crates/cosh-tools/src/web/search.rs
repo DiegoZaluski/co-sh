@@ -9,32 +9,13 @@ use super::fetch::{mcp_call, strip_na};
 
 const EXA_API: &str = "https://api.exa.ai/search";
 
-/// Parameters for a web search.
+/// Configuration for web search.
 ///
-/// `query` must be provided. `num_results` is silently capped at 10.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchArgs {
-    /// Search query sent to Exa.
-    pub query: String,
+/// `num_results` is silently capped at 10.
+#[derive(Debug, Clone, Default)]
+pub struct WebSearch {
     /// Number of results to request (max 10).
-    #[serde(rename = "numResults")]
     pub num_results: u32,
-}
-
-impl SearchArgs {
-    fn validate(&self) -> Result<(), &'static str> {
-        if self.query.is_empty() {
-            return Err("query required");
-        }
-        if self.num_results == 0 {
-            return Err("num_results must be >= 1");
-        }
-        Ok(())
-    }
-
-    fn num(&self) -> u32 {
-        self.num_results.min(10)
-    }
 }
 
 #[derive(Serialize)]
@@ -74,11 +55,16 @@ struct ApiResult {
 ///
 /// Returns `Err` if validation fails, the search fails, or all fallback
 /// methods are exhausted.
-pub async fn search(args: SearchArgs) -> Result<String, String> {
-    args.validate()?;
+pub async fn search(search: &WebSearch, query: &str) -> Result<String, String> {
+    if query.is_empty() {
+        return Err("query required".into());
+    }
+    if search.num_results == 0 {
+        return Err("num_results must be >= 1".into());
+    }
 
-    let q = &args.query;
-    let n = args.num();
+    let q = query;
+    let n = search.num_results.min(10);
 
     if let Ok(key) = std::env::var("EXA_API_KEY")
         && !key.trim().is_empty()
