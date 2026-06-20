@@ -4,6 +4,7 @@
 //! HTTP error propagation before stream start, and stream termination without
 //! a `[DONE]` signal.
 
+use super::super::StreamChunk;
 use super::common::{connector, mock_server};
 use tokio_stream::StreamExt;
 
@@ -16,11 +17,37 @@ data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n\
 data: [DONE]\n\n";
     let (port, _body, _raw, handle) = mock_server(sse, 200);
     let c = connector(port);
-    let stream = c.stream_chat("hi").await.unwrap();
+    let mut stream = c.stream_chat("hi").await.unwrap();
     handle.join().unwrap();
 
-    let chunks: Vec<String> = stream.filter_map(|r| r.ok()).collect().await;
-    assert_eq!(chunks.concat(), "Hello world");
+    let mut tokens = String::new();
+    while let Some(chunk) = stream.next().await {
+        tokens.push_str(chunk.unwrap().token());
+    }
+    assert_eq!(tokens, "Hello world");
+
+    let raw = stream.raw().await.unwrap();
+    assert!(raw.contains("world"), "last frame should contain 'world', got: {raw}");
+}
+
+/// Ensures `.raw()` on a finished stream returns the last SSE frame with metadata.
+#[tokio::test]
+async fn raw_last_frame_with_usage() {
+    let last_frame = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+    let sse = format!(
+        "\
+data: {{\"choices\":[{{\"delta\":{{\"content\":\"Hello\"}}}}]}}\n\n\
+data: {last_frame}\n\n\
+data: [DONE]\n\n"
+    );
+    let (port, _body, _raw, handle) = mock_server(&sse, 200);
+    let c = connector(port);
+    let mut stream = c.stream_chat("hi").await.unwrap();
+    handle.join().unwrap();
+
+    while let Some(_) = stream.next().await {}
+    let raw = stream.raw().await.unwrap();
+    assert_eq!(raw, last_frame);
 }
 
 /// Ensures the system prompt is included in the request body when using
@@ -32,11 +59,11 @@ data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
 data: [DONE]\n\n";
     let (port, captured, _raw, handle) = mock_server(sse, 200);
     let c = connector(port);
-    let stream = c
+    let mut stream = c
         .stream_chat_with_system("user text", "system text")
         .await
         .unwrap();
-    let _: Vec<String> = stream.filter_map(|r| r.ok()).collect().await;
+    while let Some(_) = stream.next().await {}
     handle.join().unwrap();
 
     let body = captured.lock().unwrap().take().unwrap();
@@ -73,9 +100,9 @@ async fn terminated_without_done() {
     let stream = c.stream_chat("hi").await.unwrap();
     handle.join().unwrap();
 
-    let results: Vec<Result<String, _>> = stream.collect().await;
+    let results: Vec<Result<StreamChunk, _>> = stream.collect().await;
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].as_ref().unwrap(), "partial");
+    assert_eq!(results[0].as_ref().unwrap().token(), "partial");
     assert!(
         results[1]
             .as_ref()

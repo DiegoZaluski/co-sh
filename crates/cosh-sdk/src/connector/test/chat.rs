@@ -107,7 +107,7 @@ async fn network_error() {
     );
 }
 
-/// Ensures a valid response returns the assistant content.
+/// Ensures a valid response returns the assistant content via `.message()`.
 #[tokio::test]
 async fn successful_response() {
     let (port, _body, _raw, handle) = mock_server(
@@ -118,7 +118,19 @@ async fn successful_response() {
         .chat_with_system("hello", "Be concise")
         .await;
     handle.join().unwrap();
-    assert_eq!(result.unwrap(), "Hello world");
+    assert_eq!(result.unwrap().message(), "Hello world");
+}
+
+/// Ensures `.raw()` returns the exact JSON from the API (unmodified).
+#[tokio::test]
+async fn raw_json() {
+    let raw_body = r#"{"choices":[{"message":{"content":"Hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#;
+    let (port, _body, _raw, handle) = mock_server(raw_body, 200);
+    let result = connector(port).chat("hello").await;
+    handle.join().unwrap();
+    let output = result.unwrap();
+    assert_eq!(output.message(), "Hi");
+    assert_eq!(output.raw(), raw_body);
 }
 
 /// Ensures the system prompt appears in the request body as a system-role message.

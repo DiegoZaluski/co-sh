@@ -1,4 +1,5 @@
 use super::super::error::ConnectorError;
+use super::super::output::{ChatOutput, ChatStream, StreamChunk};
 use super::super::params::{Parameters, ToolDefinition};
 use super::super::provider::{ProviderConfig, get_api_key};
 
@@ -352,7 +353,7 @@ pub(crate) async fn chat(
     params: &Parameters,
     prompt: &str,
     system_prompt: Option<&str>,
-) -> Result<String, ConnectorError> {
+) -> Result<ChatOutput, ConnectorError> {
     let ctx = prepare_request(config, params, prompt, system_prompt)?;
     let model = params
         .model
@@ -363,7 +364,11 @@ pub(crate) async fn chat(
 
     let response_text = send_request(config, &ctx.api_key, &url, &ctx.request).await?;
     let chat_response: GenerateContentResponse = serde_json::from_str(&response_text)?;
-    extract_response_text(&chat_response)
+    let message = extract_response_text(&chat_response)?;
+    Ok(ChatOutput {
+        raw: response_text,
+        message,
+    })
 }
 
 pub(crate) async fn chat_stream(
@@ -371,7 +376,7 @@ pub(crate) async fn chat_stream(
     params: &Parameters,
     prompt: &str,
     system_prompt: Option<&str>,
-) -> Result<Pin<Box<dyn Stream<Item = Result<String, ConnectorError>> + Send>>, ConnectorError> {
+) -> Result<ChatStream, ConnectorError> {
     let ctx = prepare_request(config, params, prompt, system_prompt)?;
     let model = params
         .model
@@ -382,37 +387,42 @@ pub(crate) async fn chat_stream(
 
     let response = send_request_stream(config, &ctx.api_key, &url, &ctx.request).await?;
 
-    Ok(Box::pin(stream! {
-        let mut response = response;
-        let mut buf = SseBuffer::new();
-        loop {
-            let chunk = match response.chunk().await {
-                Ok(Some(c)) => c,
-                Ok(None) => break,
-                Err(e) => {
-                    yield Err(ConnectorError::Network(e.to_string()));
-                    return;
-                }
-            };
-            for data in buf.push_and_drain(&chunk) {
-                match serde_json::from_str::<GenerateContentResponse>(&data) {
-                    Ok(ccr) => {
-                        if let Some(text) = ccr.candidates.first()
-                            .and_then(|c| c.content.parts.first())
-                            .and_then(|p| p.text.as_deref())
-                            .filter(|c| !c.is_empty())
-                        {
-                            yield Ok(text.to_owned());
-                        }
-                    }
+    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =
+        Box::pin(stream! {
+            let mut response = response;
+            let mut buf = SseBuffer::new();
+            loop {
+                let chunk = match response.chunk().await {
+                    Ok(Some(c)) => c,
+                    Ok(None) => break,
                     Err(e) => {
-                        yield Err(ConnectorError::Deserialization(e.to_string()));
+                        yield Err(ConnectorError::Network(e.to_string()));
                         return;
+                    }
+                };
+                for data in buf.push_and_drain(&chunk) {
+                    match serde_json::from_str::<GenerateContentResponse>(&data) {
+                        Ok(ccr) => {
+                            let token = ccr.candidates.first()
+                                .and_then(|c| c.content.parts.first())
+                                .and_then(|p| p.text.as_deref())
+                                .unwrap_or("")
+                                .to_owned();
+                            yield Ok(StreamChunk {
+                                raw: data,
+                                token,
+                            });
+                        }
+                        Err(e) => {
+                            yield Err(ConnectorError::Deserialization(e.to_string()));
+                            return;
+                        }
                     }
                 }
             }
-        }
-    }))
+        });
+
+    Ok(ChatStream::new(inner))
 }
 
 pub(crate) async fn embed(

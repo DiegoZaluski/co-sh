@@ -12,11 +12,13 @@ pub(crate) mod openai_compatible;
 
 mod client;
 mod error;
+mod output;
 mod params;
 mod provider;
 
 pub use client::Connector;
 pub use error::ConnectorError;
+pub use output::{ChatOutput, ChatStream, StreamChunk};
 pub use params::{ResponseFormat, ToolDefinition, ToolFunction};
 
 #[cfg(test)]

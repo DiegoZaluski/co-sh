@@ -1,11 +1,10 @@
 use super::error::ConnectorError;
+use super::output::{ChatOutput, ChatStream};
 use super::params::{Parameters, ResponseFormat, ToolDefinition};
 use super::provider::{Family, ProviderConfig, get_provider};
 
 use super::gemini;
 use super::openai_compatible;
-use std::pin::Pin;
-use tokio_stream::Stream;
 
 /// A unified client for any LLM provider.
 ///
@@ -161,7 +160,7 @@ impl Connector {
     ///
     /// Returns `MissingApiKey` if no API key is found, `HttpError` on non-2xx status,
     /// `Deserialization` if the response is malformed, or `Network` on transport failure.
-    pub async fn chat(&self, prompt: &str) -> Result<String, ConnectorError> {
+    pub async fn chat(&self, prompt: &str) -> Result<ChatOutput, ConnectorError> {
         let provider = self.provider()?;
         match provider.family {
             Family::OpenAICompatible => {
@@ -181,7 +180,7 @@ impl Connector {
         &self,
         prompt: &str,
         system: &str,
-    ) -> Result<String, ConnectorError> {
+    ) -> Result<ChatOutput, ConnectorError> {
         let provider = self.provider()?;
         match provider.family {
             Family::OpenAICompatible => {
@@ -209,7 +208,9 @@ impl Connector {
 
     /// Stream a chat completion with a user prompt.
     ///
-    /// Returns an async stream of content chunks as they arrive.
+    /// Returns a [`ChatStream`] that yields [`StreamChunk`] items. After the
+    /// stream ends, call [`raw`](ChatStream::raw) to get the last SSE frame
+    /// (typically containing `usage`, `finish_reason`, etc.).
     ///
     /// # Errors
     ///
@@ -218,7 +219,7 @@ impl Connector {
     pub async fn stream_chat(
         &self,
         prompt: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String, ConnectorError>> + Send>>, ConnectorError> {
+    ) -> Result<ChatStream, ConnectorError> {
         let provider = self.provider()?;
         match provider.family {
             Family::OpenAICompatible => {
@@ -230,6 +231,10 @@ impl Connector {
 
     /// Stream a chat completion with both system and user prompts.
     ///
+    /// Returns a [`ChatStream`] that yields [`StreamChunk`] items. After the
+    /// stream ends, call [`raw`](ChatStream::raw) to get the last SSE frame
+    /// (typically containing `usage`, `finish_reason`, etc.).
+    ///
     /// # Errors
     ///
     /// Returns `MissingApiKey` if no API key is found, `HttpError` on non-2xx status,
@@ -238,7 +243,7 @@ impl Connector {
         &self,
         prompt: &str,
         system: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String, ConnectorError>> + Send>>, ConnectorError> {
+    ) -> Result<ChatStream, ConnectorError> {
         let provider = self.provider()?;
         match provider.family {
             Family::OpenAICompatible => {

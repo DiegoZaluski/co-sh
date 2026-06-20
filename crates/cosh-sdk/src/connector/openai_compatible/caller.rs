@@ -1,4 +1,5 @@
 use super::super::error::ConnectorError;
+use super::super::output::{ChatOutput, ChatStream, StreamChunk};
 use super::super::params::{Parameters, ResponseFormat, ToolDefinition};
 use super::super::provider::{ProviderConfig, get_api_key};
 
@@ -209,7 +210,7 @@ pub(crate) async fn chat(
     params: &Parameters,
     prompt: &str,
     system_prompt: Option<&str>,
-) -> Result<String, ConnectorError> {
+) -> Result<ChatOutput, ConnectorError> {
     let api_key = params
         .api_key
         .clone()
@@ -231,11 +232,15 @@ pub(crate) async fn chat(
         .choices
         .first()
         .ok_or(ConnectorError::NoChoices)?;
-    first_choice
+    let message = first_choice
         .message
         .content
         .clone()
-        .ok_or(ConnectorError::NoContent)
+        .ok_or(ConnectorError::NoContent)?;
+    Ok(ChatOutput {
+        raw: response_text,
+        message,
+    })
 }
 
 /// Send a streaming chat completion request.
@@ -248,7 +253,7 @@ pub(crate) async fn chat_stream(
     params: &Parameters,
     prompt: &str,
     system_prompt: Option<&str>,
-) -> Result<Pin<Box<dyn Stream<Item = Result<String, ConnectorError>> + Send>>, ConnectorError> {
+) -> Result<ChatStream, ConnectorError> {
     let api_key = params
         .api_key
         .clone()
@@ -268,41 +273,46 @@ pub(crate) async fn chat_stream(
 
     let buf = SseBuffer::new();
 
-    Ok(Box::pin(stream! {
-        let mut response = response;
-        let mut buf = buf;
-        loop {
-            let chunk = match response.chunk().await {
-                Ok(Some(c)) => c,
-                Ok(None) => break,
-                Err(e) => {
-                    yield Err(ConnectorError::Network(e.to_string()));
-                    return;
-                }
-            };
-            for data in buf.push_and_drain(&chunk) {
-                if data == "[DONE]" {
-                    return;
-                }
-                match serde_json::from_str::<ChatChunkResponse>(&data) {
-                    Ok(ccr) => {
-                        if let Some(content) = ccr.choices.first()
-                            .and_then(|c| c.delta.content.as_deref())
-                            .filter(|c| !c.is_empty())
-                        {
-                            yield Ok(content.to_owned());
-                        }
-                    }
+    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =
+        Box::pin(stream! {
+            let mut response = response;
+            let mut buf = buf;
+            loop {
+                let chunk = match response.chunk().await {
+                    Ok(Some(c)) => c,
+                    Ok(None) => break,
                     Err(e) => {
-                        yield Err(ConnectorError::Deserialization(e.to_string()));
+                        yield Err(ConnectorError::Network(e.to_string()));
                         return;
+                    }
+                };
+                for data in buf.push_and_drain(&chunk) {
+                    if data == "[DONE]" {
+                        return;
+                    }
+                    match serde_json::from_str::<ChatChunkResponse>(&data) {
+                        Ok(ccr) => {
+                            let token = ccr.choices.first()
+                                .and_then(|c| c.delta.content.as_deref())
+                                .unwrap_or("")
+                                .to_owned();
+                            yield Ok(StreamChunk {
+                                raw: data,
+                                token,
+                            });
+                        }
+                        Err(e) => {
+                            yield Err(ConnectorError::Deserialization(e.to_string()));
+                            return;
+                        }
                     }
                 }
             }
-        }
-        // Stream ended without [DONE]
-        yield Err(ConnectorError::StreamTerminated);
-    }))
+            // Stream ended without [DONE]
+            yield Err(ConnectorError::StreamTerminated);
+        });
+
+    Ok(ChatStream::new(inner))
 }
 
 /// Send an embedding request and return the embedding vector.
