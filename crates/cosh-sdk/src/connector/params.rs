@@ -125,5 +125,3 @@ pub struct Parameters {
     pub(crate) base_url: Option<String>,
     pub(crate) api_key: Option<String>,
 }
-
-

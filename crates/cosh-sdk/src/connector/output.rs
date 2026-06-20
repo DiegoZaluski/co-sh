@@ -42,6 +42,7 @@ impl ChatOutput {
 pub struct StreamChunk {
     pub(crate) raw: String,
     pub(crate) token: String,
+    pub(crate) finish_reason: Option<String>,
 }
 
 impl StreamChunk {
@@ -49,6 +50,15 @@ impl StreamChunk {
     #[must_use]
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// Why the stream finished, if this chunk is the last one.
+    ///
+    /// Possible values: `"stop"`, `"length"`, `"content_filter"`, `"tool_calls"`,
+    /// or provider-specific values. Returns `None` for intermediate chunks.
+    #[must_use]
+    pub fn finish_reason(&self) -> Option<&str> {
+        self.finish_reason.as_deref()
     }
 }
 

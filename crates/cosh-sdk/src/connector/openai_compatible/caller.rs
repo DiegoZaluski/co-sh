@@ -296,9 +296,13 @@ pub(crate) async fn chat_stream(
                                 .and_then(|c| c.delta.content.as_deref())
                                 .unwrap_or("")
                                 .to_owned();
+                            let finish_reason = ccr.choices.first()
+                                .and_then(|c| c.finish_reason.as_deref())
+                                .map(String::from);
                             yield Ok(StreamChunk {
                                 raw: data,
                                 token,
+                                finish_reason,
                             });
                         }
                         Err(e) => {

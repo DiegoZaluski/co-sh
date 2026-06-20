@@ -3,7 +3,6 @@
 //! Covers: receiving all SSE chunks, system prompt inclusion in the request body,
 //! HTTP error propagation before stream start, and stream termination without
 //! a `[DONE]` signal.
-
 use super::super::StreamChunk;
 use super::common::{connector, mock_server};
 use tokio_stream::StreamExt;
@@ -27,7 +26,31 @@ data: [DONE]\n\n";
     assert_eq!(tokens, "Hello world");
 
     let raw = stream.raw().await.unwrap();
-    assert!(raw.contains("world"), "last frame should contain 'world', got: {raw}");
+    assert!(
+        raw.contains("world"),
+        "last frame should contain 'world', got: {raw}"
+    );
+}
+
+/// Ensures `.finish_reason()` returns `Some("stop")` on the last content chunk.
+#[tokio::test]
+async fn finish_reason_on_last_chunk() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n\
+data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+data: [DONE]\n\n";
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = connector(port);
+    let mut stream = c.stream_chat("hi").await.unwrap();
+    handle.join().unwrap();
+
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.token(), "Hello");
+    assert_eq!(first.finish_reason(), None);
+
+    let second = stream.next().await.unwrap().unwrap();
+    assert_eq!(second.token(), "");
+    assert_eq!(second.finish_reason(), Some("stop"));
 }
 
 /// Ensures `.raw()` on a finished stream returns the last SSE frame with metadata.

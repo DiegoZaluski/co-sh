@@ -216,10 +216,7 @@ impl Connector {
     ///
     /// Returns `MissingApiKey` if no API key is found, `HttpError` on non-2xx status,
     /// or `Network` on transport failure before the stream starts.
-    pub async fn stream_chat(
-        &self,
-        prompt: &str,
-    ) -> Result<ChatStream, ConnectorError> {
+    pub async fn stream_chat(&self, prompt: &str) -> Result<ChatStream, ConnectorError> {
         let provider = self.provider()?;
         match provider.family {
             Family::OpenAICompatible => {

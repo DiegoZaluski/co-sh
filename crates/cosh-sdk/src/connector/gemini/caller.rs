@@ -193,16 +193,18 @@ impl SseBuffer {
 // Helpers
 
 fn build_contents(prompt: &str, system_prompt: Option<&str>) -> (Vec<Content>, Option<Content>) {
-    let system_instruction = system_prompt.map(|sys| {
-        Content {
-            role: None,
-            parts: vec![Part { text: sys.to_string() }],
-        }
+    let system_instruction = system_prompt.map(|sys| Content {
+        role: None,
+        parts: vec![Part {
+            text: sys.to_string(),
+        }],
     });
 
     let contents = vec![Content {
         role: Some("user".to_string()),
-        parts: vec![Part { text: prompt.to_string() }],
+        parts: vec![Part {
+            text: prompt.to_string(),
+        }],
     }];
 
     (contents, system_instruction)
@@ -220,7 +222,10 @@ fn build_generation_config(params: &Parameters) -> Option<GenerationConfig> {
     let stop_sequences = params.stop.as_ref().and_then(|v| match v {
         serde_json::Value::String(s) => Some(vec![s.clone()]),
         serde_json::Value::Array(arr) => {
-            let strs: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            let strs: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
             if strs.is_empty() { None } else { Some(strs) }
         }
         _ => None,
@@ -260,14 +265,17 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Tool> {
     if tools.is_empty() {
         return vec![];
     }
-    let declarations: Vec<FunctionDeclaration> = tools.iter().map(|tool| {
-        FunctionDeclaration {
+    let declarations: Vec<FunctionDeclaration> = tools
+        .iter()
+        .map(|tool| FunctionDeclaration {
             name: tool.function.name.clone(),
             description: tool.function.description.clone(),
             parameters: tool.function.parameters.clone(),
-        }
-    }).collect();
-    vec![Tool { function_declarations: declarations }]
+        })
+        .collect();
+    vec![Tool {
+        function_declarations: declarations,
+    }]
 }
 
 fn build_tool_config(tool_choice: &serde_json::Value) -> Option<ToolConfig> {
@@ -286,8 +294,12 @@ fn build_tool_config(tool_choice: &serde_json::Value) -> Option<ToolConfig> {
             }
         }
         serde_json::Value::Object(obj) => {
-            let mode = obj.get("type").and_then(|v| v.as_str()).map_or("ANY".to_string(), str::to_uppercase);
-            let names = obj.get("function")
+            let mode = obj
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map_or("ANY".to_string(), str::to_uppercase);
+            let names = obj
+                .get("function")
                 .and_then(|v| v.get("name"))
                 .and_then(|v| v.as_str())
                 .map(|n| vec![n.to_string()]);
@@ -303,8 +315,14 @@ fn build_tool_config(tool_choice: &serde_json::Value) -> Option<ToolConfig> {
 }
 
 fn extract_response_text(response: &GenerateContentResponse) -> Result<String, ConnectorError> {
-    let candidate = response.candidates.first().ok_or(ConnectorError::NoChoices)?;
-    candidate.content.parts.first()
+    let candidate = response
+        .candidates
+        .first()
+        .ok_or(ConnectorError::NoChoices)?;
+    candidate
+        .content
+        .parts
+        .first()
         .and_then(|p| p.text.as_deref())
         .filter(|t| !t.is_empty())
         .map(String::from)
@@ -408,9 +426,13 @@ pub(crate) async fn chat_stream(
                                 .and_then(|p| p.text.as_deref())
                                 .unwrap_or("")
                                 .to_owned();
+                            let finish_reason = ccr.candidates.first()
+                                .and_then(|c| c.finish_reason.as_deref())
+                                .map(String::from);
                             yield Ok(StreamChunk {
                                 raw: data,
                                 token,
+                                finish_reason,
                             });
                         }
                         Err(e) => {
@@ -443,7 +465,9 @@ pub(crate) async fn embed(
     let request = EmbedContentRequest {
         content: Content {
             role: None,
-            parts: vec![Part { text: input.to_string() }],
+            parts: vec![Part {
+                text: input.to_string(),
+            }],
         },
         output_dimensionality: None,
     };
