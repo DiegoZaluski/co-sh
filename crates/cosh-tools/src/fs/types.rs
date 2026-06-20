@@ -68,7 +68,6 @@ pub struct RollbackInput<'a> {
 }
 
 //___
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub(crate) enum FsGuard {
     Allowed,
@@ -77,7 +76,6 @@ pub(crate) enum FsGuard {
 }
 
 impl FsMetadata<'_> {
-    #[allow(dead_code)]
     pub(crate) fn fs_guard(&self, path: &str) -> FsGuard {
         let path = Path::new(path);
 

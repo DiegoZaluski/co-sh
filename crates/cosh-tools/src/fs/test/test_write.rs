@@ -171,7 +171,10 @@ async fn write_strips_hashline_prefixes_and_reports_warning() {
     let content = "[main.rs#ABCD]\n42: fn main() {\n43:     println!(\"hello\");\n44: }";
 
     let target = WriteAllFile {
-        write: vec![TargetFile { path, text: content }],
+        write: vec![TargetFile {
+            path,
+            text: content,
+        }],
     };
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
@@ -183,7 +186,13 @@ async fn write_strips_hashline_prefixes_and_reports_warning() {
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
-    assert!(results[0].warnings.as_deref().unwrap().contains("auto-stripped hashline"));
+    assert!(
+        results[0]
+            .warnings
+            .as_deref()
+            .unwrap()
+            .contains("auto-stripped hashline")
+    );
 
     let written = std::fs::read_to_string(path).unwrap();
     assert!(!written.contains("[main.rs#ABCD]"));
@@ -199,7 +208,10 @@ async fn write_strips_hashline_prefixes_without_bracket_header() {
     let content = "42: fn main() {\n43:     println!(\"hello\");\n44: }";
 
     let target = WriteAllFile {
-        write: vec![TargetFile { path, text: content }],
+        write: vec![TargetFile {
+            path,
+            text: content,
+        }],
     };
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
@@ -211,7 +223,13 @@ async fn write_strips_hashline_prefixes_without_bracket_header() {
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
-    assert!(results[0].warnings.as_deref().unwrap().contains("auto-stripped hashline"));
+    assert!(
+        results[0]
+            .warnings
+            .as_deref()
+            .unwrap()
+            .contains("auto-stripped hashline")
+    );
 
     let written = std::fs::read_to_string(path).unwrap();
     assert!(!written.contains("42:"));
@@ -225,7 +243,10 @@ async fn write_does_not_strip_normal_content() {
     let content = "fn main() {\n    println!(\"hello\");\n}";
 
     let target = WriteAllFile {
-        write: vec![TargetFile { path, text: content }],
+        write: vec![TargetFile {
+            path,
+            text: content,
+        }],
     };
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
@@ -253,7 +274,10 @@ async fn write_chmods_executable_for_shebang() {
     let content = "#!/usr/bin/env bash\necho hello";
 
     let target = WriteAllFile {
-        write: vec![TargetFile { path, text: content }],
+        write: vec![TargetFile {
+            path,
+            text: content,
+        }],
     };
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
@@ -265,10 +289,19 @@ async fn write_chmods_executable_for_shebang() {
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
-    assert!(results[0].warnings.as_deref().unwrap().contains("made executable"));
+    assert!(
+        results[0]
+            .warnings
+            .as_deref()
+            .unwrap()
+            .contains("made executable")
+    );
 
     let meta = std::fs::metadata(path).unwrap();
-    assert!(meta.permissions().mode() & 0o111 != 0, "file should have execute bits");
+    assert!(
+        meta.permissions().mode() & 0o111 != 0,
+        "file should have execute bits"
+    );
     let _ = std::fs::remove_file(path);
 }
 
@@ -281,7 +314,10 @@ async fn write_does_not_chmod_without_shebang() {
     let content = "plain text file";
 
     let target = WriteAllFile {
-        write: vec![TargetFile { path, text: content }],
+        write: vec![TargetFile {
+            path,
+            text: content,
+        }],
     };
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
