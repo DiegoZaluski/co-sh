@@ -36,11 +36,15 @@ pub struct WriteResult {
 /// from content the model may have copied from read/search output.
 fn strip_write_content(content: &str) -> (String, bool) {
     static BRACKET_HEADER_RE: OnceLock<Regex> = OnceLock::new();
-    let bracket_re = BRACKET_HEADER_RE
-        .get_or_init(|| Regex::new(r"^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$").unwrap());
+    let bracket_re =
+        BRACKET_HEADER_RE.get_or_init(|| Regex::new(r"^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$").unwrap());
 
     let trimmed = content.strip_suffix('\n').unwrap_or(content);
-    let lines: Vec<String> = trimmed.replace('\r', "").split('\n').map(String::from).collect();
+    let lines: Vec<String> = trimmed
+        .replace('\r', "")
+        .split('\n')
+        .map(String::from)
+        .collect();
 
     let stripped = cosh_sdk::hashline::prefixes::strip_new_line_prefixes(&lines);
     if stripped != lines {
@@ -144,7 +148,8 @@ pub async fn write(
                     continue;
                 }
 
-                let made_executable = clean_text.starts_with("#!") && maybe_make_executable(target.path).await;
+                let made_executable =
+                    clean_text.starts_with("#!") && maybe_make_executable(target.path).await;
 
                 cosh_sdk::tree_sitter::tree_sitter().invalidate(target.path);
                 let _ = rollback::record(target.path, &clean_text);
@@ -154,10 +159,16 @@ pub async fn write(
 
                 let mut warnings: Vec<String> = Vec::new();
                 if stripped {
-                    warnings.push("auto-stripped hashline display prefixes from content before writing.".to_string());
+                    warnings.push(
+                        "auto-stripped hashline display prefixes from content before writing."
+                            .to_string(),
+                    );
                 }
                 if made_executable {
-                    warnings.push("made executable via chmod +x (content starts with #! shebang).".to_string());
+                    warnings.push(
+                        "made executable via chmod +x (content starts with #! shebang)."
+                            .to_string(),
+                    );
                 }
 
                 let res = WriteResult {

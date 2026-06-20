@@ -4,13 +4,13 @@
 //! handler that calls into the discovery layer and assembles the output.
 
 use std::fs;
-use std::path::{Component, Path};
 
 use crate::skills::discover::discover_skills;
 use crate::skills::match_util::globs_match_any;
 use crate::skills::types::{
     SkillAction, SkillContent, SkillError, SkillInfo, SkillOutput, SkillSchema,
 };
+use crate::util::guards::validate_asset_path;
 
 /// Execute a skill tool action.
 ///
@@ -82,34 +82,17 @@ fn action_read_asset(schema: &SkillSchema) -> Result<SkillOutput, SkillError> {
         ));
     }
 
-    let requested = Path::new(asset_path);
-    if requested.is_absolute() {
-        return Err(SkillError::PathTraversal(
-            "absolute paths are not allowed".into(),
-        ));
-    }
-    if requested.components().any(|c| c == Component::ParentDir) {
-        return Err(SkillError::PathTraversal(
-            "path must not contain '..' components".into(),
-        ));
-    }
+    let resolved = match validate_asset_path(&raw.base_dir, asset_path) {
+        Ok(p) => p,
+        Err(msg) if msg.starts_with("asset not found") => {
+            return Err(SkillError::NotFound(msg));
+        }
+        Err(msg) => {
+            return Err(SkillError::PathTraversal(msg));
+        }
+    };
 
-    let base_canon = raw
-        .base_dir
-        .canonicalize()
-        .map_err(|e| SkillError::PathTraversal(format!("cannot canonicalize base dir: {e}")))?;
-    let resolved = base_canon.join(asset_path);
-    let resolved_canon = resolved
-        .canonicalize()
-        .map_err(|e| SkillError::NotFound(format!("asset not found: {e}")))?;
-
-    if !resolved_canon.starts_with(&base_canon) {
-        return Err(SkillError::PathTraversal(
-            "resolved path escapes the skill directory".into(),
-        ));
-    }
-
-    let content = fs::read_to_string(&resolved_canon)
+    let content = fs::read_to_string(&resolved)
         .map_err(|e| SkillError::NotFound(format!("cannot read asset: {e}")))?;
 
     Ok(SkillOutput::ReadAsset { content })

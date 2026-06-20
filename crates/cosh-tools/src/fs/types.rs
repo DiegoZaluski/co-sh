@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::util::guards::{GuardResult, validate_path};
+
 /// A single read specification.
 pub struct Target<'a> {
     pub path: &'a str,
@@ -77,30 +79,13 @@ pub(crate) enum FsGuard {
 
 impl FsMetadata<'_> {
     pub(crate) fn fs_guard(&self, path: &str) -> FsGuard {
-        let path = Path::new(path);
+        let allowlist = self.write_path_allowlist.as_deref();
+        let blocklist = self.write_path_blocklist.as_deref();
 
-        let blocked = self
-            .write_path_blocklist
-            .as_ref()
-            .is_some_and(|list| list.iter().any(|&fs| fs == path || path.starts_with(fs)));
-        let allowed = self
-            .write_path_allowlist
-            .as_ref()
-            .is_some_and(|list| list.contains(&path));
-        let in_cwd = path.starts_with(self.root);
-
-        if blocked && allowed {
-            return FsGuard::Mismatch(
-                "Security Alert: path is in both blocklist and allowlist.".to_string(),
-            );
+        match validate_path(path, self.root, allowlist, blocklist) {
+            GuardResult::Allowed(_) => FsGuard::Allowed,
+            GuardResult::Denied(_) => FsGuard::Denied,
+            GuardResult::Mismatch(msg) => FsGuard::Mismatch(msg),
         }
-        if blocked {
-            return FsGuard::Denied;
-        }
-        if !in_cwd && !allowed {
-            return FsGuard::Denied;
-        }
-
-        FsGuard::Allowed
     }
 }
