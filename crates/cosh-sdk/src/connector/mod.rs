@@ -20,7 +20,7 @@ mod provider;
 
 pub use client::Connector;
 pub use error::ConnectorError;
-pub use output::{ChatOutput, ChatStream, StreamChunk};
+pub use output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 pub use params::{ResponseFormat, ToolDefinition, ToolFunction};
 
 #[cfg(test)]

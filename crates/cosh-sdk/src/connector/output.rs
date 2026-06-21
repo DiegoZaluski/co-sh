@@ -133,3 +133,44 @@ impl Stream for ChatStream {
         poll
     }
 }
+
+/// A single model entry returned by [`Connector::list_models`].
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub id: String,
+}
+
+impl ModelInfo {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// Result of a [`Connector::list_models`] call.
+///
+/// Provides the parsed model list via [`models`](LsOutput::models)
+/// and the raw JSON response via [`raw`](LsOutput::raw).
+#[derive(Debug)]
+pub struct LsOutput {
+    raw: String,
+    models: Vec<ModelInfo>,
+}
+
+impl LsOutput {
+    pub(crate) fn new(raw: String, models: Vec<ModelInfo>) -> Self {
+        Self { raw, models }
+    }
+
+    /// Raw JSON response from the API as received (unmodified).
+    #[must_use]
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    /// Extracted model list.
+    #[must_use]
+    pub fn models(&self) -> &[ModelInfo] {
+        &self.models
+    }
+}

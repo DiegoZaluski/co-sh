@@ -1,5 +1,5 @@
 use super::error::ConnectorError;
-use super::output::{ChatOutput, ChatStream};
+use super::output::{ChatOutput, ChatStream, LsOutput};
 use super::params::{Parameters, ResponseFormat, ToolDefinition};
 use super::provider::{Family, ProviderConfig, get_provider};
 
@@ -257,6 +257,24 @@ impl Connector {
             Family::Claude => {
                 claude::chat_stream(provider, &self.params, prompt, Some(system)).await
             }
+        }
+    }
+
+    /// Fetch the list of available models from the provider.
+    ///
+    /// Returns a [`LsOutput`] with structured model names ([`models`](LsOutput::models))
+    /// and the raw JSON response ([`raw`](LsOutput::raw)).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MissingApiKey` if no API key is found, `HttpError` on non-2xx status,
+    /// `Deserialization` if the response is malformed, or `Network` on transport failure.
+    pub async fn list_models(&self) -> Result<LsOutput, ConnectorError> {
+        let provider = self.provider()?;
+        match provider.family {
+            Family::OpenAICompatible => openai_compatible::list_models(provider, &self.params).await,
+            Family::Gemini => gemini::list_models(provider, &self.params).await,
+            Family::Claude => claude::list_models(provider, &self.params).await,
         }
     }
 }

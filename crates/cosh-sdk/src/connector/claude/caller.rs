@@ -1,6 +1,6 @@
-use super::super::common::{SseBuffer, send_request, send_request_stream};
+use super::super::common::{SseBuffer, send_get_request, send_request, send_request_stream};
 use super::super::error::ConnectorError;
-use super::super::output::{ChatOutput, ChatStream, StreamChunk};
+use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 use super::super::params::{Parameters, ToolDefinition};
 use super::super::provider::{ProviderConfig, get_api_key};
 
@@ -300,4 +300,46 @@ pub(crate) async fn chat_stream(
         });
 
     Ok(ChatStream::new(inner))
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudeModelEntry {
+    id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudeListModelsResponse {
+    data: Vec<ClaudeModelEntry>,
+}
+
+/// Fetch the list of available models from the Anthropic Claude API.
+///
+/// Sends a GET to `{base_url}/models` and returns a [`LsOutput`].
+pub(crate) async fn list_models(
+    config: &ProviderConfig,
+    params: &Parameters,
+) -> Result<LsOutput, ConnectorError> {
+    let api_key = params
+        .api_key
+        .clone()
+        .or_else(|| get_api_key(config.name))
+        .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
+
+    let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
+    let url = format!("{base_url}/models");
+
+    let headers = &[
+        ("x-api-key", api_key.as_str()),
+        ("anthropic-version", "2023-06-01"),
+    ];
+    let response_text = send_get_request(config, &url, headers).await?;
+
+    let list: ClaudeListModelsResponse = serde_json::from_str(&response_text)?;
+    let models: Vec<ModelInfo> = list
+        .data
+        .into_iter()
+        .map(|entry| ModelInfo { id: entry.id })
+        .collect();
+
+    Ok(LsOutput::new(response_text, models))
 }

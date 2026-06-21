@@ -1,6 +1,6 @@
-use super::super::common::{SseBuffer, send_request, send_request_stream};
+use super::super::common::{SseBuffer, send_get_request, send_request, send_request_stream};
 use super::super::error::ConnectorError;
-use super::super::output::{ChatOutput, ChatStream, StreamChunk};
+use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 use super::super::params::{Parameters, ResponseFormat, ToolDefinition};
 use super::super::provider::{ProviderConfig, get_api_key};
 
@@ -334,4 +334,45 @@ pub(crate) async fn embed(
         .first()
         .ok_or(ConnectorError::NoEmbeddings)?;
     Ok(first_data.embedding.clone())
+}
+
+#[derive(serde::Deserialize)]
+struct ListModelsData {
+    id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ListModelsResponse {
+    data: Vec<ListModelsData>,
+}
+
+/// Fetch the list of available models from the provider.
+///
+/// Resolves the API key, sends a GET to `{base_url}/models`, and parses
+/// the OpenAI-compatible JSON response into a [`LsOutput`].
+pub(crate) async fn list_models(
+    config: &ProviderConfig,
+    params: &Parameters,
+) -> Result<LsOutput, ConnectorError> {
+    let api_key = params
+        .api_key
+        .clone()
+        .or_else(|| get_api_key(config.name))
+        .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
+
+    let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
+    let url = format!("{base_url}/models");
+
+    let auth = format!("Bearer {api_key}");
+    let response_text =
+        send_get_request(config, &url, &[("Authorization", auth.as_str())]).await?;
+
+    let list: ListModelsResponse = serde_json::from_str(&response_text)?;
+    let models: Vec<ModelInfo> = list
+        .data
+        .into_iter()
+        .map(|item| ModelInfo { id: item.id })
+        .collect();
+
+    Ok(LsOutput::new(response_text, models))
 }
