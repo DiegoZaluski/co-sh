@@ -91,12 +91,7 @@ async fn write_reports_empty_text_inline_and_skips_file() {
     let path = "/home/inky/cosh/cosh_test_empty.txt";
     let _ = std::fs::remove_file(path);
 
-    let result = write(
-        &FsWrite,
-        meta(),
-        vec![TargetFile { path, text: "" }],
-    )
-    .await;
+    let result = write(&FsWrite, meta(), vec![TargetFile { path, text: "" }]).await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -168,7 +163,10 @@ async fn write_strips_hashline_prefixes_and_reports_warning() {
     let result = write(
         &FsWrite,
         meta(),
-        vec![TargetFile { path, text: content }],
+        vec![TargetFile {
+            path,
+            text: content,
+        }],
     )
     .await;
     assert!(result.is_ok());
@@ -198,7 +196,10 @@ async fn write_strips_hashline_prefixes_without_bracket_header() {
     let result = write(
         &FsWrite,
         meta(),
-        vec![TargetFile { path, text: content }],
+        vec![TargetFile {
+            path,
+            text: content,
+        }],
     )
     .await;
     assert!(result.is_ok());
@@ -226,7 +227,10 @@ async fn write_does_not_strip_normal_content() {
     let result = write(
         &FsWrite,
         meta(),
-        vec![TargetFile { path, text: content }],
+        vec![TargetFile {
+            path,
+            text: content,
+        }],
     )
     .await;
     assert!(result.is_ok());
@@ -250,7 +254,10 @@ async fn write_chmods_executable_for_shebang() {
     let result = write(
         &FsWrite,
         meta(),
-        vec![TargetFile { path, text: content }],
+        vec![TargetFile {
+            path,
+            text: content,
+        }],
     )
     .await;
     assert!(result.is_ok());
@@ -283,7 +290,10 @@ async fn write_does_not_chmod_without_shebang() {
     let result = write(
         &FsWrite,
         meta(),
-        vec![TargetFile { path, text: content }],
+        vec![TargetFile {
+            path,
+            text: content,
+        }],
     )
     .await;
     assert!(result.is_ok());

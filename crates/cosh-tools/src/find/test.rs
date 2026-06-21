@@ -95,11 +95,7 @@ fn glob_rejects_unknown_file_type() {
 
 #[test]
 fn glob_nonexistent_path_returns_error() {
-    let result = glob(
-        &Glob::default(),
-        "*",
-        "/nonexistent/cosh_test_path",
-    );
+    let result = glob(&Glob::default(), "*", "/nonexistent/cosh_test_path");
 
     assert!(result.is_err(), "nonexistent path should return an error");
 }
@@ -132,12 +128,8 @@ fn grep_finds_matches_in_directory() {
 
 #[test]
 fn grep_finds_matches_in_single_file() {
-    let out = grep(
-        &Grep::default(),
-        "pub fn glob",
-        GLOB_FILE,
-    )
-    .expect("grep on a single file should succeed");
+    let out = grep(&Grep::default(), "pub fn glob", GLOB_FILE)
+        .expect("grep on a single file should succeed");
 
     assert!(
         !out.matches.is_empty(),
@@ -202,11 +194,7 @@ fn grep_ignore_case_widens_results() {
 
 #[test]
 fn grep_nonexistent_path_returns_error() {
-    let result = grep(
-        &Grep::default(),
-        "fn",
-        "/nonexistent/cosh_test_path",
-    );
+    let result = grep(&Grep::default(), "fn", "/nonexistent/cosh_test_path");
 
     assert!(result.is_err(), "nonexistent path should return an error");
 }

@@ -203,7 +203,8 @@ pub(crate) async fn chat(
     let url = format!("{base_url}/chat/completions");
 
     let auth = format!("Bearer {api_key}");
-    let response_text = send_request(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
+    let response_text =
+        send_request(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
     let chat_response: ChatResponse = serde_json::from_str(&response_text)?;
     let first_choice = chat_response
         .choices
@@ -247,7 +248,8 @@ pub(crate) async fn chat_stream(
     let url = format!("{base_url}/chat/completions");
 
     let auth = format!("Bearer {api_key}");
-    let response = send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
+    let response =
+        send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
 
     let buf = SseBuffer::new();
 
@@ -324,7 +326,8 @@ pub(crate) async fn embed(
     let url = format!("{base_url}/embeddings");
 
     let auth = format!("Bearer {api_key}");
-    let response_text = send_request(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
+    let response_text =
+        send_request(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
     let embed_response: EmbeddingResponse = serde_json::from_str(&response_text)?;
     let first_data = embed_response
         .data

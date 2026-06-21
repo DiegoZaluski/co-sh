@@ -1,7 +1,5 @@
 use super::super::{Connector, ToolDefinition, ToolFunction};
-use super::common::{
-    ENV_LOCK, EnvGuard, claude_connector, claude_connector_no_key, mock_server,
-};
+use super::common::{ENV_LOCK, EnvGuard, claude_connector, claude_connector_no_key, mock_server};
 use tokio_stream::StreamExt;
 
 #[tokio::test]
@@ -106,7 +104,10 @@ async fn tools_serialized() {
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["tools"][0]["name"], "get_weather");
     assert_eq!(json["tools"][0]["description"], "Get the weather");
-    assert_eq!(json["tools"][0]["input_schema"], serde_json::json!({"type":"object"}));
+    assert_eq!(
+        json["tools"][0]["input_schema"],
+        serde_json::json!({"type":"object"})
+    );
 }
 
 #[tokio::test]
@@ -149,8 +150,7 @@ data: {\"type\":\"message_stop\"}\n\n";
 
 #[tokio::test]
 async fn raw_last_frame_with_usage() {
-    let last_frame =
-        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":15}}"#;
+    let last_frame = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":15}}"#;
     let sse = format!(
         "\
 data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"Hi\"}}}}\n\n\
@@ -206,10 +206,7 @@ async fn http_500() {
 
 #[tokio::test]
 async fn network_error() {
-    let err = claude_connector(0)
-        .chat("hello")
-        .await
-        .unwrap_err();
+    let err = claude_connector(0).chat("hello").await.unwrap_err();
     assert!(
         err.to_string().contains("error")
             || err.to_string().contains("refused")
@@ -229,7 +226,8 @@ async fn missing_api_key() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("API key not set for provider: claude"),
+        err.to_string()
+            .contains("API key not set for provider: claude"),
         "got: {}",
         err
     );

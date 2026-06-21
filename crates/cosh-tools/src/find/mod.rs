@@ -12,6 +12,4 @@ mod test;
 
 pub use glob::glob;
 pub use grep::grep;
-pub use types::{
-    ContextEntry, Glob, GlobEntry, GlobOutput, Grep, GrepMatchEntry, GrepOutput,
-};
+pub use types::{ContextEntry, Glob, GlobEntry, GlobOutput, Grep, GrepMatchEntry, GrepOutput};

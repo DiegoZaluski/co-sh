@@ -89,8 +89,10 @@ fn convert_stop(value: &serde_json::Value) -> Option<Vec<String>> {
     match value {
         serde_json::Value::String(s) => Some(vec![s.clone()]),
         serde_json::Value::Array(arr) => {
-            let strs: Vec<String> =
-                arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            let strs: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
             if strs.is_empty() { None } else { Some(strs) }
         }
         _ => None,
@@ -135,10 +137,9 @@ fn build_request(
     let stop_sequences = params.stop.as_ref().and_then(convert_stop);
     let tools = params.tools.as_ref().map(|t| build_tools(t));
     let tool_choice = params.tool_choice.as_ref().and_then(convert_tool_choice);
-    let metadata = params
-        .user
-        .as_ref()
-        .map(|uid| Metadata { user_id: Some(uid.clone()) });
+    let metadata = params.user.as_ref().map(|uid| Metadata {
+        user_id: Some(uid.clone()),
+    });
 
     MessageRequest {
         model,
@@ -208,7 +209,10 @@ pub(crate) async fn chat(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/messages");
 
-    let headers = &[("x-api-key", ctx.api_key.as_str()), ("anthropic-version", "2023-06-01")];
+    let headers = &[
+        ("x-api-key", ctx.api_key.as_str()),
+        ("anthropic-version", "2023-06-01"),
+    ];
     let response_text = send_request(config, &url, &ctx.request, headers).await?;
     let chat_response: MessageResponse = serde_json::from_str(&response_text)?;
     let message = extract_response_text(&chat_response)?;
@@ -228,7 +232,10 @@ pub(crate) async fn chat_stream(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/messages");
 
-    let headers = &[("x-api-key", ctx.api_key.as_str()), ("anthropic-version", "2023-06-01")];
+    let headers = &[
+        ("x-api-key", ctx.api_key.as_str()),
+        ("anthropic-version", "2023-06-01"),
+    ];
     let response = send_request_stream(config, &url, &ctx.request, headers).await?;
 
     let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =

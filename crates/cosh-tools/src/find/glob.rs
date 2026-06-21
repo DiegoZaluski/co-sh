@@ -15,11 +15,7 @@ use super::types::{Glob, GlobEntry, GlobOutput};
 /// the glob pattern is invalid, an unknown `file_type` string is given, or the
 /// operation is cancelled by a timeout.
 pub fn glob(glob: &Glob, pattern: &str, path: &str) -> Result<GlobOutput, String> {
-    let file_type = glob
-        .file_type
-        .as_deref()
-        .map(parse_file_type)
-        .transpose()?;
+    let file_type = glob.file_type.as_deref().map(parse_file_type).transpose()?;
 
     let result = sdk_glob(GlobOptions {
         pattern: pattern.to_owned(),

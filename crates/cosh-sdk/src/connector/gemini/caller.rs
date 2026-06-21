@@ -166,8 +166,6 @@ struct EmbedContentResponse {
     embedding: EmbeddingValues,
 }
 
-
-
 // Helpers
 
 fn build_contents(prompt: &str, system_prompt: Option<&str>) -> (Vec<Content>, Option<Content>) {
@@ -358,7 +356,13 @@ pub(crate) async fn chat(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/models/{model}:generateContent");
 
-    let response_text = send_request(config, &url, &ctx.request, &[("x-goog-api-key", ctx.api_key.as_str())]).await?;
+    let response_text = send_request(
+        config,
+        &url,
+        &ctx.request,
+        &[("x-goog-api-key", ctx.api_key.as_str())],
+    )
+    .await?;
     let chat_response: GenerateContentResponse = serde_json::from_str(&response_text)?;
     let message = extract_response_text(&chat_response)?;
     Ok(ChatOutput {
@@ -381,7 +385,13 @@ pub(crate) async fn chat_stream(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/models/{model}:streamGenerateContent");
 
-    let response = send_request_stream(config, &url, &ctx.request, &[("x-goog-api-key", ctx.api_key.as_str())]).await?;
+    let response = send_request_stream(
+        config,
+        &url,
+        &ctx.request,
+        &[("x-goog-api-key", ctx.api_key.as_str())],
+    )
+    .await?;
 
     let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =
         Box::pin(stream! {
@@ -452,7 +462,13 @@ pub(crate) async fn embed(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/models/{model}:embedContent");
 
-    let response_text = send_request(config, &url, &request, &[("x-goog-api-key", api_key.as_str())]).await?;
+    let response_text = send_request(
+        config,
+        &url,
+        &request,
+        &[("x-goog-api-key", api_key.as_str())],
+    )
+    .await?;
     let embed_response: EmbedContentResponse = serde_json::from_str(&response_text)?;
     Ok(embed_response.embedding.values)
 }

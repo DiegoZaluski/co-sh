@@ -39,14 +39,9 @@ async fn rollback_denied_when_path_is_outside_project_root() {
     std::fs::write(outside, "content").unwrap();
     let _ = record(outside, "content");
 
-    let err = rollback(
-        &FsRollback,
-        meta(),
-        outside,
-        "",
-    )
-    .await
-    .unwrap_err();
+    let err = rollback(&FsRollback, meta(), outside, "")
+        .await
+        .unwrap_err();
 
     assert!(
         err.contains("permission denied"),
@@ -69,14 +64,9 @@ async fn rollback_denied_when_path_is_in_blocklist() {
         write_path_blocklist: Some(vec![Path::new(ROOT)]),
     };
 
-    let err = rollback(
-        &FsRollback,
-        blocked_meta,
-        &path,
-        "",
-    )
-    .await
-    .unwrap_err();
+    let err = rollback(&FsRollback, blocked_meta, &path, "")
+        .await
+        .unwrap_err();
 
     assert!(
         err.contains("permission denied"),
@@ -97,13 +87,7 @@ async fn rollback_returns_error_on_blocklist_allowlist_mismatch() {
         write_path_blocklist: Some(vec![Path::new(&path)]),
     };
 
-    let result = rollback(
-        &FsRollback,
-        mismatch_meta,
-        &path,
-        "",
-    )
-    .await;
+    let result = rollback(&FsRollback, mismatch_meta, &path, "").await;
     assert!(result.is_err(), "both-list mismatch must return an error");
     rm(&path);
 }
@@ -125,13 +109,7 @@ async fn rollback_allowed_outside_root_when_path_in_allowlist() {
         write_path_blocklist: None,
     };
 
-    let result = rollback(
-        &FsRollback,
-        allowed_meta,
-        &outside,
-        "",
-    )
-    .await;
+    let result = rollback(&FsRollback, allowed_meta, &outside, "").await;
     assert!(
         result.is_ok(),
         "explicitly allowed path outside root must succeed, got: {:?}",
@@ -150,14 +128,9 @@ async fn rollback_empty_hash_restores_previous_version() {
     write_file(&path, "version two\n");
     let _ = record(&path, "version two\n");
 
-    let out = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        "",
-    )
-    .await
-    .expect("empty hash must trigger previous-version restore");
+    let out = rollback(&FsRollback, meta(), &path, "")
+        .await
+        .expect("empty hash must trigger previous-version restore");
 
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -176,14 +149,9 @@ async fn rollback_whitespace_only_hash_treated_as_empty() {
     write_file(&path, "v2\n");
     let _ = record(&path, "v2\n");
 
-    let out = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        "   ",
-    )
-    .await
-    .expect("whitespace-only hash must be treated as empty");
+    let out = rollback(&FsRollback, meta(), &path, "   ")
+        .await
+        .expect("whitespace-only hash must be treated as empty");
 
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -203,14 +171,9 @@ async fn rollback_hash_with_surrounding_whitespace_is_trimmed() {
     let _ = record(&path, "updated\n");
 
     let padded = format!("  {h}  ");
-    let out = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        &padded,
-    )
-    .await
-    .expect("hash with surrounding whitespace must be trimmed and resolved");
+    let out = rollback(&FsRollback, meta(), &path, &padded)
+        .await
+        .expect("hash with surrounding whitespace must be trimmed and resolved");
 
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -229,14 +192,9 @@ async fn rollback_explicit_hash_restores_target_version() {
     write_file(&path, "state b\n");
     let _ = record(&path, "state b\n");
 
-    let out = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        &h_a,
-    )
-    .await
-    .expect("explicit hash restore must succeed");
+    let out = rollback(&FsRollback, meta(), &path, &h_a)
+        .await
+        .expect("explicit hash restore must succeed");
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "state a\n");
     assert_eq!(
@@ -256,14 +214,7 @@ async fn rollback_header_has_hashline_format() {
     write_file(&path, "v2\n");
     let _ = record(&path, "v2\n");
 
-    let out = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        &h,
-    )
-    .await
-    .unwrap();
+    let out = rollback(&FsRollback, meta(), &path, &h).await.unwrap();
 
     assert!(
         out.header.starts_with('\u{00B6}'),
@@ -288,14 +239,7 @@ async fn rollback_replaced_hash_reflects_content_before_restore() {
     write_file(&path, "after\n");
     let h_after = record(&path, "after\n").unwrap();
 
-    let out = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        "",
-    )
-    .await
-    .unwrap();
+    let out = rollback(&FsRollback, meta(), &path, "").await.unwrap();
 
     assert_eq!(
         out.replaced_hash, h_after,
@@ -311,14 +255,9 @@ async fn rollback_replaced_hash_is_empty_when_file_did_not_exist() {
     let h = record(&path, "content\n").unwrap();
     rm(&path);
 
-    let out = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        &h,
-    )
-    .await
-    .expect("restore of deleted file must succeed");
+    let out = rollback(&FsRollback, meta(), &path, &h)
+        .await
+        .expect("restore of deleted file must succeed");
 
     assert_eq!(
         out.replaced_hash, "",
@@ -335,14 +274,7 @@ async fn rollback_warning_is_none_on_clean_restore() {
     write_file(&path, "v2\n");
     let _ = record(&path, "v2\n");
 
-    let out = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        "",
-    )
-    .await
-    .unwrap();
+    let out = rollback(&FsRollback, meta(), &path, "").await.unwrap();
 
     assert!(
         out.warning.is_none(),
@@ -360,14 +292,9 @@ async fn rollback_warning_is_some_when_file_was_externally_modified() {
     // Simulate external modification — write directly without record()
     write_file(&path, "externally changed\n");
 
-    let out = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        &h,
-    )
-    .await
-    .expect("restore over external modification must succeed");
+    let out = rollback(&FsRollback, meta(), &path, &h)
+        .await
+        .expect("restore over external modification must succeed");
 
     assert!(
         out.warning.is_some(),
@@ -389,14 +316,7 @@ async fn rollback_error_no_history_for_path() {
     let path = tmp("no_history_tool");
     write_file(&path, "fresh file\n");
 
-    let err = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        "",
-    )
-    .await
-    .unwrap_err();
+    let err = rollback(&FsRollback, meta(), &path, "").await.unwrap_err();
 
     assert!(
         err.contains("no rollback history"),
@@ -413,14 +333,9 @@ async fn rollback_error_hash_not_found_in_history() {
     write_file(&path, "updated\n");
     let _ = record(&path, "updated\n");
 
-    let err = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        "DEAD",
-    )
-    .await
-    .unwrap_err();
+    let err = rollback(&FsRollback, meta(), &path, "DEAD")
+        .await
+        .unwrap_err();
 
     assert!(err.contains("DEAD"), "error must mention the bad hash");
     assert!(err.contains(&h), "error must list known hashes");
@@ -436,24 +351,10 @@ async fn rollback_error_already_at_requested_version() {
     let _ = record(&path, "v2\n");
 
     // Restore to v1 first
-    rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        &h,
-    )
-    .await
-    .unwrap();
+    rollback(&FsRollback, meta(), &path, &h).await.unwrap();
 
     // Restore again — disk already has v1
-    let err = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        &h,
-    )
-    .await
-    .unwrap_err();
+    let err = rollback(&FsRollback, meta(), &path, &h).await.unwrap_err();
 
     assert!(
         err.contains("already at version"),
@@ -468,14 +369,7 @@ async fn rollback_error_no_previous_when_only_one_version() {
     write_file(&path, "only version\n");
     let _ = record(&path, "only version\n");
 
-    let err = rollback(
-        &FsRollback,
-        meta(),
-        &path,
-        "",
-    )
-    .await
-    .unwrap_err();
+    let err = rollback(&FsRollback, meta(), &path, "").await.unwrap_err();
 
     assert!(
         err.contains("no previous version"),
