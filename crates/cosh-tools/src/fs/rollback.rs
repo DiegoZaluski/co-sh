@@ -51,8 +51,8 @@ pub async fn rollback(
     use super::types;
     let _ = config;
 
-    match metadata.fs_guard(path) {
-        types::FsGuard::Allowed => {}
+    let validated_path = match metadata.fs_guard(path) {
+        types::FsGuard::Allowed(path) => path,
         types::FsGuard::Denied => {
             return Err(format!(
                 "restore permission denied for `{path}`; \
@@ -60,8 +60,9 @@ pub async fn rollback(
             ));
         }
         types::FsGuard::Mismatch(msg) => return Err(msg),
-    }
+    };
 
+    let path_str = validated_path.to_string_lossy().to_string();
     let hash = hash.trim();
     let hash = if hash.is_empty() {
         None
@@ -70,7 +71,7 @@ pub async fn rollback(
     };
 
     let out = restore(RestoreInput {
-        path: path.to_owned(),
+        path: path_str,
         hash,
     })
     .await?;

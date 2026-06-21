@@ -36,7 +36,9 @@ use std::fmt::Write as _;
 ///     .with_timeout(120.0);
 ///
 /// let (token, source) = auth.resolve_token().unwrap();
-/// let api_token = auth.get_api_token(&token).await;
+/// let api_token = tokio::runtime::Runtime::new()
+///     .unwrap()
+///     .block_on(auth.get_api_token(&token));
 /// ```
 #[derive(Debug)]
 pub struct CopilotAuth {

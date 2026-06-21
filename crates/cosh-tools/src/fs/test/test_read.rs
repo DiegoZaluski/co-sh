@@ -1,10 +1,21 @@
+use std::path::Path;
+
 use super::super::read::read;
-use super::super::types::{FsRead, Target};
+use super::super::types::{FsMetadata, FsRead, Target};
+
+fn meta() -> FsMetadata<'static> {
+    FsMetadata {
+        root: Path::new("/home/inky/cosh"),
+        write_path_allowlist: None,
+        write_path_blocklist: None,
+    }
+}
 
 #[tokio::test]
 async fn test_function_search() {
     let results = read(
         &FsRead,
+        meta(),
         vec![
             Target {
                 path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/tokenizer.rs",
@@ -32,6 +43,7 @@ async fn test_function_search() {
 async fn test_line_block() {
     let results = read(
         &FsRead,
+        meta(),
         vec![Target {
             path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/tokenizer.rs",
             line: Some(5),

@@ -60,9 +60,7 @@ static SESSION: OnceLock<Arc<Mutex<InMemorySnapshotStore>>> = OnceLock::new();
 ///
 /// The store is a process-global singleton shared across all file tools.
 ///
-/// # Panics
-///
-/// Panics if `MAX_PATHS` is zero (it is not with the current constant).
+/// The store mutex is recovered transparently if poisoned.
 #[must_use]
 pub fn session_store() -> &'static Arc<Mutex<InMemorySnapshotStore>> {
     SESSION.get_or_init(|| {
@@ -84,9 +82,7 @@ pub fn session_store() -> &'static Arc<Mutex<InMemorySnapshotStore>> {
 /// The returned hash matches the token in the hashline header `¶path#HASH`
 /// and can be passed to [`restore`] to return to this exact version.
 ///
-/// # Panics
-///
-/// Panics if the session store mutex is poisoned.
+/// The store mutex is recovered transparently if poisoned.
 #[must_use]
 pub fn record(path: &str, text: &str) -> Option<String> {
     if text.len() > MAX_SNAPSHOT_BYTES {
@@ -103,7 +99,7 @@ pub fn record(path: &str, text: &str) -> Option<String> {
     Some(
         session_store()
             .lock()
-            .expect("rollback session store poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .record(path, &normalized),
     )
 }
@@ -260,9 +256,7 @@ fn external_mod_warning(path: &str, disk_hash: &str, head_hash: Option<&str>) ->
 ///   modification); lists known hashes so the caller can pick one explicitly.
 /// - A disk write error occurs.
 ///
-/// # Panics
-///
-/// Panics if the session store mutex is poisoned.
+/// The store mutex is recovered transparently if poisoned.
 pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
     let path = &input.path;
 
@@ -277,7 +271,7 @@ pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
     let (target_text, target_hash, warning) = {
         let mut store = session_store()
             .lock()
-            .expect("rollback session store poisoned");
+            .unwrap_or_else(|e| e.into_inner());
 
         let history = store.history(path);
         if history.is_empty() {
@@ -334,7 +328,7 @@ pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
     {
         let already_stored = session_store()
             .lock()
-            .expect("rollback session store poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .by_hash(path, &d.hash)
             .is_some();
         if !already_stored {
@@ -362,7 +356,7 @@ pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
     if input.hash.is_some() {
         session_store()
             .lock()
-            .expect("rollback session store poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .record(path, &target_text);
     }
     crate::tree_sitter::tree_sitter().invalidate(path);

@@ -133,12 +133,13 @@ pub async fn write(
         }
 
         match metadata.fs_guard(target.path) {
-            types::FsGuard::Allowed => {
-                if let Ok(current) = fs.read_text(target.path).await {
-                    let _ = rollback::record(target.path, &current);
+            types::FsGuard::Allowed(validated_path) => {
+                let path_str = validated_path.to_string_lossy();
+                if let Ok(current) = fs.read_text(&path_str).await {
+                    let _ = rollback::record(&path_str, &current);
                 }
 
-                if let Err(err) = fs.write_text(target.path, &clean_text).await {
+                if let Err(err) = fs.write_text(&path_str, &clean_text).await {
                     let warning = format!("failed to write `{}`: {}", target.path, err);
                     let res = WriteResult {
                         file_hash: String::new(),
@@ -151,13 +152,13 @@ pub async fn write(
                 }
 
                 let made_executable =
-                    clean_text.starts_with("#!") && maybe_make_executable(target.path).await;
+                    clean_text.starts_with("#!") && maybe_make_executable(&path_str).await;
 
-                cosh_sdk::tree_sitter::tree_sitter().invalidate(target.path);
-                let _ = rollback::record(target.path, &clean_text);
+                cosh_sdk::tree_sitter::tree_sitter().invalidate(&path_str);
+                let _ = rollback::record(&path_str, &clean_text);
 
                 let hash = format::compute_file_hash(&clean_text);
-                let header = format::format_hashline_header(target.path, &hash);
+                let header = format::format_hashline_header(&path_str, &hash);
 
                 let mut warnings: Vec<String> = Vec::new();
                 if stripped {

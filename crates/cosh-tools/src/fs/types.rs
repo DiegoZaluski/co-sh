@@ -1,6 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::util::guards::{GuardResult, validate_path};
+use crate::util::guards::{GuardResult, normalize_path, validate_path};
 
 /// A single read specification.
 pub struct Target<'a> {
@@ -48,7 +48,7 @@ pub struct FsRollback;
 //___
 #[derive(Debug, PartialEq)]
 pub(crate) enum FsGuard {
-    Allowed,
+    Allowed(PathBuf),
     Denied,
     Mismatch(String),
 }
@@ -59,7 +59,40 @@ impl FsMetadata<'_> {
         let blocklist = self.write_path_blocklist.as_deref();
 
         match validate_path(path, self.root, allowlist, blocklist) {
-            GuardResult::Allowed(_) => FsGuard::Allowed,
+            GuardResult::Allowed(normalized) => {
+                let Ok(root_canon) = self.root.canonicalize() else {
+                    return FsGuard::Denied;
+                };
+
+                let root_norm = normalize_path(self.root, self.root);
+                let in_root = normalized.starts_with(&root_norm);
+
+                let resolved = match normalized.canonicalize() {
+                    Ok(canon) => canon,
+                    Err(_) => match normalized.parent() {
+                        Some(parent) => match parent.canonicalize() {
+                            Ok(parent_canon) => {
+                                let file_name = normalized.file_name().unwrap_or_default();
+                                parent_canon.join(file_name)
+                            }
+                            Err(_) => {
+                                if in_root {
+                                    normalized
+                                } else {
+                                    return FsGuard::Denied;
+                                }
+                            }
+                        },
+                        None => return FsGuard::Denied,
+                    },
+                };
+
+                if in_root && !resolved.starts_with(&root_canon) {
+                    return FsGuard::Denied;
+                }
+
+                FsGuard::Allowed(resolved)
+            }
             GuardResult::Denied(_) => FsGuard::Denied,
             GuardResult::Mismatch(msg) => FsGuard::Mismatch(msg),
         }

@@ -1,4 +1,4 @@
-pub(crate) mod copilot_auth;
+pub mod copilot_auth;
 
 #[cfg(test)]
 mod test;

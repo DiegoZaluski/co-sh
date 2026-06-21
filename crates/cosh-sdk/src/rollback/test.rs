@@ -1,3 +1,4 @@
+use serial_test::serial;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::hashline::snapshots::SnapshotStore;
@@ -29,6 +30,7 @@ fn rm(path: &str) {
 // record() — unit tests (no disk I/O needed)
 
 #[test]
+#[serial]
 fn record_returns_hash_for_normal_file() {
     let hash = record("/fake/path.rs", "fn main() {}");
     assert!(hash.is_some(), "expected hash for normal content");
@@ -38,6 +40,7 @@ fn record_returns_hash_for_normal_file() {
 }
 
 #[test]
+#[serial]
 fn record_returns_same_hash_for_identical_content() {
     let a = record("/fake/dedup_a.rs", "same content");
     let b = record("/fake/dedup_b.rs", "same content");
@@ -45,6 +48,7 @@ fn record_returns_same_hash_for_identical_content() {
 }
 
 #[test]
+#[serial]
 fn record_deduplicates_repeated_calls_for_same_path() {
     let p = "/fake/dedup_same_path.rs";
     let h1 = record(p, "version one");
@@ -64,12 +68,14 @@ fn record_deduplicates_repeated_calls_for_same_path() {
 }
 
 #[test]
+#[serial]
 fn record_skips_binary_content_null_byte() {
     let result = record("/fake/binary.bin", "valid\0invalid");
     assert!(result.is_none(), "content with null bytes must be skipped");
 }
 
 #[test]
+#[serial]
 fn record_skips_oversized_content() {
     let big = "x".repeat(MAX_SNAPSHOT_BYTES + 1);
     let result = record("/fake/big.txt", &big);
@@ -80,6 +86,7 @@ fn record_skips_oversized_content() {
 }
 
 #[test]
+#[serial]
 fn record_normalizes_crlf_to_lf_before_storing() {
     let p = "/fake/crlf_norm.rs";
     let lf_hash = record(p, "line1\nline2\n");
@@ -102,6 +109,7 @@ fn record_normalizes_crlf_to_lf_before_storing() {
 }
 
 #[test]
+#[serial]
 fn record_strips_bom_before_storing() {
     let p = "/fake/bom_strip.rs";
     let bom_hash = record(p, "\u{FEFF}content after bom");
@@ -121,6 +129,7 @@ fn record_strips_bom_before_storing() {
 // restore() — success paths (require real disk I/O)
 
 #[tokio::test]
+#[serial]
 async fn restore_by_hash_reverts_file_to_target_version() {
     let path = tmp("by_hash");
     write(&path, "version one\n");
@@ -146,6 +155,7 @@ async fn restore_by_hash_reverts_file_to_target_version() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_previous_version_with_hash_none() {
     let path = tmp("prev_none");
     write(&path, "v1 content\n");
@@ -167,6 +177,7 @@ async fn restore_previous_version_with_hash_none() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_output_replaced_hash_equals_pre_restore_disk_hash() {
     let path = tmp("replaced_hash");
     write(&path, "alpha\n");
@@ -190,6 +201,7 @@ async fn restore_output_replaced_hash_equals_pre_restore_disk_hash() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_enables_undo_of_undo() {
     let path = tmp("undo_undo");
     write(&path, "original\n");
@@ -221,6 +233,7 @@ async fn restore_enables_undo_of_undo() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_multi_step_navigation() {
     let path = tmp("multi_step");
     let versions = ["v1\n", "v2\n", "v3\n", "v4\n"];
@@ -245,6 +258,7 @@ async fn restore_multi_step_navigation() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_recreates_deleted_file_with_explicit_hash() {
     let path = tmp("recreate_hash");
     write(&path, "content to restore\n");
@@ -279,6 +293,7 @@ async fn restore_recreates_deleted_file_with_explicit_hash() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_deleted_file_no_hash_restores_to_head_with_warning() {
     let path = tmp("recreate_none");
     write(&path, "last known\n");
@@ -305,6 +320,7 @@ async fn restore_deleted_file_no_hash_restores_to_head_with_warning() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_external_modification_with_explicit_hash_warns_and_succeeds() {
     let path = tmp("ext_mod_hash");
     write(&path, "session version\n");
@@ -332,6 +348,7 @@ async fn restore_external_modification_with_explicit_hash_warns_and_succeeds() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_preserves_crlf_line_ending_from_current_disk() {
     let path = tmp("crlf_preserve");
     write(&path, "v1 line\n");
@@ -359,6 +376,7 @@ async fn restore_preserves_crlf_line_ending_from_current_disk() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_preserves_bom_from_current_disk() {
     let path = tmp("bom_preserve");
     write(&path, "plain text v1\n");
@@ -385,6 +403,7 @@ async fn restore_preserves_bom_from_current_disk() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_header_is_valid_hashline_format() {
     let path = tmp("header_fmt");
     write(&path, "content\n");
@@ -415,6 +434,7 @@ async fn restore_header_is_valid_hashline_format() {
 // restore() — error paths
 
 #[tokio::test]
+#[serial]
 async fn restore_error_no_history_for_path() {
     let path = tmp("no_history");
     write(&path, "some content\n");
@@ -439,6 +459,7 @@ async fn restore_error_no_history_for_path() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_error_hash_not_found_lists_known_hashes() {
     let path = tmp("hash_not_found");
     write(&path, "content\n");
@@ -468,6 +489,7 @@ async fn restore_error_hash_not_found_lists_known_hashes() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_error_already_at_target_version() {
     let path = tmp("already_current");
     write(&path, "current content\n");
@@ -502,6 +524,7 @@ async fn restore_error_already_at_target_version() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_error_no_previous_version_at_oldest() {
     let path = tmp("oldest_only");
     write(&path, "only version\n");
@@ -527,6 +550,7 @@ async fn restore_error_no_previous_version_at_oldest() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_error_hash_none_on_externally_modified_file() {
     let path = tmp("ext_mod_none");
     write(&path, "session wrote this\n");
@@ -559,6 +583,7 @@ async fn restore_error_hash_none_on_externally_modified_file() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_error_disk_read_failure_non_utf8() {
     // Write raw bytes that are not valid UTF-8 to a file.
     // tokio::fs::read_to_string will fail, which restore maps to an error.
@@ -585,6 +610,7 @@ async fn restore_error_disk_read_failure_non_utf8() {
 // Window / LRU boundary tests
 
 #[test]
+#[serial]
 fn record_respects_max_versions_per_path() {
     let p = tmp("max_versions");
     let extra = MAX_VERSIONS_PER_PATH + 3;
@@ -617,6 +643,7 @@ fn record_respects_max_versions_per_path() {
 }
 
 #[test]
+#[serial]
 fn record_at_exactly_max_snapshot_bytes_is_accepted() {
     let content = "a".repeat(MAX_SNAPSHOT_BYTES);
     let result = record("/fake/exact_limit.txt", &content);
@@ -627,6 +654,7 @@ fn record_at_exactly_max_snapshot_bytes_is_accepted() {
 }
 
 #[test]
+#[serial]
 fn record_one_byte_over_max_snapshot_bytes_is_rejected() {
     let content = "a".repeat(MAX_SNAPSHOT_BYTES + 1);
     let result = record("/fake/over_limit.txt", &content);
@@ -639,6 +667,7 @@ fn record_one_byte_over_max_snapshot_bytes_is_rejected() {
 // Gap tests — real agent scenarios not previously covered
 
 #[test]
+#[serial]
 fn record_accepts_empty_content() {
     // Agents commonly clear a file before rewriting it completely.
     let result = record("/fake/empty.rs", "");
@@ -653,6 +682,7 @@ fn record_accepts_empty_content() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_to_empty_content_clears_file() {
     let path = tmp("restore_empty");
     write(&path, "original content\n");
@@ -677,6 +707,7 @@ async fn restore_to_empty_content_clears_file() {
 }
 
 #[test]
+#[serial]
 fn record_lru_path_eviction_removes_entire_history() {
     // Agent opens MAX_PATHS + 1 distinct files. The first file's history
     // must be evicted so the store stays within its path budget.
@@ -704,6 +735,7 @@ fn record_lru_path_eviction_removes_entire_history() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_fails_with_clear_error_after_path_eviction() {
     // Verify that the error message is actionable when a path's history
     // has been evicted from the store.
@@ -739,6 +771,7 @@ async fn restore_fails_with_clear_error_after_path_eviction() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_then_record_new_edit_navigates_correctly() {
     // The most common real agent workflow:
     // 1. Agent writes v1 and v2.
@@ -780,6 +813,7 @@ async fn restore_then_record_new_edit_navigates_correctly() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_replaced_hash_is_empty_string_when_file_did_not_exist() {
     // When restoring a deleted file, replaced_hash must be an empty string
     // because there was no on-disk content to compute a hash from.
@@ -805,6 +839,7 @@ async fn restore_replaced_hash_is_empty_string_when_file_did_not_exist() {
 }
 
 #[test]
+#[serial]
 fn record_accepts_unicode_content() {
     // Agents write files with UTF-8 comments, docstrings, string literals
     // containing emoji and non-ASCII characters.
@@ -829,6 +864,7 @@ fn record_accepts_unicode_content() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_multiple_paths_are_independent() {
     // Restoring file A must not affect file B's history or content.
     let path_a = tmp("independent_a");
@@ -867,10 +903,12 @@ async fn restore_multiple_paths_are_independent() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_fails_when_write_directory_does_not_exist() {
     // The parent directory of the target path does not exist.
     // restore() must return a clear disk-write error, not panic.
-    let path = "/tmp/cosh_rb_nonexistent_dir/file.rs".to_string();
+    let base = tmp("nonexistent_parent");
+    let path = format!("{base}/sub/file.rs");
     let _ = record(&path, "some content");
 
     // Write second version so hash=None has somewhere to go
@@ -891,6 +929,7 @@ async fn restore_fails_when_write_directory_does_not_exist() {
 }
 
 #[tokio::test]
+#[serial]
 async fn restore_error_when_file_grew_beyond_snapshot_limit() {
     // Agent recorded a small file (v1), then wrote a version too large to
     // snapshot (v2). With hash=None, the disk content (v2) is not in the

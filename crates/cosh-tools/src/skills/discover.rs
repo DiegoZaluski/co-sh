@@ -91,32 +91,38 @@ pub fn discover_skills(schema: &SkillSchema) -> Result<Vec<RawSkill>, SkillError
 
 fn discover_from_directory(path: &str, recursive: bool) -> Result<Vec<RawSkill>, SkillError> {
     let root = Path::new(path);
+    let root = root
+        .canonicalize()
+        .map_err(|e| SkillError::InvalidSource(format!("cannot canonicalize path: {e}")))?;
     if !root.is_dir() {
         return Err(SkillError::InvalidSource(format!(
             "not a directory: {path}"
         )));
     }
 
-    let source_key = if let Ok(canon) = root.canonicalize() {
-        format!("dir:{}", canon.display())
-    } else {
-        format!("dir:{path}")
-    };
+    let source_key = format!("dir:{}", root.display());
 
     let mut skill_dirs: Vec<PathBuf> = Vec::new();
 
     if recursive {
-        collect_skill_dirs_recursive(root, &mut skill_dirs)?;
+        collect_skill_dirs_recursive(&root, &mut skill_dirs)?;
     } else {
-        let entries = fs::read_dir(root)
+        let entries = fs::read_dir(&root)
             .map_err(|e| SkillError::InvalidSource(format!("cannot read directory: {e}")))?;
         for entry in entries {
             let entry =
                 entry.map_err(|e| SkillError::InvalidSource(format!("read_dir error: {e}")))?;
-            if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                let skill_path = entry.path().join("SKILL.md");
+            let path = entry.path();
+            let Ok(canon_entry) = path.canonicalize() else {
+                continue;
+            };
+            if !canon_entry.starts_with(&root) {
+                continue;
+            }
+            if canon_entry.is_dir() {
+                let skill_path = canon_entry.join("SKILL.md");
                 if skill_path.is_file() {
-                    skill_dirs.push(entry.path());
+                    skill_dirs.push(canon_entry);
                 }
             }
         }
@@ -133,27 +139,34 @@ fn discover_from_directory(path: &str, recursive: bool) -> Result<Vec<RawSkill>,
 }
 
 fn collect_skill_dirs_recursive(root: &Path, result: &mut Vec<PathBuf>) -> Result<(), SkillError> {
-    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    let root = root.to_path_buf();
+    let mut stack: Vec<PathBuf> = vec![root.clone()];
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
     while let Some(current) = stack.pop() {
         let canon = current
             .canonicalize()
             .map_err(|e| SkillError::InvalidSource(format!("cannot canonicalize path: {e}")))?;
-        if !visited.insert(canon) {
+        if !visited.insert(canon.clone()) {
             continue;
         }
-        let entries = fs::read_dir(&current)
+        let entries = fs::read_dir(&canon)
             .map_err(|e| SkillError::InvalidSource(format!("cannot read directory: {e}")))?;
         for entry in entries {
             let entry =
                 entry.map_err(|e| SkillError::InvalidSource(format!("read_dir error: {e}")))?;
             let path = entry.path();
-            if path.is_dir() {
-                if path.join("SKILL.md").is_file() {
-                    result.push(path.clone());
+            let Ok(canon_entry) = path.canonicalize() else {
+                continue;
+            };
+            if !canon_entry.starts_with(&root) {
+                continue;
+            }
+            if canon_entry.is_dir() {
+                if canon_entry.join("SKILL.md").is_file() {
+                    result.push(canon_entry.clone());
                 }
-                stack.push(path);
+                stack.push(canon_entry);
             }
         }
     }

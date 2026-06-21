@@ -51,17 +51,18 @@ async fn edit_target(
     target: EditTarget<'_>,
     metadata: FsMetadata<'_>,
 ) -> Result<EditResult, String> {
-    match metadata.fs_guard(target.path) {
-        types::FsGuard::Allowed => {}
+    let validated_path = match metadata.fs_guard(target.path) {
+        types::FsGuard::Allowed(path) => path,
         types::FsGuard::Denied => {
             return Err(format!("write permissions denied for `{}`", target.path));
         }
         types::FsGuard::Mismatch(msg) => {
             return Err(msg);
         }
-    }
+    };
 
-    let raw = fs.read_text(target.path).await.map_err(|_| {
+    let path_str = validated_path.to_string_lossy();
+    let raw = fs.read_text(&path_str).await.map_err(|_| {
         format!(
             "file `{}` not found. Use the write tool to create new files.",
             target.path
@@ -70,7 +71,7 @@ async fn edit_target(
 
     let bom_result = normalize::strip_bom(&raw);
     let normalized = normalize::normalize_to_lf(&bom_result.text);
-    let _ = rollback::record(target.path, &normalized);
+    let _ = rollback::record(&path_str, &normalized);
 
     let actual_hash = compute_file_hash(&normalized);
     if actual_hash != target.file_hash {
@@ -111,16 +112,16 @@ async fn edit_target(
 
     let after = apply_result.text;
     let new_hash = compute_file_hash(&after);
-    let header = format_hashline_header(target.path, &new_hash);
+    let header = format_hashline_header(&path_str, &new_hash);
 
     let persisted = bom_result.bom + &after;
 
-    fs.write_text(target.path, &persisted)
+    fs.write_text(&path_str, &persisted)
         .await
         .map_err(|e| format!("failed to write `{}`: {}", target.path, e))?;
 
-    cosh_sdk::tree_sitter::tree_sitter().invalidate(target.path);
-    let _ = rollback::record(target.path, &after);
+    cosh_sdk::tree_sitter::tree_sitter().invalidate(&path_str);
+    let _ = rollback::record(&path_str, &after);
 
     Ok(EditResult {
         path: target.path.to_string(),

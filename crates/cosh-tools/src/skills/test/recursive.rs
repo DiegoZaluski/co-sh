@@ -4,7 +4,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 
-use super::super::{SkillAction, SkillOutput, SkillSchema, execute};
+use super::super::{SkillAction, SkillOutput, SkillSchema, SkillSource, execute};
 use super::common::{TempDir, list_schema};
 
 #[test]
@@ -61,6 +61,54 @@ fn recursive_discovery_finds_nested_skills() {
             assert!(
                 names.contains(&"internal-tools"),
                 "nested skill should be found in recursive mode"
+            );
+        }
+        _ => panic!("expected List output"),
+    }
+}
+
+// Canonicalize + starts_with check now rejects symlinks pointing outside
+// the intended base directory.
+
+#[cfg(unix)]
+#[test]
+fn discover_gap_symlink_outside_base() {
+    let real_base = TempDir::new();
+    let trap_base = TempDir::new();
+
+    // Put a skill inside trap_base
+    let real_skill = trap_base.path().join("secret-skill");
+    fs::create_dir_all(&real_skill).unwrap();
+    fs::write(
+        real_skill.join("SKILL.md"),
+        "---\nname: secret-skill\n---\nhidden content",
+    )
+    .unwrap();
+
+    // Symlink inside real_base that points to trap_base
+    let symlink_dir = real_base.path().join("poisoned-link");
+    symlink(trap_base.path(), &symlink_dir).unwrap();
+
+    let out = execute(&SkillSchema {
+        action: SkillAction::List,
+        recursive: true,
+        sources: vec![SkillSource::Directory {
+            path: real_base.path().to_string_lossy().into_owned(),
+        }],
+        skill_name: None,
+        asset_path: None,
+        match_paths: Vec::new(),
+        ignore: Vec::new(),
+        include: Vec::new(),
+    })
+    .expect("discovery should succeed");
+
+    match out {
+        SkillOutput::List { skills } => {
+            let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+            assert!(
+                !names.contains(&"secret-skill"),
+                "canonicalize must reject symlink traversal: found secret-skill: {names:?}"
             );
         }
         _ => panic!("expected List output"),

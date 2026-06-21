@@ -4,7 +4,7 @@
 //! request the whole file, a syntactic block at a given line, or a definition
 //! block matching a name (symbol, struct, class, …).  When the name search
 //! targets a directory the entire tree is walked recursively.
-use super::types::{FsRead, Target};
+use super::types::{FsMetadata, FsRead, Target};
 
 use cosh_sdk::hashline::{
     format,
@@ -29,19 +29,59 @@ pub struct ReadResult {
 /// Each target produces one or more [`ReadResult`] entries. Errors and
 /// incomplete reads are recorded as warnings inside each result instead of
 /// aborting the entire operation.
-pub async fn read(config: &FsRead, targets: Vec<Target<'_>>) -> Vec<ReadResult> {
+pub async fn read(
+    config: &FsRead,
+    metadata: FsMetadata<'_>,
+    targets: Vec<Target<'_>>,
+) -> Vec<ReadResult> {
     let _ = config;
     let fs = DiskFilesystem::new();
     let mut results: Vec<ReadResult> = Vec::new();
 
     for target in targets {
-        results.extend(read_target(fs.clone(), target).await);
+        results.extend(read_target(fs.clone(), target, &metadata).await);
     }
 
     results
 }
 
-async fn read_target(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadResult> {
+async fn read_target(
+    fs: DiskFilesystem,
+    target: Target<'_>,
+    metadata: &FsMetadata<'_>,
+) -> Vec<ReadResult> {
+    use super::types::FsGuard;
+    match metadata.fs_guard(target.path) {
+        FsGuard::Allowed(validated_path) => {
+            let path = validated_path.to_string_lossy().to_string();
+            let target = Target {
+                path: &path,
+                line: target.line,
+                symbol: target.symbol,
+            };
+            read_target_impl(fs, target).await
+        }
+        FsGuard::Denied => vec![ReadResult {
+            path: target.path.to_string(),
+            file_hash: String::new(),
+            header: String::new(),
+            content: String::new(),
+            warnings: Some(format!(
+                "read permission denied for `{}`",
+                target.path
+            )),
+        }],
+        FsGuard::Mismatch(msg) => vec![ReadResult {
+            path: target.path.to_string(),
+            file_hash: String::new(),
+            header: String::new(),
+            content: String::new(),
+            warnings: Some(msg),
+        }],
+    }
+}
+
+async fn read_target_impl(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadResult> {
     if let Some(name) = target.symbol {
         return search_symbol(&fs, target.path, name).await;
     }
