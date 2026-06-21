@@ -3,6 +3,7 @@ use super::output::{ChatOutput, ChatStream};
 use super::params::{Parameters, ResponseFormat, ToolDefinition};
 use super::provider::{Family, ProviderConfig, get_provider};
 
+use super::claude;
 use super::gemini;
 use super::openai_compatible;
 
@@ -167,6 +168,7 @@ impl Connector {
                 openai_compatible::chat(provider, &self.params, prompt, None).await
             }
             Family::Gemini => gemini::chat(provider, &self.params, prompt, None).await,
+            Family::Claude => claude::chat(provider, &self.params, prompt, None).await,
         }
     }
 
@@ -187,6 +189,7 @@ impl Connector {
                 openai_compatible::chat(provider, &self.params, prompt, Some(system)).await
             }
             Family::Gemini => gemini::chat(provider, &self.params, prompt, Some(system)).await,
+            Family::Claude => claude::chat(provider, &self.params, prompt, Some(system)).await,
         }
     }
 
@@ -203,6 +206,7 @@ impl Connector {
                 openai_compatible::embed(provider, &self.params, input).await
             }
             Family::Gemini => gemini::embed(provider, &self.params, input).await,
+            Family::Claude => Err(ConnectorError::NotImplemented("embedding")),
         }
     }
 
@@ -223,6 +227,7 @@ impl Connector {
                 openai_compatible::chat_stream(provider, &self.params, prompt, None).await
             }
             Family::Gemini => gemini::chat_stream(provider, &self.params, prompt, None).await,
+            Family::Claude => claude::chat_stream(provider, &self.params, prompt, None).await,
         }
     }
 
@@ -248,6 +253,9 @@ impl Connector {
             }
             Family::Gemini => {
                 gemini::chat_stream(provider, &self.params, prompt, Some(system)).await
+            }
+            Family::Claude => {
+                claude::chat_stream(provider, &self.params, prompt, Some(system)).await
             }
         }
     }

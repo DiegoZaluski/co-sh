@@ -1,3 +1,4 @@
+use super::super::common::{SseBuffer, send_request, send_request_stream};
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, StreamChunk};
 use super::super::params::{Parameters, ToolDefinition};
@@ -165,30 +166,7 @@ struct EmbedContentResponse {
     embedding: EmbeddingValues,
 }
 
-// SSE buffer
 
-struct SseBuffer {
-    buf: Vec<u8>,
-}
-
-impl SseBuffer {
-    fn new() -> Self {
-        Self { buf: Vec::new() }
-    }
-
-    fn push_and_drain(&mut self, chunk: &[u8]) -> Vec<String> {
-        self.buf.extend_from_slice(chunk);
-        let mut frames = Vec::new();
-        while let Some(end) = self.buf.windows(2).position(|w| w == b"\n\n") {
-            let raw: Vec<u8> = self.buf.drain(..=end + 1).collect();
-            let text = String::from_utf8_lossy(&raw[..raw.len().saturating_sub(2)]);
-            if let Some(data) = text.lines().find_map(|l| l.strip_prefix("data: ")) {
-                frames.push(data.to_owned());
-            }
-        }
-        frames
-    }
-}
 
 // Helpers
 
@@ -380,7 +358,7 @@ pub(crate) async fn chat(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/models/{model}:generateContent");
 
-    let response_text = send_request(config, &ctx.api_key, &url, &ctx.request).await?;
+    let response_text = send_request(config, &url, &ctx.request, &[("x-goog-api-key", ctx.api_key.as_str())]).await?;
     let chat_response: GenerateContentResponse = serde_json::from_str(&response_text)?;
     let message = extract_response_text(&chat_response)?;
     Ok(ChatOutput {
@@ -403,7 +381,7 @@ pub(crate) async fn chat_stream(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/models/{model}:streamGenerateContent");
 
-    let response = send_request_stream(config, &ctx.api_key, &url, &ctx.request).await?;
+    let response = send_request_stream(config, &url, &ctx.request, &[("x-goog-api-key", ctx.api_key.as_str())]).await?;
 
     let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =
         Box::pin(stream! {
@@ -474,55 +452,7 @@ pub(crate) async fn embed(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/models/{model}:embedContent");
 
-    let response_text = send_request(config, &api_key, &url, &request).await?;
+    let response_text = send_request(config, &url, &request, &[("x-goog-api-key", api_key.as_str())]).await?;
     let embed_response: EmbedContentResponse = serde_json::from_str(&response_text)?;
     Ok(embed_response.embedding.values)
-}
-
-async fn send_request(
-    config: &ProviderConfig,
-    api_key: &str,
-    url: &str,
-    body: &(impl serde::Serialize + Sync),
-) -> Result<String, ConnectorError> {
-    let response = send_request_stream(config, api_key, url, body).await?;
-    Ok(response.text().await?)
-}
-
-async fn send_request_stream(
-    config: &ProviderConfig,
-    api_key: &str,
-    url: &str,
-    body: &(impl serde::Serialize + Sync),
-) -> Result<reqwest::Response, ConnectorError> {
-    let client = reqwest::Client::new();
-    let mut request_builder = client
-        .post(url)
-        .header("x-goog-api-key", api_key)
-        .header("Content-Type", "application/json");
-
-    if config.needs_extra_headers {
-        request_builder = request_builder
-            .header("HTTP-Referer", "https://localhost")
-            .header("X-Title", "provider");
-    }
-
-    let json_body = serde_json::to_string(body)?;
-    let response = request_builder.body(json_body).send().await?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unable to read error response".to_string());
-        let error_msg = format!("HTTP {} - {}", status.as_u16(), error_text);
-        log::error!("HTTP Error captured: {error_msg}");
-        return Err(ConnectorError::HttpError {
-            status: status.as_u16(),
-            body: error_text,
-        });
-    }
-
-    Ok(response)
 }

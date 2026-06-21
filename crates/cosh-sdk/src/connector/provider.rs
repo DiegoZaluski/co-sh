@@ -5,6 +5,7 @@
 pub(crate) enum Family {
     OpenAICompatible,
     Gemini,
+    Claude,
 }
 
 #[derive(Debug)]
@@ -257,6 +258,16 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             needs_extra_headers: false,
         },
     ),
+    (
+        "claude",
+        ProviderConfig {
+            name: "claude",
+            family: Family::Claude,
+            base_url: "https://api.anthropic.com/v1",
+            default_model: "claude-sonnet-4-6",
+            needs_extra_headers: false,
+        },
+    ),
 ];
 
 const API_KEY_ENVS: &[(&str, &str)] = &[
@@ -282,6 +293,7 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     ("vercel", "VERCEL_API_KEY"),
     ("azure", "AZURE_OPENAI_KEY"),
     ("gemini", "GEMINI_API_KEY"),
+    ("claude", "ANTHROPIC_API_KEY"),
 ];
 
 pub(crate) fn get_provider(name: &str) -> Option<&'static ProviderConfig> {

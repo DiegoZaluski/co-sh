@@ -1,3 +1,4 @@
+use super::super::common::{SseBuffer, send_request, send_request_stream};
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, StreamChunk};
 use super::super::params::{Parameters, ResponseFormat, ToolDefinition};
@@ -117,31 +118,6 @@ struct Delta {
     content: Option<String>,
 }
 
-struct SseBuffer {
-    buf: Vec<u8>,
-}
-
-impl SseBuffer {
-    fn new() -> Self {
-        Self { buf: Vec::new() }
-    }
-
-    /// Push new bytes and drain any complete SSE frames.
-    /// Returns the `data:` payload of each frame.
-    fn push_and_drain(&mut self, chunk: &[u8]) -> Vec<String> {
-        self.buf.extend_from_slice(chunk);
-        let mut frames = Vec::new();
-        while let Some(end) = self.buf.windows(2).position(|w| w == b"\n\n") {
-            let raw: Vec<u8> = self.buf.drain(..=end + 1).collect();
-            let text = String::from_utf8_lossy(&raw[..raw.len().saturating_sub(2)]);
-            if let Some(data) = text.lines().find_map(|l| l.strip_prefix("data: ")) {
-                frames.push(data.to_owned());
-            }
-        }
-        frames
-    }
-}
-
 // Embedding types
 
 #[derive(serde::Serialize)]
@@ -226,7 +202,8 @@ pub(crate) async fn chat(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/chat/completions");
 
-    let response_text = send_request(config, &api_key, &url, &request).await?;
+    let auth = format!("Bearer {api_key}");
+    let response_text = send_request(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
     let chat_response: ChatResponse = serde_json::from_str(&response_text)?;
     let first_choice = chat_response
         .choices
@@ -269,7 +246,8 @@ pub(crate) async fn chat_stream(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/chat/completions");
 
-    let response = send_request_stream(config, &api_key, &url, &request).await?;
+    let auth = format!("Bearer {api_key}");
+    let response = send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
 
     let buf = SseBuffer::new();
 
@@ -345,59 +323,12 @@ pub(crate) async fn embed(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/embeddings");
 
-    let response_text = send_request(config, &api_key, &url, &request).await?;
+    let auth = format!("Bearer {api_key}");
+    let response_text = send_request(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
     let embed_response: EmbeddingResponse = serde_json::from_str(&response_text)?;
     let first_data = embed_response
         .data
         .first()
         .ok_or(ConnectorError::NoEmbeddings)?;
     Ok(first_data.embedding.clone())
-}
-
-async fn send_request(
-    config: &ProviderConfig,
-    api_key: &str,
-    url: &str,
-    body: &(impl serde::Serialize + Sync),
-) -> Result<String, ConnectorError> {
-    let response = send_request_stream(config, api_key, url, body).await?;
-    Ok(response.text().await?)
-}
-
-async fn send_request_stream(
-    config: &ProviderConfig,
-    api_key: &str,
-    url: &str,
-    body: &(impl serde::Serialize + Sync),
-) -> Result<reqwest::Response, ConnectorError> {
-    let client = reqwest::Client::new();
-    let mut request_builder = client
-        .post(url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json");
-
-    if config.needs_extra_headers {
-        request_builder = request_builder
-            .header("HTTP-Referer", "https://localhost")
-            .header("X-Title", "provider");
-    }
-
-    let json_body = serde_json::to_string(body)?;
-    let response = request_builder.body(json_body).send().await?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unable to read error response".to_string());
-        let error_msg = format!("HTTP {} - {}", status.as_u16(), error_text);
-        log::error!("HTTP Error captured: {error_msg}");
-        return Err(ConnectorError::HttpError {
-            status: status.as_u16(),
-            body: error_text,
-        });
-    }
-
-    Ok(response)
 }

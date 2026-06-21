@@ -124,9 +124,24 @@ pub fn connector(port: u16) -> Connector {
         .with_api_key("sk-test")
 }
 
+/// Build a Claude Connector pointed at a mock server on the given port.
+pub fn claude_connector(port: u16) -> Connector {
+    Connector::new("claude")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}"))
+        .with_api_key("sk-ant-test")
+}
+
 /// Like `connector()` but without an API key — for testing env var fallback.
 pub fn connector_no_key(port: u16) -> Connector {
     Connector::new("openai")
         .unwrap()
         .with_base_url(format!("http://127.0.0.1:{port}/v1"))
+}
+
+/// Like `claude_connector()` but without an API key — for testing env var fallback.
+pub fn claude_connector_no_key(port: u16) -> Connector {
+    Connector::new("claude")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}"))
 }
