@@ -39,7 +39,7 @@ impl Connector {
 
     /// Create a new Connector for the given provider name.
     ///
-    /// Supported providers: `openai`, `groq`, `mistral`, `together`, `openrouter`,
+    /// Supported providers: `claude`, `openai`, `groq`, `mistral`, `together`, `openrouter`,
     /// `xai`, `deepseek`, `perplexity`, `fireworks`, `cohere`, `huggingface`,
     /// `sambanova`, `poe`, `cerebras`, `nvidia`, `anyscale`, `vercel`, `cloudflare`,
     /// `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `gemini`.
@@ -272,7 +272,9 @@ impl Connector {
     pub async fn list_models(&self) -> Result<LsOutput, ConnectorError> {
         let provider = self.provider()?;
         match provider.family {
-            Family::OpenAICompatible => openai_compatible::list_models(provider, &self.params).await,
+            Family::OpenAICompatible => {
+                openai_compatible::list_models(provider, &self.params).await
+            }
             Family::Gemini => gemini::list_models(provider, &self.params).await,
             Family::Claude => claude::list_models(provider, &self.params).await,
         }
