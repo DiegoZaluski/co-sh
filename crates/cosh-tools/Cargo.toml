@@ -18,6 +18,9 @@ path = "../cosh-sdk"
 version = "1.52.3"
 features = ["rt", "macros"]
 
+[dev-dependencies.proptest]
+version = "1"
+
 
 [dependencies.tokio]
 version = "1.52.3"
