@@ -23,6 +23,9 @@ default-features = false
 version = "1.52.3"
 features = ["full"]
 
+[dependencies.tokio-stream]
+version = "0.1"
+
 [dependencies.xxhash-rust]
 version = "0.8"
 features = ["xxh32"]
