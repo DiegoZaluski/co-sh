@@ -4,8 +4,7 @@ use tempfile::TempDir;
 
 fn make_cache(tmp: &TempDir) -> NamespaceCache {
     let path = tmp.path().join("cache.toml");
-    NamespaceCache::new()
-        .with_cache_file(path.display().to_string())
+    NamespaceCache::new().with_cache_file(path.display().to_string())
 }
 
 #[test]
@@ -139,8 +138,7 @@ fn with_cache_file_writes_to_custom_path() {
     let tmp = TempDir::new().unwrap();
     let custom = tmp.path().join("custom-cache.toml");
 
-    let mut cache = NamespaceCache::new()
-        .with_cache_file(custom.display().to_string());
+    let mut cache = NamespaceCache::new().with_cache_file(custom.display().to_string());
     cache.set_context("s", "n", "data");
     cache.mark_modified("desc".into());
     cache.flush().unwrap();
