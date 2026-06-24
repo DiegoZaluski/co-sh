@@ -4,145 +4,134 @@ use tempfile::TempDir;
 
 fn make_cache(tmp: &TempDir) -> NamespaceCache {
     let path = tmp.path().join("cache.toml");
-    NamespaceCache::new("server-a", "fs", "file content", "a tool")
+    NamespaceCache::new()
         .with_cache_file(path.display().to_string())
 }
 
 #[test]
-fn build_returns_valid_toml() {
+fn verify_returns_modified_when_no_cache() {
+    let tmp = TempDir::new().unwrap();
+    let mut cache = make_cache(&tmp);
+    cache.set_context("server-a", "fs", "file content");
+
+    assert_eq!(cache.verify(), Verification::Modified);
+}
+
+#[test]
+fn verify_returns_synced_when_cache_matches() {
+    let tmp = TempDir::new().unwrap();
+    let mut cache = make_cache(&tmp);
+    cache.set_context("server-a", "fs", "file content");
+    cache.mark_modified("a tool".into());
+    cache.flush().unwrap();
+
+    // fresh instance reading the same file
+    let mut cache2 = make_cache(&tmp);
+    cache2.set_context("server-a", "fs", "file content");
+    assert_eq!(cache2.verify(), Verification::Synced);
+}
+
+#[test]
+fn verify_returns_modified_when_content_differs() {
+    let tmp = TempDir::new().unwrap();
+    let mut cache = make_cache(&tmp);
+    cache.set_context("s", "n", "v1");
+    cache.mark_modified("".into());
+    cache.flush().unwrap();
+
+    let mut cache2 = make_cache(&tmp);
+    cache2.set_context("s", "n", "v2");
+    assert_eq!(cache2.verify(), Verification::Modified);
+}
+
+#[test]
+fn verify_returns_modified_when_entry_unknown() {
+    let tmp = TempDir::new().unwrap();
+    let mut cache = make_cache(&tmp);
+    cache.set_context("server-x", "unknown-ns", "any");
+
+    assert_eq!(cache.verify(), Verification::Modified);
+}
+
+#[test]
+fn set_context_changes_hash_when_content_changes() {
     let tmp = TempDir::new().unwrap();
     let mut cache = make_cache(&tmp);
 
-    let toml = cache.build().unwrap();
+    cache.set_context("s", "n", "hello");
+    let hash_a = cache.hash();
 
-    assert!(toml.starts_with("[server-a.fs]"), "unexpected toml: {toml}");
-    assert!(toml.contains("hash ="));
-    assert!(toml.contains("description"));
+    cache.set_context("s", "n", "world");
+    let hash_b = cache.hash();
+
+    assert_ne!(hash_a, hash_b);
 }
 
 #[test]
-fn build_changes_hash_when_content_changes() {
+fn flush_creates_valid_toml() {
     let tmp = TempDir::new().unwrap();
-    let mut a = NamespaceCache::new("s", "n", "hello", "").with_cache_file(tmp.path().join("a.toml").display().to_string());
-    let mut b = NamespaceCache::new("s", "n", "world", "").with_cache_file(tmp.path().join("b.toml").display().to_string());
+    let mut cache = make_cache(&tmp);
+    cache.set_context("server-a", "fs", "file content");
+    cache.mark_modified("a tool".into());
+    cache.flush().unwrap();
 
-    a.build().unwrap();
-    b.build().unwrap();
-
-    assert_ne!(a.hash(), b.hash());
+    let path = tmp.path().join("cache.toml");
+    let content = std::fs::read_to_string(path).unwrap();
+    assert!(content.starts_with("[server-a.fs]"));
+    assert!(content.contains("hash ="));
+    assert!(content.contains("description"));
 }
 
 #[test]
-fn get_cache_returns_empty_when_no_file() {
+fn flush_persists_description() {
+    let tmp = TempDir::new().unwrap();
+    let mut cache = make_cache(&tmp);
+    cache.set_context("server-a", "fs", "file content");
+    cache.mark_modified("my description".into());
+    cache.flush().unwrap();
+
+    // read back and verify
+    let mut cache2 = make_cache(&tmp);
+    cache2.set_context("server-a", "fs", "file content");
+    // should be synced because content + description match the flushed file
+    assert_eq!(cache2.verify(), Verification::Synced);
+}
+
+#[test]
+fn flush_is_noop_when_not_dirty() {
     let tmp = TempDir::new().unwrap();
     let cache = make_cache(&tmp);
+    // no mark_modified called
+    cache.flush().unwrap();
 
-    let result = cache.get_cache().unwrap();
-
-    assert!(result.is_empty());
+    let path = tmp.path().join("cache.toml");
+    assert!(!path.exists());
 }
 
 #[test]
-fn set_then_get_cache_roundtrip() {
+fn multi_entry_roundtrip() {
     let tmp = TempDir::new().unwrap();
     let mut cache = make_cache(&tmp);
 
-    let toml = cache.build().unwrap();
-    cache.set_cache(&toml).unwrap();
+    // first entry
+    cache.set_context("server-a", "fs", "content-1");
+    cache.mark_modified("desc-1".into());
 
-    let loaded = cache.get_cache().unwrap();
-    let entry = loaded
-        .get("server-a")
-        .and_then(|s| s.get("fs"))
-        .unwrap();
+    // second entry
+    cache.set_context("server-a", "git", "content-2");
+    cache.mark_modified("desc-2".into());
 
-    assert_eq!(entry.hash, cache.hash());
-    assert_eq!(entry.description, "a tool");
-}
+    cache.flush().unwrap();
 
-#[test]
-fn run_returns_modified_when_no_cache() {
-    let tmp = TempDir::new().unwrap();
-    let mut cache = make_cache(&tmp);
-
-    let result = cache.run().unwrap();
-
-    assert_eq!(result, Verification::Modified);
-}
-
-#[test]
-fn run_returns_synced_when_cache_matches() {
-    let tmp = TempDir::new().unwrap();
-    let mut cache = make_cache(&tmp);
-
-    let toml = cache.build().unwrap();
-    cache.set_cache(&toml).unwrap();
-
-    // fresh instance reading same file
     let mut cache2 = make_cache(&tmp);
-    let result = cache2.run().unwrap();
+    cache2.set_context("server-a", "fs", "content-1");
+    assert_eq!(cache2.verify(), Verification::Synced);
 
-    assert_eq!(result, Verification::Synced);
-}
+    cache2.set_context("server-a", "git", "content-2");
+    assert_eq!(cache2.verify(), Verification::Synced);
 
-#[test]
-fn run_returns_modified_when_content_differs() {
-    let tmp = TempDir::new().unwrap();
-    let mut cache = NamespaceCache::new("s", "n", "v1", "")
-        .with_cache_file(tmp.path().join("c.toml").display().to_string());
-
-    let toml = cache.build().unwrap();
-    cache.set_cache(&toml).unwrap();
-
-    // same server+name, but different content hash
-    let mut cache2 = NamespaceCache::new("s", "n", "v2", "")
-        .with_cache_file(tmp.path().join("c.toml").display().to_string());
-
-    let result = cache2.run().unwrap();
-    assert_eq!(result, Verification::Modified);
-}
-
-#[test]
-fn run_returns_modified_when_entry_unknown() {
-    let tmp = TempDir::new().unwrap();
-    let mut cache = NamespaceCache::new("server-x", "unknown-ns", "any", "")
-        .with_cache_file(tmp.path().join("d.toml").display().to_string());
-
-    let result = cache.run().unwrap();
-
-    assert_eq!(result, Verification::Modified);
-}
-
-#[test]
-fn update_persists_new_description() {
-    let tmp = TempDir::new().unwrap();
-    let mut cache = make_cache(&tmp);
-
-    // first write via run to populate cache
-    cache.run().unwrap();
-    cache.update("updated description".into()).unwrap();
-
-    // read back
-    let loaded = cache.get_cache().unwrap();
-    let entry = loaded
-        .get("server-a")
-        .and_then(|s| s.get("fs"))
-        .unwrap();
-
-    assert_eq!(entry.description, "updated description");
-    assert_eq!(entry.hash, cache.hash());
-}
-
-#[test]
-fn update_builds_automatically_if_hash_is_zero() {
-    let tmp = TempDir::new().unwrap();
-    let mut cache = make_cache(&tmp);
-
-    // hash is 0, build never called
-    assert_eq!(cache.hash(), 0);
-    cache.update("desc".into()).unwrap();
-
-    assert_ne!(cache.hash(), 0);
+    cache2.set_context("server-a", "fs", "content-changed");
+    assert_eq!(cache2.verify(), Verification::Modified);
 }
 
 #[test]
@@ -150,13 +139,26 @@ fn with_cache_file_writes_to_custom_path() {
     let tmp = TempDir::new().unwrap();
     let custom = tmp.path().join("custom-cache.toml");
 
-    let mut cache = NamespaceCache::new("s", "n", "data", "desc")
+    let mut cache = NamespaceCache::new()
         .with_cache_file(custom.display().to_string());
-
-    let toml = cache.build().unwrap();
-    cache.set_cache(&toml).unwrap();
+    cache.set_context("s", "n", "data");
+    cache.mark_modified("desc".into());
+    cache.flush().unwrap();
 
     assert!(custom.exists());
+}
+
+#[test]
+fn hash_is_zero_before_set_context() {
+    let cache = NamespaceCache::new();
+    assert_eq!(cache.hash(), 0);
+}
+
+#[test]
+fn hash_is_nonzero_after_set_context() {
+    let mut cache = NamespaceCache::new();
+    cache.set_context("s", "n", "some content");
+    assert_ne!(cache.hash(), 0);
 }
 
 #[test]

@@ -1,23 +1,27 @@
 //! On-disk hash cache for tool namespaces — avoids unnecessary re-fetches.
 //!
-//! [`NamespaceCache`] stores the xxHash of each namespace's content in a local
-//! TOML file. On the next run it compares the current hash against the stored
-//! one and returns [`Verification::Synced`] (unchanged) or
-//! [`Verification::Modified`] (needs refresh).
+//! Uses a **write-back** strategy: the TOML cache is loaded into memory once
+//! at construction. All verification and updates happen in memory. At the end
+//! of the session call [`flush()`] to persist changes to disk in a single
+//! write.
 //!
 //! # Quick start
 //!
 //! ```rust,ignore
-//! let mut cache = NamespaceCache::new("server-a", "filesystem", "content", "desc")
+//! let mut cache = NamespaceCache::new()
 //!     .with_cache_file("cache.toml");
 //!
-//! match cache.run()? {
-//!     Verification::Synced => println!("cache is fresh"),
-//!     Verification::Modified => {
-//!         println!("hash changed, re-fetch needed");
-//!         cache.update("new description".into())?;
+//! for tool in tools {
+//!     cache.set_context(&tool.server, &tool.ns, &tool.content, &tool.desc);
+//!     match cache.verify() {
+//!         Verification::Synced => {},
+//!         Verification::Modified => {
+//!             // re-fetch the namespace, then mark
+//!             cache.mark_modified("new description".into());
+//!         },
 //!     }
 //! }
+//! cache.flush()?;
 //! ```
 //!
 //! # File format
@@ -33,8 +37,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 use xxhash_rust::xxh32::xxh32;
-
-const CACHE_FILE: &str = "cache-namespace-tools.toml";
 
 #[derive(Debug)]
 pub enum CacheError {
@@ -91,13 +93,13 @@ pub struct CacheData {
 }
 
 pub struct NamespaceCache {
+    cache_file: Option<String>,
+    cache: HashMap<String, HashMap<String, CacheData>>,
+    dirty: bool,
     name_server: String,
     name: String,
     content: String,
-    description: String,
     hash: u32,
-    cache: HashMap<String, HashMap<String, CacheData>>,
-    cache_file: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -108,117 +110,64 @@ pub enum Verification {
 
 impl NamespaceCache {
     #[must_use]
-    pub fn new(
-        name_server: impl Into<String>,
-        name: impl Into<String>,
-        content: impl Into<String>,
-        description: impl Into<String>,
-    ) -> Self {
+    pub fn new() -> Self {
         Self {
-            name_server: name_server.into(),
-            name: name.into(),
-            content: content.into(),
-            description: description.into(),
-            hash: 0,
+            cache_file: None,
             cache: HashMap::new(),
-            cache_file: CACHE_FILE.to_string(),
+            dirty: false,
+            name_server: String::new(),
+            name: String::new(),
+            content: String::new(),
+            hash: 0,
         }
     }
 
+    /// Sets the cache file path and loads its contents into memory.
+    ///
+    /// If the file does not exist or is corrupt, an empty cache is used.
     #[must_use]
     pub fn with_cache_file(mut self, path: impl Into<String>) -> Self {
-        self.cache_file = path.into();
+        let path = path.into();
+        if Path::new(&path).exists() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(parsed) = toml::from_str(&content) {
+                    self.cache = parsed;
+                }
+            }
+        }
+        self.cache_file = Some(path);
         self
     }
 
-    /// Builds a TOML string for the current cache entry.
+    /// Sets the current tool context and computes its content hash.
     ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Serialize`] if serialization fails.
-    pub fn build(&mut self) -> Result<String, CacheError> {
-        let cache_data = CacheData {
-            hash: xxh32(self.content.as_bytes(), 0),
-            description: self.description.clone(),
-        };
-        self.hash = cache_data.hash;
-
-        let mut servers = HashMap::new();
-        let mut namespaces = HashMap::new();
-        namespaces.insert(self.name.clone(), cache_data);
-        servers.insert(self.name_server.clone(), namespaces);
-
-        Ok(toml::to_string_pretty(&servers)?)
+    /// Must be called before [`verify()`] or [`mark_modified()`].
+    pub fn set_context(&mut self, name_server: &str, name: &str, content: &str) {
+        self.name_server = name_server.to_string();
+        self.name = name.to_string();
+        self.content = content.to_string();
+        self.hash = xxh32(content.as_bytes(), 0);
     }
 
-    /// Writes a TOML string to the cache file on disk.
+    /// Checks whether the current tool's content matches the cached hash.
     ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Io`] if the file cannot be written.
-    pub fn set_cache(&self, toml_str: &str) -> Result<(), CacheError> {
-        Ok(std::fs::write(&self.cache_file, toml_str)?)
-    }
-
-    /// Reads and deserializes the cache file from disk.
-    ///
-    /// Returns an empty [`HashMap`] if the file does not exist.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Io`] if the file cannot be read, or
-    /// [`CacheError::Deserialize`] if the content is invalid TOML.
-    pub fn get_cache(&self) -> Result<HashMap<String, HashMap<String, CacheData>>, CacheError> {
-        let path = Path::new(&self.cache_file);
-        if !path.exists() {
-            return Ok(HashMap::new());
-        }
-
-        let content = std::fs::read_to_string(path)?;
-        Ok(toml::from_str(&content)?)
-    }
-
-    /// Checks whether the cached entry matches the current content.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Io`] or [`CacheError::Deserialize`] if the
-    /// cache file cannot be read, or [`CacheError::Serialize`] if the
-    /// new entry cannot be built.
-    pub fn run(&mut self) -> Result<Verification, CacheError> {
-        let old_cache = self.get_cache()?;
-        let _ = self.build()?;
-
-        let cached_hash = old_cache
+    /// Pure in-memory operation — no I/O.
+    #[must_use]
+    pub fn verify(&self) -> Verification {
+        match self
+            .cache
             .get(&self.name_server)
             .and_then(|s| s.get(&self.name))
-            .map(|entry| entry.hash);
-
-        match cached_hash {
-            Some(old_hash) if old_hash == self.hash => Ok(Verification::Synced),
-            _ => {
-                self.cache = old_cache;
-                Ok(Verification::Modified)
-            }
+        {
+            Some(entry) if entry.hash == self.hash => Verification::Synced,
+            _ => Verification::Modified,
         }
     }
 
-    /// Updates the cache entry with a new description and persists to disk.
+    /// Updates the in-memory cache entry for the current tool.
     ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Serialize`] if serialization fails, or
-    /// [`CacheError::Io`] if the file cannot be written.
-    #[must_use]
-    pub fn hash(&self) -> u32 {
-        self.hash
-    }
-
-    pub fn update(&mut self, description: String) -> Result<(), CacheError> {
-        if self.hash == 0 {
-            self.build()?;
-        }
-
+    /// Changes are not written to disk until [`flush()`] is called.
+    pub fn mark_modified(&mut self, description: String) {
         let entry = self
             .cache
             .entry(self.name_server.clone())
@@ -228,12 +177,70 @@ impl NamespaceCache {
                 hash: 0,
                 description: String::new(),
             });
-
         entry.hash = self.hash;
         entry.description = description;
+        self.dirty = true;
+    }
 
-        let toml_str = toml::to_string_pretty(&self.cache.clone())?;
+    /// Writes the in-memory cache to disk as a single TOML file.
+    ///
+    /// No-op if no entries have been marked as modified.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CacheError::Serialize`] if serialization fails, or
+    /// [`CacheError::Io`] if the file cannot be written.
+    pub fn flush(&self) -> Result<(), CacheError> {
+        if !self.dirty {
+            return Ok(());
+        }
+        let Some(ref file) = self.cache_file else {
+            return Ok(());
+        };
+        let toml_str = toml::to_string_pretty(&self.cache)?;
+        Ok(std::fs::write(file, &toml_str)?)
+    }
 
-        self.set_cache(&toml_str)
+    /// Returns a reference to the entire in-memory cache tree.
+    ///
+    /// Useful for iterating over all cached entries or building context
+    /// for LLM prompts without hitting disk.
+    ///
+    /// ```rust,ignore
+    /// for (server, namespaces) in cache.cached() {
+    ///     for (name, data) in namespaces {
+    ///         prompt.push_str(&format!("[{server}:{name}] {}\n", data.description));
+    ///     }
+    /// }
+    /// ```
+    #[must_use]
+    pub fn cached(&self) -> &HashMap<String, HashMap<String, CacheData>> {
+        &self.cache
+    }
+
+    /// Looks up a cached description for a given server + namespace.
+    ///
+    /// Returns `None` if the entry does not exist.
+    ///
+    /// ```rust,ignore
+    /// let summary = cache.get_description("my-server", "filesystem");
+    /// ```
+    #[must_use]
+    pub fn get_description(&self, name_server: &str, name: &str) -> Option<&str> {
+        self.cache
+            .get(name_server)
+            .and_then(|s| s.get(name))
+            .map(|entry| entry.description.as_str())
+    }
+
+    #[must_use]
+    pub fn hash(&self) -> u32 {
+        self.hash
+    }
+}
+
+impl Default for NamespaceCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
