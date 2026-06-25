@@ -1,5 +1,5 @@
-use super::{entry, ParseOptions};
-use crate::extract_action::jsonish::{error::JsonishError, Value};
+use super::{ParseOptions, entry};
+use crate::extract_action::jsonish::{Value, error::JsonishError};
 
 pub fn parse(str: &str, options: &ParseOptions) -> Result<Vec<Value>, JsonishError> {
     // Find all balanced JSON objects but w/o any fixes.
@@ -120,15 +120,17 @@ print("Hello, world!")
             let Value::AnyOf(value, _) = value else {
                 panic!("Expected AnyOf, got {value:#?}");
             };
-            assert!(value.contains(&Value::Object(
-                [(
-                    "a".to_string(),
-                    Value::Number((1).into(), CompletionState::Complete)
-                )]
-                .into_iter()
-                .collect(),
-                CompletionState::Complete
-            )));
+            assert!(
+                value.contains(&Value::Object(
+                    [(
+                        "a".to_string(),
+                        Value::Number((1).into(), CompletionState::Complete)
+                    )]
+                    .into_iter()
+                    .collect(),
+                    CompletionState::Complete
+                ))
+            );
         }
         {
             let value = &res[1];

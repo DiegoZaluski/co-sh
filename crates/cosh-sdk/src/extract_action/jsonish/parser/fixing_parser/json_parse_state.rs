@@ -1,7 +1,9 @@
 use std::iter::Peekable;
 
 use super::json_collection::JsonCollection;
-use crate::extract_action::jsonish::{error::JsonishError, value::CompletionState, value::Fixes, Value};
+use crate::extract_action::jsonish::{
+    Value, error::JsonishError, value::CompletionState, value::Fixes,
+};
 
 /// Tracks quote and backslash state incrementally for quoted strings
 /// to avoid O(n²) rescanning when determining if a quote closes a string.
@@ -295,8 +297,7 @@ impl JsonParseState {
                     let is_null = current_value.trim().eq_ignore_ascii_case("null");
                     let is_identifier =
                         !(current_value.contains(' ') || current_value.contains('('));
-                    let is_possible_value =
-                        is_numeric || is_bool || is_null || is_identifier;
+                    let is_possible_value = is_numeric || is_bool || is_null || is_identifier;
 
                     if let Some((_, next_c)) = next.peek() {
                         match next_c {
@@ -315,14 +316,16 @@ impl JsonParseState {
                                 let mut buffer = ",".to_string();
                                 let mut anything_but_whitespace = false;
                                 while let Some((_, next_next_c)) = next.next() {
-                                    anything_but_whitespace = anything_but_whitespace
-                                        || !next_next_c.is_whitespace();
+                                    anything_but_whitespace =
+                                        anything_but_whitespace || !next_next_c.is_whitespace();
                                     buffer.push(next_next_c);
                                     match next_next_c {
                                         ' ' => {}
                                         '\n' => {
                                             if !anything_but_whitespace {
-                                                log::debug!("Closing due to: newline after comma + space");
+                                                log::debug!(
+                                                    "Closing due to: newline after comma + space"
+                                                );
                                                 return CloseStringResult::Close(
                                                     idx,
                                                     CompletionState::Complete,
@@ -338,7 +341,9 @@ impl JsonParseState {
                                             }
                                         }
                                         '"' => {
-                                            log::debug!("Closing due to: new key after space + comma");
+                                            log::debug!(
+                                                "Closing due to: new key after space + comma"
+                                            );
                                             return CloseStringResult::Close(
                                                 idx,
                                                 CompletionState::Complete,
@@ -603,54 +608,52 @@ impl JsonParseState {
                     self.consume(token)
                 }
             }
-            '\\' => {
-                match next.peek() {
-                    Some((_, 'n')) => {
-                        self.consume('\n')?;
-                        Ok(1)
-                    }
-                    Some((_, 't')) => {
-                        self.consume('\t')?;
-                        Ok(1)
-                    }
-                    Some((_, 'r')) => {
-                        self.consume('\r')?;
-                        Ok(1)
-                    }
-                    Some((_, 'b')) => {
-                        self.consume('\x08')?;
-                        Ok(1)
-                    }
-                    Some((_, 'f')) => {
-                        self.consume('\x0C')?;
-                        Ok(1)
-                    }
-                    Some((_, '\\')) => {
-                        self.consume('\\')?;
-                        Ok(1)
-                    }
-                    Some((_, '"')) => {
-                        self.consume('"')?;
-                        Ok(1)
-                    }
-                    Some((_, 'u')) => {
-                        let mut buffer = String::new();
-                        buffer.push(token);
-                        for _ in 0..4 {
-                            if let Some((_, c)) = next.next() {
-                                buffer.push(c);
-                            } else {
-                                break;
-                            }
-                        }
-                        for c in buffer.chars() {
-                            let _ = self.consume(c);
-                        }
-                        Ok(5)
-                    }
-                    _ => self.consume(token),
+            '\\' => match next.peek() {
+                Some((_, 'n')) => {
+                    self.consume('\n')?;
+                    Ok(1)
                 }
-            }
+                Some((_, 't')) => {
+                    self.consume('\t')?;
+                    Ok(1)
+                }
+                Some((_, 'r')) => {
+                    self.consume('\r')?;
+                    Ok(1)
+                }
+                Some((_, 'b')) => {
+                    self.consume('\x08')?;
+                    Ok(1)
+                }
+                Some((_, 'f')) => {
+                    self.consume('\x0C')?;
+                    Ok(1)
+                }
+                Some((_, '\\')) => {
+                    self.consume('\\')?;
+                    Ok(1)
+                }
+                Some((_, '"')) => {
+                    self.consume('"')?;
+                    Ok(1)
+                }
+                Some((_, 'u')) => {
+                    let mut buffer = String::new();
+                    buffer.push(token);
+                    for _ in 0..4 {
+                        if let Some((_, c)) = next.next() {
+                            buffer.push(c);
+                        } else {
+                            break;
+                        }
+                    }
+                    for c in buffer.chars() {
+                        let _ = self.consume(c);
+                    }
+                    Ok(5)
+                }
+                _ => self.consume(token),
+            },
             _ => self.consume(token),
         }
     }
@@ -748,15 +751,13 @@ impl JsonParseState {
         mut next: Peekable<impl Iterator<Item = (usize, char)>>,
     ) -> Result<usize, JsonishError> {
         match token {
-            '*' => {
-                match next.peek() {
-                    Some((_, '/')) => {
-                        self.complete_collection(CompletionState::Complete);
-                        Ok(1)
-                    }
-                    _ => Ok(0),
+            '*' => match next.peek() {
+                Some((_, '/')) => {
+                    self.complete_collection(CompletionState::Complete);
+                    Ok(1)
                 }
-            }
+                _ => Ok(0),
+            },
             _ => self.consume(token),
         }
     }
@@ -775,10 +776,7 @@ impl JsonParseState {
 
         if is_triple_quoted {
             self.collection_stack.push((
-                JsonCollection::TripleQuotedString(
-                    String::new(),
-                    CompletionState::Incomplete,
-                ),
+                JsonCollection::TripleQuotedString(String::new(), CompletionState::Incomplete),
                 Vec::default(),
             ));
             return 2;
@@ -826,20 +824,14 @@ impl JsonParseState {
         match next.peek() {
             Some((_, '/')) => {
                 self.collection_stack.push((
-                    JsonCollection::TrailingComment(
-                        String::new(),
-                        CompletionState::Incomplete,
-                    ),
+                    JsonCollection::TrailingComment(String::new(), CompletionState::Incomplete),
                     Vec::default(),
                 ));
                 Some(1)
             }
             Some((_, '*')) => {
                 self.collection_stack.push((
-                    JsonCollection::BlockComment(
-                        String::new(),
-                        CompletionState::Incomplete,
-                    ),
+                    JsonCollection::BlockComment(String::new(), CompletionState::Incomplete),
                     Vec::default(),
                 ));
                 Some(1)
@@ -850,10 +842,7 @@ impl JsonParseState {
                     Some((JsonCollection::Object(_, _, _), _))
                 ) {
                     self.collection_stack.push((
-                        JsonCollection::UnquotedString(
-                            token.into(),
-                            CompletionState::Incomplete,
-                        ),
+                        JsonCollection::UnquotedString(token.into(), CompletionState::Incomplete),
                         Vec::default(),
                     ));
                     return Some(0);

@@ -7,5 +7,5 @@ mod parser;
 mod value;
 
 pub use error::JsonishError;
-pub use parser::{parse, ParseOptions};
+pub use parser::{ParseOptions, parse};
 pub use value::{CompletionState, Fixes, Value};

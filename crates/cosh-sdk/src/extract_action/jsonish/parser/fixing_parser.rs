@@ -3,12 +3,11 @@ mod json_parse_state;
 
 use self::json_parse_state::JsonParseState;
 use super::ParseOptions;
-use crate::extract_action::jsonish::{error::JsonishError, value::CompletionState, value::Fixes, Value};
+use crate::extract_action::jsonish::{
+    Value, error::JsonishError, value::CompletionState, value::Fixes,
+};
 
-pub fn parse(
-    str: &str,
-    _options: &ParseOptions,
-) -> Result<Vec<(Value, Vec<Fixes>)>, JsonishError> {
+pub fn parse(str: &str, _options: &ParseOptions) -> Result<Vec<(Value, Vec<Fixes>)>, JsonishError> {
     // Try to fix some common JSON issues
     // - Unquoted single word strings
     // - Single quoted strings
@@ -52,11 +51,11 @@ pub fn parse(
     // Determine what to return.
 
     match state.completed_values.len() {
-                    0 => Err(JsonishError("No JSON objects found".into())),
-        1 => state
-            .completed_values
-            .pop()
-            .map_or(Err(JsonishError("Failed to pop completed value".into())), |(_name, value, fixes)| Ok(vec![(value, fixes)])),
+        0 => Err(JsonishError("No JSON objects found".into())),
+        1 => state.completed_values.pop().map_or(
+            Err(JsonishError("Failed to pop completed value".into())),
+            |(_name, value, fixes)| Ok(vec![(value, fixes)]),
+        ),
         _ => {
             if state.completed_values.iter().all(|f| f.0 == "string") {
                 // If all the values are strings, return them as an array of strings
@@ -88,7 +87,7 @@ pub fn parse(
                     })
                     .collect();
                 match values.len() {
-        0 => Err(JsonishError("No JSON objects found".into())),
+                    0 => Err(JsonishError("No JSON objects found".into())),
                     _ => Ok(values),
                 }
             }

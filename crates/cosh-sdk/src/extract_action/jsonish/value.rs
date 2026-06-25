@@ -155,7 +155,11 @@ impl Value {
     #[must_use]
     pub fn completion_state(&self) -> &CompletionState {
         match self {
-            Value::String(_, s) | Value::Number(_, s) | Value::Object(_, s) | Value::Array(_, s) | Value::Markdown(_, _, s) => s,
+            Value::String(_, s)
+            | Value::Number(_, s)
+            | Value::Object(_, s)
+            | Value::Array(_, s)
+            | Value::Markdown(_, _, s) => s,
             Value::Boolean(_) | Value::Null | Value::FixedJson(_, _) => &CompletionState::Complete,
             Value::AnyOf(choices, _) => {
                 if choices
@@ -172,7 +176,9 @@ impl Value {
 
     pub fn complete_deeply(&mut self) {
         match self {
-            Value::String(_, s) | Value::Number(_, s) | Value::Markdown(_, _, s) => *s = CompletionState::Complete,
+            Value::String(_, s) | Value::Number(_, s) | Value::Markdown(_, _, s) => {
+                *s = CompletionState::Complete
+            }
             Value::Boolean(_) | Value::Null => {}
             Value::Object(kv_pairs, s) => {
                 *s = CompletionState::Complete;

@@ -1,11 +1,7 @@
 use std::sync::LazyLock;
 
 use super::ParseOptions;
-use crate::extract_action::jsonish::{
-    error::JsonishError,
-    parser::ParsingMode,
-    Value,
-};
+use crate::extract_action::jsonish::{Value, error::JsonishError, parser::ParsingMode};
 
 #[derive(Debug)]
 pub enum MarkdownResult {
@@ -173,15 +169,17 @@ print("Hello, world!")
             let Value::AnyOf(value, _) = value else {
                 panic!("Expected AnyOf, got {value:#?}");
             };
-            assert!(value.contains(&Value::Object(
-                [(
-                    "a".to_string(),
-                    Value::Number((1).into(), CompletionState::Complete)
-                )]
-                .into_iter()
-                .collect(),
-                CompletionState::Complete
-            )));
+            assert!(
+                value.contains(&Value::Object(
+                    [(
+                        "a".to_string(),
+                        Value::Number((1).into(), CompletionState::Complete)
+                    )]
+                    .into_iter()
+                    .collect(),
+                    CompletionState::Complete
+                ))
+            );
         }
         {
             let (tag, value) = if let MarkdownResult::CodeBlock(tag, value) = &res[1] {
@@ -265,8 +263,8 @@ dolor sit amet
     }
 
     #[test]
-    fn fence_like_sequence_inside_triple_backtick_string_does_not_split_markdown_blocks(
-    ) -> Result<(), JsonishError> {
+    fn fence_like_sequence_inside_triple_backtick_string_does_not_split_markdown_blocks()
+    -> Result<(), JsonishError> {
         let res = parse(
             r#"
 ```json

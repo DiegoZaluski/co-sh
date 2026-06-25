@@ -1,5 +1,5 @@
-use crate::extract_action::jsonish::value::CompletionState;
 use crate::extract_action::jsonish::Value;
+use crate::extract_action::jsonish::value::CompletionState;
 
 #[derive(Debug)]
 pub enum JsonCollection {
@@ -66,7 +66,7 @@ impl From<JsonCollection> for Option<Value> {
     fn from(collection: JsonCollection) -> Option<Value> {
         Some(match collection {
             JsonCollection::TrailingComment(_, _) | JsonCollection::BlockComment(_, _) => {
-                return None
+                return None;
             }
             JsonCollection::Object(keys, values, object_completion) => {
                 // log::debug!("keys: {:?}", keys);
@@ -127,7 +127,9 @@ struct DedentResult {
 fn dedent(s: &str) -> DedentResult {
     let lines: Vec<&str> = s.lines().collect();
     if lines.len() <= 1 {
-        return DedentResult { content: s.to_string() };
+        return DedentResult {
+            content: s.to_string(),
+        };
     }
     let min_indent = lines
         .iter()
