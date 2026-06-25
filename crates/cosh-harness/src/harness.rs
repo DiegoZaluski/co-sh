@@ -2,13 +2,13 @@ use crate::namespace_cache::{CacheData, NamespaceCache, Verification};
 use crate::summarizer;
 
 use cosh_sdk::connector::Connector;
+use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use rmcp::ServiceExt;
 use rmcp::model::Tool;
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
-
 const CACHE_FILE: &str = "cache-namespace-tools.toml";
 
 pub struct NamespaceTool {
@@ -22,6 +22,7 @@ pub struct ServerSession {
     pub tools: Vec<Tool>,
     pub client: RunningService<RoleClient, ()>,
 }
+
 pub struct PromptSystem {
     pub title: String,
     pub text: String,
@@ -42,10 +43,10 @@ pub struct Harness {
     system_prompts: Vec<PromptSystem>,
     expanded_namespaces: HashSet<(String, String)>,
     internal_tools: Vec<InternalTool>,
-
     #[allow(dead_code)]
     /// To stop the agent loop.
     stop: bool,
+    tool_issuer: VecDeque<ToolCallData>,
 }
 
 impl Harness {
@@ -82,6 +83,7 @@ impl Harness {
             expanded_namespaces: HashSet::new(),
             internal_tools: vec![expand_namespace],
             stop: false,
+            tool_issuer: VecDeque::new(),
         }
     }
 
@@ -255,16 +257,72 @@ impl Harness {
         &self.header_context
     }
 
+    /// Build an extractor with all registered MCP and internal tools.
+    fn build_extractor(&self) -> ExtractAction {
+        let mut extractor = ExtractAction::new();
+        for session in &self.sessions {
+            for tool in &session.tools {
+                extractor.add_tool(ToolSchema {
+                    name: tool.name.to_string(),
+                    input_schema: serde_json::Value::Object((*tool.input_schema).clone()),
+                });
+            }
+        }
+        for tool in &self.internal_tools {
+            extractor.add_tool(ToolSchema {
+                name: tool.name.clone(),
+                input_schema: tool.input_schema.clone(),
+            });
+        }
+        extractor
+    }
+
+    /// Handle an internal tool call immediately, returning `true` if consumed.
+    pub(crate) fn handle_internal_tool(&mut self, tc: &ToolCallData) -> bool {
+        let Some(internal) = self.internal_tools.iter().find(|t| t.name == tc.name) else {
+            return false;
+        };
+        match internal.name.as_str() {
+            "expand_namespace" => {
+                if let (Some(server), Some(ns)) = (
+                    tc.arguments.get("server").and_then(|v| v.as_str()),
+                    tc.arguments.get("namespace").and_then(|v| v.as_str()),
+                ) {
+                    self.expanded_namespaces
+                        .insert((server.to_string(), ns.to_string()));
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
     /// Send a chat completion and return the full response as a single string.
     ///
     /// Use this when streaming is not enabled — the model's reply is collected
     /// entirely and returned as `Result<String, String>`.
     pub async fn chat(&mut self, input: &str) -> Result<String, String> {
-        self.connector
+        let out = self
+            .connector
             .chat_with_system(input, &self.header_context)
             .await
-            .map_err(|e| e.to_string())
-            .map(|out| out.message().to_string())
+            .map_err(|e| e.to_string())?;
+
+        let extractor = self.build_extractor();
+        let result = extractor.extract_batch(out.message());
+
+        let mut output = String::new();
+        for item in result.items {
+            match item {
+                Item::Text(t) => output.push_str(&t),
+                Item::ToolCall(tc) if !self.handle_internal_tool(&tc) => {
+                    self.tool_issuer.push_back(tc);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(output)
     }
 
     /// Stream a chat completion, calling `on_token` with each text delta.
@@ -276,19 +334,32 @@ impl Harness {
         input: &str,
         mut on_token: impl FnMut(&str),
     ) -> Result<String, String> {
+        use tokio_stream::StreamExt;
+
         let mut stream = self
             .connector
             .stream_chat_with_system(input, &self.header_context)
             .await
             .map_err(|e| e.to_string())?;
 
-        use tokio_stream::StreamExt;
+        let mut extractor = self.build_extractor();
+
         while let Some(content) = stream.next().await {
             let chunk = content.map_err(|err| err.to_string())?;
-            on_token(chunk.token());
+            match extractor.extract_stream(chunk.token()) {
+                StreamAction::Text(text) => on_token(&text),
+                StreamAction::ToolCall(tc) if !self.handle_internal_tool(&tc) => {
+                    self.tool_issuer.push_back(tc);
+                }
+                _ => {}
+            }
         }
 
         Ok("done".into())
+    }
+
+    pub async fn dispatch_next(&self) {
+        todo!()
     }
 }
 
