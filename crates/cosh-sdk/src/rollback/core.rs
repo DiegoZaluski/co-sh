@@ -36,7 +36,7 @@
 //!   rollback can itself be rolled back.
 
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use crate::hashline::{
     format::{compute_file_hash, format_hashline_header},
@@ -61,6 +61,10 @@ static SESSION: OnceLock<Arc<Mutex<InMemorySnapshotStore>>> = OnceLock::new();
 /// The store is a process-global singleton shared across all file tools.
 ///
 /// The store mutex is recovered transparently if poisoned.
+///
+/// # Panics
+///
+/// Panics if `MAX_PATHS` is zero (it is a compile-time constant guaranteed to be nonzero).
 #[must_use]
 pub fn session_store() -> &'static Arc<Mutex<InMemorySnapshotStore>> {
     SESSION.get_or_init(|| {
@@ -99,7 +103,7 @@ pub fn record(path: &str, text: &str) -> Option<String> {
     Some(
         session_store()
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .record(path, &normalized),
     )
 }
@@ -257,6 +261,12 @@ fn external_mod_warning(path: &str, disk_hash: &str, head_hash: Option<&str>) ->
 /// - A disk write error occurs.
 ///
 /// The store mutex is recovered transparently if poisoned.
+///
+/// # Panics
+///
+/// Panics if the history is empty when `hash` is `None` and the file does not
+/// exist on disk, as restoring to the head of history is impossible without a
+/// recorded version.
 pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
     let path = &input.path;
 
@@ -271,7 +281,7 @@ pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
     let (target_text, target_hash, warning) = {
         let mut store = session_store()
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
 
         let history = store.history(path);
         if history.is_empty() {
@@ -328,7 +338,7 @@ pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
     {
         let already_stored = session_store()
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .by_hash(path, &d.hash)
             .is_some();
         if !already_stored {
@@ -356,7 +366,7 @@ pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
     if input.hash.is_some() {
         session_store()
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .record(path, &target_text);
     }
     crate::tree_sitter::tree_sitter().invalidate(path);

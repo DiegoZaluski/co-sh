@@ -364,8 +364,7 @@ pub(crate) async fn list_models(
     let url = format!("{base_url}/models");
 
     let auth = format!("Bearer {api_key}");
-    let response_text =
-        send_get_request(config, &url, &[("Authorization", auth.as_str())]).await?;
+    let response_text = send_get_request(config, &url, &[("Authorization", auth.as_str())]).await?;
 
     let list: ListModelsResponse = serde_json::from_str(&response_text)?;
     let models: Vec<ModelInfo> = list

@@ -509,7 +509,11 @@ pub(crate) async fn list_models(
         .models
         .into_iter()
         .map(|entry| ModelInfo {
-            id: entry.name.strip_prefix("models/").unwrap_or(&entry.name).to_string(),
+            id: entry
+                .name
+                .strip_prefix("models/")
+                .unwrap_or(&entry.name)
+                .to_string(),
         })
         .collect();
 

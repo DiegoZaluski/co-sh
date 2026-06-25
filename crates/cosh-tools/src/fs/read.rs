@@ -66,10 +66,7 @@ async fn read_target(
             file_hash: String::new(),
             header: String::new(),
             content: String::new(),
-            warnings: Some(format!(
-                "read permission denied for `{}`",
-                target.path
-            )),
+            warnings: Some(format!("read permission denied for `{}`", target.path)),
         }],
         FsGuard::Mismatch(msg) => vec![ReadResult {
             path: target.path.to_string(),
