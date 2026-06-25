@@ -36,24 +36,36 @@ async fn chat_extracts_tool_call_into_queue() {
                 "required": ["path"]
             }),
         )
-        .with_mock_chat(Ok(r#"Some text before {"name": "filesystem.read", "arguments": {"path": "/a"}}"#));
+        .with_mock_chat(Ok(
+            r#"Some text before {"name": "filesystem.read", "arguments": {"path": "/a"}}"#,
+        ));
 
     let result = h.chat("use tool").await.unwrap();
 
-    assert_eq!(result, "Some text before ", "text before tool call preserved");
+    assert_eq!(
+        result, "Some text before ",
+        "text before tool call preserved"
+    );
 
     let err = h.dispatch_next().await.unwrap_err();
-    assert!(err.contains("no server found"), "tool queued but no session");
+    assert!(
+        err.contains("no server found"),
+        "tool queued but no session"
+    );
 }
 
 #[tokio::test]
 async fn chat_extracts_internal_tool_and_handles_immediately() {
-    let mut h = make_harness()
-        .with_mock_chat(Ok(r#"{"name": "expand_namespace", "arguments": {"server": "s1", "namespace": "ns1"}}"#));
+    let mut h = make_harness().with_mock_chat(Ok(
+        r#"{"name": "expand_namespace", "arguments": {"server": "s1", "namespace": "ns1"}}"#,
+    ));
 
     let result = h.chat("expand").await.unwrap();
 
-    assert!(result.is_empty(), "internal tool text should be empty: {result:?}");
+    assert!(
+        result.is_empty(),
+        "internal tool text should be empty: {result:?}"
+    );
 
     let err = h.dispatch_next().await.unwrap_err();
     assert!(err.contains("no pending tool calls"));

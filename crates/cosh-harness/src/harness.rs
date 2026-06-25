@@ -34,33 +34,9 @@ pub struct InternalTool {
     pub input_schema: serde_json::Value,
 }
 
-pub struct Harness {
-    connector: Connector,
-    sessions: Vec<ServerSession>,
-    live_cache: HashMap<String, HashMap<String, CacheData>>,
-    protocol: Option<String>, // add fallback ?
-    header_context: String,
-    system_prompts: Vec<PromptSystem>,
-    expanded_namespaces: HashSet<(String, String)>,
-    internal_tools: Vec<InternalTool>,
-    #[allow(dead_code)]
-    /// To stop the agent loop.
-    stop: bool,
-    tool_issuer: VecDeque<ToolCallData>,
-
-    #[cfg(test)]
-    pub(crate) mock_chat_response: Option<Result<String, String>>,
-    #[cfg(test)]
-    pub(crate) mock_stream_response: Option<Result<Vec<String>, String>>,
-    #[cfg(test)]
-    pub(crate) test_tools: Vec<ToolSchema>,
-}
-
-impl Harness {
-    #[must_use]
-    pub fn new(connector: Connector) -> Self {
-        // --- Tool System ---
-        let expand_namespace = InternalTool {
+fn default_internal_tools() -> Vec<InternalTool> {
+    vec![
+        InternalTool {
             name: "expand_namespace".into(),
             description: "Expand a namespace to see every available MCP tool inside it with their original descriptions and schemas. Call this when the summary alone is not enough to understand what the namespace offers.".into(),
             input_schema: serde_json::json!({
@@ -77,9 +53,42 @@ impl Harness {
                 },
                 "required": ["server", "namespace"]
             }),
-        };
+        },
+        InternalTool {
+            name: "stop_agent_loop".into(),
+            description: "Stop running the agent loop".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+    ]
+}
 
-        // --- Harness Setup ---
+pub struct Harness {
+    connector: Connector,
+    sessions: Vec<ServerSession>,
+    live_cache: HashMap<String, HashMap<String, CacheData>>,
+    protocol: Option<String>, // add fallback ?
+    header_context: String,
+    system_prompts: Vec<PromptSystem>,
+    expanded_namespaces: HashSet<(String, String)>,
+    internal_tools: Vec<InternalTool>,
+    /// To stop the agent loop.
+    stop: bool,
+    tool_issuer: VecDeque<ToolCallData>,
+
+    #[cfg(test)]
+    pub(crate) mock_chat_response: Option<Result<String, String>>,
+    #[cfg(test)]
+    pub(crate) mock_stream_response: Option<Result<Vec<String>, String>>,
+    #[cfg(test)]
+    pub(crate) test_tools: Vec<ToolSchema>,
+}
+
+impl Harness {
+    #[must_use]
+    pub fn new(connector: Connector) -> Self {
         Self {
             connector,
             sessions: Vec::new(),
@@ -88,7 +97,7 @@ impl Harness {
             header_context: String::new(),
             system_prompts: Vec::new(),
             expanded_namespaces: HashSet::new(),
-            internal_tools: vec![expand_namespace],
+            internal_tools: default_internal_tools(),
             stop: false,
             tool_issuer: VecDeque::new(),
 
@@ -324,6 +333,10 @@ impl Harness {
                 }
                 true
             }
+            "stop_agent_loop" => {
+                self.stop = true;
+                true
+            }
             _ => true,
         }
     }
@@ -495,18 +508,7 @@ impl Harness {
             header_context: String::new(),
             system_prompts: Vec::new(),
             expanded_namespaces: HashSet::new(),
-            internal_tools: vec![InternalTool {
-                name: "expand_namespace".into(),
-                description: "Expand a namespace to see every available MCP tool inside it with their original descriptions and schemas.".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "server": { "type": "string" },
-                        "namespace": { "type": "string" }
-                    },
-                    "required": ["server", "namespace"]
-                }),
-            }],
+            internal_tools: default_internal_tools(),
             stop: false,
             tool_issuer: VecDeque::new(),
             mock_chat_response: None,

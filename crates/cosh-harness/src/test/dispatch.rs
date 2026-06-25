@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use crate::harness::{Harness, ServerSession};
 use cosh_sdk::extract_action::ToolCallData;
+use rmcp::ErrorData as McpError;
+use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
     ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{MaybeSendFuture, RequestContext, RoleServer};
-use rmcp::ErrorData as McpError;
-use rmcp::ServiceExt;
 use serde_json::json;
 
 fn make_harness() -> Harness {
@@ -57,7 +57,12 @@ impl ServerHandler for IntegrityChecker {
         tool.input_schema = Arc::new(serde_json::Map::new());
 
         let tools = vec![tool];
-        async move { Ok(ListToolsResult { tools, ..Default::default() }) }
+        async move {
+            Ok(ListToolsResult {
+                tools,
+                ..Default::default()
+            })
+        }
     }
 }
 
@@ -92,7 +97,12 @@ impl ServerHandler for CrashOnCall {
         tool.input_schema = Arc::new(serde_json::Map::new());
 
         let tools = vec![tool];
-        async move { Ok(ListToolsResult { tools, ..Default::default() }) }
+        async move {
+            Ok(ListToolsResult {
+                tools,
+                ..Default::default()
+            })
+        }
     }
 }
 
@@ -158,11 +168,22 @@ async fn ok_session(
             tool.input_schema = Arc::new(serde_json::Map::new());
 
             let tools = vec![tool];
-            async move { Ok(ListToolsResult { tools, ..Default::default() }) }
+            async move {
+                Ok(ListToolsResult {
+                    tools,
+                    ..Default::default()
+                })
+            }
         }
     }
 
-    session_from_handler(server_name, OkServer { name: tool_name.into() }).await
+    session_from_handler(
+        server_name,
+        OkServer {
+            name: tool_name.into(),
+        },
+    )
+    .await
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
@@ -237,7 +258,9 @@ async fn dispatch_next_success_removes_from_queue() {
 async fn dispatch_next_preserves_item_on_server_error() {
     let (session, server_handle) = session_from_handler(
         "crash-server",
-        CrashOnCall { tool_name: "crash.tool".into() },
+        CrashOnCall {
+            tool_name: "crash.tool".into(),
+        },
     )
     .await;
 
@@ -250,11 +273,17 @@ async fn dispatch_next_preserves_item_on_server_error() {
 
     // Dispatch fails — server returned error
     let err = h.dispatch_next().await.unwrap_err();
-    assert!(err.contains("server crashed"), "expected server error, got: {err}");
+    assert!(
+        err.contains("server crashed"),
+        "expected server error, got: {err}"
+    );
 
     // Item should STILL be in queue — dispatch_next preserves on failure.
     let err2 = h.dispatch_next().await.unwrap_err();
-    assert!(err2.contains("server crashed"), "item should still be in queue, got: {err2}");
+    assert!(
+        err2.contains("server crashed"),
+        "item should still be in queue, got: {err2}"
+    );
 
     drop(h);
     let _ = server_handle.await;
