@@ -4,7 +4,7 @@ use crate::summarizer;
 use cosh_sdk::connector::Connector;
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use rmcp::ServiceExt;
-use rmcp::model::Tool;
+use rmcp::model::{CallToolRequestParams, Tool};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -47,6 +47,13 @@ pub struct Harness {
     /// To stop the agent loop.
     stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
+
+    #[cfg(test)]
+    pub(crate) mock_chat_response: Option<Result<String, String>>,
+    #[cfg(test)]
+    pub(crate) mock_stream_response: Option<Result<Vec<String>, String>>,
+    #[cfg(test)]
+    pub(crate) test_tools: Vec<ToolSchema>,
 }
 
 impl Harness {
@@ -84,9 +91,20 @@ impl Harness {
             internal_tools: vec![expand_namespace],
             stop: false,
             tool_issuer: VecDeque::new(),
+
+            #[cfg(test)]
+            mock_chat_response: None,
+            #[cfg(test)]
+            mock_stream_response: None,
+            #[cfg(test)]
+            test_tools: Vec::new(),
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the transport cannot be created,
+    /// the MCP handshake fails, or the protocol is unsupported.
     pub async fn connect(
         &mut self,
         server: &str,
@@ -123,9 +141,15 @@ impl Harness {
         Ok(())
     }
 
-    // Builds the full content for each (server, namespace) by concatenating
-    // every tool's description + input_schema. The string is used as the hash
-    // seed — any change to any tool in the group invalidates the namespace.
+    /// Builds the full content for each (server, namespace) by concatenating
+    /// every tool's description + `input_schema`. The string is used as the hash
+    /// seed — any change to any tool in the group invalidates the namespace.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a tool name does not contain a `.` — the harness assumes
+    /// MCP tools use a `namespace.name` convention internally.
+    #[must_use]
     pub fn build_cache_map(&self) -> HashMap<(String, String), String> {
         let mut out = HashMap::new();
         for session in &self.sessions {
@@ -150,6 +174,9 @@ impl Harness {
         out
     }
 
+    /// # Panics
+    ///
+    /// Panics if the cache file cannot be written to disk.
     pub fn resolve_cache(&mut self) -> &HashMap<String, HashMap<String, CacheData>> {
         let cache_map = self.build_cache_map();
         let mut cache = NamespaceCache::new().with_cache_file(CACHE_FILE);
@@ -164,7 +191,7 @@ impl Harness {
         }
 
         cache.flush().expect("failed to flush cache");
-        self.live_cache = cache.cached().clone();
+        self.live_cache.clone_from(cache.cached());
         &self.live_cache
     }
 
@@ -274,6 +301,10 @@ impl Harness {
                 input_schema: tool.input_schema.clone(),
             });
         }
+        #[cfg(test)]
+        for ts in &self.test_tools {
+            extractor.add_tool(ts.clone());
+        }
         extractor
     }
 
@@ -297,20 +328,9 @@ impl Harness {
         }
     }
 
-    /// Send a chat completion and return the full response as a single string.
-    ///
-    /// Use this when streaming is not enabled — the model's reply is collected
-    /// entirely and returned as `Result<String, String>`.
-    pub async fn chat(&mut self, input: &str) -> Result<String, String> {
-        let out = self
-            .connector
-            .chat_with_system(input, &self.header_context)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let extractor = self.build_extractor();
-        let result = extractor.extract_batch(out.message());
-
+    /// Process extracted items into a text response, routing tool calls.
+    fn process_extraction(&mut self, raw: &str, extractor: &ExtractAction) -> String {
+        let result = extractor.extract_batch(raw);
         let mut output = String::new();
         for item in result.items {
             match item {
@@ -321,19 +341,77 @@ impl Harness {
                 _ => {}
             }
         }
+        output
+    }
 
-        Ok(output)
+    /// Send a chat completion and return the full response as a single string.
+    ///
+    /// Use this when streaming is not enabled — the model's reply is collected
+    /// entirely and returned as `Result<String, String>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connector call fails.
+    pub async fn chat(&mut self, input: &str) -> Result<String, String> {
+        #[cfg(test)]
+        if let Some(ref response) = self.mock_chat_response.clone() {
+            let raw = response.clone()?;
+            return Ok(self.process_extraction(&raw, &self.build_extractor()));
+        }
+
+        let out = self
+            .connector
+            .chat_with_system(input, &self.header_context)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(self.process_extraction(out.message(), &self.build_extractor()))
+    }
+
+    /// Process a stream chunk through the extractor, routing tool calls and
+    /// yielding text via the callback.
+    fn process_stream_chunk(
+        &mut self,
+        token: &str,
+        extractor: &mut ExtractAction,
+        on_token: &mut dyn FnMut(&str),
+    ) {
+        match extractor.extract_stream(token) {
+            StreamAction::Text(text) => on_token(&text),
+            StreamAction::ToolCall(tc) if !self.handle_internal_tool(&tc) => {
+                self.tool_issuer.push_back(tc);
+            }
+            _ => {}
+        }
     }
 
     /// Stream a chat completion, calling `on_token` with each text delta.
     ///
     /// Use this when streaming is enabled — tokens are delivered in real time
     /// via the callback. Returns `Ok("done".into())` when the stream finishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connector stream fails to start or a chunk is malformed.
     pub async fn stream_chat(
         &mut self,
         input: &str,
         mut on_token: impl FnMut(&str),
     ) -> Result<String, String> {
+        #[cfg(test)]
+        if let Some(response) = self.mock_stream_response.clone() {
+            match response {
+                Ok(tokens) => {
+                    let mut extractor = self.build_extractor();
+                    for token in &tokens {
+                        self.process_stream_chunk(token, &mut extractor, &mut on_token);
+                    }
+                    return Ok("done".into());
+                }
+                Err(msg) => return Err(msg),
+            }
+        }
+
         use tokio_stream::StreamExt;
 
         let mut stream = self
@@ -346,25 +424,124 @@ impl Harness {
 
         while let Some(content) = stream.next().await {
             let chunk = content.map_err(|err| err.to_string())?;
-            match extractor.extract_stream(chunk.token()) {
-                StreamAction::Text(text) => on_token(&text),
-                StreamAction::ToolCall(tc) if !self.handle_internal_tool(&tc) => {
-                    self.tool_issuer.push_back(tc);
-                }
-                _ => {}
-            }
+            self.process_stream_chunk(chunk.token(), &mut extractor, &mut on_token);
         }
 
         Ok("done".into())
     }
 
-    pub async fn dispatch_next(&self) {
-        todo!()
+    /// Dequeue and dispatch the next pending tool call to its MCP server.
+    ///
+    /// Returns the text content of the tool response on success.
+    /// Returns an error if the queue is empty, the tool is not found,
+    /// arguments are malformed, or the server call fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the queue is empty, the tool is unknown,
+    /// arguments are not a JSON object, or the MCP server call fails.
+    pub async fn dispatch_next(&mut self) -> Result<String, String> {
+        // Peek at the front without consuming — item stays on failure.
+        let (tool_name, args_map) = {
+            let tc = self
+                .tool_issuer
+                .front()
+                .ok_or_else(|| "no pending tool calls".to_string())?;
+
+            let serde_json::Value::Object(ref args_map) = tc.arguments else {
+                return Err("tool arguments must be a JSON object".to_string());
+            };
+
+            (tc.name.clone(), args_map.clone())
+        };
+
+        let idx = self
+            .sessions
+            .iter()
+            .position(|s| s.tools.iter().any(|t| t.name == tool_name))
+            .ok_or_else(|| format!("no server found for tool '{tool_name}'"))?;
+
+        let params = CallToolRequestParams::new(tool_name).with_arguments(args_map);
+
+        let result = self.sessions[idx]
+            .client
+            .call_tool(params)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Only remove on success — item stays queued for retry on error.
+        self.tool_issuer.pop_front();
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
+
+        Ok(text)
     }
 }
 
 #[cfg(test)]
 impl Harness {
+    /// Create a harness for testing without a real connector.
+    pub(crate) fn new_test() -> Self {
+        Self {
+            connector: Connector::new("openai").unwrap(),
+            sessions: Vec::new(),
+            live_cache: HashMap::new(),
+            protocol: None,
+            header_context: String::new(),
+            system_prompts: Vec::new(),
+            expanded_namespaces: HashSet::new(),
+            internal_tools: vec![InternalTool {
+                name: "expand_namespace".into(),
+                description: "Expand a namespace to see every available MCP tool inside it with their original descriptions and schemas.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "server": { "type": "string" },
+                        "namespace": { "type": "string" }
+                    },
+                    "required": ["server", "namespace"]
+                }),
+            }],
+            stop: false,
+            tool_issuer: VecDeque::new(),
+            mock_chat_response: None,
+            mock_stream_response: None,
+            test_tools: Vec::new(),
+        }
+    }
+
+    /// Register a tool schema for testing extraction without needing a real MCP session.
+    pub(crate) fn with_test_tool(mut self, name: &str, schema: serde_json::Value) -> Self {
+        self.test_tools.push(ToolSchema {
+            name: name.to_string(),
+            input_schema: schema,
+        });
+        self
+    }
+
+    /// Set a mock response for `chat()`. `Ok(text)` simulates a successful reply;
+    /// `Err(msg)` simulates a connector failure.
+    pub(crate) fn with_mock_chat(mut self, response: Result<&str, &str>) -> Self {
+        self.mock_chat_response = Some(response.map(|s| s.to_string()).map_err(|s| s.to_string()));
+        self
+    }
+
+    /// Set mock tokens for `stream_chat()`. `Ok(tokens)` simulates successful
+    /// streaming; `Err(msg)` simulates a stream start failure.
+    pub(crate) fn with_mock_stream(mut self, response: Result<Vec<&str>, &str>) -> Self {
+        self.mock_stream_response = Some(
+            response
+                .map(|v| v.into_iter().map(|s| s.to_string()).collect())
+                .map_err(|s| s.to_string()),
+        );
+        self
+    }
+
     pub(crate) fn push_session(&mut self, session: ServerSession) {
         self.sessions.push(session);
     }
@@ -376,5 +553,9 @@ impl Harness {
     pub(crate) fn expand_namespace(&mut self, server: &str, ns: &str) {
         self.expanded_namespaces
             .insert((server.to_string(), ns.to_string()));
+    }
+
+    pub(crate) fn push_tool_call(&mut self, tc: ToolCallData) {
+        self.tool_issuer.push_back(tc);
     }
 }

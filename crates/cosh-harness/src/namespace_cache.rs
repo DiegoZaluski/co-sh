@@ -128,12 +128,11 @@ impl NamespaceCache {
     #[must_use]
     pub fn with_cache_file(mut self, path: impl Into<String>) -> Self {
         let path = path.into();
-        if Path::new(&path).exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(parsed) = toml::from_str(&content) {
-                    self.cache = parsed;
-                }
-            }
+        if Path::new(&path).exists()
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(parsed) = toml::from_str(&content)
+        {
+            self.cache = parsed;
         }
         self.cache_file = Some(path);
         self

@@ -1,6 +1,5 @@
 use crate::harness::{Harness, ServerSession};
 use crate::namespace_cache::CacheData;
-use cosh_sdk::connector::Connector;
 use rmcp::model::Tool;
 use rmcp::service::{RoleClient, serve_directly};
 use rmcp::transport::async_rw::AsyncRwTransport;
@@ -10,7 +9,7 @@ use std::sync::Arc;
 // ── Helpers ──────────────────────────────────────────────────────
 
 fn make_harness() -> Harness {
-    Harness::new(Connector::new("openai").unwrap())
+    Harness::new_test()
 }
 
 fn mock_tool(name: &str, desc: &str) -> Tool {

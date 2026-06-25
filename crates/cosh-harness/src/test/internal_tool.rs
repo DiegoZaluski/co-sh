@@ -1,10 +1,9 @@
 use crate::harness::Harness;
-use cosh_sdk::connector::Connector;
 use cosh_sdk::extract_action::ToolCallData;
 use serde_json::json;
 
 fn make_harness() -> Harness {
-    Harness::new(Connector::new("openai").unwrap())
+    Harness::new_test()
 }
 
 #[test]
@@ -38,5 +37,4 @@ fn handle_internal_tool_populates_expanded_namespaces() {
     };
 
     h.handle_internal_tool(&tc);
-    // verify expanded_namespaces is populated (we check via format_header_context later)
 }

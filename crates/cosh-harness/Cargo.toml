@@ -14,6 +14,7 @@ toml = "1.1"
 version= "1.7.0"
 features = [
     "client",
+    "server",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
 ]
