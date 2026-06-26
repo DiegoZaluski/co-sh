@@ -1,54 +1,18 @@
-//! Mutation operations for the todo list.
-//!
-//! Each [`TodoAction`] variant is dispatched to a pure function that
-//! validates invariants, mutates the list, and returns a
-//! [`TodoWriteOutput`] with the new state and diagnostics (nags).
-//!
-//! # State machine
-//!
-//! ```text
-//! ┌─────────┐   Start    ┌────────────┐   Complete   ┌───────────┐
-//! │ Pending │ ─────────→ │ InProgress │ ───────────→ │ Completed │
-//! └─────────┘            └────────────┘              └───────────┘
-//!      ↓                                                ↓
-//!  Cancel                                            Cancel
-//!      ↓                                                ↓
-//! ┌───────────┐                                    ┌───────────┐
-//! │ Cancelled │                                    │ Cancelled │
-//! └───────────┘                                    └───────────┘
-//! ```
-//!
-//! # Actions
-//!
-//! | Action | Effect |
-//! |---|---|
-//! | [`Add`](TodoAction::Add) | Append a new task with optional timeline and dependencies |
-//! | [`Start`](TodoAction::Start) | Transition a task to `InProgress`; rejects if another is already in progress |
-//! | [`Complete`](TodoAction::Complete) | Mark done |
-//! | [`Cancel`](TodoAction::Cancel) | Mark cancelled |
-//! | [`Update`](TodoAction::Update) | Modify description, timeline, or dependencies |
-//! | [`Remove`](TodoAction::Remove) | Delete a task and warn about stale dependency refs |
-//! | [`Clean`](TodoAction::Clean) | Sweep completed/cancelled tasks (optionally keep pending) |
-//!
-//! # Nag system
-//!
-//! Non-blocking diagnostics (warnings) are returned as [`Nag`] items
-//! alongside every successful result. A nag never blocks an action; it is
-//! advisory only.
-//!
-//! # Errors
-//!
-//! The [`todo_write`] function returns `Err(String)` with a
-//! human-readable explanation when invariants are violated:
-//!
-//! - Empty description on `Add` or `Update`
-//! - Starting a non-existent task
-//! - Two tasks `InProgress` concurrently
-//! - Referencing a non-existent dependency
-
 use std::fmt::Write;
 
-use super::types::{Nag, TodoAction, TodoItem, TodoList, TodoStatus, TodoWriteOutput, now_ms};
+use super::types::{Nag, TodoItem, TodoList, TodoStatus, TodoWriteOutput, now_ms};
+
+pub enum TodoWriteAction {
+    Add {
+        group: String,
+        description: String,
+        timeline_ms: Option<u64>,
+        depends_on: Option<Vec<String>>,
+    },
+    Start { id: String },
+    Remove { id: String },
+    Clean { keep_pending: bool },
+}
 
 /// Apply a mutation action to the todo list.
 ///
@@ -58,35 +22,23 @@ use super::types::{Nag, TodoAction, TodoItem, TodoList, TodoStatus, TodoWriteOut
 /// - An `Add` action has an empty description.
 /// - A `Start` targets a non-existent or already-in-progress item.
 /// - Dependencies are not satisfied.
-pub fn todo_write(list: &TodoList, action: &TodoAction) -> Result<TodoWriteOutput, String> {
+pub fn todo_write(list: &TodoList, action: &TodoWriteAction) -> Result<TodoWriteOutput, String> {
     match action {
-        TodoAction::Add {
+        TodoWriteAction::Add {
+            group,
             description,
             timeline_ms,
             depends_on,
-        } => add(list, description, *timeline_ms, depends_on.as_ref()),
-        TodoAction::Start { id } => start(list, id),
-        TodoAction::Complete { id } => complete(list, id),
-        TodoAction::Cancel { id } => cancel(list, id),
-        TodoAction::Update {
-            id,
-            description,
-            timeline_ms,
-            depends_on,
-        } => update(
-            list,
-            id,
-            description.as_ref(),
-            *timeline_ms,
-            depends_on.as_ref(),
-        ),
-        TodoAction::Remove { id } => remove(list, id),
-        TodoAction::Clean { keep_pending } => Ok(clean(list, *keep_pending)),
+        } => add(list, group, description, *timeline_ms, depends_on.as_ref()),
+        TodoWriteAction::Start { id } => start(list, id),
+        TodoWriteAction::Remove { id } => remove(list, id),
+        TodoWriteAction::Clean { keep_pending } => Ok(clean(list, *keep_pending)),
     }
 }
 
 fn add(
     list: &TodoList,
+    group: &str,
     description: &str,
     timeline_ms: Option<u64>,
     depends_on: Option<&Vec<String>>,
@@ -96,8 +48,8 @@ fn add(
     }
 
     let mut nags: Vec<Nag> = Vec::new();
-    let mut items = list.items.clone();
-    let id = next_id(&items);
+    let mut groups = list.groups.clone();
+    let id = next_id(&groups);
 
     if let Some(deps) = depends_on {
         for dep_id in deps {
@@ -105,7 +57,7 @@ fn add(
                 nags.push(Nag {
                     message: format!("Dependency '{dep_id}' is a self-reference."),
                 });
-            } else if !items.iter().any(|i| i.id == *dep_id) {
+            } else if !item_exists(&groups, dep_id) {
                 nags.push(Nag {
                     message: format!("Dependency '{dep_id}' does not exist in the task list."),
                 });
@@ -114,7 +66,7 @@ fn add(
     }
 
     let now = now_ms();
-    items.push(TodoItem {
+    let item = TodoItem {
         id: id.clone(),
         description: description.to_owned(),
         status: TodoStatus::Pending,
@@ -122,29 +74,37 @@ fn add(
         depends_on: depends_on.cloned().unwrap_or_default(),
         created_at: now,
         updated_at: now,
-    });
+    };
+
+    if let Some(g) = groups.iter_mut().find(|g| g.title == group) {
+        g.items.push(item);
+    } else {
+        groups.push(super::types::TaskGroup {
+            title: group.to_owned(),
+            items: vec![item],
+        });
+    }
 
     Ok(TodoWriteOutput {
-        list: TodoList { items },
+        list: TodoList { groups },
         nags,
     })
 }
 
 fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
-    let mut items = list.items.clone();
+    let mut groups = list.groups.clone();
     let mut nags: Vec<Nag> = Vec::new();
 
-    let idx = items
-        .iter()
-        .position(|i| i.id == id)
+    let (gi, ii) = find_item(&groups, id)
         .ok_or_else(|| format!("Task '{id}' not found."))?;
 
-    if let Some(nag) = check_timeline(&items[idx], now_ms()) {
+    if let Some(nag) = check_timeline(&groups[gi].items[ii], now_ms()) {
         nags.push(nag);
     }
 
-    let others_in_progress: Vec<&str> = items
+    let others_in_progress: Vec<&str> = groups
         .iter()
+        .flat_map(|g| &g.items)
         .filter(|i| i.status == TodoStatus::InProgress && i.id != id)
         .map(|i| i.id.as_str())
         .collect();
@@ -156,9 +116,9 @@ fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
         ));
     }
 
-    let item = &items[idx];
-    for dep_id in &item.depends_on {
-        let dep = items.iter().find(|i| i.id == *dep_id);
+    let deps = groups[gi].items[ii].depends_on.clone();
+    for dep_id in &deps {
+        let dep = find_item_in_groups(&groups, dep_id);
         match dep {
             Some(d) if d.status != TodoStatus::Completed => {
                 nags.push(Nag {
@@ -179,121 +139,34 @@ fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
         }
     }
 
-    items[idx].status = TodoStatus::InProgress;
-    items[idx].updated_at = now_ms();
+    groups[gi].items[ii].status = TodoStatus::InProgress;
+    groups[gi].items[ii].updated_at = now_ms();
 
     Ok(TodoWriteOutput {
-        list: TodoList { items },
-        nags,
-    })
-}
-
-fn complete(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
-    let mut nags: Vec<Nag> = Vec::new();
-
-    let idx = list
-        .items
-        .iter()
-        .position(|i| i.id == id)
-        .ok_or_else(|| format!("Task '{id}' not found."))?;
-
-    let mut items = list.items.clone();
-    items[idx].status = TodoStatus::Completed;
-    items[idx].updated_at = now_ms();
-
-    if let Some(nag) = check_timeline(&items[idx], items[idx].updated_at) {
-        nags.push(nag);
-    }
-
-    Ok(TodoWriteOutput {
-        list: TodoList { items },
-        nags,
-    })
-}
-
-fn cancel(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
-    let mut items = list.items.clone();
-
-    let idx = items
-        .iter()
-        .position(|i| i.id == id)
-        .ok_or_else(|| format!("Task '{id}' not found."))?;
-
-    items[idx].status = TodoStatus::Cancelled;
-    items[idx].updated_at = now_ms();
-
-    Ok(TodoWriteOutput {
-        list: TodoList { items },
-        nags: Vec::new(),
-    })
-}
-
-fn update(
-    list: &TodoList,
-    id: &str,
-    description: Option<&String>,
-    timeline_ms: Option<u64>,
-    depends_on: Option<&Vec<String>>,
-) -> Result<TodoWriteOutput, String> {
-    let mut items = list.items.clone();
-    let mut nags: Vec<Nag> = Vec::new();
-
-    let idx = items
-        .iter()
-        .position(|i| i.id == id)
-        .ok_or_else(|| format!("Task '{id}' not found."))?;
-
-    if let Some(desc) = description {
-        if desc.trim().is_empty() {
-            return Err("Description cannot be empty.".into());
-        }
-        items[idx].description.clone_from(desc);
-    }
-
-    if let Some(tl) = timeline_ms {
-        items[idx].timeline_ms = Some(tl);
-    }
-
-    if let Some(deps) = depends_on {
-        for dep_id in deps {
-            if *dep_id == id {
-                nags.push(Nag {
-                    message: format!("Dependency '{dep_id}' is a self-reference."),
-                });
-            } else if !items.iter().any(|i| i.id == *dep_id) {
-                nags.push(Nag {
-                    message: format!("Dependency '{dep_id}' does not exist in the task list."),
-                });
-            }
-        }
-        items[idx].depends_on.clone_from(deps);
-    }
-
-    let updated_at = now_ms();
-    items[idx].updated_at = updated_at;
-
-    if let Some(nag) = check_timeline(&items[idx], updated_at) {
-        nags.push(nag);
-    }
-
-    Ok(TodoWriteOutput {
-        list: TodoList { items },
+        list: TodoList { groups },
         nags,
     })
 }
 
 fn remove(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
-    let mut items = list.items.clone();
-    let len_before = items.len();
+    let mut groups = list.groups.clone();
+    let mut removed = false;
 
-    items.retain(|i| i.id != id);
+    for g in &mut groups {
+        if let Some(pos) = g.items.iter().position(|i| i.id == id) {
+            g.items.remove(pos);
+            removed = true;
+            break;
+        }
+    }
 
-    if items.len() == len_before {
+    if !removed {
         return Err(format!("Task '{id}' not found."));
     }
 
-    let stale_refs: Vec<String> = items
+    let stale_refs: Vec<String> = groups
         .iter()
+        .flat_map(|g| &g.items)
         .filter(|i| i.depends_on.contains(&id.to_string()))
         .map(|i| i.id.clone())
         .collect();
@@ -309,30 +182,69 @@ fn remove(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
     }
 
     Ok(TodoWriteOutput {
-        list: TodoList { items },
+        list: TodoList { groups },
         nags,
     })
 }
 
 fn clean(list: &TodoList, keep_pending: bool) -> TodoWriteOutput {
-    let items = list.items.clone();
-    let (keep, removed): (Vec<_>, Vec<_>) = items.into_iter().partition(|i| match i.status {
-        TodoStatus::Pending if keep_pending => true,
-        TodoStatus::InProgress => true,
-        _ => false,
-    });
+    let mut groups = list.groups.clone();
+    let mut total_removed = 0usize;
+
+    for g in &mut groups {
+        let len_before = g.items.len();
+        g.items.retain(|i| match i.status {
+            TodoStatus::Pending if keep_pending => true,
+            TodoStatus::InProgress => true,
+            _ => false,
+        });
+        total_removed += len_before - g.items.len();
+    }
 
     let mut nags: Vec<Nag> = Vec::new();
-    if !removed.is_empty() {
+    if total_removed > 0 {
         nags.push(Nag {
-            message: format!("Removed {} completed or cancelled tasks.", removed.len()),
+            message: format!("Removed {total_removed} completed or cancelled tasks."),
         });
     }
 
     TodoWriteOutput {
-        list: TodoList { items: keep },
+        list: TodoList { groups },
         nags,
     }
+}
+
+// Internal helpers exported for sibling modules
+pub(super) fn next_id(groups: &[super::types::TaskGroup]) -> String {
+    let max = groups
+        .iter()
+        .flat_map(|g| &g.items)
+        .filter_map(|i| i.id.strip_prefix("task-"))
+        .filter_map(|s| s.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("task-{}", max + 1)
+}
+
+pub(super) fn find_item(groups: &[super::types::TaskGroup], id: &str) -> Option<(usize, usize)> {
+    groups
+        .iter()
+        .enumerate()
+        .find_map(|(gi, g)| g.items.iter().position(|i| i.id == id).map(|ii| (gi, ii)))
+}
+
+pub(super) fn item_exists(groups: &[super::types::TaskGroup], id: &str) -> bool {
+    groups.iter().any(|g| g.items.iter().any(|i| i.id == id))
+}
+
+pub(super) fn find_item_in_groups<'a>(
+    groups: &'a [super::types::TaskGroup],
+    id: &str,
+) -> Option<&'a TodoItem> {
+    groups
+        .iter()
+        .flat_map(|g| &g.items)
+        .find(|i| i.id == id)
 }
 
 fn check_timeline(item: &TodoItem, now: u64) -> Option<Nag> {
@@ -350,16 +262,6 @@ fn check_timeline(item: &TodoItem, now: u64) -> Option<Nag> {
     } else {
         None
     }
-}
-
-fn next_id(items: &[TodoItem]) -> String {
-    let max = items
-        .iter()
-        .filter_map(|i| i.id.strip_prefix("task-"))
-        .filter_map(|s| s.parse::<usize>().ok())
-        .max()
-        .unwrap_or(0);
-    format!("task-{}", max + 1)
 }
 
 fn join_ids(ids: &[&str]) -> String {

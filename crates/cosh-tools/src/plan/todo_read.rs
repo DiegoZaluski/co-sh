@@ -1,9 +1,4 @@
-//! Query operations for the todo list.
-//!
-//! Supports listing tasks (optionally filtered by status) and
-//! fetching a single task by ID.
-
-use super::types::{TodoItem, TodoList, TodoReadAction, TodoReadOutput, TodoStatus};
+use super::types::{TaskGroup, TodoList, TodoReadAction, TodoReadOutput, TodoStatus};
 
 /// Query the todo list.
 ///
@@ -12,37 +7,49 @@ use super::types::{TodoItem, TodoList, TodoReadAction, TodoReadOutput, TodoStatu
 /// Returns `Err` if a `Get` targets a non-existent task.
 pub fn todo_read(list: &TodoList, action: &TodoReadAction) -> Result<TodoReadOutput, String> {
     match action {
-        TodoReadAction::List { status } => Ok(list_tasks(list, status.as_ref())),
+        TodoReadAction::List { group, status } => Ok(list_tasks(list, group.as_deref(), status.as_ref())),
         TodoReadAction::Get { id } => get_task(list, id),
     }
 }
 
-fn list_tasks(list: &TodoList, status: Option<&TodoStatus>) -> TodoReadOutput {
-    let items: Vec<TodoItem> = match status {
-        Some(s) => list
-            .items
-            .iter()
-            .filter(|i| i.status == *s)
-            .cloned()
-            .collect(),
-        None => list.items.clone(),
-    };
+fn list_tasks(
+    list: &TodoList,
+    group: Option<&str>,
+    status: Option<&TodoStatus>,
+) -> TodoReadOutput {
+    let groups: Vec<TaskGroup> = list
+        .groups
+        .iter()
+        .filter(|g| group.is_none_or(|gname| g.title == gname))
+        .map(|g| TaskGroup {
+            title: g.title.clone(),
+            items: g
+                .items
+                .iter()
+                .filter(|i| status.is_none_or(|s| i.status == *s))
+                .cloned()
+                .collect(),
+        })
+        .collect();
 
     TodoReadOutput {
-        items,
+        groups,
         nags: Vec::new(),
     }
 }
 
 fn get_task(list: &TodoList, id: &str) -> Result<TodoReadOutput, String> {
-    let item = list
-        .items
-        .iter()
-        .find(|i| i.id == id)
-        .ok_or_else(|| format!("Task '{id}' not found."))?;
+    for g in &list.groups {
+        if let Some(item) = g.items.iter().find(|i| i.id == id) {
+            return Ok(TodoReadOutput {
+                groups: vec![TaskGroup {
+                    title: g.title.clone(),
+                    items: vec![item.clone()],
+                }],
+                nags: Vec::new(),
+            });
+        }
+    }
 
-    Ok(TodoReadOutput {
-        items: vec![item.clone()],
-        nags: Vec::new(),
-    })
+    Err(format!("Task '{id}' not found."))
 }
