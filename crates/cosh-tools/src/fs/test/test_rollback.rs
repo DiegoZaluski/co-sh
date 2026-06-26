@@ -18,8 +18,8 @@ fn tmp(label: &str) -> String {
 fn meta() -> FsMetadata<'static> {
     FsMetadata {
         root: Path::new(ROOT),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
+        allowlist: None,
+        blocklist: None,
     }
 }
 
@@ -60,8 +60,8 @@ async fn rollback_denied_when_path_is_in_blocklist() {
 
     let blocked_meta = FsMetadata {
         root: Path::new(ROOT),
-        write_path_allowlist: None,
-        write_path_blocklist: Some(vec![Path::new(ROOT)]),
+        allowlist: None,
+        blocklist: Some(vec![Path::new(ROOT)]),
     };
 
     let err = rollback(&FsRollback, blocked_meta, &path, "")
@@ -83,8 +83,8 @@ async fn rollback_returns_error_on_blocklist_allowlist_mismatch() {
 
     let mismatch_meta = FsMetadata {
         root: Path::new(ROOT),
-        write_path_allowlist: Some(vec![Path::new(&path)]),
-        write_path_blocklist: Some(vec![Path::new(&path)]),
+        allowlist: Some(vec![Path::new(&path)]),
+        blocklist: Some(vec![Path::new(&path)]),
     };
 
     let result = rollback(&FsRollback, mismatch_meta, &path, "").await;
@@ -105,8 +105,8 @@ async fn rollback_allowed_outside_root_when_path_in_allowlist() {
 
     let allowed_meta = FsMetadata {
         root: Path::new(ROOT),
-        write_path_allowlist: Some(vec![Path::new(&outside)]),
-        write_path_blocklist: None,
+        allowlist: Some(vec![Path::new(&outside)]),
+        blocklist: None,
     };
 
     let result = rollback(&FsRollback, allowed_meta, &outside, "").await;

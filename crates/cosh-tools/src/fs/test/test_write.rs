@@ -5,8 +5,8 @@ use std::path::Path;
 fn meta() -> FsMetadata<'static> {
     FsMetadata {
         root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
+        allowlist: None,
+        blocklist: None,
     }
 }
 
@@ -61,8 +61,8 @@ async fn write_creates_multiple_files_in_single_call() {
 async fn write_denied_when_path_is_in_blocklist() {
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
+        allowlist: None,
+        blocklist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
     };
 
     let result = write(
@@ -110,8 +110,8 @@ async fn write_allowed_outside_root_when_path_in_allowlist() {
     let path = "/tmp/cosh_test_allowlist_write.txt";
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: Some(vec![Path::new(path)]),
-        write_path_blocklist: None,
+        allowlist: Some(vec![Path::new(path)]),
+        blocklist: None,
     };
 
     let result = write(
@@ -138,8 +138,8 @@ async fn write_allowed_outside_root_when_path_in_allowlist() {
 async fn write_errors_on_inconsistent_blocklist_and_allowlist() {
     let metadata = FsMetadata {
         root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
-        write_path_blocklist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
+        allowlist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
+        blocklist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
     };
 
     let result = write(

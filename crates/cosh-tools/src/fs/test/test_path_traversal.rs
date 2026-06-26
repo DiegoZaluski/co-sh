@@ -24,8 +24,8 @@ const PROJECT_ROOT: &str = "/home/inky/cosh";
 fn meta() -> FsMetadata<'static> {
     FsMetadata {
         root: Path::new(PROJECT_ROOT),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
+        allowlist: None,
+        blocklist: None,
     }
 }
 
@@ -142,8 +142,8 @@ async fn write_traversal_via_dotdot_is_denied() {
 
     let metadata = FsMetadata {
         root: Path::new(PROJECT_ROOT),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
+        allowlist: None,
+        blocklist: None,
     };
 
     let result = write(
@@ -183,8 +183,8 @@ async fn write_traversal_blocklist_respected_after_normalization() {
 
     let metadata = FsMetadata {
         root: Path::new(PROJECT_ROOT),
-        write_path_allowlist: None,
-        write_path_blocklist: Some(vec![Path::new("/tmp")]),
+        allowlist: None,
+        blocklist: Some(vec![Path::new("/tmp")]),
     };
 
     let result = write(
@@ -229,8 +229,8 @@ async fn write_gap_symlink_escape() {
 
     let metadata = FsMetadata {
         root: Path::new(PROJECT_ROOT),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
+        allowlist: None,
+        blocklist: None,
     };
 
     let symlink_target = format!("{symlink_path}/evil.txt");
@@ -291,8 +291,8 @@ async fn edit_gap_symlink_escape() {
         &FsEdit,
         FsMetadata {
             root: Path::new(PROJECT_ROOT),
-            write_path_allowlist: None,
-            write_path_blocklist: None,
+            allowlist: None,
+            blocklist: None,
         },
         vec![EditTarget {
             path: &symlink_target,
@@ -333,8 +333,8 @@ async fn edit_traversal_via_dotdot_resolves_inside_root_and_succeeds() {
         &FsEdit,
         FsMetadata {
             root: Path::new(PROJECT_ROOT),
-            write_path_allowlist: None,
-            write_path_blocklist: None,
+            allowlist: None,
+            blocklist: None,
         },
         vec![EditTarget {
             path: traversal_path,
@@ -367,8 +367,8 @@ async fn edit_traversal_escape_via_dotdot_is_denied() {
         &FsEdit,
         FsMetadata {
             root: Path::new(PROJECT_ROOT),
-            write_path_allowlist: None,
-            write_path_blocklist: None,
+            allowlist: None,
+            blocklist: None,
         },
         vec![EditTarget {
             path: escape_path,
@@ -408,8 +408,8 @@ async fn rollback_traversal_via_dotdot_resolves_inside_root_and_succeeds() {
         &FsRollback,
         FsMetadata {
             root: Path::new(PROJECT_ROOT),
-            write_path_allowlist: None,
-            write_path_blocklist: None,
+            allowlist: None,
+            blocklist: None,
         },
         traversal_path,
         "",
@@ -439,8 +439,8 @@ async fn rollback_traversal_escape_via_dotdot_is_denied() {
         &FsRollback,
         FsMetadata {
             root: Path::new(PROJECT_ROOT),
-            write_path_allowlist: None,
-            write_path_blocklist: None,
+            allowlist: None,
+            blocklist: None,
         },
         escape_path,
         "",

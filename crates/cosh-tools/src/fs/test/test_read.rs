@@ -6,8 +6,8 @@ use super::super::types::{FsMetadata, FsRead, Target};
 fn meta() -> FsMetadata<'static> {
     FsMetadata {
         root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
+        allowlist: None,
+        blocklist: None,
     }
 }
 

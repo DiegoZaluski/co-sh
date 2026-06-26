@@ -6,8 +6,8 @@ use std::path::Path;
 fn make_metadata() -> FsMetadata<'static> {
     FsMetadata {
         root: Path::new("/home/inky/cosh"),
-        write_path_allowlist: None,
-        write_path_blocklist: None,
+        allowlist: None,
+        blocklist: None,
     }
 }
 

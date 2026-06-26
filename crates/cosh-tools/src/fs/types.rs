@@ -25,8 +25,8 @@ pub struct FsWrite;
 #[derive(Debug, Clone)]
 pub struct FsMetadata<'a> {
     pub root: &'a Path,
-    pub write_path_allowlist: Option<Vec<&'a Path>>,
-    pub write_path_blocklist: Option<Vec<&'a Path>>,
+    pub allowlist: Option<Vec<&'a Path>>,
+    pub blocklist: Option<Vec<&'a Path>>,
 }
 
 // ___
@@ -55,8 +55,8 @@ pub(crate) enum FsGuard {
 
 impl FsMetadata<'_> {
     pub(crate) fn fs_guard(&self, path: &str) -> FsGuard {
-        let allowlist = self.write_path_allowlist.as_deref();
-        let blocklist = self.write_path_blocklist.as_deref();
+        let allowlist = self.allowlist.as_deref();
+        let blocklist = self.blocklist.as_deref();
 
         match validate_path(path, self.root, allowlist, blocklist) {
             GuardResult::Allowed(normalized) => {
