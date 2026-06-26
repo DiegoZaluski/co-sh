@@ -86,6 +86,13 @@ pub struct Harness {
     pub(crate) test_tools: Vec<ToolSchema>,
 }
 
+/// Extract the namespace portion of a tool name (everything before the first `.`).
+///
+/// Returns `""` when the name has no dot — no namespace to extract.
+fn namespace_of(name: &str) -> &str {
+    name.split_once('.').map_or("", |(ns, _)| ns)
+}
+
 impl Harness {
     #[must_use]
     pub fn new(connector: Connector) -> Self {
@@ -154,10 +161,8 @@ impl Harness {
     /// every tool's description + `input_schema`. The string is used as the hash
     /// seed — any change to any tool in the group invalidates the namespace.
     ///
-    /// # Panics
-    ///
-    /// Panics if a tool name does not contain a `.` — the harness assumes
-    /// MCP tools use a `namespace.name` convention internally.
+    /// Tools whose name does not contain a `.` (no namespace) are skipped —
+    /// they are rendered inline instead of being summarized.
     #[must_use]
     pub fn build_cache_map(&self) -> HashMap<(String, String), String> {
         let mut out = HashMap::new();
@@ -165,12 +170,15 @@ impl Harness {
             // Group tool parts by namespace within this server
             let mut ns_parts: HashMap<String, Vec<String>> = HashMap::new();
             for tool in &session.tools {
-                let ns = tool.name.split('.').next().unwrap().to_string(); // ATTENTION HERE
+                let ns = namespace_of(&tool.name);
+                if ns.is_empty() {
+                    continue;
+                }
                 let desc = tool.description.as_deref().unwrap_or_default();
                 // input_schema is Arc<JsonObject> — serialize to include in hash
                 let schema = serde_json::to_string(&*tool.input_schema).unwrap_or_default();
                 ns_parts
-                    .entry(ns)
+                    .entry(ns.to_string())
                     .or_default()
                     .push(format!("{desc}\n{schema}"));
             }
@@ -225,12 +233,10 @@ impl Harness {
     /// previously marked as expanded via `expand_namespace` show the original
     /// tool descriptions from the MCP sessions instead of the cached summary.
     ///
+    /// Tools whose name does not contain a `.` (no namespace) are rendered
+    /// inline with full schema — they are not cached or summarized.
+    ///
     /// Clears the expanded set after formatting so the next loop starts fresh.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a tool name does not contain a `.` — the harness assumes
-    /// MCP tools use a `namespace.name` convention internally.
     pub fn format_header_context(&mut self) -> &str {
         let mut out = String::new();
 
@@ -248,15 +254,21 @@ impl Harness {
             );
         }
 
-        // Index tools by (server, namespace) for O(1) expanded lookup
+        // Index tools by (server, namespace) for O(1) expanded lookup.
+        // Dotless tools are excluded — they render in a separate section.
         let mut tools_by_ns: HashMap<(&str, &str), Vec<&Tool>> = HashMap::new();
+        let mut dotless_tools: Vec<(&str, &Tool)> = Vec::new();
         for session in &self.sessions {
             for tool in &session.tools {
-                let ns = tool.name.split('.').next().unwrap();
-                tools_by_ns
-                    .entry((session.name_server.as_str(), ns))
-                    .or_default() // ???!
-                    .push(tool);
+                let ns = namespace_of(&tool.name);
+                if ns.is_empty() {
+                    dotless_tools.push((session.name_server.as_str(), tool));
+                } else {
+                    tools_by_ns
+                        .entry((session.name_server.as_str(), ns))
+                        .or_default()
+                        .push(tool);
+                }
             }
         }
 
@@ -270,7 +282,7 @@ impl Harness {
                     if let Some(tools) = tools_by_ns.get(&(server.as_str(), ns.as_str())) {
                         for tool in tools {
                             let desc = tool.description.as_deref().unwrap_or_default();
-                            let schema = serde_json::to_string_pretty(&tool.input_schema) // *
+                            let schema = serde_json::to_string_pretty(&tool.input_schema)
                                 .unwrap_or_default();
                             let _ = write!(
                                 out,
@@ -282,6 +294,20 @@ impl Harness {
                 } else {
                     let _ = writeln!(out, "- **{}.{}**: {}", server, ns, data.description);
                 }
+            }
+        }
+
+        // Render tools with no namespace individually (always expanded).
+        if !dotless_tools.is_empty() {
+            let _ = write!(out, "## Other Tools\n\n");
+            for (server, tool) in &dotless_tools {
+                let desc = tool.description.as_deref().unwrap_or_default();
+                let schema = serde_json::to_string_pretty(&tool.input_schema).unwrap_or_default();
+                let _ = write!(
+                    out,
+                    "- **{}** (on `{server}`): {}\n  Schema: {}\n",
+                    tool.name, desc, schema,
+                );
             }
         }
 
