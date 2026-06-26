@@ -177,7 +177,7 @@ impl Value {
     pub fn complete_deeply(&mut self) {
         match self {
             Value::String(_, s) | Value::Number(_, s) | Value::Markdown(_, _, s) => {
-                *s = CompletionState::Complete
+                *s = CompletionState::Complete;
             }
             Value::Boolean(_) | Value::Null => {}
             Value::Object(kv_pairs, s) => {

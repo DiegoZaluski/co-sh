@@ -103,9 +103,8 @@ Some intro text.
     std::fs::remove_file(&path).ok();
 }
 
-/// BUG PROOF: `- [X]` (capital X) não é reconhecido.
-/// O parser só checa `- [x]` minúsculo. Muitos renders geram `[X]`.
-/// Este teste FAIL no código atual.
+/// Verifica que `- [X]` (capital X) é reconhecido como tarefa completa.
+/// O parser trata `- [x]` e `- [X]` como Completed (além de `- [ ]` como Pending).
 #[test]
 fn parse_capital_x_completed() {
     let path = write_plan("## Backend\n- [X] Feito");

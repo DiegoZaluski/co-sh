@@ -293,11 +293,10 @@ fn clean_empty_list_is_noop() {
     assert!(output.list.groups.is_empty());
 }
 
-/// BUG PROOF: Dependência circular não é detectada.
-/// `todo_write::add` e `todo_edit` não verificam ciclos transitivos.
-/// A -> B -> C -> A cria deadlock sem warning. Este teste FAIL no código atual.
+/// Verifica que `todo_edit` detecta dependência circular transitiva.
+/// A -> B -> C -> A é detectado via BFS em `would_create_cycle`.
 #[test]
-fn add_detects_circular_dependency() {
+fn edit_detects_circular_dependency() {
     let list = add_task(&TodoList::default(), "default", "Task A"); // task-1
     let list = add_task_with_deps(&list, "default", "Task B", vec!["task-1".into()]); // task-2
     let list = add_task_with_deps(&list, "default", "Task C", vec!["task-2".into()]); // task-3

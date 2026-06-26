@@ -1,4 +1,4 @@
-use super::types::{Nag, TodoList, TodoWriteOutput};
+use super::types::{Nag, PlanError, TodoList, TodoWriteOutput};
 
 /// Edit the metadata of an existing task.
 pub struct TodoEdit {
@@ -14,17 +14,20 @@ pub struct TodoEdit {
 /// # Errors
 ///
 /// Returns `Err` if the task does not exist or if description is empty.
-pub fn todo_edit(list: &TodoList, edit: &TodoEdit) -> Result<TodoWriteOutput, String> {
+pub fn todo_edit(list: &TodoList, edit: &TodoEdit) -> Result<TodoWriteOutput, PlanError> {
     let mut groups = list.groups.clone();
     let mut nags: Vec<Nag> = Vec::new();
 
     let (gi, ii) = super::todo_write::find_item(&groups, &edit.id).ok_or_else(|| {
-        format!("Task '{}' does not exist. Use List to see available tasks.", edit.id)
+        PlanError(format!(
+            "Task '{}' does not exist. Use List to see available tasks.",
+            edit.id
+        ))
     })?;
 
     if let Some(desc) = &edit.description {
         if desc.trim().is_empty() {
-            return Err("Description must be non-empty text.".into());
+            return Err(PlanError("Description must be non-empty text.".into()));
         }
         groups[gi].items[ii].description.clone_from(desc);
     }

@@ -1,4 +1,4 @@
-use super::types::{Nag, TodoList, TodoStatus, TodoWriteOutput};
+use super::types::{Nag, PlanError, TodoList, TodoStatus, TodoWriteOutput};
 
 pub enum TodoCrossOff {
     Complete { id: String },
@@ -10,7 +10,7 @@ pub enum TodoCrossOff {
 /// # Errors
 ///
 /// Returns `Err` if the task does not exist or is already in a terminal state.
-pub fn todo_cross_off(list: &TodoList, action: &TodoCrossOff) -> Result<TodoWriteOutput, String> {
+pub fn todo_cross_off(list: &TodoList, action: &TodoCrossOff) -> Result<TodoWriteOutput, PlanError> {
     match action {
         TodoCrossOff::Complete { id } => set_terminal(list, id, TodoStatus::Completed),
         TodoCrossOff::Cancel { id } => set_terminal(list, id, TodoStatus::Cancelled),
@@ -21,16 +21,20 @@ fn set_terminal(
     list: &TodoList,
     id: &str,
     status: TodoStatus,
-) -> Result<TodoWriteOutput, String> {
+) -> Result<TodoWriteOutput, PlanError> {
     let mut groups = list.groups.clone();
     let (gi, ii) = super::todo_write::find_item(&groups, id).ok_or_else(|| {
-        format!("Task '{id}' does not exist. Use List to see available tasks.")
+        PlanError(format!("Task '{id}' does not exist. Use List to see available tasks."))
     })?;
 
     let item = &groups[gi].items[ii];
     match item.status {
-        TodoStatus::Completed => return Err(format!("Task '{id}' is already completed.")),
-        TodoStatus::Cancelled => return Err(format!("Task '{id}' is already cancelled.")),
+        TodoStatus::Completed => {
+            return Err(PlanError(format!("Task '{id}' is already completed.")))
+        }
+        TodoStatus::Cancelled => {
+            return Err(PlanError(format!("Task '{id}' is already cancelled.")))
+        }
         TodoStatus::InProgress | TodoStatus::Pending => {}
     }
 
@@ -41,10 +45,7 @@ fn set_terminal(
     // Nag about any items that depend on this one.
     for g in &groups {
         for i in &g.items {
-            let blocked = match status {
-                TodoStatus::Cancelled => i.status != TodoStatus::Completed && i.status != TodoStatus::Cancelled,
-                _ => i.status == TodoStatus::Pending,
-            };
+            let blocked = i.status != TodoStatus::Completed && i.status != TodoStatus::Cancelled;
             if i.depends_on.iter().any(|d| d == id) && blocked {
                 nags.push(Nag {
                     message: format!(

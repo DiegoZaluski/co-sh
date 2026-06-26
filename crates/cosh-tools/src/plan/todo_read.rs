@@ -1,11 +1,11 @@
-use super::types::{Nag, TaskGroup, TodoList, TodoReadAction, TodoReadOutput, TodoStatus};
+use super::types::{Nag, PlanError, TaskGroup, TodoList, TodoReadAction, TodoReadOutput, TodoStatus};
 
 /// Query the todo list.
 ///
 /// # Errors
 ///
 /// Returns `Err` if a `Get` targets a non-existent task.
-pub fn todo_read(list: &TodoList, action: &TodoReadAction) -> Result<TodoReadOutput, String> {
+pub fn todo_read(list: &TodoList, action: &TodoReadAction) -> Result<TodoReadOutput, PlanError> {
     match action {
         TodoReadAction::List { group, status } => Ok(list_tasks(list, group.as_deref(), status.as_ref())),
         TodoReadAction::Get { id } => get_task(list, id),
@@ -60,7 +60,7 @@ fn verification_nags(list: &TodoList) -> Vec<Nag> {
         .collect()
 }
 
-fn get_task(list: &TodoList, id: &str) -> Result<TodoReadOutput, String> {
+fn get_task(list: &TodoList, id: &str) -> Result<TodoReadOutput, PlanError> {
     for g in &list.groups {
         if let Some(item) = g.items.iter().find(|i| i.id == id) {
             return Ok(TodoReadOutput {
@@ -74,5 +74,5 @@ fn get_task(list: &TodoList, id: &str) -> Result<TodoReadOutput, String> {
         }
     }
 
-    Err(format!("Task '{id}' not found."))
+    Err(PlanError(format!("Task '{id}' not found.")))
 }

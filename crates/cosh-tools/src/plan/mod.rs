@@ -14,7 +14,8 @@ pub use todo_edit::{TodoEdit, todo_edit};
 pub use todo_read::todo_read;
 pub use todo_write::{TodoWriteAction, todo_write};
 pub use types::{
-    Nag, TaskGroup, TodoItem, TodoList, TodoReadAction, TodoReadOutput, TodoStatus, TodoWriteOutput,
+    Nag, PlanError, TaskGroup, TodoItem, TodoList, TodoReadAction, TodoReadOutput, TodoStatus,
+    TodoWriteOutput,
 };
 
 /// Static prompt injected when the model uses the plan tool.
@@ -86,7 +87,7 @@ impl Plan {
     /// # Errors
     ///
     /// Returns `Err` if the underlying `todo_write` operation fails.
-    pub fn todo_write(&mut self, action: &TodoWriteAction) -> Result<TodoWriteOutput, String> {
+    pub fn todo_write(&mut self, action: &TodoWriteAction) -> Result<TodoWriteOutput, PlanError> {
         let output = todo_write(&self.list, action)?;
         self.list = output.list.clone();
         Ok(output)
@@ -98,7 +99,7 @@ impl Plan {
     /// # Errors
     ///
     /// Returns `Err` if the underlying `todo_edit` operation fails.
-    pub fn todo_edit(&mut self, edit: &TodoEdit) -> Result<TodoWriteOutput, String> {
+    pub fn todo_edit(&mut self, edit: &TodoEdit) -> Result<TodoWriteOutput, PlanError> {
         let output = todo_edit(&self.list, edit)?;
         self.list = output.list.clone();
         Ok(output)
@@ -110,7 +111,7 @@ impl Plan {
     /// # Errors
     ///
     /// Returns `Err` if the underlying `todo_cross_off` operation fails.
-    pub fn todo_cross_off(&mut self, action: &TodoCrossOff) -> Result<TodoWriteOutput, String> {
+    pub fn todo_cross_off(&mut self, action: &TodoCrossOff) -> Result<TodoWriteOutput, PlanError> {
         let output = todo_cross_off(&self.list, action)?;
         self.list = output.list.clone();
         Ok(output)
@@ -121,7 +122,7 @@ impl Plan {
     /// # Errors
     ///
     /// See `todo_read` for available actions and error conditions.
-    pub fn todo_read(&self, action: &TodoReadAction) -> Result<TodoReadOutput, String> {
+    pub fn todo_read(&self, action: &TodoReadAction) -> Result<TodoReadOutput, PlanError> {
         todo_read(&self.list, action)
     }
 
@@ -130,7 +131,7 @@ impl Plan {
     /// # Errors
     ///
     /// Returns `Err` if the file cannot be read or parsed.
-    pub fn load_from_md(&mut self, path: &str) -> Result<(), String> {
+    pub fn load_from_md(&mut self, path: &str) -> Result<(), PlanError> {
         self.list = plan_from_md(path)?;
         Ok(())
     }

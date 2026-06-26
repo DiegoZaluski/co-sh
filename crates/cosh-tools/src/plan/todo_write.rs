@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use super::types::{Nag, TodoItem, TodoList, TodoStatus, TodoWriteOutput};
+use super::types::{Nag, PlanError, TodoItem, TodoList, TodoStatus, TodoWriteOutput};
 
 pub enum TodoWriteAction {
     Add {
@@ -31,7 +31,7 @@ pub enum TodoWriteAction {
 /// - A `Start` targets a non-existent or already-in-progress item.
 /// - Dependencies are not satisfied.
 /// - `VerifyGroup` targets a non-existent group.
-pub fn todo_write(list: &TodoList, action: &TodoWriteAction) -> Result<TodoWriteOutput, String> {
+pub fn todo_write(list: &TodoList, action: &TodoWriteAction) -> Result<TodoWriteOutput, PlanError> {
     match action {
         TodoWriteAction::Add {
             group,
@@ -50,9 +50,9 @@ fn add(
     group: &str,
     description: &str,
     depends_on: Option<&Vec<String>>,
-) -> Result<TodoWriteOutput, String> {
+) -> Result<TodoWriteOutput, PlanError> {
     if description.trim().is_empty() {
-        return Err("Description must be non-empty text.".into());
+        return Err(PlanError("Description must be non-empty text.".into()));
     }
 
     let mut nags: Vec<Nag> = Vec::new();
@@ -96,12 +96,12 @@ fn add(
     })
 }
 
-fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
+fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, PlanError> {
     let mut groups = list.groups.clone();
     let mut nags: Vec<Nag> = Vec::new();
 
     let (gi, ii) = find_item(&groups, id).ok_or_else(|| {
-        format!("Task '{id}' does not exist. Use List to see available tasks.")
+        PlanError(format!("Task '{id}' does not exist. Use List to see available tasks."))
     })?;
 
     let others_in_progress: Vec<&str> = groups
@@ -112,10 +112,10 @@ fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
         .collect();
 
     if !others_in_progress.is_empty() {
-        return Err(format!(
+        return Err(PlanError(format!(
             "Only one task at a time can be InProgress. Complete or cancel {} first before starting '{id}'.",
             join_ids(&others_in_progress),
-        ));
+        )));
     }
 
     let deps = groups[gi].items[ii].depends_on.clone();
@@ -149,7 +149,7 @@ fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
     })
 }
 
-fn remove(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
+fn remove(list: &TodoList, id: &str) -> Result<TodoWriteOutput, PlanError> {
     let mut groups = list.groups.clone();
     let mut removed = false;
 
@@ -162,9 +162,9 @@ fn remove(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
     }
 
     if !removed {
-        return Err(format!(
+        return Err(PlanError(format!(
             "Task '{id}' does not exist. Use List to see available tasks."
-        ));
+        )));
     }
 
     let stale_refs: Vec<String> = groups
@@ -226,12 +226,12 @@ fn clean(list: &TodoList, keep_pending: bool) -> TodoWriteOutput {
     }
 }
 
-fn verify_group(list: &TodoList, group: &str) -> Result<TodoWriteOutput, String> {
+fn verify_group(list: &TodoList, group: &str) -> Result<TodoWriteOutput, PlanError> {
     let mut groups = list.groups.clone();
     let g = groups
         .iter_mut()
         .find(|g| g.title == group)
-        .ok_or_else(|| format!("Group '{group}' does not exist."))?;
+        .ok_or_else(|| PlanError(format!("Group '{group}' does not exist.")))?;
 
     g.tests_verified = true;
 

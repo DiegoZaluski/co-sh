@@ -57,3 +57,9 @@ pub struct TodoReadOutput {
     pub groups: Vec<TaskGroup>,
     pub nags: Vec<Nag>,
 }
+
+/// Error type for plan operations.
+/// Wraps human-readable error messages intended as correction prompts for the model.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{0}")]
+pub struct PlanError(pub String);

@@ -1,6 +1,6 @@
 use std::fs;
 
-use super::types::{TaskGroup, TodoItem, TodoList, TodoStatus};
+use super::types::{PlanError, TaskGroup, TodoItem, TodoList, TodoStatus};
 
 /// Parse a Markdown plan file into a `TodoList`.
 ///
@@ -16,9 +16,9 @@ use super::types::{TaskGroup, TodoItem, TodoList, TodoStatus};
 ///
 /// Returns `Err` if the file cannot be read.
 #[allow(clippy::missing_panics_doc)]
-pub fn plan_from_md(path: &str) -> Result<TodoList, String> {
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("Failed to read plan file: {e}"))?;
+pub fn plan_from_md(path: &str) -> Result<TodoList, PlanError> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| PlanError(format!("Failed to read plan file: {e}")))?;
 
     let mut groups: Vec<TaskGroup> = Vec::new();
     let mut next_id: usize = 1;
@@ -31,7 +31,7 @@ pub fn plan_from_md(path: &str) -> Result<TodoList, String> {
             groups.push(TaskGroup {
                 title: title.to_owned(),
                 items: Vec::new(),
-                tests_verified: true, // loaded from markdown — nothing to verify yet
+                tests_verified: false,
             });
             continue;
         }
