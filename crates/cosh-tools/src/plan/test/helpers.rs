@@ -8,7 +8,6 @@ pub fn add_task(list: &TodoList, group: &str, description: &str) -> TodoList {
         &TodoWriteAction::Add {
             group: group.into(),
             description: description.into(),
-            timeline_ms: None,
             depends_on: None,
         },
     )
@@ -41,7 +40,6 @@ pub fn add_task_with_deps(
         &TodoWriteAction::Add {
             group: group.into(),
             description: description.into(),
-            timeline_ms: None,
             depends_on: Some(depends_on),
         },
     )

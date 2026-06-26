@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum TodoStatus {
     Pending,
@@ -13,10 +11,7 @@ pub struct TodoItem {
     pub id: String,
     pub description: String,
     pub status: TodoStatus,
-    pub timeline_ms: Option<u64>,
     pub depends_on: Vec<String>,
-    pub created_at: u64,
-    pub updated_at: u64,
 }
 
 /// A named group of tasks.
@@ -58,14 +53,4 @@ pub struct TodoWriteOutput {
 pub struct TodoReadOutput {
     pub groups: Vec<TaskGroup>,
     pub nags: Vec<Nag>,
-}
-
-pub(crate) fn now_ms() -> u64 {
-    u64::try_from(
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
-    )
-    .unwrap_or(u64::MAX)
 }

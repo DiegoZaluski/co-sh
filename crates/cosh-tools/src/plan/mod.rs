@@ -18,8 +18,42 @@ pub use types::{
 };
 
 /// Static prompt injected when the model uses the plan tool.
-/// Teaches the model the plan file syntax.
-pub const PLAN_WRITE: &str = "";
+/// Teaches the model the plan file syntax so the file can be
+/// automatically parsed into a structured TODO list.
+pub const PLAN_WRITE: &str = "\
+# Plan: <title>
+
+Write your plan using standard Markdown with flat checklist items.
+Every plan file must follow this exact structure to be parseable.
+
+## Group heading (required — one per group of tasks)
+- [ ] Task description
+  - depends: task-<N>, task-<N>   (optional, comma-separated)
+- [ ] Another task
+- [x] Completed task (optional)
+
+## Another group
+- [ ] More tasks
+
+Rules:
+1. Start each group with `## ` (level-2 heading). The text after `## ` becomes the group title.
+2. Each task is a checklist item: `- [ ] ` for pending, `- [x] ` for completed.
+3. `depends:` goes on a sub-bullet indented under the task (2 spaces + `- depends: task-1, task-3`).
+4. No nesting deeper than one sub-level. Blockquotes, code fences, and regular paragraphs are ignored.
+5. IDs are assigned sequentially (`task-1`, `task-2`, …) in the order tasks appear.
+6. Use `fs.write` to save the plan to the agreed path. Do NOT attempt to call a dedicated plan tool — just write the file.
+
+Example:
+
+## Database
+- [ ] Design schema
+- [ ] Write migrations
+
+## API
+- [ ] User endpoints
+  - depends: task-1
+- [x] Health check
+";
 
 /// Plan instructs the model on how to write plans and provides
 /// stateful wrappers over the pure todo operations.

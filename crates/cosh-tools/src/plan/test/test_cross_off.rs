@@ -80,7 +80,6 @@ fn complete_nags_dependents() {
         &TodoWriteAction::Add {
             group: "default".into(),
             description: "Child".into(),
-            timeline_ms: None,
             depends_on: Some(vec!["task-1".into()]),
         },
     )
@@ -158,7 +157,6 @@ fn cancel_nags_dependents() {
         &TodoWriteAction::Add {
             group: "default".into(),
             description: "Child".into(),
-            timeline_ms: None,
             depends_on: Some(vec!["task-1".into()]),
         },
     )

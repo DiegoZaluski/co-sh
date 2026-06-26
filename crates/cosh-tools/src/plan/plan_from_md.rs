@@ -8,7 +8,6 @@ use super::types::{TaskGroup, TodoItem, TodoList, TodoStatus};
 /// ```markdown
 /// ## Group Name
 /// - [ ] Task description
-///   - timeline: 2d
 ///   - depends: task-1, task-2
 /// - [x] Completed task
 /// ```
@@ -53,10 +52,7 @@ pub fn plan_from_md(path: &str) -> Result<TodoList, String> {
                 } else {
                     TodoStatus::Pending
                 },
-                timeline_ms: None,
                 depends_on: Vec::new(),
-                created_at: 0,
-                updated_at: 0,
             });
             continue;
         }
@@ -65,9 +61,7 @@ pub fn plan_from_md(path: &str) -> Result<TodoList, String> {
         if let Some(rest) = trimmed.strip_prefix("- ")
             && let Some(last_item) = last_group.items.last_mut()
         {
-            if let Some(val) = rest.strip_prefix("timeline:") {
-                last_item.timeline_ms = Some(parse_timeline(val.trim())?);
-            } else if let Some(val) = rest.strip_prefix("depends:") {
+            if let Some(val) = rest.strip_prefix("depends:") {
                 last_item.depends_on = val
                     .split(',')
                     .map(|s| s.trim().to_owned())
@@ -78,44 +72,4 @@ pub fn plan_from_md(path: &str) -> Result<TodoList, String> {
     }
 
     Ok(TodoList { groups })
-}
-
-fn parse_timeline(s: &str) -> Result<u64, String> {
-    let s = s.trim().to_lowercase();
-
-    if let Some(num_str) = s.strip_suffix("ms") {
-        return num_str
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| format!("Invalid timeline value: '{s}'"));
-    }
-
-    if let Some(num_str) = s.strip_suffix('d') {
-        let days: u64 = num_str
-            .trim()
-            .parse()
-            .map_err(|_| format!("Invalid timeline value: '{s}'"))?;
-        return Ok(days * 86_400_000);
-    }
-
-    if let Some(num_str) = s.strip_suffix('h') {
-        let hours: u64 = num_str
-            .trim()
-            .parse()
-            .map_err(|_| format!("Invalid timeline value: '{s}'"))?;
-        return Ok(hours * 3_600_000);
-    }
-
-    if s.ends_with("min") {
-        let num_str = s.strip_suffix("min").unwrap();
-        let mins: u64 = num_str
-            .trim()
-            .parse()
-            .map_err(|_| format!("Invalid timeline value: '{s}'"))?;
-        return Ok(mins * 60_000);
-    }
-
-    // Bare number → ms
-    s.parse::<u64>()
-        .map_err(|_| format!("Invalid timeline value: '{s}'"))
 }

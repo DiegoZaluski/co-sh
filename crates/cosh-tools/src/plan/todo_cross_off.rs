@@ -1,4 +1,4 @@
-use super::types::{Nag, TodoList, TodoStatus, TodoWriteOutput, now_ms};
+use super::types::{Nag, TodoList, TodoStatus, TodoWriteOutput};
 
 pub enum TodoCrossOff {
     Complete { id: String },
@@ -23,8 +23,9 @@ fn set_terminal(
     status: TodoStatus,
 ) -> Result<TodoWriteOutput, String> {
     let mut groups = list.groups.clone();
-    let (gi, ii) = super::todo_write::find_item(&groups, id)
-        .ok_or_else(|| format!("Task '{id}' not found."))?;
+    let (gi, ii) = super::todo_write::find_item(&groups, id).ok_or_else(|| {
+        format!("Task '{id}' does not exist. Use List to see available tasks.")
+    })?;
 
     let item = &groups[gi].items[ii];
     match item.status {
@@ -34,7 +35,6 @@ fn set_terminal(
     }
 
     groups[gi].items[ii].status = status.clone();
-    groups[gi].items[ii].updated_at = now_ms();
 
     let mut nags = Vec::new();
 

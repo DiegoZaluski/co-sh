@@ -64,46 +64,6 @@ fn parse_multiple_groups() {
 }
 
 #[test]
-fn parse_timeline_days() {
-    let path = write_plan("## Backend\n- [ ] Task\n  - timeline: 2d");
-    let list = plan_from_md(&path).unwrap();
-    assert_eq!(list.groups[0].items[0].timeline_ms, Some(172_800_000));
-    std::fs::remove_file(&path).ok();
-}
-
-#[test]
-fn parse_timeline_hours() {
-    let path = write_plan("## Backend\n- [ ] Task\n  - timeline: 4h");
-    let list = plan_from_md(&path).unwrap();
-    assert_eq!(list.groups[0].items[0].timeline_ms, Some(14_400_000));
-    std::fs::remove_file(&path).ok();
-}
-
-#[test]
-fn parse_timeline_minutes() {
-    let path = write_plan("## Backend\n- [ ] Task\n  - timeline: 30min");
-    let list = plan_from_md(&path).unwrap();
-    assert_eq!(list.groups[0].items[0].timeline_ms, Some(1_800_000));
-    std::fs::remove_file(&path).ok();
-}
-
-#[test]
-fn parse_timeline_ms() {
-    let path = write_plan("## Backend\n- [ ] Task\n  - timeline: 5000ms");
-    let list = plan_from_md(&path).unwrap();
-    assert_eq!(list.groups[0].items[0].timeline_ms, Some(5000));
-    std::fs::remove_file(&path).ok();
-}
-
-#[test]
-fn parse_timeline_bare_number() {
-    let path = write_plan("## Backend\n- [ ] Task\n  - timeline: 999");
-    let list = plan_from_md(&path).unwrap();
-    assert_eq!(list.groups[0].items[0].timeline_ms, Some(999));
-    std::fs::remove_file(&path).ok();
-}
-
-#[test]
 fn parse_depends_on() {
     let path = write_plan("## Backend\n- [ ] Task\n  - depends: task-1, task-2");
     let list = plan_from_md(&path).unwrap();
@@ -147,14 +107,6 @@ Some intro text.
 fn parse_nonexistent_file() {
     let result = plan_from_md("/tmp/nonexistent_plan_test_file.md");
     assert!(result.is_err());
-}
-
-#[test]
-fn parse_invalid_timeline() {
-    let path = write_plan("## Backend\n- [ ] Task\n  - timeline: abc");
-    let result = plan_from_md(&path);
-    assert!(result.is_err());
-    std::fs::remove_file(&path).ok();
 }
 
 #[test]

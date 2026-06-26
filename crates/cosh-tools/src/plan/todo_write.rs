@@ -1,12 +1,11 @@
 use std::fmt::Write;
 
-use super::types::{Nag, TodoItem, TodoList, TodoStatus, TodoWriteOutput, now_ms};
+use super::types::{Nag, TodoItem, TodoList, TodoStatus, TodoWriteOutput};
 
 pub enum TodoWriteAction {
     Add {
         group: String,
         description: String,
-        timeline_ms: Option<u64>,
         depends_on: Option<Vec<String>>,
     },
     Start { id: String },
@@ -27,9 +26,8 @@ pub fn todo_write(list: &TodoList, action: &TodoWriteAction) -> Result<TodoWrite
         TodoWriteAction::Add {
             group,
             description,
-            timeline_ms,
             depends_on,
-        } => add(list, group, description, *timeline_ms, depends_on.as_ref()),
+        } => add(list, group, description, depends_on.as_ref()),
         TodoWriteAction::Start { id } => start(list, id),
         TodoWriteAction::Remove { id } => remove(list, id),
         TodoWriteAction::Clean { keep_pending } => Ok(clean(list, *keep_pending)),
@@ -40,11 +38,10 @@ fn add(
     list: &TodoList,
     group: &str,
     description: &str,
-    timeline_ms: Option<u64>,
     depends_on: Option<&Vec<String>>,
 ) -> Result<TodoWriteOutput, String> {
     if description.trim().is_empty() {
-        return Err("Cannot add a task with an empty description.".into());
+        return Err("Description must be non-empty text.".into());
     }
 
     let mut nags: Vec<Nag> = Vec::new();
@@ -65,15 +62,11 @@ fn add(
         }
     }
 
-    let now = now_ms();
     let item = TodoItem {
         id: id.clone(),
         description: description.to_owned(),
         status: TodoStatus::Pending,
-        timeline_ms,
         depends_on: depends_on.cloned().unwrap_or_default(),
-        created_at: now,
-        updated_at: now,
     };
 
     if let Some(g) = groups.iter_mut().find(|g| g.title == group) {
@@ -95,12 +88,9 @@ fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
     let mut groups = list.groups.clone();
     let mut nags: Vec<Nag> = Vec::new();
 
-    let (gi, ii) = find_item(&groups, id)
-        .ok_or_else(|| format!("Task '{id}' not found."))?;
-
-    if let Some(nag) = check_timeline(&groups[gi].items[ii], now_ms()) {
-        nags.push(nag);
-    }
+    let (gi, ii) = find_item(&groups, id).ok_or_else(|| {
+        format!("Task '{id}' does not exist. Use List to see available tasks.")
+    })?;
 
     let others_in_progress: Vec<&str> = groups
         .iter()
@@ -111,7 +101,7 @@ fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
 
     if !others_in_progress.is_empty() {
         return Err(format!(
-            "Cannot start '{id}' — {} still in progress.",
+            "Only one task at a time can be InProgress. Complete or cancel {} first before starting '{id}'.",
             join_ids(&others_in_progress),
         ));
     }
@@ -140,7 +130,6 @@ fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
     }
 
     groups[gi].items[ii].status = TodoStatus::InProgress;
-    groups[gi].items[ii].updated_at = now_ms();
 
     Ok(TodoWriteOutput {
         list: TodoList { groups },
@@ -161,7 +150,9 @@ fn remove(list: &TodoList, id: &str) -> Result<TodoWriteOutput, String> {
     }
 
     if !removed {
-        return Err(format!("Task '{id}' not found."));
+        return Err(format!(
+            "Task '{id}' does not exist. Use List to see available tasks."
+        ));
     }
 
     let stale_refs: Vec<String> = groups
@@ -245,23 +236,6 @@ pub(super) fn find_item_in_groups<'a>(
         .iter()
         .flat_map(|g| &g.items)
         .find(|i| i.id == id)
-}
-
-fn check_timeline(item: &TodoItem, now: u64) -> Option<Nag> {
-    let timeline = item.timeline_ms?;
-    let elapsed = now.saturating_sub(item.created_at);
-    if elapsed > timeline {
-        Some(Nag {
-            message: format!(
-                "'{}' has exceeded its timeline ({}ms) by {}ms.",
-                item.id,
-                timeline,
-                elapsed - timeline,
-            ),
-        })
-    } else {
-        None
-    }
 }
 
 fn join_ids(ids: &[&str]) -> String {

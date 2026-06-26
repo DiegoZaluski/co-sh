@@ -12,7 +12,6 @@ fn add_valid_task() {
         &TodoWriteAction::Add {
             group: "default".into(),
             description: "Fix memory leak".into(),
-            timeline_ms: None,
             depends_on: None,
         },
     )
@@ -38,7 +37,6 @@ fn add_to_existing_group() {
         &TodoWriteAction::Add {
             group: "backend".into(),
             description: "Task 2".into(),
-            timeline_ms: None,
             depends_on: None,
         },
     )
@@ -55,7 +53,6 @@ fn add_to_different_groups() {
         &TodoWriteAction::Add {
             group: "backend".into(),
             description: "API".into(),
-            timeline_ms: None,
             depends_on: None,
         },
     )
@@ -83,7 +80,6 @@ fn add_with_nonexistent_dependency_nags() {
         &TodoWriteAction::Add {
             group: "default".into(),
             description: "Task".into(),
-            timeline_ms: None,
             depends_on: Some(vec!["nonexistent".into()]),
         },
     )
@@ -103,7 +99,6 @@ fn add_empty_description_rejected() {
         &TodoWriteAction::Add {
             group: "default".into(),
             description: "".into(),
-            timeline_ms: None,
             depends_on: None,
         },
     );
@@ -118,30 +113,10 @@ fn add_whitespace_description_rejected() {
         &TodoWriteAction::Add {
             group: "default".into(),
             description: "   ".into(),
-            timeline_ms: None,
             depends_on: None,
         },
     );
     assert!(result.is_err());
-}
-
-#[test]
-fn add_with_timeline() {
-    let list = TodoList::default();
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Add {
-            group: "default".into(),
-            description: "Timed".into(),
-            timeline_ms: Some(60_000),
-            depends_on: None,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        output.list.groups[0].items[0].timeline_ms,
-        Some(60_000)
-    );
 }
 
 #[test]

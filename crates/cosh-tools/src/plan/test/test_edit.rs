@@ -11,7 +11,6 @@ fn update_description() {
             id: "task-1".into(),
             description: Some("New".into()),
             group: None,
-            timeline_ms: None,
             depends_on: None,
         },
     )
@@ -28,7 +27,6 @@ fn update_moves_group() {
             id: "task-1".into(),
             description: None,
             group: Some("b".into()),
-            timeline_ms: None,
             depends_on: None,
         },
     )
@@ -48,31 +46,10 @@ fn update_empty_description_rejected() {
             id: "task-1".into(),
             description: Some("".into()),
             group: None,
-            timeline_ms: None,
             depends_on: None,
         },
     );
     assert!(result.is_err());
-}
-
-#[test]
-fn update_timeline() {
-    let list = add_task(&TodoList::default(), "default", "Task");
-    let output = todo_edit(
-        &list,
-        &TodoEdit {
-            id: "task-1".into(),
-            description: None,
-            group: None,
-            timeline_ms: Some(120_000),
-            depends_on: None,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        output.list.groups[0].items[0].timeline_ms,
-        Some(120_000)
-    );
 }
 
 #[test]
@@ -84,7 +61,6 @@ fn update_depends_on() {
             id: "task-1".into(),
             description: None,
             group: None,
-            timeline_ms: None,
             depends_on: Some(vec!["other".into()]),
         },
     )
@@ -104,7 +80,6 @@ fn update_nonexistent_fails() {
             id: "ghost".into(),
             description: None,
             group: None,
-            timeline_ms: None,
             depends_on: None,
         },
     );
@@ -120,7 +95,6 @@ fn update_depends_on_self_reference_nags() {
             id: "task-1".into(),
             description: None,
             group: None,
-            timeline_ms: None,
             depends_on: Some(vec!["task-1".into()]),
         },
     )
@@ -141,7 +115,6 @@ fn update_depends_on_nonexistent_nags() {
             id: "task-1".into(),
             description: None,
             group: None,
-            timeline_ms: None,
             depends_on: Some(vec!["ghost".into()]),
         },
     )
