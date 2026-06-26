@@ -34,14 +34,18 @@ fn set_terminal(
         TodoStatus::InProgress | TodoStatus::Pending => {}
     }
 
-    groups[gi].items[ii].status = status.clone();
+    groups[gi].items[ii].status = status;
 
     let mut nags = Vec::new();
 
     // Nag about any items that depend on this one.
     for g in &groups {
         for i in &g.items {
-            if i.depends_on.iter().any(|d| d == id) && i.status == TodoStatus::Pending {
+            let blocked = match status {
+                TodoStatus::Cancelled => i.status != TodoStatus::Completed && i.status != TodoStatus::Cancelled,
+                _ => i.status == TodoStatus::Pending,
+            };
+            if i.depends_on.iter().any(|d| d == id) && blocked {
                 nags.push(Nag {
                     message: format!(
                         "'{}' depends on '{id}' which is now {:?}.",

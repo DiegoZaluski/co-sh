@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TodoStatus {
     Pending,
     InProgress,
@@ -19,6 +19,9 @@ pub struct TodoItem {
 pub struct TaskGroup {
     pub title: String,
     pub items: Vec<TodoItem>,
+    /// Whether the model has confirmed that tests were run for this group.
+    /// Set to `false` on creation; set to `true` via `VerifyGroup` action.
+    pub tests_verified: bool,
 }
 
 /// The full mutable state of the todo system.
@@ -41,14 +44,14 @@ pub struct Nag {
     pub message: String,
 }
 
-/// Output produced by mutation operations (todo_write, todo_edit, todo_cross_off).
+/// Output produced by mutation operations (`todo_write`, `todo_edit`, `todo_cross_off`).
 #[derive(Debug, Clone)]
 pub struct TodoWriteOutput {
     pub list: TodoList,
     pub nags: Vec<Nag>,
 }
 
-/// Output produced by [`todo_read`](super::todo_read::todo_read).
+/// Output produced by `todo_read`.
 #[derive(Debug, Clone)]
 pub struct TodoReadOutput {
     pub groups: Vec<TaskGroup>,

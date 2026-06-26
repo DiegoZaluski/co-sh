@@ -2,7 +2,7 @@ use std::fs;
 
 use super::types::{TaskGroup, TodoItem, TodoList, TodoStatus};
 
-/// Parse a Markdown plan file into a [`TodoList`].
+/// Parse a Markdown plan file into a `TodoList`.
 ///
 /// Expected format:
 /// ```markdown
@@ -11,6 +11,11 @@ use super::types::{TaskGroup, TodoItem, TodoList, TodoStatus};
 ///   - depends: task-1, task-2
 /// - [x] Completed task
 /// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the file cannot be read.
+#[allow(clippy::missing_panics_doc)]
 pub fn plan_from_md(path: &str) -> Result<TodoList, String> {
     let content =
         fs::read_to_string(path).map_err(|e| format!("Failed to read plan file: {e}"))?;
@@ -26,6 +31,7 @@ pub fn plan_from_md(path: &str) -> Result<TodoList, String> {
             groups.push(TaskGroup {
                 title: title.to_owned(),
                 items: Vec::new(),
+                tests_verified: true, // loaded from markdown — nothing to verify yet
             });
             continue;
         }
@@ -40,8 +46,9 @@ pub fn plan_from_md(path: &str) -> Result<TodoList, String> {
         if let Some(desc) = trimmed
             .strip_prefix("- [ ] ")
             .or_else(|| trimmed.strip_prefix("- [x] "))
+            .or_else(|| trimmed.strip_prefix("- [X] "))
         {
-            let completed = trimmed.starts_with("- [x]");
+            let completed = trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]");
             let id = format!("task-{next_id}");
             next_id += 1;
             last_group.items.push(TodoItem {
@@ -60,14 +67,13 @@ pub fn plan_from_md(path: &str) -> Result<TodoList, String> {
         // Metadata sub-bullet on the last item
         if let Some(rest) = trimmed.strip_prefix("- ")
             && let Some(last_item) = last_group.items.last_mut()
+            && let Some(val) = rest.strip_prefix("depends:")
         {
-            if let Some(val) = rest.strip_prefix("depends:") {
-                last_item.depends_on = val
-                    .split(',')
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-            }
+            last_item.depends_on = val
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
     }
 

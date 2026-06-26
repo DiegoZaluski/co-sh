@@ -1,4 +1,4 @@
-use super::types::{TaskGroup, TodoList, TodoReadAction, TodoReadOutput, TodoStatus};
+use super::types::{Nag, TaskGroup, TodoList, TodoReadAction, TodoReadOutput, TodoStatus};
 
 /// Query the todo list.
 ///
@@ -29,13 +29,35 @@ fn list_tasks(
                 .filter(|i| status.is_none_or(|s| i.status == *s))
                 .cloned()
                 .collect(),
+            tests_verified: g.tests_verified,
         })
         .collect();
 
-    TodoReadOutput {
-        groups,
-        nags: Vec::new(),
-    }
+    let nags = verification_nags(list);
+
+    TodoReadOutput { groups, nags }
+}
+
+/// Generate nags for groups where all tasks are terminal (completed/cancelled)
+/// but the model has not confirmed tests via `VerifyGroup`.
+fn verification_nags(list: &TodoList) -> Vec<Nag> {
+    list.groups
+        .iter()
+        .filter(|g| {
+            !g.tests_verified
+                && !g.items.is_empty()
+                && g.items
+                    .iter()
+                    .all(|i| matches!(i.status, TodoStatus::Completed | TodoStatus::Cancelled))
+        })
+        .map(|g| Nag {
+            message: format!(
+                "Group '{}' is complete but tests have not been confirmed. \
+                 Use VerifyGroup to confirm tests passed.",
+                g.title
+            ),
+        })
+        .collect()
 }
 
 fn get_task(list: &TodoList, id: &str) -> Result<TodoReadOutput, String> {
@@ -45,6 +67,7 @@ fn get_task(list: &TodoList, id: &str) -> Result<TodoReadOutput, String> {
                 groups: vec![TaskGroup {
                     title: g.title.clone(),
                     items: vec![item.clone()],
+                    tests_verified: g.tests_verified,
                 }],
                 nags: Vec::new(),
             });

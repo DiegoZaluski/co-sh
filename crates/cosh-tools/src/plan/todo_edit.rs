@@ -39,6 +39,12 @@ pub fn todo_edit(list: &TodoList, edit: &TodoEdit) -> Result<TodoWriteOutput, St
                 nags.push(Nag {
                     message: format!("Dependency '{dep_id}' does not exist in the task list."),
                 });
+            } else if super::todo_write::would_create_cycle(&groups, &edit.id, dep_id) {
+                nags.push(Nag {
+                    message: format!(
+                        "Dependency '{dep_id}' would create a circular dependency chain."
+                    ),
+                });
             }
         }
         groups[gi].items[ii].depends_on.clone_from(deps);
@@ -55,6 +61,7 @@ pub fn todo_edit(list: &TodoList, edit: &TodoEdit) -> Result<TodoWriteOutput, St
             groups.push(super::types::TaskGroup {
                 title: new_group.to_owned(),
                 items: vec![item],
+                tests_verified: false,
             });
         }
         return Ok(TodoWriteOutput {

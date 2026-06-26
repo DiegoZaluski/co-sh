@@ -175,3 +175,35 @@ fn cancel_nags_dependents() {
         .any(|n| n.message.contains("depends on"));
     assert!(has_nag);
 }
+
+/// BUG PROOF: Cancel com dependente InProgress não gera nag.
+/// `set_terminal` só checa `i.status == TodoStatus::Pending`, ignorando
+/// dependentes em InProgress. Este teste FAIL no código atual.
+#[test]
+fn cancel_nags_inprogress_dependents() {
+    let list = add_task(&TodoList::default(), "default", "Parent"); // task-1
+    let list = todo_write(
+        &list,
+        &TodoWriteAction::Add {
+            group: "default".into(),
+            description: "Child".into(),
+            depends_on: Some(vec!["task-1".into()]),
+        },
+    )
+    .unwrap()
+    .list; // task-2
+    let list = todo_write(
+        &list,
+        &TodoWriteAction::Start {
+            id: "task-2".into(),
+        },
+    )
+    .unwrap()
+    .list;
+    let output = todo_cross_off(&list, &TodoCrossOff::Cancel { id: "task-1".into() }).unwrap();
+    let has_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("depends on") && n.message.contains("Cancelled"));
+    assert!(has_nag, "Cancel parent deveria nagar InProgress dependent");
+}
