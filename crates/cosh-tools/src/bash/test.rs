@@ -9,8 +9,7 @@ const BUFFER_SIZE: usize = 4096;
 
 #[tokio::test]
 async fn test_spawn_bash_simple_echo() {
-    let stream = spawn_bash(None, ".", "echo hello");
-    tokio::pin!(stream);
+    let mut stream = spawn_bash(None, ".", "echo hello");
 
     let mut got_output = false;
     while let Some(result) = stream.next().await {
@@ -25,9 +24,7 @@ async fn test_spawn_bash_simple_echo() {
 
 #[tokio::test]
 async fn test_spawn_bash_stderr() {
-    let stream = spawn_bash(None, ".", "echo error >&2");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash(None, ".", "echo error >&2");
     let mut got_stderr = false;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -41,9 +38,7 @@ async fn test_spawn_bash_stderr() {
 
 #[tokio::test]
 async fn test_spawn_bash_stdout_and_stderr() {
-    let stream = spawn_bash(None, ".", "echo out; echo err >&2");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash(None, ".", "echo out; echo err >&2");
     let mut out = vec![];
     let mut err = vec![];
     while let Some(result) = stream.next().await {
@@ -57,13 +52,11 @@ async fn test_spawn_bash_stdout_and_stderr() {
 
 #[tokio::test]
 async fn test_spawn_bash_with_env() {
-    let stream = spawn_bash(
+    let mut stream = spawn_bash(
         Some(vec![("MY_VAR".to_string(), "hello".to_string())]),
         ".",
         "echo $MY_VAR",
     );
-    tokio::pin!(stream);
-
     let mut output = vec![];
     while let Some(result) = stream.next().await {
         let item = result.unwrap();
@@ -74,13 +67,11 @@ async fn test_spawn_bash_with_env() {
 
 #[tokio::test]
 async fn test_spawn_bash_invalid_env_var_name() {
-    let stream = spawn_bash(
+    let mut stream = spawn_bash(
         Some(vec![("INVALID-KEY".to_string(), "value".to_string())]),
         ".",
         "echo hello",
     );
-    tokio::pin!(stream);
-
     let mut got_error = false;
     while let Some(result) = stream.next().await {
         if result.is_err() {
@@ -93,9 +84,7 @@ async fn test_spawn_bash_invalid_env_var_name() {
 
 #[tokio::test]
 async fn test_spawn_bash_nonexistent_cwd() {
-    let stream = spawn_bash(None, "/nonexistent-path-12345", "echo hello");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash(None, "/nonexistent-path-12345", "echo hello");
     let mut got_error = false;
     while let Some(result) = stream.next().await {
         if result.is_err() {
@@ -110,9 +99,7 @@ async fn test_spawn_bash_nonexistent_cwd() {
 async fn test_spawn_bash_large_output() {
     let n = BUFFER_SIZE * 2 + 100;
     let cmd = format!("printf 'a%.0s' $(seq 1 {n})", n = n);
-    let stream = spawn_bash(None, ".", &cmd);
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash(None, ".", &cmd);
     let mut total = 0usize;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -123,9 +110,7 @@ async fn test_spawn_bash_large_output() {
 
 #[tokio::test]
 async fn test_spawn_bash_exit_code() {
-    let stream = spawn_bash(None, ".", "exit 42");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash(None, ".", "exit 42");
     let mut exit_code = None;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -138,13 +123,11 @@ async fn test_spawn_bash_exit_code() {
 
 #[tokio::test]
 async fn test_spawn_bash_invalid_env_var_error_kind() {
-    let stream = spawn_bash(
+    let mut stream = spawn_bash(
         Some(vec![("BAD-KEY!".to_string(), "x".to_string())]),
         ".",
         "echo hi",
     );
-    tokio::pin!(stream);
-
     let mut got = false;
     while let Some(result) = stream.next().await {
         match result {
@@ -161,9 +144,7 @@ async fn test_spawn_bash_invalid_env_var_error_kind() {
 
 #[tokio::test]
 async fn test_spawn_bash_empty_command() {
-    let stream = spawn_bash(None, ".", "");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash(None, ".", "");
     let mut got_output = false;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -177,9 +158,7 @@ async fn test_spawn_bash_empty_command() {
 
 #[tokio::test]
 async fn test_spawn_bash_exit_code_zero() {
-    let stream = spawn_bash(None, ".", "exit 0");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash(None, ".", "exit 0");
     let mut exit_code = None;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -194,9 +173,7 @@ async fn test_spawn_bash_exit_code_zero() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_signal() {
-    let stream = spawn_bash(None, ".", "kill -KILL $$");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash(None, ".", "kill -KILL $$");
     let mut got_signal = false;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -211,9 +188,7 @@ async fn test_spawn_bash_signal() {
 
 #[tokio::test]
 async fn test_spawn_bash_exit_code_after_output() {
-    let stream = spawn_bash(None, ".", "echo hello && echo world && exit 10");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash(None, ".", "echo hello && echo world && exit 10");
     let mut saw_data = false;
     let mut exit_code = None;
     while let Some(result) = stream.next().await {
@@ -240,9 +215,7 @@ async fn test_spawn_bash_exit_code_after_output() {
 
 #[tokio::test]
 async fn test_spawn_bash_pty_simple_echo() {
-    let stream = spawn_bash_pty(None, ".", "echo hello");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash_pty(None, ".", "echo hello");
     let mut output = vec![];
     while let Some(result) = stream.next().await {
         let item = result.unwrap();
@@ -255,9 +228,7 @@ async fn test_spawn_bash_pty_simple_echo() {
 
 #[tokio::test]
 async fn test_spawn_bash_pty_exit_code() {
-    let stream = spawn_bash_pty(None, ".", "exit 42");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash_pty(None, ".", "exit 42");
     let mut exit_code = None;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -270,13 +241,11 @@ async fn test_spawn_bash_pty_exit_code() {
 
 #[tokio::test]
 async fn test_spawn_bash_pty_env() {
-    let stream = spawn_bash_pty(
+    let mut stream = spawn_bash_pty(
         Some(vec![("MY_VAR".to_string(), "world".to_string())]),
         ".",
         "echo hello $MY_VAR",
     );
-    tokio::pin!(stream);
-
     let mut output = vec![];
     while let Some(result) = stream.next().await {
         let item = result.unwrap();
@@ -288,13 +257,11 @@ async fn test_spawn_bash_pty_env() {
 
 #[tokio::test]
 async fn test_spawn_bash_pty_invalid_env_var_name() {
-    let stream = spawn_bash_pty(
+    let mut stream = spawn_bash_pty(
         Some(vec![("INVALID-KEY".to_string(), "value".to_string())]),
         ".",
         "echo hello",
     );
-    tokio::pin!(stream);
-
     let mut got_error = false;
     while let Some(result) = stream.next().await {
         if result.is_err() {
@@ -308,9 +275,7 @@ async fn test_spawn_bash_pty_invalid_env_var_name() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_signal() {
-    let stream = spawn_bash_pty(None, ".", "kill -KILL $$");
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash_pty(None, ".", "kill -KILL $$");
     let mut got_signal = false;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -327,9 +292,7 @@ async fn test_spawn_bash_pty_signal() {
 async fn test_spawn_bash_pty_large_output() {
     let n = BUFFER_SIZE * 2 + 100;
     let cmd = format!("printf 'a%.0s' $(seq 1 {n})", n = n);
-    let stream = spawn_bash_pty(None, ".", &cmd);
-    tokio::pin!(stream);
-
+    let mut stream = spawn_bash_pty(None, ".", &cmd);
     let mut total = 0usize;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();

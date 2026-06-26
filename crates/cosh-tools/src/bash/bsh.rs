@@ -10,11 +10,13 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use regex::Regex;
 use std::io::Read;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::OnceLock;
 use tokio::io::AsyncReadExt;
 use tokio::io::{Error, ErrorKind};
 use tokio::sync::mpsc;
+use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 
 /// Returns the list of critical bash patterns that are checked before execution.
@@ -112,7 +114,6 @@ fn signal_name_to_number(name: &str) -> Option<i32> {
 }
 
 // Types
-
 #[derive(Default)]
 pub struct Bash {
     pub timeout: Option<u64>,
@@ -165,11 +166,11 @@ pub(super) fn validate_bash_patterns(command: &str) -> Result<(), String> {
 ///
 /// Returns [`BashError`] if the command is an absolute path or matches a
 /// dangerous security pattern.
-pub fn run(
+pub fn run<'a>(
     bash: &Bash,
-    command: &str,
-    cwd: &str,
-) -> Result<impl tokio_stream::Stream<Item = SpawnOutput>, BashError> {
+    command: &'a str,
+    cwd: &'a str,
+) -> Result<Pin<Box<dyn Stream<Item = SpawnOutput> + Send + 'a>>, BashError> {
     // Guards
     if Path::new(command).is_absolute() {
         return Err(BashError {
@@ -188,25 +189,23 @@ pub fn run(
     let env = bash.env.clone();
     let use_pty = bash.pty;
 
-    Ok(stream! {
+    Ok(Box::pin(stream! {
         if use_pty {
-            let stream = spawn_bash_pty(env, cwd, command);
-            tokio::pin!(stream);
+            let mut stream = spawn_bash_pty(env, cwd, command);
             while let Some(item) = stream.next().await {
                 if let Ok(output) = item {
                     yield output;
                 }
             }
         } else {
-            let stream = spawn_bash(env, cwd, command);
-            tokio::pin!(stream);
+            let mut stream = spawn_bash(env, cwd, command);
             while let Some(item) = stream.next().await {
                 if let Ok(output) = item {
                     yield output;
                 }
             }
         }
-    })
+    }))
 }
 
 /// Spawn a bash process and return its output as an async stream.
@@ -216,16 +215,16 @@ pub fn run(
 /// Panics if the child process stdout or stderr pipe cannot be taken (this
 /// only happens if [`std::process::Stdio::piped`] was not set).
 #[allow(clippy::too_many_lines)]
-pub(crate) fn spawn_bash(
+pub(crate) fn spawn_bash<'a>(
     env: Option<Vec<(String, String)>>,
-    cwd: &str,
-    command: &str,
-) -> impl tokio_stream::Stream<Item = Result<SpawnOutput, Error>> {
+    cwd: &'a str,
+    command: &'a str,
+) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send + 'a>> {
     let mut buffer_stdout = [0u8; BUFFER_SIZE];
     let mut buffer_stderr = [0u8; BUFFER_SIZE];
     let mut cmd = tokio::process::Command::new("bash");
 
-    stream! {
+    Box::pin(stream! {
         if let Some(env) = env {
             let valid_pattern = env_var_pattern();
             for (key, value) in env {
@@ -329,7 +328,7 @@ pub(crate) fn spawn_bash(
             signal,
             truncated: false,
         });
-    }
+    })
 }
 
 /// Spawn a bash process into a PTY and return its output as an async stream.
@@ -347,11 +346,11 @@ pub(crate) fn spawn_bash_pty(
     env: Option<Vec<(String, String)>>,
     cwd: &str,
     command: &str,
-) -> impl tokio_stream::Stream<Item = Result<SpawnOutput, Error>> {
+) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> {
     let cwd = cwd.to_string();
     let command = command.to_string();
 
-    stream! {
+    Box::pin(stream! {
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         tokio::task::spawn_blocking(move || {
@@ -473,5 +472,5 @@ pub(crate) fn spawn_bash_pty(
         while let Some(item) = rx.recv().await {
             yield item;
         }
-    }
+    })
 }

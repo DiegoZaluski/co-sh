@@ -66,17 +66,17 @@ async fn namespaced_tools_are_summarized_dotless_tools_are_inline() {
     let header = h.format_header_context();
 
     // ── Namespaced tools appear as a cached summary ──
-    assert!(
-        header.contains("server-mcp.fs"),
-        "cache key should appear"
-    );
+    assert!(header.contains("server-mcp.fs"), "cache key should appear");
     assert!(
         header.contains("File system read/write/edit operations"),
         "cached summary should appear"
     );
 
     // ── Dotless tools appear in ## Other Tools ──
-    assert!(header.contains("## Other Tools"), "dotless section should exist");
+    assert!(
+        header.contains("## Other Tools"),
+        "dotless section should exist"
+    );
 
     // Each dotless tool should be listed individually with its description
     assert!(header.contains("read"));
