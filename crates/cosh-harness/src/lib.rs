@@ -14,3 +14,5 @@ pub mod summarizer;
 
 #[cfg(test)]
 mod test;
+
+pub use harness::Harness;
