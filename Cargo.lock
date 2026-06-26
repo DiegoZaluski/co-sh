@@ -257,6 +257,7 @@ dependencies = [
 name = "cosh-harness"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "cosh-sdk",
  "rmcp",
  "serde",

@@ -77,6 +77,7 @@ pub struct Harness {
     /// To stop the agent loop.
     stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
+    server_response: Vec<String>,
 
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
@@ -107,7 +108,7 @@ impl Harness {
             internal_tools: default_internal_tools(),
             stop: false,
             tool_issuer: VecDeque::new(),
-
+            server_response: Vec::new(),
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
@@ -383,6 +384,19 @@ impl Harness {
         output
     }
 
+    /// Build the final context by appending pending server responses to the header.
+    fn build_chat_context(&mut self) -> String {
+        let mut out = self.header_context.clone();
+        if !self.server_response.is_empty() {
+            let _ = write!(out, "\n## Tool Results\n\n");
+            for (i, resp) in self.server_response.iter().enumerate() {
+                let _ = writeln!(out, "### Result {}\n{}\n", i + 1, resp);
+            }
+            self.server_response.clear();
+        }
+        out
+    }
+
     /// Send a chat completion and return the full response as a single string.
     ///
     /// Use this when streaming is not enabled — the model's reply is collected
@@ -398,9 +412,11 @@ impl Harness {
             return Ok(self.process_extraction(&raw, &self.build_extractor()));
         }
 
+        let context = self.build_chat_context();
+
         let out = self
             .connector
-            .chat_with_system(input, &self.header_context)
+            .chat_with_system(input, &context)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -453,9 +469,11 @@ impl Harness {
 
         use tokio_stream::StreamExt;
 
+        let context = self.build_chat_context();
+
         let mut stream = self
             .connector
-            .stream_chat_with_system(input, &self.header_context)
+            .stream_chat_with_system(input, &context)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -511,14 +529,18 @@ impl Harness {
         // Only remove on success — item stays queued for retry on error.
         self.tool_issuer.pop_front();
 
-        let text = result
+        let text: Vec<String> = result
             .content
             .iter()
-            .find_map(|c| c.as_text())
-            .map(|t| t.text.clone())
-            .unwrap_or_default();
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect();
 
-        Ok(text)
+        let text = text.join("\n");
+
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        self.server_response.push(format!("[{}] {}", ts, text));
+
+        Ok(text) // !?!
     }
 }
 
@@ -536,6 +558,7 @@ impl Harness {
             expanded_namespaces: HashSet::new(),
             internal_tools: default_internal_tools(),
             stop: false,
+            server_response: Vec::new(),
             tool_issuer: VecDeque::new(),
             mock_chat_response: None,
             mock_stream_response: None,
