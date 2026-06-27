@@ -4,3 +4,5 @@ pub mod find;
 pub mod hashline;
 pub mod rollback;
 pub mod tree_sitter;
+
+pub mod term_screen;
