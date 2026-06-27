@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use serde::Serialize;
+use thiserror::Error;
 
 // Public types
 
@@ -83,26 +84,17 @@ pub enum SkillOutput {
 }
 
 /// Error type for skill operations.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum SkillError {
+    #[error("skill not found: {0}")]
     NotFound(String),
+    #[error("path traversal detected: {0}")]
     PathTraversal(String),
+    #[error("invalid action: {0}")]
     InvalidAction(String),
+    #[error("invalid source: {0}")]
     InvalidSource(String),
 }
-
-impl std::fmt::Display for SkillError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SkillError::NotFound(msg) => write!(f, "skill not found: {msg}"),
-            SkillError::PathTraversal(msg) => write!(f, "path traversal detected: {msg}"),
-            SkillError::InvalidAction(msg) => write!(f, "invalid action: {msg}"),
-            SkillError::InvalidSource(msg) => write!(f, "invalid source: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for SkillError {}
 
 // Internal types (shared across sub-modules)
 
