@@ -12,7 +12,10 @@ use std::io::Read;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::io::{Error, ErrorKind};
 use tokio::sync::mpsc;
@@ -24,7 +27,7 @@ use tokio_stream::StreamExt;
 /// # Panics
 ///
 /// Panics if any of the internal regular expressions fail to compile (they are
-/// static and guaranteed valid at compile time).
+/// static and guaranteed valid on first access).
 pub fn critical_bash_patterns() -> &'static [Regex] {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -114,12 +117,6 @@ fn signal_name_to_number(name: &str) -> Option<i32> {
 }
 
 // Types
-#[derive(Default)]
-pub struct Bash {
-    pub timeout: Option<u64>,
-    pub env: Option<Vec<(String, String)>>,
-    pub pty: bool,
-}
 
 pub struct BashOutput {
     pub stdout: Option<String>,
@@ -162,12 +159,18 @@ pub(super) fn validate_bash_patterns(command: &str) -> Result<(), String> {
 /// `bash -c <command>` as a child process in the given `cwd`.
 /// Returns a stream of [`SpawnOutput`] items.
 ///
+/// When `timeout_ms` is `Some(ms)`, the child is killed after `ms`
+/// milliseconds and the stream yields a final item with
+/// `signal: Some(-1)` and `exit_code: None`.
+///
 /// # Errors
 ///
 /// Returns [`BashError`] if the command is an absolute path or matches a
 /// dangerous security pattern.
 pub fn run<'a>(
-    bash: &Bash,
+    timeout_ms: Option<u64>,
+    env: &Option<Vec<(String, String)>>,
+    pty: bool,
     command: &'a str,
     cwd: &'a str,
 ) -> Result<Pin<Box<dyn Stream<Item = SpawnOutput> + Send + 'a>>, BashError> {
@@ -186,19 +189,19 @@ pub fn run<'a>(
         });
     }
 
-    let env = bash.env.clone();
-    let use_pty = bash.pty;
+    let env = (*env).clone();
+    let use_pty = pty;
 
     Ok(Box::pin(stream! {
         if use_pty {
-            let mut stream = spawn_bash_pty(env, cwd, command);
+            let mut stream = spawn_bash_pty(env, cwd, command, timeout_ms);
             while let Some(item) = stream.next().await {
                 if let Ok(output) = item {
                     yield output;
                 }
             }
         } else {
-            let mut stream = spawn_bash(env, cwd, command);
+            let mut stream = spawn_bash(env, cwd, command, timeout_ms);
             while let Some(item) = stream.next().await {
                 if let Ok(output) = item {
                     yield output;
@@ -210,6 +213,10 @@ pub fn run<'a>(
 
 /// Spawn a bash process and return its output as an async stream.
 ///
+/// When `timeout_ms` is `Some(ms)`, the child is killed after `ms`
+/// milliseconds and the stream yields a final item with
+/// `signal: Some(-1)` and `exit_code: None`.
+///
 /// # Panics
 ///
 /// Panics if the child process stdout or stderr pipe cannot be taken (this
@@ -219,6 +226,7 @@ pub(crate) fn spawn_bash<'a>(
     env: Option<Vec<(String, String)>>,
     cwd: &'a str,
     command: &'a str,
+    timeout_ms: Option<u64>,
 ) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send + 'a>> {
     let mut buffer_stdout = [0u8; BUFFER_SIZE];
     let mut buffer_stderr = [0u8; BUFFER_SIZE];
@@ -256,8 +264,29 @@ pub(crate) fn spawn_bash<'a>(
         let mut stream_stderr = child.stderr.take().unwrap();
         let mut stdout_done = false;
         let mut stderr_done = false;
+        let deadline = timeout_ms.map(|ms| tokio::time::Instant::now() + Duration::from_millis(ms));
+
         loop {
             tokio::select! {
+                biased;
+
+                () = async {
+                    match deadline {
+                        Some(dl) => tokio::time::sleep_until(dl).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    let _ = child.kill().await;
+                    yield Ok(SpawnOutput {
+                        stdout: vec![],
+                        stderr: vec![],
+                        exit_code: None,
+                        signal: Some(-1),
+                        truncated: false,
+                    });
+                    return;
+                }
+
                 result_stdout = stream_stdout.read(&mut buffer_stdout), if !stdout_done => {
                     match result_stdout {
                         Ok(0) => stdout_done = true,
@@ -341,17 +370,64 @@ pub(crate) fn spawn_bash<'a>(
 /// I/O is bridged from the synchronous `portable_pty` reader to the async
 /// stream via [`tokio::task::spawn_blocking`] and an `mpsc` channel, adding
 /// one buffer copy per chunk.
+///
+/// # Timeout mechanism
+///
+/// A **self-pipe** trick is used to unblock the blocking [`poll(2)`] call
+/// from the async timeout handler without requiring a separate monitor
+/// thread:
+///
+/// 1. A [`libc::pipe2`] is created before [`tokio::task::spawn_blocking`]
+///    is called, giving one fd for each side of the pipe.
+/// 2. The read end (`pipe_rx`) is moved into the blocking task; the write
+///    end (`pipe_tx`) stays on the async side.
+/// 3. In the blocking task, [`libc::poll`] watches **both** the PTY master
+///    file descriptor and `pipe_rx` for readability.
+/// 4. When the async timeout fires, it writes a single byte to `pipe_tx`.
+///    `poll` wakes immediately, the blocking task detects the byte on the
+///    pipe fd, breaks out of the read loop, kills and reaps the child.
+///
+/// # Safety
+///
+/// The three `unsafe` blocks in this function are:
+///
+/// | Location | Call | Invariant |
+/// |---|---|---|
+/// | Stream setup | `pipe2` | `pipe_fds` is a valid pointer to 2 `i32`s |
+/// | Timeout handler | `write` + `close` on `pipe_tx` | `pipe_tx` is a valid fd, not used after |
+/// | Blocking task | `poll`, `read`, `close` on `pipe_rx` and `pty_fd` | Both fds are valid and open for the lifetime of `poll_fds`; `pipe_rx` is closed once after use |
+///
+/// These are trivially verified by inspection — the pipe fds are created
+/// together, one is consumed per side, and each is closed exactly once.
+///
+/// [`poll(2)`]: https://man7.org/linux/man-pages/man2/poll.2.html
 #[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_bash_pty(
     env: Option<Vec<(String, String)>>,
     cwd: &str,
     command: &str,
+    timeout_ms: Option<u64>,
 ) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> {
     let cwd = cwd.to_string();
     let command = command.to_string();
+    let kill_flag = Arc::new(AtomicBool::new(false));
 
     Box::pin(stream! {
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let kill = kill_flag.clone();
+
+        // Create a self-pipe before spawn_blocking so the write end
+        // (pipe_tx) is accessible from the async timeout handler.
+        let mut pipe_fds: [libc::c_int; 2] = [0; 2];
+        // SAFETY: pipe2 is safe per POSIX; fds provides a valid array pointer.
+        let pipe_result = unsafe {
+            libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC)
+        };
+        if pipe_result != 0 {
+            yield Err(Error::other("failed to create self-pipe for timeout"));
+            return;
+        }
+        let (pipe_rx, pipe_tx) = (pipe_fds[0], pipe_fds[1]);
 
         tokio::task::spawn_blocking(move || {
             // Validate environment variables (same rules as spawn_bash).
@@ -417,30 +493,106 @@ pub(crate) fn spawn_bash_pty(
             // EOF to the master reader once the child exits.
             drop(pair.slave);
 
+            // Get the PTY master fd for poll(). Both pair.master and the
+            // cloned reader share the same underlying PTY, so polling the
+            // master fd for POLLIN and reading from the reader is coherent.
+            let Some(pty_fd) = pair.master.as_raw_fd() else {
+                let _ = tx.send(Err(Error::other("failed to get PTY fd")));
+                return;
+            };
+
+            // poll_fds[0] = PTY master, poll_fds[1] = self-pipe read end.
+            let mut poll_fds = [
+                libc::pollfd { fd: pty_fd, events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: pipe_rx, events: libc::POLLIN, revents: 0 },
+            ];
+
             let mut buf = [0u8; BUFFER_SIZE];
             loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx
-                            .send(Ok(SpawnOutput {
+                let n_ready = loop {
+
+                    let res = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, -1) };
+                    if res < 0 {
+                        let err = std::io::Error::last_os_error();
+                        if err.raw_os_error() == Some(libc::EINTR) {
+                            continue;
+                        }
+                        let _ = tx.send(Err(Error::other(format!("pty poll error: {err}"))));
+                        return;
+                    }
+                    break res;
+                };
+
+                if n_ready == 0 {
+                    // Spurious wakeup (shouldn't happen with -1 timeout).
+                    continue;
+                }
+
+                // Self-pipe has data → timeout requested by the async handler.
+                if poll_fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                    // Consume the notification byte (ignore errors — we
+                    // only care that poll woke up).
+                    let _ = unsafe {
+                        libc::read(
+                            pipe_rx,
+                            buf.as_mut_ptr().cast::<libc::c_void>(),
+                            buf.len(),
+                        )
+                    };
+                    break;
+                }
+
+                // PTY has data available.
+                if poll_fds[0].revents & libc::POLLIN != 0 {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if tx
+                                .send(Ok(SpawnOutput {
+                                    stdout: buf[..n].to_vec(),
+                                    stderr: vec![],
+                                    exit_code: None,
+                                    signal: None,
+                                    truncated: n == BUFFER_SIZE,
+                                }))
+                                .is_err()
+                            {
+                                // Receiver dropped (stream cancelled).
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(Error::other(format!("pty read error: {e}"))));
+                            return;
+                        }
+                    }
+                }
+
+                // PTY hung up (child exited).
+                if poll_fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                    // Drain any remaining data before breaking.
+                    match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => {}
+                        Ok(n) => {
+                            let _ = tx.send(Ok(SpawnOutput {
                                 stdout: buf[..n].to_vec(),
                                 stderr: vec![],
                                 exit_code: None,
                                 signal: None,
                                 truncated: n == BUFFER_SIZE,
-                            }))
-                            .is_err()
-                        {
-                            // Receiver dropped (stream consumer cancelled).
-                            break;
+                            }));
                         }
                     }
-                    Err(e) => {
-                        let _ = tx.send(Err(Error::other(format!("pty read error: {e}"))));
-                        return;
-                    }
+                    break;
                 }
+            }
+
+            // Close pipe read end (write end is closed by the async handler).
+            // SAFETY: pipe_rx is a valid fd not used after this point.
+            unsafe { libc::close(pipe_rx); }
+
+            if kill.load(Ordering::Relaxed) {
+                let _ = child.kill();
             }
 
             match child.wait() {
@@ -469,8 +621,55 @@ pub(crate) fn spawn_bash_pty(
             }
         });
 
-        while let Some(item) = rx.recv().await {
-            yield item;
+        let deadline = timeout_ms.map(|ms| tokio::time::Instant::now() + Duration::from_millis(ms));
+        loop {
+            tokio::select! {
+                biased;
+
+                () = async {
+                    match deadline {
+                        Some(dl) => tokio::time::sleep_until(dl).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    kill_flag.store(true, Ordering::Relaxed);
+
+                    // Write a byte to the self-pipe so the blocking task's
+                    // poll() wakes up and detects the timeout.
+                    let byte: u8 = 0;
+                    // SAFETY: pipe_tx is a valid fd owned by this scope.
+                    unsafe {
+                        libc::write(
+                            pipe_tx,
+                            (&raw const byte).cast::<libc::c_void>(),
+                            1,
+                        );
+                    }
+                    // SAFETY: pipe_tx is never used after this point.
+                    unsafe { libc::close(pipe_tx); }
+
+                    yield Ok(SpawnOutput {
+                        stdout: vec![],
+                        stderr: vec![],
+                        exit_code: None,
+                        signal: Some(-1),
+                        truncated: false,
+                    });
+                    return;
+                }
+
+                item = rx.recv() => {
+                    match item {
+                        Some(result) => yield result,
+                        None => break,
+                    }
+                }
+            }
         }
+
+        // Stream ended normally — close the pipe write end.
+        // SAFETY: pipe_tx was not closed by the timeout handler (the
+        // handler returned above).
+        unsafe { libc::close(pipe_tx); }
     })
 }

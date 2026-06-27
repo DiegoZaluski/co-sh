@@ -9,7 +9,7 @@ const BUFFER_SIZE: usize = 4096;
 
 #[tokio::test]
 async fn test_spawn_bash_simple_echo() {
-    let mut stream = spawn_bash(None, ".", "echo hello");
+    let mut stream = spawn_bash(None, ".", "echo hello", None);
 
     let mut got_output = false;
     while let Some(result) = stream.next().await {
@@ -24,7 +24,7 @@ async fn test_spawn_bash_simple_echo() {
 
 #[tokio::test]
 async fn test_spawn_bash_stderr() {
-    let mut stream = spawn_bash(None, ".", "echo error >&2");
+    let mut stream = spawn_bash(None, ".", "echo error >&2", None);
     let mut got_stderr = false;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -38,7 +38,7 @@ async fn test_spawn_bash_stderr() {
 
 #[tokio::test]
 async fn test_spawn_bash_stdout_and_stderr() {
-    let mut stream = spawn_bash(None, ".", "echo out; echo err >&2");
+    let mut stream = spawn_bash(None, ".", "echo out; echo err >&2", None);
     let mut out = vec![];
     let mut err = vec![];
     while let Some(result) = stream.next().await {
@@ -56,6 +56,7 @@ async fn test_spawn_bash_with_env() {
         Some(vec![("MY_VAR".to_string(), "hello".to_string())]),
         ".",
         "echo $MY_VAR",
+        None,
     );
     let mut output = vec![];
     while let Some(result) = stream.next().await {
@@ -71,6 +72,7 @@ async fn test_spawn_bash_invalid_env_var_name() {
         Some(vec![("INVALID-KEY".to_string(), "value".to_string())]),
         ".",
         "echo hello",
+        None,
     );
     let mut got_error = false;
     while let Some(result) = stream.next().await {
@@ -84,7 +86,7 @@ async fn test_spawn_bash_invalid_env_var_name() {
 
 #[tokio::test]
 async fn test_spawn_bash_nonexistent_cwd() {
-    let mut stream = spawn_bash(None, "/nonexistent-path-12345", "echo hello");
+    let mut stream = spawn_bash(None, "/nonexistent-path-12345", "echo hello", None);
     let mut got_error = false;
     while let Some(result) = stream.next().await {
         if result.is_err() {
@@ -99,7 +101,7 @@ async fn test_spawn_bash_nonexistent_cwd() {
 async fn test_spawn_bash_large_output() {
     let n = BUFFER_SIZE * 2 + 100;
     let cmd = format!("printf 'a%.0s' $(seq 1 {n})", n = n);
-    let mut stream = spawn_bash(None, ".", &cmd);
+    let mut stream = spawn_bash(None, ".", &cmd, None);
     let mut total = 0usize;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -110,7 +112,7 @@ async fn test_spawn_bash_large_output() {
 
 #[tokio::test]
 async fn test_spawn_bash_exit_code() {
-    let mut stream = spawn_bash(None, ".", "exit 42");
+    let mut stream = spawn_bash(None, ".", "exit 42", None);
     let mut exit_code = None;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -127,6 +129,7 @@ async fn test_spawn_bash_invalid_env_var_error_kind() {
         Some(vec![("BAD-KEY!".to_string(), "x".to_string())]),
         ".",
         "echo hi",
+        None,
     );
     let mut got = false;
     while let Some(result) = stream.next().await {
@@ -144,7 +147,7 @@ async fn test_spawn_bash_invalid_env_var_error_kind() {
 
 #[tokio::test]
 async fn test_spawn_bash_empty_command() {
-    let mut stream = spawn_bash(None, ".", "");
+    let mut stream = spawn_bash(None, ".", "", None);
     let mut got_output = false;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -158,7 +161,7 @@ async fn test_spawn_bash_empty_command() {
 
 #[tokio::test]
 async fn test_spawn_bash_exit_code_zero() {
-    let mut stream = spawn_bash(None, ".", "exit 0");
+    let mut stream = spawn_bash(None, ".", "exit 0", None);
     let mut exit_code = None;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -173,7 +176,7 @@ async fn test_spawn_bash_exit_code_zero() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_signal() {
-    let mut stream = spawn_bash(None, ".", "kill -KILL $$");
+    let mut stream = spawn_bash(None, ".", "kill -KILL $$", None);
     let mut got_signal = false;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -188,7 +191,7 @@ async fn test_spawn_bash_signal() {
 
 #[tokio::test]
 async fn test_spawn_bash_exit_code_after_output() {
-    let mut stream = spawn_bash(None, ".", "echo hello && echo world && exit 10");
+    let mut stream = spawn_bash(None, ".", "echo hello && echo world && exit 10", None);
     let mut saw_data = false;
     let mut exit_code = None;
     while let Some(result) = stream.next().await {
@@ -210,12 +213,12 @@ async fn test_spawn_bash_exit_code_after_output() {
 
 // ── PTY path tests ────────────────────────────────────────────────────
 // With a PTY the terminal line discipline translates `\n` to `\r\n`, so
-// output bytes differ from the non-PTY path.  We trim whitespace before
-// comparing text content.
+// output bytes differ from the non-PTY path.  We use `text.contains()`
+// instead of exact byte comparison.
 
 #[tokio::test]
 async fn test_spawn_bash_pty_simple_echo() {
-    let mut stream = spawn_bash_pty(None, ".", "echo hello");
+    let mut stream = spawn_bash_pty(None, ".", "echo hello", None);
     let mut output = vec![];
     while let Some(result) = stream.next().await {
         let item = result.unwrap();
@@ -228,7 +231,7 @@ async fn test_spawn_bash_pty_simple_echo() {
 
 #[tokio::test]
 async fn test_spawn_bash_pty_exit_code() {
-    let mut stream = spawn_bash_pty(None, ".", "exit 42");
+    let mut stream = spawn_bash_pty(None, ".", "exit 42", None);
     let mut exit_code = None;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -245,6 +248,7 @@ async fn test_spawn_bash_pty_env() {
         Some(vec![("MY_VAR".to_string(), "world".to_string())]),
         ".",
         "echo hello $MY_VAR",
+        None,
     );
     let mut output = vec![];
     while let Some(result) = stream.next().await {
@@ -261,6 +265,7 @@ async fn test_spawn_bash_pty_invalid_env_var_name() {
         Some(vec![("INVALID-KEY".to_string(), "value".to_string())]),
         ".",
         "echo hello",
+        None,
     );
     let mut got_error = false;
     while let Some(result) = stream.next().await {
@@ -275,7 +280,7 @@ async fn test_spawn_bash_pty_invalid_env_var_name() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_signal() {
-    let mut stream = spawn_bash_pty(None, ".", "kill -KILL $$");
+    let mut stream = spawn_bash_pty(None, ".", "kill -KILL $$", None);
     let mut got_signal = false;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
@@ -292,11 +297,192 @@ async fn test_spawn_bash_pty_signal() {
 async fn test_spawn_bash_pty_large_output() {
     let n = BUFFER_SIZE * 2 + 100;
     let cmd = format!("printf 'a%.0s' $(seq 1 {n})", n = n);
-    let mut stream = spawn_bash_pty(None, ".", &cmd);
+    let mut stream = spawn_bash_pty(None, ".", &cmd, None);
     let mut total = 0usize;
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
         total += output.stdout.len();
     }
     assert_eq!(total, n);
+}
+
+#[tokio::test]
+async fn test_spawn_bash_timeout() {
+    let mut stream = spawn_bash(None, ".", "sleep 10", Some(10));
+
+    let mut items = vec![];
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].signal, Some(-1));
+    assert_eq!(items[0].exit_code, None);
+    assert!(items[0].stdout.is_empty());
+    assert!(items[0].stderr.is_empty());
+}
+
+#[tokio::test]
+async fn test_spawn_bash_pty_timeout() {
+    let mut stream = spawn_bash_pty(None, ".", "sleep 10", Some(10));
+
+    let mut items = vec![];
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].signal, Some(-1));
+    assert_eq!(items[0].exit_code, None);
+    assert!(items[0].stdout.is_empty());
+    assert!(items[0].stderr.is_empty());
+}
+
+#[tokio::test]
+async fn test_spawn_bash_timeout_zero() {
+    let mut stream = spawn_bash(None, ".", "echo should-not-appear", Some(0));
+
+    let mut items = vec![];
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].signal, Some(-1));
+    assert!(items[0].stdout.is_empty());
+    assert!(items[0].stderr.is_empty());
+}
+
+#[tokio::test]
+async fn test_spawn_bash_pty_timeout_zero() {
+    let mut stream = spawn_bash_pty(None, ".", "echo should-not-appear", Some(0));
+
+    let mut items = vec![];
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].signal, Some(-1));
+    assert!(items[0].stdout.is_empty());
+    assert!(items[0].stderr.is_empty());
+}
+
+#[tokio::test]
+async fn test_spawn_bash_timeout_partial_output() {
+    let mut stream = spawn_bash(None, ".", "echo hello && sleep 10", Some(200));
+
+    let mut items = vec![];
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert!(!items.is_empty(), "expected at least the timeout item");
+    assert_eq!(items.last().unwrap().signal, Some(-1));
+    assert_eq!(items.last().unwrap().exit_code, None);
+    assert!(items.last().unwrap().stdout.is_empty());
+    let all_stdout: Vec<u8> = items.iter().flat_map(|i| i.stdout.clone()).collect();
+    assert!(
+        all_stdout.starts_with(b"hello\n"),
+        "expected 'hello\\n' before timeout, got: {:?}",
+        String::from_utf8_lossy(&all_stdout),
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_bash_pty_timeout_partial_output() {
+    let mut stream = spawn_bash_pty(None, ".", "echo hello && sleep 10", Some(200));
+
+    let mut items = vec![];
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert!(!items.is_empty(), "expected at least the timeout item");
+    assert_eq!(items.last().unwrap().signal, Some(-1));
+    assert_eq!(items.last().unwrap().exit_code, None);
+    assert!(items.last().unwrap().stdout.is_empty());
+    let all_stdout: Vec<u8> = items.iter().flat_map(|i| i.stdout.clone()).collect();
+    let text = String::from_utf8_lossy(&all_stdout);
+    assert!(
+        text.contains("hello"),
+        "expected 'hello' before timeout, got: {text:?}",
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_bash_no_timeout_completes_normally() {
+    let mut stream = spawn_bash(None, ".", "echo hi", Some(10_000));
+
+    let mut items = vec![];
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert!(!items.is_empty(), "expected output items");
+    let last = items.last().unwrap();
+    assert_eq!(last.signal, None, "no timeout expected");
+    assert_eq!(last.exit_code, Some(0));
+}
+
+#[tokio::test]
+async fn test_spawn_bash_pty_no_timeout_completes_normally() {
+    let mut stream = spawn_bash_pty(None, ".", "echo hi", Some(10_000));
+
+    let mut items = vec![];
+    while let Some(result) = stream.next().await {
+        items.push(result.unwrap());
+    }
+
+    assert!(!items.is_empty(), "expected output items");
+    let last = items.last().unwrap();
+    assert_eq!(last.signal, None, "no timeout expected");
+    assert_eq!(last.exit_code, Some(0));
+}
+
+#[tokio::test]
+async fn test_spawn_bash_timeout_signal_exit_code_invariant() {
+    let mut stream = spawn_bash(None, ".", "sleep 10", Some(10));
+
+    while let Some(result) = stream.next().await {
+        let item = result.unwrap();
+        if item.signal == Some(-1) {
+            assert_eq!(item.exit_code, None);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_spawn_bash_pty_timeout_signal_exit_code_invariant() {
+    let mut stream = spawn_bash_pty(None, ".", "sleep 10", Some(10));
+
+    while let Some(result) = stream.next().await {
+        let item = result.unwrap();
+        if item.signal == Some(-1) {
+            assert_eq!(item.exit_code, None);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_spawn_bash_pty_timeout_large_output_before_timeout() {
+    let n = BUFFER_SIZE * 2 + 50;
+    let cmd = format!(
+        "printf 'a%.0s' $(seq 1 {n}) && sleep 10",
+        n = n,
+    );
+    let mut stream = spawn_bash_pty(None, ".", &cmd, Some(200));
+
+    let mut data = 0usize;
+    while let Some(result) = stream.next().await {
+        let item = result.unwrap();
+        if item.signal == Some(-1) {
+            assert_eq!(item.exit_code, None);
+        } else {
+            data += item.stdout.len();
+        }
+    }
+
+    assert!(data > 0, "expected some data before PTY timeout");
+    assert_eq!(data, n, "expected all pre-sleep output");
 }
