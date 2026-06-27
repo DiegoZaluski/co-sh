@@ -1,4 +1,7 @@
-use crate::plan::{TodoList, TodoReadAction, TodoStatus, todo_cross_off, todo_read, todo_write, TodoCrossOff, TodoWriteAction};
+use crate::plan::{
+    TodoCrossOff, TodoList, TodoReadAction, TodoStatus, TodoWriteAction, todo_cross_off, todo_read,
+    todo_write,
+};
 
 use super::helpers::{add_task, populated_list};
 
@@ -106,21 +109,13 @@ fn get_existing_task() {
     assert_eq!(output.groups[0].title, "backend");
     assert_eq!(output.groups[0].items.len(), 1);
     assert_eq!(output.groups[0].items[0].description, "Task B");
-    assert_eq!(
-        output.groups[0].items[0].status,
-        TodoStatus::Completed
-    );
+    assert_eq!(output.groups[0].items[0].status, TodoStatus::Completed);
 }
 
 #[test]
 fn get_nonexistent_fails() {
     let list = populated_list();
-    let result = todo_read(
-        &list,
-        &TodoReadAction::Get {
-            id: "ghost".into(),
-        },
-    );
+    let result = todo_read(&list, &TodoReadAction::Get { id: "ghost".into() });
     assert!(result.is_err());
 }
 
@@ -141,27 +136,78 @@ fn get_from_empty_list_fails() {
 #[test]
 fn list_nags_unverified_completed_group() {
     let list = add_task(&TodoList::default(), "backend", "Task A");
-    let list = todo_cross_off(&list, &TodoCrossOff::Complete { id: "task-1".into() }).unwrap().list;
-    let output = todo_read(&list, &TodoReadAction::List { group: None, status: None }).unwrap();
-    let has_nag = output.nags.iter().any(|n| n.message.contains("tests have not been confirmed"));
+    let list = todo_cross_off(
+        &list,
+        &TodoCrossOff::Complete {
+            id: "task-1".into(),
+        },
+    )
+    .unwrap()
+    .list;
+    let output = todo_read(
+        &list,
+        &TodoReadAction::List {
+            group: None,
+            status: None,
+        },
+    )
+    .unwrap();
+    let has_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("tests have not been confirmed"));
     assert!(has_nag, "should nag when completed group is unverified");
 }
 
 #[test]
 fn list_no_nag_for_verified_group() {
     let list = add_task(&TodoList::default(), "backend", "Task A");
-    let list = todo_cross_off(&list, &TodoCrossOff::Complete { id: "task-1".into() }).unwrap().list;
-    let list = todo_write(&list, &TodoWriteAction::VerifyGroup { group: "backend".into() }).unwrap().list;
-    let output = todo_read(&list, &TodoReadAction::List { group: None, status: None }).unwrap();
-    let has_nag = output.nags.iter().any(|n| n.message.contains("tests have not been confirmed"));
+    let list = todo_cross_off(
+        &list,
+        &TodoCrossOff::Complete {
+            id: "task-1".into(),
+        },
+    )
+    .unwrap()
+    .list;
+    let list = todo_write(
+        &list,
+        &TodoWriteAction::VerifyGroup {
+            group: "backend".into(),
+        },
+    )
+    .unwrap()
+    .list;
+    let output = todo_read(
+        &list,
+        &TodoReadAction::List {
+            group: None,
+            status: None,
+        },
+    )
+    .unwrap();
+    let has_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("tests have not been confirmed"));
     assert!(!has_nag, "should not nag when group is verified");
 }
 
 #[test]
 fn list_no_nag_for_incomplete_group() {
     let list = add_task(&TodoList::default(), "backend", "Task A"); // still Pending
-    let output = todo_read(&list, &TodoReadAction::List { group: None, status: None }).unwrap();
-    let has_nag = output.nags.iter().any(|n| n.message.contains("tests have not been confirmed"));
+    let output = todo_read(
+        &list,
+        &TodoReadAction::List {
+            group: None,
+            status: None,
+        },
+    )
+    .unwrap();
+    let has_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("tests have not been confirmed"));
     assert!(!has_nag, "should not nag when group has pending tasks");
 }
 
@@ -172,8 +218,20 @@ fn list_no_nag_for_empty_group() {
         items: vec![],
         tests_verified: false,
     };
-    let list = TodoList { groups: vec![group] };
-    let output = todo_read(&list, &TodoReadAction::List { group: None, status: None }).unwrap();
-    let has_nag = output.nags.iter().any(|n| n.message.contains("tests have not been confirmed"));
+    let list = TodoList {
+        groups: vec![group],
+    };
+    let output = todo_read(
+        &list,
+        &TodoReadAction::List {
+            group: None,
+            status: None,
+        },
+    )
+    .unwrap();
+    let has_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("tests have not been confirmed"));
     assert!(!has_nag, "should not nag for empty group");
 }

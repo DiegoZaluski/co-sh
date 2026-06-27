@@ -467,10 +467,7 @@ async fn test_spawn_bash_pty_timeout_signal_exit_code_invariant() {
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout_large_output_before_timeout() {
     let n = BUFFER_SIZE * 2 + 50;
-    let cmd = format!(
-        "printf 'a%.0s' $(seq 1 {n}) && sleep 10",
-        n = n,
-    );
+    let cmd = format!("printf 'a%.0s' $(seq 1 {n}) && sleep 10", n = n,);
     let mut stream = spawn_bash_pty(None, ".", &cmd, Some(200));
 
     let mut data = 0usize;

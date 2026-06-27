@@ -8,11 +8,19 @@ pub enum TodoWriteAction {
         description: String,
         depends_on: Option<Vec<String>>,
     },
-    Start { id: String },
-    Remove { id: String },
-    Clean { keep_pending: bool },
+    Start {
+        id: String,
+    },
+    Remove {
+        id: String,
+    },
+    Clean {
+        keep_pending: bool,
+    },
     /// Confirm that tests were run for all completed tasks in the given group.
-    VerifyGroup { group: String },
+    VerifyGroup {
+        group: String,
+    },
 }
 
 /// Apply a mutation action to the todo list.
@@ -101,7 +109,9 @@ fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, PlanError> {
     let mut nags: Vec<Nag> = Vec::new();
 
     let (gi, ii) = find_item(&groups, id).ok_or_else(|| {
-        PlanError(format!("Task '{id}' does not exist. Use List to see available tasks."))
+        PlanError(format!(
+            "Task '{id}' does not exist. Use List to see available tasks."
+        ))
     })?;
 
     let others_in_progress: Vec<&str> = groups
@@ -132,9 +142,7 @@ fn start(list: &TodoList, id: &str) -> Result<TodoWriteOutput, PlanError> {
             }
             None => {
                 nags.push(Nag {
-                    message: format!(
-                        "'{id}' depends on '{dep_id}' which no longer exists."
-                    ),
+                    message: format!("'{id}' depends on '{dep_id}' which no longer exists."),
                 });
             }
             _ => {}
@@ -216,7 +224,10 @@ fn clean(list: &TodoList, keep_pending: bool) -> TodoWriteOutput {
     }
     if groups_removed > 0 {
         nags.push(Nag {
-            message: format!("Removed {groups_removed} empty group{}.", if groups_removed == 1 { "" } else { "s" }),
+            message: format!(
+                "Removed {groups_removed} empty group{}.",
+                if groups_removed == 1 { "" } else { "s" }
+            ),
         });
     }
 
@@ -236,12 +247,13 @@ fn verify_group(list: &TodoList, group: &str) -> Result<TodoWriteOutput, PlanErr
     g.tests_verified = true;
 
     let mut nags = Vec::new();
-    let has_pending = g.items.iter().any(|i| matches!(i.status, TodoStatus::Pending | TodoStatus::InProgress));
+    let has_pending = g
+        .items
+        .iter()
+        .any(|i| matches!(i.status, TodoStatus::Pending | TodoStatus::InProgress));
     if has_pending {
         nags.push(Nag {
-            message: format!(
-                "Group '{group}' still has pending or in-progress tasks."
-            ),
+            message: format!("Group '{group}' still has pending or in-progress tasks."),
         });
     }
 
@@ -308,10 +320,7 @@ pub(super) fn find_item_in_groups<'a>(
     groups: &'a [super::types::TaskGroup],
     id: &str,
 ) -> Option<&'a TodoItem> {
-    groups
-        .iter()
-        .flat_map(|g| &g.items)
-        .find(|i| i.id == id)
+    groups.iter().flat_map(|g| &g.items).find(|i| i.id == id)
 }
 
 fn join_ids(ids: &[&str]) -> String {

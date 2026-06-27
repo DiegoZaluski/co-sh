@@ -1,4 +1,6 @@
-use super::types::{Nag, PlanError, TaskGroup, TodoList, TodoReadAction, TodoReadOutput, TodoStatus};
+use super::types::{
+    Nag, PlanError, TaskGroup, TodoList, TodoReadAction, TodoReadOutput, TodoStatus,
+};
 
 /// Query the todo list.
 ///
@@ -7,16 +9,14 @@ use super::types::{Nag, PlanError, TaskGroup, TodoList, TodoReadAction, TodoRead
 /// Returns `Err` if a `Get` targets a non-existent task.
 pub fn todo_read(list: &TodoList, action: &TodoReadAction) -> Result<TodoReadOutput, PlanError> {
     match action {
-        TodoReadAction::List { group, status } => Ok(list_tasks(list, group.as_deref(), status.as_ref())),
+        TodoReadAction::List { group, status } => {
+            Ok(list_tasks(list, group.as_deref(), status.as_ref()))
+        }
         TodoReadAction::Get { id } => get_task(list, id),
     }
 }
 
-fn list_tasks(
-    list: &TodoList,
-    group: Option<&str>,
-    status: Option<&TodoStatus>,
-) -> TodoReadOutput {
+fn list_tasks(list: &TodoList, group: Option<&str>, status: Option<&TodoStatus>) -> TodoReadOutput {
     let groups: Vec<TaskGroup> = list
         .groups
         .iter()

@@ -109,7 +109,11 @@ Some intro text.
 fn parse_capital_x_completed() {
     let path = write_plan("## Backend\n- [X] Feito");
     let list = plan_from_md(&path).unwrap();
-    assert_eq!(list.groups[0].items.len(), 1, "Deveria parsear task com [X]");
+    assert_eq!(
+        list.groups[0].items.len(),
+        1,
+        "Deveria parsear task com [X]"
+    );
     assert_eq!(list.groups[0].items[0].status, TodoStatus::Completed);
     std::fs::remove_file(&path).ok();
 }

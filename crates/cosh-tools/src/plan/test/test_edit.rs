@@ -65,10 +65,7 @@ fn update_depends_on() {
         },
     )
     .unwrap();
-    assert_eq!(
-        output.list.groups[0].items[0].depends_on,
-        vec!["other"]
-    );
+    assert_eq!(output.list.groups[0].items[0].depends_on, vec!["other"]);
 }
 
 #[test]

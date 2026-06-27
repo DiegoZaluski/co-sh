@@ -1,4 +1,6 @@
-use crate::plan::{TodoCrossOff, TodoList, TodoStatus, todo_cross_off, todo_write, TodoWriteAction};
+use crate::plan::{
+    TodoCrossOff, TodoList, TodoStatus, TodoWriteAction, todo_cross_off, todo_write,
+};
 
 use super::helpers::add_task;
 
@@ -14,21 +16,13 @@ fn complete_task() {
         },
     )
     .unwrap();
-    assert_eq!(
-        output.list.groups[0].items[0].status,
-        TodoStatus::Completed
-    );
+    assert_eq!(output.list.groups[0].items[0].status, TodoStatus::Completed);
 }
 
 #[test]
 fn complete_nonexistent_fails() {
     let list = TodoList::default();
-    let result = todo_cross_off(
-        &list,
-        &TodoCrossOff::Complete {
-            id: "ghost".into(),
-        },
-    );
+    let result = todo_cross_off(&list, &TodoCrossOff::Complete { id: "ghost".into() });
     assert!(result.is_err());
 }
 
@@ -92,10 +86,7 @@ fn complete_nags_dependents() {
         },
     )
     .unwrap();
-    let has_nag = output
-        .nags
-        .iter()
-        .any(|n| n.message.contains("depends on"));
+    let has_nag = output.nags.iter().any(|n| n.message.contains("depends on"));
     assert!(has_nag);
 }
 
@@ -111,21 +102,13 @@ fn cancel_task() {
         },
     )
     .unwrap();
-    assert_eq!(
-        output.list.groups[0].items[0].status,
-        TodoStatus::Cancelled
-    );
+    assert_eq!(output.list.groups[0].items[0].status, TodoStatus::Cancelled);
 }
 
 #[test]
 fn cancel_nonexistent_fails() {
     let list = TodoList::default();
-    let result = todo_cross_off(
-        &list,
-        &TodoCrossOff::Cancel {
-            id: "ghost".into(),
-        },
-    );
+    let result = todo_cross_off(&list, &TodoCrossOff::Cancel { id: "ghost".into() });
     assert!(result.is_err());
 }
 
@@ -169,10 +152,7 @@ fn cancel_nags_dependents() {
         },
     )
     .unwrap();
-    let has_nag = output
-        .nags
-        .iter()
-        .any(|n| n.message.contains("depends on"));
+    let has_nag = output.nags.iter().any(|n| n.message.contains("depends on"));
     assert!(has_nag);
 }
 
@@ -200,7 +180,13 @@ fn cancel_nags_inprogress_dependents() {
     )
     .unwrap()
     .list;
-    let output = todo_cross_off(&list, &TodoCrossOff::Cancel { id: "task-1".into() }).unwrap();
+    let output = todo_cross_off(
+        &list,
+        &TodoCrossOff::Cancel {
+            id: "task-1".into(),
+        },
+    )
+    .unwrap();
     let has_nag = output
         .nags
         .iter()
@@ -231,10 +217,19 @@ fn complete_nags_inprogress_dependents() {
     )
     .unwrap()
     .list;
-    let output = todo_cross_off(&list, &TodoCrossOff::Complete { id: "task-1".into() }).unwrap();
+    let output = todo_cross_off(
+        &list,
+        &TodoCrossOff::Complete {
+            id: "task-1".into(),
+        },
+    )
+    .unwrap();
     let has_nag = output
         .nags
         .iter()
         .any(|n| n.message.contains("depends on") && n.message.contains("Completed"));
-    assert!(has_nag, "Complete parent deveria nagar InProgress dependent");
+    assert!(
+        has_nag,
+        "Complete parent deveria nagar InProgress dependent"
+    );
 }

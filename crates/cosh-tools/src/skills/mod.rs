@@ -150,10 +150,7 @@ impl Skills {
     /// # Errors
     ///
     /// Returns `SkillError` if a source cannot be read.
-    pub fn match_skills(
-        &self,
-        match_paths: Vec<String>,
-    ) -> Result<SkillOutput, SkillError> {
+    pub fn match_skills(&self, match_paths: Vec<String>) -> Result<SkillOutput, SkillError> {
         let mut schema = self.schema(SkillAction::Match);
         schema.match_paths = match_paths;
         execute(&schema)

@@ -1,6 +1,4 @@
-use crate::plan::{
-    TodoCrossOff, TodoList, TodoWriteAction, todo_cross_off, todo_write,
-};
+use crate::plan::{TodoCrossOff, TodoList, TodoWriteAction, todo_cross_off, todo_write};
 
 pub fn add_task(list: &TodoList, group: &str, description: &str) -> TodoList {
     todo_write(
@@ -20,12 +18,22 @@ pub fn populated_list() -> TodoList {
     list = add_task(&list, "backend", "Task A");
     list = add_task(&list, "backend", "Task B");
     list = add_task(&list, "frontend", "Task C");
-    list = todo_cross_off(&list, &TodoCrossOff::Complete { id: "task-2".into() })
-        .unwrap()
-        .list;
-    list = todo_write(&list, &TodoWriteAction::Start { id: "task-1".into() })
-        .unwrap()
-        .list;
+    list = todo_cross_off(
+        &list,
+        &TodoCrossOff::Complete {
+            id: "task-2".into(),
+        },
+    )
+    .unwrap()
+    .list;
+    list = todo_write(
+        &list,
+        &TodoWriteAction::Start {
+            id: "task-1".into(),
+        },
+    )
+    .unwrap()
+    .list;
     list
 }
 

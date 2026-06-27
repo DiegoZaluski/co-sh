@@ -36,7 +36,9 @@ pub enum TodoReadAction {
         group: Option<String>,
         status: Option<TodoStatus>,
     },
-    Get { id: String },
+    Get {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone)]

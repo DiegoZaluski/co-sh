@@ -1,4 +1,6 @@
-use crate::plan::{TodoCrossOff, TodoList, TodoStatus, TodoWriteAction, todo_cross_off, todo_write};
+use crate::plan::{
+    TodoCrossOff, TodoList, TodoStatus, TodoWriteAction, todo_cross_off, todo_write,
+};
 
 use super::helpers::{add_task, add_task_with_deps};
 
@@ -23,10 +25,7 @@ fn add_valid_task() {
         output.list.groups[0].items[0].description,
         "Fix memory leak"
     );
-    assert_eq!(
-        output.list.groups[0].items[0].status,
-        TodoStatus::Pending
-    );
+    assert_eq!(output.list.groups[0].items[0].status, TodoStatus::Pending);
 }
 
 #[test]
@@ -66,10 +65,7 @@ fn add_to_different_groups() {
 fn add_with_dependencies() {
     let list = add_task(&TodoList::default(), "default", "Prerequisite");
     let output = add_task_with_deps(&list, "default", "Dependent", vec!["task-1".into()]);
-    assert_eq!(
-        output.groups[0].items[1].depends_on,
-        vec!["task-1"]
-    );
+    assert_eq!(output.groups[0].items[1].depends_on, vec!["task-1"]);
 }
 
 #[test]
@@ -282,8 +278,17 @@ fn clean_removes_across_groups() {
     )
     .unwrap()
     .list;
-    let output = todo_write(&list, &TodoWriteAction::Clean { keep_pending: false }).unwrap();
-    assert!(output.list.groups.is_empty(), "empty groups should be removed");
+    let output = todo_write(
+        &list,
+        &TodoWriteAction::Clean {
+            keep_pending: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        output.list.groups.is_empty(),
+        "empty groups should be removed"
+    );
 }
 
 #[test]
@@ -311,8 +316,14 @@ fn edit_detects_circular_dependency() {
         },
     )
     .unwrap();
-    let has_cycle_nag = output.nags.iter().any(|n| n.message.contains("cycle") || n.message.contains("circular"));
-    assert!(has_cycle_nag, "Dependência circular A->B->C->A deveria gerar nag");
+    let has_cycle_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("cycle") || n.message.contains("circular"));
+    assert!(
+        has_cycle_nag,
+        "Dependência circular A->B->C->A deveria gerar nag"
+    );
 }
 
 #[test]
@@ -328,7 +339,11 @@ fn clean_keeps_groups_with_remaining_items() {
     .unwrap()
     .list;
     let output = todo_write(&list, &TodoWriteAction::Clean { keep_pending: true }).unwrap();
-    assert_eq!(output.list.groups.len(), 1, "group with remaining items should persist");
+    assert_eq!(
+        output.list.groups.len(),
+        1,
+        "group with remaining items should persist"
+    );
     assert_eq!(output.list.groups[0].title, "backend");
     assert_eq!(output.list.groups[0].items.len(), 1);
 }
@@ -344,9 +359,21 @@ fn clean_nags_count() {
     )
     .unwrap()
     .list;
-    let output = todo_write(&list, &TodoWriteAction::Clean { keep_pending: false }).unwrap();
-    let has_task_nag = output.nags.iter().any(|n| n.message.contains("Removed 1 completed"));
-    let has_group_nag = output.nags.iter().any(|n| n.message.contains("empty group"));
+    let output = todo_write(
+        &list,
+        &TodoWriteAction::Clean {
+            keep_pending: false,
+        },
+    )
+    .unwrap();
+    let has_task_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("Removed 1 completed"));
+    let has_group_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("empty group"));
     assert!(has_task_nag, "should nag about removed tasks");
     assert!(has_group_nag, "should nag about removed empty group");
 }
@@ -357,22 +384,49 @@ fn clean_nags_count() {
 fn verify_group_marks_verified() {
     let list = add_task(&TodoList::default(), "backend", "Task A");
     let list = add_task(&list, "backend", "Task B");
-    let list = todo_cross_off(&list, &TodoCrossOff::Complete { id: "task-1".into() }).unwrap().list;
-    let output = todo_write(&list, &TodoWriteAction::VerifyGroup { group: "backend".into() }).unwrap();
-    assert!(output.list.groups[0].tests_verified, "group should be verified after VerifyGroup");
+    let list = todo_cross_off(
+        &list,
+        &TodoCrossOff::Complete {
+            id: "task-1".into(),
+        },
+    )
+    .unwrap()
+    .list;
+    let output = todo_write(
+        &list,
+        &TodoWriteAction::VerifyGroup {
+            group: "backend".into(),
+        },
+    )
+    .unwrap();
+    assert!(
+        output.list.groups[0].tests_verified,
+        "group should be verified after VerifyGroup"
+    );
 }
 
 #[test]
 fn verify_nonexistent_group_fails() {
     let list = TodoList::default();
-    let result = todo_write(&list, &TodoWriteAction::VerifyGroup { group: "ghost".into() });
+    let result = todo_write(
+        &list,
+        &TodoWriteAction::VerifyGroup {
+            group: "ghost".into(),
+        },
+    );
     assert!(result.is_err());
 }
 
 #[test]
 fn verify_group_with_pending_nags() {
     let list = add_task(&TodoList::default(), "backend", "Task A"); // still Pending
-    let output = todo_write(&list, &TodoWriteAction::VerifyGroup { group: "backend".into() }).unwrap();
+    let output = todo_write(
+        &list,
+        &TodoWriteAction::VerifyGroup {
+            group: "backend".into(),
+        },
+    )
+    .unwrap();
     assert!(output.list.groups[0].tests_verified, "should still verify");
     let has_nag = output.nags.iter().any(|n| n.message.contains("pending"));
     assert!(has_nag, "should nag about pending tasks in verified group");
@@ -381,8 +435,18 @@ fn verify_group_with_pending_nags() {
 #[test]
 fn verify_group_persists_after_add() {
     let list = add_task(&TodoList::default(), "backend", "Task A");
-    let list = todo_write(&list, &TodoWriteAction::VerifyGroup { group: "backend".into() }).unwrap().list;
+    let list = todo_write(
+        &list,
+        &TodoWriteAction::VerifyGroup {
+            group: "backend".into(),
+        },
+    )
+    .unwrap()
+    .list;
     // Add another task — tests_verified should remain true
     let list = add_task(&list, "backend", "Task B");
-    assert!(list.groups[0].tests_verified, "adding a task should not unverify the group");
+    assert!(
+        list.groups[0].tests_verified,
+        "adding a task should not unverify the group"
+    );
 }

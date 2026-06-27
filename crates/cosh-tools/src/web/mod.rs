@@ -70,6 +70,12 @@ impl Web {
     /// Returns `Err` if the query is empty, validation fails, or the search
     /// itself fails.
     pub async fn search(&self, query: &str) -> Result<String, String> {
-        search(&WebSearch { num_results: self.num_results }, query).await
+        search(
+            &WebSearch {
+                num_results: self.num_results,
+            },
+            query,
+        )
+        .await
     }
 }
