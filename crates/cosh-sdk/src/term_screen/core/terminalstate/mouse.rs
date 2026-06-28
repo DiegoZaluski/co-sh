@@ -1,5 +1,11 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::missing_errors_doc)]
-use super::super::input::{MouseEvent, MouseButton, KeyModifiers, KeyCode, MouseEventKind};
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::missing_errors_doc
+)]
+use super::super::input::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use super::MouseEncoding;
 use super::TerminalState;
 use anyhow::bail;

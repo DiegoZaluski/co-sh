@@ -1,4 +1,12 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::items_after_statements, clippy::too_many_lines, clippy::match_same_arms)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::items_after_statements,
+    clippy::too_many_lines,
+    clippy::match_same_arms
+)]
 use super::Result;
 use super::color::SrgbaTuple;
 pub use super::hyperlink::Hyperlink;
@@ -15,7 +23,7 @@ use num_traits::FromPrimitive;
 use ordered_float::NotNan;
 use std::sync::LazyLock;
 
-use super::allocate::{String, Vec, ToString, ToOwned, HashMap, Box};
+use super::allocate::{Box, HashMap, String, ToOwned, ToString, Vec};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColorOrQuery {
@@ -162,9 +170,7 @@ impl OperatingSystemCommand {
             for slice in osc {
                 vec.push(slice.to_vec());
             }
-            log::trace!(
-                "OSC internal parse err: {err}, track as Unspecified {vec:?}"
-            );
+            log::trace!("OSC internal parse err: {err}, track as Unspecified {vec:?}");
             OperatingSystemCommand::Unspecified(vec)
         })
     }
@@ -303,7 +309,19 @@ impl OperatingSystemCommand {
             }};
         }
 
-        use self::OperatingSystemCommandCode::{SetIconNameAndWindowTitle, SetWindowTitle, SetWindowTitleSun, SetIconName, SetIconNameSun, SetHyperlink, ManipulateSelectionData, SystemNotification, SetCurrentWorkingDirectory, ITermProprietary, RxvtProprietary, FinalTermSemanticPrompt, ChangeColorNumber, ResetColors, ResetSpecialColor, ResetTextForegroundColor, ResetTextBackgroundColor, ResetTextCursorColor, ResetMouseForegroundColor, ResetMouseBackgroundColor, ResetTektronixForegroundColor, ResetTektronixBackgroundColor, ResetHighlightColor, ResetTektronixCursorColor, ResetHighlightForegroundColor, SetTextForegroundColor, SetTextBackgroundColor, SetTextCursorColor, SetMouseForegroundColor, SetMouseBackgroundColor, SetTektronixForegroundColor, SetTektronixBackgroundColor, SetHighlightBackgroundColor, SetTektronixCursorColor, SetHighlightForegroundColor};
+        use self::OperatingSystemCommandCode::{
+            ChangeColorNumber, FinalTermSemanticPrompt, ITermProprietary, ManipulateSelectionData,
+            ResetColors, ResetHighlightColor, ResetHighlightForegroundColor,
+            ResetMouseBackgroundColor, ResetMouseForegroundColor, ResetSpecialColor,
+            ResetTektronixBackgroundColor, ResetTektronixCursorColor,
+            ResetTektronixForegroundColor, ResetTextBackgroundColor, ResetTextCursorColor,
+            ResetTextForegroundColor, RxvtProprietary, SetCurrentWorkingDirectory,
+            SetHighlightBackgroundColor, SetHighlightForegroundColor, SetHyperlink, SetIconName,
+            SetIconNameAndWindowTitle, SetIconNameSun, SetMouseBackgroundColor,
+            SetMouseForegroundColor, SetTektronixBackgroundColor, SetTektronixCursorColor,
+            SetTektronixForegroundColor, SetTextBackgroundColor, SetTextCursorColor,
+            SetTextForegroundColor, SetWindowTitle, SetWindowTitleSun, SystemNotification,
+        };
         match osc_code {
             SetIconNameAndWindowTitle => single_title_string!(SetIconNameAndWindowTitle),
             SetWindowTitle => single_title_string!(SetWindowTitle),
@@ -548,7 +566,13 @@ impl Display for OperatingSystemCommand {
             }};
         }
 
-        use self::OperatingSystemCommand::{SetIconNameAndWindowTitle, SetWindowTitle, SetWindowTitleSun, SetIconName, SetIconNameSun, SetHyperlink, RxvtExtension, Unspecified, ClearSelection, QuerySelection, SetSelection, SystemNotification, ITermProprietary, FinalTermSemanticPrompt, ResetColors, ChangeColorNumber, ChangeDynamicColors, ResetDynamicColor, CurrentWorkingDirectory, ConEmuProgress};
+        use self::OperatingSystemCommand::{
+            ChangeColorNumber, ChangeDynamicColors, ClearSelection, ConEmuProgress,
+            CurrentWorkingDirectory, FinalTermSemanticPrompt, ITermProprietary, QuerySelection,
+            ResetColors, ResetDynamicColor, RxvtExtension, SetHyperlink, SetIconName,
+            SetIconNameAndWindowTitle, SetIconNameSun, SetSelection, SetWindowTitle,
+            SetWindowTitleSun, SystemNotification, Unspecified,
+        };
         match self {
             SetIconNameAndWindowTitle(title) => single_string!(SetIconNameAndWindowTitle, title),
             SetWindowTitle(title) => single_string!(SetWindowTitle, title),
@@ -1018,13 +1042,9 @@ impl ITermFileData {
             .get("height")
             .and_then(|s| ITermDimension::parse(s).ok())
             .unwrap_or(ITermDimension::Automatic);
-        let preserve_aspect_ratio = params
-            .get("preserveAspectRatio")
-            .is_none_or(|s| *s != "0");
+        let preserve_aspect_ratio = params.get("preserveAspectRatio").is_none_or(|s| *s != "0");
         let inline = params.get("inline").is_some_and(|s| *s != "0");
-        let do_not_move_cursor = params
-            .get("doNotMoveCursor")
-            .is_some_and(|s| *s != "0");
+        let do_not_move_cursor = params.get("doNotMoveCursor").is_some_and(|s| *s != "0");
         let data = data.ok_or_else(|| "didn't set data".to_string())?;
         Ok(Self {
             name,
@@ -1096,7 +1116,7 @@ pub enum ITermDimension {
 
 impl Display for ITermDimension {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        use self::ITermDimension::{Automatic, Cells, Pixels, Percent};
+        use self::ITermDimension::{Automatic, Cells, Percent, Pixels};
         match self {
             Automatic => write!(f, "auto"),
             Cells(n) => write!(f, "{n}"),
@@ -1308,7 +1328,11 @@ pub(crate) fn base64_decode<T: AsRef<[u8]>>(s: T) -> Result<Vec<u8>> {
 impl Display for ITermProprietary {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         write!(f, "1337;")?;
-        use self::ITermProprietary::{SetMark, StealFocus, ClearScrollback, CurrentDir, SetProfile, CopyToClipboard, EndCopy, HighlightCursorLine, RequestCellSize, ReportCellSize, Copy, ReportVariable, SetUserVar, SetBadgeFormat, File, UnicodeVersion};
+        use self::ITermProprietary::{
+            ClearScrollback, Copy, CopyToClipboard, CurrentDir, EndCopy, File, HighlightCursorLine,
+            ReportCellSize, ReportVariable, RequestCellSize, SetBadgeFormat, SetMark, SetProfile,
+            SetUserVar, StealFocus, UnicodeVersion,
+        };
         match self {
             SetMark => write!(f, "SetMark")?,
             StealFocus => write!(f, "StealFocus")?,

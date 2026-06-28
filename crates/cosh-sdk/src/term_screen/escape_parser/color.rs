@@ -1,4 +1,10 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::items_after_statements)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::items_after_statements
+)]
 pub use crate::term_screen::color_types::{LinearRgba, SrgbaTuple};
 use num_derive::FromPrimitive;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -137,9 +143,7 @@ impl RgbColor {
     #[must_use]
     pub fn to_x11_16bit_rgb_string(self) -> String {
         let (red, green, blue) = self.to_tuple_rgb8();
-        format!(
-            "rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}"
-        )
+        format!("rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}")
     }
 
     /// Construct a color from a string of the form `#RRGGBB` where

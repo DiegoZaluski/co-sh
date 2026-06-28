@@ -14,7 +14,7 @@ use core::fmt::{Display, Formatter, Result as FmtResult, Write as FmtWrite};
 use num_derive::FromPrimitive;
 
 mod allocate;
-use allocate::{String, Box, Vec, ToString};
+use allocate::{Box, String, ToString, Vec};
 
 pub mod apc;
 pub mod color;
@@ -454,10 +454,7 @@ impl Display for SixelData {
                 hue_angle,
                 lightness,
                 saturation,
-            } => write!(
-                f,
-                "#{color_number};1;{hue_angle};{lightness};{saturation}"
-            ),
+            } => write!(f, "#{color_number};1;{hue_angle};{lightness};{saturation}"),
             Self::SelectColorMapEntry(n) => write!(f, "#{n}"),
             Self::CarriageReturn => write!(f, "$"),
             Self::NewLine => write!(f, "-"),
@@ -576,9 +573,7 @@ impl OneBased {
     #[allow(clippy::result_unit_err)]
     pub fn from_esc_param_with_big_default(v: &CsiParam) -> core::result::Result<Self, ()> {
         match v {
-            CsiParam::Integer(v) if *v == 0 => Ok(Self {
-                value: u32::MAX,
-            }),
+            CsiParam::Integer(v) if *v == 0 => Ok(Self { value: u32::MAX }),
             CsiParam::Integer(v) if *v > 0 && *v <= i64::from(u32::MAX) => {
                 Ok(Self { value: *v as u32 })
             }

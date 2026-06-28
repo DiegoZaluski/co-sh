@@ -1,4 +1,14 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::items_after_statements, clippy::too_many_lines, clippy::needless_pass_by_value, clippy::missing_panics_doc, clippy::return_self_not_must_use)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::items_after_statements,
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value,
+    clippy::missing_panics_doc,
+    clippy::return_self_not_must_use
+)]
 use super::super::cellcluster::CellCluster;
 use super::super::hyperlink::Rule;
 use super::super::{Change, SEQ_ZERO, SequenceNo};
@@ -681,11 +691,7 @@ impl Line {
             lower = cell.cell_index();
         }
 
-        if upper > lower
-            && upper >= len
-            && cells
-                .last()
-                .is_some_and(|cell| cell.attrs().wrapped())
+        if upper > lower && upper >= len && cells.last().is_some_and(|cell| cell.attrs().wrapped())
         {
             DoubleClickRange::RangeWithWrap(lower..upper)
         } else {
@@ -1185,7 +1191,9 @@ impl Line {
                     // background color, we don't need to emit an instruction
                     // to clear the remainder of the line unless it has a different
                     // background color.
-                    if attr.background() != crate::term_screen::cell::color::ColorAttribute::default() {
+                    if attr.background()
+                        != crate::term_screen::cell::color::ColorAttribute::default()
+                    {
                         result.push(Change::ClearToEndOfLine(attr.background()));
                     }
                 } else {

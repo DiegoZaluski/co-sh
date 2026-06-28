@@ -1,7 +1,7 @@
 mod cellref;
 mod clusterline;
-mod linebits;
 mod line_internal;
+mod linebits;
 mod storage;
 mod test;
 mod vecstorage;

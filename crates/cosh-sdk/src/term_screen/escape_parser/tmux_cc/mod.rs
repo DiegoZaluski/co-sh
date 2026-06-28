@@ -1,4 +1,11 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::too_many_lines, clippy::items_after_statements, clippy::missing_errors_doc)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    clippy::missing_errors_doc
+)]
 use super::Result;
 use super::error::Context;
 use crate::bail;

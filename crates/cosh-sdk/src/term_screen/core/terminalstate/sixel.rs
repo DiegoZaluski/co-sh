@@ -1,6 +1,6 @@
 #![allow(clippy::needless_pass_by_value)]
 use super::TerminalState;
-use super::image::{check_image_dimensions, ImageAttachStyle};
+use super::image::{ImageAttachStyle, check_image_dimensions};
 use super::{ImageAttachParams, default_color_map};
 use crate::term_screen::cell::color::RgbColor;
 use crate::term_screen::cell::image::ImageDataType;
@@ -35,7 +35,7 @@ impl TerminalState {
             RgbaImage::from_pixel(width, height, [red, green, blue, 0xffu8].into())
         };
 
-let mut col = 0;
+        let mut col = 0;
         let mut row = 0;
         let mut foreground_color = RgbColor::new_8bpc(0, 0xff, 0);
 

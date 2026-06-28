@@ -1,4 +1,10 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::items_after_statements, clippy::too_many_lines)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::items_after_statements,
+    clippy::too_many_lines
+)]
 use super::super::color::RgbColor;
 use super::super::{Sixel, SixelData};
 

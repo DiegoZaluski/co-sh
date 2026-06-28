@@ -1,4 +1,14 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::items_after_statements, clippy::too_many_lines, clippy::match_same_arms, clippy::unused_self, clippy::match_wildcard_for_single_variants)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::items_after_statements,
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    clippy::unused_self,
+    clippy::match_wildcard_for_single_variants
+)]
 use super::OneBased;
 use super::color::{AnsiColor, ColorSpec, RgbColor, SrgbaTuple};
 use crate::term_screen::input_types::Modifiers;
@@ -9,7 +19,7 @@ use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
 
-use super::allocate::{Box, Vec, String};
+use super::allocate::{Box, String, Vec};
 
 pub use vtparse::CsiParam;
 
@@ -1827,19 +1837,18 @@ impl<'a> CSIParser<'a> {
                 .req_secondary_device_attributes(params)
                 .map(|dev| CSI::Device(Box::new(dev))),
 
-            ('m' | 'M', [CsiParam::P(b'<'), ..]) => {
-                self.mouse_sgr1006(params).map(CSI::Mouse)
-            }
+            ('m' | 'M', [CsiParam::P(b'<'), ..]) => self.mouse_sgr1006(params).map(CSI::Mouse),
 
             ('c', [CsiParam::P(b'?'), ..]) => self
                 .secondary_device_attributes(params)
                 .map(|dev| CSI::Device(Box::new(dev))),
 
             ('S', [CsiParam::P(b'?'), ..]) => XtSmGraphics::parse(params),
-            ('p', [CsiParam::Integer(_), CsiParam::P(b'$')]
-            | [CsiParam::P(b'?'), CsiParam::Integer(_), CsiParam::P(b'$')]) => {
-                self.decrqm(params)
-            }
+            (
+                'p',
+                [CsiParam::Integer(_), CsiParam::P(b'$')]
+                | [CsiParam::P(b'?'), CsiParam::Integer(_), CsiParam::P(b'$')],
+            ) => self.decrqm(params),
             ('h', [CsiParam::P(b'?'), ..]) => self
                 .dec(self.focus(params, 1, 0))
                 .map(|mode| CSI::Mode(Mode::SetDecPrivateMode(mode))),
@@ -2725,9 +2734,7 @@ impl<'a> CSIParser<'a> {
                         SgrCode::IntensityBold => one!(Sgr::Intensity(Intensity::Bold)),
                         SgrCode::IntensityDim => one!(Sgr::Intensity(Intensity::Half)),
                         SgrCode::NormalIntensity => one!(Sgr::Intensity(Intensity::Normal)),
-                        SgrCode::UnderlineOn => {
-                            Ok(self.underline(params))
-                        }
+                        SgrCode::UnderlineOn => Ok(self.underline(params)),
                         SgrCode::UnderlineDouble => one!(Sgr::Underline(Underline::Double)),
                         SgrCode::UnderlineOff => one!(Sgr::Underline(Underline::None)),
                         SgrCode::UnderlineColor => {

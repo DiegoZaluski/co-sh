@@ -1,6 +1,10 @@
 //! Colors for attributes
 
-#![allow(clippy::items_after_statements, clippy::similar_names, clippy::non_std_lazy_statics)]
+#![allow(
+    clippy::items_after_statements,
+    clippy::similar_names,
+    clippy::non_std_lazy_statics
+)]
 pub use crate::term_screen::cell::color::{AnsiColor, ColorAttribute, RgbColor, SrgbaTuple};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;

@@ -21,9 +21,14 @@ impl Eq for SrgbaTuple {}
 impl SrgbaTuple {
     #[must_use]
     pub fn from_named(name: &str) -> Option<Self> {
-        csscolorparser::parse(name)
-            .ok()
-            .map(|c| SrgbaTuple(f64::from(c.r), f64::from(c.g), f64::from(c.b), f64::from(c.a)))
+        csscolorparser::parse(name).ok().map(|c| {
+            SrgbaTuple(
+                f64::from(c.r),
+                f64::from(c.g),
+                f64::from(c.b),
+                f64::from(c.a),
+            )
+        })
     }
 
     #[must_use]
@@ -100,7 +105,14 @@ impl core::hash::Hash for SrgbaTuple {
 impl core::str::FromStr for SrgbaTuple {
     type Err = csscolorparser::ParseColorError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        csscolorparser::parse(s).map(|c| SrgbaTuple(f64::from(c.r), f64::from(c.g), f64::from(c.b), f64::from(c.a)))
+        csscolorparser::parse(s).map(|c| {
+            SrgbaTuple(
+                f64::from(c.r),
+                f64::from(c.g),
+                f64::from(c.b),
+                f64::from(c.a),
+            )
+        })
     }
 }
 

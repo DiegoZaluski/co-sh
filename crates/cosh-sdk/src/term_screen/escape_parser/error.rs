@@ -1,6 +1,6 @@
 use core::fmt::Display;
 
-use super::allocate::{String, Box, ToString};
+use super::allocate::{Box, String, ToString};
 
 /// The termwiz Error type encapsulates a range of internal
 /// errors in an opaque manner.  You can use the `source`

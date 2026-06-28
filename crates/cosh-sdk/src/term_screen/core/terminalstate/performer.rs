@@ -1,4 +1,12 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::items_after_statements, clippy::too_many_lines, clippy::match_same_arms)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::items_after_statements,
+    clippy::too_many_lines,
+    clippy::match_same_arms
+)]
 use super::super::terminal::{Alert, Progress};
 use super::super::{ClipboardSelection, DCS, Position, ST, VisibleRowIndex};
 use super::TerminalState;

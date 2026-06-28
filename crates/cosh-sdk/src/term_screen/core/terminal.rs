@@ -1,5 +1,5 @@
 use super::terminalstate::performer::Performer;
-use super::{Serialize, Deserialize, str, TerminalState, Deref, DerefMut, TerminalConfiguration};
+use super::{Deref, DerefMut, Deserialize, Serialize, TerminalConfiguration, TerminalState, str};
 use crate::term_screen::escape_parser::parser::Parser;
 use std::sync::Arc;
 

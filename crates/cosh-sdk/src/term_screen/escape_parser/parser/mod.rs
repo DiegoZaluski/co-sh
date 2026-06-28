@@ -345,11 +345,11 @@ impl<F: FnMut(Action)> VTActor for Performer<'_, F> {
 mod test {
     use super::*;
 
+    use crate::term_screen::escape_parser::color::ColorSpec;
     use crate::term_screen::escape_parser::csi::{
         CharacterPath, DecPrivateMode, DecPrivateModeCode, Device, Intensity, Mode, Sgr, Underline,
         Window, XtSmGraphics, XtSmGraphicsItem, XtermKeyModifierResource,
     };
-    use crate::term_screen::escape_parser::color::ColorSpec;
     use crate::term_screen::escape_parser::{EscCode, OneBased};
 
     use k9::assert_equal as assert_eq;

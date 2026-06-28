@@ -1,5 +1,5 @@
 use super::TerminalState;
-use super::image::{dimensions, check_image_dimensions, ImageAttachParams, ImageAttachStyle};
+use super::image::{ImageAttachParams, ImageAttachStyle, check_image_dimensions, dimensions};
 use crate::term_screen::cell::image::ImageDataType;
 use crate::term_screen::escape_parser::osc::ITermFileData;
 use ::image::ImageFormat;
@@ -7,12 +7,12 @@ use ::image::imageops::FilterType;
 use log::error;
 
 #[allow(
-        clippy::too_many_lines,
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_possible_wrap
-    )]
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
 impl TerminalState {
     pub(crate) fn set_image(&mut self, image: ITermFileData) {
         if !image.inline {

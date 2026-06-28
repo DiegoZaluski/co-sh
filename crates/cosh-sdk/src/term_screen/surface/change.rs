@@ -1,4 +1,9 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::missing_panics_doc)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::missing_panics_doc
+)]
 use super::{CursorShape, CursorVisibility, Position};
 use crate::term_screen::cell::color::ColorAttribute;
 pub use crate::term_screen::cell::image::{ImageData, TextureCoordinate};

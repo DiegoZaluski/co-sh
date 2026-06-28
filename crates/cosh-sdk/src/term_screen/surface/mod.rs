@@ -1,15 +1,21 @@
-#![allow(clippy::must_use_candidate, clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::doc_markdown)]
+#![allow(
+    clippy::must_use_candidate,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    clippy::doc_markdown
+)]
 use self::line::CellRef;
-use std::borrow::Cow;
-use core::cmp::min;
-use finl_unicode::grapheme_clusters::Graphemes;
-use serde::{Deserialize, Serialize};
 use crate::term_screen::cell::color::ColorAttribute;
 use crate::term_screen::cell::image::ImageCell;
 use crate::term_screen::cell::{Cell, CellAttributes};
+use core::cmp::min;
+use finl_unicode::grapheme_clusters::Graphemes;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
-use std::string::ToString;
 use std::string::String;
+use std::string::ToString;
 use std::vec;
 use std::vec::Vec;
 
@@ -27,8 +33,7 @@ pub use self::line::Line;
 /// Relative(0) is the current position in the line or
 /// column and EndRelative(0) is the end position in the
 /// line or column.
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Position {
     /// Negative values move up, positive values down, 0 means no change
     Relative(isize),
@@ -38,16 +43,14 @@ pub enum Position {
     EndRelative(usize),
 }
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Default, Clone, Hash, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Hash, Copy, PartialEq, Eq)]
 pub enum CursorVisibility {
     Hidden,
     #[default]
     Visible,
 }
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CursorShape {
     #[default]
     Default,
@@ -890,10 +893,10 @@ fn compute_position_change(current: usize, pos: &Position, limit: usize) -> usiz
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::sync::Arc;
     use crate::term_screen::cell::color::AnsiColor;
     use crate::term_screen::cell::image::ImageData;
     use crate::term_screen::cell::{AttributeChange, Intensity};
+    use std::sync::Arc;
 
     // The \x20's look a little awkward, but we can't use a plain
     // space in the first chararcter of a multi-line continuation;

@@ -1,4 +1,11 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::too_many_lines, clippy::ref_option, clippy::needless_pass_by_value)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines,
+    clippy::ref_option,
+    clippy::needless_pass_by_value
+)]
 use super::cellref::CellRef;
 use crate::term_screen::cell::{Cell, CellAttributes};
 use core::convert::TryInto;

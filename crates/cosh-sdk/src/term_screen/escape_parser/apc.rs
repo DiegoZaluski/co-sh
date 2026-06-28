@@ -1,5 +1,15 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::too_many_lines, clippy::match_same_arms, clippy::items_after_statements, clippy::ref_option, clippy::option_option, clippy::trivially_copy_pass_by_ref)]
-use super::allocate::{BTreeMap, ToString, String, Vec};
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    clippy::items_after_statements,
+    clippy::ref_option,
+    clippy::option_option,
+    clippy::trivially_copy_pass_by_ref
+)]
+use super::allocate::{BTreeMap, String, ToString, Vec};
 use super::osc::{base64_decode, base64_encode};
 use core::fmt::{Display, Error as FmtError, Formatter};
 

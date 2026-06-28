@@ -1,7 +1,20 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::too_many_lines, clippy::needless_pass_by_value, clippy::manual_let_else, clippy::unnecessary_wraps, clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value,
+    clippy::manual_let_else,
+    clippy::unnecessary_wraps,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc
+)]
 use super::super::StableRowIndex;
 use super::TerminalState;
-use super::image::{check_image_dimensions, dimensions, ImageAttachParams, ImageAttachStyle, PlacementInfo};
+use super::image::{
+    ImageAttachParams, ImageAttachStyle, PlacementInfo, check_image_dimensions, dimensions,
+};
 use crate::term_screen::cell::image::ImageDataType;
 use crate::term_screen::escape_parser::apc::{
     KittyFrameCompositionMode, KittyImage, KittyImageCompression, KittyImageData, KittyImageDelete,
@@ -383,16 +396,20 @@ impl TerminalState {
         verbosity: KittyImageVerbosity,
     ) -> anyhow::Result<()> {
         let image_id = match frame.image_number {
-            Some(no) => if let Some(id) = self.kitty_img.number_to_id.get(&no) { *id } else {
-                self.kitty_send_response(
-                    verbosity,
-                    false,
-                    frame.image_id,
-                    frame.image_number,
-                    "ENOENT".to_string(),
-                );
-                anyhow::bail!("no such image_number {no}");
-            },
+            Some(no) => {
+                if let Some(id) = self.kitty_img.number_to_id.get(&no) {
+                    *id
+                } else {
+                    self.kitty_send_response(
+                        verbosity,
+                        false,
+                        frame.image_id,
+                        frame.image_number,
+                        "ENOENT".to_string(),
+                    );
+                    anyhow::bail!("no such image_number {no}");
+                }
+            }
             None => frame.image_id.ok_or_else(|| {
                 self.kitty_send_response(
                     verbosity,
@@ -555,7 +572,9 @@ impl TerminalState {
             (background_pixel & 0xff) as u8,
         ]);
 
-        let anim = if let Some(anim) = self.kitty_img.id_to_data.get(&image_id) { anim } else {
+        let anim = if let Some(anim) = self.kitty_img.id_to_data.get(&image_id) {
+            anim
+        } else {
             self.kitty_send_response(
                 verbosity,
                 false,

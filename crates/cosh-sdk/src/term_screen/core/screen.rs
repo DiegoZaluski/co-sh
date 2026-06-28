@@ -181,9 +181,7 @@ impl Screen {
         // out first in the rewrap case so that we don't lose any
         // real information off the top of the scrollback
         let capacity = physical_rows + self.scrollback_size();
-        while self.lines.len() > capacity
-            && self.lines.back().is_some_and(Line::is_whitespace)
-        {
+        while self.lines.len() > capacity && self.lines.back().is_some_and(Line::is_whitespace) {
             self.lines.pop_back();
         }
 
@@ -461,7 +459,11 @@ impl Screen {
     /// the screen; 0 .. `physical_rows` by clamping it to the nearest
     /// boundary.
     #[inline]
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap
+    )]
     fn clamp_visible_row(&self, row: VisibleRowIndex) -> VisibleRowIndex {
         (row.max(0) as usize).min(self.physical_rows) as VisibleRowIndex
     }
@@ -470,7 +472,11 @@ impl Screen {
     /// will be invalidated by inserting or removing rows!
     #[inline]
     #[must_use]
-    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_wrap,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     pub fn phys_row(&self, row: VisibleRowIndex) -> PhysRowIndex {
         let row = self.clamp_visible_row(row);
         self.lines
@@ -674,9 +680,7 @@ impl Screen {
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let insert_at_end = scroll_region.end as usize == self.physical_rows;
 
-        debug!(
-            "scroll_up {scroll_region:?} num_rows={num_rows} phys_scroll={phys_scroll:?}",
-        );
+        debug!("scroll_up {scroll_region:?} num_rows={num_rows} phys_scroll={phys_scroll:?}");
         // Invalidate the lines that will move before they move so that
         // the indices of the lines are stable (we may remove lines below)
         // We only need invalidate if the StableRowIndex of the row would be

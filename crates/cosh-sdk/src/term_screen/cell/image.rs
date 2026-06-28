@@ -312,7 +312,9 @@ impl ImageDataType {
         use sha2::Digest;
         let mut hasher = sha2::Sha256::new();
         match self {
-            ImageDataType::EncodedFile(data) | ImageDataType::Rgba8 { data, .. } => hasher.update(data),
+            ImageDataType::EncodedFile(data) | ImageDataType::Rgba8 { data, .. } => {
+                hasher.update(data);
+            }
             ImageDataType::AnimRgba8 {
                 frames, durations, ..
             } => {

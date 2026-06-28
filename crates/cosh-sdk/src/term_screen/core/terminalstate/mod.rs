@@ -1,8 +1,26 @@
 // The range_plus_one lint can't see when the LHS is not compatible with
 // and inclusive range
 #![allow(clippy::range_plus_one)]
-#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::too_many_lines, clippy::match_same_arms, clippy::struct_excessive_bools, clippy::needless_pass_by_value, clippy::default_trait_access, clippy::assigning_clones, clippy::missing_errors_doc, clippy::missing_panics_doc, clippy::non_std_lazy_statics)]
-use super::{CursorPosition, CellAttributes, Screen, Deref, DerefMut, TerminalSize, TerminalConfiguration, Range, VisibleRowIndex, MouseButton, MouseEvent, Progress, Clipboard, DeviceControlHandler, AlertHandler, DownloadHandler, str, ClipboardSelection, MouseEventKind, KeyModifiers, CSI, Alert, Error, Position, SemanticType, Hyperlink, ST, DCS, Cell, SemanticZone, StableRowIndex};
+#![allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    clippy::struct_excessive_bools,
+    clippy::needless_pass_by_value,
+    clippy::default_trait_access,
+    clippy::assigning_clones,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::non_std_lazy_statics
+)]
+use super::{
+    Alert, AlertHandler, CSI, Cell, CellAttributes, Clipboard, ClipboardSelection, CursorPosition,
+    DCS, Deref, DerefMut, DeviceControlHandler, DownloadHandler, Error, Hyperlink, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind, Position, Progress, Range, ST, Screen, SemanticType,
+    SemanticZone, StableRowIndex, TerminalConfiguration, TerminalSize, VisibleRowIndex, str,
+};
 use crate::term_screen::bidi::ParagraphDirectionHint;
 use crate::term_screen::cell::UnicodeVersion;
 use crate::term_screen::cell::image::ImageData;
@@ -1355,7 +1373,10 @@ impl TerminalState {
                             action_or_status: XtSmGraphicsStatus::Success.to_i64(),
                             value: vec![],
                         },
-                        Some(XtSmGraphicsAction::ReadMaximumAllowedValue | XtSmGraphicsAction::ReadAttribute) => match g.item {
+                        Some(
+                            XtSmGraphicsAction::ReadMaximumAllowedValue
+                            | XtSmGraphicsAction::ReadAttribute,
+                        ) => match g.item {
                             XtSmGraphicsItem::Unspecified(_) => unreachable!("checked above"),
                             XtSmGraphicsItem::NumberOfColorRegisters => XtSmGraphics {
                                 item: g.item,
@@ -1669,8 +1690,10 @@ impl TerminalState {
                 self.decqrm_response(mode, true, self.bracketed_paste);
             }
 
-            Mode::SetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::OptEnableAlternateScreen
-                | DecPrivateModeCode::EnableAlternateScreen)) => {
+            Mode::SetDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::OptEnableAlternateScreen
+                | DecPrivateModeCode::EnableAlternateScreen,
+            )) => {
                 if !self.screen.is_alt_screen_active() {
                     self.screen.activate_alt_screen(self.seqno);
                     self.pen = CellAttributes::default();
