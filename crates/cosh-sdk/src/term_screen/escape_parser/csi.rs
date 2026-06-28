@@ -19,8 +19,6 @@ use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
 
-
-
 pub use vtparse::CsiParam;
 
 /// Specify whether you want to slowly or rapidly annoy your users

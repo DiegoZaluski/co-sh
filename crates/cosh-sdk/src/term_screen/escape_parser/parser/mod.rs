@@ -8,8 +8,6 @@ use log::error;
 use num_traits::FromPrimitive;
 use vtparse::{CsiParam, VTActor, VTParser};
 
-
-
 #[derive(Default)]
 struct GetTcapBuilder {
     current: Vec<u8>,

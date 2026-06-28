@@ -82,10 +82,6 @@ pub trait AlertHandler: Send + Sync {
     fn alert(&mut self, alert: Alert);
 }
 
-pub trait DownloadHandler: Send + Sync {
-    fn save_to_downloads(&self, name: Option<String>, data: Vec<u8>);
-}
-
 /// Represents an instance of a terminal emulator.
 pub struct Terminal {
     /// The terminal model/state

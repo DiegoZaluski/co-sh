@@ -18,9 +18,9 @@
 use super::error;
 use super::{
     Alert, AlertHandler, CSI, Cell, CellAttributes, Clipboard, ClipboardSelection, CursorPosition,
-    DCS, Deref, DerefMut, DeviceControlHandler, DownloadHandler, Hyperlink, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind, Position, Progress, Range, ST, Screen, SemanticType,
-    SemanticZone, StableRowIndex, TerminalConfiguration, TerminalSize, VisibleRowIndex, str,
+    DCS, Deref, DerefMut, DeviceControlHandler, Hyperlink, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind, Position, Progress, Range, ST, Screen, SemanticType, SemanticZone,
+    StableRowIndex, TerminalConfiguration, TerminalSize, VisibleRowIndex, str,
 };
 use crate::term_screen::bidi::ParagraphDirectionHint;
 use crate::term_screen::cell::UnicodeVersion;
@@ -39,7 +39,7 @@ use num_traits::ToPrimitive;
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::sync::Arc;
-use std::sync::mpsc::{Sender, channel};
+
 use terminfo::{Database, Value};
 use url::Url;
 
@@ -337,14 +337,13 @@ pub struct TerminalState {
     clipboard: Option<Arc<dyn Clipboard>>,
     device_control_handler: Option<Box<dyn DeviceControlHandler>>,
     alert_handler: Option<Box<dyn AlertHandler>>,
-    download_handler: Option<Arc<dyn DownloadHandler>>,
 
     current_dir: Option<Url>,
 
     term_program: String,
     term_version: String,
 
-    writer: BufWriter<ThreadedWriter>,
+    writer: BufWriter<Box<dyn std::io::Write + Send>>,
 
     user_vars: HashMap<String, String>,
 
@@ -360,8 +359,6 @@ pub struct TerminalState {
     /// We don't want that, so we use this flag to remember
     /// whether we want to skip it or not.
     suppress_initial_title_change: bool,
-
-    accumulating_title: Option<String>,
 
     /// seqno when we last lost focus
     lost_focus_seqno: SequenceNo,
@@ -387,72 +384,6 @@ struct UnicodeVersionStackEntry {
     label: Option<String>,
 }
 
-/// This struct implements a writer that sends the data across
-/// to another thread so that the write side of the terminal
-/// processing never blocks.
-///
-/// This is important for example when processing large pastes into
-/// vim.  In that scenario, we can fill up the data pending
-/// on vim's input buffer, while it is busy trying to send
-/// output to the terminal.  A deadlock is reached because
-/// `send_paste` blocks on the writer, but it is unable to make
-/// progress until we're able to read the output from vim.
-///
-/// We either need input or output to be non-blocking.
-/// Output seems safest because we want to be able to exert
-/// back-pressure when there is a lot of data to read,
-/// and we're in control of the write side, which represents
-/// input from the interactive user, or pastes.
-struct ThreadedWriter {
-    sender: Sender<WriterMessage>,
-}
-
-enum WriterMessage {
-    Data(Vec<u8>),
-    Flush,
-}
-
-impl ThreadedWriter {
-    fn new(mut writer: Box<dyn std::io::Write + Send>) -> Self {
-        let (sender, receiver) = channel::<WriterMessage>();
-
-        std::thread::spawn(move || {
-            while let Ok(msg) = receiver.recv() {
-                match msg {
-                    WriterMessage::Data(buf) => {
-                        if writer.write(&buf).is_err() {
-                            break;
-                        }
-                    }
-                    WriterMessage::Flush => {
-                        if writer.flush().is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        Self { sender }
-    }
-}
-
-impl std::io::Write for ThreadedWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.sender
-            .send(WriterMessage::Data(buf.to_vec()))
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::BrokenPipe, err))?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.sender
-            .send(WriterMessage::Flush)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::BrokenPipe, err))?;
-        Ok(())
-    }
-}
-
 impl TerminalState {
     /// Constructs the terminal state.
     /// You generally want the `Terminal` struct rather than this one;
@@ -464,7 +395,7 @@ impl TerminalState {
         term_version: &str,
         writer: Box<dyn std::io::Write + Send>,
     ) -> TerminalState {
-        let writer = BufWriter::new(ThreadedWriter::new(writer));
+        let writer = BufWriter::new(writer);
         let seqno = 1;
         let screen = ScreenOrAlt::new(size, &config, seqno, config.bidi_mode());
 
@@ -515,7 +446,6 @@ impl TerminalState {
             clipboard: None,
             device_control_handler: None,
             alert_handler: None,
-            download_handler: None,
             current_dir: None,
             term_program: term_program.to_string(),
             term_version: term_version.to_string(),
@@ -526,7 +456,6 @@ impl TerminalState {
             unicode_version_stack: vec![],
             suppress_initial_title_change: false,
             enable_conpty_quirks: false,
-            accumulating_title: None,
             lost_focus_seqno: seqno,
             lost_focus_alerted_seqno: seqno,
             focused: true,
@@ -569,10 +498,6 @@ impl TerminalState {
 
     pub fn set_notification_handler(&mut self, handler: Box<dyn AlertHandler>) {
         self.alert_handler.replace(handler);
-    }
-
-    pub fn set_download_handler(&mut self, handler: &Arc<dyn DownloadHandler>) {
-        self.download_handler.replace(handler.clone());
     }
 
     /// Returns the title text associated with the terminal session.

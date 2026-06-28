@@ -19,7 +19,6 @@ pub mod hyperlink;
 pub mod osc;
 pub mod parser;
 
-
 pub use self::csi::CSI;
 pub use self::error::{Error, Result};
 pub use self::esc::{Esc, EscCode};
@@ -216,7 +215,6 @@ pub enum DeviceControlMode {
     Data(u8),
     /// A self contained (Enter, Data*, Exit) sequence
     ShortDeviceControl(Box<ShortDeviceControl>),
-
 }
 
 impl Display for DeviceControlMode {
@@ -240,7 +238,6 @@ impl Display for DeviceControlMode {
             Self::Exit => Ok(()),
             Self::Data(c) => f.write_char(*c as char),
             Self::ShortDeviceControl(s) => s.fmt(f),
-
         }
     }
 }
@@ -252,7 +249,6 @@ impl core::fmt::Debug for DeviceControlMode {
             Self::Exit => write!(fmt, "Exit"),
             Self::Data(b) => write!(fmt, "Data({:?} 0x{b:x})", *b as char),
             Self::ShortDeviceControl(s) => write!(fmt, "ShortDeviceControl({s:?})"),
-
         }
     }
 }

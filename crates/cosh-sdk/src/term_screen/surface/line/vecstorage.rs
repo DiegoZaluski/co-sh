@@ -18,8 +18,6 @@ impl VecStorage {
     pub(crate) fn set_cell(&mut self, idx: usize, cell: Cell, _clear_image_placement: bool) {
         self.cells[idx] = cell;
     }
-
-
 }
 
 impl core::ops::Deref for VecStorage {

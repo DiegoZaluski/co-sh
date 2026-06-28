@@ -54,10 +54,6 @@ impl TerminalConfiguration for TestTermConfig {
     fn color_palette(&self) -> ColorPalette {
         ColorPalette::default()
     }
-
-    fn enable_kitty_graphics(&self) -> bool {
-        true
-    }
 }
 
 impl TestTerm {

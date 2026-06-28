@@ -21,8 +21,6 @@ use core::str::FromStr;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use ordered_float::NotNan;
-use std::sync::LazyLock;
-
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -430,26 +428,8 @@ pub enum OperatingSystemCommandCode {
     )*
 }
 
-impl OscMap {
-    #[allow(dead_code)]
-    fn new() -> Self {
-        let mut code_to_variant = HashMap::new();
-        let mut variant_to_code = HashMap::new();
-
-        use OperatingSystemCommandCode::*;
-
-        $(
-            code_to_variant.insert($value, $label);
-            variant_to_code.insert($label, $value);
-        )*
-
-        Self {
-            code_to_variant,
-            variant_to_code,
-        }
-    }
-
-    fn linear_search_code(code: &str) -> Option<OperatingSystemCommandCode> {
+impl OperatingSystemCommandCode {
+    fn linear_search_code(code: &str) -> Option<Self> {
         use OperatingSystemCommandCode::*;
         match code {
         $(
@@ -459,7 +439,7 @@ impl OscMap {
         }
     }
 
-    fn linear_search_variant(v: &OperatingSystemCommandCode) -> &'static str {
+    fn linear_search_variant(v: &Self) -> &'static str {
         use OperatingSystemCommandCode::*;
         match *v {
         $(
@@ -467,7 +447,6 @@ impl OscMap {
         )*
         }
     }
-
 }
     };
 }
@@ -521,25 +500,13 @@ osc_entries!(
     SetWindowTitleSun = "l",
     SetIconNameSun = "L",
 );
-
-#[allow(dead_code)]
-struct OscMap {
-    #[allow(dead_code)]
-    code_to_variant: HashMap<&'static str, OperatingSystemCommandCode>,
-    #[allow(dead_code)]
-    variant_to_code: HashMap<OperatingSystemCommandCode, &'static str>,
-}
-
-#[allow(dead_code)]
-static OSC_MAP: LazyLock<OscMap> = LazyLock::new(OscMap::new);
-
 impl OperatingSystemCommandCode {
     fn from_code(code: &str) -> Option<Self> {
-        OscMap::linear_search_code(code)
+        Self::linear_search_code(code)
     }
 
     fn as_code(self) -> &'static str {
-        OscMap::linear_search_variant(&self)
+        Self::linear_search_variant(&self)
     }
 }
 

@@ -173,10 +173,6 @@ pub trait TerminalConfiguration: Downcast + std::fmt::Debug + Send + Sync {
         String::new()
     }
 
-    fn enable_kitty_graphics(&self) -> bool {
-        false
-    }
-
     fn enable_kitty_keyboard(&self) -> bool {
         false
     }

@@ -1571,5 +1571,4 @@ mod test {
         s.add_change("A\u{200b}B");
         assert_eq!(s.screen_chars_to_string(), "A\u{200b}B \n");
     }
-
 }

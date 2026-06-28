@@ -9,8 +9,6 @@ pub use crate::term_screen::color_types::{LinearRgba, SrgbaTuple};
 use num_derive::FromPrimitive;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-
-
 #[derive(Debug, Clone, Copy, FromPrimitive, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 /// These correspond to the classic ANSI color indices and are

@@ -273,5 +273,3 @@ impl ChangeSequence {
         self.changes.push(change);
     }
 }
-
-

@@ -480,8 +480,6 @@ impl Line {
         &self.zones
     }
 
-
-
     /// Returns true if the line contains a hyperlink
     #[inline]
     pub fn has_hyperlink(&self) -> bool {
