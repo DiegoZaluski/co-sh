@@ -28,6 +28,8 @@ pub use rollback::{RollbackResult, rollback};
 pub use types::{EditTarget, FsEdit, FsMetadata, FsRead, FsRollback, FsWrite, Target, TargetFile};
 pub use write::{WriteResult, write};
 
+use crate::ToolDescription;
+
 /// Shared-state wrapper for file-system tool operations.
 ///
 /// Use the builder methods after [`new`](Self::new) to configure the
@@ -40,6 +42,15 @@ pub struct Fs {
     /// Your frontend should request confirmation before setting this field.
     allowlist: Option<Vec<PathBuf>>,
     blocklist: Option<Vec<PathBuf>>,
+
+    /// MCP Tool description for `read`.
+    pub description_read: ToolDescription,
+    /// MCP Tool description for `write`.
+    pub description_write: ToolDescription,
+    /// MCP Tool description for `edit`.
+    pub description_edit: ToolDescription,
+    /// MCP Tool description for `rollback`.
+    pub description_rollback: ToolDescription,
 }
 
 impl Default for Fs {
@@ -52,12 +63,156 @@ impl Fs {
     /// Create a new `Fs` with no root path set.
     ///
     /// All paths are denied until [`cwd`](Self::cwd) is called.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn new() -> Self {
         Self {
             root: PathBuf::new(),
             allowlist: None,
             blocklist: None,
+            description_read: serde_json::json!({
+                "name": "fs_read",
+                "description": concat!(
+                    "Read one or more files or named symbols from the project. ",
+                    "Each target can specify a file path, an optional line number to ",
+                    "read a single line, or an optional symbol name to look up a ",
+                    "specific code symbol (function, class, variable, etc.) within ",
+                    "the file."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "targets": {
+                            "type": "array",
+                            "description": "List of read targets",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Path to the file to read, relative to the project root"
+                                    },
+                                    "line": {
+                                        "type": "integer",
+                                        "description": concat!(
+                                            "Optional specific 1-based line number to read ",
+                                            "(reads only that line)"
+                                        )
+                                    },
+                                    "symbol": {
+                                        "type": "string",
+                                        "description": concat!(
+                                            "Optional symbol name to look up ",
+                                            "(function, class, variable) within the file"
+                                        )
+                                    }
+                                },
+                                "required": ["path"]
+                            }
+                        }
+                    },
+                    "required": ["targets"]
+                }
+            }),
+            description_write: serde_json::json!({
+                "name": "fs_write",
+                "description": concat!(
+                    "Write content to one or more files. Creates new files or ",
+                    "overwrites existing ones entirely. Paths are validated against ",
+                    "the project root, allowlist, and blocklist guards before writing."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "targets": {
+                            "type": "array",
+                            "description": "List of file write targets",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Path to the file to write, relative to the project root"
+                                    },
+                                    "text": {
+                                        "type": "string",
+                                        "description": "Full text content to write to the file"
+                                    }
+                                },
+                                "required": ["path", "text"]
+                            }
+                        }
+                    },
+                    "required": ["targets"]
+                }
+            }),
+            description_edit: serde_json::json!({
+                "name": "fs_edit",
+                "description": concat!(
+                    "Apply targeted edits to one or more files using a diff-like ",
+                    "instruction format. Uses the file's current hash for safety -- ",
+                    "the operation fails if the file has changed since the hash was ",
+                    "recorded. Supports semantic operations like replace, insert, ",
+                    "and delete on specific text within the file."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "targets": {
+                            "type": "array",
+                            "description": "List of edit targets",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "Path to the file to edit, relative to the project root"
+                                    },
+                                    "file_hash": {
+                                        "type": "string",
+                                        "description": concat!(
+                                            "Hash of the current file content for ",
+                                            "safety verification"
+                                        )
+                                    },
+                                    "ops": {
+                                        "type": "string",
+                                        "description": concat!(
+                                            "Edit operations string describing the changes ",
+                                            "to apply (search/replace format)"
+                                        )
+                                    }
+                                },
+                                "required": ["path", "file_hash", "ops"]
+                            }
+                        }
+                    },
+                    "required": ["targets"]
+                }
+            }),
+            description_rollback: serde_json::json!({
+                "name": "fs_rollback",
+                "description": concat!(
+                    "Roll back a file to a previously recorded session version. ",
+                    "Uses the session's rollback history to restore the file to the ",
+                    "state identified by the given hash. Returns an error if the ",
+                    "path has no rollback history."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file to roll back, relative to the project root"
+                        },
+                        "hash": {
+                            "type": "string",
+                            "description": "Session hash identifying which version to restore"
+                        }
+                    },
+                    "required": ["path", "hash"]
+                }
+            }),
         }
     }
 

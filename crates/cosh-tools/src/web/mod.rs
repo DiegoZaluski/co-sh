@@ -21,6 +21,8 @@ mod test;
 pub use fetch::{WebFetch, fetch};
 pub use search::{WebSearch, search};
 
+use crate::ToolDescription;
+
 /// Shared-state wrapper for web tool operations.
 ///
 /// Use the builder method [`num_results`](Self::num_results) after
@@ -28,6 +30,11 @@ pub use search::{WebSearch, search};
 /// operation methods directly.
 pub struct Web {
     num_results: u32,
+
+    /// MCP Tool description for `fetch`.
+    pub description_fetch: ToolDescription,
+    /// MCP Tool description for `search`.
+    pub description_search: ToolDescription,
 }
 
 impl Default for Web {
@@ -40,7 +47,47 @@ impl Web {
     /// Create a new `Web` with default search result count (10).
     #[must_use]
     pub fn new() -> Self {
-        Self { num_results: 10 }
+        Self {
+            num_results: 10,
+            description_fetch: serde_json::json!({
+                "name": "web_fetch",
+                "description": concat!(
+                    "Fetch a URL and return its content as clean, readable markdown. ",
+                    "Strips navigation, scripts, and boilerplate HTML to produce ",
+                    "LLM-friendly text. Falls back through multiple extraction ",
+                    "methods if the primary one fails."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "The full HTTP or HTTPS URL to fetch"
+                        }
+                    },
+                    "required": ["url"]
+                }
+            }),
+            description_search: serde_json::json!({
+                "name": "web_search",
+                "description": concat!(
+                    "Search the web using a text query and return results as clean ",
+                    "markdown. Each result includes a title, snippet, and URL. ",
+                    "Use this to find current information, documentation, or ",
+                    "answers that are not available in the local codebase."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query string"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }),
+        }
     }
 
     /// Set the number of search results (capped at 10 by the underlying API).

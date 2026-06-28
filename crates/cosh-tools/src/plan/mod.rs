@@ -18,6 +18,8 @@ pub use types::{
     TodoWriteOutput,
 };
 
+use crate::ToolDescription;
+
 /// Static prompt injected when the model uses the plan tool.
 /// Teaches the model the plan file syntax so the file can be
 /// automatically parsed into a structured TODO list.
@@ -59,19 +61,217 @@ Example:
 
 /// Plan instructs the model on how to write plans and provides
 /// stateful wrappers over the pure todo operations.
-#[derive(Default)]
 pub struct Plan {
     list: TodoList,
     with_test: bool,
+
+    /// MCP Tool description for `todo_write`.
+    pub description_todo_write: ToolDescription,
+    /// MCP Tool description for `todo_edit`.
+    pub description_todo_edit: ToolDescription,
+    /// MCP Tool description for `todo_cross_off`.
+    pub description_todo_cross_off: ToolDescription,
+    /// MCP Tool description for `todo_read`.
+    pub description_todo_read: ToolDescription,
+    /// MCP Tool description for `load_from_md`.
+    pub description_load_from_md: ToolDescription,
+}
+
+impl Default for Plan {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Plan {
     /// Creates an empty plan.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn new() -> Self {
         Plan {
             list: TodoList::default(),
             with_test: false,
+            description_todo_write: serde_json::json!({
+                "name": "plan_todo_write",
+                "description": concat!(
+                    "Mutate the TODO list by adding, starting, removing, cleaning, ",
+                    "or verifying tasks. Supports adding new tasks with optional ",
+                    "dependencies, marking tasks as in-progress, removing tasks, ",
+                    "cleaning completed tasks, and verifying that all tasks in a ",
+                    "group have been tested."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "object",
+                            "description": "The mutation action to perform",
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "type": "string", "const": "Add" },
+                                        "group": { "type": "string", "description": "The task group name" },
+                                        "description": { "type": "string", "description": "Task description" },
+                                        "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Optional task IDs this task depends on" }
+                                    },
+                                    "required": ["type", "group", "description"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "type": "string", "const": "Start" },
+                                        "id": { "type": "string", "description": "Task ID to mark as in-progress" }
+                                    },
+                                    "required": ["type", "id"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "type": "string", "const": "Remove" },
+                                        "id": { "type": "string", "description": "Task ID to remove" }
+                                    },
+                                    "required": ["type", "id"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "type": "string", "const": "Clean" },
+                                        "keep_pending": { "type": "boolean", "description": "If true, only remove completed/cancelled tasks; if false, remove all" }
+                                    },
+                                    "required": ["type", "keep_pending"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "type": "string", "const": "VerifyGroup" },
+                                        "group": { "type": "string", "description": "Group name to verify tests for" }
+                                    },
+                                    "required": ["type", "group"]
+                                }
+                            ]
+                        }
+                    },
+                    "required": ["action"]
+                }
+            }),
+            description_todo_edit: serde_json::json!({
+                "name": "plan_todo_edit",
+                "description": concat!(
+                    "Edit an existing task's metadata: description, group assignment, ",
+                    "or dependency list. Only the provided fields are updated; ",
+                    "omitted fields remain unchanged."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "edit": {
+                            "type": "object",
+                            "description": "The edit operation to perform",
+                            "properties": {
+                                "id": { "type": "string", "description": "ID of the task to edit" },
+                                "description": { "type": "string", "description": "Optional new description for the task" },
+                                "group": { "type": "string", "description": "Optional new group name to move the task to" },
+                                "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Optional new dependency list" }
+                            },
+                            "required": ["id"]
+                        }
+                    },
+                    "required": ["edit"]
+                }
+            }),
+            description_todo_cross_off: serde_json::json!({
+                "name": "plan_todo_cross_off",
+                "description": concat!(
+                    "Mark a task as completed or cancelled. Updates the task status ",
+                    "to 'Completed' or 'Cancelled' and refreshes the internal state."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "object",
+                            "description": "The cross-off action",
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "type": "string", "const": "Complete" },
+                                        "id": { "type": "string", "description": "Task ID to mark as completed" }
+                                    },
+                                    "required": ["type", "id"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "type": "string", "const": "Cancel" },
+                                        "id": { "type": "string", "description": "Task ID to cancel" }
+                                    },
+                                    "required": ["type", "id"]
+                                }
+                            ]
+                        }
+                    },
+                    "required": ["action"]
+                }
+            }),
+            description_todo_read: serde_json::json!({
+                "name": "plan_todo_read",
+                "description": concat!(
+                    "Query the TODO list state. Supports listing all tasks with ",
+                    "optional filtering by group and/or status, or fetching a ",
+                    "single task by its ID. Returns the matching task groups, ",
+                    "items, and any nag messages for the user."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "object",
+                            "description": "The read action to perform",
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "type": "string", "const": "List" },
+                                        "group": { "type": "string", "description": "Optional group name filter" },
+                                        "status": { "type": "string", "description": "Optional status filter (Pending, InProgress, Completed, Cancelled)" }
+                                    },
+                                    "required": ["type"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "type": "string", "const": "Get" },
+                                        "id": { "type": "string", "description": "Task ID to fetch" }
+                                    },
+                                    "required": ["type", "id"]
+                                }
+                            ]
+                        }
+                    },
+                    "required": ["action"]
+                }
+            }),
+            description_load_from_md: serde_json::json!({
+                "name": "plan_load_from_md",
+                "description": concat!(
+                    "Parse a Markdown plan file following the PLAN_WRITE syntax and ",
+                    "load it as the internal TODO list state. The file must contain ",
+                    "level-2 headings for groups and checklist items for tasks with ",
+                    "optional dependency declarations."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the Markdown plan file to parse and load"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            }),
         }
     }
 

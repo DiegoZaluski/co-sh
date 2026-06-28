@@ -34,6 +34,8 @@ pub use types::{
     SkillSource,
 };
 
+use crate::ToolDescription;
+
 /// Shared-state wrapper for skill tool operations.
 ///
 /// Holds the discovery configuration (sources, recursion, filters) and
@@ -43,6 +45,15 @@ pub struct Skills {
     recursive: bool,
     ignore: Vec<String>,
     include: Vec<String>,
+
+    /// MCP Tool description for `list`.
+    pub description_list: ToolDescription,
+    /// MCP Tool description for `read`.
+    pub description_read: ToolDescription,
+    /// MCP Tool description for `read_asset`.
+    pub description_read_asset: ToolDescription,
+    /// MCP Tool description for `match_skills`.
+    pub description_match_skills: ToolDescription,
 }
 
 impl Default for Skills {
@@ -60,6 +71,83 @@ impl Skills {
             recursive: false,
             ignore: Vec::new(),
             include: Vec::new(),
+            description_list: serde_json::json!({
+                "name": "skills_list",
+                "description": concat!(
+                    "List all available skills from the configured sources. ",
+                    "Returns skill names and descriptions for every skill found ",
+                    "across all sources, respecting ignore/include filters and ",
+                    "recursion settings."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            }),
+            description_read: serde_json::json!({
+                "name": "skills_read",
+                "description": concat!(
+                    "Read the full content of a named skill. Retrieves the ",
+                    "skill's metadata (name, description) and body content from ",
+                    "the first source that contains it (first-source-wins on ",
+                    "name collision)."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the skill to read"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            }),
+            description_read_asset: serde_json::json!({
+                "name": "skills_read_asset",
+                "description": concat!(
+                    "Read an asset file from a named skill's directory. ",
+                    "Asset paths must be relative and must not traverse outside ",
+                    "the skill directory (path traversal is blocked). Returns ",
+                    "the raw asset content."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the skill that owns the asset"
+                        },
+                        "asset_path": {
+                            "type": "string",
+                            "description": "Relative path to the asset file within the skill directory"
+                        }
+                    },
+                    "required": ["name", "asset_path"]
+                }
+            }),
+            description_match_skills: serde_json::json!({
+                "name": "skills_match_skills",
+                "description": concat!(
+                    "Match skills against a set of active file paths. Skills ",
+                    "whose glob patterns match at least one path, or that have ",
+                    "`always_apply` set to true, are returned. Useful for ",
+                    "auto-activating relevant skills based on the current ",
+                    "workspace context."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "match_paths": {
+                            "type": "array",
+                            "description": "File paths to match against skill glob patterns",
+                            "items": { "type": "string" }
+                        }
+                    },
+                    "required": ["match_paths"]
+                }
+            }),
         }
     }
 

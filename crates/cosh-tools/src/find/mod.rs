@@ -32,6 +32,7 @@ pub use grep::grep;
 pub use types::{ContextEntry, Glob, GlobEntry, GlobOutput, Grep, GrepMatchEntry, GrepOutput};
 
 use types::{Glob as GlobConfig, Grep as GrepConfig};
+use crate::ToolDescription;
 
 /// Shared-state wrapper for file-search tool operations.
 ///
@@ -52,6 +53,11 @@ pub struct Find {
     hidden: Option<bool>,
     gitignore: Option<bool>,
     timeout_ms: Option<u32>,
+
+    /// MCP Tool description for `glob`.
+    pub description_glob: ToolDescription,
+    /// MCP Tool description for `grep`.
+    pub description_grep: ToolDescription,
 }
 
 impl Default for Find {
@@ -78,6 +84,54 @@ impl Find {
             hidden: None,
             gitignore: None,
             timeout_ms: None,
+            description_glob: serde_json::json!({
+                "name": "find_glob",
+                "description": concat!(
+                    "Find files and directories matching a glob pattern. ",
+                    "Supports recursive search, file type filtering (file/dir/symlink), ",
+                    "sorting by modification time, hidden file inclusion, and ",
+                    ".gitignore respect. Returns a list of matching entries with ",
+                    "path, file type, size, and modification time."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "The glob pattern to match (e.g. \"**/*.rs\", \"src/**\", \"*.toml\")"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "The root directory to search within"
+                        }
+                    },
+                    "required": ["pattern", "path"]
+                }
+            }),
+            description_grep: serde_json::json!({
+                "name": "find_grep",
+                "description": concat!(
+                    "Search file content for lines matching a regex pattern. ",
+                    "Supports case-insensitive matching, file name glob filtering, ",
+                    "language-specific search, context lines before/after each match, ",
+                    "max count limiting, hidden file inclusion, and .gitignore respect. ",
+                    "Returns match locations with line numbers, content, and context."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "The regex pattern to search for in file contents"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "The root directory to search within"
+                        }
+                    },
+                    "required": ["pattern", "path"]
+                }
+            }),
         }
     }
 

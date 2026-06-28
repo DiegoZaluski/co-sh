@@ -21,6 +21,7 @@ use tokio_stream::Stream;
 
 use crate::bash::bsh::BashError;
 use crate::bash::bsh::SpawnOutput;
+use crate::ToolDescription;
 
 /// Shared-state wrapper for bash execution.
 ///
@@ -31,6 +32,9 @@ pub struct Bash {
     env: Option<Vec<(String, String)>>,
     pty: bool,
     cwd: String,
+
+    /// MCP Tool description for `run`.
+    pub description_run: ToolDescription,
 }
 
 impl Default for Bash {
@@ -53,6 +57,30 @@ impl Bash {
             env: None,
             pty: false,
             cwd: String::new(),
+            description_run: serde_json::json!({
+                "name": "bash_run",
+                "description": concat!(
+                    "Execute a bash command and return its output as an async stream. ",
+                    "Supports configurable timeout, environment variables, and ",
+                    "pseudo-terminal (PTY) mode. PTY mode multiplexes stdout and ",
+                    "stderr for colored output and interactive prompts. ",
+                    "Security validation blocks dangerous patterns like rm -rf /, ",
+                    "fork bombs, and remote execution."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": concat!(
+                                "The bash command to execute. Must not be an absolute path ",
+                                "and must not match dangerous security patterns."
+                            )
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }),
         }
     }
 
