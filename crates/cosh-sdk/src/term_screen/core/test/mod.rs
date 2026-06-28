@@ -9,11 +9,11 @@ mod csi;
 mod image;
 // mod selection; FIXME: port to render layer
 use crate::term_screen::core::color::ColorPalette;
+use crate::term_screen::escape_parser::csi::{Edit, EraseInDisplay, EraseInLine};
+use crate::term_screen::escape_parser::{CSI, OneBased, OperatingSystemCommand};
+use crate::term_screen::surface::{CursorShape, CursorVisibility, SEQ_ZERO, SequenceNo};
 use k9::assert_equal as assert_eq;
 use std::sync::{Arc, Mutex};
-use crate::term_screen::escape_parser::csi::{Edit, EraseInDisplay, EraseInLine};
-use crate::term_screen::escape_parser::{OneBased, OperatingSystemCommand, CSI};
-use crate::term_screen::surface::{CursorShape, CursorVisibility, SequenceNo, SEQ_ZERO};
 
 #[derive(Debug)]
 struct LocalClip {
@@ -298,7 +298,7 @@ fn print_visible_lines(term: &Terminal) {
 /// The other cell attributes are not compared; this is
 /// a convenience for writing visually understandable tests.
 fn assert_visible_contents(term: &Terminal, file: &str, line: u32, expect_lines: &[&str]) {
-    print_visible_lines(&term);
+    print_visible_lines(term);
     let screen = term.screen();
 
     let expect: Vec<Line> = expect_lines.iter().map(|s| (*s).into()).collect();
@@ -307,7 +307,7 @@ fn assert_visible_contents(term: &Terminal, file: &str, line: u32, expect_lines:
 }
 
 fn assert_all_contents(term: &Terminal, file: &str, line: u32, expect_lines: &[&str]) {
-    print_all_lines(&term);
+    print_all_lines(term);
     let screen = term.screen();
 
     let expect: Vec<Line> = expect_lines.iter().map(|s| (*s).into()).collect();
@@ -1132,10 +1132,12 @@ fn test_scroll_margins() {
     term.print("1\n2\n3\n4\n");
     assert_all_contents(&term, file!(), line!(), &["1", "2", "3", "4", ""]);
 
-    let margins = CSI::Cursor(crate::term_screen::escape_parser::csi::Cursor::SetTopAndBottomMargins {
-        top: OneBased::new(1),
-        bottom: OneBased::new(2),
-    });
+    let margins = CSI::Cursor(
+        crate::term_screen::escape_parser::csi::Cursor::SetTopAndBottomMargins {
+            top: OneBased::new(1),
+            bottom: OneBased::new(2),
+        },
+    );
     term.print(format!("{}", margins));
 
     term.print("z\n");

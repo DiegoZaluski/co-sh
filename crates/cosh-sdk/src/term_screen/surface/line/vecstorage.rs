@@ -1,29 +1,27 @@
+#![allow(clippy::needless_pass_by_value)]
 use super::cellref::CellRef;
-use std::sync::Arc;
-use serde::{Deserialize, Serialize};
-use unicode_segmentation::UnicodeSegmentation;
 use crate::term_screen::cell::Cell;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use unicode_segmentation::UnicodeSegmentation;
 
 use std::vec::Vec;
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct VecStorage {
     cells: Vec<Cell>,
 }
 
 impl VecStorage {
-	pub(crate) fn new(cells: Vec<Cell>) -> Self {
-		Self { cells }
-	}
+    pub(crate) fn new(cells: Vec<Cell>) -> Self {
+        Self { cells }
+    }
 
-	pub(crate) fn set_cell(&mut self, idx: usize, mut cell: Cell, clear_image_placement: bool) {
-        if !clear_image_placement {
-            if let Some(images) = self.cells[idx].attrs().images() {
-                for image in images {
-                    if image.has_placement_id() {
-                        cell.attrs_mut().attach_image(Box::new(image));
-                    }
+    pub(crate) fn set_cell(&mut self, idx: usize, mut cell: Cell, clear_image_placement: bool) {
+        if !clear_image_placement && let Some(images) = self.cells[idx].attrs().images() {
+            for image in images {
+                if image.has_placement_id() {
+                    cell.attrs_mut().attach_image(image);
                 }
             }
         }
@@ -44,19 +42,19 @@ impl VecStorage {
         let mut has_implicit_hyperlinks = false;
         for (byte_idx, _grapheme) in line.grapheme_indices(true) {
             let cell = &mut self.cells[cell_idx];
-            let mut matched = false;
+            let mut has_match = false;
             for m in &matches {
                 if m.range.contains(&byte_idx) {
                     let attrs = cell.attrs_mut();
                     // Don't replace existing links
                     if attrs.hyperlink().is_none() {
                         attrs.set_hyperlink(Some(Arc::clone(&m.link)));
-                        matched = true;
+                        has_match = true;
                     }
                 }
             }
             cell_idx += cell.width();
-            if matched {
+            if has_match {
                 has_implicit_hyperlinks = true;
             }
         }

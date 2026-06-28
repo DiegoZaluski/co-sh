@@ -1,8 +1,8 @@
 #![allow(clippy::many_single_char_names)]
 use crate::term_screen::escape_parser::tmux_cc::Event;
 use crate::term_screen::escape_parser::{
-    Action, DeviceControlMode, EnterDeviceControlMode, Esc, OperatingSystemCommand,
-    ShortDeviceControl, CSI,
+    Action, CSI, DeviceControlMode, EnterDeviceControlMode, Esc, OperatingSystemCommand,
+    ShortDeviceControl,
 };
 use core::borrow::BorrowMut;
 use core::cell::RefCell;
@@ -10,7 +10,7 @@ use log::error;
 use num_traits::FromPrimitive;
 use vtparse::{CsiParam, VTActor, VTParser};
 
-use crate::term_screen::escape_parser::allocate::*;
+use crate::term_screen::escape_parser::allocate::{Box, String, ToString, Vec};
 
 mod sixel;
 use sixel::SixelBuilder;
@@ -23,9 +23,10 @@ struct GetTcapBuilder {
 
 impl GetTcapBuilder {
     fn flush(&mut self) {
-        let decoded = hex::decode(&self.current)
-            .map(|s| String::from_utf8_lossy(&s).to_string())
-            .unwrap_or_else(|_| String::from_utf8_lossy(&self.current).to_string());
+        let decoded = hex::decode(&self.current).map_or_else(
+            |_| String::from_utf8_lossy(&self.current).to_string(),
+            |s| String::from_utf8_lossy(&s).to_string(),
+        );
         self.names.push(decoded);
         self.current.clear();
     }
@@ -70,14 +71,15 @@ impl Default for Parser {
 }
 
 impl Parser {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             state_machine: VTParser::new(),
-            state: RefCell::new(Default::default()),
+            state: RefCell::new(ParseState::default()),
         }
     }
 
-    /// advance with tmux parser, bypass VTParse
+    /// advance with tmux parser, bypass `VTParse`
     fn advance_tmux_bytes(
         &mut self,
         bytes: &[u8],
@@ -85,7 +87,7 @@ impl Parser {
         let parser_state = self.state.borrow();
         let tmux_state = parser_state.tmux_state.as_ref().unwrap();
         let mut tmux_parser = tmux_state.borrow_mut();
-        return tmux_parser.advance_bytes(bytes);
+        tmux_parser.advance_bytes(bytes)
     }
 
     pub fn parse<F: FnMut(Action)>(&mut self, bytes: &[u8], mut callback: F) {
@@ -99,7 +101,7 @@ impl Parser {
                 }
                 Err(err_buf) => {
                     // capture bytes cannot be parsed
-                    let unparsed_str = err_buf.to_string().to_owned();
+                    let unparsed_str = err_buf.to_string().clone();
                     let mut parser_state = self.state.borrow_mut();
                     parser_state.tmux_state = None;
                     let mut perform = Performer {
@@ -196,7 +198,7 @@ struct Performer<'a, F: FnMut(Action) + 'a> {
 }
 
 fn is_short_dcs(intermediates: &[u8], byte: u8) -> bool {
-    if intermediates == &[b'$'] && byte == b'q' {
+    if intermediates == [b'$'] && byte == b'q' {
         // DECRQSS
         true
     } else {
@@ -204,7 +206,7 @@ fn is_short_dcs(intermediates: &[u8], byte: u8) -> bool {
     }
 }
 
-impl<'a, F: FnMut(Action)> VTActor for Performer<'a, F> {
+impl<F: FnMut(Action)> VTActor for Performer<'_, F> {
     fn print(&mut self, c: char) {
         (self.callback)(Action::Print(c));
     }
@@ -221,7 +223,7 @@ impl<'a, F: FnMut(Action)> VTActor for Performer<'a, F> {
 
     fn apc_dispatch(&mut self, data: Vec<u8>) {
         if let Some(img) = super::KittyImage::parse_apc(&data) {
-            (self.callback)(Action::KittyImage(Box::new(img)))
+            (self.callback)(Action::KittyImage(Box::new(img)));
         } else {
             log::trace!("Ignoring APC data: {:?}", String::from_utf8_lossy(&data));
         }
@@ -276,18 +278,15 @@ impl<'a, F: FnMut(Action)> VTActor for Performer<'a, F> {
         } else {
             if let Some(tmux_state) = &self.state.tmux_state {
                 let mut tmux_parser = tmux_state.borrow_mut();
-                match tmux_parser.advance_byte(data) {
-                    Ok(optional_events) => {
-                        if let Some(tmux_event) = optional_events {
-                            (self.callback)(Action::DeviceControl(DeviceControlMode::TmuxEvents(
-                                Box::new(vec![tmux_event]),
-                            )));
-                        }
+                if let Ok(optional_events) = tmux_parser.advance_byte(data) {
+                    if let Some(tmux_event) = optional_events {
+                        (self.callback)(Action::DeviceControl(DeviceControlMode::TmuxEvents(
+                            Box::new(vec![tmux_event]),
+                        )));
                     }
-                    Err(_) => {
-                        drop(tmux_parser);
-                        self.state.tmux_state = None; // drop tmux state
-                    }
+                } else {
+                    drop(tmux_parser);
+                    self.state.tmux_state = None; // drop tmux state
                 }
                 return;
             }
@@ -342,23 +341,25 @@ impl<'a, F: FnMut(Action)> VTActor for Performer<'a, F> {
     }
 }
 
+#[allow(clippy::wildcard_imports, unused_imports)]
 mod test {
     use super::*;
 
-    use crate::term_screen::escape_parser::color::ColorSpec;
     use crate::term_screen::escape_parser::csi::{
         CharacterPath, DecPrivateMode, DecPrivateModeCode, Device, Intensity, Mode, Sgr, Underline,
         Window, XtSmGraphics, XtSmGraphicsItem, XtermKeyModifierResource,
     };
+    use crate::term_screen::escape_parser::color::ColorSpec;
     use crate::term_screen::escape_parser::{EscCode, OneBased};
 
     use k9::assert_equal as assert_eq;
     use std::io::Write;
 
+    #[allow(dead_code)]
     fn encode(seq: &Vec<Action>) -> String {
         let mut res = Vec::new();
         for s in seq {
-            write!(res, "{}", s).unwrap();
+            write!(res, "{s}").unwrap();
         }
         String::from_utf8(res).unwrap()
     }
@@ -732,6 +733,7 @@ mod test {
         );
     }
 
+    #[allow(dead_code)]
     fn round_trip_parse(s: &str) -> Vec<Action> {
         let mut p = Parser::new();
         let actions = p.parse_as_vec(s.as_bytes());
@@ -739,6 +741,7 @@ mod test {
         actions
     }
 
+    #[allow(dead_code)]
     fn parse_as(s: &str, expected: &str) -> Vec<Action> {
         let mut p = Parser::new();
         let actions = p.parse_as_vec(s.as_bytes());

@@ -1,10 +1,11 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::too_many_lines, clippy::ref_option, clippy::needless_pass_by_value)]
 use super::cellref::CellRef;
+use crate::term_screen::cell::{Cell, CellAttributes};
 use core::convert::TryInto;
 use core::num::NonZeroU8;
 use finl_unicode::grapheme_clusters::Graphemes;
 use fixedbitset::FixedBitSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use crate::term_screen::cell::{Cell, CellAttributes};
 
 use std::boxed::Box;
 use std::fmt;
@@ -12,8 +13,7 @@ use std::string::String;
 use std::vec;
 use std::vec::Vec;
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct Cluster {
     cell_width: u16,
     attrs: CellAttributes,
@@ -22,8 +22,7 @@ struct Cluster {
 /// Stores line data as a contiguous string and a series of
 /// clusters of attribute data describing attributed ranges
 /// within the line
-#[derive(Serialize, Deserialize)]
-#[derive(Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub(crate) struct ClusteredLine {
     pub text: String,
     #[serde(
@@ -196,59 +195,48 @@ impl ClusteredLine {
     pub fn append_grapheme(&mut self, text: &str, cell_width: usize, attrs: CellAttributes) {
         let cell_width = cell_width as u16;
         let new_cluster = match self.clusters.last() {
-            Some(cluster) => {
-                if cluster.attrs != attrs {
-                    true
-                } else {
-                    // If we overflow the max length of a run,
-                    // then we need a new cluster
-                    let (_, did_overflow) = cluster.cell_width.overflowing_add(cell_width);
-                    did_overflow
-                }
+            Some(cluster) if cluster.attrs == attrs => {
+                // If we overflow the max length of a run,
+                // then we need a new cluster
+                let (_, did_overflow) = cluster.cell_width.overflowing_add(cell_width);
+                did_overflow
             }
-            None => true,
+            Some(_) | None => true,
         };
         let new_cell_index = self.len as usize;
         if new_cluster {
-            self.clusters.push(Cluster { attrs, cell_width });
+            self.clusters.push(Cluster { cell_width, attrs });
         } else if let Some(cluster) = self.clusters.last_mut() {
             cluster.cell_width += cell_width;
         }
         self.text.push_str(text);
 
         if cell_width > 1 {
-            let bitset = match self.is_double_wide.take() {
-                Some(mut bitset) => {
-                    bitset.grow(new_cell_index + 1);
-                    bitset.set(new_cell_index, true);
-                    bitset
-                }
-                None => {
-                    let mut bitset = FixedBitSet::with_capacity(new_cell_index + 1);
-                    bitset.set(new_cell_index, true);
-                    Box::new(bitset)
-                }
+            let bitset = if let Some(mut bitset) = self.is_double_wide.take() {
+                bitset.grow(new_cell_index + 1);
+                bitset.set(new_cell_index, true);
+                bitset
+            } else {
+                let mut bitset = FixedBitSet::with_capacity(new_cell_index + 1);
+                bitset.set(new_cell_index, true);
+                Box::new(bitset)
             };
             self.is_double_wide.replace(bitset);
         }
         self.last_cell_width = NonZeroU8::new(cell_width as u8);
-        self.len += cell_width as u32;
+        self.len += u32::from(cell_width);
     }
 
     pub fn append(&mut self, cell: Cell) {
         let cell_width = cell.width() as u16;
         let new_cluster = match self.clusters.last() {
-            Some(cluster) => {
-                if cluster.attrs != *cell.attrs() {
-                    true
-                } else {
-                    // If we overflow the max length of a run,
-                    // then we need a new cluster
-                    let (_, did_overflow) = cluster.cell_width.overflowing_add(cell_width);
-                    did_overflow
-                }
+            Some(cluster) if cluster.attrs == *cell.attrs() => {
+                // If we overflow the max length of a run,
+                // then we need a new cluster
+                let (_, did_overflow) = cluster.cell_width.overflowing_add(cell_width);
+                did_overflow
             }
-            None => true,
+            Some(_) | None => true,
         };
         let new_cell_index = self.len as usize;
         if new_cluster {
@@ -262,22 +250,19 @@ impl ClusteredLine {
         self.text.push_str(cell.str());
 
         if cell_width > 1 {
-            let bitset = match self.is_double_wide.take() {
-                Some(mut bitset) => {
-                    bitset.grow(new_cell_index + 1);
-                    bitset.set(new_cell_index, true);
-                    bitset
-                }
-                None => {
-                    let mut bitset = FixedBitSet::with_capacity(new_cell_index + 1);
-                    bitset.set(new_cell_index, true);
-                    Box::new(bitset)
-                }
+            let bitset = if let Some(mut bitset) = self.is_double_wide.take() {
+                bitset.grow(new_cell_index + 1);
+                bitset.set(new_cell_index, true);
+                bitset
+            } else {
+                let mut bitset = FixedBitSet::with_capacity(new_cell_index + 1);
+                bitset.set(new_cell_index, true);
+                Box::new(bitset)
             };
             self.is_double_wide.replace(bitset);
         }
         self.last_cell_width = NonZeroU8::new(cell_width as u8);
-        self.len += cell_width as u32;
+        self.len += u32::from(cell_width);
     }
 
     pub fn prune_trailing_blanks(&mut self) -> bool {
@@ -312,17 +297,17 @@ impl ClusteredLine {
     }
 
     fn compute_last_cell_width(&mut self) -> Option<NonZeroU8> {
-        if self.last_cell_width.is_none() {
-            if let Some(last_cell) = self.iter().last() {
-                self.last_cell_width = NonZeroU8::new(last_cell.width() as u8);
-            }
+        if self.last_cell_width.is_none()
+            && let Some(last_cell) = self.iter().last()
+        {
+            self.last_cell_width = NonZeroU8::new(last_cell.width() as u8);
         }
         self.last_cell_width
     }
 
     pub fn set_last_cell_was_wrapped(&mut self, wrapped: bool) {
         if let Some(width) = self.compute_last_cell_width() {
-            let width = width.get() as u16;
+            let width = u16::from(width.get());
             if let Some(last_cluster) = self.clusters.last_mut() {
                 let mut attrs = last_cluster.attrs.clone();
                 attrs.set_wrapped(wrapped);

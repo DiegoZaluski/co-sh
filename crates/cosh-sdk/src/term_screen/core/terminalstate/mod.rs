@@ -1,29 +1,30 @@
 // The range_plus_one lint can't see when the LHS is not compatible with
 // and inclusive range
 #![allow(clippy::range_plus_one)]
-use super::*;
+#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::too_many_lines, clippy::match_same_arms, clippy::struct_excessive_bools, clippy::needless_pass_by_value, clippy::default_trait_access, clippy::assigning_clones, clippy::missing_errors_doc, clippy::missing_panics_doc, clippy::non_std_lazy_statics)]
+use super::{CursorPosition, CellAttributes, Screen, Deref, DerefMut, TerminalSize, TerminalConfiguration, Range, VisibleRowIndex, MouseButton, MouseEvent, Progress, Clipboard, DeviceControlHandler, AlertHandler, DownloadHandler, str, ClipboardSelection, MouseEventKind, KeyModifiers, CSI, Alert, Error, Position, SemanticType, Hyperlink, ST, DCS, Cell, SemanticZone, StableRowIndex};
+use crate::term_screen::bidi::ParagraphDirectionHint;
+use crate::term_screen::cell::UnicodeVersion;
+use crate::term_screen::cell::image::ImageData;
 use crate::term_screen::core::color::{ColorPalette, RgbColor};
 use crate::term_screen::core::config::{BidiMode, NewlineCanon};
-use log::debug;
-use num_traits::ToPrimitive;
-use std::collections::HashMap;
-use std::io::{BufWriter, Write};
-use std::num::NonZeroUsize;
-use std::sync::mpsc::{channel, Sender};
-use std::sync::Arc;
-use terminfo::{Database, Value};
-use crate::term_screen::input_types::KeyboardEncoding;
-use url::Url;
-use crate::term_screen::bidi::ParagraphDirectionHint;
-use crate::term_screen::cell::image::ImageData;
-use crate::term_screen::cell::UnicodeVersion;
 use crate::term_screen::escape_parser::csi::{
     Cursor, CursorStyle, DecPrivateMode, DecPrivateModeCode, Device, Edit, EraseInDisplay,
     EraseInLine, Mode, Sgr, TabulationClear, TerminalMode, TerminalModeCode, Window, XtSmGraphics,
     XtSmGraphicsAction, XtSmGraphicsItem, XtSmGraphicsStatus, XtermKeyModifierResource,
 };
-use crate::term_screen::escape_parser::{OneBased, OperatingSystemCommand, CSI};
+use crate::term_screen::escape_parser::{CSI, OneBased, OperatingSystemCommand};
+use crate::term_screen::input_types::KeyboardEncoding;
 use crate::term_screen::surface::{CursorShape, CursorVisibility, SequenceNo};
+use log::debug;
+use num_traits::ToPrimitive;
+use std::collections::HashMap;
+use std::io::{BufWriter, Write};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::sync::mpsc::{Sender, channel};
+use terminfo::{Database, Value};
+use url::Url;
 
 mod image;
 mod iterm;
@@ -32,8 +33,8 @@ mod kitty;
 mod mouse;
 pub(crate) mod performer;
 mod sixel;
-use crate::term_screen::core::terminalstate::image::*;
-use crate::term_screen::core::terminalstate::kitty::*;
+use crate::term_screen::core::terminalstate::image::ImageAttachParams;
+use crate::term_screen::core::terminalstate::kitty::KittyImageState;
 
 lazy_static::lazy_static! {
     static ref DB: Option<Database> = Database::from_env().ok();
@@ -55,7 +56,7 @@ pub(crate) enum CharSet {
 pub(crate) enum MouseEncoding {
     X10,
     Utf8,
-    SGR,
+    Sgr,
     SgrPixels,
 }
 
@@ -74,21 +75,11 @@ impl TabStop {
     }
 
     fn find_prev_tab_stop(&self, col: usize) -> Option<usize> {
-        for i in (0..col.min(self.tabs.len())).rev() {
-            if self.tabs[i] {
-                return Some(i);
-            }
-        }
-        None
+        (0..col.min(self.tabs.len())).rev().find(|&i| self.tabs[i])
     }
 
     fn find_next_tab_stop(&self, col: usize) -> Option<usize> {
-        for i in col + 1..self.tabs.len() {
-            if self.tabs[i] {
-                return Some(i);
-            }
-        }
-        None
+        (col + 1..self.tabs.len()).find(|&i| self.tabs[i])
     }
 
     /// Respond to the terminal resizing.
@@ -120,7 +111,7 @@ impl TabStop {
             }
             _ => {
                 if log_unknown_escape_sequences {
-                    log::warn!("unhandled TabulationClear {:?}", to_clear);
+                    log::warn!("unhandled TabulationClear {to_clear:?}");
                 }
             }
         }
@@ -261,7 +252,7 @@ pub struct TerminalState {
     /// If true, writing a character inserts a new cell
     insert: bool,
 
-    /// https://vt100.net/docs/vt510-rm/DECAWM.html
+    /// <https://vt100.net/docs/vt510-rm/DECAWM.html>
     dec_auto_wrap: bool,
 
     /// Reverse Wraparound Mode
@@ -270,8 +261,8 @@ pub struct TerminalState {
     /// Reverse video mode
     reverse_video_mode: bool,
 
-    /// https://vt100.net/docs/vt510-rm/DECOM.html
-    /// When OriginMode is enabled, cursor is constrained to the
+    /// <https://vt100.net/docs/vt510-rm/DECOM.html>
+    /// When `OriginMode` is enabled, cursor is constrained to the
     /// scroll region and its position is relative to the scroll
     /// region.
     dec_origin_mode: bool,
@@ -283,13 +274,13 @@ pub struct TerminalState {
 
     /// When set, modifies the sequence of bytes sent for keys
     /// designated as cursor keys.  This includes various navigation
-    /// keys.  The code in key_down() is responsible for interpreting this.
+    /// keys.  The code in `key_down()` is responsible for interpreting this.
     application_cursor_keys: bool,
     modify_other_keys: Option<i64>,
 
     dec_ansi_mode: bool,
 
-    /// https://vt100.net/dec/ek-vt38t-ug-001.pdf#page=132 has a
+    /// <https://vt100.net/dec/ek-vt38t-ug-001.pdf#page=132> has a
     /// discussion on what sixel dispay mode (DECSDM) does.
     sixel_display_mode: bool,
     use_private_color_registers_for_each_graphic: bool,
@@ -365,7 +356,7 @@ pub struct TerminalState {
     unicode_version_stack: Vec<UnicodeVersionStackEntry>,
 
     enable_conpty_quirks: bool,
-    /// On Windows, the ConPTY layer emits an OSC sequence to
+    /// On Windows, the `ConPTY` layer emits an OSC sequence to
     /// set the title shortly after it starts up.
     /// We don't want that, so we use this flag to remember
     /// whether we want to skip it or not.
@@ -375,7 +366,7 @@ pub struct TerminalState {
 
     /// seqno when we last lost focus
     lost_focus_seqno: SequenceNo,
-    /// seqno when we last emitted Alert::OutputSinceFocusLost
+    /// seqno when we last emitted `Alert::OutputSinceFocusLost`
     lost_focus_alerted_seqno: SequenceNo,
     focused: bool,
 
@@ -432,7 +423,7 @@ fn default_color_map() -> HashMap<u16, RgbColor> {
 /// vim.  In that scenario, we can fill up the data pending
 /// on vim's input buffer, while it is busy trying to send
 /// output to the terminal.  A deadlock is reached because
-/// send_paste blocks on the writer, but it is unable to make
+/// `send_paste` blocks on the writer, but it is unable to make
 /// progress until we're able to read the output from vim.
 ///
 /// We either need input or output to be non-blocking.
@@ -586,6 +577,7 @@ impl TerminalState {
         self.suppress_initial_title_change = true;
     }
 
+    #[must_use]
     pub fn current_seqno(&self) -> SequenceNo {
         self.seqno
     }
@@ -598,6 +590,7 @@ impl TerminalState {
         self.config = config;
     }
 
+    #[must_use]
     pub fn get_config(&self) -> Arc<dyn TerminalConfiguration> {
         Arc::clone(&self.config)
     }
@@ -635,10 +628,12 @@ impl TerminalState {
     /// abbreviated information.
     /// What we do here is prefer to return the OSC 1 icon title
     /// if it is set, otherwise return the OSC 2 window title.
+    #[must_use]
     pub fn get_title(&self) -> &str {
         self.icon_title.as_ref().unwrap_or(&self.title)
     }
 
+    #[must_use]
     pub fn get_progress(&self) -> Progress {
         self.progress.clone()
     }
@@ -646,6 +641,7 @@ impl TerminalState {
     /// Returns the current working directory associated with the
     /// terminal session.  The working directory can be changed by
     /// the applicaiton using the OSC 7 escape sequence.
+    #[must_use]
     pub fn get_current_dir(&self) -> Option<&Url> {
         self.current_dir.as_ref()
     }
@@ -657,10 +653,10 @@ impl TerminalState {
     /// However, if they have used dynamic color scheme escape
     /// sequences we'll fork a copy of the palette at that time
     /// so that we can start tracking those changes.
+    #[must_use]
     pub fn palette(&self) -> ColorPalette {
         self.palette
-            .as_ref()
-            .cloned()
+            .clone()
             .unwrap_or_else(|| self.config.color_palette())
     }
 
@@ -682,8 +678,7 @@ impl TerminalState {
         if self
             .palette
             .as_ref()
-            .map(|p| *p == self.config.color_palette())
-            .unwrap_or(false)
+            .is_some_and(|p| *p == self.config.color_palette())
         {
             self.palette.take();
         }
@@ -691,6 +686,7 @@ impl TerminalState {
 
     /// Returns a reference to the active screen (either the primary or
     /// the alternate screen).
+    #[must_use]
     pub fn screen(&self) -> &Screen {
         &self.screen
     }
@@ -745,10 +741,12 @@ impl TerminalState {
     /// supported mouse reporting modes.
     /// This is useful for the hosting GUI application to decide how best
     /// to dispatch mouse events to the terminal.
+    #[must_use]
     pub fn is_mouse_grabbed(&self) -> bool {
         self.mouse_tracking || self.button_event_mouse || self.any_event_mouse
     }
 
+    #[must_use]
     pub fn is_alt_screen_active(&self) -> bool {
         self.screen.is_alt_screen_active()
     }
@@ -756,6 +754,7 @@ impl TerminalState {
     /// Returns true if the associated application has enabled
     /// bracketed paste mode, which can be helpful to the hosting
     /// GUI application to decide about fragmenting a large paste.
+    #[must_use]
     pub fn bracketed_paste_enabled(&self) -> bool {
         self.bracketed_paste
     }
@@ -793,6 +792,7 @@ impl TerminalState {
 
     /// Returns true if there is new output since the terminal
     /// lost focus
+    #[must_use]
     pub fn has_unseen_output(&self) -> bool {
         !self.focused && self.seqno > self.lost_focus_seqno
     }
@@ -855,7 +855,7 @@ impl TerminalState {
                     .saved_cursor
                     .as_ref()
                     .map(|s| s.position)
-                    .unwrap_or_else(CursorPosition::default),
+                    .unwrap_or_default(),
                 self.cursor,
             )
         } else {
@@ -866,7 +866,7 @@ impl TerminalState {
                     .saved_cursor
                     .as_ref()
                     .map(|s| s.position)
-                    .unwrap_or_else(CursorPosition::default),
+                    .unwrap_or_default(),
             )
         };
 
@@ -910,6 +910,7 @@ impl TerminalState {
         }
     }
 
+    #[must_use]
     pub fn get_size(&self) -> TerminalSize {
         let screen = self.screen();
         TerminalSize {
@@ -939,6 +940,7 @@ impl TerminalState {
 
     /// Returns the 0-based cursor position relative to the top left of
     /// the visible screen
+    #[must_use]
     pub fn cursor_pos(&self) -> CursorPosition {
         CursorPosition {
             x: self.cursor.x,
@@ -954,10 +956,12 @@ impl TerminalState {
     }
 
     /// Returns the current cell attributes of the screen
+    #[must_use]
     pub fn pen(&self) -> CellAttributes {
         self.pen.clone()
     }
 
+    #[must_use]
     pub fn user_vars(&self) -> &HashMap<String, String> {
         &self.user_vars
     }
@@ -1053,9 +1057,9 @@ impl TerminalState {
             &left_and_right_margins,
             num_rows,
             seqno,
-            blank_attr,
+            &blank_attr,
             bidi_mode,
-        )
+        );
     }
 
     fn scroll_down(&mut self, num_rows: usize) {
@@ -1069,12 +1073,12 @@ impl TerminalState {
             &left_and_right_margins,
             num_rows,
             seqno,
-            blank_attr,
+            &blank_attr,
             bidi_mode,
-        )
+        );
     }
 
-    /// Defined by FinalTermSemanticPrompt; a fresh-line is a NOP if the
+    /// Defined by `FinalTermSemanticPrompt`; a fresh-line is a NOP if the
     /// cursor is already at the left margin, otherwise it is the same as
     /// a new line.
     fn fresh_line(&mut self) {
@@ -1097,7 +1101,7 @@ impl TerminalState {
         } else {
             y + 1
         };
-        self.set_cursor_pos(&Position::Absolute(x as i64), &Position::Absolute(y as i64));
+        self.set_cursor_pos(&Position::Absolute(x as i64), &Position::Absolute(y));
     }
 
     /// Moves the cursor down one line in the same column.
@@ -1175,10 +1179,7 @@ impl TerminalState {
     }
 
     fn set_hyperlink(&mut self, link: Option<Hyperlink>) {
-        self.pen.set_hyperlink(match link {
-            Some(hyperlink) => Some(Arc::new(hyperlink)),
-            None => None,
-        });
+        self.pen.set_hyperlink(link.map(Arc::new));
     }
 
     /// <https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h4-Device-Control-functions:DCS-plus-q-Pt-ST.F95>
@@ -1189,7 +1190,7 @@ impl TerminalState {
         for name in &names {
             res.push_str("\x1bP");
 
-            let encoded_name = hex::encode_upper(&name);
+            let encoded_name = hex::encode_upper(name);
             match name.as_str() {
                 "TN" | "name" => {
                     res.push_str("1+r");
@@ -1218,21 +1219,21 @@ impl TerminalState {
 
                 _ => {
                     if let Some(ref db) = *DB {
-                    if let Some(value) = db.raw(name) {
-                        res.push_str("1+r");
-                        res.push_str(&encoded_name);
-                        res.push('=');
-                        let value = match value {
-                            Value::True => hex::encode_upper("1"),
-                            Value::Number(n) => hex::encode_upper(&n.to_string()),
-                            Value::String(s) => hex::encode_upper(s),
-                        };
-                        res.push_str(&value);
-                    } else {
-                        log::trace!("xt_get_tcap: unknown name {}", name);
-                        res.push_str("0+r");
-                        res.push_str(&encoded_name);
-                    }
+                        if let Some(value) = db.raw(name) {
+                            res.push_str("1+r");
+                            res.push_str(&encoded_name);
+                            res.push('=');
+                            let value = match value {
+                                Value::True => hex::encode_upper("1"),
+                                Value::Number(n) => hex::encode_upper(n.to_string()),
+                                Value::String(s) => hex::encode_upper(s),
+                            };
+                            res.push_str(&value);
+                        } else {
+                            log::trace!("xt_get_tcap: unknown name {name}");
+                            res.push_str("0+r");
+                            res.push_str(&encoded_name);
+                        }
                     }
                 }
             }
@@ -1252,7 +1253,7 @@ impl TerminalState {
         match dev {
             Device::DeviceAttributes(a) => {
                 if self.config.log_unknown_escape_sequences() {
-                    log::warn!("unhandled: {:?}", a);
+                    log::warn!("unhandled: {a:?}");
                 }
             }
             Device::SoftReset => {
@@ -1292,7 +1293,7 @@ impl TerminalState {
                 ident.push_str(";52"); // Clipboard access
                 ident.push('c');
 
-                self.writer.write(ident.as_bytes()).ok();
+                self.writer.write_all(ident.as_bytes()).ok();
                 self.writer.flush().ok();
             }
             Device::RequestSecondaryDeviceAttributes => {
@@ -1307,19 +1308,19 @@ impl TerminalState {
                 // pv >= 95 < 277 -> ttymouse=xterm2
                 // pv >= 277 -> ttymouse=sgr
                 // pv >= 279 - xterm will probe for additional device settings.
-                self.writer.write(b"\x1b[>1;277;0c").ok();
+                self.writer.write_all(b"\x1b[>1;277;0c").ok();
                 self.writer.flush().ok();
             }
             Device::RequestTertiaryDeviceAttributes => {
                 self.writer
-                    .write(format!("\x1bP!|00000000{}", ST).as_bytes())
+                    .write_all(format!("\x1bP!|00000000{ST}").as_bytes())
                     .ok();
                 self.writer.flush().ok();
             }
             Device::RequestTerminalNameAndVersion => {
-                self.writer.write(DCS.as_bytes()).ok();
+                self.writer.write_all(DCS.as_bytes()).ok();
                 self.writer
-                    .write(
+                    .write_all(
                         format!(">|{} {}{}", self.term_program, self.term_version, ST).as_bytes(),
                     )
                     .ok();
@@ -1327,12 +1328,12 @@ impl TerminalState {
             }
             Device::RequestTerminalParameters(a) => {
                 self.writer
-                    .write(format!("\x1b[{};1;1;128;128;1;0x", a + 2).as_bytes())
+                    .write_all(format!("\x1b[{};1;1;128;128;1;0x", a + 2).as_bytes())
                     .ok();
                 self.writer.flush().ok();
             }
             Device::StatusReport => {
-                self.writer.write(b"\x1b[0n").ok();
+                self.writer.write_all(b"\x1b[0n").ok();
                 self.writer.flush().ok();
             }
             Device::XtSmGraphics(g) => {
@@ -1354,8 +1355,7 @@ impl TerminalState {
                             action_or_status: XtSmGraphicsStatus::Success.to_i64(),
                             value: vec![],
                         },
-                        Some(XtSmGraphicsAction::ReadMaximumAllowedValue)
-                        | Some(XtSmGraphicsAction::ReadAttribute) => match g.item {
+                        Some(XtSmGraphicsAction::ReadMaximumAllowedValue | XtSmGraphicsAction::ReadAttribute) => match g.item {
                             XtSmGraphicsItem::Unspecified(_) => unreachable!("checked above"),
                             XtSmGraphicsItem::NumberOfColorRegisters => XtSmGraphics {
                                 item: g.item,
@@ -1374,7 +1374,7 @@ impl TerminalState {
 
                 let dev = Device::XtSmGraphics(response);
 
-                write!(self.writer, "\x1b[{}", dev).ok();
+                write!(self.writer, "\x1b[{dev}").ok();
                 self.writer.flush().ok();
             }
         }
@@ -1423,8 +1423,8 @@ impl TerminalState {
             0
         };
 
-        log::trace!("{:?} -> recognized={} status={}", mode, recognized, status);
-        write!(self.writer, "\x1b[{}{};{}$y", prefix, number, status).ok();
+        log::trace!("{mode:?} -> recognized={recognized} status={status}");
+        write!(self.writer, "\x1b[{prefix}{number};{status}$y").ok();
         self.writer.flush().ok();
     }
 
@@ -1669,12 +1669,8 @@ impl TerminalState {
                 self.decqrm_response(mode, true, self.bracketed_paste);
             }
 
-            Mode::SetDecPrivateMode(DecPrivateMode::Code(
-                DecPrivateModeCode::OptEnableAlternateScreen,
-            ))
-            | Mode::SetDecPrivateMode(DecPrivateMode::Code(
-                DecPrivateModeCode::EnableAlternateScreen,
-            )) => {
+            Mode::SetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::OptEnableAlternateScreen
+                | DecPrivateModeCode::EnableAlternateScreen)) => {
                 if !self.screen.is_alt_screen_active() {
                     self.screen.activate_alt_screen(self.seqno);
                     self.pen = CellAttributes::default();
@@ -1815,7 +1811,7 @@ impl TerminalState {
             }
 
             Mode::SetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::SGRMouse)) => {
-                self.mouse_encoding = MouseEncoding::SGR;
+                self.mouse_encoding = MouseEncoding::Sgr;
                 self.last_mouse_move.take();
             }
             Mode::ResetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::SGRMouse)) => {
@@ -1826,10 +1822,7 @@ impl TerminalState {
                 self.decqrm_response(
                     mode,
                     true,
-                    match self.mouse_encoding {
-                        MouseEncoding::SGR => true,
-                        _ => false,
-                    },
+                    matches!(self.mouse_encoding, MouseEncoding::Sgr),
                 );
             }
             Mode::SetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::SGRPixelsMouse)) => {
@@ -1844,10 +1837,7 @@ impl TerminalState {
                 self.decqrm_response(
                     mode,
                     true,
-                    match self.mouse_encoding {
-                        MouseEncoding::SgrPixels => true,
-                        _ => false,
-                    },
+                    matches!(self.mouse_encoding, MouseEncoding::SgrPixels),
                 );
             }
 
@@ -1863,10 +1853,7 @@ impl TerminalState {
                 self.decqrm_response(
                     mode,
                     true,
-                    match self.mouse_encoding {
-                        MouseEncoding::Utf8 => true,
-                        _ => false,
-                    },
+                    matches!(self.mouse_encoding, MouseEncoding::Utf8),
                 );
             }
 
@@ -1907,7 +1894,7 @@ impl TerminalState {
             }
             Mode::SaveDecPrivateMode(DecPrivateMode::Code(n))
             | Mode::RestoreDecPrivateMode(DecPrivateMode::Code(n)) => {
-                log::warn!("save/restore dec mode {:?} unimplemented", n)
+                log::warn!("save/restore dec mode {n:?} unimplemented");
             }
 
             Mode::SetDecPrivateMode(DecPrivateMode::Code(
@@ -1936,13 +1923,13 @@ impl TerminalState {
             | Mode::SaveDecPrivateMode(DecPrivateMode::Unspecified(_))
             | Mode::RestoreDecPrivateMode(DecPrivateMode::Unspecified(_)) => {
                 if self.config.log_unknown_escape_sequences() {
-                    log::warn!("unhandled DecPrivateMode {:?}", mode);
+                    log::warn!("unhandled DecPrivateMode {mode:?}");
                 }
             }
 
-            mode @ Mode::SetMode(_) | mode @ Mode::ResetMode(_) => {
+            mode @ (Mode::SetMode(_) | Mode::ResetMode(_)) => {
                 if self.config.log_unknown_escape_sequences() {
-                    log::warn!("unhandled {:?}", mode);
+                    log::warn!("unhandled {mode:?}");
                 }
             }
 
@@ -1959,7 +1946,7 @@ impl TerminalState {
 
             Mode::XtermKeyMode { resource, value } => {
                 if self.config.log_unknown_escape_sequences() {
-                    log::warn!("unhandled XtermKeyMode {:?} {:?}", resource, value);
+                    log::warn!("unhandled XtermKeyMode {resource:?} {value:?}");
                 }
             }
 
@@ -2012,11 +1999,7 @@ impl TerminalState {
         // on xterm, so, to prevent a lot of noise in esctest, treat them as spaces, at least when
         // asking for the checksum of a single cell (which is what esctest does).
         // See: https://github.com/wezterm/wezterm/pull/4565
-        if checksum == 0 {
-            32u16
-        } else {
-            checksum
-        }
+        if checksum == 0 { 32u16 } else { checksum }
     }
 
     fn perform_csi_window(&mut self, window: Window) {
@@ -2079,7 +2062,7 @@ impl TerminalState {
                         right.as_zero_based(),
                         bottom.as_zero_based(),
                     );
-                    write!(self.writer, "\x1bP{}!~{:04x}\x1b\\", request_id, checksum).ok();
+                    write!(self.writer, "\x1bP{request_id}!~{checksum:04x}\x1b\\").ok();
                     self.writer.flush().ok();
                 }
             }
@@ -2097,7 +2080,7 @@ impl TerminalState {
 
             _ => {
                 if self.config.log_unknown_escape_sequences() {
-                    log::warn!("unhandled Window CSI {:?}", window);
+                    log::warn!("unhandled Window CSI {window:?}");
                 }
             }
         }
@@ -2160,7 +2143,7 @@ impl TerminalState {
 
                     let blank_attr = self.pen.clone_sgr_only();
                     let screen = self.screen_mut();
-                    for _ in x..limit as usize {
+                    for _ in x..limit {
                         screen.erase_cell(x, y, right_margin, seqno, blank_attr.clone());
                     }
                 }
@@ -2178,7 +2161,7 @@ impl TerminalState {
                         &left_and_right_margins,
                         n as usize,
                         seqno,
-                        blank_attr,
+                        &blank_attr,
                         bidi_mode,
                     );
                 }
@@ -2190,7 +2173,7 @@ impl TerminalState {
                 {
                     let blank = Cell::blank_with_attrs(self.pen.clone_sgr_only());
                     let screen = self.screen_mut();
-                    for x in x..limit as usize {
+                    for x in x..limit {
                         screen.set_cell(x, y, &blank, seqno);
                     }
                 }
@@ -2209,7 +2192,7 @@ impl TerminalState {
                     // in the test suite.
                     // So this is here for now until a better solution is found.
                     // <https://github.com/wezterm/wezterm/issues/3548>
-                    EraseInLine::EraseToEndOfLine => cx + if self.wrap_next { 1 } else { 0 }..cols,
+                    EraseInLine::EraseToEndOfLine => cx + usize::from(self.wrap_next)..cols,
                     EraseInLine::EraseToStartOfLine => 0..cx + 1,
                     EraseInLine::EraseLine => 0..cols,
                 };
@@ -2249,7 +2232,7 @@ impl TerminalState {
                         &left_and_right_margins,
                         n as usize,
                         seqno,
-                        blank_attr,
+                        &blank_attr,
                         bidi_mode,
                     );
                 }
@@ -2316,14 +2299,14 @@ impl TerminalState {
         }
     }
 
-    /// https://vt100.net/docs/vt510-rm/DECSLRM.html
+    /// <https://vt100.net/docs/vt510-rm/DECSLRM.html>
     fn set_left_and_right_margins(&mut self, left: OneBased, right: OneBased) {
         // The terminal only recognizes this control function if vertical split
         // screen mode (DECLRMM) is set.
         if self.left_and_right_margin_mode {
             let cols = self.screen().physical_cols as u32;
-            let left = left.as_zero_based().min(cols - 1).max(0) as usize;
-            let right = right.as_zero_based().min(cols - 1).max(0) as usize;
+            let left = left.as_zero_based().min(cols - 1) as usize;
+            let right = right.as_zero_based().min(cols - 1) as usize;
 
             // The value of the left margin (Pl) must be less than the right margin (Pr).
             if left >= right {
@@ -2377,10 +2360,10 @@ impl TerminalState {
             }
             Cursor::BackwardTabulation(n) => {
                 for _ in 0..n {
-                    let x = match self.tabs.find_prev_tab_stop(self.cursor.x) {
-                        Some(x) => x,
-                        None => 0,
-                    };
+                    let x = self
+                        .tabs
+                        .find_prev_tab_stop(self.cursor.x)
+                        .unwrap_or_default();
                     self.set_cursor_pos(&Position::Absolute(x as i64), &Position::Relative(0));
                 }
             }
@@ -2398,7 +2381,9 @@ impl TerminalState {
 
             Cursor::Left(_n) => {
                 // https://vt100.net/docs/vt510-rm/CUB.html
-                unreachable!("Actually handled in Performer::csi_dispatch by rewriting as ControlCode::Backspace");
+                unreachable!(
+                    "Actually handled in Performer::csi_dispatch by rewriting as ControlCode::Backspace"
+                );
             }
 
             Cursor::Right(n) => {
@@ -2484,7 +2469,7 @@ impl TerminalState {
                 &Position::Relative(0),
             ),
             Cursor::CharacterPositionForward(col) => {
-                self.set_cursor_pos(&Position::Relative(i64::from(col)), &Position::Relative(0))
+                self.set_cursor_pos(&Position::Relative(i64::from(col)), &Position::Relative(0));
             }
             Cursor::LinePositionAbsolute(line) => self.set_cursor_pos(
                 &Position::Relative(0),
@@ -2495,7 +2480,7 @@ impl TerminalState {
                 &Position::Relative(-(i64::from(line))),
             ),
             Cursor::LinePositionForward(line) => {
-                self.set_cursor_pos(&Position::Relative(0), &Position::Relative(i64::from(line)))
+                self.set_cursor_pos(&Position::Relative(0), &Position::Relative(i64::from(line)));
             }
             Cursor::NextLine(n) => {
                 // https://vt100.net/docs/vt510-rm/CNL.html
@@ -2562,7 +2547,7 @@ impl TerminalState {
                         })) as u32,
                 );
                 let report = CSI::Cursor(Cursor::ActivePositionReport { line, col });
-                write!(self.writer, "{}", report).ok();
+                write!(self.writer, "{report}").ok();
                 self.writer.flush().ok();
             }
             Cursor::SaveCursor => {
@@ -2596,7 +2581,7 @@ impl TerminalState {
         }
     }
 
-    /// https://vt100.net/docs/vt510-rm/DECSC.html
+    /// <https://vt100.net/docs/vt510-rm/DECSC.html>
     fn dec_save_cursor(&mut self) {
         let saved = SavedCursor {
             position: self.cursor,
@@ -2614,7 +2599,7 @@ impl TerminalState {
         *self.screen.saved_cursor() = Some(saved);
     }
 
-    /// https://vt100.net/docs/vt510-rm/DECRC.html
+    /// <https://vt100.net/docs/vt510-rm/DECRC.html>
     fn dec_restore_cursor(&mut self) {
         let saved = self
             .screen
@@ -2649,7 +2634,7 @@ impl TerminalState {
     }
 
     fn perform_csi_sgr(&mut self, sgr: Sgr) {
-        debug!("{:?}", sgr);
+        debug!("{sgr:?}");
         match sgr {
             Sgr::Reset => {
                 let link = self.pen.hyperlink().map(Arc::clone);
@@ -2703,7 +2688,7 @@ impl TerminalState {
     /// `SemanticType` (Prompt, Input, Output).
     /// Due to the way that the terminal clears the screen, the raw, literal
     /// set of zones is overly fragmented by blanks.  This method will ignore
-    /// trailing Output regions when computing the SemanticZone bounds.
+    /// trailing Output regions when computing the `SemanticZone` bounds.
     ///
     /// By default, all screen data is of type Output.  The shell needs to
     /// employ OSC 133 escapes to markup its output.
@@ -2751,10 +2736,12 @@ impl TerminalState {
     }
 
     #[inline]
+    #[must_use]
     pub fn get_reverse_video(&self) -> bool {
         self.reverse_video_mode
     }
 
+    #[must_use]
     pub fn get_keyboard_encoding(&self) -> KeyboardEncoding {
         self.screen()
             .keyboard_stack

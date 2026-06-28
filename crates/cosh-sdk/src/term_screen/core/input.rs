@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 
 pub use crate::term_screen::input_types::{KeyCode, Modifiers as KeyModifiers};
 
-#[derive(Deserialize, Serialize)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub enum MouseButton {
     Left,
     Middle,
@@ -20,16 +19,14 @@ pub enum MouseButton {
     None,
 }
 
-#[derive(Deserialize, Serialize)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MouseEventKind {
     Press,
     Release,
     Move,
 }
 
-#[derive(Deserialize, Serialize)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub struct MouseEvent {
     pub kind: MouseEventKind,
     pub x: usize,
@@ -66,6 +63,7 @@ pub struct LastMouseClick {
 const CLICK_INTERVAL: u64 = 500;
 
 impl LastMouseClick {
+    #[must_use]
     pub fn new(button: MouseButton, position: ClickPosition) -> Self {
         Self {
             button,
@@ -75,6 +73,7 @@ impl LastMouseClick {
         }
     }
 
+    #[must_use]
     pub fn add(&self, button: MouseButton, position: ClickPosition) -> Self {
         let now = Instant::now();
         let streak = if button == self.button

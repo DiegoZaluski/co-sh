@@ -1,5 +1,6 @@
+#![allow(clippy::items_after_statements)]
 use core::fmt::{Display, Error as FmtError, Formatter, Write as FmtWrite};
-use num_derive::*;
+use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +28,7 @@ pub enum EscCode {
     /// RIS - Full Reset
     FullReset = esc!('c'),
     /// IND - Index.  Note that for Vt52 and Windows 10 ANSI consoles,
-    /// this is interpreted as CursorUp
+    /// this is interpreted as `CursorUp`
     Index = esc!('D'),
     /// NEL - Next Line
     NextLine = esc!('E'),
@@ -84,7 +85,7 @@ pub enum EscCode {
     /// Designate G1 Character Set – US ASCII
     AsciiCharacterSetG1 = esc!(')', 'B'),
 
-    /// https://vt100.net/docs/vt510-rm/DECALN.html
+    /// <https://vt100.net/docs/vt510-rm/DECALN.html>
     DecScreenAlignmentDisplay = esc!('#', '8'),
 
     /// DECDHL - DEC double-height line, top half
@@ -110,8 +111,9 @@ pub enum EscCode {
 }
 
 impl Esc {
+    #[must_use]
     pub fn parse(intermediate: Option<u8>, control: u8) -> Self {
-        Self::internal_parse(intermediate, control).unwrap_or_else(|_| Esc::Unspecified {
+        Self::internal_parse(intermediate, control).unwrap_or(Esc::Unspecified {
             intermediate,
             control,
         })
@@ -136,13 +138,13 @@ impl Display for Esc {
     // practice so it may not be worthwhile with modern networks.
     fn fmt(&self, f: &mut Formatter) -> Result<(), FmtError> {
         f.write_char(0x1b as char)?;
-        use self::Esc::*;
+        use self::Esc::{Code, Unspecified};
         match self {
             Code(code) => {
                 let packed = code
                     .to_u16()
                     .expect("num-derive failed to implement ToPrimitive");
-                if packed > u16::from(u8::max_value()) {
+                if packed > u16::from(u8::MAX) {
                     write!(
                         f,
                         "{}{}",
@@ -163,7 +165,7 @@ impl Display for Esc {
                     f.write_char(*control as char)?;
                 }
             }
-        };
+        }
         Ok(())
     }
 }

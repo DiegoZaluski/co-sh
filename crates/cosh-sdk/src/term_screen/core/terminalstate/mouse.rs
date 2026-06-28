@@ -1,4 +1,5 @@
-use super::super::input::*;
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::missing_errors_doc)]
+use super::super::input::{MouseEvent, MouseButton, KeyModifiers, KeyCode, MouseEventKind};
 use super::MouseEncoding;
 use super::TerminalState;
 use anyhow::bail;
@@ -35,7 +36,7 @@ impl TerminalState {
         self.encode_coord(event.x as i64, &mut buf);
         self.encode_coord(event.y, &mut buf);
         log::trace!("{event:?} {buf:?}");
-        self.writer.write(&buf)?;
+        self.writer.write_all(&buf)?;
         self.writer.flush()?;
         Ok(())
     }
@@ -76,7 +77,7 @@ impl TerminalState {
     fn mouse_wheel(&mut self, event: MouseEvent) -> anyhow::Result<()> {
         let (button, _button) = self.mouse_report_button_number(&event);
 
-        if self.mouse_encoding == MouseEncoding::SGR
+        if self.mouse_encoding == MouseEncoding::Sgr
             && (self.mouse_tracking || self.button_event_mouse || self.any_event_mouse)
         {
             log::trace!(
@@ -96,8 +97,8 @@ impl TerminalState {
         } else if self.mouse_encoding == MouseEncoding::SgrPixels
             && (self.mouse_tracking || self.button_event_mouse || self.any_event_mouse)
         {
-            let height = self.screen.physical_rows as usize;
-            let width = self.screen.physical_cols as usize;
+            let height = self.screen.physical_rows;
+            let width = self.screen.physical_cols;
             log::trace!(
                 "wheel {event:?} ESC [<{};{};{}M",
                 button,
@@ -145,7 +146,7 @@ impl TerminalState {
             return Ok(());
         }
 
-        if self.mouse_encoding == MouseEncoding::SGR {
+        if self.mouse_encoding == MouseEncoding::Sgr {
             log::trace!(
                 "press {event:?} ESC [<{};{};{}M",
                 button,
@@ -161,8 +162,8 @@ impl TerminalState {
             )?;
             self.writer.flush()?;
         } else if self.mouse_encoding == MouseEncoding::SgrPixels {
-            let height = self.screen.physical_rows as usize;
-            let width = self.screen.physical_cols as usize;
+            let height = self.screen.physical_rows;
+            let width = self.screen.physical_cols;
             log::trace!(
                 "press {event:?} ESC [<{};{};{}M",
                 button,
@@ -193,7 +194,7 @@ impl TerminalState {
         if !self.current_mouse_buttons.is_empty() {
             self.current_mouse_buttons.retain(|&b| b != button);
             if self.mouse_tracking || self.button_event_mouse || self.any_event_mouse {
-                if self.mouse_encoding == MouseEncoding::SGR {
+                if self.mouse_encoding == MouseEncoding::Sgr {
                     log::trace!(
                         "release {event:?} ESC [<{};{};{}m",
                         release_button,
@@ -209,8 +210,8 @@ impl TerminalState {
                     )?;
                     self.writer.flush()?;
                 } else if self.mouse_encoding == MouseEncoding::SgrPixels {
-                    let height = self.screen.physical_rows as usize;
-                    let width = self.screen.physical_cols as usize;
+                    let height = self.screen.physical_rows;
+                    let width = self.screen.physical_cols;
                     log::trace!(
                         "release {event:?} ESC [<{};{};{}m",
                         release_button,
@@ -269,7 +270,7 @@ impl TerminalState {
             let (button, _button) = self.mouse_report_button_number(&event);
             let button = 32 + button;
 
-            if self.mouse_encoding == MouseEncoding::SGR {
+            if self.mouse_encoding == MouseEncoding::Sgr {
                 log::trace!(
                     "move {event:?} ESC [<{};{};{}M",
                     button,
@@ -285,8 +286,8 @@ impl TerminalState {
                 )?;
                 self.writer.flush()?;
             } else if self.mouse_encoding == MouseEncoding::SgrPixels {
-                let height = self.screen.physical_rows as usize;
-                let width = self.screen.physical_cols as usize;
+                let height = self.screen.physical_rows;
+                let width = self.screen.physical_cols;
                 log::trace!(
                     "move {event:?} ESC [<{};{};{}M",
                     button,

@@ -1,6 +1,7 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::items_after_statements, clippy::too_many_lines, clippy::match_same_arms)]
+use super::Result;
 use super::color::SrgbaTuple;
 pub use super::hyperlink::Hyperlink;
-use super::Result;
 use crate::bail;
 use crate::ensure;
 use crate::format_err;
@@ -9,12 +10,12 @@ use bitflags::bitflags;
 use core::fmt::{Display, Error as FmtError, Formatter, Result as FmtResult};
 use core::str;
 use core::str::FromStr;
-use num_derive::*;
+use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use ordered_float::NotNan;
 use std::sync::LazyLock;
 
-use super::allocate::*;
+use super::allocate::{String, Vec, ToString, ToOwned, HashMap, Box};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColorOrQuery {
@@ -154,6 +155,7 @@ impl Display for Selection {
 }
 
 impl OperatingSystemCommand {
+    #[must_use]
     pub fn parse(osc: &[&[u8]]) -> Self {
         Self::internal_parse(osc).unwrap_or_else(|err| {
             let mut vec = Vec::new();
@@ -161,9 +163,7 @@ impl OperatingSystemCommand {
                 vec.push(slice.to_vec());
             }
             log::trace!(
-                "OSC internal parse err: {}, track as Unspecified {:?}",
-                err,
-                vec
+                "OSC internal parse err: {err}, track as Unspecified {vec:?}"
             );
             OperatingSystemCommand::Unspecified(vec)
         })
@@ -189,7 +189,7 @@ impl OperatingSystemCommand {
         let mut iter = osc.iter();
         iter.next(); // skip the command word that we already know is present
 
-        while let Some(index) = iter.next() {
+        for index in iter {
             if index.is_empty() {
                 continue;
             }
@@ -213,7 +213,7 @@ impl OperatingSystemCommand {
             } else {
                 ColorOrQuery::Color(
                     SrgbaTuple::from_str(spec)
-                        .map_err(|_| format!("invalid color spec {:?}", spec))?,
+                        .map_err(|_| format!("invalid color spec {spec:?}"))?,
                 )
             };
 
@@ -228,14 +228,14 @@ impl OperatingSystemCommand {
 
     fn parse_reset_dynamic_color_number(idx: u8) -> Result<Self> {
         let which_color: DynamicColorNumber = FromPrimitive::from_u8(idx)
-            .ok_or_else(|| format!("osc code is not a valid DynamicColorNumber!?"))?;
+            .ok_or_else(|| "osc code is not a valid DynamicColorNumber!?".to_string())?;
 
         Ok(OperatingSystemCommand::ResetDynamicColor(which_color))
     }
 
     fn parse_change_dynamic_color_number(idx: u8, osc: &[&[u8]]) -> Result<Self> {
         let which_color: DynamicColorNumber = FromPrimitive::from_u8(idx)
-            .ok_or_else(|| format!("osc code is not a valid DynamicColorNumber!?"))?;
+            .ok_or_else(|| "osc code is not a valid DynamicColorNumber!?".to_string())?;
         let mut colors = vec![];
         for spec in osc.iter().skip(1) {
             if spec == b"?" {
@@ -244,7 +244,7 @@ impl OperatingSystemCommand {
                 let spec = str::from_utf8(spec)?;
                 colors.push(ColorOrQuery::Color(
                     SrgbaTuple::from_str(spec)
-                        .map_err(|_| format!("invalid color spec {:?}", spec))?,
+                        .map_err(|_| format!("invalid color spec {spec:?}"))?,
                 ));
             }
         }
@@ -277,7 +277,7 @@ impl OperatingSystemCommand {
         } else {
             OperatingSystemCommandCode::from_code(&p1str)
         }
-        .ok_or_else(|| format!("unknown code"))?;
+        .ok_or_else(|| "unknown code".to_string())?;
 
         macro_rules! single_string {
             ($variant:ident) => {{
@@ -303,7 +303,7 @@ impl OperatingSystemCommand {
             }};
         }
 
-        use self::OperatingSystemCommandCode::*;
+        use self::OperatingSystemCommandCode::{SetIconNameAndWindowTitle, SetWindowTitle, SetWindowTitleSun, SetIconName, SetIconNameSun, SetHyperlink, ManipulateSelectionData, SystemNotification, SetCurrentWorkingDirectory, ITermProprietary, RxvtProprietary, FinalTermSemanticPrompt, ChangeColorNumber, ResetColors, ResetSpecialColor, ResetTextForegroundColor, ResetTextBackgroundColor, ResetTextCursorColor, ResetMouseForegroundColor, ResetMouseBackgroundColor, ResetTektronixForegroundColor, ResetTektronixBackgroundColor, ResetHighlightColor, ResetTektronixCursorColor, ResetHighlightForegroundColor, SetTextForegroundColor, SetTextBackgroundColor, SetTextCursorColor, SetMouseForegroundColor, SetMouseBackgroundColor, SetTektronixForegroundColor, SetTektronixBackgroundColor, SetHighlightBackgroundColor, SetTektronixCursorColor, SetHighlightForegroundColor};
         match osc_code {
             SetIconNameAndWindowTitle => single_title_string!(SetIconNameAndWindowTitle),
             SetWindowTitle => single_title_string!(SetWindowTitle),
@@ -321,18 +321,18 @@ impl OperatingSystemCommand {
                 if osc.len() >= 3 && osc[1] == b"4" {
                     fn get_pct(v: &&[u8]) -> u8 {
                         let number = str::from_utf8(v).unwrap_or("0");
-                        number.parse::<u8>().unwrap_or(0).max(0).min(100)
+                        number.parse::<u8>().unwrap_or(0).min(100)
                     }
                     match osc[2] {
                         b"0" => return Ok(OperatingSystemCommand::ConEmuProgress(Progress::None)),
                         b"1" => {
-                            let pct = osc.get(3).map(get_pct).unwrap_or(0);
+                            let pct = osc.get(3).map_or(0, get_pct);
                             return Ok(OperatingSystemCommand::ConEmuProgress(
                                 Progress::SetPercentage(pct),
                             ));
                         }
                         b"2" => {
-                            let pct = osc.get(3).map(get_pct).unwrap_or(0);
+                            let pct = osc.get(3).map_or(0, get_pct);
                             return Ok(OperatingSystemCommand::ConEmuProgress(Progress::SetError(
                                 pct,
                             )));
@@ -413,6 +413,7 @@ pub enum OperatingSystemCommandCode {
 }
 
 impl OscMap {
+    #[allow(dead_code)]
     fn new() -> Self {
         let mut code_to_variant = HashMap::new();
         let mut variant_to_code = HashMap::new();
@@ -463,7 +464,7 @@ osc_entries!(
     /// iTerm2
     ChangeTitleTabColor = "6",
     SetCurrentWorkingDirectory = "7",
-    /// See https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
+    /// See <https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda>
     SetHyperlink = "8",
     /// iTerm2
     SystemNotification = "9",
@@ -503,11 +504,15 @@ osc_entries!(
     SetIconNameSun = "L",
 );
 
+#[allow(dead_code)]
 struct OscMap {
+    #[allow(dead_code)]
     code_to_variant: HashMap<&'static str, OperatingSystemCommandCode>,
+    #[allow(dead_code)]
     variant_to_code: HashMap<OperatingSystemCommandCode, &'static str>,
 }
 
+#[allow(dead_code)]
 static OSC_MAP: LazyLock<OscMap> = LazyLock::new(OscMap::new);
 
 impl OperatingSystemCommandCode {
@@ -543,7 +548,7 @@ impl Display for OperatingSystemCommand {
             }};
         }
 
-        use self::OperatingSystemCommand::*;
+        use self::OperatingSystemCommand::{SetIconNameAndWindowTitle, SetWindowTitle, SetWindowTitleSun, SetIconName, SetIconNameSun, SetHyperlink, RxvtExtension, Unspecified, ClearSelection, QuerySelection, SetSelection, SystemNotification, ITermProprietary, FinalTermSemanticPrompt, ResetColors, ChangeColorNumber, ChangeDynamicColors, ResetDynamicColor, CurrentWorkingDirectory, ConEmuProgress};
         match self {
             SetIconNameAndWindowTitle(title) => single_string!(SetIconNameAndWindowTitle, title),
             SetWindowTitle(title) => single_string!(SetWindowTitle, title),
@@ -561,47 +566,47 @@ impl Display for OperatingSystemCommand {
                     f.write_str(&String::from_utf8_lossy(item))?;
                 }
             }
-            ClearSelection(s) => write!(f, "52;{}", s)?,
-            QuerySelection(s) => write!(f, "52;{};?", s)?,
+            ClearSelection(s) => write!(f, "52;{s}")?,
+            QuerySelection(s) => write!(f, "52;{s};?")?,
             SetSelection(s, val) => write!(f, "52;{};{}", s, base64_encode(val))?,
-            SystemNotification(s) => write!(f, "9;{}", s)?,
+            SystemNotification(s) => write!(f, "9;{s}")?,
             ITermProprietary(i) => i.fmt(f)?,
             FinalTermSemanticPrompt(i) => i.fmt(f)?,
             ResetColors(colors) => {
                 write!(f, "104")?;
                 for c in colors {
-                    write!(f, ";{}", c)?;
+                    write!(f, ";{c}")?;
                 }
             }
             ChangeColorNumber(specs) => {
                 write!(f, "4;")?;
                 for pair in specs {
-                    write!(f, "{};{}", pair.palette_index, pair.color)?
+                    write!(f, "{};{}", pair.palette_index, pair.color)?;
                 }
             }
             ChangeDynamicColors(first_color, colors) => {
                 write!(f, "{}", *first_color as u8)?;
                 for color in colors {
-                    write!(f, ";{}", color)?
+                    write!(f, ";{color}")?;
                 }
             }
             ResetDynamicColor(color) => {
                 write!(f, "{}", 100 + *color as u8)?;
             }
-            CurrentWorkingDirectory(s) => write!(f, "7;{}", s)?,
+            CurrentWorkingDirectory(s) => write!(f, "7;{s}")?,
             ConEmuProgress(Progress::None) => write!(f, "9;4;0")?,
             ConEmuProgress(Progress::SetPercentage(pct)) => write!(f, "9;4;1;{pct}")?,
             ConEmuProgress(Progress::SetError(pct)) => write!(f, "9;4;2;{pct}")?,
             ConEmuProgress(Progress::SetIndeterminate) => write!(f, "9;4;3")?,
             ConEmuProgress(Progress::Paused) => write!(f, "9;4;4")?,
-        };
+        }
         // Use the longer form ST as neovim doesn't like the BEL version
         write!(f, "\x1b\\")?;
         Ok(())
     }
 }
 
-/// https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md
+/// <https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinalTermClick {
     /// Allow motion only within the single input line using left/right arrow keys
@@ -640,10 +645,11 @@ impl Display for FinalTermClick {
     }
 }
 
-/// https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// <https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md>
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FinalTermPromptKind {
     /// A normal left side primary prompt
+    #[default]
     Initial,
     /// A right-aligned prompt
     RightSide,
@@ -651,12 +657,6 @@ pub enum FinalTermPromptKind {
     Continuation,
     /// A continuation prompt where the input cannot be edited
     Secondary,
-}
-
-impl Default for FinalTermPromptKind {
-    fn default() -> Self {
-        Self::Initial
-    }
 }
 
 impl core::convert::TryFrom<&str> for FinalTermPromptKind {
@@ -683,7 +683,7 @@ impl Display for FinalTermPromptKind {
     }
 }
 
-/// https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md
+/// <https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinalTermSemanticPrompt {
     /// Do a "fresh line"; if the cursor is at the left margin then
@@ -698,7 +698,7 @@ pub enum FinalTermSemanticPrompt {
         cl: Option<FinalTermClick>,
     },
 
-    /// Denote the end of a command output and then perform FreshLine
+    /// Denote the end of a command output and then perform `FreshLine`
     MarkEndOfCommandWithFreshLine {
         aid: Option<String>,
         cl: Option<FinalTermClick>,
@@ -775,7 +775,7 @@ impl FinalTermSemanticPrompt {
         }
 
         if param == "D" {
-            let status = match osc.get(2).map(|&p| p) {
+            let status = match osc.get(2).copied() {
                 Some(s) => match str::from_utf8(s) {
                     Ok(s) => s.parse().unwrap_or(0),
                     _ => 0,
@@ -822,40 +822,40 @@ impl Display for FinalTermSemanticPrompt {
             Self::FreshLineAndStartPrompt { aid, cl } => {
                 write!(f, "A")?;
                 if let Some(aid) = aid {
-                    write!(f, ";aid={}", aid)?;
+                    write!(f, ";aid={aid}")?;
                 }
                 if let Some(cl) = cl {
-                    write!(f, ";cl={}", cl)?;
+                    write!(f, ";cl={cl}")?;
                 }
             }
             Self::MarkEndOfCommandWithFreshLine { aid, cl } => {
                 write!(f, "N")?;
                 if let Some(aid) = aid {
-                    write!(f, ";aid={}", aid)?;
+                    write!(f, ";aid={aid}")?;
                 }
                 if let Some(cl) = cl {
-                    write!(f, ";cl={}", cl)?;
+                    write!(f, ";cl={cl}")?;
                 }
             }
             Self::StartPrompt(kind) => {
-                write!(f, "P;k={}", kind)?;
+                write!(f, "P;k={kind}")?;
             }
             Self::MarkEndOfPromptAndStartOfInputUntilNextMarker => write!(f, "B")?,
             Self::MarkEndOfPromptAndStartOfInputUntilEndOfLine => write!(f, "I")?,
             Self::MarkEndOfInputAndStartOfOutput { aid } => {
                 write!(f, "C")?;
                 if let Some(aid) = aid {
-                    write!(f, ";aid={}", aid)?;
+                    write!(f, ";aid={aid}")?;
                 }
             }
             Self::CommandStatus {
                 status,
                 aid: Some(aid),
             } => {
-                write!(f, "D;{};err={};aid={}", status, status, aid)?;
+                write!(f, "D;{status};err={status};aid={aid}")?;
             }
             Self::CommandStatus { status, aid: None } => {
-                write!(f, "D;{}", status)?;
+                write!(f, "D;{status}")?;
             }
         }
         Ok(())
@@ -884,18 +884,18 @@ pub enum ITermProprietary {
     /// To change the session's profile on the fly
     SetProfile(String),
     /// Currently defined values for the string parameter are "rule", "find", "font"
-    /// or an empty string.  iTerm2 will go into paste mode until EndCopy is received.
+    /// or an empty string.  iTerm2 will go into paste mode until `EndCopy` is received.
     CopyToClipboard(String),
-    /// Ends CopyToClipboard mode in iTerm2.
+    /// Ends `CopyToClipboard` mode in iTerm2.
     EndCopy,
     /// The boolean should be yes or no. This shows or hides the cursor guide
     HighlightCursorLine(bool),
-    /// Request that the terminal send a ReportCellSize response
+    /// Request that the terminal send a `ReportCellSize` response
     RequestCellSize,
-    /// The response to RequestCellSize.  The height and width are the dimensions
+    /// The response to `RequestCellSize`.  The height and width are the dimensions
     /// of a cell measured in points according to the docs, but in practice, they
     /// are actually pixels.
-    /// If scale is_some(), the width and height will be multiplied by scale to
+    /// If scale `is_some()`, the width and height will be multiplied by scale to
     /// get the true device dimensions
     ReportCellSize {
         height_pixels: NotNan<f32>,
@@ -906,7 +906,7 @@ pub enum ITermProprietary {
     Copy(String),
     /// Each iTerm2 session has internal variables (as described in
     /// <https://www.iterm2.com/documentation-badges.html>). This escape sequence reports
-    /// a variable's value.  The response is another ReportVariable.
+    /// a variable's value.  The response is another `ReportVariable`.
     ReportVariable(String),
     /// User-defined variables may be set with the following escape sequence
     SetUserVar {
@@ -1020,14 +1020,12 @@ impl ITermFileData {
             .unwrap_or(ITermDimension::Automatic);
         let preserve_aspect_ratio = params
             .get("preserveAspectRatio")
-            .map(|s| *s != "0")
-            .unwrap_or(true);
-        let inline = params.get("inline").map(|s| *s != "0").unwrap_or(false);
+            .is_none_or(|s| *s != "0");
+        let inline = params.get("inline").is_some_and(|s| *s != "0");
         let do_not_move_cursor = params
             .get("doNotMoveCursor")
-            .map(|s| *s != "0")
-            .unwrap_or(false);
-        let data = data.ok_or_else(|| format!("didn't set data"))?;
+            .is_some_and(|s| *s != "0");
+        let data = data.ok_or_else(|| "didn't set data".to_string())?;
         Ok(Self {
             name,
             size,
@@ -1046,12 +1044,12 @@ impl Display for ITermFileData {
         write!(f, "File")?;
         let mut sep = "=";
         let emit_sep = |sep, f: &mut Formatter| -> core::result::Result<&str, FmtError> {
-            write!(f, "{}", sep)?;
+            write!(f, "{sep}")?;
             Ok(";")
         };
         if let Some(size) = self.size {
             sep = emit_sep(sep, f)?;
-            write!(f, "size={}", size)?;
+            write!(f, "size={size}")?;
         }
         if let Some(ref name) = self.name {
             sep = emit_sep(sep, f)?;
@@ -1087,28 +1085,23 @@ impl Display for ITermFileData {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ITermDimension {
+    #[default]
     Automatic,
     Cells(i64),
     Pixels(i64),
     Percent(i64),
 }
 
-impl Default for ITermDimension {
-    fn default() -> Self {
-        Self::Automatic
-    }
-}
-
 impl Display for ITermDimension {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        use self::ITermDimension::*;
+        use self::ITermDimension::{Automatic, Cells, Pixels, Percent};
         match self {
             Automatic => write!(f, "auto"),
-            Cells(n) => write!(f, "{}", n),
-            Pixels(n) => write!(f, "{}px", n),
-            Percent(n) => write!(f, "{}%", n),
+            Cells(n) => write!(f, "{n}"),
+            Pixels(n) => write!(f, "{n}px"),
+            Percent(n) => write!(f, "{n}%"),
         }
     }
 }
@@ -1124,12 +1117,10 @@ impl ITermDimension {
     fn parse(s: &str) -> Result<Self> {
         if s == "auto" {
             Ok(ITermDimension::Automatic)
-        } else if s.ends_with("px") {
-            let s = &s[..s.len() - 2];
+        } else if let Some(s) = s.strip_suffix("px") {
             let num = s.parse()?;
             Ok(ITermDimension::Pixels(num))
-        } else if s.ends_with('%') {
-            let s = &s[..s.len() - 1];
+        } else if let Some(s) = s.strip_suffix('%') {
             let num = s.parse()?;
             Ok(ITermDimension::Percent(num))
         } else {
@@ -1141,13 +1132,14 @@ impl ITermDimension {
     /// Convert the dimension into a number of pixels based on the provided
     /// size of a cell and number of cells in that dimension.
     /// Returns None for the Automatic variant.
+    #[must_use]
     pub fn to_pixels(&self, cell_size: usize, num_cells: usize) -> Option<usize> {
         match self {
             ITermDimension::Automatic => None,
             ITermDimension::Cells(n) => Some((*n).max(0) as usize * cell_size),
             ITermDimension::Pixels(n) => Some((*n).max(0) as usize),
             ITermDimension::Percent(n) => Some(
-                (((*n).max(0).min(100) as f32 / 100.0) * num_cells as f32 * cell_size as f32)
+                (((*n).clamp(0, 100) as f32 / 100.0) * num_cells as f32 * cell_size as f32)
                     as usize,
             ),
         }
@@ -1155,7 +1147,7 @@ impl ITermDimension {
 }
 
 impl ITermProprietary {
-    #[allow(clippy::cyclomatic_complexity, clippy::cognitive_complexity)]
+    #[allow(clippy::cognitive_complexity, clippy::cognitive_complexity)]
     fn parse(osc: &[&[u8]]) -> Result<Self> {
         // iTerm has a number of different styles of OSC parameter
         // encodings, which makes this section of code a bit gnarly.
@@ -1164,7 +1156,7 @@ impl ITermProprietary {
         let param = String::from_utf8_lossy(osc[1]);
 
         let mut iter = param.splitn(2, '=');
-        let keyword = iter.next().ok_or_else(|| format!("bad params"))?;
+        let keyword = iter.next().ok_or_else(|| "bad params".to_string())?;
         let p1 = iter.next();
 
         macro_rules! single {
@@ -1207,11 +1199,7 @@ impl ITermProprietary {
         one_str!(SetProfile, "SetProfile");
         one_str!(CopyToClipboard, "CopyToClipboard");
 
-        let p1_empty = match p1 {
-            Some(p1) if p1 == "" => true,
-            None => true,
-            _ => false,
-        };
+        let p1_empty = matches!(p1, Some("") | None);
 
         if osc.len() == 3 && keyword == "Copy" && p1_empty {
             return Ok(ITermProprietary::Copy(String::from_utf8(base64_decode(
@@ -1224,67 +1212,72 @@ impl ITermProprietary {
             )?));
         }
 
-        if osc.len() == 3 && keyword == "ReportCellSize" && p1.is_some() {
-            if let Some(p1) = p1 {
-                return Ok(ITermProprietary::ReportCellSize {
-                    height_pixels: NotNan::new(p1.parse()?).map_err(not_nan_err)?,
-                    width_pixels: NotNan::new(String::from_utf8_lossy(osc[2]).parse()?)
-                        .map_err(not_nan_err)?,
-                    scale: None,
+        if osc.len() == 3
+            && keyword == "ReportCellSize"
+            && p1.is_some()
+            && let Some(p1) = p1
+        {
+            return Ok(ITermProprietary::ReportCellSize {
+                height_pixels: NotNan::new(p1.parse()?).map_err(not_nan_err)?,
+                width_pixels: NotNan::new(String::from_utf8_lossy(osc[2]).parse()?)
+                    .map_err(not_nan_err)?,
+                scale: None,
+            });
+        }
+        if osc.len() == 4
+            && keyword == "ReportCellSize"
+            && p1.is_some()
+            && let Some(p1) = p1
+        {
+            return Ok(ITermProprietary::ReportCellSize {
+                height_pixels: NotNan::new(p1.parse()?).map_err(not_nan_err)?,
+                width_pixels: NotNan::new(String::from_utf8_lossy(osc[2]).parse()?)
+                    .map_err(not_nan_err)?,
+                scale: Some(
+                    NotNan::new(String::from_utf8_lossy(osc[3]).parse()?).map_err(not_nan_err)?,
+                ),
+            });
+        }
+
+        if osc.len() == 2
+            && keyword == "SetUserVar"
+            && let Some(p1) = p1
+        {
+            let mut iter = p1.splitn(2, '=');
+            let p1 = iter.next();
+            let p2 = iter.next();
+
+            if let (Some(k), Some(v)) = (p1, p2) {
+                return Ok(ITermProprietary::SetUserVar {
+                    name: k.to_string(),
+                    value: String::from_utf8(base64_decode(v)?)?,
                 });
             }
         }
-        if osc.len() == 4 && keyword == "ReportCellSize" && p1.is_some() {
-            if let Some(p1) = p1 {
-                return Ok(ITermProprietary::ReportCellSize {
-                    height_pixels: NotNan::new(p1.parse()?).map_err(not_nan_err)?,
-                    width_pixels: NotNan::new(String::from_utf8_lossy(osc[2]).parse()?)
-                        .map_err(not_nan_err)?,
-                    scale: Some(
-                        NotNan::new(String::from_utf8_lossy(osc[3]).parse()?)
-                            .map_err(not_nan_err)?,
-                    ),
-                });
+
+        if osc.len() == 2
+            && keyword == "UnicodeVersion"
+            && let Some(p1) = p1
+        {
+            let mut iter = p1.splitn(2, ' ');
+            let keyword = iter.next();
+            let label = iter.next();
+
+            if let Some("push") = keyword {
+                return Ok(ITermProprietary::UnicodeVersion(
+                    ITermUnicodeVersionOp::Push(label.map(std::string::ToString::to_string)),
+                ));
             }
-        }
-
-        if osc.len() == 2 && keyword == "SetUserVar" {
-            if let Some(p1) = p1 {
-                let mut iter = p1.splitn(2, '=');
-                let p1 = iter.next();
-                let p2 = iter.next();
-
-                if let (Some(k), Some(v)) = (p1, p2) {
-                    return Ok(ITermProprietary::SetUserVar {
-                        name: k.to_string(),
-                        value: String::from_utf8(base64_decode(v)?)?,
-                    });
-                }
+            if let Some("pop") = keyword {
+                return Ok(ITermProprietary::UnicodeVersion(
+                    ITermUnicodeVersionOp::Pop(label.map(std::string::ToString::to_string)),
+                ));
             }
-        }
 
-        if osc.len() == 2 && keyword == "UnicodeVersion" {
-            if let Some(p1) = p1 {
-                let mut iter = p1.splitn(2, ' ');
-                let keyword = iter.next();
-                let label = iter.next();
-
-                if let Some("push") = keyword {
-                    return Ok(ITermProprietary::UnicodeVersion(
-                        ITermUnicodeVersionOp::Push(label.map(|s| s.to_string())),
-                    ));
-                }
-                if let Some("pop") = keyword {
-                    return Ok(ITermProprietary::UnicodeVersion(
-                        ITermUnicodeVersionOp::Pop(label.map(|s| s.to_string())),
-                    ));
-                }
-
-                if let Ok(n) = p1.parse::<u8>() {
-                    return Ok(ITermProprietary::UnicodeVersion(
-                        ITermUnicodeVersionOp::Set(n),
-                    ));
-                }
+            if let Ok(n) = p1.parse::<u8>() {
+                return Ok(ITermProprietary::UnicodeVersion(
+                    ITermUnicodeVersionOp::Set(n),
+                ));
             }
         }
 
@@ -1296,12 +1289,12 @@ impl ITermProprietary {
     }
 }
 
-/// base64::encode is deprecated, so make a less frustrating helper
+/// `base64::encode` is deprecated, so make a less frustrating helper
 pub(crate) fn base64_encode<T: AsRef<[u8]>>(s: T) -> String {
     base64::engine::general_purpose::STANDARD.encode(s)
 }
 
-/// base64::decode is deprecated, so make a less frustrating helper
+/// `base64::decode` is deprecated, so make a less frustrating helper
 pub(crate) fn base64_decode<T: AsRef<[u8]>>(s: T) -> Result<Vec<u8>> {
     use base64::engine::{GeneralPurpose, GeneralPurposeConfig};
     GeneralPurpose::new(
@@ -1315,17 +1308,17 @@ pub(crate) fn base64_decode<T: AsRef<[u8]>>(s: T) -> Result<Vec<u8>> {
 impl Display for ITermProprietary {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         write!(f, "1337;")?;
-        use self::ITermProprietary::*;
+        use self::ITermProprietary::{SetMark, StealFocus, ClearScrollback, CurrentDir, SetProfile, CopyToClipboard, EndCopy, HighlightCursorLine, RequestCellSize, ReportCellSize, Copy, ReportVariable, SetUserVar, SetBadgeFormat, File, UnicodeVersion};
         match self {
             SetMark => write!(f, "SetMark")?,
             StealFocus => write!(f, "StealFocus")?,
             ClearScrollback => write!(f, "ClearScrollback")?,
-            CurrentDir(s) => write!(f, "CurrentDir={}", s)?,
-            SetProfile(s) => write!(f, "SetProfile={}", s)?,
-            CopyToClipboard(s) => write!(f, "CopyToClipboard={}", s)?,
+            CurrentDir(s) => write!(f, "CurrentDir={s}")?,
+            SetProfile(s) => write!(f, "SetProfile={s}")?,
+            CopyToClipboard(s) => write!(f, "CopyToClipboard={s}")?,
             EndCopy => write!(f, "EndCopy")?,
             HighlightCursorLine(yes) => {
-                write!(f, "HighlightCursorLine={}", if *yes { "yes" } else { "no" })?
+                write!(f, "HighlightCursorLine={}", if *yes { "yes" } else { "no" })?;
             }
             RequestCellSize => write!(f, "ReportCellSize")?,
             ReportCellSize {
@@ -1344,17 +1337,17 @@ impl Display for ITermProprietary {
             Copy(s) => write!(f, "Copy=;{}", base64_encode(s))?,
             ReportVariable(s) => write!(f, "ReportVariable={}", base64_encode(s))?,
             SetUserVar { name, value } => {
-                write!(f, "SetUserVar={}={}", name, base64_encode(value))?
+                write!(f, "SetUserVar={}={}", name, base64_encode(value))?;
             }
             SetBadgeFormat(s) => write!(f, "SetBadgeFormat={}", base64_encode(s))?,
             File(file) => file.fmt(f)?,
-            UnicodeVersion(ITermUnicodeVersionOp::Set(n)) => write!(f, "UnicodeVersion={}", n)?,
+            UnicodeVersion(ITermUnicodeVersionOp::Set(n)) => write!(f, "UnicodeVersion={n}")?,
             UnicodeVersion(ITermUnicodeVersionOp::Push(Some(label))) => {
-                write!(f, "UnicodeVersion=push {}", label)?
+                write!(f, "UnicodeVersion=push {label}")?;
             }
             UnicodeVersion(ITermUnicodeVersionOp::Push(None)) => write!(f, "UnicodeVersion=push")?,
             UnicodeVersion(ITermUnicodeVersionOp::Pop(Some(label))) => {
-                write!(f, "UnicodeVersion=pop {}", label)?
+                write!(f, "UnicodeVersion=pop {label}")?;
             }
             UnicodeVersion(ITermUnicodeVersionOp::Pop(None)) => write!(f, "UnicodeVersion=pop")?,
         }

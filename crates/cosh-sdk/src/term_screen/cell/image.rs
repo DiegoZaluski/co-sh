@@ -23,7 +23,7 @@ where
     D: Deserializer<'de>,
 {
     let value = f32::deserialize(deserializer)?;
-    NotNan::new(value).map_err(|e| serde::de::Error::custom(format!("{:?}", e)))
+    NotNan::new(value).map_err(|e| serde::de::Error::custom(format!("{e:?}")))
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -34,8 +34,7 @@ where
     value.into_inner().serialize(serializer)
 }
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TextureCoordinate {
     #[serde(
         deserialize_with = "deserialize_notnan",
@@ -50,10 +49,14 @@ pub struct TextureCoordinate {
 }
 
 impl TextureCoordinate {
+    #[must_use]
     pub fn new(x: NotNan<f32>, y: NotNan<f32>) -> Self {
         Self { x, y }
     }
 
+    #[must_use]
+    /// # Panics
+    /// If either coordinate is NaN.
     pub fn new_f32(x: f32, y: f32) -> Self {
         let x = NotNan::new(x).unwrap();
         let y = NotNan::new(y).unwrap();
@@ -66,11 +69,10 @@ impl TextureCoordinate {
 /// carve up the image and track each slice of it.  Each cell needs to know
 /// its "texture coordinates" within that image so that we can render the
 /// right slice.
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ImageCell {
     /// Texture coordinate for the top left of this cell.
-    /// (0,0) is the top left of the ImageData. (1, 1) is
+    /// (0,0) is the top left of the `ImageData`. (1, 1) is
     /// the bottom right.
     top_left: TextureCoordinate,
     /// Texture coordinates for the bottom right of this cell.
@@ -111,6 +113,7 @@ impl ImageCell {
         self.placement_id.hash(hasher);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn with_z_index(
         top_left: TextureCoordinate,
         bottom_right: TextureCoordinate,
@@ -137,43 +140,52 @@ impl ImageCell {
         }
     }
 
+    #[must_use]
     pub fn matches_placement(&self, image_id: u32, placement_id: Option<u32>) -> bool {
         self.image_id == Some(image_id) && self.placement_id == placement_id
     }
 
+    #[must_use]
     pub fn has_placement_id(&self) -> bool {
         self.placement_id.is_some()
     }
 
+    #[must_use]
     pub fn image_id(&self) -> Option<u32> {
         self.image_id
     }
 
+    #[must_use]
     pub fn placement_id(&self) -> Option<u32> {
         self.placement_id
     }
 
+    #[must_use]
     pub fn top_left(&self) -> TextureCoordinate {
         self.top_left
     }
 
+    #[must_use]
     pub fn bottom_right(&self) -> TextureCoordinate {
         self.bottom_right
     }
 
+    #[must_use]
     pub fn image_data(&self) -> &Arc<ImageData> {
         &self.data
     }
 
-    /// negative z_index is rendered beneath the text layer.
+    /// negative `z_index` is rendered beneath the text layer.
     /// >= 0 is rendered above the text.
-    /// negative z_index < INT32_MIN/2 will be drawn under cells
-    /// with non-default background colors
+    /// > negative z_index < INT32_MIN/2 will be drawn under cells
+    /// > with non-default background colors
+    #[must_use]
     pub fn z_index(&self) -> i32 {
         self.z_index
     }
 
     /// Returns padding (left, top, right, bottom)
+    #[must_use]
     pub fn padding(&self) -> (u16, u16, u16, u16) {
         (
             self.padding_left,
@@ -184,8 +196,7 @@ impl ImageCell {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum ImageDataType {
     /// Data is in the native image file format
     /// (best for file formats that have animated content)
@@ -245,11 +256,16 @@ impl std::fmt::Debug for ImageDataType {
 }
 
 impl ImageDataType {
+    #[must_use]
+    /// # Panics
+    /// If `data.len()` does not match `width * height * 4`.
     pub fn new_single_frame(width: u32, height: u32, data: Vec<u8>) -> Self {
         let hash = Self::hash_bytes(&data);
+        #[allow(clippy::cast_possible_truncation)]
+        let len = data.len() as u32;
         assert_eq!(
             width * height * 4,
-            data.len() as u32,
+            len,
             "invalid dimensions {}x{} for pixel data of length {}",
             width,
             height,
@@ -264,6 +280,7 @@ impl ImageDataType {
     }
 
     /// Black pixels
+    #[must_use]
     pub fn placeholder() -> Self {
         let mut data = vec![];
         let size = 8;
@@ -273,6 +290,7 @@ impl ImageDataType {
         ImageDataType::new_single_frame(size, size, data)
     }
 
+    #[must_use]
     pub fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
         use sha2::Digest;
         let mut hasher = sha2::Sha256::new();
@@ -281,17 +299,20 @@ impl ImageDataType {
     }
 
     /// Swap out image data to disk-backed storage.
-    /// This is a no-op stub since we removed wezterm_blob_leases.
+    /// This is a no-op stub since we removed `wezterm_blob_leases`.
+    ///
+    /// # Errors
+    /// This implementation never returns an error.
     pub fn swap_out(self) -> Result<Self, crate::term_screen::escape_parser::error::InternalError> {
         Ok(self)
     }
 
+    #[must_use]
     pub fn compute_hash(&self) -> [u8; 32] {
         use sha2::Digest;
         let mut hasher = sha2::Sha256::new();
         match self {
-            ImageDataType::EncodedFile(data) => hasher.update(data),
-            ImageDataType::Rgba8 { data, .. } => hasher.update(data),
+            ImageDataType::EncodedFile(data) | ImageDataType::Rgba8 { data, .. } => hasher.update(data),
             ImageDataType::AnimRgba8 {
                 frames, durations, ..
             } => {
@@ -304,26 +325,25 @@ impl ImageDataType {
                     hasher.update(b);
                 }
             }
-        };
+        }
         hasher.finalize().into()
     }
 
     /// Divides the animation frame durations by the provided
-    /// speed_factor, so a factor of 2 will halve the duration.
+    /// `speed_factor`, so a factor of 2 will halve the duration.
     /// # Panics
-    /// if the speed_factor is negative, non-finite or the result
+    /// if the `speed_factor` is negative, non-finite or the result
     /// overflows the allow Duration range.
     pub fn adjust_speed(&mut self, speed_factor: f32) {
-        match self {
-            Self::AnimRgba8 { durations, .. } => {
-                for d in durations {
-                    *d = d.mul_f32(1. / speed_factor);
-                }
+        if let Self::AnimRgba8 { durations, .. } = self {
+            for d in durations {
+                *d = d.mul_f32(1. / speed_factor);
             }
-            _ => {}
         }
     }
 
+    /// # Errors
+    /// Returns an error if the image format is unrecognized or the data is malformed.
     pub fn dimensions(&self) -> Result<(u32, u32), ImageCellError> {
         fn dimensions_for_data(data: &[u8]) -> image::ImageResult<(u32, u32)> {
             let reader =
@@ -340,9 +360,10 @@ impl ImageDataType {
         }
     }
 
-    /// Decode an encoded file into either an Rgba8 or AnimRgba8 variant
-    /// if we recognize the file format, otherwise the EncodedFile data
+    /// Decode an encoded file into either an `Rgba8` or `AnimRgba8` variant
+    /// if we recognize the file format, otherwise the `EncodedFile` data
     /// is preserved as is.
+    #[must_use]
     pub fn decode(self) -> Self {
         use image::{AnimationDecoder, ImageFormat};
 
@@ -351,7 +372,7 @@ impl ImageDataType {
                 let format = match image::guess_format(&data) {
                     Ok(format) => format,
                     Err(err) => {
-                        log::warn!("Unable to decode raw image data: {:#}", err);
+                        log::warn!("Unable to decode raw image data: {err:#}");
                         return Self::EncodedFile(data);
                     }
                 };
@@ -359,25 +380,25 @@ impl ImageDataType {
                 match format {
                     ImageFormat::Gif => image::codecs::gif::GifDecoder::new(cursor)
                         .and_then(|decoder| decoder.into_frames().collect_frames())
-                        .and_then(|frames| {
-                            if frames.is_empty() {
-                                log::error!("decoded image has 0 frames, using placeholder");
-                                Ok(Self::placeholder())
-                            } else {
-                                Ok(Self::decode_frames(frames))
-                            }
-                        })
-                        .unwrap_or_else(|err| {
-                            log::error!(
-                                "Unable to parse animated gif: {:#}, trying as single frame",
-                                err
-                            );
-                            Self::decode_single(data)
-                        }),
+                        .map_or_else(
+                            |err| {
+                                log::error!(
+                                    "Unable to parse animated gif: {err:#}, trying as single frame"
+                                );
+                                Self::decode_single(data)
+                            },
+                            |frames| {
+                                if frames.is_empty() {
+                                    log::error!("decoded image has 0 frames, using placeholder");
+                                    Self::placeholder()
+                                } else {
+                                    Self::decode_frames(frames)
+                                }
+                            },
+                        ),
                     ImageFormat::Png => {
-                        let decoder = match image::codecs::png::PngDecoder::new(cursor) {
-                            Ok(d) => d,
-                            _ => return Self::EncodedFile(data),
+                        let Ok(decoder) = image::codecs::png::PngDecoder::new(cursor) else {
+                            return Self::EncodedFile(data);
                         };
                         if decoder.is_apng().unwrap_or(false) {
                             match decoder
@@ -396,9 +417,8 @@ impl ImageDataType {
                         }
                     }
                     ImageFormat::WebP => {
-                        let decoder = match image::codecs::webp::WebPDecoder::new(cursor) {
-                            Ok(d) => d,
-                            _ => return Self::EncodedFile(data),
+                        let Ok(decoder) = image::codecs::webp::WebPDecoder::new(cursor) else {
+                            return Self::EncodedFile(data);
                         };
                         match decoder.into_frames().collect_frames() {
                             Ok(frames) if frames.is_empty() => {
@@ -422,7 +442,7 @@ impl ImageDataType {
         let mut frames = vec![];
         let mut durations = vec![];
         let mut hashes = vec![];
-        for frame in img_frames.into_iter() {
+        for frame in img_frames {
             let duration: Duration = frame.delay().into();
             durations.push(duration);
             let image = image::DynamicImage::ImageRgba8(frame.into_buffer()).to_rgba8();
@@ -478,7 +498,7 @@ pub struct ImageData {
 }
 
 struct HexSlice<'a>(&'a [u8]);
-impl<'a> std::fmt::Display for HexSlice<'a> {
+impl std::fmt::Display for HexSlice<'_> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
         for byte in self.0 {
             write!(fmt, "{byte:x}")?;
@@ -504,7 +524,8 @@ impl PartialEq for ImageData {
 }
 
 impl ImageData {
-    /// Create a new ImageData struct with the provided raw data.
+    /// Create a new `ImageData` struct with the provided raw data.
+    #[must_use]
     pub fn with_raw_data(data: Vec<u8>) -> Self {
         let hash = ImageDataType::hash_bytes(&data);
         Self::with_data_and_hash(ImageDataType::EncodedFile(data).decode(), hash)
@@ -517,6 +538,7 @@ impl ImageData {
         }
     }
 
+    #[must_use]
     pub fn with_data(data: ImageDataType) -> Self {
         let hash = data.compute_hash();
         Self {
@@ -534,6 +556,12 @@ impl ImageData {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// # Panics
+    /// If the lock is poisoned.
     pub fn data(&self) -> MutexGuard<'_, ImageDataType> {
         self.data.lock().unwrap()
     }

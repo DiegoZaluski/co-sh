@@ -1,18 +1,19 @@
+#![allow(clippy::missing_errors_doc)]
 //! Handling hyperlinks.
 //! This gist describes an escape sequence for explicitly managing hyperlinks:
 //! <https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda>
 //! We use that as the foundation of our hyperlink support, and the game
 //! plan is to then implicitly enable the hyperlink attribute for a cell
-//! as we recognize linkable input text during print() processing.
-use std::sync::Arc;
+//! as we recognize linkable input text during `print()` processing.
 use core::ops::Range;
 use fancy_regex::{Captures, Regex};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::sync::Arc;
 
 use std::borrow::ToOwned;
-use std::string::ToString;
 use std::format;
 use std::string::String;
+use std::string::ToString;
 use std::vec::Vec;
 
 pub use crate::term_screen::escape_parser::hyperlink::Hyperlink;
@@ -26,8 +27,7 @@ pub use crate::term_screen::escape_parser::hyperlink::Hyperlink;
 /// URL to view the details for that issue.
 /// The Rule struct is configuration that is passed to the terminal
 /// and is evaluated when processing mouse hover events.
-#[derive(Deserialize, Serialize)]
-#[derive(Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Rule {
     /// The compiled regex for the rule.  This is used to match
     /// against a line of text from the screen (typically the line
@@ -61,9 +61,9 @@ impl From<&Regex> for RegexWrap {
     }
 }
 
-impl Into<Regex> for RegexWrap {
-    fn into(self) -> Regex {
-        self.0
+impl From<RegexWrap> for Regex {
+    fn from(val: RegexWrap) -> Self {
+        val.0
     }
 }
 
@@ -72,7 +72,7 @@ where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    Regex::new(&s).map_err(|e| serde::de::Error::custom(format!("{:?}", e)))
+    Regex::new(&s).map_err(|e| serde::de::Error::custom(format!("{e:?}")))
 }
 
 fn serialize_regex<S>(regex: &Regex, serializer: S) -> Result<S::Ok, S::Error>
@@ -100,7 +100,7 @@ struct Match<'t> {
     captures: Captures<'t>,
 }
 
-impl<'t> Match<'t> {
+impl Match<'_> {
     /// Returns the length of the matched text in bytes (not cells!)
     fn len(&self) -> usize {
         let c0 = self.highlight().unwrap();
@@ -118,13 +118,13 @@ impl<'t> Match<'t> {
     }
 
     /// Expand replacements in the format string to yield the URL
-    /// The replacement is as described on Rule::format.
+    /// The replacement is as described on `Rule::format`.
     fn expand(&self) -> String {
         let mut result = self.rule.format.clone();
         // Start with the highest numbered capture and decrement.
         // This avoids ambiguity when replacing $11 vs $1.
         for n in (0..self.captures.len()).rev() {
-            let search = format!("${}", n);
+            let search = format!("${n}");
             if let Some(rep) = self.captures.get(n) {
                 result = result.replace(&search, rep.as_str());
             } else {
@@ -140,7 +140,7 @@ pub const GENERIC_HYPERLINK_PATTERN: &str = r"\b\w+://\S+[_/a-zA-Z0-9-]";
 
 impl Rule {
     /// Construct a new rule.  It may fail if the regex is invalid.
-    pub fn new(regex: &str, format: &str) -> Result<Self, fancy_regex::Error> {
+    pub fn new(regex: &str, format: &str) -> Result<Self, Box<fancy_regex::Error>> {
         Self::with_highlight(regex, format, 0)
     }
 
@@ -148,40 +148,39 @@ impl Rule {
         regex: &str,
         format: &str,
         highlight: usize,
-    ) -> Result<Self, fancy_regex::Error> {
+    ) -> Result<Self, Box<fancy_regex::Error>> {
         Ok(Self {
-            regex: Regex::new(regex)?,
+            regex: Regex::new(regex).map_err(Box::new)?,
             format: format.to_owned(),
             highlight,
         })
     }
 
     /// Given a line of text from the terminal screen, and a set of
-    /// rules, return the set of RuleMatches.
+    /// rules, return the set of `RuleMatches`.
+    #[must_use]
     pub fn match_hyperlinks(line: &str, rules: &[Rule]) -> Vec<RuleMatch> {
         let mut matches = Vec::new();
-        for rule in rules.iter() {
-            for capture_result in rule.regex.captures_iter(line) {
-                if let Ok(captures) = capture_result {
-                    let m = Match { rule, captures };
-                    if m.highlight().is_some() {
-                        matches.push(m);
-                    }
+        for rule in rules {
+            for captures in rule.regex.captures_iter(line).flatten() {
+                let m = Match { rule, captures };
+                if m.highlight().is_some() {
+                    matches.push(m);
                 }
             }
         }
         // Sort the matches by descending match length.
         // This is to avoid confusion if multiple rules match the
         // same sections of text.
-        matches.sort_by(|a, b| b.len().cmp(&a.len()));
+        matches.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
         matches
             .into_iter()
             .map(|m| {
                 let url = m.expand();
-                let link = Arc::new(Hyperlink::new_implicit(url));
+                let hyperlink = Arc::new(Hyperlink::new_implicit(url));
                 RuleMatch {
-                    link,
+                    link: hyperlink,
                     range: m.range(),
                 }
             })

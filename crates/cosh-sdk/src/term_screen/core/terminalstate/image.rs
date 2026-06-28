@@ -1,14 +1,14 @@
-use super::TerminalState;
 use super::super::{Position, StableRowIndex};
+use super::TerminalState;
+use crate::term_screen::cell::Cell;
+use crate::term_screen::cell::image::{ImageCell, ImageDataType};
+use crate::term_screen::surface::TextureCoordinate;
+use crate::term_screen::surface::change::ImageData;
 use anyhow::Context;
-use humansize::{SizeFormatter, DECIMAL};
+use humansize::{DECIMAL, SizeFormatter};
 use num_traits::{One, Zero};
 use ordered_float::NotNan;
 use std::sync::Arc;
-use crate::term_screen::cell::image::{ImageCell, ImageDataType};
-use crate::term_screen::cell::Cell;
-use crate::term_screen::surface::change::ImageData;
-use crate::term_screen::surface::TextureCoordinate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlacementInfo {
@@ -19,7 +19,7 @@ pub struct PlacementInfo {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ImageAttachParams {
-    /// Dimensions of the underlying ImageData, in pixels
+    /// Dimensions of the underlying `ImageData`, in pixels
     pub image_width: u32,
     pub image_height: u32,
 
@@ -42,7 +42,7 @@ pub struct ImageAttachParams {
     pub z_index: i32,
 
     /// Desired number of cells to span.
-    /// If None, then compute based on source_width and source_height
+    /// If None, then compute based on `source_width` and `source_height`
     pub columns: Option<usize>,
     pub rows: Option<usize>,
 
@@ -63,9 +63,17 @@ pub enum ImageAttachStyle {
 }
 
 impl TerminalState {
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::map_unwrap_or,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap
+    )]
     pub(crate) fn assign_image_to_cells(
         &mut self,
-        params: ImageAttachParams,
+        params: &ImageAttachParams,
     ) -> anyhow::Result<PlacementInfo> {
         let seqno = self.seqno;
         let physical_cols = self.screen().physical_cols;
@@ -83,9 +91,7 @@ impl TerminalState {
         // <https://github.com/wezterm/wezterm/issues/6344>
         anyhow::ensure!(
             cell_pixel_width != 0 && cell_pixel_height != 0,
-            "refusing to display image: terminal has no cell pixel dimensions (WxH: {}x{})",
-            cell_pixel_width,
-            cell_pixel_height
+            "refusing to display image: terminal has no cell pixel dimensions (WxH: {cell_pixel_width}x{cell_pixel_height})",
         );
 
         let cell_padding_left = params
@@ -114,9 +120,7 @@ impl TerminalState {
         // <https://github.com/wezterm/wezterm/issues/6344>
         anyhow::ensure!(
             draw_width != 0 && draw_height != 0,
-            "refusing to display image with zero draw dimensions (WxH: {}x{})",
-            draw_width,
-            draw_height
+            "refusing to display image with zero draw dimensions (WxH: {draw_width}x{draw_height})",
         );
 
         let (fullcells_width, remainder_width_cell, x_delta_divisor) = params
@@ -156,6 +160,7 @@ impl TerminalState {
         let target_pixel_height = fullcells_height * cell_pixel_height + remainder_height_cell;
         let first_row = self.screen().visible_row_to_stable_row(self.cursor.y);
 
+        #[allow(clippy::cast_precision_loss)]
         let mut ypos = NotNan::new(params.source_origin_y as f32 / params.image_height as f32)
             .with_context(|| format!("computing ypos {params:#?}"))?;
         let start_xpos = NotNan::new(params.source_origin_x as f32 / params.image_width as f32)
@@ -223,7 +228,7 @@ impl TerminalState {
                     .get_cell(cursor_x + x, cursor_y)
                     .cloned()
                     .unwrap_or_else(Cell::blank);
-                let img = Box::new(ImageCell::with_z_index(
+                let img = ImageCell::with_z_index(
                     TextureCoordinate::new(xpos, ypos),
                     TextureCoordinate::new(xpos + x_delta, ypos + y_delta),
                     params.data.clone(),
@@ -234,7 +239,7 @@ impl TerminalState {
                     padding_bottom,
                     params.image_id,
                     params.placement_id,
-                ));
+                );
                 match params.style {
                     ImageAttachStyle::Kitty => cell.attrs_mut().attach_image(img),
                     ImageAttachStyle::Sixel | ImageAttachStyle::Iterm => {
@@ -341,9 +346,5 @@ pub(crate) fn dimensions(data: &[u8]) -> anyhow::Result<ImageInfo> {
 
 /// Returns `1` if `b` is true, else `0`,
 fn one_or_zero<T: Zero + One>(b: bool) -> T {
-    if b {
-        T::one()
-    } else {
-        T::zero()
-    }
+    if b { T::one() } else { T::zero() }
 }

@@ -1,11 +1,18 @@
-use super::image::*;
 use super::TerminalState;
-use ::image::imageops::FilterType;
-use ::image::ImageFormat;
-use log::error;
+use super::image::{dimensions, check_image_dimensions, ImageAttachParams, ImageAttachStyle};
 use crate::term_screen::cell::image::ImageDataType;
 use crate::term_screen::escape_parser::osc::ITermFileData;
+use ::image::ImageFormat;
+use ::image::imageops::FilterType;
+use log::error;
 
+#[allow(
+        clippy::too_many_lines,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap
+    )]
 impl TerminalState {
     pub(crate) fn set_image(&mut self, image: ITermFileData) {
         if !image.inline {
@@ -79,7 +86,7 @@ impl TerminalState {
                         candidates.push(((width * y_scale) as usize, self.pixel_height));
                     }
 
-                    candidates.sort_by(|a, b| (a.0 * a.1).cmp(&(b.0 * b.1)));
+                    candidates.sort_by_key(|a| a.0 * a.1);
 
                     candidates.pop().unwrap()
                 } else {
@@ -103,10 +110,7 @@ impl TerminalState {
 
         let downscaled = (width < info.width as usize) || (height < info.height as usize);
         let data = match (downscaled, info.format) {
-            (true, ImageFormat::Gif)
-            | (true, ImageFormat::Png)
-            | (true, ImageFormat::WebP)
-            | (false, _) => {
+            (true, ImageFormat::Gif | ImageFormat::Png | ImageFormat::WebP) | (false, _) => {
                 // Don't resample things that might be animations,
                 // or things that don't need resampling
                 ImageDataType::EncodedFile(image.data)
@@ -129,7 +133,7 @@ impl TerminalState {
             }
         };
 
-        if let Err(err) = self.assign_image_to_cells(ImageAttachParams {
+        if let Err(err) = self.assign_image_to_cells(&ImageAttachParams {
             image_width: width as u32,
             image_height: height as u32,
             source_width: None,
@@ -147,7 +151,7 @@ impl TerminalState {
             placement_id: None,
             do_not_move_cursor: image.do_not_move_cursor,
         }) {
-            log::error!("set iterm2 image: {:#}", err);
+            log::error!("set iterm2 image: {err:#}");
         }
     }
 }

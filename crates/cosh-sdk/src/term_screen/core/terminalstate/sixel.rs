@@ -1,17 +1,18 @@
-use super::image::*;
-use super::{default_color_map, ImageAttachParams};
+#![allow(clippy::needless_pass_by_value)]
 use super::TerminalState;
-use ::image::RgbaImage;
+use super::image::{check_image_dimensions, ImageAttachStyle};
+use super::{ImageAttachParams, default_color_map};
 use crate::term_screen::cell::color::RgbColor;
 use crate::term_screen::cell::image::ImageDataType;
 use crate::term_screen::escape_parser::{Sixel, SixelData};
+use ::image::RgbaImage;
 
 impl TerminalState {
-    pub(crate) fn sixel(&mut self, sixel: Box<Sixel>) {
+    pub(crate) fn sixel(&mut self, sixel: Sixel) {
         let (width, height) = sixel.dimensions();
 
         if let Err(err) = check_image_dimensions(width, height) {
-            log::error!("{}", err);
+            log::error!("{err}");
             return;
         }
 
@@ -28,28 +29,28 @@ impl TerminalState {
         } else {
             let background_color = color_map
                 .get(&0)
-                .cloned()
+                .copied()
                 .unwrap_or(RgbColor::new_8bpc(0, 0, 0));
             let (red, green, blue) = background_color.to_tuple_rgb8();
             RgbaImage::from_pixel(width, height, [red, green, blue, 0xffu8].into())
         };
 
-        let mut x = 0;
-        let mut y = 0;
+let mut col = 0;
+        let mut row = 0;
         let mut foreground_color = RgbColor::new_8bpc(0, 0xff, 0);
 
-        let mut emit_sixel = |d: &u8, foreground_color: &RgbColor, x: u32, y: u32| {
-            if x >= width {
+        let mut emit_sixel = |d: &u8, foreground_color: &RgbColor, col: u32, row: u32| {
+            if col >= width {
                 return;
             }
             let (red, green, blue) = foreground_color.to_tuple_rgb8();
             for bitno in 0..6 {
-                if y + bitno >= height {
+                if row + bitno >= height {
                     break;
                 }
                 let on = (d & (1 << bitno)) != 0;
                 if on {
-                    image.get_pixel_mut(x, y + bitno).0 = [red, green, blue, 0xffu8];
+                    image.get_pixel_mut(col, row + bitno).0 = [red, green, blue, 0xffu8];
                 }
             }
         };
@@ -57,21 +58,21 @@ impl TerminalState {
         for d in &sixel.data {
             match d {
                 SixelData::Data(d) => {
-                    emit_sixel(d, &foreground_color, x, y);
-                    x += 1;
+                    emit_sixel(d, &foreground_color, col, row);
+                    col += 1;
                 }
 
                 SixelData::Repeat { repeat_count, data } => {
                     for _ in 0..*repeat_count {
-                        emit_sixel(data, &foreground_color, x, y);
-                        x += 1;
+                        emit_sixel(data, &foreground_color, col, row);
+                        col += 1;
                     }
                 }
 
-                SixelData::CarriageReturn => x = 0,
+                SixelData::CarriageReturn => col = 0,
                 SixelData::NewLine => {
-                    x = 0;
-                    y += 6;
+                    col = 0;
+                    row += 6;
                 }
 
                 SixelData::DefineColorMapRGB { color_number, rgb } => {
@@ -90,21 +91,21 @@ impl TerminalState {
                     // go from sixel red to standard hsl red.
                     // Negative values wrap around the circle.
                     // https://github.com/wezterm/wezterm/issues/775
-                    let angle = (*hue_angle as f64) - 120.0;
+                    let angle = f64::from(*hue_angle) - 120.0;
                     let angle = if angle < 0. { 360.0 + angle } else { angle };
-                    let c = csscolorparser::Color::from_hsla(
+                    let color = csscolorparser::Color::from_hsla(
                         angle as f32,
-                        *saturation as f32 / 100.,
-                        *lightness as f32 / 100.,
+                        f32::from(*saturation) / 100.,
+                        f32::from(*lightness) / 100.,
                         1.,
                     );
-                    let [r, g, b, _] = c.to_rgba8();
-                    color_map.insert(*color_number, RgbColor::new_8bpc(r, g, b));
+                    let [red, green, blue, _] = color.to_rgba8();
+                    color_map.insert(*color_number, RgbColor::new_8bpc(red, green, blue));
                 }
 
                 SixelData::SelectColorMapEntry(n) => {
-                    foreground_color = color_map.get(n).cloned().unwrap_or_else(|| {
-                        log::error!("sixel selected noexistent colormap entry {}", n);
+                    foreground_color = color_map.get(n).copied().unwrap_or_else(|| {
+                        log::error!("sixel selected noexistent colormap entry {n}");
                         RgbColor::new_8bpc(255, 255, 255)
                     });
                 }
@@ -129,7 +130,7 @@ impl TerminalState {
             self.cursor.x = 0;
             self.cursor.y = 0;
         }
-        if let Err(err) = self.assign_image_to_cells(ImageAttachParams {
+        if let Err(err) = self.assign_image_to_cells(&ImageAttachParams {
             image_width: width,
             image_height: height,
             source_width: None,
@@ -147,7 +148,7 @@ impl TerminalState {
             placement_id: None,
             do_not_move_cursor: self.sixel_display_mode,
         }) {
-            log::error!("set sixel image: {:#}", err);
+            log::error!("set sixel image: {err:#}");
         }
         if self.sixel_display_mode {
             self.cursor = old_cursor;

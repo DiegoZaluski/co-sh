@@ -1,9 +1,10 @@
 //! Colors for attributes
 
+#![allow(clippy::items_after_statements, clippy::similar_names, clippy::non_std_lazy_statics)]
+pub use crate::term_screen::cell::color::{AnsiColor, ColorAttribute, RgbColor, SrgbaTuple};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::result::Result;
-pub use crate::term_screen::cell::color::{AnsiColor, ColorAttribute, RgbColor, SrgbaTuple};
 
 #[derive(Clone, PartialEq)]
 pub struct Palette256(pub [SrgbaTuple; 256]);
@@ -22,6 +23,7 @@ impl<'de> Deserialize<'de> for Palette256 {
     where
         D: Deserializer<'de>,
     {
+        #[allow(clippy::items_after_statements)]
         let s = Vec::<SrgbaTuple>::deserialize(deserializer)?;
         use std::convert::TryInto;
         Ok(Self(s.try_into().map_err(|_| {
@@ -40,8 +42,7 @@ impl std::iter::FromIterator<SrgbaTuple> for Palette256 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColorPalette {
     pub colors: Palette256,
     pub foreground: SrgbaTuple,
@@ -66,20 +67,22 @@ impl fmt::Debug for Palette256 {
 }
 
 impl ColorPalette {
+    #[must_use]
     pub fn resolve_fg(&self, color: ColorAttribute) -> SrgbaTuple {
         match color {
             ColorAttribute::Default => self.foreground,
             ColorAttribute::PaletteIndex(idx) => self.colors.0[idx as usize],
             ColorAttribute::TrueColorWithPaletteFallback(color, _)
-            | ColorAttribute::TrueColorWithDefaultFallback(color) => color.into(),
+            | ColorAttribute::TrueColorWithDefaultFallback(color) => color,
         }
     }
+    #[must_use]
     pub fn resolve_bg(&self, color: ColorAttribute) -> SrgbaTuple {
         match color {
             ColorAttribute::Default => self.background,
             ColorAttribute::PaletteIndex(idx) => self.colors.0[idx as usize],
             ColorAttribute::TrueColorWithPaletteFallback(color, _)
-            | ColorAttribute::TrueColorWithDefaultFallback(color) => color.into(),
+            | ColorAttribute::TrueColorWithDefaultFallback(color) => color,
         }
     }
 }
@@ -140,6 +143,7 @@ impl ColorPalette {
         // 216 color cube.
         // This isn't the perfect color cube, but it matches the values used
         // by xterm, which are slightly brighter.
+        #[allow(clippy::items_after_statements)]
         static RAMP6: [u8; 6] = [0, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
         for idx in 0..216 {
             let blue = RAMP6[idx % 6];
@@ -150,6 +154,7 @@ impl ColorPalette {
         }
 
         // 24 grey scales
+        #[allow(clippy::items_after_statements)]
         static GREYS: [u8; 24] = [
             0x08, 0x12, 0x1c, 0x26, 0x30, 0x3a, 0x44, 0x4e, 0x58, 0x62, 0x6c, 0x76, 0x80, 0x8a,
             0x94, 0x9e, 0xa8, 0xb2, /* Grey70 */
@@ -166,9 +171,12 @@ impl ColorPalette {
 
         let cursor_bg = RgbColor::new_8bpc(0x52, 0xad, 0x70).into();
         let cursor_border = RgbColor::new_8bpc(0x52, 0xad, 0x70).into();
-        let cursor_fg = colors[AnsiColor::Black as usize].into();
+        #[allow(clippy::similar_names)]
+        let cursor_fg = colors[AnsiColor::Black as usize];
 
+        #[allow(clippy::similar_names)]
         let selection_fg = SrgbaTuple(0., 0., 0., 0.);
+        #[allow(clippy::similar_names)]
         let selection_bg = SrgbaTuple(0.5, 0.4, 0.6, 0.5);
 
         let scrollbar_thumb = RgbColor::new_8bpc(0x22, 0x22, 0x22).into();

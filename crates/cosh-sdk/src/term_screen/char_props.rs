@@ -11,8 +11,9 @@ pub enum Presentation {
 
 impl Presentation {
     /// Determine presentation for a grapheme.
-    /// Returns (default_presentation, optional_variation_override).
+    /// Returns (`default_presentation`, `optional_variation_override`).
     /// A VariationSelector-16 (U+FE0F) forces Emoji, VS-15 (U+FE0E) forces Text.
+    #[must_use]
     pub fn for_grapheme(s: &str) -> (Presentation, Option<Presentation>) {
         let mut chars = s.chars();
         let base = chars.next();
@@ -60,27 +61,27 @@ pub enum WcWidth {
 }
 
 impl WcWidth {
+    #[must_use]
     pub fn width_unicode_9_or_later(self) -> u32 {
         match self {
             WcWidth::Two | WcWidth::Ambiguous => 2,
-            WcWidth::One => 1,
+            WcWidth::One | WcWidth::Unassigned => 1,
             WcWidth::Zero => 0,
-            WcWidth::Unassigned => 1,
         }
     }
 
+    #[must_use]
     pub fn width_unicode_8_or_earlier(self) -> u32 {
         match self {
             WcWidth::Two => 2,
-            WcWidth::Ambiguous => 1,
-            WcWidth::One => 1,
+            WcWidth::Ambiguous | WcWidth::One | WcWidth::Unassigned => 1,
             WcWidth::Zero => 0,
-            WcWidth::Unassigned => 1,
         }
     }
 }
 
 /// A simplified width table: classify a char using unicode-width
+#[must_use]
 pub fn wcwidth_classify(c: char) -> WcWidth {
     // Special cases: line/paragraph separator have zero width
     if matches!(c, '\u{2028}' | '\u{2029}') {
@@ -98,9 +99,9 @@ pub fn wcwidth_classify(c: char) -> WcWidth {
             }
         }
         _ => {
-            if (c >= '\u{3000}' && c <= '\u{3000}')
-                || (c >= '\u{FF01}' && c <= '\u{FF60}')
-                || (c >= '\u{FFE0}' && c <= '\u{FFE6}')
+            if c == '\u{3000}'
+                || ('\u{FF01}'..='\u{FF60}').contains(&c)
+                || ('\u{FFE0}'..='\u{FFE6}').contains(&c)
             {
                 WcWidth::Two
             } else if c > '\u{00FF}' {
@@ -116,18 +117,20 @@ pub fn wcwidth_classify(c: char) -> WcWidth {
 pub struct WhiteSpaceTable;
 
 impl WhiteSpaceTable {
+    #[must_use]
     pub fn contains_u32(&self, c: u32) -> bool {
-        char::from_u32(c).map_or(false, |ch| ch.is_whitespace())
+        char::from_u32(c).is_some_and(char::is_whitespace)
     }
 }
 
 pub static WHITE_SPACE: WhiteSpaceTable = WhiteSpaceTable;
 
-/// Inline replacement for wezterm_char_props::emoji_variation::WCWIDTH_TABLE
+/// Inline replacement for `wezterm_char_props::emoji_variation::WCWIDTH_TABLE`
 pub mod emoji_variation {
     use super::WcWidth;
     pub struct WcWidthTable;
     impl WcWidthTable {
+        #[must_use]
         pub fn classify(&self, c: char) -> WcWidth {
             super::wcwidth_classify(c)
         }
@@ -135,17 +138,17 @@ pub mod emoji_variation {
     pub static WCWIDTH_TABLE: WcWidthTable = WcWidthTable;
 }
 
-/// Inline replacement for wezterm_char_props::emoji
+/// Inline replacement for `wezterm_char_props::emoji`
 pub mod emoji {
     pub use super::Presentation;
 }
 
-/// Inline replacement for wezterm_char_props::widechar_width
+/// Inline replacement for `wezterm_char_props::widechar_width`
 pub mod widechar_width {
     pub use super::WcWidth;
 }
 
-/// Inline replacement for wezterm_char_props::white_space
+/// Inline replacement for `wezterm_char_props::white_space`
 pub mod white_space {
     pub use super::WHITE_SPACE;
 }

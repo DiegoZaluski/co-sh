@@ -1,30 +1,30 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::items_after_statements, clippy::too_many_lines, clippy::needless_pass_by_value, clippy::missing_panics_doc, clippy::return_self_not_must_use)]
 use super::super::cellcluster::CellCluster;
 use super::super::hyperlink::Rule;
+use super::super::{Change, SEQ_ZERO, SequenceNo};
 use super::cellref::CellRef;
 use super::clusterline::ClusteredLine;
 use super::linebits::LineBits;
 use super::storage::{CellStorage, VisibleCellIter};
 use super::vecstorage::{VecStorage, VecStorageIter};
-use super::super::{Change, SequenceNo, SEQ_ZERO};
-use std::borrow::Cow;
-use std::sync::{Arc, Weak};
+use crate::term_screen::bidi::{Direction, ParagraphDirectionHint};
+use crate::term_screen::cell::{Cell, CellAttributes, SemanticType, UnicodeVersion};
 use core::any::Any;
 use core::hash::Hash;
 use core::ops::Range;
 use finl_unicode::grapheme_clusters::Graphemes;
 use serde::{Deserialize, Serialize};
 use siphasher::sip128::{Hasher128, SipHasher};
+use std::borrow::Cow;
 use std::sync::Mutex;
-use crate::term_screen::bidi::{Direction, ParagraphDirectionHint};
-use crate::term_screen::cell::{Cell, CellAttributes, SemanticType, UnicodeVersion};
+use std::sync::{Arc, Weak};
 
-use std::string::ToString;
 use std::string::String;
+use std::string::ToString;
 use std::vec;
 use std::vec::Vec;
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ZoneRange {
     pub semantic_type: SemanticType,
     pub range: Range<u16>,
@@ -36,8 +36,7 @@ pub enum DoubleClickRange {
     RangeWithWrap(Range<usize>),
 }
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Line {
     pub(crate) cells: CellStorage,
     zones: Vec<ZoneRange>,
@@ -66,6 +65,7 @@ impl PartialEq for Line {
 }
 
 impl Line {
+    #[must_use]
     pub fn with_width_and_cell(width: usize, cell: Cell, seqno: SequenceNo) -> Self {
         let mut cells = Vec::with_capacity(width);
         cells.resize(width, cell.clone());
@@ -79,6 +79,7 @@ impl Line {
         }
     }
 
+    #[must_use]
     pub fn from_cells(cells: Vec<Cell>, seqno: SequenceNo) -> Self {
         let bits = LineBits::NONE;
         Self {
@@ -94,6 +95,7 @@ impl Line {
     /// and lower memory utilization.
     /// The line will automatically switch to cell storage when necessary
     /// to apply edits.
+    #[must_use]
     pub fn new(seqno: SequenceNo) -> Self {
         Self {
             bits: LineBits::NONE,
@@ -109,9 +111,10 @@ impl Line {
     /// This is independent of the seqno and is based purely on the
     /// content of the line.
     ///
-    /// Line doesn't implement Hash in terms of this function as compute_shape_hash
+    /// Line doesn't implement Hash in terms of this function as `compute_shape_hash`
     /// doesn't every possible bit of internal state, and we don't want to
     /// encourage using Line directly as a hash key.
+    #[must_use]
     pub fn compute_shape_hash(&self) -> [u8; 16] {
         let mut hasher = SipHasher::new();
         self.bits.bits().hash(&mut hasher);
@@ -121,6 +124,7 @@ impl Line {
         hasher.finish128().as_bytes()
     }
 
+    #[must_use]
     pub fn with_width(width: usize, seqno: SequenceNo) -> Self {
         let mut cells = Vec::with_capacity(width);
         cells.resize_with(width, Cell::blank);
@@ -134,6 +138,7 @@ impl Line {
         }
     }
 
+    #[must_use]
     pub fn from_text(
         s: &str,
         attrs: &CellAttributes,
@@ -160,6 +165,7 @@ impl Line {
         }
     }
 
+    #[must_use]
     pub fn from_text_with_wrapped_last_col(
         s: &str,
         attrs: &CellAttributes,
@@ -209,12 +215,11 @@ impl Line {
             for cell in cells {
                 let need_new_line = lines
                     .last_mut()
-                    .map(|line| line.len() + cell.width() > width)
-                    .unwrap_or(true);
+                    .is_none_or(|line| line.len() + cell.width() > width);
                 if need_new_line {
-                    lines
-                        .last_mut()
-                        .map(|line| line.set_last_cell_was_wrapped(true, seqno));
+                    if let Some(line) = lines.last_mut() {
+                        line.set_last_cell_was_wrapped(true, seqno);
+                    }
                     lines.push(Line::new(seqno));
                     delta = cell.cell_index();
                 }
@@ -240,7 +245,7 @@ impl Line {
     /// and not for use by "middleware" crates.
     /// A Weak reference is stored.
     /// `get_appdata` is used to retrieve a previously stored reference.
-        pub fn set_appdata<T: Any + Send + Sync>(&self, appdata: Arc<T>) {
+    pub fn set_appdata<T: Any + Send + Sync>(&self, appdata: Arc<T>) {
         let appdata: Arc<dyn Any + Send + Sync> = appdata;
         self.appdata
             .lock()
@@ -248,19 +253,19 @@ impl Line {
             .replace(Arc::downgrade(&appdata));
     }
 
-        pub fn clear_appdata(&self) {
+    pub fn clear_appdata(&self) {
         self.appdata.lock().unwrap().take();
     }
 
     /// Retrieve the appdata for the line, if any.
     /// This may return None in the case where the underlying data has
     /// been released: Line only stores a Weak reference to it.
-        pub fn get_appdata(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+    pub fn get_appdata(&self) -> Option<Arc<dyn Any + Send + Sync>> {
         self.appdata
             .lock()
             .unwrap()
             .as_ref()
-            .and_then(|data| data.upgrade())
+            .and_then(std::sync::Weak::upgrade)
     }
 
     /// Returns true if the line's last changed seqno is more recent
@@ -274,7 +279,7 @@ impl Line {
     }
 
     /// Annotate the line with the sequence number of a change.
-    /// This can be used together with Line::changed_since to
+    /// This can be used together with `Line::changed_since` to
     /// manage caching and rendering
     #[inline]
     pub fn update_last_change_seqno(&mut self, seqno: SequenceNo) {
@@ -357,7 +362,7 @@ impl Line {
     }
 
     /// Set the bidi direction for the line.
-    /// This affects both the bidi algorithm (if enabled via set_bidi_enabled)
+    /// This affects both the bidi algorithm (if enabled via `set_bidi_enabled`)
     /// and the layout direction of the line.
     /// `auto_detect` specifies whether the direction should be auto-detected
     /// before falling back to the specified direction.
@@ -386,7 +391,7 @@ impl Line {
         self.update_last_change_seqno(seqno);
     }
 
-    /// Returns a tuple of (BIDI_ENABLED, Direction), indicating whether
+    /// Returns a tuple of (`BIDI_ENABLED`, Direction), indicating whether
     /// the line should have the bidi algorithm applied and its base
     /// direction, respectively.
     pub fn bidi_info(&self) -> (bool, ParagraphDirectionHint) {
@@ -489,7 +494,7 @@ impl Line {
         let cells = self.coerce_vec_storage();
         for cell in cells.iter_mut() {
             let replace = match cell.attrs().hyperlink() {
-                Some(ref link) if link.is_implicit() => Some(Cell::new_grapheme(
+                Some(link) if link.is_implicit() => Some(Cell::new_grapheme(
                     cell.str(),
                     cell.attrs().clone().set_hyperlink(None).clone(),
                     None,
@@ -551,7 +556,7 @@ impl Line {
     /// is the responsibility of the caller to call `invalidate_implicit_hyperlinks`
     /// if it wishes to call this function with different `rules`.
     ///
-    /// This function will call Line::clear_appdata on lines where
+    /// This function will call `Line::clear_appdata` on lines where
     /// hyperlinks are adjusted.
     pub fn apply_hyperlink_rules(rules: &[Rule], logical_line: &mut [&mut Line]) {
         if rules.is_empty() || logical_line.is_empty() {
@@ -581,8 +586,8 @@ impl Line {
 
         if !logical.has_hyperlink() {
             for line in logical_line.iter_mut() {
-			line.bits.set(LineBits::SCANNED_IMPLICIT_HYPERLINKS, true);
-				line.clear_appdata();
+                line.bits.set(LineBits::SCANNED_IMPLICIT_HYPERLINKS, true);
+                line.clear_appdata();
             }
             return;
         }
@@ -595,8 +600,8 @@ impl Line {
             let remainder = logical.split_off(len, seq);
             **phys = logical;
             logical = remainder;
-			phys.set_last_cell_was_wrapped(wrapped, seq);
-			phys.clear_appdata();
+            phys.set_last_cell_was_wrapped(wrapped, seq);
+            phys.clear_appdata();
             if is_cluster {
                 phys.compress_for_scrollback();
             }
@@ -680,8 +685,7 @@ impl Line {
             && upper >= len
             && cells
                 .last()
-                .map(|cell| cell.attrs().wrapped())
-                .unwrap_or(false)
+                .is_some_and(|cell| cell.attrs().wrapped())
         {
             DoubleClickRange::RangeWithWrap(lower..upper)
         } else {
@@ -779,7 +783,7 @@ impl Line {
         cell: Cell,
         seqno: SequenceNo,
     ) {
-        self.set_cell_impl(idx, cell, true, seqno)
+        self.set_cell_impl(idx, cell, true, seqno);
     }
 
     fn raw_set_cell(&mut self, idx: usize, cell: Cell, clear: bool) {
@@ -978,7 +982,7 @@ impl Line {
     }
 
     pub fn fill_range(&mut self, cols: Range<usize>, cell: &Cell, seqno: SequenceNo) {
-        if self.len() == 0 && *cell == Cell::blank() {
+        if self.is_empty() && *cell == Cell::blank() {
             // We would be filling it with blanks only to prune
             // them all away again before we return; NOP
             return;
@@ -997,15 +1001,19 @@ impl Line {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Iterates the visible cells, respecting the width of the cell.
     /// For instance, a double-width cell overlaps the following (blank)
     /// cell, so that blank cell is omitted from the iterator results.
-    /// The iterator yields (column_index, Cell).  Column index is the
-    /// index into Self::cells, and due to the possibility of skipping
+    /// The iterator yields (`column_index`, Cell).  Column index is the
+    /// index into `Self::cells`, and due to the possibility of skipping
     /// the characters that follow wide characters, the column index may
     /// skip some positions.  It is returned as a convenience to the consumer
-    /// as using .enumerate() on this iterator wouldn't be as useful.
-    pub fn visible_cells<'a>(&'a self) -> impl Iterator<Item = CellRef<'a>> {
+    /// as using .`enumerate()` on this iterator wouldn't be as useful.
+    pub fn visible_cells(&self) -> impl Iterator<Item = CellRef<'_>> {
         match &self.cells {
             CellStorage::V(cells) => VisibleCellIter::V(VecStorageIter {
                 cells: cells.iter(),
@@ -1038,7 +1046,7 @@ impl Line {
         self.make_cells();
 
         match &mut self.cells {
-            CellStorage::V(c) => return c,
+            CellStorage::V(c) => c,
             CellStorage::C(_) => unreachable!(),
         }
     }
@@ -1069,8 +1077,7 @@ impl Line {
     pub fn last_cell_was_wrapped(&self) -> bool {
         self.visible_cells()
             .last()
-            .map(|c| c.attrs().wrapped())
-            .unwrap_or(false)
+            .is_some_and(|c| c.attrs().wrapped())
     }
 
     /// Adjust the value of the wrapped attribute on the last cell of this
@@ -1119,7 +1126,7 @@ impl Line {
 
     /// mutable access the cell data, but the caller must take care
     /// to only mutate attributes rather than the cell textual content.
-    /// Use set_cell if you need to modify the textual content of the
+    /// Use `set_cell` if you need to modify the textual content of the
     /// cell, so that important invariants are upheld.
     pub fn cells_mut_for_attr_changes_only(&mut self) -> &mut [Cell] {
         self.coerce_vec_storage().as_mut_slice()
@@ -1169,7 +1176,7 @@ impl Line {
                         // we can prune it out and return just the line
                         // clearing operation
                         if let Change::AllAttributes(_) = result[0] {
-                            result.clear()
+                            result.clear();
                         }
                     }
 
@@ -1178,7 +1185,7 @@ impl Line {
                     // background color, we don't need to emit an instruction
                     // to clear the remainder of the line unless it has a different
                     // background color.
-                    if attr.background() != Default::default() {
+                    if attr.background() != crate::term_screen::cell::color::ColorAttribute::default() {
                         result.push(Change::ClearToEndOfLine(attr.background()));
                     }
                 } else {
@@ -1193,7 +1200,7 @@ impl Line {
     }
 }
 
-impl<'a> From<&'a str> for Line {
+impl From<&str> for Line {
     fn from(s: &str) -> Line {
         Line::from_text(s, &CellAttributes::default(), SEQ_ZERO, None)
     }

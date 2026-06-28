@@ -3,8 +3,7 @@ use super::clusterline::{ClusterLineCellIter, ClusteredLine};
 use super::vecstorage::{VecStorage, VecStorageIter};
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) enum CellStorage {
     V(VecStorage),
     C(ClusteredLine),

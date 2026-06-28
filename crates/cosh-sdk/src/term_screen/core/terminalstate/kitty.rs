@@ -1,7 +1,14 @@
-use super::image::*;
-use super::{ImageAttachParams, PlacementInfo};
-use super::TerminalState;
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::too_many_lines, clippy::needless_pass_by_value, clippy::manual_let_else, clippy::unnecessary_wraps, clippy::missing_errors_doc, clippy::missing_panics_doc)]
 use super::super::StableRowIndex;
+use super::TerminalState;
+use super::image::{check_image_dimensions, dimensions, ImageAttachParams, ImageAttachStyle, PlacementInfo};
+use crate::term_screen::cell::image::ImageDataType;
+use crate::term_screen::escape_parser::apc::{
+    KittyFrameCompositionMode, KittyImage, KittyImageCompression, KittyImageData, KittyImageDelete,
+    KittyImageFormat, KittyImageFrame, KittyImageFrameCompose, KittyImagePlacement,
+    KittyImageTransmit, KittyImageVerbosity,
+};
+use crate::term_screen::surface::change::ImageData;
 use ::image::{
     DynamicImage, GenericImage, GenericImageView, ImageBuffer, RgbImage, Rgba, RgbaImage,
 };
@@ -10,13 +17,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
-use crate::term_screen::cell::image::ImageDataType;
-use crate::term_screen::escape_parser::apc::{
-    KittyFrameCompositionMode, KittyImage, KittyImageCompression, KittyImageData, KittyImageDelete,
-    KittyImageFormat, KittyImageFrame, KittyImageFrameCompose, KittyImagePlacement,
-    KittyImageTransmit, KittyImageVerbosity,
-};
-use crate::term_screen::surface::change::ImageData;
 
 #[derive(Debug, Default)]
 pub struct KittyImageState {
@@ -88,33 +88,26 @@ impl TerminalState {
                 )
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "image_number has no matching image id {:?} in number_to_id",
-                        image_number
+                        "image_number has no matching image id {image_number:?} in number_to_id"
                     )
                 })?,
         };
 
         log::trace!(
-            "kitty_img_place image_id {:?} image_no {:?} placement {:?} verb {:?}",
-            image_id,
-            image_number,
-            placement,
-            verbosity
+            "kitty_img_place image_id {image_id:?} image_no {image_number:?} placement {placement:?} verb {verbosity:?}"
         );
         if image_id != 0 {
             self.kitty_remove_placement(image_id, placement.placement_id);
         }
         let img = Arc::clone(self.kitty_img.id_to_data.get(&image_id).ok_or_else(|| {
             anyhow::anyhow!(
-                "no matching image id {} in id_to_data for image_number {:?}",
-                image_id,
-                image_number
+                "no matching image id {image_id} in id_to_data for image_number {image_number:?}"
             )
         })?);
 
         let (image_width, image_height) = img.data().dimensions()?;
 
-        let info = self.assign_image_to_cells(ImageAttachParams {
+        let info = self.assign_image_to_cells(&ImageAttachParams {
             image_width,
             image_height,
             source_width: placement.w,
@@ -163,7 +156,7 @@ impl TerminalState {
                 placement,
                 verbosity,
             } => {
-                log::trace!("TransmitDataAndDisplay {:#?} {:#?}", transmit, placement);
+                log::trace!("TransmitDataAndDisplay {transmit:#?} {placement:#?}");
                 let image_number = transmit.image_number;
                 let image_id = self.kitty_img_transmit(transmit, verbosity)?;
                 self.kitty_img_place(Some(image_id), image_number, placement, verbosity)
@@ -173,7 +166,7 @@ impl TerminalState {
     }
 
     pub(crate) fn kitty_img(&mut self, img: KittyImage) -> anyhow::Result<()> {
-        log::trace!("{:?}", img);
+        log::trace!("{img:?}");
         if !self.config.enable_kitty_graphics() {
             return Ok(());
         }
@@ -195,7 +188,7 @@ impl TerminalState {
                         false,
                         transmit.image_id,
                         transmit.image_number,
-                        format!("ERROR:{:#}", err),
+                        format!("ERROR:{err:#}"),
                     );
                 }
             },
@@ -249,11 +242,7 @@ impl TerminalState {
                 verbosity,
             } => {
                 log::trace!(
-                    "remove a placement: image_id {} placement_id {:?} delete {} verb {:?}",
-                    image_id,
-                    placement_id,
-                    delete,
-                    verbosity
+                    "remove a placement: image_id {image_id} placement_id {placement_id:?} delete {delete} verb {verbosity:?}"
                 );
 
                 self.kitty_remove_placement(image_id, placement_id);
@@ -269,7 +258,7 @@ impl TerminalState {
                 self.kitty_remove_all_placements(delete);
             }
             KittyImage::Delete { what, verbosity } => {
-                log::warn!("unhandled KittyImage::Delete {:?} {:?}", what, verbosity);
+                log::warn!("unhandled KittyImage::Delete {what:?} {verbosity:?}");
             }
             KittyImage::TransmitFrame {
                 transmit,
@@ -277,15 +266,15 @@ impl TerminalState {
                 verbosity,
             } => {
                 if let Err(err) = self.kitty_frame_transmit(transmit, frame, verbosity) {
-                    log::error!("Error {:#} while handling KittyImage::TransmitFrame", err,);
+                    log::error!("Error {err:#} while handling KittyImage::TransmitFrame");
                 }
             }
             KittyImage::ComposeFrame { frame, verbosity } => {
                 if let Err(err) = self.kitty_frame_compose(frame, verbosity) {
-                    log::error!("Error {:#} while handling KittyImage::ComposeFrame", err);
+                    log::error!("Error {err:#} while handling KittyImage::ComposeFrame");
                 }
             }
-        };
+        }
 
         Ok(())
     }
@@ -313,7 +302,7 @@ impl TerminalState {
     fn kitty_remove_placement(&mut self, image_id: u32, placement_id: Option<u32>) {
         if placement_id.is_some() {
             if let Some(info) = self.kitty_img.placements.remove(&(image_id, placement_id)) {
-                log::trace!("removed placement {} {:?}", image_id, placement_id);
+                log::trace!("removed placement {image_id} {placement_id:?}");
                 self.kitty_remove_placement_from_model(image_id, placement_id, info);
             }
         } else {
@@ -323,7 +312,7 @@ impl TerminalState {
                     to_clear.push(*p);
                 }
             }
-            for p in to_clear.into_iter() {
+            for p in to_clear {
                 if let Some(info) = self.kitty_img.placements.remove(&(image_id, p)) {
                     self.kitty_remove_placement_from_model(image_id, p, info);
                 }
@@ -334,12 +323,12 @@ impl TerminalState {
             "after remove: there are {} placements, {} images, {} memory",
             self.kitty_img.placements.len(),
             self.kitty_img.id_to_data.len(),
-            self.kitty_img.used_memory,
+            self.kitty_img.used_memory
         );
     }
 
     pub(crate) fn kitty_remove_all_placements(&mut self, delete: bool) {
-        for ((image_id, p), info) in std::mem::take(&mut self.kitty_img.placements).into_iter() {
+        for ((image_id, p), info) in std::mem::take(&mut self.kitty_img.placements) {
             self.kitty_remove_placement_from_model(image_id, p, info);
         }
         if delete {
@@ -369,20 +358,20 @@ impl TerminalState {
             }
         }
 
-        log::trace!("Query Response: {}", message);
+        log::trace!("Query Response: {message}");
 
         match (image_id, image_no) {
             (Some(id), Some(no)) => {
-                write!(self.writer, "\x1b_GI={},i={};{}\x1b\\", no, id, message).ok();
+                write!(self.writer, "\x1b_GI={no},i={id};{message}\x1b\\").ok();
             }
             (Some(id), None) => {
-                write!(self.writer, "\x1b_Gi={};{}\x1b\\", id, message).ok();
+                write!(self.writer, "\x1b_Gi={id};{message}\x1b\\").ok();
             }
             (None, Some(no)) => {
-                write!(self.writer, "\x1b_GI={};{}\x1b\\", no, message).ok();
+                write!(self.writer, "\x1b_GI={no};{message}\x1b\\").ok();
             }
             (None, None) => {
-                write!(self.writer, "\x1b_G{}\x1b\\", message).ok();
+                write!(self.writer, "\x1b_G{message}\x1b\\").ok();
             }
         }
         self.writer.flush().ok();
@@ -394,18 +383,15 @@ impl TerminalState {
         verbosity: KittyImageVerbosity,
     ) -> anyhow::Result<()> {
         let image_id = match frame.image_number {
-            Some(no) => match self.kitty_img.number_to_id.get(&no) {
-                Some(id) => *id,
-                None => {
-                    self.kitty_send_response(
-                        verbosity,
-                        false,
-                        frame.image_id,
-                        frame.image_number,
-                        "ENOENT".to_string(),
-                    );
-                    anyhow::bail!("no such image_number {}", no);
-                }
+            Some(no) => if let Some(id) = self.kitty_img.number_to_id.get(&no) { *id } else {
+                self.kitty_send_response(
+                    verbosity,
+                    false,
+                    frame.image_id,
+                    frame.image_number,
+                    "ENOENT".to_string(),
+                );
+                anyhow::bail!("no such image_number {no}");
             },
             None => frame.image_id.ok_or_else(|| {
                 self.kitty_send_response(
@@ -444,7 +430,7 @@ impl TerminalState {
             .kitty_img
             .id_to_data
             .get(&image_id)
-            .ok_or_else(|| anyhow::anyhow!("invalid image id {}", image_id))?;
+            .ok_or_else(|| anyhow::anyhow!("invalid image id {image_id}"))?;
 
         let mut img = img.data();
         match &mut *img {
@@ -459,9 +445,7 @@ impl TerminalState {
             } => {
                 anyhow::ensure!(
                     src_frame == target_frame && src_frame == 1,
-                    "src_frame={} target_frame={} but there is only a single frame",
-                    src_frame,
-                    target_frame
+                    "src_frame={src_frame} target_frame={target_frame} but there is only a single frame"
                 );
 
                 let src = clip_view(
@@ -486,8 +470,6 @@ impl TerminalState {
                     frame.composition_mode,
                 )?;
 
-                drop(dest);
-
                 *hash = ImageDataType::hash_bytes(data);
             }
             ImageDataType::AnimRgba8 {
@@ -499,13 +481,11 @@ impl TerminalState {
             } => {
                 anyhow::ensure!(
                     src_frame > 0 && src_frame <= frames.len(),
-                    "src_frame {} is out of range",
-                    src_frame
+                    "src_frame {src_frame} is out of range"
                 );
                 anyhow::ensure!(
                     target_frame > 0 && target_frame <= frames.len(),
-                    "target_frame {} is out of range",
-                    target_frame
+                    "target_frame {target_frame} is out of range"
                 );
 
                 let src = clip_view(
@@ -530,7 +510,6 @@ impl TerminalState {
                     frame.composition_mode,
                 )?;
 
-                drop(dest);
                 hashes[target_frame - 1] = ImageDataType::hash_bytes(&frames[target_frame - 1]);
             }
         }
@@ -565,7 +544,7 @@ impl TerminalState {
                 ..
             } => RgbaImage::from_vec(width, height, data)
                 .ok_or_else(|| anyhow::anyhow!("data isn't rgba8"))?,
-            wat => anyhow::bail!("data isn't rgba8 {:?}", wat),
+            wat => anyhow::bail!("data isn't rgba8 {wat:?}"),
         };
 
         let background_pixel = frame.background_pixel.unwrap_or(0);
@@ -576,22 +555,17 @@ impl TerminalState {
             (background_pixel & 0xff) as u8,
         ]);
 
-        let anim = match self.kitty_img.id_to_data.get(&image_id) {
-            Some(anim) => anim,
-            None => {
-                self.kitty_send_response(
-                    verbosity,
-                    false,
-                    Some(image_id),
-                    image_number,
-                    "ENOENT".to_string(),
-                );
-                anyhow::bail!(
-                    "no matching image id {} in id_to_data for image_number {:?}",
-                    image_id,
-                    image_number
-                )
-            }
+        let anim = if let Some(anim) = self.kitty_img.id_to_data.get(&image_id) { anim } else {
+            self.kitty_send_response(
+                verbosity,
+                false,
+                Some(image_id),
+                image_number,
+                "ENOENT".to_string(),
+            );
+            anyhow::bail!(
+                "no matching image id {image_id} in id_to_data for image_number {image_number:?}"
+            )
         };
 
         let mut anim = anim.data();
@@ -604,7 +578,7 @@ impl TerminalState {
 
         match &mut *anim {
             ImageDataType::EncodedFile(_) => {
-                anyhow::bail!("Expected decoded image for image id {}", image_id)
+                anyhow::bail!("Expected decoded image for image id {image_id}")
             }
             ImageDataType::Rgba8 {
                 data,
@@ -616,8 +590,7 @@ impl TerminalState {
                     Some(1) => Some(1),
                     None => None,
                     Some(n) => anyhow::bail!(
-                        "attempted to copy frame {} but there is only a single frame",
-                        n
+                        "attempted to copy frame {n} but there is only a single frame"
                     ),
                 };
 
@@ -630,16 +603,12 @@ impl TerminalState {
                                 .ok_or_else(|| {
                                     anyhow::anyhow!(
                                         "ImageBuffer::from_raw failed for single \
-                                         frame of {}x{} ({} bytes)",
-                                        width,
-                                        height,
-                                        len
+                                         frame of {width}x{height} ({len} bytes)"
                                     )
                                 })?;
 
                         blit(&mut anim_img, &img, x, y, frame.composition_mode)?;
 
-                        drop(anim_img);
                         *hash = ImageDataType::hash_bytes(data);
                     }
                     Some(2) | None => {
@@ -669,8 +638,7 @@ impl TerminalState {
                         };
                     }
                     Some(n) => anyhow::bail!(
-                        "attempted to edit frame {} but there is only a single frame",
-                        n
+                        "attempted to edit frame {n} but there is only a single frame"
                     ),
                 }
             }
@@ -723,16 +691,12 @@ impl TerminalState {
                             .ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "ImageBuffer::from_raw failed for single \
-                                         frame of {}x{} ({} bytes)",
-                                    width,
-                                    height,
-                                    len
+                                         frame of {width}x{height} ({len} bytes)"
                                 )
                             })?;
 
                     blit(&mut anim_img, &img, x, y, frame.composition_mode)?;
 
-                    drop(anim_img);
                     hashes[frame_no - 1] = ImageDataType::hash_bytes(&frames[frame_no - 1]);
                 }
             }
@@ -745,7 +709,7 @@ impl TerminalState {
         &mut self,
         transmit: KittyImageTransmit,
     ) -> anyhow::Result<(u32, Option<u32>, ImageDataType)> {
-        log::trace!("transmit {:?}", transmit);
+        log::trace!("transmit {transmit:?}");
         let (id, no) = match (transmit.image_id, transmit.image_number) {
             (Some(_), Some(_)) => {
                 // TODO: send an EINVAL error back here
@@ -772,12 +736,12 @@ impl TerminalState {
             KittyImageCompression::None => data,
             KittyImageCompression::Deflate => {
                 miniz_oxide::inflate::decompress_to_vec_zlib(&data)
-                    .map_err(|e| anyhow::anyhow!("decompressing data: {:?}", e))?
+                    .map_err(|e| anyhow::anyhow!("decompressing data: {e:?}"))?
             }
         };
 
         let img = match transmit.format {
-            None | Some(KittyImageFormat::Rgba) | Some(KittyImageFormat::Rgb) => {
+            None | Some(KittyImageFormat::Rgba | KittyImageFormat::Rgb) => {
                 let (width, height) = match (transmit.width, transmit.height) {
                     (Some(w), Some(h)) => (w, h),
                     _ => {
@@ -891,7 +855,7 @@ impl TerminalState {
             }
 
             let mut b64_decoded = vec![];
-            for mut data in data.into_iter() {
+            for mut data in data {
                 match &mut data {
                     KittyImageData::DirectBin(b) => {
                         b64_decoded.append(b);
@@ -902,7 +866,7 @@ impl TerminalState {
                         }
                     }
                     data => {
-                        anyhow::bail!("expected data chunks to be Direct data, found {:#?}", data)
+                        anyhow::bail!("expected data chunks to be Direct data, found {data:#?}")
                     }
                 }
             }

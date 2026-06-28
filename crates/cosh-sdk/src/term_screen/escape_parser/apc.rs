@@ -1,9 +1,10 @@
-use super::allocate::*;
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::too_many_lines, clippy::match_same_arms, clippy::items_after_statements, clippy::ref_option, clippy::option_option, clippy::trivially_copy_pass_by_ref)]
+use super::allocate::{BTreeMap, ToString, String, Vec};
 use super::osc::{base64_decode, base64_encode};
 use core::fmt::{Display, Error as FmtError, Formatter};
 
 fn get<'a>(keys: &BTreeMap<&str, &'a str>, k: &str) -> Option<&'a str> {
-    keys.get(k).map(|&s| s)
+    keys.get(k).copied()
 }
 
 fn geti<T: core::str::FromStr>(keys: &BTreeMap<&str, &str>, k: &str) -> Option<T> {
@@ -48,10 +49,10 @@ pub enum KittyImageData {
     },
 
     /// The name of a shared memory object.
-    /// Can be opened via shm_open() and then should be removed
-    /// via shm_unlink().
-    /// On Windows, OpenFileMapping(), MapViewOfFile(), UnmapViewOfFile()
-    /// and CloseHandle() are used to access and release the data.
+    /// Can be opened via `shm_open()` and then should be removed
+    /// via `shm_unlink()`.
+    /// On Windows, `OpenFileMapping()`, `MapViewOfFile()`, `UnmapViewOfFile()`
+    /// and `CloseHandle()` are used to access and release the data.
     /// t='s'
     SharedMem {
         name: String,
@@ -110,17 +111,17 @@ impl KittyImageData {
         match t {
             "d" => Some(Self::Direct(String::from_utf8(payload.to_vec()).ok()?)),
             "f" => Some(Self::File {
-                path: String::from_utf8(base64_decode(payload.to_vec()).ok()?).ok()?,
+                path: String::from_utf8(base64_decode(payload).ok()?).ok()?,
                 data_size: geti(keys, "S"),
                 data_offset: geti(keys, "O"),
             }),
             "t" => Some(Self::TemporaryFile {
-                path: String::from_utf8(base64_decode(payload.to_vec()).ok()?).ok()?,
+                path: String::from_utf8(base64_decode(payload).ok()?).ok()?,
                 data_size: geti(keys, "S"),
                 data_offset: geti(keys, "O"),
             }),
             "s" => Some(Self::SharedMem {
-                name: String::from_utf8(base64_decode(payload.to_vec()).ok()?).ok()?,
+                name: String::from_utf8(base64_decode(payload).ok()?).ok()?,
                 data_size: geti(keys, "S"),
                 data_offset: geti(keys, "O"),
             }),
@@ -128,10 +129,10 @@ impl KittyImageData {
         }
     }
 
-    fn to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
+    fn add_to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
         match self {
             Self::Direct(d) => {
-                keys.insert("payload", d.to_string());
+                keys.insert("payload", d.clone());
             }
             Self::DirectBin(d) => {
                 keys.insert("payload", base64_encode(d));
@@ -142,7 +143,7 @@ impl KittyImageData {
                 data_size,
             } => {
                 keys.insert("t", "f".to_string());
-                keys.insert("payload", base64_encode(&path));
+                keys.insert("payload", base64_encode(path));
                 set(keys, "S", data_size);
                 set(keys, "S", data_offset);
             }
@@ -152,7 +153,7 @@ impl KittyImageData {
                 data_size,
             } => {
                 keys.insert("t", "t".to_string());
-                keys.insert("payload", base64_encode(&path));
+                keys.insert("payload", base64_encode(path));
                 set(keys, "S", data_size);
                 set(keys, "S", data_offset);
             }
@@ -162,7 +163,7 @@ impl KittyImageData {
                 data_size,
             } => {
                 keys.insert("t", "s".to_string());
-                keys.insert("payload", base64_encode(&name));
+                keys.insert("payload", base64_encode(name));
                 set(keys, "S", data_size);
                 set(keys, "S", data_offset);
             }
@@ -173,7 +174,7 @@ impl KittyImageData {
     /// This operation is not repeatable as some of the sources require
     /// removing the underlying file or shared memory object as part
     /// of the read operation.
-    /// Note: SharedMem variant is unsupported without "kitty-shm" feature.
+    /// Note: `SharedMem` variant is unsupported without "kitty-shm" feature.
     pub fn load_data(self) -> std::io::Result<Vec<u8>> {
         use std::io::{Read, Seek};
         fn read_from_file(
@@ -197,11 +198,11 @@ impl KittyImageData {
         }
 
         match self {
-            Self::Direct(data) => base64_decode(data).or_else(|err| {
-                Err(std::io::Error::new(
+            Self::Direct(data) => base64_decode(data).map_err(|err| {
+                std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("base64 decode: {err:#}"),
-                ))
+                )
             }),
             Self::DirectBin(bin) => Ok(bin),
             Self::File {
@@ -226,10 +227,10 @@ impl KittyImageData {
                         return true;
                     }
 
-                    if let Ok(t) = std::env::var("TMPDIR") {
-                        if p.starts_with(&t) {
-                            return true;
-                        }
+                    if let Ok(t) = std::env::var("TMPDIR")
+                        && p.starts_with(&t)
+                    {
+                        return true;
                     }
 
                     false
@@ -238,16 +239,13 @@ impl KittyImageData {
                 if looks_like_temp_path(&path) {
                     if let Err(err) = std::fs::remove_file(&path) {
                         log::error!(
-                            "Unable to remove kitty image protocol temporary file {}: {:#}",
-                            path,
-                            err
+                            "Unable to remove kitty image protocol temporary file {path}: {err:#}"
                         );
                     }
                 } else {
                     log::warn!(
-                        "kitty image protocol temporary file {} isn't in a known \
-                                temporary directory; won't try to remove it",
-                        path
+                        "kitty image protocol temporary file {path} isn't in a known \
+                                temporary directory; won't try to remove it"
                     );
                 }
 
@@ -260,8 +258,6 @@ impl KittyImageData {
         }
     }
 }
-
-
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum KittyImageVerbosity {
@@ -280,7 +276,7 @@ impl KittyImageVerbosity {
         }
     }
 
-    fn to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
+    fn add_to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
         match self {
             Self::Verbose => {}
             Self::OnlyErrors => {
@@ -314,7 +310,7 @@ impl KittyImageFormat {
         }
     }
 
-    fn to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
+    fn add_to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
         match self {
             Self::Rgb => keys.insert("f", "24".to_string()),
             Self::Rgba => keys.insert("f", "32".to_string()),
@@ -339,7 +335,7 @@ impl KittyImageCompression {
         }
     }
 
-    fn to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
+    fn add_to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
         match self {
             Self::None => {}
             Self::Deflate => {
@@ -390,9 +386,9 @@ impl KittyImageTransmit {
         })
     }
 
-    fn to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
+    fn add_to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
         if let Some(f) = &self.format {
-            f.to_keys(keys);
+            f.add_to_keys(keys);
         }
 
         set(keys, "s", &self.width);
@@ -403,8 +399,8 @@ impl KittyImageTransmit {
             keys.insert("m", "1".to_string());
         }
 
-        self.compression.to_keys(keys);
-        self.data.to_keys(keys);
+        self.compression.add_to_keys(keys);
+        self.data.add_to_keys(keys);
     }
 }
 
@@ -430,7 +426,7 @@ pub struct KittyImagePlacement {
     /// r=...
     pub rows: Option<u32>,
     /// By default, cursor will move to after the bottom right
-    /// cell of the image placement.  do_not_move_cursor cursor
+    /// cell of the image placement.  `do_not_move_cursor` cursor
     /// set to true prevents that.
     /// C=0, C=1
     pub do_not_move_cursor: bool,
@@ -462,7 +458,7 @@ impl KittyImagePlacement {
         })
     }
 
-    fn to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
+    fn add_to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
         set(keys, "x", &self.x);
         set(keys, "y", &self.y);
         set(keys, "w", &self.w);
@@ -490,9 +486,9 @@ pub enum KittyImageDelete {
     /// Delete all placements on visible screen
     All { delete: bool },
     /// d='i' or d='I'
-    /// Delete all images with specified image_id.
-    /// If placement_id is specified, then both image_id
-    /// and placement_id must match
+    /// Delete all images with specified `image_id`.
+    /// If `placement_id` is specified, then both `image_id`
+    /// and `placement_id` must match
     ByImageId {
         image_id: u32,
         placement_id: Option<u32>,
@@ -500,7 +496,7 @@ pub enum KittyImageDelete {
     },
     /// d='n' or d='N'
     /// Delete newest image with specified image number.
-    /// If placement_id is specified, then placement_id
+    /// If `placement_id` is specified, then `placement_id`
     /// must also match.
     ByImageNumber {
         image_number: u32,
@@ -594,7 +590,7 @@ impl KittyImageDelete {
         }
     }
 
-    fn to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
+    fn add_to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
         fn d(c: char, delete: &bool) -> String {
             if *delete { c.to_ascii_uppercase() } else { c }.to_string()
         }
@@ -673,7 +669,7 @@ pub struct KittyImageFrameCompose {
 
     /// 1-based number of the frame which should be the base
     /// data for the new frame being created.
-    /// If omitted, use background_pixel to specify color.
+    /// If omitted, use `background_pixel` to specify color.
     /// c=...
     pub target_frame: Option<u32>,
 
@@ -707,7 +703,7 @@ pub struct KittyImageFrameCompose {
     pub src_y: Option<u32>,
 
     /// Composition mode.
-    /// Default is AlphaBlending
+    /// Default is `AlphaBlending`
     /// C=...
     pub composition_mode: KittyFrameCompositionMode,
 }
@@ -739,7 +735,7 @@ impl KittyImageFrameCompose {
         })
     }
 
-    fn to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
+    fn add_to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
         set(keys, "i", &self.image_id);
         set(keys, "I", &self.image_number);
         set(keys, "w", &self.w);
@@ -768,7 +764,7 @@ pub struct KittyImageFrame {
 
     /// 1-based number of the frame which should be the base
     /// data for the new frame being created.
-    /// If omitted, use background_pixel to specify color.
+    /// If omitted, use `background_pixel` to specify color.
     /// c=...
     pub base_frame: Option<u32>,
 
@@ -783,7 +779,7 @@ pub struct KittyImageFrame {
     pub duration_ms: Option<u32>,
 
     /// Composition mode.
-    /// Default is AlphaBlending
+    /// Default is `AlphaBlending`
     /// X=...
     pub composition_mode: KittyFrameCompositionMode,
 
@@ -819,7 +815,7 @@ impl KittyImageFrame {
         })
     }
 
-    fn to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
+    fn add_to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
         set(keys, "x", &self.x);
         set(keys, "y", &self.y);
         set(keys, "c", &self.base_frame);
@@ -876,6 +872,7 @@ pub enum KittyImage {
 }
 
 impl KittyImage {
+    #[must_use]
     pub fn verbosity(&self) -> KittyImageVerbosity {
         match self {
             Self::TransmitData { verbosity, .. } => *verbosity,
@@ -888,6 +885,7 @@ impl KittyImage {
         }
     }
 
+    #[must_use]
     pub fn parse_apc(data: &[u8]) -> Option<Self> {
         if data.is_empty() || data[0] != b'G' {
             return None;
@@ -897,9 +895,8 @@ impl KittyImage {
         let key_string = core::str::from_utf8(keys).ok()?;
         let mut keys: BTreeMap<&str, &str> = BTreeMap::new();
         for k_v in key_string.split(',') {
-            let mut k_v = k_v.splitn(2, '=');
-            let k = k_v.next()?;
-            let v = k_v.next()?;
+            let (k, v) = k_v.split_once('=')?;
+
             keys.insert(k, v);
         }
 
@@ -942,19 +939,19 @@ impl KittyImage {
         }
     }
 
-    fn to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
+    fn add_to_keys(&self, keys: &mut BTreeMap<&'static str, String>) {
         match self {
             Self::TransmitData {
                 transmit,
                 verbosity,
             } => {
                 // Implied: keys.insert("a", "t".to_string());
-                verbosity.to_keys(keys);
-                transmit.to_keys(keys);
+                verbosity.add_to_keys(keys);
+                transmit.add_to_keys(keys);
             }
             Self::Query { transmit } => {
                 keys.insert("a", "q".to_string());
-                transmit.to_keys(keys);
+                transmit.add_to_keys(keys);
             }
             Self::TransmitDataAndDisplay {
                 transmit,
@@ -962,9 +959,9 @@ impl KittyImage {
                 placement,
             } => {
                 keys.insert("a", "Q".to_string());
-                verbosity.to_keys(keys);
-                placement.to_keys(keys);
-                transmit.to_keys(keys);
+                verbosity.add_to_keys(keys);
+                placement.add_to_keys(keys);
+                transmit.add_to_keys(keys);
             }
             Self::Display {
                 image_id,
@@ -973,8 +970,8 @@ impl KittyImage {
                 verbosity,
             } => {
                 keys.insert("a", "p".to_string());
-                verbosity.to_keys(keys);
-                placement.to_keys(keys);
+                verbosity.add_to_keys(keys);
+                placement.add_to_keys(keys);
                 if let Some(image_id) = image_id {
                     keys.insert("i", image_id.to_string());
                 }
@@ -984,8 +981,8 @@ impl KittyImage {
             }
             Self::Delete { what, verbosity } => {
                 keys.insert("a", "d".to_string());
-                verbosity.to_keys(keys);
-                what.to_keys(keys);
+                verbosity.add_to_keys(keys);
+                what.add_to_keys(keys);
             }
             Self::TransmitFrame {
                 transmit,
@@ -993,14 +990,14 @@ impl KittyImage {
                 frame,
             } => {
                 keys.insert("a", "f".to_string());
-                transmit.to_keys(keys);
-                frame.to_keys(keys);
-                verbosity.to_keys(keys);
+                transmit.add_to_keys(keys);
+                frame.add_to_keys(keys);
+                verbosity.add_to_keys(keys);
             }
             Self::ComposeFrame { frame, verbosity } => {
                 keys.insert("a", "c".to_string());
-                frame.to_keys(keys);
-                verbosity.to_keys(keys);
+                frame.add_to_keys(keys);
+                verbosity.add_to_keys(keys);
             }
         }
     }
@@ -1010,7 +1007,7 @@ impl Display for KittyImage {
     fn fmt(&self, f: &mut Formatter) -> Result<(), FmtError> {
         write!(f, "\x1b_G")?;
         let mut keys = BTreeMap::new();
-        self.to_keys(&mut keys);
+        self.add_to_keys(&mut keys);
         let mut payload = None;
         let mut first = true;
         for (k, v) in keys {
@@ -1023,12 +1020,12 @@ impl Display for KittyImage {
                     write!(f, ",")?;
                 }
 
-                write!(f, "{}={}", k, v)?;
+                write!(f, "{k}={v}")?;
             }
         }
 
         if let Some(p) = payload {
-            write!(f, ";{}", p)?;
+            write!(f, ";{p}")?;
         }
 
         Ok(())

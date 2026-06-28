@@ -1,3 +1,4 @@
+#![allow(clippy::must_use_candidate, clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::doc_markdown)]
 use self::line::CellRef;
 use std::borrow::Cow;
 use core::cmp::min;
@@ -7,7 +8,6 @@ use crate::term_screen::cell::color::ColorAttribute;
 use crate::term_screen::cell::image::ImageCell;
 use crate::term_screen::cell::{Cell, CellAttributes};
 
-use std::borrow::ToOwned;
 use std::string::ToString;
 use std::string::String;
 use std::vec;
@@ -39,21 +39,17 @@ pub enum Position {
 }
 
 #[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, Hash, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Hash, Copy, PartialEq, Eq)]
 pub enum CursorVisibility {
     Hidden,
+    #[default]
     Visible,
 }
 
-impl Default for CursorVisibility {
-    fn default() -> CursorVisibility {
-        CursorVisibility::Visible
-    }
-}
-
 #[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CursorShape {
+    #[default]
     Default,
     BlinkingBlock,
     SteadyBlock,
@@ -61,12 +57,6 @@ pub enum CursorShape {
     SteadyUnderline,
     BlinkingBar,
     SteadyBar,
-}
-
-impl Default for CursorShape {
-    fn default() -> CursorShape {
-        CursorShape::Default
-    }
 }
 
 impl CursorShape {
@@ -272,7 +262,7 @@ impl Surface {
         let seq = self.seqno.saturating_sub(1) + changes.len();
 
         for change in &changes {
-            self.apply_change(&change);
+            self.apply_change(change);
         }
 
         self.seqno += changes.len();
@@ -304,7 +294,7 @@ impl Surface {
             Change::CursorShape(shape) => self.cursor_shape = Some(*shape),
             Change::CursorVisibility(visibility) => self.cursor_visibility = *visibility,
             Change::Image(image) => self.add_image(image),
-            Change::Title(text) => self.title = text.to_owned(),
+            Change::Title(text) => self.title.clone_from(text),
             Change::ScrollRegionUp {
                 first_row,
                 region_size,
@@ -343,7 +333,7 @@ impl Surface {
                         ' ',
                         self.attributes
                             .clone()
-                            .set_image(Box::new(ImageCell::new(
+                            .set_image(ImageCell::new(
                                 TextureCoordinate::new(
                                     image.top_left.x + xpos,
                                     image.top_left.y + ypos,
@@ -353,7 +343,7 @@ impl Surface {
                                     image.top_left.y + ypos + ysize,
                                 ),
                                 image.image.clone(),
-                            )))
+                            ))
                             .clone(),
                     ),
                     self.seqno,
@@ -517,7 +507,7 @@ impl Surface {
     }
 
     pub fn screen_lines(&self) -> Vec<Cow<'_, Line>> {
-        self.lines.iter().map(|line| Cow::Borrowed(line)).collect()
+        self.lines.iter().map(Cow::Borrowed).collect()
     }
 
     /// Returns a stream of changes suitable to update the screen
@@ -584,11 +574,11 @@ impl Surface {
             // Home the cursor and clear the screen to defaults.  Hide the
             // cursor while we're repainting.
             Change::CursorVisibility(CursorVisibility::Hidden),
-            Change::ClearScreen(Default::default()),
+            Change::ClearScreen(ColorAttribute::default()),
         ];
 
         if !self.title.is_empty() {
-            result.push(Change::Title(self.title.to_owned()));
+            result.push(Change::Title(self.title.clone()));
         }
 
         let mut attr = CellAttributes::default();
@@ -609,40 +599,31 @@ impl Surface {
         for (idx, line) in self.lines.iter().rev().enumerate() {
             let changes = line.changes(&attr);
             if changes.is_empty() {
-                // The line recorded no changes; this means that the line
-                // consists of spaces and the default background color
                 match trailing_color {
-                    Some(other) if other != Default::default() => {
-                        // Color doesn't match up, so we have to stop
-                        // looking for the ClearToEndOfScreen run here
-                        break;
-                    }
-                    // Color does match
+                    Some(other) if other != ColorAttribute::default() => break,
                     Some(_) => continue,
-                    // we don't have a run, we should start one
                     None => {
-                        trailing_color = Some(Default::default());
+                        trailing_color = Some(ColorAttribute::default());
                         trailing_idx = Some(idx);
                         continue;
                     }
                 }
-            } else {
-                let last_change = changes.len() - 1;
-                match (&changes[last_change], trailing_color) {
-                    (&Change::ClearToEndOfLine(ref color), None) => {
-                        trailing_color = Some(*color);
-                        trailing_idx = Some(idx);
-                    }
-                    (&Change::ClearToEndOfLine(ref color), Some(other)) => {
-                        if other == *color {
-                            trailing_idx = Some(idx);
-                            continue;
-                        } else {
-                            break;
-                        }
-                    }
-                    _ => break,
+            }
+
+            let last_change = changes.len() - 1;
+            match (&changes[last_change], trailing_color) {
+                (Change::ClearToEndOfLine(color), None) => {
+                    trailing_color = Some(*color);
+                    trailing_idx = Some(idx);
                 }
+                (Change::ClearToEndOfLine(color), Some(other)) => {
+                    if other == *color {
+                        trailing_idx = Some(idx);
+                        continue;
+                    }
+                    break;
+                }
+                _ => break,
             }
         }
 
@@ -773,7 +754,7 @@ impl Surface {
         diff_state.changes
     }
 
-    pub fn diff_lines(&self, other_lines: Vec<&Line>) -> Vec<Change> {
+    pub fn diff_lines(&self, other_lines: &[&Line]) -> Vec<Change> {
         let mut diff_state = DiffState::default();
         for ((row_num, line), other_line) in self.lines.iter().enumerate().zip(other_lines.iter()) {
             diff_line(&mut diff_state, line, row_num, other_line, 0, line.len(), 0);
@@ -889,7 +870,7 @@ fn diff_line(
 /// Applies a Position update to either the x or y position.
 /// The value is clamped to be in the range: 0..limit
 fn compute_position_change(current: usize, pos: &Position, limit: usize) -> usize {
-    use self::Position::*;
+    use self::Position::{Absolute, EndRelative, Relative};
     match pos {
         Relative(delta) => {
             if *delta >= 0 {
@@ -898,7 +879,7 @@ fn compute_position_change(current: usize, pos: &Position, limit: usize) -> usiz
                     limit.saturating_sub(1),
                 )
             } else {
-                current.saturating_sub((*delta).abs() as usize)
+                current.saturating_sub((*delta).unsigned_abs())
             }
         }
         Absolute(abs) => min(*abs, limit.saturating_sub(1)),
@@ -1023,7 +1004,7 @@ mod test {
         assert_eq!(
             &[
                 Change::CursorVisibility(CursorVisibility::Hidden),
-                Change::ClearScreen(Default::default()),
+                Change::ClearScreen(ColorAttribute::default()),
                 Change::Text("hel".into()),
                 Change::CursorPosition {
                     x: Position::Absolute(0),
@@ -1057,7 +1038,7 @@ mod test {
         assert_eq!(
             &[
                 Change::CursorVisibility(CursorVisibility::Hidden),
-                Change::ClearScreen(Default::default()),
+                Change::ClearScreen(ColorAttribute::default()),
                 Change::AllAttributes(
                     CellAttributes::default()
                         .set_background(AnsiColor::Red)
@@ -1091,7 +1072,7 @@ mod test {
         assert_eq!(
             &[
                 Change::CursorVisibility(CursorVisibility::Hidden),
-                Change::ClearScreen(Default::default()),
+                Change::ClearScreen(ColorAttribute::default()),
                 Change::AllAttributes(
                     CellAttributes::default()
                         .set_background(AnsiColor::Red)
@@ -1129,7 +1110,7 @@ mod test {
         assert_eq!(
             &[
                 Change::CursorVisibility(CursorVisibility::Hidden),
-                Change::ClearScreen(Default::default()),
+                Change::ClearScreen(ColorAttribute::default()),
                 Change::CursorPosition {
                     x: Position::Absolute(3),
                     y: Position::Absolute(2),
@@ -1208,7 +1189,7 @@ mod test {
 
         let empty = &[
             Change::CursorVisibility(CursorVisibility::Hidden),
-            Change::ClearScreen(Default::default()),
+            Change::ClearScreen(ColorAttribute::default()),
             Change::CursorVisibility(CursorVisibility::Visible),
         ];
 
@@ -1241,7 +1222,7 @@ mod test {
 
         let full = &[
             Change::CursorVisibility(CursorVisibility::Hidden),
-            Change::ClearScreen(Default::default()),
+            Change::ClearScreen(ColorAttribute::default()),
             Change::Text("a".to_string()),
             Change::CursorPosition {
                 x: Position::Absolute(1),
@@ -1266,7 +1247,7 @@ mod test {
         assert_eq!(
             &[
                 Change::CursorVisibility(CursorVisibility::Hidden),
-                Change::ClearScreen(Default::default()),
+                Change::ClearScreen(ColorAttribute::default()),
                 Change::AllAttributes(
                     CellAttributes::default()
                         .set_foreground(AnsiColor::Maroon)
@@ -1301,7 +1282,7 @@ mod test {
 
         let full = &[
             Change::CursorVisibility(CursorVisibility::Hidden),
-            Change::ClearScreen(Default::default()),
+            Change::ClearScreen(ColorAttribute::default()),
             Change::Text(" a".to_string()),
             Change::CursorPosition {
                 x: Position::Absolute(1),
@@ -1325,7 +1306,7 @@ mod test {
 
         let initial = &[
             Change::CursorVisibility(CursorVisibility::Hidden),
-            Change::ClearScreen(Default::default()),
+            Change::ClearScreen(ColorAttribute::default()),
             Change::Text("a".to_string()),
             Change::CursorPosition {
                 x: Position::Absolute(1),
@@ -1667,41 +1648,41 @@ mod test {
                     Cell::new(
                         ' ',
                         CellAttributes::default()
-                            .set_image(Box::new(ImageCell::new(
+                            .set_image(ImageCell::new(
                                 TextureCoordinate::new_f32(0.0, 0.0),
                                 TextureCoordinate::new_f32(0.25, 0.5),
                                 data.clone()
-                            )))
+                            ))
                             .clone()
                     ),
                     Cell::new(
                         ' ',
                         CellAttributes::default()
-                            .set_image(Box::new(ImageCell::new(
+                            .set_image(ImageCell::new(
                                 TextureCoordinate::new_f32(0.25, 0.0),
                                 TextureCoordinate::new_f32(0.5, 0.5),
                                 data.clone()
-                            )))
+                            ))
                             .clone()
                     ),
                     Cell::new(
                         ' ',
                         CellAttributes::default()
-                            .set_image(Box::new(ImageCell::new(
+                            .set_image(ImageCell::new(
                                 TextureCoordinate::new_f32(0.5, 0.0),
                                 TextureCoordinate::new_f32(0.75, 0.5),
                                 data.clone()
-                            )))
+                            ))
                             .clone()
                     ),
                     Cell::new(
                         ' ',
                         CellAttributes::default()
-                            .set_image(Box::new(ImageCell::new(
+                            .set_image(ImageCell::new(
                                 TextureCoordinate::new_f32(0.75, 0.0),
                                 TextureCoordinate::new_f32(1.0, 0.5),
                                 data.clone()
-                            )))
+                            ))
                             .clone()
                     ),
                 ],
@@ -1709,41 +1690,41 @@ mod test {
                     Cell::new(
                         ' ',
                         CellAttributes::default()
-                            .set_image(Box::new(ImageCell::new(
+                            .set_image(ImageCell::new(
                                 TextureCoordinate::new_f32(0.0, 0.5),
                                 TextureCoordinate::new_f32(0.25, 1.0),
                                 data.clone()
-                            )))
+                            ))
                             .clone()
                     ),
                     Cell::new(
                         ' ',
                         CellAttributes::default()
-                            .set_image(Box::new(ImageCell::new(
+                            .set_image(ImageCell::new(
                                 TextureCoordinate::new_f32(0.25, 0.5),
                                 TextureCoordinate::new_f32(0.5, 1.0),
                                 data.clone()
-                            )))
+                            ))
                             .clone()
                     ),
                     Cell::new(
                         ' ',
                         CellAttributes::default()
-                            .set_image(Box::new(ImageCell::new(
+                            .set_image(ImageCell::new(
                                 TextureCoordinate::new_f32(0.5, 0.5),
                                 TextureCoordinate::new_f32(0.75, 1.0),
                                 data.clone()
-                            )))
+                            ))
                             .clone()
                     ),
                     Cell::new(
                         ' ',
                         CellAttributes::default()
-                            .set_image(Box::new(ImageCell::new(
+                            .set_image(ImageCell::new(
                                 TextureCoordinate::new_f32(0.75, 0.5),
                                 TextureCoordinate::new_f32(1.0, 1.0),
                                 data.clone()
-                            )))
+                            ))
                             .clone()
                     ),
                 ],
@@ -1765,11 +1746,11 @@ mod test {
             [[Cell::new(
                 ' ',
                 CellAttributes::default()
-                    .set_image(Box::new(ImageCell::new(
+                    .set_image(ImageCell::new(
                         TextureCoordinate::new_f32(0.25, 0.3),
                         TextureCoordinate::new_f32(0.75, 0.8),
                         data.clone()
-                    )))
+                    ))
                     .clone()
             ),]]
         );

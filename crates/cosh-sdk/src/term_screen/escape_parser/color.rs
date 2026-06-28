@@ -1,11 +1,11 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::items_after_statements)]
+pub use crate::term_screen::color_types::{LinearRgba, SrgbaTuple};
 use num_derive::FromPrimitive;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-pub use crate::term_screen::color_types::{LinearRgba, SrgbaTuple};
 
-use super::allocate::*;
+use super::allocate::{String, Vec};
 
-#[derive(Debug, Clone, Copy, FromPrimitive, PartialEq, Eq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, FromPrimitive, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 /// These correspond to the classic ANSI color indices and are
 /// used for convenience/readability in code
@@ -57,15 +57,16 @@ pub struct RgbColor {
     bits: u32,
 }
 
-impl Into<SrgbaTuple> for RgbColor {
-    fn into(self) -> SrgbaTuple {
-        self.to_tuple_rgba()
+impl From<RgbColor> for SrgbaTuple {
+    fn from(val: RgbColor) -> Self {
+        val.to_tuple_rgba()
     }
 }
 
 impl RgbColor {
     /// Construct a color from discrete red, green, blue values
     /// in the range 0-255.
+    #[must_use]
     pub const fn new_8bpc(red: u8, green: u8, blue: u8) -> Self {
         Self {
             bits: ((red as u32) << 16) | ((green as u32) << 8) | blue as u32,
@@ -74,6 +75,8 @@ impl RgbColor {
 
     /// Construct a color from discrete red, green, blue values
     /// in the range 0.0-1.0 in the sRGB colorspace.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn new_f32(red: f32, green: f32, blue: f32) -> Self {
         let red = (red * 255.) as u8;
         let green = (green * 255.) as u8;
@@ -83,6 +86,8 @@ impl RgbColor {
 
     /// Returns red, green, blue as 8bpc values.
     /// Will convert from 10bpc if that is the internal storage.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn to_tuple_rgb8(self) -> (u8, u8, u8) {
         (
             (self.bits >> 16) as u8,
@@ -94,11 +99,12 @@ impl RgbColor {
     /// Returns red, green, blue as floating point values in the range 0.0-1.0.
     /// An alpha channel with the value of 1.0 is included.
     /// The values are in the sRGB colorspace.
+    #[must_use]
     pub fn to_tuple_rgba(self) -> SrgbaTuple {
         SrgbaTuple(
-            (self.bits >> 16) as u8 as f64 / 255.0,
-            (self.bits >> 8) as u8 as f64 / 255.0,
-            self.bits as u8 as f64 / 255.0,
+            f64::from((self.bits >> 16) as u8) / 255.0,
+            f64::from((self.bits >> 8) as u8) / 255.0,
+            f64::from(self.bits as u8) / 255.0,
             1.0,
         )
     }
@@ -106,6 +112,7 @@ impl RgbColor {
     /// Returns red, green, blue as floating point values in the range 0.0-1.0.
     /// An alpha channel with the value of 1.0 is included.
     /// The values are converted from sRGB to linear colorspace.
+    #[must_use]
     pub fn to_linear_tuple_rgba(self) -> LinearRgba {
         self.to_tuple_rgba().to_linear()
     }
@@ -114,22 +121,24 @@ impl RgbColor {
     /// Returns None if the supplied name is not recognized.
     /// The list of names can be found here:
     /// <https://en.wikipedia.org/wiki/X11_color_names>
+    #[must_use]
     pub fn from_named(name: &str) -> Option<RgbColor> {
         Some(SrgbaTuple::from_named(name)?.into())
     }
 
     /// Returns a string of the form `#RRGGBB`
+    #[must_use]
     pub fn to_rgb_string(self) -> String {
         let (red, green, blue) = self.to_tuple_rgb8();
-        format!("#{:02x}{:02x}{:02x}", red, green, blue)
+        format!("#{red:02x}{green:02x}{blue:02x}")
     }
 
     /// Returns a string of the form `rgb:RRRR/GGGG/BBBB`
+    #[must_use]
     pub fn to_x11_16bit_rgb_string(self) -> String {
         let (red, green, blue) = self.to_tuple_rgb8();
         format!(
-            "rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}",
-            red, red, green, green, blue, blue
+            "rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}"
         )
     }
 
@@ -139,13 +148,21 @@ impl RgbColor {
     /// in the HSL color space, where `hue` is measure in degrees and has
     /// a range of 0-360, and both `sat` and `light` are specified in percentage
     /// in the range 0-100.
+    #[must_use]
+    #[allow(clippy::many_single_char_names, clippy::cast_possible_truncation)]
     pub fn from_rgb_str(s: &str) -> Option<RgbColor> {
         // Handle hsl: prefix with space separators (original wezterm format)
         if let Some(hsl) = s.strip_prefix("hsl:") {
-            let parts: Vec<f64> = hsl.split_whitespace().filter_map(|p| p.parse().ok()).collect();
+            let parts: Vec<f64> = hsl
+                .split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect();
             if parts.len() >= 3 {
                 let c = csscolorparser::Color::from_hsla(
-                    parts[0] as f32, parts[1] as f32 / 100., parts[2] as f32 / 100., 1.0,
+                    parts[0] as f32,
+                    parts[1] as f32 / 100.,
+                    parts[2] as f32 / 100.,
+                    1.0,
                 );
                 let [r, g, b, _] = c.to_rgba8();
                 return Some(RgbColor::new_8bpc(r, g, b));
@@ -173,7 +190,7 @@ impl RgbColor {
             let digits = hex.len();
             if digits % 3 == 0 {
                 let per = digits / 3;
-                if per >= 1 && per <= 4 {
+                if (1..=4).contains(&per) {
                     let to_u8 = |i: usize| -> Option<u8> {
                         let hex_part = &hex[i * per..(i + 1) * per];
                         let v = u32::from_str_radix(hex_part, 16).ok()?;
@@ -208,23 +225,25 @@ impl RgbColor {
     /// Returns None if the supplied name is not recognized.
     /// The list of names can be found here:
     /// <https://ogeon.github.io/docs/palette/master/palette/named/index.html>
+    #[must_use]
     pub fn from_named_or_rgb_string(s: &str) -> Option<Self> {
-        RgbColor::from_rgb_str(&s).or_else(|| RgbColor::from_named(&s))
+        RgbColor::from_rgb_str(s).or_else(|| RgbColor::from_named(s))
     }
 }
 
 impl From<SrgbaTuple> for RgbColor {
+    #[allow(clippy::cast_possible_truncation)]
     fn from(srgb: SrgbaTuple) -> RgbColor {
         let SrgbaTuple(r, g, b, _) = srgb;
         Self::new_f32(r as f32, g as f32, b as f32)
     }
 }
 
-/// This is mildly unfortunate: in order to round trip RgbColor with serde
+/// This is mildly unfortunate: in order to round trip `RgbColor` with serde
 /// we need to provide a Serialize impl equivalent to the Deserialize impl
 /// below.  We use the impl below to allow more flexible specification of
 /// color strings in the config file.  A side effect of doing it this way
-/// is that we have to serialize RgbColor as a 7-byte string when we could
+/// is that we have to serialize `RgbColor` as a 7-byte string when we could
 /// otherwise serialize it as a 3-byte array.  There's probably a way
 /// to make this work more efficiently, but for now this will do.
 impl Serialize for RgbColor {
@@ -244,7 +263,7 @@ impl<'de> Deserialize<'de> for RgbColor {
     {
         let s = String::deserialize(deserializer)?;
         RgbColor::from_named_or_rgb_string(&s)
-            .ok_or_else(|| format!("unknown color name: {}", s))
+            .ok_or_else(|| format!("unknown color name: {s}"))
             .map_err(serde::de::Error::custom)
     }
 }
@@ -255,19 +274,14 @@ pub type PaletteIndex = u8;
 /// Specifies the color to be used when rendering a cell.
 /// This differs from `ColorAttribute` in that this type can only
 /// specify one of the possible color types at once, whereas the
-/// `ColorAttribute` type can specify a TrueColor value and a fallback.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+/// `ColorAttribute` type can specify a `TrueColor` value and a fallback.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub enum ColorSpec {
+    #[default]
     Default,
     /// Use either a raw number, or use values from the `AnsiColor` enum
     PaletteIndex(PaletteIndex),
     TrueColor(SrgbaTuple),
-}
-
-impl Default for ColorSpec {
-    fn default() -> Self {
-        ColorSpec::Default
-    }
 }
 
 impl From<AnsiColor> for ColorSpec {

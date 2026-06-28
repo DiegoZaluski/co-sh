@@ -1,22 +1,11 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::items_after_statements, clippy::too_many_lines, clippy::match_same_arms)]
 use super::super::terminal::{Alert, Progress};
-use super::{
-    default_color_map, CharSet, MouseEncoding, TabStop, UnicodeVersionStackEntry,
-};
+use super::super::{ClipboardSelection, DCS, Position, ST, VisibleRowIndex};
 use super::TerminalState;
-use super::super::{ClipboardSelection, Position, VisibleRowIndex, DCS, ST};
-use finl_unicode::grapheme_clusters::Graphemes;
-use log::{debug, error};
-use num_traits::FromPrimitive;
-use ordered_float::NotNan;
-use std::fmt::Write;
-use std::io::Write as _;
-use std::ops::{Deref, DerefMut};
-use crate::term_screen::input_types::KeyboardEncoding;
-use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
-use url::Url;
+use super::{CharSet, MouseEncoding, TabStop, UnicodeVersionStackEntry, default_color_map};
 use crate::term_screen::bidi::ParagraphDirectionHint;
 use crate::term_screen::cell::{
-    grapheme_column_width, is_white_space_grapheme, Cell, CellAttributes, SemanticType,
+    Cell, CellAttributes, SemanticType, grapheme_column_width, is_white_space_grapheme,
 };
 use crate::term_screen::escape_parser::csi::{
     CharacterPath, EraseInDisplay, Keyboard, KittyKeyboardFlags, KittyKeyboardMode,
@@ -26,8 +15,18 @@ use crate::term_screen::escape_parser::osc::{
     ITermUnicodeVersionOp, Selection,
 };
 use crate::term_screen::escape_parser::{
-    Action, ControlCode, DeviceControlMode, Esc, EscCode, OperatingSystemCommand, CSI,
+    Action, CSI, ControlCode, DeviceControlMode, Esc, EscCode, OperatingSystemCommand,
 };
+use crate::term_screen::input_types::KeyboardEncoding;
+use finl_unicode::grapheme_clusters::Graphemes;
+use log::{debug, error};
+use num_traits::FromPrimitive;
+use ordered_float::NotNan;
+use std::fmt::Write;
+use std::io::Write as _;
+use std::ops::{Deref, DerefMut};
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
+use url::Url;
 
 /// A helper struct for implementing `vtparse::VTActor` while compartmentalizing
 /// the terminal state and the embedding/host terminal interface
@@ -36,7 +35,7 @@ pub(crate) struct Performer<'a> {
     print: String,
 }
 
-impl<'a> Deref for Performer<'a> {
+impl Deref for Performer<'_> {
     type Target = TerminalState;
 
     fn deref(&self) -> &TerminalState {
@@ -44,13 +43,13 @@ impl<'a> Deref for Performer<'a> {
     }
 }
 
-impl<'a> DerefMut for Performer<'a> {
+impl DerefMut for Performer<'_> {
     fn deref_mut(&mut self) -> &mut TerminalState {
-        &mut self.state
+        self.state
     }
 }
 
-impl<'a> Drop for Performer<'a> {
+impl Drop for Performer<'_> {
     fn drop(&mut self) {
         self.flush_print();
     }
@@ -157,7 +156,7 @@ impl<'a> Performer<'a> {
                     // Ensure that White_Space shows as a space
                     print_width = 1;
                 } else {
-                    log::trace!("Eliding zero-width grapheme {:?}", g);
+                    log::trace!("Eliding zero-width grapheme {g:?}");
                     continue;
                 }
             }
@@ -186,8 +185,7 @@ impl<'a> Performer<'a> {
                             .line_mut(y)
                             .visible_cells()
                             .last()
-                            .map(|cell| makes_sense_to_wrap(cell.str()))
-                            .unwrap_or(false);
+                            .is_some_and(|cell| makes_sense_to_wrap(cell.str()));
                     if should_mark_wrapped {
                         screen.line_mut(y).set_last_cell_was_wrapped(true, seqno);
                     }
@@ -206,7 +204,7 @@ impl<'a> Performer<'a> {
             if self.insert {
                 let margin = self.left_and_right_margins.end;
                 let screen = self.screen_mut();
-                for _ in x..x + print_width as usize {
+                for _ in x..x + print_width {
                     screen.insert_cell(x, y, margin, seqno);
                 }
             }
@@ -224,11 +222,11 @@ impl<'a> Performer<'a> {
             self.screen_mut()
                 .set_cell_grapheme(x, y, g, print_width, pen, seqno);
 
-            if !wrappable {
+            if wrappable {
+                self.wrap_next = self.dec_auto_wrap;
+            } else {
                 self.cursor.x += print_width;
                 self.wrap_next = false;
-            } else {
-                self.wrap_next = self.dec_auto_wrap;
             }
         }
 
@@ -236,12 +234,12 @@ impl<'a> Performer<'a> {
         self.print.clear();
     }
 
-    /// ConPTY, at the time of writing, does something horrible to rewrite
+    /// `ConPTY`, at the time of writing, does something horrible to rewrite
     /// `ESC k TITLE ST` into something completely different and out-of-order,
     /// and critically, removes the ST.
     /// The result is that our hack to accumulate the tmux title gets stuck
     /// in a mode where all printable output is accumulated for the title.
-    /// To combat this, we pop_tmux_title_state when we're obviously moving
+    /// To combat this, we `pop_tmux_title_state` when we're obviously moving
     /// to different escape sequence parsing states.
     /// <https://github.com/wezterm/wezterm/issues/2442>
     fn pop_tmux_title_state(&mut self) {
@@ -251,25 +249,20 @@ impl<'a> Performer<'a> {
     }
 
     pub fn perform(&mut self, action: Action) {
-        debug!("perform {:?}", action);
-        if self.suppress_initial_title_change {
-            match &action {
-                Action::OperatingSystemCommand(osc) => match **osc {
-                    OperatingSystemCommand::SetIconNameAndWindowTitle(_) => {
-                        debug!("suppressed {:?}", osc);
-                        self.suppress_initial_title_change = false;
-                        return;
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
+        debug!("perform {action:?}");
+        if self.suppress_initial_title_change
+            && let Action::OperatingSystemCommand(osc) = &action
+            && let OperatingSystemCommand::SetIconNameAndWindowTitle(_) = **osc
+        {
+            debug!("suppressed {osc:?}");
+            self.suppress_initial_title_change = false;
+            return;
         }
         match action {
             Action::Print(c) => self.print(c),
             Action::PrintString(s) => {
                 for c in s.chars() {
-                    self.print(c)
+                    self.print(c);
                 }
             }
             Action::Control(code) => self.control(code),
@@ -277,12 +270,12 @@ impl<'a> Performer<'a> {
             Action::OperatingSystemCommand(osc) => self.osc_dispatch(*osc),
             Action::Esc(esc) => self.esc_dispatch(esc),
             Action::CSI(csi) => self.csi_dispatch(csi),
-            Action::Sixel(sixel) => self.sixel(sixel),
+            Action::Sixel(sixel) => self.sixel(*sixel),
             Action::XtGetTcap(names) => self.xt_get_tcap(names),
             Action::KittyImage(img) => {
                 self.flush_print();
                 if let Err(err) = self.kitty_img(*img) {
-                    log::error!("kitty_img: {:#}", err);
+                    log::error!("kitty_img: {err:#}");
                 }
             }
         }
@@ -301,13 +294,13 @@ impl<'a> Performer<'a> {
                         // but note that *that* text has the validity value
                         // inverted; there's a note about this in the xterm
                         // ctlseqs docs.
-                        match s.data.as_slice() {
-                            &[b'"', b'p'] => {
+                        match *s.data.as_slice() {
+                            [b'"', b'p'] => {
                                 // DECSCL - select conformance level
-                                write!(self.writer, "{}1$r65;1\"p{}", DCS, ST).ok();
+                                write!(self.writer, "{DCS}1$r65;1\"p{ST}").ok();
                                 self.writer.flush().ok();
                             }
-                            &[b'r'] => {
+                            [b'r'] => {
                                 // DECSTBM - top and bottom margins
                                 let margins = self.top_and_bottom_margins.clone();
                                 write!(
@@ -321,7 +314,7 @@ impl<'a> Performer<'a> {
                                 .ok();
                                 self.writer.flush().ok();
                             }
-                            &[b's'] => {
+                            [b's'] => {
                                 // DECSLRM - left and right margins
                                 let margins = self.left_and_right_margins.clone();
                                 write!(
@@ -337,17 +330,17 @@ impl<'a> Performer<'a> {
                             }
                             _ => {
                                 if self.config.log_unknown_escape_sequences() {
-                                    log::warn!("unhandled DECRQSS {:?}", s);
+                                    log::warn!("unhandled DECRQSS {s:?}");
                                 }
                                 // Reply that the request is invalid
-                                write!(self.writer, "{}0$r{}", DCS, ST).ok();
+                                write!(self.writer, "{DCS}0$r{ST}").ok();
                                 self.writer.flush().ok();
                             }
                         }
                     }
                     _ => {
                         if self.config.log_unknown_escape_sequences() {
-                            log::warn!("unhandled {:?}", s);
+                            log::warn!("unhandled {s:?}");
                         }
                     }
                 }
@@ -356,7 +349,7 @@ impl<'a> Performer<'a> {
                 Some(handler) => handler.handle_device_control(ctrl),
                 None => {
                     if self.config.log_unknown_escape_sequences() {
-                        log::warn!("unhandled {:?}", ctrl);
+                        log::warn!("unhandled {ctrl:?}");
                     }
                 }
             },
@@ -473,8 +466,8 @@ impl<'a> Performer<'a> {
 
             ControlCode::Enquiry => {
                 let response = self.config.enq_answerback();
-                if response.len() > 0 {
-                    write!(self.writer, "{}", response).ok();
+                if !response.is_empty() {
+                    write!(self.writer, "{response}").ok();
                     self.writer.flush().ok();
                 }
             }
@@ -483,7 +476,7 @@ impl<'a> Performer<'a> {
 
             _ => {
                 if self.config.log_unknown_escape_sequences() {
-                    log::warn!("unhandled ControlCode {:?}", control);
+                    log::warn!("unhandled ControlCode {control:?}");
                 }
             }
         }
@@ -506,7 +499,7 @@ impl<'a> Performer<'a> {
             CSI::Edit(edit) => self.state.perform_csi_edit(edit),
             CSI::Mode(mode) => self.state.perform_csi_mode(mode),
             CSI::Device(dev) => self.state.perform_device(*dev),
-            CSI::Mouse(mouse) => error!("mouse report sent by app? {:?}", mouse),
+            CSI::Mouse(mouse) => error!("mouse report sent by app? {mouse:?}"),
             CSI::Window(window) => self.state.perform_csi_window(*window),
             CSI::SelectCharacterPath(CharacterPath::ImplementationDefault, _) => {
                 self.state.bidi_hint.take();
@@ -580,7 +573,7 @@ impl<'a> Performer<'a> {
                     log::warn!("unknown unspecified CSI: {:?}", format!("{}", unspec));
                 }
             }
-        };
+        }
     }
 
     fn esc_dispatch(&mut self, esc: Esc) {
@@ -729,7 +722,7 @@ impl<'a> Performer<'a> {
 
             _ => {
                 if self.config.log_unknown_escape_sequences() {
-                    log::warn!("ESC: unhandled {:?}", esc);
+                    log::warn!("ESC: unhandled {esc:?}");
                 }
             }
         }
@@ -778,7 +771,7 @@ impl<'a> Performer<'a> {
                     for item in unspec {
                         write!(&mut output, " {}", String::from_utf8_lossy(&item)).ok();
                     }
-                    log::warn!("{}", output);
+                    log::warn!("{output}");
                 }
             }
 
@@ -790,8 +783,8 @@ impl<'a> Performer<'a> {
             OperatingSystemCommand::SetSelection(selection, selection_data) => {
                 let selection = selection_to_selection(selection);
                 match self.set_clipboard_contents(selection, Some(selection_data)) {
-                    Ok(_) => (),
-                    Err(err) => error!("failed to set clipboard in response to OSC 52: {:#?}", err),
+                    Ok(()) => (),
+                    Err(err) => error!("failed to set clipboard in response to OSC 52: {err:#?}"),
                 }
             }
             OperatingSystemCommand::ITermProprietary(iterm) => match iterm {
@@ -823,7 +816,7 @@ impl<'a> Performer<'a> {
                             },
                         },
                     );
-                    write!(self.writer, "{}", response).ok();
+                    write!(self.writer, "{response}").ok();
                     self.writer.flush().ok();
                 }
                 ITermProprietary::File(image) => self.set_image(*image),
@@ -856,7 +849,7 @@ impl<'a> Performer<'a> {
                 }
                 _ => {
                     if self.config.log_unknown_escape_sequences() {
-                        log::warn!("unhandled iterm2: {:?}", iterm);
+                        log::warn!("unhandled iterm2: {iterm:?}");
                     }
                 }
             },
@@ -882,12 +875,12 @@ impl<'a> Performer<'a> {
                 self.pen.set_semantic_type(SemanticType::Prompt);
             }
             OperatingSystemCommand::FinalTermSemanticPrompt(
-                FinalTermSemanticPrompt::MarkEndOfPromptAndStartOfInputUntilNextMarker { .. },
+                FinalTermSemanticPrompt::MarkEndOfPromptAndStartOfInputUntilNextMarker,
             ) => {
                 self.pen.set_semantic_type(SemanticType::Input);
             }
             OperatingSystemCommand::FinalTermSemanticPrompt(
-                FinalTermSemanticPrompt::MarkEndOfPromptAndStartOfInputUntilEndOfLine { .. },
+                FinalTermSemanticPrompt::MarkEndOfPromptAndStartOfInputUntilEndOfLine,
             ) => {
                 self.pen.set_semantic_type(SemanticType::Input);
                 self.clear_semantic_attribute_on_newline = true;
@@ -910,18 +903,18 @@ impl<'a> Performer<'a> {
                         focus: true,
                     });
                 } else {
-                    log::info!("Application sends SystemNotification: {}", message);
+                    log::info!("Application sends SystemNotification: {message}");
                 }
             }
             OperatingSystemCommand::RxvtExtension(params) => {
-                if let Some("notify") = params.get(0).map(String::as_str) {
+                if let Some("notify") = params.first().map(String::as_str) {
                     let title = params.get(1);
                     let body = params.get(2);
                     let (title, body) = match (title.cloned(), body.cloned()) {
                         (Some(title), None) => (None, title),
                         (Some(title), Some(body)) => (Some(title), body),
                         _ => {
-                            log::warn!("malformed rxvt notify escape: {:?}", params);
+                            log::warn!("malformed rxvt notify escape: {params:?}");
                             return;
                         }
                     };
@@ -941,7 +934,7 @@ impl<'a> Performer<'a> {
                 }
             }
             OperatingSystemCommand::ChangeColorNumber(specs) => {
-                log::trace!("ChangeColorNumber: {:?}", specs);
+                log::trace!("ChangeColorNumber: {specs:?}");
                 for pair in specs {
                     match pair.color {
                         ColorOrQuery::Query => {
@@ -952,7 +945,7 @@ impl<'a> Performer<'a> {
                                         self.palette().colors.0[pair.palette_index as usize],
                                     ),
                                 }]);
-                            write!(self.writer, "{}", response).ok();
+                            write!(self.writer, "{response}").ok();
                             self.writer.flush().ok();
                         }
                         ColorOrQuery::Color(c) => {
@@ -965,7 +958,7 @@ impl<'a> Performer<'a> {
             }
 
             OperatingSystemCommand::ResetColors(colors) => {
-                log::trace!("ResetColors: {:?}", colors);
+                log::trace!("ResetColors: {colors:?}");
                 if colors.is_empty() {
                     // Reset all colors
                     self.palette.take();
@@ -986,12 +979,11 @@ impl<'a> Performer<'a> {
             }
 
             OperatingSystemCommand::ChangeDynamicColors(first_color, colors) => {
-                log::trace!("ChangeDynamicColors: {:?} {:?}", first_color, colors);
+                log::trace!("ChangeDynamicColors: {first_color:?} {colors:?}");
                 use crate::term_screen::escape_parser::osc::DynamicColorNumber;
-                let mut idx: u8 = first_color as u8;
-                for color in colors {
+                for (idx, color) in (first_color as u8..).zip(colors) {
                     let which_color: Option<DynamicColorNumber> = FromPrimitive::from_u8(idx);
-                    log::trace!("ChangeDynamicColors item: {:?}", which_color);
+                    log::trace!("ChangeDynamicColors item: {which_color:?}");
                     if let Some(which_color) = which_color {
                         macro_rules! set_or_query {
                             ($name:ident) => {
@@ -1017,15 +1009,15 @@ impl<'a> Performer<'a> {
                                     // We set the border to the background color; we don't
                                     // have an escape that sets that independently, and this
                                     // way just looks better.
-                                    self.palette_mut().cursor_border = c.into();
+                                    self.palette_mut().cursor_border = c;
                                 }
-                                set_or_query!(cursor_bg)
+                                set_or_query!(cursor_bg);
                             }
                             DynamicColorNumber::HighlightForegroundColor => {
-                                set_or_query!(selection_fg)
+                                set_or_query!(selection_fg);
                             }
                             DynamicColorNumber::HighlightBackgroundColor => {
-                                set_or_query!(selection_bg)
+                                set_or_query!(selection_bg);
                             }
                             DynamicColorNumber::MouseForegroundColor
                             | DynamicColorNumber::MouseBackgroundColor
@@ -1034,14 +1026,13 @@ impl<'a> Performer<'a> {
                             | DynamicColorNumber::TektronixCursorColor => {}
                         }
                     }
-                    idx += 1;
                 }
                 self.implicit_palette_reset_if_same_as_configured();
                 self.palette_did_change();
             }
 
             OperatingSystemCommand::ResetDynamicColor(color) => {
-                log::trace!("ResetDynamicColor: {:?}", color);
+                log::trace!("ResetDynamicColor: {color:?}");
                 use crate::term_screen::escape_parser::osc::DynamicColorNumber;
                 let which_color: Option<DynamicColorNumber> = FromPrimitive::from_u8(color as u8);
                 if let Some(which_color) = which_color {

@@ -1,8 +1,9 @@
+#![allow(clippy::needless_pass_by_value)]
 use super::line::CellRef;
-use std::borrow::Cow;
 use crate::term_screen::bidi::{BidiContext, Direction, ParagraphDirectionHint};
 use crate::term_screen::cell::CellAttributes;
 use crate::term_screen::char_props::emoji::Presentation;
+use std::borrow::Cow;
 
 use std::string::String;
 use std::vec;
@@ -28,6 +29,7 @@ pub struct CellCluster {
 impl CellCluster {
     /// Given a byte index into `self.text`, return the corresponding
     /// cell index in the originating line.
+    #[must_use]
     pub fn byte_to_cell_idx(&self, byte_idx: usize) -> usize {
         if self.byte_to_cell_idx.is_empty() {
             self.first_cell_idx + byte_idx
@@ -36,6 +38,7 @@ impl CellCluster {
         }
     }
 
+    #[must_use]
     pub fn byte_to_cell_width(&self, byte_idx: usize) -> u8 {
         if self.byte_to_cell_width.is_empty() {
             1
@@ -44,7 +47,7 @@ impl CellCluster {
         }
     }
 
-    /// Compute the list of CellClusters from a set of visible cells.
+    /// Compute the list of `CellClusters` from a set of visible cells.
     /// The input is typically the result of calling `Line::visible_cells()`.
     pub fn make_cluster<'a>(
         hint: usize,
@@ -72,7 +75,7 @@ impl CellCluster {
                 None => {
                     // Start new cluster
                     only_whitespace = cell_str == " ";
-                    whitespace_run = if only_whitespace { 1 } else { 0 };
+                    whitespace_run = i32::from(only_whitespace);
                     Some(CellCluster::new(
                         hint,
                         presentation,
@@ -88,7 +91,7 @@ impl CellCluster {
                         clusters.push(last);
 
                         only_whitespace = cell_str == " ";
-                        whitespace_run = if only_whitespace { 1 } else { 0 };
+                        whitespace_run = i32::from(only_whitespace);
                         Some(CellCluster::new(
                             hint,
                             presentation,

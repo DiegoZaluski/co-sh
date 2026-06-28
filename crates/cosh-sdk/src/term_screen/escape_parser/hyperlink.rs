@@ -4,10 +4,9 @@ use crate::format_err;
 use core::hash::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
 
-use super::allocate::*;
+use super::allocate::{HashMap, String, ToString, ToOwned};
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Hyperlink {
     params: HashMap<String, String>,
     uri: String,
@@ -17,6 +16,7 @@ pub struct Hyperlink {
 }
 
 impl Hyperlink {
+    #[must_use]
     pub fn uri(&self) -> &str {
         &self.uri
     }
@@ -30,6 +30,7 @@ impl Hyperlink {
         self.implicit.hash(hasher);
     }
 
+    #[must_use]
     pub fn params(&self) -> &HashMap<String, String> {
         &self.params
     }
@@ -43,6 +44,7 @@ impl Hyperlink {
     }
 
     #[inline]
+    #[must_use]
     pub fn is_implicit(&self) -> bool {
         self.implicit
     }
@@ -105,7 +107,7 @@ impl core::fmt::Display for Hyperlink {
             if idx > 0 {
                 write!(f, ":")?;
             }
-            write!(f, "{}={}", k, v)?;
+            write!(f, "{k}={v}")?;
         }
         // TODO: ensure that link.uri doesn't contain characters
         // outside the range 32-126.  Need to pull in a URI/URL

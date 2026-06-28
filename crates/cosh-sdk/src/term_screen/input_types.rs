@@ -1,5 +1,5 @@
 //! Input types for keyboard and mouse
-//! Inline replacement for wezterm-input-types and termwiz::input types
+//! Inline replacement for wezterm-input-types and `termwiz::input` types
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ impl Default for KittyKeyboardFlags {
     }
 }
 
-/// Keyboard encoding modes (replacement for termwiz::input::KeyboardEncoding)
+/// Keyboard encoding modes (replacement for `termwiz::input::KeyboardEncoding`)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KeyboardEncoding {
     Xterm,
@@ -54,7 +54,7 @@ pub enum KeyboardEncoding {
     Win32,
 }
 
-/// Key code enum (minimal stub for termwiz::input::KeyCode)
+/// Key code enum (minimal stub for `termwiz::input::KeyCode`)
 /// Used by core for keyboard encoding
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KeyCode {
@@ -182,7 +182,7 @@ pub enum KeyCode {
     LaunchApplication16,
 }
 
-/// Encoding modes for key events (replacement for termwiz::input::KeyCodeEncodeModes)
+/// Encoding modes for key events (replacement for `termwiz::input::KeyCodeEncodeModes`)
 #[derive(Debug, Clone)]
 pub struct KeyCodeEncodeModes {
     pub key: KeyCode,
@@ -194,7 +194,15 @@ pub struct KeyCodeEncodeModes {
 }
 
 impl KeyCode {
-    pub fn encode(&self, _mods: Modifiers, _modes: KeyCodeEncodeModes, _is_down: bool) -> anyhow::Result<String> {
+    /// Stub implementation that always returns an empty sequence.
+    /// # Errors
+    /// This implementation never returns an error.
+    pub fn encode(
+        &self,
+        _mods: Modifiers,
+        _modes: KeyCodeEncodeModes,
+        _is_down: bool,
+    ) -> anyhow::Result<String> {
         // Minimal stub: output a placeholder sequence.
         // A full implementation would map to xterm/CSI-u/kitty encodings.
         Ok(String::new())

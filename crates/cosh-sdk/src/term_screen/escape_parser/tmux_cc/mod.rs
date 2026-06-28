@@ -1,5 +1,6 @@
-use super::error::Context;
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::too_many_lines, clippy::items_after_statements, clippy::missing_errors_doc)]
 use super::Result;
+use super::error::Context;
 use crate::bail;
 use crate::format_err;
 use parser::Rule;
@@ -517,7 +518,7 @@ fn parse_line(line: &[u8]) -> Result<Event> {
 }
 
 /// Decode OpenBSD `vis` encoded strings
-/// See: https://github.com/tmux/tmux/blob/486ce9b09855ae30a2bf5e576cb6f7ad37792699/compat/unvis.c
+/// See: <https://github.com/tmux/tmux/blob/486ce9b09855ae30a2bf5e576cb6f7ad37792699/compat/unvis.c>
 fn unvis_bytes(s: &[u8]) -> Result<Vec<u8>> {
     enum State {
         Ground,
@@ -531,10 +532,10 @@ fn unvis_bytes(s: &[u8]) -> Result<Vec<u8>> {
 
     let mut state = State::Ground;
     let mut result: Vec<u8> = vec![];
-    let mut bytes = s.iter();
+    let bytes = s.iter();
 
     fn is_octal(b: u8) -> bool {
-        b >= b'0' && b <= b'7'
+        (b'0'..=b'7').contains(&b)
     }
 
     fn unvis_byte(b: u8, state: &mut State, result: &mut Vec<u8>) -> Result<bool> {
@@ -672,7 +673,7 @@ fn unvis_bytes(s: &[u8]) -> Result<Vec<u8>> {
         Ok(false)
     }
 
-    while let Some(&b) = bytes.next() {
+    for &b in bytes {
         let again = unvis_byte(b, &mut state, &mut result)?;
         if again {
             unvis_byte(b, &mut state, &mut result)?;
@@ -720,22 +721,22 @@ fn parse_layout_pane(pair: Pair<Rule>) -> Result<PaneLayout> {
         None => 0,
     };
 
-    return Ok(PaneLayout {
+    Ok(PaneLayout {
         pane_id,
         pane_width,
         pane_height,
         pane_left,
         pane_top,
-    });
+    })
 }
 
 fn parse_layout_inner(
-    mut pairs: Pairs<Rule>,
+    pairs: Pairs<Rule>,
     result: &mut Vec<WindowLayout>,
 ) -> Result<Vec<PaneLayout>> {
     let mut stack = Vec::new();
 
-    while let Some(pair) = pairs.next() {
+    for pair in pairs {
         let rule = pair.as_rule();
         match rule {
             Rule::layout_split_horizontal | Rule::layout_split_vertical => {
@@ -758,7 +759,7 @@ fn parse_layout_inner(
 
                 pane.pane_id = last_item.pane_id;
 
-                layout_inner.insert(0, pane.clone());
+                layout_inner.insert(0, pane);
 
                 if let Rule::layout_split_horizontal = rule {
                     result.insert(0, WindowLayout::SplitHorizontal(layout_inner));
@@ -843,7 +844,14 @@ pub struct Parser {
     begun: Option<Guarded>,
 }
 
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Parser {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             buffer: vec![],
@@ -897,11 +905,11 @@ impl Parser {
                     {
                         Some(Event::Guarded(begun))
                     } else {
-                        log::error!("mismatched %end; expected {:?} but got {}", begun, line);
+                        log::error!("mismatched %end; expected {begun:?} but got {line}");
                         None
                     }
                 } else {
-                    log::error!("unexpected %end with no %begin ({})", line);
+                    log::error!("unexpected %end with no %begin ({line})");
                     None
                 }
             }
@@ -918,11 +926,11 @@ impl Parser {
                         begun.error = true;
                         Some(Event::Guarded(begun))
                     } else {
-                        log::error!("mismatched %error; expected {:?} but got {}", begun, line);
+                        log::error!("mismatched %error; expected {begun:?} but got {line}");
                         None
                     }
                 } else {
-                    log::error!("unexpected %error with no %begin ({})", line);
+                    log::error!("unexpected %error with no %begin ({line})");
                     None
                 }
             }
@@ -937,7 +945,7 @@ impl Parser {
             }
         };
         self.buffer.clear();
-        return Ok(result);
+        Ok(result)
     }
 
     fn process_line(&mut self) -> Result<Option<Event>> {
@@ -971,7 +979,7 @@ impl Parser {
             }
             Ok(event) => Some(event),
             Err(err) => {
-                log::error!("Unrecognized tmux cc line: {}", err);
+                log::error!("Unrecognized tmux cc line: {err}");
                 bail!("{}", String::from_utf8_lossy(&self.buffer));
             }
         };

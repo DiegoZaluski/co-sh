@@ -15,11 +15,11 @@
 //!
 //! The entrypoint to the crate is the [Terminal](terminal/struct.Terminal.html)
 //! struct.
+use crate::term_screen::surface::SequenceNo;
 use anyhow::Error;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut, Range};
 use std::str;
-use crate::term_screen::surface::SequenceNo;
 
 pub mod config;
 pub use config::TerminalConfiguration;
@@ -64,7 +64,7 @@ pub type VisibleRowIndex = i64;
 pub type ScrollbackOrVisibleRowIndex = i32;
 
 /// Allows referencing a logical line in the scrollback, allowing for scrolling.
-/// The StableRowIndex counts from the top of the scrollback, growing larger
+/// The `StableRowIndex` counts from the top of the scrollback, growing larger
 /// as you move down through the display rows.
 /// Initially the very first line as StableRowIndex==0.  If the scrollback
 /// is filled and lines are purged (say we need to purge 5 lines), then whichever
@@ -72,7 +72,7 @@ pub type ScrollbackOrVisibleRowIndex = i32;
 /// which is the same value that that logical line had prior to data being purged
 /// out of the scrollback.
 ///
-/// As per ScrollbackOrVisibleRowIndex above, a StableRowIndex can never
+/// As per `ScrollbackOrVisibleRowIndex` above, a `StableRowIndex` can never
 /// legally be a negative number.  We're just using a differently sized type
 /// to have the compiler assist us in detecting improper usage.
 pub type StableRowIndex = isize;
@@ -100,8 +100,7 @@ pub enum Position {
 
 /// Describes the location of the cursor in the visible portion
 /// of the screen.
-#[derive(Deserialize, Serialize)]
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct CursorPosition {
     pub x: usize,
     pub y: VisibleRowIndex,
@@ -110,8 +109,7 @@ pub struct CursorPosition {
     pub seqno: SequenceNo,
 }
 
-#[derive(Deserialize, Serialize)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
 pub struct SemanticZone {
     pub start_y: StableRowIndex,
     pub start_x: usize,

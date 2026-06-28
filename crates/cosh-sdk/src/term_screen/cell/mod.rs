@@ -1,15 +1,15 @@
 //! Model a cell in the terminal display
 use self::color::{ColorAttribute, PaletteIndex};
 use self::image::ImageCell;
-use std::sync::Arc;
-use core::hash::{Hash, Hasher};
-use core::mem;
-use finl_unicode::grapheme_clusters::Graphemes;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use crate::term_screen::char_props::emoji::Presentation;
 use crate::term_screen::char_props::emoji_variation::WCWIDTH_TABLE;
 use crate::term_screen::char_props::widechar_width::WcWidth;
 pub use crate::term_screen::escape_parser::osc::Hyperlink;
+use core::hash::{Hash, Hasher};
+use core::mem;
+use finl_unicode::grapheme_clusters::Graphemes;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::sync::Arc;
 
 use std::boxed::Box;
 use std::vec::Vec;
@@ -17,24 +17,18 @@ use std::vec::Vec;
 pub mod color;
 pub mod image;
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 enum SmallColor {
+    #[default]
     Default,
     PaletteIndex(PaletteIndex),
 }
 
-impl Default for SmallColor {
-    fn default() -> Self {
-        Self::Default
-    }
-}
-
-impl Into<ColorAttribute> for SmallColor {
-    fn into(self) -> ColorAttribute {
-        match self {
-            Self::Default => ColorAttribute::Default,
-            Self::PaletteIndex(idx) => ColorAttribute::PaletteIndex(idx),
+impl From<SmallColor> for ColorAttribute {
+    fn from(val: SmallColor) -> Self {
+        match val {
+            SmallColor::Default => ColorAttribute::Default,
+            SmallColor::PaletteIndex(idx) => ColorAttribute::PaletteIndex(idx),
         }
     }
 }
@@ -44,8 +38,8 @@ impl Into<ColorAttribute> for SmallColor {
 /// to reduce per-cell overhead.
 /// The setter methods return a mutable self reference so that they can
 /// be chained together.
-#[derive(Serialize, Deserialize)]
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[allow(clippy::unsafe_derive_deserialize)]
 pub struct CellAttributes {
     attributes: u32,
     /// The foreground color
@@ -53,7 +47,7 @@ pub struct CellAttributes {
     /// The background color
     background: SmallColor,
     /// Relatively rarely used attributes spill over to a heap
-    /// allocated struct in order to keep CellAttributes
+    /// allocated struct in order to keep `CellAttributes`
     /// smaller in the common case.
     fat: Option<Box<FatAttributes>>,
 }
@@ -79,13 +73,12 @@ impl core::fmt::Debug for CellAttributes {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Default, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
 struct FatAttributes {
     /// The hyperlink content, if any
     hyperlink: Option<Arc<Hyperlink>>,
     /// The image data, if any
-    image: Vec<Box<ImageCell>>,
+    image: Vec<ImageCell>,
     /// The color of the underline.  If None, then
     /// the foreground color is to be used
     underline_color: ColorAttribute,
@@ -166,19 +159,14 @@ macro_rules! bitfield {
 /// taking; this is the default if left unspecified),
 /// Input (that the user typed) and Prompt (effectively, "chrome" provided
 /// by the shell or application that the user is interacting with.
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum SemanticType {
+    #[default]
     Output = 0,
     Input = 1,
     Prompt = 2,
-}
-
-impl Default for SemanticType {
-    fn default() -> Self {
-        Self::Output
-    }
 }
 
 pub use crate::term_screen::escape_parser::csi::{Blink, Intensity, Underline, VerticalAlign};
@@ -202,6 +190,7 @@ impl CellAttributes {
     bitfield!(semantic_type, set_semantic_type, SemanticType, 0b11, 13);
     bitfield!(vertical_align, set_vertical_align, VerticalAlign, 0b11, 15);
 
+    #[must_use]
     pub const fn blank() -> Self {
         Self {
             attributes: 0,
@@ -214,6 +203,7 @@ impl CellAttributes {
     /// Returns true if the attribute bits in both objects are equal.
     /// This can be used to cheaply test whether the styles of the two
     /// cells are the same, and is used by some `Renderer` implementations.
+    #[must_use]
     pub fn attribute_bits_equal(&self, other: &Self) -> bool {
         self.attributes == other.attributes
     }
@@ -228,6 +218,8 @@ impl CellAttributes {
     }
 
     /// Set the foreground color for the cell to that specified
+    /// # Panics
+    /// If the fat attributes are not yet allocated and the foreground color is not a default or palette index.
     pub fn set_foreground<C: Into<ColorAttribute>>(&mut self, foreground: C) -> &mut Self {
         let foreground: ColorAttribute = foreground.into();
         match foreground {
@@ -255,15 +247,18 @@ impl CellAttributes {
         self
     }
 
+    #[must_use]
     pub fn foreground(&self) -> ColorAttribute {
-        if let Some(fat) = self.fat.as_ref() {
-            if fat.foreground != ColorAttribute::Default {
-                return fat.foreground;
-            }
+        if let Some(fat) = self.fat.as_ref()
+            && fat.foreground != ColorAttribute::Default
+        {
+            return fat.foreground;
         }
         self.foreground.into()
     }
 
+    /// # Panics
+    /// If the fat attributes are not yet allocated and the background color is not a default or palette index.
     pub fn set_background<C: Into<ColorAttribute>>(&mut self, background: C) -> &mut Self {
         let background: ColorAttribute = background.into();
         match background {
@@ -291,11 +286,12 @@ impl CellAttributes {
         self
     }
 
+    #[must_use]
     pub fn background(&self) -> ColorAttribute {
-        if let Some(fat) = self.fat.as_ref() {
-            if fat.background != ColorAttribute::Default {
-                return fat.background;
-            }
+        if let Some(fat) = self.fat.as_ref()
+            && fat.background != ColorAttribute::Default
+        {
+            return fat.background;
         }
         self.background.into()
     }
@@ -318,26 +314,22 @@ impl CellAttributes {
     }
 
     fn deallocate_fat_attributes_if_none(&mut self) {
-        let deallocate = self
-            .fat
-            .as_ref()
-            .map(|fat| {
-                {
-                    if !fat.image.is_empty() {
-                        return false;
-                    }
-                }
-                fat.hyperlink.is_none()
-                    && fat.underline_color == ColorAttribute::Default
-                    && fat.foreground == ColorAttribute::Default
-                    && fat.background == ColorAttribute::Default
-            })
-            .unwrap_or(false);
+        let deallocate = self.fat.as_ref().is_some_and(|fat| {
+            if !fat.image.is_empty() {
+                return false;
+            }
+            fat.hyperlink.is_none()
+                && fat.underline_color == ColorAttribute::Default
+                && fat.foreground == ColorAttribute::Default
+                && fat.background == ColorAttribute::Default
+        });
         if deallocate {
             self.fat.take();
         }
     }
 
+    /// # Panics
+    /// If the fat attributes need to be allocated first and the allocation fails.
     pub fn set_hyperlink(&mut self, link: Option<Arc<Hyperlink>>) -> &mut Self {
         if link.is_none() && self.fat.is_none() {
             self
@@ -352,7 +344,9 @@ impl CellAttributes {
 
 impl CellAttributes {
     /// Assign a single image to a cell.
-    pub fn set_image(&mut self, image: Box<ImageCell>) -> &mut Self {
+    /// # Panics
+    /// If the fat attributes need to be allocated first.
+    pub fn set_image(&mut self, image: ImageCell) -> &mut Self {
         self.allocate_fat_attributes();
         self.fat.as_mut().unwrap().image = vec![image];
         self
@@ -377,7 +371,9 @@ impl CellAttributes {
 
     /// Add an image attachement, preserving any existing attachments.
     /// The list of images is maintained in z-index order
-    pub fn attach_image(&mut self, image: Box<ImageCell>) -> &mut Self {
+    /// # Panics
+    /// If the fat attributes need to be allocated first.
+    pub fn attach_image(&mut self, image: ImageCell) -> &mut Self {
         self.allocate_fat_attributes();
         let fat = self.fat.as_mut().unwrap();
         let z_index = image.z_index();
@@ -392,6 +388,8 @@ impl CellAttributes {
 }
 
 impl CellAttributes {
+    /// # Panics
+    /// If the fat attributes need to be allocated first.
     pub fn set_underline_color<C: Into<ColorAttribute>>(
         &mut self,
         underline_color: C,
@@ -409,6 +407,9 @@ impl CellAttributes {
 
     /// Clone the attributes, but exclude fancy extras such
     /// as hyperlinks or future sprite things
+    /// # Panics
+    /// If the fat attributes have not been allocated yet.
+    #[must_use]
     pub fn clone_sgr_only(&self) -> Self {
         let mut res = Self {
             attributes: self.attributes,
@@ -416,15 +417,14 @@ impl CellAttributes {
             background: self.background,
             fat: None,
         };
-        if let Some(fat) = self.fat.as_ref() {
-            if fat.background != ColorAttribute::Default
-                || fat.foreground != ColorAttribute::Default
-            {
-                res.allocate_fat_attributes();
-                let new_fat = res.fat.as_mut().unwrap();
-                new_fat.foreground = fat.foreground;
-                new_fat.background = fat.background;
-            }
+        if let Some(fat) = self.fat.as_ref()
+            && (fat.background != ColorAttribute::Default
+                || fat.foreground != ColorAttribute::Default)
+        {
+            res.allocate_fat_attributes();
+            let new_fat = res.fat.as_mut().unwrap();
+            new_fat.foreground = fat.foreground;
+            new_fat.background = fat.background;
         }
         // Reset the semantic type; clone_sgr_only is used primarily
         // to create a "blank" cell when clearing and we want that to
@@ -449,6 +449,7 @@ impl CellAttributes {
         res
     }
 
+    #[must_use]
     pub fn hyperlink(&self) -> Option<&Arc<Hyperlink>> {
         self.fat.as_ref().and_then(|fat| fat.hyperlink.as_ref())
     }
@@ -456,22 +457,24 @@ impl CellAttributes {
     /// Returns the list of attached images in z-index order.
     /// Returns None if there are no attached images; will
     /// never return Some(vec![]).
+    #[must_use]
     pub fn images(&self) -> Option<Vec<ImageCell>> {
         let fat = self.fat.as_ref()?;
         if fat.image.is_empty() {
             return None;
         }
-        Some(fat.image.iter().map(|im| im.as_ref().clone()).collect())
+        Some(fat.image.clone())
     }
 
+    #[must_use]
     pub fn underline_color(&self) -> ColorAttribute {
         self.fat
             .as_ref()
-            .map(|fat| fat.underline_color)
-            .unwrap_or(ColorAttribute::Default)
+            .map_or(ColorAttribute::Default, |fat| fat.underline_color)
     }
 
     pub fn apply_change(&mut self, change: &AttributeChange) {
+        #[allow(clippy::enum_glob_use)]
         use AttributeChange::*;
         match change {
             Intensity(value) => {
@@ -526,7 +529,7 @@ where
     s.serialize(serializer)
 }
 
-/// TeenyString encodes string storage in a single u64.
+/// `TeenyString` encodes string storage in a single u64.
 /// The scheme is simple but effective: strings that encode into a
 /// byte slice that is 1 less byte than the machine word size can
 /// be encoded directly into the usize bits stored in the struct.
@@ -536,7 +539,7 @@ where
 /// from the heap and the usize holds its raw pointer address.
 ///
 /// When the string is inlined, the next-MSB is used to short-cut
-/// calling grapheme_column_width; if it is set, then the TeenyString
+/// calling `grapheme_column_width`; if it is set, then the `TeenyString`
 /// has length 2, otherwise, it has length 1 (we don't allow zero-length
 /// strings).
 struct TeenyString(u64);
@@ -548,7 +551,7 @@ struct TeenyStringHeap {
 impl TeenyString {
     const fn marker_mask() -> u64 {
         if cfg!(target_endian = "little") {
-            0x80000000_00000000
+            0x8000_0000_0000_0000
         } else {
             0x1
         }
@@ -556,7 +559,7 @@ impl TeenyString {
 
     const fn double_wide_mask() -> u64 {
         if cfg!(target_endian = "little") {
-            0xc0000000_00000000
+            0xc000_0000_0000_0000
         } else {
             0x3
         }
@@ -606,11 +609,11 @@ impl TeenyString {
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     bytes.as_ptr(),
-                    &mut word as *mut u64 as *mut u8,
+                    core::ptr::from_mut(&mut word).cast::<u8>(),
                     len,
                 );
             }
-            let word = Self::set_marker_bit(word as u64, width);
+            let word = Self::set_marker_bit(word, width);
             Self(word)
         } else {
             let vec = Box::new(TeenyStringHeap {
@@ -624,9 +627,9 @@ impl TeenyString {
 
     pub const fn space() -> Self {
         Self(if cfg!(target_endian = "little") {
-            0x80000000_00000020
+            0x8000_0000_0000_0020
         } else {
-            0x20000000_00000001
+            0x2000_0000_0000_0001
         })
     }
 
@@ -639,7 +642,7 @@ impl TeenyString {
         if Self::is_marker_bit_set(self.0) {
             if Self::is_double_width(self.0) { 2 } else { 1 }
         } else {
-            let heap = self.0 as *const u64 as *const TeenyStringHeap;
+            let heap = (self.0 as *const u64).cast::<TeenyStringHeap>();
             unsafe { (*heap).width }
         }
     }
@@ -652,7 +655,7 @@ impl TeenyString {
 
     pub fn as_bytes(&self) -> &[u8] {
         if Self::is_marker_bit_set(self.0) {
-            let bytes = &self.0 as *const u64 as *const u8;
+            let bytes = core::ptr::from_ref(&self.0).cast::<u8>();
             let bytes =
                 unsafe { core::slice::from_raw_parts(bytes, core::mem::size_of::<u64>() - 1) };
             let len = bytes
@@ -662,7 +665,7 @@ impl TeenyString {
 
             &bytes[0..len]
         } else {
-            let heap = self.0 as *const u64 as *const TeenyStringHeap;
+            let heap = (self.0 as *const u64).cast::<TeenyStringHeap>();
             unsafe { (*heap).bytes.as_slice() }
         }
     }
@@ -671,7 +674,7 @@ impl TeenyString {
 impl Drop for TeenyString {
     fn drop(&mut self) {
         if !Self::is_marker_bit_set(self.0) {
-            let vec = unsafe { Box::from_raw(self.0 as *mut usize as *mut TeenyStringHeap) };
+            let vec = unsafe { Box::from_raw((self.0 as *mut usize).cast::<TeenyStringHeap>()) };
             drop(vec);
         }
     }
@@ -695,8 +698,7 @@ impl core::cmp::PartialEq for TeenyString {
 impl core::cmp::Eq for TeenyString {}
 
 /// Models the contents of a cell on the terminal display
-#[derive(Serialize, Deserialize)]
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq)]
 pub struct Cell {
     #[serde(
         deserialize_with = "deserialize_teenystring",
@@ -726,6 +728,7 @@ impl Cell {
     /// Create a new cell holding the specified character and with the
     /// specified cell attributes.
     /// All control and movement characters are rewritten as a space.
+    #[must_use]
     pub fn new(text: char, attrs: CellAttributes) -> Self {
         let storage = TeenyString::from_char(text);
         Self {
@@ -734,6 +737,7 @@ impl Cell {
         }
     }
 
+    #[must_use]
     pub const fn blank() -> Self {
         Self {
             text: TeenyString::space(),
@@ -741,6 +745,7 @@ impl Cell {
         }
     }
 
+    #[must_use]
     pub const fn blank_with_attrs(attrs: CellAttributes) -> Self {
         Self {
             text: TeenyString::space(),
@@ -751,6 +756,7 @@ impl Cell {
     /// Indicates whether this cell has text or emoji presentation.
     /// The width already reflects that choice; this information
     /// is also useful when selecting an appropriate font.
+    #[must_use]
     pub fn presentation(&self) -> Presentation {
         match Presentation::for_grapheme(self.str()) {
             (_, Some(variation)) => variation,
@@ -765,6 +771,7 @@ impl Cell {
     /// over.  This function technically allows for an arbitrary string to
     /// be passed but it should not be used to hold strings other than
     /// graphemes.
+    #[must_use]
     pub fn new_grapheme(
         text: &str,
         attrs: CellAttributes,
@@ -778,6 +785,7 @@ impl Cell {
         }
     }
 
+    #[must_use]
     pub fn new_grapheme_with_width(text: &str, width: usize, attrs: CellAttributes) -> Self {
         let storage = TeenyString::from_str(text, Some(width), None);
         Self {
@@ -787,20 +795,24 @@ impl Cell {
     }
 
     /// Returns the textual content of the cell
+    #[must_use]
     pub fn str(&self) -> &str {
         self.text.str()
     }
 
     /// Returns the number of cells visually occupied by this grapheme
+    #[must_use]
     pub fn width(&self) -> usize {
         self.text.width()
     }
 
     /// Returns the attributes of the cell
+    #[must_use]
     pub fn attrs(&self) -> &CellAttributes {
         &self.attrs
     }
 
+    #[must_use]
     pub fn attrs_mut(&mut self) -> &mut CellAttributes {
         &mut self.attrs
     }
@@ -814,6 +826,7 @@ pub struct UnicodeVersion {
 }
 
 impl UnicodeVersion {
+    #[must_use]
     pub const fn new(version: u8) -> Self {
         Self {
             version,
@@ -840,17 +853,18 @@ impl UnicodeVersion {
 
     #[inline]
     fn wcwidth(&self, c: char) -> usize {
-        if let Some(ref cell_widths) = self.cell_widths {
-            if let Some(width) = cell_widths.get(&(c as u32)) {
-                return (*width).into();
-            }
+        if let Some(ref cell_widths) = self.cell_widths
+            && let Some(width) = cell_widths.get(&(c as u32))
+        {
+            return (*width).into();
         }
         self.width(WCWIDTH_TABLE.classify(c))
     }
 
     #[inline]
+    #[must_use]
     pub fn idx(&self) -> usize {
-        (if self.version > 9 { 2 } else { 0 }) | (if self.ambiguous_are_wide { 1 } else { 0 })
+        (if self.version > 9 { 2 } else { 0 }) | usize::from(self.ambiguous_are_wide)
     }
 }
 
@@ -860,13 +874,15 @@ pub const LATEST_UNICODE_VERSION: UnicodeVersion = UnicodeVersion {
     cell_widths: None,
 };
 
-/// Returns true if the char `c` has the unicode White_Space property
+/// Returns true if the char `c` has the unicode `White_Space` property
+#[must_use]
 pub fn is_white_space_char(c: char) -> bool {
     crate::term_screen::char_props::white_space::WHITE_SPACE.contains_u32(c as u32)
 }
 
 /// Returns true if the grapheme string `g` consists entirely of characters
-/// that have the unicode White_Space property.
+/// that have the unicode `White_Space` property.
+#[must_use]
 pub fn is_white_space_grapheme(g: &str) -> bool {
     for c in g.chars() {
         if !is_white_space_char(c) {
@@ -880,6 +896,7 @@ pub fn is_white_space_grapheme(g: &str) -> bool {
 /// of graphemes.
 /// Calls through to `grapheme_column_width` for each grapheme
 /// and sums up the length.
+#[must_use]
 pub fn unicode_column_width(s: &str, version: Option<&UnicodeVersion>) -> usize {
     Graphemes::new(s)
         .map(|g| grapheme_column_width(g, version))
@@ -916,8 +933,9 @@ pub fn unicode_column_width(s: &str, version: Option<&UnicodeVersion>) -> usize 
 /// The terminal emulator can then pass the unicode version through to
 /// the Cell that is used to hold a grapheme, and that per-Cell version
 /// can then be used to calculate width.
+#[must_use]
 pub fn grapheme_column_width(s: &str, version: Option<&UnicodeVersion>) -> usize {
-    let version = version.as_deref().unwrap_or(&LATEST_UNICODE_VERSION);
+    let version = version.unwrap_or(&LATEST_UNICODE_VERSION);
 
     // Optimization: if there is a single byte we can directly cast
     // that byte as a char which will be in the range 0.255.
@@ -941,9 +959,8 @@ pub fn grapheme_column_width(s: &str, version: Option<&UnicodeVersion>) -> usize
         // the grapheme forces the width. We can bypass
         // the WcWidth classification if that is true.
         match Presentation::for_grapheme(s) {
-            (_, Some(Presentation::Emoji)) => return 2,
             (_, Some(Presentation::Text)) => return 1,
-            (Presentation::Emoji, None) => return 2,
+            (_, Some(Presentation::Emoji)) | (Presentation::Emoji, None) => return 2,
             (Presentation::Text, None) => {}
         }
     }
@@ -960,8 +977,7 @@ pub fn grapheme_column_width(s: &str, version: Option<&UnicodeVersion>) -> usize
 /// Models a change in the attributes of a cell in a stream of changes.
 /// Each variant specifies one of the possible attributes; the corresponding
 /// value holds the new value to be used for that attribute.
-#[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum AttributeChange {
     Intensity(Intensity),
     Underline(Underline),
@@ -987,7 +1003,7 @@ mod test {
         );
 
         let s = TeenyString::from_char('a');
-        assert_eq!(s.as_bytes(), &[b'a']);
+        assert_eq!(s.as_bytes(), b"a");
 
         let longer = TeenyString::from_str("hellothere", None, None);
         assert_eq!(longer.as_bytes(), b"hellothere");
@@ -1001,7 +1017,10 @@ mod test {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn memory_usage() {
-        assert_eq!(core::mem::size_of::<crate::term_screen::escape_parser::color::RgbColor>(), 4);
+        assert_eq!(
+            core::mem::size_of::<crate::term_screen::escape_parser::color::RgbColor>(),
+            4
+        );
         assert_eq!(core::mem::size_of::<ColorAttribute>(), 40);
         assert_eq!(core::mem::size_of::<CellAttributes>(), 16);
         assert_eq!(core::mem::size_of::<Cell>(), 24);

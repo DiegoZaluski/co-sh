@@ -2,18 +2,19 @@
 // using derive(FromPrimitive)
 #![allow(clippy::useless_attribute)]
 #![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#![allow(clippy::missing_errors_doc)]
 //! This module provides the ability to parse escape sequences and attach
 //! semantic meaning to them.  It can also encode the semantic values as
 //! escape sequences.  It provides encoding and decoding functionality
 //! only; it does not provide terminal emulation facilities itself.
 use self::tmux_cc::Event;
-use core::fmt::{Display, Formatter, Result as FmtResult, Write as FmtWrite};
-use num_derive::*;
 use crate::term_screen::color_types::LinearRgba;
-
+use core::fmt::{Display, Formatter, Result as FmtResult, Write as FmtWrite};
+use num_derive::FromPrimitive;
 
 mod allocate;
-use allocate::*;
+use allocate::{String, Box, Vec, ToString};
 
 pub mod apc;
 pub mod color;
@@ -97,8 +98,8 @@ fn action_size() {
 impl Display for Action {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
-            Action::Print(c) => write!(f, "{}", c),
-            Action::PrintString(s) => write!(f, "{}", s),
+            Action::Print(c) => write!(f, "{c}"),
+            Action::PrintString(s) => write!(f, "{s}"),
             Action::Control(c) => f.write_char(*c as u8 as char),
             Action::DeviceControl(c) => c.fmt(f),
             Action::OperatingSystemCommand(osc) => osc.fmt(f),
@@ -112,7 +113,7 @@ impl Display for Action {
                         write!(f, ";")?;
                     }
                     for &b in name.as_bytes() {
-                        write!(f, "{:x}", b)?;
+                        write!(f, "{b:x}")?;
                     }
                 }
 
@@ -171,7 +172,7 @@ impl Display for ShortDeviceControl {
             if idx > 0 {
                 write!(f, ";")?;
             }
-            write!(f, "{}", p)?;
+            write!(f, "{p}")?;
         }
         for b in &self.intermediates {
             f.write_char(*b as char)?;
@@ -240,7 +241,7 @@ impl Display for DeviceControlMode {
                     if idx > 0 {
                         write!(f, ";")?;
                     }
-                    write!(f, "{}", p)?;
+                    write!(f, "{p}")?;
                 }
                 for b in &mode.intermediates {
                     f.write_char(*b as char)?;
@@ -260,10 +261,10 @@ impl Display for DeviceControlMode {
 impl core::fmt::Debug for DeviceControlMode {
     fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
         match self {
-            Self::Enter(mode) => write!(fmt, "Enter({:?})", mode),
+            Self::Enter(mode) => write!(fmt, "Enter({mode:?})"),
             Self::Exit => write!(fmt, "Exit"),
-            Self::Data(b) => write!(fmt, "Data({:?} 0x{:x})", *b as char, *b),
-            Self::ShortDeviceControl(s) => write!(fmt, "ShortDeviceControl({:?})", s),
+            Self::Data(b) => write!(fmt, "Data({:?} 0x{b:x})", *b as char),
+            Self::ShortDeviceControl(s) => write!(fmt, "ShortDeviceControl({s:?})"),
             Self::TmuxEvents(_) => write!(fmt, "tmux event"),
         }
     }
@@ -298,6 +299,7 @@ pub struct Sixel {
 
 impl Sixel {
     /// Returns the width, height of the image
+    #[must_use]
     pub fn dimensions(&self) -> (u32, u32) {
         if let (Some(w), Some(h)) = (self.pixel_width, self.pixel_height) {
             return (w, h);
@@ -346,10 +348,10 @@ impl Display for Sixel {
             write!(
                 f,
                 "\x1bP;{}{}q\"{};{};{};{}",
-                if self.background_is_transparent { 1 } else { 0 },
+                i32::from(self.background_is_transparent),
                 match self.horizontal_grid_size {
-                    Some(h) => format!(";{}", h),
-                    None => "".to_string(),
+                    Some(h) => format!(";{h}"),
+                    None => String::new(),
                 },
                 self.pan,
                 self.pad,
@@ -366,14 +368,14 @@ impl Display for Sixel {
                     (3, 1) => 3,
                     (1, 1) => 7,
                     _ => {
-                        log::error!("bad pad/pan combo: {:?}", self);
+                        log::error!("bad pad/pan combo: {self:?}");
                         return Err(core::fmt::Error);
                     }
                 },
-                if self.background_is_transparent { 1 } else { 0 },
+                i32::from(self.background_is_transparent),
                 match self.horizontal_grid_size {
-                    Some(h) => format!(";{}", h),
-                    None => "".to_string(),
+                    Some(h) => format!(";{h}"),
+                    None => String::new(),
                 },
             )?;
         }
@@ -454,10 +456,9 @@ impl Display for SixelData {
                 saturation,
             } => write!(
                 f,
-                "#{};1;{};{};{}",
-                color_number, hue_angle, lightness, saturation
+                "#{color_number};1;{hue_angle};{lightness};{saturation}"
             ),
-            Self::SelectColorMapEntry(n) => write!(f, "#{}", n),
+            Self::SelectColorMapEntry(n) => write!(f, "#{n}"),
             Self::CarriageReturn => write!(f, "$"),
             Self::NewLine => write!(f, "-"),
         }
@@ -541,6 +542,7 @@ pub struct OneBased {
 }
 
 impl OneBased {
+    #[must_use]
     pub fn new(value: u32) -> Self {
         debug_assert!(
             value != 0,
@@ -549,18 +551,20 @@ impl OneBased {
         Self { value }
     }
 
+    #[must_use]
     pub fn from_zero_based(value: u32) -> Self {
         Self { value: value + 1 }
     }
 
     /// Map a value from an escape sequence parameter.
     /// 0 is equivalent to 1
+    #[allow(clippy::result_unit_err)]
     pub fn from_esc_param(v: &CsiParam) -> core::result::Result<Self, ()> {
         match v {
             CsiParam::Integer(v) if *v == 0 => Ok(Self {
                 value: num_traits::one(),
             }),
-            CsiParam::Integer(v) if *v > 0 && *v <= i64::from(u32::max_value()) => {
+            CsiParam::Integer(v) if *v > 0 && *v <= i64::from(u32::MAX) => {
                 Ok(Self { value: *v as u32 })
             }
             _ => Err(()),
@@ -568,13 +572,14 @@ impl OneBased {
     }
 
     /// Map a value from an escape sequence parameter.
-    /// 0 is equivalent to max_value.
+    /// 0 is equivalent to MAX.
+    #[allow(clippy::result_unit_err)]
     pub fn from_esc_param_with_big_default(v: &CsiParam) -> core::result::Result<Self, ()> {
         match v {
             CsiParam::Integer(v) if *v == 0 => Ok(Self {
-                value: u32::max_value(),
+                value: u32::MAX,
             }),
-            CsiParam::Integer(v) if *v > 0 && *v <= i64::from(u32::max_value()) => {
+            CsiParam::Integer(v) if *v > 0 && *v <= i64::from(u32::MAX) => {
                 Ok(Self { value: *v as u32 })
             }
             _ => Err(()),
@@ -582,15 +587,18 @@ impl OneBased {
     }
 
     /// Map a value from an optional escape sequence parameter
+    #[allow(clippy::result_unit_err)]
     pub fn from_optional_esc_param(o: Option<&CsiParam>) -> core::result::Result<Self, ()> {
         Self::from_esc_param(o.unwrap_or(&CsiParam::Integer(1)))
     }
 
     /// Return the underlying value as a 0-based value
+    #[must_use]
     pub fn as_zero_based(self) -> u32 {
         self.value.saturating_sub(1)
     }
 
+    #[must_use]
     pub fn as_one_based(self) -> u32 {
         self.value
     }

@@ -1,8 +1,10 @@
-use super::super::input::*;
+#![allow(clippy::missing_errors_doc)]
+use super::super::input::{KeyCode, KeyModifiers};
 use super::TerminalState;
-use std::io::Write;
 use crate::term_screen::input_types::{KeyCodeEncodeModes, KeyboardEncoding};
+use std::io::Write;
 
+#[allow(clippy::needless_pass_by_value)]
 impl TerminalState {
     fn effective_keyboard_encoding(&self) -> KeyboardEncoding {
         match self
@@ -22,6 +24,9 @@ impl TerminalState {
     /// that is embedding the Terminal.  This method translates the
     /// keycode into a sequence of bytes to send to the slave end
     /// of the pty via the `Write`-able object provided by the caller.
+    ///
+    /// # Errors
+    /// Returns an error if the write operation fails.
     fn key_up_down(
         &mut self,
         key: KeyCode,
@@ -49,9 +54,9 @@ impl TerminalState {
 
         let label = if is_down { "key_down" } else { "key_up" };
         if self.config.debug_key_events() {
-            log::info!("{}: sending {:?}, {:?} {:?}", label, to_send, key, mods);
+            log::info!("{label}: sending {to_send:?}, {key:?} {mods:?}");
         } else {
-            log::trace!("{}: sending {:?}, {:?} {:?}", label, to_send, key, mods);
+            log::trace!("{label}: sending {to_send:?}, {key:?} {mods:?}");
         }
         self.writer.write_all(to_send.as_bytes())?;
         self.writer.flush()?;

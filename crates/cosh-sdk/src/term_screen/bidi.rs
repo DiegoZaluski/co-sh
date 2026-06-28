@@ -12,21 +12,17 @@ pub enum Direction {
 }
 
 /// Hint for paragraph direction in bidi resolution
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ParagraphDirectionHint {
     AutoLeftToRight,
     AutoRightToLeft,
+    #[default]
     LeftToRight,
     RightToLeft,
 }
 
-impl Default for ParagraphDirectionHint {
-    fn default() -> Self {
-        ParagraphDirectionHint::LeftToRight
-    }
-}
-
 impl ParagraphDirectionHint {
+    #[must_use]
     pub fn direction(self) -> Direction {
         match self {
             ParagraphDirectionHint::AutoLeftToRight | ParagraphDirectionHint::LeftToRight => {
@@ -65,7 +61,14 @@ pub struct ReorderedRun {
     pub direction: Direction,
 }
 
+impl Default for BidiContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BidiContext {
+    #[must_use]
     pub fn new() -> Self {
         BidiContext
     }
@@ -78,8 +81,13 @@ impl BidiContext {
 
     /// Get reordered visual runs.
     /// Stub: returns a single LTR run covering the entire range.
+    #[must_use]
     pub fn reordered_runs(&self, range: std::ops::Range<usize>) -> Vec<ReorderedRun> {
         let indices: Vec<usize> = range.clone().collect();
-        vec![ReorderedRun { range, indices, direction: Direction::LeftToRight }]
+        vec![ReorderedRun {
+            range,
+            indices,
+            direction: Direction::LeftToRight,
+        }]
     }
 }

@@ -1,16 +1,19 @@
-use super::*;
 use super::terminalstate::performer::Performer;
-use std::sync::Arc;
+use super::{Serialize, Deserialize, str, TerminalState, Deref, DerefMut, TerminalConfiguration};
 use crate::term_screen::escape_parser::parser::Parser;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClipboardSelection {
     Clipboard,
     PrimarySelection,
 }
 
 pub trait Clipboard: Send + Sync {
+    /// Sets the clipboard contents for the given selection.
+    ///
+    /// # Errors
+    /// Returns an error if the clipboard operation fails.
     fn set_contents(
         &self,
         selection: ClipboardSelection,
@@ -29,11 +32,13 @@ impl Clipboard for Box<dyn Clipboard> {
 }
 
 pub trait DeviceControlHandler: Send + Sync {
-    fn handle_device_control(&mut self, _control: crate::term_screen::escape_parser::DeviceControlMode);
+    fn handle_device_control(
+        &mut self,
+        _control: crate::term_screen::escape_parser::DeviceControlMode,
+    );
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Progress {
     #[default]
     None,
@@ -42,8 +47,7 @@ pub enum Progress {
     Indeterminate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Alert {
     Bell,
     ToastNotification {
@@ -61,7 +65,7 @@ pub enum Alert {
     TabTitleChanged(Option<String>),
     /// When the color palette has been updated
     PaletteChanged,
-    /// A UserVar has changed value
+    /// A `UserVar` has changed value
     SetUserVar {
         name: String,
         value: String,
@@ -103,8 +107,7 @@ impl DerefMut for Terminal {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TerminalSize {
     pub rows: usize,
     pub cols: usize,
@@ -161,6 +164,9 @@ impl Terminal {
     /// The slice is not required to be a complete sequence of escape
     /// characters; it is valid to feed in chunks of data as they arrive.
     /// The output is parsed and applied to the terminal model.
+    ///
+    /// # Errors
+    /// This method does not return errors; it handles them internally.
     pub fn advance_bytes<B: AsRef<[u8]>>(&mut self, bytes: B) {
         self.state.increment_seqno();
         {

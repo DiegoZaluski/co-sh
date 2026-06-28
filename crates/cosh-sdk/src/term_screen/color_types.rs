@@ -19,12 +19,14 @@ impl PartialEq for SrgbaTuple {
 impl Eq for SrgbaTuple {}
 
 impl SrgbaTuple {
+    #[must_use]
     pub fn from_named(name: &str) -> Option<Self> {
-        csscolorparser::parse(name).ok().map(|c| {
-            SrgbaTuple(c.r as f64, c.g as f64, c.b as f64, c.a as f64)
-        })
+        csscolorparser::parse(name)
+            .ok()
+            .map(|c| SrgbaTuple(f64::from(c.r), f64::from(c.g), f64::from(c.b), f64::from(c.a)))
     }
 
+    #[must_use]
     pub fn to_linear(&self) -> LinearRgba {
         fn linearize(v: f64) -> f64 {
             if v <= 0.04045 {
@@ -41,6 +43,8 @@ impl SrgbaTuple {
         )
     }
 
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn to_srgb_u8(&self) -> (u8, u8, u8, u8) {
         (
             (self.0 * 255.0).round() as u8,
@@ -50,13 +54,14 @@ impl SrgbaTuple {
         )
     }
 
+    #[must_use]
     pub fn to_x11_16bit_rgb_string(&self) -> String {
         let (r, g, b, _) = self.to_srgb_u8();
         format!(
             "#{:04x}{:04x}{:04x}",
-            (r as u16) * 257,
-            (g as u16) * 257,
-            (b as u16) * 257,
+            u16::from(r) * 257,
+            u16::from(g) * 257,
+            u16::from(b) * 257,
         )
     }
 }
@@ -64,9 +69,9 @@ impl SrgbaTuple {
 impl From<(u8, u8, u8)> for SrgbaTuple {
     fn from(v: (u8, u8, u8)) -> Self {
         SrgbaTuple(
-            v.0 as f64 / 255.0,
-            v.1 as f64 / 255.0,
-            v.2 as f64 / 255.0,
+            f64::from(v.0) / 255.0,
+            f64::from(v.1) / 255.0,
+            f64::from(v.2) / 255.0,
             1.0,
         )
     }
@@ -75,10 +80,10 @@ impl From<(u8, u8, u8)> for SrgbaTuple {
 impl From<(u8, u8, u8, u8)> for SrgbaTuple {
     fn from(v: (u8, u8, u8, u8)) -> Self {
         SrgbaTuple(
-            v.0 as f64 / 255.0,
-            v.1 as f64 / 255.0,
-            v.2 as f64 / 255.0,
-            v.3 as f64 / 255.0,
+            f64::from(v.0) / 255.0,
+            f64::from(v.1) / 255.0,
+            f64::from(v.2) / 255.0,
+            f64::from(v.3) / 255.0,
         )
     }
 }
@@ -95,13 +100,19 @@ impl core::hash::Hash for SrgbaTuple {
 impl core::str::FromStr for SrgbaTuple {
     type Err = csscolorparser::ParseColorError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        csscolorparser::parse(s).map(|c| SrgbaTuple(c.r as f64, c.g as f64, c.b as f64, c.a as f64))
+        csscolorparser::parse(s).map(|c| SrgbaTuple(f64::from(c.r), f64::from(c.g), f64::from(c.b), f64::from(c.a)))
     }
 }
 
 impl fmt::Display for SrgbaTuple {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "rgb({:.0},{:.0},{:.0})", self.0 * 255., self.1 * 255., self.2 * 255.)
+        write!(
+            f,
+            "rgb({:.0},{:.0},{:.0})",
+            self.0 * 255.,
+            self.1 * 255.,
+            self.2 * 255.
+        )
     }
 }
 
