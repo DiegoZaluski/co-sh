@@ -9,7 +9,7 @@ pub use crate::term_screen::color_types::{LinearRgba, SrgbaTuple};
 use num_derive::FromPrimitive;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::allocate::{String, Vec};
+
 
 #[derive(Debug, Clone, Copy, FromPrimitive, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]

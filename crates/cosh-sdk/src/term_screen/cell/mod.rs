@@ -1,6 +1,5 @@
 //! Model a cell in the terminal display
 use self::color::{ColorAttribute, PaletteIndex};
-use self::image::ImageCell;
 pub use crate::term_screen::char_props::emoji::Presentation;
 use crate::term_screen::char_props::emoji_variation::WCWIDTH_TABLE;
 use crate::term_screen::char_props::widechar_width::WcWidth;
@@ -15,7 +14,6 @@ use std::boxed::Box;
 use std::vec::Vec;
 
 pub mod color;
-pub mod image;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 enum SmallColor {
@@ -77,8 +75,6 @@ impl core::fmt::Debug for CellAttributes {
 struct FatAttributes {
     /// The hyperlink content, if any
     hyperlink: Option<Arc<Hyperlink>>,
-    /// The image data, if any
-    image: Vec<ImageCell>,
     /// The color of the underline.  If None, then
     /// the foreground color is to be used
     underline_color: ColorAttribute,
@@ -90,9 +86,6 @@ impl FatAttributes {
     pub fn compute_shape_hash<H: Hasher>(&self, hasher: &mut H) {
         if let Some(link) = &self.hyperlink {
             link.compute_shape_hash(hasher);
-        }
-        for cell in &self.image {
-            cell.compute_shape_hash(hasher);
         }
         self.underline_color.hash(hasher);
         self.foreground.hash(hasher);
@@ -305,7 +298,6 @@ impl CellAttributes {
         if self.fat.is_none() {
             self.fat.replace(Box::new(FatAttributes {
                 hyperlink: None,
-                image: vec![],
                 underline_color: ColorAttribute::Default,
                 foreground: ColorAttribute::Default,
                 background: ColorAttribute::Default,
@@ -315,9 +307,6 @@ impl CellAttributes {
 
     fn deallocate_fat_attributes_if_none(&mut self) {
         let deallocate = self.fat.as_ref().is_some_and(|fat| {
-            if !fat.image.is_empty() {
-                return false;
-            }
             fat.hyperlink.is_none()
                 && fat.underline_color == ColorAttribute::Default
                 && fat.foreground == ColorAttribute::Default
@@ -339,51 +328,6 @@ impl CellAttributes {
             self.deallocate_fat_attributes_if_none();
             self
         }
-    }
-}
-
-impl CellAttributes {
-    /// Assign a single image to a cell.
-    /// # Panics
-    /// If the fat attributes need to be allocated first.
-    pub fn set_image(&mut self, image: ImageCell) -> &mut Self {
-        self.allocate_fat_attributes();
-        self.fat.as_mut().unwrap().image = vec![image];
-        self
-    }
-
-    /// Clear all images from a cell
-    pub fn clear_images(&mut self) -> &mut Self {
-        if let Some(fat) = self.fat.as_mut() {
-            fat.image.clear();
-        }
-        self.deallocate_fat_attributes_if_none();
-        self
-    }
-
-    pub fn detach_image_with_placement(&mut self, image_id: u32, placement_id: Option<u32>) {
-        if let Some(fat) = self.fat.as_mut() {
-            fat.image
-                .retain(|im| !im.matches_placement(image_id, placement_id));
-        }
-        self.deallocate_fat_attributes_if_none();
-    }
-
-    /// Add an image attachement, preserving any existing attachments.
-    /// The list of images is maintained in z-index order
-    /// # Panics
-    /// If the fat attributes need to be allocated first.
-    pub fn attach_image(&mut self, image: ImageCell) -> &mut Self {
-        self.allocate_fat_attributes();
-        let fat = self.fat.as_mut().unwrap();
-        let z_index = image.z_index();
-        match fat
-            .image
-            .binary_search_by(|probe| probe.z_index().cmp(&z_index))
-        {
-            Ok(idx) | Err(idx) => fat.image.insert(idx, image),
-        }
-        self
     }
 }
 
@@ -452,18 +396,6 @@ impl CellAttributes {
     #[must_use]
     pub fn hyperlink(&self) -> Option<&Arc<Hyperlink>> {
         self.fat.as_ref().and_then(|fat| fat.hyperlink.as_ref())
-    }
-
-    /// Returns the list of attached images in z-index order.
-    /// Returns None if there are no attached images; will
-    /// never return Some(vec![]).
-    #[must_use]
-    pub fn images(&self) -> Option<Vec<ImageCell>> {
-        let fat = self.fat.as_ref()?;
-        if fat.image.is_empty() {
-            return None;
-        }
-        Some(fat.image.clone())
     }
 
     #[must_use]

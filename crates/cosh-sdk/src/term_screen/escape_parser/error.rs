@@ -1,7 +1,5 @@
 use core::fmt::Display;
 
-use super::allocate::{Box, String, ToString};
-
 /// The termwiz Error type encapsulates a range of internal
 /// errors in an opaque manner.  You can use the `source`
 /// method to reach the underlying errors if
@@ -54,12 +52,6 @@ pub enum InternalError {
 
     #[error("{0}")]
     StringErr(#[from] StringWrap),
-
-    #[error(transparent)]
-    ImageError(#[from] image::ImageError),
-
-    #[error(transparent)]
-    Pest(#[from] pest::error::Error<crate::term_screen::escape_parser::tmux_cc::parser::Rule>),
 
     #[error("{}", .context)]
     Context {

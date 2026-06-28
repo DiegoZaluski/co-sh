@@ -7,7 +7,6 @@
 )]
 use self::line::CellRef;
 use crate::term_screen::cell::color::ColorAttribute;
-use crate::term_screen::cell::image::ImageCell;
 use crate::term_screen::cell::{Cell, CellAttributes};
 use core::cmp::min;
 use finl_unicode::grapheme_clusters::Graphemes;
@@ -19,13 +18,10 @@ use std::string::ToString;
 use std::vec;
 use std::vec::Vec;
 
-pub mod cellcluster;
 pub mod change;
-pub mod hyperlink;
 pub mod line;
 
 pub use self::change::{Change, LineAttribute};
-pub use self::change::{Image, TextureCoordinate};
 pub use self::line::Line;
 
 /// Position holds 0-based positioning information, where
@@ -296,7 +292,6 @@ impl Surface {
             Change::CursorColor(color) => self.cursor_color = *color,
             Change::CursorShape(shape) => self.cursor_shape = Some(*shape),
             Change::CursorVisibility(visibility) => self.cursor_visibility = *visibility,
-            Change::Image(image) => self.add_image(image),
             Change::Title(text) => self.title.clone_from(text),
             Change::ScrollRegionUp {
                 first_row,
@@ -310,54 +305,6 @@ impl Surface {
             } => self.scroll_region_down(*first_row, *region_size, *scroll_count),
             Change::LineAttribute(attr) => self.line_attribute(attr),
         }
-    }
-
-    fn add_image(&mut self, image: &Image) {
-        use ordered_float::NotNan;
-
-        let xsize = (image.bottom_right.x - image.top_left.x) / image.width as f32;
-        let ysize = (image.bottom_right.y - image.top_left.y) / image.height as f32;
-
-        if self.ypos + image.height > self.height {
-            let scroll = (self.ypos + image.height) - self.height;
-            for _ in 0..scroll {
-                self.scroll_screen_up();
-            }
-            self.ypos -= scroll;
-        }
-
-        let mut ypos = NotNan::new(0.0).unwrap();
-        for y in 0..image.height {
-            let mut xpos = NotNan::new(0.0).unwrap();
-            for x in 0..image.width {
-                self.lines[self.ypos + y].set_cell(
-                    self.xpos + x,
-                    Cell::new(
-                        ' ',
-                        self.attributes
-                            .clone()
-                            .set_image(ImageCell::new(
-                                TextureCoordinate::new(
-                                    image.top_left.x + xpos,
-                                    image.top_left.y + ypos,
-                                ),
-                                TextureCoordinate::new(
-                                    image.top_left.x + xpos + xsize,
-                                    image.top_left.y + ypos + ysize,
-                                ),
-                                image.image.clone(),
-                            ))
-                            .clone(),
-                    ),
-                    self.seqno,
-                );
-
-                xpos += xsize;
-            }
-            ypos += ysize;
-        }
-
-        self.xpos += image.width;
     }
 
     fn clear_screen(&mut self, color: ColorAttribute) {
@@ -894,9 +841,7 @@ fn compute_position_change(current: usize, pos: &Position, limit: usize) -> usiz
 mod test {
     use super::*;
     use crate::term_screen::cell::color::AnsiColor;
-    use crate::term_screen::cell::image::ImageData;
     use crate::term_screen::cell::{AttributeChange, Intensity};
-    use std::sync::Arc;
 
     // The \x20's look a little awkward, but we can't use a plain
     // space in the first chararcter of a multi-line continuation;
@@ -1627,135 +1572,4 @@ mod test {
         assert_eq!(s.screen_chars_to_string(), "A\u{200b}B \n");
     }
 
-    #[test]
-    fn images() {
-        // a dummy image blob with nonsense content
-        let data = Arc::new(ImageData::with_raw_data(vec![]));
-        let mut s = Surface::new(2, 2);
-        s.add_change(Change::Image(Image {
-            top_left: TextureCoordinate::new_f32(0.0, 0.0),
-            bottom_right: TextureCoordinate::new_f32(1.0, 1.0),
-            image: data.clone(),
-            width: 4,
-            height: 2,
-        }));
-
-        // We're checking that we slice the image up and assign the correct
-        // texture coordinates for each cell.  The width and height are
-        // different from each other to help ensure that the right terms
-        // are used by add_image() function.
-        assert_eq!(
-            s.screen_cells(),
-            [
-                [
-                    Cell::new(
-                        ' ',
-                        CellAttributes::default()
-                            .set_image(ImageCell::new(
-                                TextureCoordinate::new_f32(0.0, 0.0),
-                                TextureCoordinate::new_f32(0.25, 0.5),
-                                data.clone()
-                            ))
-                            .clone()
-                    ),
-                    Cell::new(
-                        ' ',
-                        CellAttributes::default()
-                            .set_image(ImageCell::new(
-                                TextureCoordinate::new_f32(0.25, 0.0),
-                                TextureCoordinate::new_f32(0.5, 0.5),
-                                data.clone()
-                            ))
-                            .clone()
-                    ),
-                    Cell::new(
-                        ' ',
-                        CellAttributes::default()
-                            .set_image(ImageCell::new(
-                                TextureCoordinate::new_f32(0.5, 0.0),
-                                TextureCoordinate::new_f32(0.75, 0.5),
-                                data.clone()
-                            ))
-                            .clone()
-                    ),
-                    Cell::new(
-                        ' ',
-                        CellAttributes::default()
-                            .set_image(ImageCell::new(
-                                TextureCoordinate::new_f32(0.75, 0.0),
-                                TextureCoordinate::new_f32(1.0, 0.5),
-                                data.clone()
-                            ))
-                            .clone()
-                    ),
-                ],
-                [
-                    Cell::new(
-                        ' ',
-                        CellAttributes::default()
-                            .set_image(ImageCell::new(
-                                TextureCoordinate::new_f32(0.0, 0.5),
-                                TextureCoordinate::new_f32(0.25, 1.0),
-                                data.clone()
-                            ))
-                            .clone()
-                    ),
-                    Cell::new(
-                        ' ',
-                        CellAttributes::default()
-                            .set_image(ImageCell::new(
-                                TextureCoordinate::new_f32(0.25, 0.5),
-                                TextureCoordinate::new_f32(0.5, 1.0),
-                                data.clone()
-                            ))
-                            .clone()
-                    ),
-                    Cell::new(
-                        ' ',
-                        CellAttributes::default()
-                            .set_image(ImageCell::new(
-                                TextureCoordinate::new_f32(0.5, 0.5),
-                                TextureCoordinate::new_f32(0.75, 1.0),
-                                data.clone()
-                            ))
-                            .clone()
-                    ),
-                    Cell::new(
-                        ' ',
-                        CellAttributes::default()
-                            .set_image(ImageCell::new(
-                                TextureCoordinate::new_f32(0.75, 0.5),
-                                TextureCoordinate::new_f32(1.0, 1.0),
-                                data.clone()
-                            ))
-                            .clone()
-                    ),
-                ],
-            ]
-        );
-
-        // Check that starting at not the texture origin coordinates
-        // gives reasonable values in the resultant cell
-        let mut other = Surface::new(1, 1);
-        other.add_change(Change::Image(Image {
-            top_left: TextureCoordinate::new_f32(0.25, 0.3),
-            bottom_right: TextureCoordinate::new_f32(0.75, 0.8),
-            image: data.clone(),
-            width: 1,
-            height: 1,
-        }));
-        assert_eq!(
-            other.screen_cells(),
-            [[Cell::new(
-                ' ',
-                CellAttributes::default()
-                    .set_image(ImageCell::new(
-                        TextureCoordinate::new_f32(0.25, 0.3),
-                        TextureCoordinate::new_f32(0.75, 0.8),
-                        data.clone()
-                    ))
-                    .clone()
-            ),]]
-        );
-    }
 }

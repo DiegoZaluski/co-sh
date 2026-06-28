@@ -6,7 +6,6 @@ mod c0;
 use bitflags::bitflags;
 mod c1;
 mod csi;
-mod image;
 // mod selection; FIXME: port to render layer
 use crate::term_screen::core::color::ColorPalette;
 use crate::term_screen::escape_parser::csi::{Edit, EraseInDisplay, EraseInLine};

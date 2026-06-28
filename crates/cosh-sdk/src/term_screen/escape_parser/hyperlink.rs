@@ -4,7 +4,7 @@ use crate::format_err;
 use core::hash::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
 
-use super::allocate::{HashMap, String, ToOwned, ToString};
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Hyperlink {

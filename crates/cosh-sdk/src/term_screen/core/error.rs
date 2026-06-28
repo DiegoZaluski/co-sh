@@ -10,12 +10,6 @@ pub enum TermScreenError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    #[error(transparent)]
-    Image(#[from] crate::term_screen::cell::image::ImageCellError),
-
-    #[error(transparent)]
-    ImageError(#[from] ::image::ImageError),
-
     #[error("{0}")]
     Msg(String),
 

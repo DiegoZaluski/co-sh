@@ -2,8 +2,6 @@
 use super::cellref::CellRef;
 use crate::term_screen::cell::Cell;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use unicode_segmentation::UnicodeSegmentation;
 
 use std::vec::Vec;
 
@@ -17,50 +15,11 @@ impl VecStorage {
         Self { cells }
     }
 
-    pub(crate) fn set_cell(&mut self, idx: usize, mut cell: Cell, clear_image_placement: bool) {
-        if !clear_image_placement && let Some(images) = self.cells[idx].attrs().images() {
-            for image in images {
-                if image.has_placement_id() {
-                    cell.attrs_mut().attach_image(image);
-                }
-            }
-        }
+    pub(crate) fn set_cell(&mut self, idx: usize, cell: Cell, _clear_image_placement: bool) {
         self.cells[idx] = cell;
     }
 
-    pub(crate) fn scan_and_create_hyperlinks(
-        &mut self,
-        line: &str,
-        matches: Vec<crate::term_screen::surface::hyperlink::RuleMatch>,
-    ) -> bool {
-        // The capture range is measured in bytes but we need to translate
-        // that to the index of the column.  This is complicated a bit further
-        // because double wide sequences have a blank column cell after them
-        // in the cells array, but the string we match against excludes that
-        // string.
-        let mut cell_idx = 0;
-        let mut has_implicit_hyperlinks = false;
-        for (byte_idx, _grapheme) in line.grapheme_indices(true) {
-            let cell = &mut self.cells[cell_idx];
-            let mut has_match = false;
-            for m in &matches {
-                if m.range.contains(&byte_idx) {
-                    let attrs = cell.attrs_mut();
-                    // Don't replace existing links
-                    if attrs.hyperlink().is_none() {
-                        attrs.set_hyperlink(Some(Arc::clone(&m.link)));
-                        has_match = true;
-                    }
-                }
-            }
-            cell_idx += cell.width();
-            if has_match {
-                has_implicit_hyperlinks = true;
-            }
-        }
 
-        has_implicit_hyperlinks
-    }
 }
 
 impl core::ops::Deref for VecStorage {

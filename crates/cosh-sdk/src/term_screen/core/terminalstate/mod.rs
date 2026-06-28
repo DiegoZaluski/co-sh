@@ -24,8 +24,7 @@ use super::{
 };
 use crate::term_screen::bidi::ParagraphDirectionHint;
 use crate::term_screen::cell::UnicodeVersion;
-use crate::term_screen::cell::image::ImageData;
-use crate::term_screen::core::color::{ColorPalette, RgbColor};
+use crate::term_screen::core::color::ColorPalette;
 use crate::term_screen::core::config::{BidiMode, NewlineCanon};
 use crate::term_screen::escape_parser::csi::{
     Cursor, CursorStyle, DecPrivateMode, DecPrivateModeCode, Device, Edit, EraseInDisplay,
@@ -39,21 +38,14 @@ use log::debug;
 use num_traits::ToPrimitive;
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, channel};
 use terminfo::{Database, Value};
 use url::Url;
 
-mod image;
-mod iterm;
 mod keyboard;
-mod kitty;
 mod mouse;
 pub(crate) mod performer;
-mod sixel;
-use crate::term_screen::core::terminalstate::image::ImageAttachParams;
-use crate::term_screen::core::terminalstate::kitty::KittyImageState;
 
 lazy_static::lazy_static! {
     static ref DB: Option<Database> = Database::from_env().ok();
@@ -299,14 +291,6 @@ pub struct TerminalState {
 
     dec_ansi_mode: bool,
 
-    /// <https://vt100.net/dec/ek-vt38t-ug-001.pdf#page=132> has a
-    /// discussion on what sixel dispay mode (DECSDM) does.
-    sixel_display_mode: bool,
-    use_private_color_registers_for_each_graphic: bool,
-
-    /// Graphics mode color register map.
-    color_map: HashMap<u16, RgbColor>,
-
     /// When set, modifies the sequence of bytes sent for keys
     /// in the numeric keypad portion of the keyboard.
     application_keypad: bool,
@@ -362,12 +346,8 @@ pub struct TerminalState {
 
     writer: BufWriter<ThreadedWriter>,
 
-    image_cache: lru::LruCache<[u8; 32], Arc<ImageData>>,
-    sixel_scrolls_right: bool,
-
     user_vars: HashMap<String, String>,
 
-    kitty_img: KittyImageState,
     seqno: SequenceNo,
 
     /// The unicode version that is in effect
@@ -405,33 +385,6 @@ pub struct TerminalState {
 struct UnicodeVersionStackEntry {
     vers: UnicodeVersion,
     label: Option<String>,
-}
-
-fn default_color_map() -> HashMap<u16, RgbColor> {
-    let mut color_map = HashMap::new();
-    // Match colors to the VT340 color table:
-    // https://github.com/hackerb9/vt340test/blob/main/colormap/showcolortable.png
-    for (idx, r, g, b) in [
-        (0, 0, 0, 0),
-        (1, 0x33, 0x33, 0xcc),
-        (2, 0xcc, 0x23, 0x23),
-        (3, 0x33, 0xcc, 0x33),
-        (4, 0xcc, 0x33, 0xcc),
-        (5, 0x33, 0xcc, 0xcc),
-        (6, 0xcc, 0xcc, 0xcc),
-        (7, 0x77, 0x77, 0x77),
-        (8, 0x44, 0x44, 0x44),
-        (9, 0x56, 0x56, 0x99),
-        (10, 0x99, 0x44, 0x44),
-        (11, 0x56, 0x99, 0x56),
-        (12, 0x99, 0x56, 0x99),
-        (13, 0x56, 0x99, 0x99),
-        (14, 0x99, 0x99, 0x56),
-        (15, 0xcc, 0xcc, 0xcc),
-    ] {
-        color_map.insert(idx, RgbColor::new_8bpc(r, g, b));
-    }
-    color_map
 }
 
 /// This struct implements a writer that sends the data across
@@ -515,8 +468,6 @@ impl TerminalState {
         let seqno = 1;
         let screen = ScreenOrAlt::new(size, &config, seqno, config.bidi_mode());
 
-        let color_map = default_color_map();
-
         let unicode_version = config.unicode_version();
 
         TerminalState {
@@ -539,15 +490,11 @@ impl TerminalState {
             application_cursor_keys: false,
             modify_other_keys: None,
             dec_ansi_mode: false,
-            sixel_display_mode: false,
-            use_private_color_registers_for_each_graphic: false,
-            color_map,
             application_keypad: false,
             bracketed_paste: false,
             focus_tracking: false,
             mouse_encoding: MouseEncoding::X10,
             keyboard_encoding: KeyboardEncoding::Xterm,
-            sixel_scrolls_right: false,
             any_event_mouse: false,
             button_event_mouse: false,
             mouse_tracking: false,
@@ -573,9 +520,7 @@ impl TerminalState {
             term_program: term_program.to_string(),
             term_version: term_version.to_string(),
             writer,
-            image_cache: lru::LruCache::new(NonZeroUsize::new(16).unwrap()),
             user_vars: HashMap::new(),
-            kitty_img: Default::default(),
             seqno,
             unicode_version,
             unicode_version_stack: vec![],
@@ -1293,7 +1238,6 @@ impl TerminalState {
                 self.screen.saved_cursor().take();
                 self.screen.activate_primary_screen(self.seqno);
                 self.screen.saved_cursor().take();
-                self.kitty_remove_all_placements(true);
 
                 self.reverse_wraparound_mode = false;
                 self.reverse_video_mode = false;
@@ -1572,26 +1516,6 @@ impl TerminalState {
             }
 
             Mode::SetDecPrivateMode(DecPrivateMode::Code(
-                DecPrivateModeCode::UsePrivateColorRegistersForEachGraphic,
-            )) => {
-                self.use_private_color_registers_for_each_graphic = true;
-            }
-            Mode::ResetDecPrivateMode(DecPrivateMode::Code(
-                DecPrivateModeCode::UsePrivateColorRegistersForEachGraphic,
-            )) => {
-                self.use_private_color_registers_for_each_graphic = false;
-            }
-            Mode::QueryDecPrivateMode(DecPrivateMode::Code(
-                DecPrivateModeCode::UsePrivateColorRegistersForEachGraphic,
-            )) => {
-                self.decqrm_response(
-                    mode,
-                    true,
-                    self.use_private_color_registers_for_each_graphic,
-                );
-            }
-
-            Mode::SetDecPrivateMode(DecPrivateMode::Code(
                 DecPrivateModeCode::SynchronizedOutput,
             )) => {
                 // This is handled in wezterm's mux
@@ -1735,20 +1659,26 @@ impl TerminalState {
                 self.decqrm_response(mode, true, self.application_cursor_keys);
             }
 
-            Mode::SetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::SixelDisplayMode)) => {
-                self.sixel_display_mode = true;
-            }
-            Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+            Mode::SetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::SixelDisplayMode))
+            | Mode::ResetDecPrivateMode(DecPrivateMode::Code(
                 DecPrivateModeCode::SixelDisplayMode,
-            )) => {
-                self.sixel_display_mode = false;
-            }
+            )) => {}
             Mode::QueryDecPrivateMode(DecPrivateMode::Code(
                 DecPrivateModeCode::SixelDisplayMode,
             )) => {
-                self.decqrm_response(mode, true, self.sixel_display_mode);
+                self.decqrm_response(mode, true, false);
             }
-
+            Mode::SetDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::UsePrivateColorRegistersForEachGraphic,
+            ))
+            | Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::UsePrivateColorRegistersForEachGraphic,
+            )) => {}
+            Mode::QueryDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::UsePrivateColorRegistersForEachGraphic,
+            )) => {
+                self.decqrm_response(mode, true, false);
+            }
             Mode::SetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::DecAnsiMode)) => {
                 self.dec_ansi_mode = true;
             }
@@ -1883,20 +1813,15 @@ impl TerminalState {
 
             Mode::SetDecPrivateMode(DecPrivateMode::Code(
                 DecPrivateModeCode::SixelScrollsRight,
-            )) => {
-                self.sixel_scrolls_right = true;
-            }
-            Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+            ))
+            | Mode::ResetDecPrivateMode(DecPrivateMode::Code(
                 DecPrivateModeCode::SixelScrollsRight,
-            )) => {
-                self.sixel_scrolls_right = false;
-            }
+            )) => {}
             Mode::QueryDecPrivateMode(DecPrivateMode::Code(
                 DecPrivateModeCode::SixelScrollsRight,
             )) => {
-                self.decqrm_response(mode, true, self.sixel_scrolls_right);
+                self.decqrm_response(mode, true, false);
             }
-
             Mode::SetDecPrivateMode(DecPrivateMode::Code(
                 DecPrivateModeCode::ClearAndEnableAlternateScreen,
             )) => {

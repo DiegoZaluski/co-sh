@@ -10,7 +10,7 @@
 use super::super::terminal::{Alert, Progress};
 use super::super::{ClipboardSelection, DCS, Position, ST, VisibleRowIndex};
 use super::TerminalState;
-use super::{CharSet, MouseEncoding, TabStop, UnicodeVersionStackEntry, default_color_map};
+use super::{CharSet, MouseEncoding, TabStop, UnicodeVersionStackEntry};
 use crate::term_screen::bidi::ParagraphDirectionHint;
 use crate::term_screen::cell::{
     Cell, CellAttributes, SemanticType, grapheme_column_width, is_white_space_grapheme,
@@ -278,14 +278,7 @@ impl<'a> Performer<'a> {
             Action::OperatingSystemCommand(osc) => self.osc_dispatch(*osc),
             Action::Esc(esc) => self.esc_dispatch(esc),
             Action::CSI(csi) => self.csi_dispatch(csi),
-            Action::Sixel(sixel) => self.sixel(*sixel),
             Action::XtGetTcap(names) => self.xt_get_tcap(names),
-            Action::KittyImage(img) => {
-                self.flush_print();
-                if let Err(err) = self.kitty_img(*img) {
-                    log::error!("kitty_img: {err:#}");
-                }
-            }
         }
     }
 
@@ -689,10 +682,7 @@ impl<'a> Performer<'a> {
                 self.reverse_wraparound_mode = false;
                 self.reverse_video_mode = false;
                 self.dec_origin_mode = false;
-                self.use_private_color_registers_for_each_graphic = false;
-                self.color_map = default_color_map();
                 self.application_cursor_keys = false;
-                self.sixel_display_mode = false;
                 self.dec_ansi_mode = false;
                 self.application_keypad = false;
                 self.bracketed_paste = false;
@@ -700,7 +690,6 @@ impl<'a> Performer<'a> {
                 self.mouse_tracking = false;
                 self.mouse_encoding = MouseEncoding::X10;
                 self.keyboard_encoding = KeyboardEncoding::Xterm;
-                self.sixel_scrolls_right = false;
                 self.any_event_mouse = false;
                 self.button_event_mouse = false;
                 self.current_mouse_buttons.clear();
@@ -827,7 +816,6 @@ impl<'a> Performer<'a> {
                     write!(self.writer, "{response}").ok();
                     self.writer.flush().ok();
                 }
-                ITermProprietary::File(image) => self.set_image(*image),
                 ITermProprietary::SetUserVar { name, value } => {
                     self.user_vars.insert(name.clone(), value.clone());
                     if let Some(handler) = self.alert_handler.as_mut() {

@@ -1,19 +1,14 @@
 #![allow(clippy::many_single_char_names)]
-use crate::term_screen::escape_parser::tmux_cc::Event;
 use crate::term_screen::escape_parser::{
     Action, CSI, DeviceControlMode, EnterDeviceControlMode, Esc, OperatingSystemCommand,
     ShortDeviceControl,
 };
-use core::borrow::BorrowMut;
 use core::cell::RefCell;
 use log::error;
 use num_traits::FromPrimitive;
 use vtparse::{CsiParam, VTActor, VTParser};
 
-use crate::term_screen::escape_parser::allocate::{Box, String, ToString, Vec};
 
-mod sixel;
-use sixel::SixelBuilder;
 
 #[derive(Default)]
 struct GetTcapBuilder {
@@ -47,10 +42,8 @@ impl GetTcapBuilder {
 
 #[derive(Default)]
 struct ParseState {
-    sixel: Option<SixelBuilder>,
     dcs: Option<ShortDeviceControl>,
     get_tcap: Option<GetTcapBuilder>,
-    tmux_state: Option<RefCell<crate::term_screen::escape_parser::tmux_cc::Parser>>,
 }
 
 /// The `Parser` struct holds the state machine that is used to decode
@@ -79,42 +72,7 @@ impl Parser {
         }
     }
 
-    /// advance with tmux parser, bypass `VTParse`
-    fn advance_tmux_bytes(
-        &mut self,
-        bytes: &[u8],
-    ) -> crate::term_screen::escape_parser::Result<Vec<Event>> {
-        let parser_state = self.state.borrow();
-        let tmux_state = parser_state.tmux_state.as_ref().unwrap();
-        let mut tmux_parser = tmux_state.borrow_mut();
-        tmux_parser.advance_bytes(bytes)
-    }
-
     pub fn parse<F: FnMut(Action)>(&mut self, bytes: &[u8], mut callback: F) {
-        let is_tmux_mode: bool = self.state.borrow().tmux_state.is_some();
-        if is_tmux_mode {
-            match self.advance_tmux_bytes(bytes) {
-                Ok(tmux_events) => {
-                    callback(Action::DeviceControl(DeviceControlMode::TmuxEvents(
-                        Box::new(tmux_events),
-                    )));
-                }
-                Err(err_buf) => {
-                    // capture bytes cannot be parsed
-                    let unparsed_str = err_buf.to_string().clone();
-                    let mut parser_state = self.state.borrow_mut();
-                    parser_state.tmux_state = None;
-                    let mut perform = Performer {
-                        callback: &mut callback,
-                        state: &mut parser_state,
-                    };
-                    self.state_machine
-                        .parse(unparsed_str.as_bytes(), &mut perform);
-                }
-            }
-            return;
-        }
-
         let mut perform = Performer {
             callback: &mut callback,
             state: &mut self.state.borrow_mut(),
@@ -222,11 +180,7 @@ impl<F: FnMut(Action)> VTActor for Performer<'_, F> {
     }
 
     fn apc_dispatch(&mut self, data: Vec<u8>) {
-        if let Some(img) = super::KittyImage::parse_apc(&data) {
-            (self.callback)(Action::KittyImage(Box::new(img)));
-        } else {
-            log::trace!("Ignoring APC data: {:?}", String::from_utf8_lossy(&data));
-        }
+        log::trace!("Ignoring APC data: {:?}", String::from_utf8_lossy(&data));
     }
 
     fn dcs_hook(
@@ -236,12 +190,9 @@ impl<F: FnMut(Action)> VTActor for Performer<'_, F> {
         intermediates: &[u8],
         ignored_extra_intermediates: bool,
     ) {
-        self.state.sixel.take();
         self.state.get_tcap.take();
         self.state.dcs.take();
-        if byte == b'q' && intermediates.is_empty() && !ignored_extra_intermediates {
-            self.state.sixel.replace(SixelBuilder::new(params));
-        } else if byte == b'q' && intermediates == [b'+'] {
+        if byte == b'q' && intermediates == [b'+'] {
             self.state.get_tcap.replace(GetTcapBuilder::default());
         } else if !ignored_extra_intermediates && is_short_dcs(intermediates, byte) {
             self.state.dcs.replace(ShortDeviceControl {
@@ -251,12 +202,6 @@ impl<F: FnMut(Action)> VTActor for Performer<'_, F> {
                 data: vec![],
             });
         } else {
-            if byte == b'p' && params == [1000] {
-                // into tmux_cc mode
-                self.state.borrow_mut().tmux_state = Some(RefCell::new(
-                    crate::term_screen::escape_parser::tmux_cc::Parser::new(),
-                ));
-            }
             (self.callback)(Action::DeviceControl(DeviceControlMode::Enter(Box::new(
                 EnterDeviceControlMode {
                     byte,
@@ -271,25 +216,9 @@ impl<F: FnMut(Action)> VTActor for Performer<'_, F> {
     fn dcs_put(&mut self, data: u8) {
         if let Some(dcs) = self.state.dcs.as_mut() {
             dcs.data.push(data);
-        } else if let Some(sixel) = self.state.sixel.as_mut() {
-            sixel.push(data);
         } else if let Some(tcap) = self.state.get_tcap.as_mut() {
             tcap.push(data);
         } else {
-            if let Some(tmux_state) = &self.state.tmux_state {
-                let mut tmux_parser = tmux_state.borrow_mut();
-                if let Ok(optional_events) = tmux_parser.advance_byte(data) {
-                    if let Some(tmux_event) = optional_events {
-                        (self.callback)(Action::DeviceControl(DeviceControlMode::TmuxEvents(
-                            Box::new(vec![tmux_event]),
-                        )));
-                    }
-                } else {
-                    drop(tmux_parser);
-                    self.state.tmux_state = None; // drop tmux state
-                }
-                return;
-            }
             (self.callback)(Action::DeviceControl(DeviceControlMode::Data(data)));
         }
     }
@@ -299,9 +228,6 @@ impl<F: FnMut(Action)> VTActor for Performer<'_, F> {
             (self.callback)(Action::DeviceControl(
                 DeviceControlMode::ShortDeviceControl(Box::new(dcs)),
             ));
-        } else if let Some(mut sixel) = self.state.sixel.take() {
-            sixel.finish();
-            (self.callback)(Action::Sixel(Box::new(sixel.sixel)));
         } else if let Some(tcap) = self.state.get_tcap.take() {
             (self.callback)(Action::XtGetTcap(tcap.finish()));
         } else {
@@ -873,77 +799,6 @@ mod test {
             vec![
                 Action::CSI(CSI::Sgr(Sgr::Reset)),
                 Action::CSI(CSI::Sgr(Sgr::Underline(Underline::Single))),
-            ]
-        );
-    }
-
-    #[test]
-    fn kitty_img() {
-        use crate::term_screen::escape_parser::apc::*;
-        assert_eq!(
-            round_trip_parse("\x1b_Gf=24,s=10,v=20;aGVsbG8=\x1b\\"),
-            vec![
-                Action::KittyImage(Box::new(KittyImage::TransmitData {
-                    transmit: KittyImageTransmit {
-                        format: Some(KittyImageFormat::Rgb),
-                        data: KittyImageData::Direct("aGVsbG8=".to_string()),
-                        width: Some(10),
-                        height: Some(20),
-                        image_id: None,
-                        image_number: None,
-                        compression: KittyImageCompression::None,
-                        more_data_follows: false,
-                    },
-                    verbosity: KittyImageVerbosity::Verbose,
-                })),
-                Action::Esc(Esc::Code(EscCode::StringTerminator)),
-            ]
-        );
-
-        assert_eq!(
-            parse_as(
-                "\x1b_Ga=q,s=1,v=1,i=1;YWJjZA==\x1b\\",
-                "\x1b_Ga=q,i=1,s=1,v=1;YWJjZA==\x1b\\"
-            ),
-            vec![
-                Action::KittyImage(Box::new(KittyImage::Query {
-                    transmit: KittyImageTransmit {
-                        format: None,
-                        data: KittyImageData::Direct("YWJjZA==".to_string()),
-                        width: Some(1),
-                        height: Some(1),
-                        image_id: Some(1),
-                        image_number: None,
-                        compression: KittyImageCompression::None,
-                        more_data_follows: false,
-                    },
-                })),
-                Action::Esc(Esc::Code(EscCode::StringTerminator)),
-            ]
-        );
-        assert_eq!(
-            parse_as(
-                "\x1b_Ga=q,t=f,s=1,v=1,i=2;L3Zhci90bXAvdG1wdGYxd3E4Ym4=\x1b\\",
-                "\x1b_Ga=q,i=2,s=1,t=f,v=1;L3Zhci90bXAvdG1wdGYxd3E4Ym4=\x1b\\"
-            ),
-            vec![
-                Action::KittyImage(Box::new(KittyImage::Query {
-                    transmit: KittyImageTransmit {
-                        format: None,
-                        data: KittyImageData::File {
-                            path: "/var/tmp/tmptf1wq8bn".to_string(),
-                            data_offset: None,
-                            data_size: None,
-                        },
-                        width: Some(1),
-                        height: Some(1),
-                        image_id: Some(2),
-                        image_number: None,
-                        compression: KittyImageCompression::None,
-                        more_data_follows: false,
-                    },
-                })),
-                Action::Esc(Esc::Code(EscCode::StringTerminator)),
             ]
         );
     }

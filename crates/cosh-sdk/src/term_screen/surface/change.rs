@@ -6,11 +6,9 @@
 )]
 use super::{CursorShape, CursorVisibility, Position};
 use crate::term_screen::cell::color::ColorAttribute;
-pub use crate::term_screen::cell::image::{ImageData, TextureCoordinate};
 use crate::term_screen::cell::{AttributeChange, CellAttributes, unicode_column_width};
 use finl_unicode::grapheme_clusters::Graphemes;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 use std::string::String;
 use std::vec;
@@ -63,14 +61,6 @@ pub enum Change {
     CursorShape(CursorShape),
     /// Change the cursor visibility
     CursorVisibility(CursorVisibility),
-    /// Place an image at the current cursor position.
-    /// The image defines the dimensions in cells.
-    /// TODO: check iterm rendering behavior when the image is larger than the width of the screen.
-    /// If the image is taller than the remaining space at the bottom
-    /// of the screen, the screen will scroll up.
-    /// The cursor Y position is unchanged by rendering the Image.
-    /// The cursor X position will be incremented by `Image::width` cells.
-    Image(Image),
     /// Scroll the `region_size` lines starting at `first_row` upwards
     /// by `scroll_count` lines.  The `scroll_count` lines at the top of
     /// the region are overwritten.  The `scroll_count` lines at the
@@ -249,10 +239,6 @@ impl ChangeSequence {
                 }
                 self.update_render_height();
             }
-            Change::Image(im) => {
-                self.cursor_x += im.width;
-                self.render_y_max = self.render_y_max.max(self.cursor_y + im.height as isize);
-            }
             Change::ClearScreen(_) => {
                 self.cursor_x = 0;
                 self.cursor_y = 0;
@@ -288,28 +274,4 @@ impl ChangeSequence {
     }
 }
 
-/// The `Image` `Change` needs to support adding an image that spans multiple
-/// rows and columns, as well as model the content for just one of those cells.
-/// For instance, if some of the cells inside an image are replaced by textual
-/// content, and the screen is scrolled, computing the diff change stream needs
-/// to be able to express that a single cell holds a slice from a larger image.
-/// The `Image` struct expresses its dimensions in cells and references a region
-/// in the shared source image data using texture coordinates.
-/// A 4x3 cell image would set `width=3`, `height=3`, `top_left=(0,0)`, `bottom_right=(1,1)`.
-/// The top left cell from that image, if it were to be included in a diff,
-/// would be recorded as `width=1`, `height=1`, `top_left=(0,0)`, `bottom_right=(1/4,1/3)`.
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
-pub struct Image {
-    /// measured in cells
-    pub width: usize,
-    /// measure in cells
-    pub height: usize,
-    /// Texture coordinate for the top left of this image block.
-    /// (0,0) is the top left of the `ImageData`. (1, 1) is
-    /// the bottom right.
-    pub top_left: TextureCoordinate,
-    /// Texture coordinates for the bottom right of this image block.
-    pub bottom_right: TextureCoordinate,
-    /// the image data
-    pub image: Arc<ImageData>,
-}
+

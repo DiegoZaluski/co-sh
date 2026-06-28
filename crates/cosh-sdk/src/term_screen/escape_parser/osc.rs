@@ -23,7 +23,7 @@ use num_traits::FromPrimitive;
 use ordered_float::NotNan;
 use std::sync::LazyLock;
 
-use super::allocate::{Box, HashMap, String, ToOwned, ToString, Vec};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColorOrQuery {
