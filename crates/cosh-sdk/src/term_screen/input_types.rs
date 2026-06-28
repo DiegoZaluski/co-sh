@@ -202,7 +202,7 @@ impl KeyCode {
         _mods: Modifiers,
         _modes: KeyCodeEncodeModes,
         _is_down: bool,
-    ) -> anyhow::Result<String> {
+    ) -> crate::term_screen::core::error::Result<String> {
         // Minimal stub: output a placeholder sequence.
         // A full implementation would map to xterm/CSI-u/kitty encodings.
         Ok(String::new())

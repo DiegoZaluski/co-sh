@@ -33,7 +33,7 @@ impl Clipboard for LocalClip {
         &self,
         _selection: ClipboardSelection,
         clip: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::term_screen::core::error::Result<()> {
         *self.clip.lock().unwrap() = clip;
         Ok(())
     }

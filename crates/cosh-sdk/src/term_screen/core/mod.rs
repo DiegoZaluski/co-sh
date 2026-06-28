@@ -16,12 +16,12 @@
 //! The entrypoint to the crate is the [Terminal](terminal/struct.Terminal.html)
 //! struct.
 use crate::term_screen::surface::SequenceNo;
-use anyhow::Error;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut, Range};
 use std::str;
 
 pub mod config;
+pub mod error;
 pub use config::TerminalConfiguration;
 
 pub mod input;

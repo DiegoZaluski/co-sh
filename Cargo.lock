@@ -504,7 +504,6 @@ dependencies = [
 name = "cosh-sdk"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-stream",
  "base64",
  "bitflags 2.13.0",

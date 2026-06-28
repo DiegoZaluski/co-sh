@@ -8,7 +8,8 @@
 use super::super::input::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use super::MouseEncoding;
 use super::TerminalState;
-use anyhow::bail;
+use crate::term_screen::core::error;
+use crate::ts_bail;
 use std::io::Write;
 
 impl TerminalState {
@@ -37,7 +38,7 @@ impl TerminalState {
         }
     }
 
-    fn encode_x10_or_utf8(&mut self, event: MouseEvent, button: i8) -> anyhow::Result<()> {
+    fn encode_x10_or_utf8(&mut self, event: MouseEvent, button: i8) -> error::Result<()> {
         let mut buf = vec![b'\x1b', b'[', b'M', (32 + button) as u8];
         self.encode_coord(event.x as i64, &mut buf);
         self.encode_coord(event.y, &mut buf);
@@ -80,7 +81,7 @@ impl TerminalState {
         (code, button)
     }
 
-    fn mouse_wheel(&mut self, event: MouseEvent) -> anyhow::Result<()> {
+    fn mouse_wheel(&mut self, event: MouseEvent) -> error::Result<()> {
         let (button, _button) = self.mouse_report_button_number(&event);
 
         if self.mouse_encoding == MouseEncoding::Sgr
@@ -134,7 +135,7 @@ impl TerminalState {
                         MouseButton::WheelUp(_) => KeyCode::UpArrow,
                         MouseButton::WheelLeft(_) => KeyCode::LeftArrow,
                         MouseButton::WheelRight(_) => KeyCode::RightArrow,
-                        _ => bail!("unexpected mouse event"),
+                        _ => ts_bail!("unexpected mouse event"),
                     },
                     KeyModifiers::default(),
                 )?;
@@ -143,7 +144,7 @@ impl TerminalState {
         Ok(())
     }
 
-    fn mouse_button_press(&mut self, event: MouseEvent) -> anyhow::Result<()> {
+    fn mouse_button_press(&mut self, event: MouseEvent) -> error::Result<()> {
         let (button, event_button) = self.mouse_report_button_number(&event);
         self.current_mouse_buttons.retain(|&b| b != event_button);
         self.current_mouse_buttons.push(event_button);
@@ -195,7 +196,7 @@ impl TerminalState {
         Ok(())
     }
 
-    fn mouse_button_release(&mut self, event: MouseEvent) -> anyhow::Result<()> {
+    fn mouse_button_release(&mut self, event: MouseEvent) -> error::Result<()> {
         let (release_button, button) = self.mouse_report_button_number(&event);
         if !self.current_mouse_buttons.is_empty() {
             self.current_mouse_buttons.retain(|&b| b != button);
@@ -250,7 +251,7 @@ impl TerminalState {
         Ok(())
     }
 
-    fn mouse_move(&mut self, event: MouseEvent) -> anyhow::Result<()> {
+    fn mouse_move(&mut self, event: MouseEvent) -> error::Result<()> {
         let moved = match (&self.last_mouse_move, self.mouse_encoding) {
             (None, _) => true,
             (Some(last), MouseEncoding::SgrPixels) => {
@@ -326,7 +327,7 @@ impl TerminalState {
     /// Informs the terminal of a mouse event.
     /// If mouse reporting has been activated, the mouse event will be encoded
     /// appropriately and written to the associated writer.
-    pub fn mouse_event(&mut self, mut event: MouseEvent) -> anyhow::Result<()> {
+    pub fn mouse_event(&mut self, mut event: MouseEvent) -> error::Result<()> {
         // Clamp the mouse coordinates to the size of the model.
         // This situation can trigger for example when the
         // window is resized and leaves a partial row at the bottom of the

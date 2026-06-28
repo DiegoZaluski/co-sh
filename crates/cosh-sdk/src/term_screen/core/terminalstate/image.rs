@@ -2,9 +2,10 @@ use super::super::{Position, StableRowIndex};
 use super::TerminalState;
 use crate::term_screen::cell::Cell;
 use crate::term_screen::cell::image::{ImageCell, ImageDataType};
+use crate::term_screen::core::error::{self, ContextExt};
 use crate::term_screen::surface::TextureCoordinate;
 use crate::term_screen::surface::change::ImageData;
-use anyhow::Context;
+use crate::{ts_bail, ts_ensure};
 use humansize::{DECIMAL, SizeFormatter};
 use num_traits::{One, Zero};
 use ordered_float::NotNan;
@@ -74,7 +75,7 @@ impl TerminalState {
     pub(crate) fn assign_image_to_cells(
         &mut self,
         params: &ImageAttachParams,
-    ) -> anyhow::Result<PlacementInfo> {
+    ) -> error::Result<PlacementInfo> {
         let seqno = self.seqno;
         let physical_cols = self.screen().physical_cols;
         let physical_rows = self.screen().physical_rows;
@@ -89,7 +90,7 @@ impl TerminalState {
         // There is no sane way to place a pixel-addressed image without a cell size.
         // => Refuse the image placement instead of panicking and taking down the terminal.
         // <https://github.com/wezterm/wezterm/issues/6344>
-        anyhow::ensure!(
+        ts_ensure!(
             cell_pixel_width != 0 && cell_pixel_height != 0,
             "refusing to display image: terminal has no cell pixel dimensions (WxH: {cell_pixel_width}x{cell_pixel_height})",
         );
@@ -118,7 +119,7 @@ impl TerminalState {
         // (e.g. an image with explicit `w=0`/`h=0`, or a source origin outside the image bounds)
         // => Refuse the image placement instead of panicking and taking down the terminal.
         // <https://github.com/wezterm/wezterm/issues/6344>
-        anyhow::ensure!(
+        ts_ensure!(
             draw_width != 0 && draw_height != 0,
             "refusing to display image with zero draw dimensions (WxH: {draw_width}x{draw_height})",
         );
@@ -162,7 +163,7 @@ impl TerminalState {
 
         #[allow(clippy::cast_precision_loss)]
         let mut ypos = NotNan::new(params.source_origin_y as f32 / params.image_height as f32)
-            .with_context(|| format!("computing ypos {params:#?}"))?;
+            .with_context(format!("computing ypos {params:#?}"))?;
         let start_xpos = NotNan::new(params.source_origin_x as f32 / params.image_width as f32)
             .context("computing xpos")?;
 
@@ -305,11 +306,11 @@ impl TerminalState {
     }
 }
 
-pub(crate) fn check_image_dimensions(width: u32, height: u32) -> anyhow::Result<()> {
+pub(crate) fn check_image_dimensions(width: u32, height: u32) -> error::Result<()> {
     const MAX_IMAGE_SIZE: u32 = 100_000_000;
     let size = width.saturating_mul(height).saturating_mul(4);
     if size > MAX_IMAGE_SIZE {
-        anyhow::bail!(
+        ts_bail!(
             "Ignoring image data for image with dimensions {}x{} \
              because required RAM {} > max allowed {}",
             width,
@@ -319,7 +320,7 @@ pub(crate) fn check_image_dimensions(width: u32, height: u32) -> anyhow::Result<
         );
     }
     if size == 0 {
-        anyhow::bail!("Ignoring image with 0x0 dimensions");
+        ts_bail!("Ignoring image with 0x0 dimensions");
     }
     Ok(())
 }
@@ -331,11 +332,11 @@ pub(crate) struct ImageInfo {
     pub format: image::ImageFormat,
 }
 
-pub(crate) fn dimensions(data: &[u8]) -> anyhow::Result<ImageInfo> {
+pub(crate) fn dimensions(data: &[u8]) -> error::Result<ImageInfo> {
     let reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format()?;
     let format = reader
         .format()
-        .ok_or_else(|| anyhow::anyhow!("unknown format!?"))?;
+        .ok_or_else(|| error::TermScreenError::Msg("unknown format!?".to_string()))?;
     let (width, height) = reader.into_dimensions()?;
     Ok(ImageInfo {
         width,

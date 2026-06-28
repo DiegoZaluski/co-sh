@@ -15,9 +15,10 @@
     clippy::missing_panics_doc,
     clippy::non_std_lazy_statics
 )]
+use super::error;
 use super::{
     Alert, AlertHandler, CSI, Cell, CellAttributes, Clipboard, ClipboardSelection, CursorPosition,
-    DCS, Deref, DerefMut, DeviceControlHandler, DownloadHandler, Error, Hyperlink, KeyModifiers,
+    DCS, Deref, DerefMut, DeviceControlHandler, DownloadHandler, Hyperlink, KeyModifiers,
     MouseButton, MouseEvent, MouseEventKind, Position, Progress, Range, ST, Screen, SemanticType,
     SemanticZone, StableRowIndex, TerminalConfiguration, TerminalSize, VisibleRowIndex, str,
 };
@@ -719,7 +720,7 @@ impl TerminalState {
         &self,
         selection: ClipboardSelection,
         text: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> error::Result<()> {
         if let Some(clip) = self.clipboard.as_ref() {
             clip.set_contents(selection, text)?;
         }
@@ -835,7 +836,7 @@ impl TerminalState {
     /// in the bracketing, otherwise it is fed to the writer as-is.
     /// De-fang the text by removing any embedded bracketed paste
     /// sequence that may be present.
-    pub fn send_paste(&mut self, text: &str) -> Result<(), Error> {
+    pub fn send_paste(&mut self, text: &str) -> error::Result<()> {
         let mut buf = String::new();
         if self.bracketed_paste {
             buf.push_str("\x1b[200~");
@@ -2715,7 +2716,7 @@ impl TerminalState {
     ///
     /// By default, all screen data is of type Output.  The shell needs to
     /// employ OSC 133 escapes to markup its output.
-    pub fn get_semantic_zones(&mut self) -> anyhow::Result<Vec<SemanticZone>> {
+    pub fn get_semantic_zones(&mut self) -> error::Result<Vec<SemanticZone>> {
         let screen = self.screen_mut();
 
         let mut current_zone: Option<SemanticZone> = None;

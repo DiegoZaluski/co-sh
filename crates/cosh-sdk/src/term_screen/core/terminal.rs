@@ -1,3 +1,4 @@
+use super::error;
 use super::terminalstate::performer::Performer;
 use super::{Deref, DerefMut, Deserialize, Serialize, TerminalConfiguration, TerminalState, str};
 use crate::term_screen::escape_parser::parser::Parser;
@@ -18,7 +19,7 @@ pub trait Clipboard: Send + Sync {
         &self,
         selection: ClipboardSelection,
         data: Option<String>,
-    ) -> anyhow::Result<()>;
+    ) -> error::Result<()>;
 }
 
 impl Clipboard for Box<dyn Clipboard> {
@@ -26,7 +27,7 @@ impl Clipboard for Box<dyn Clipboard> {
         &self,
         selection: ClipboardSelection,
         data: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> error::Result<()> {
         self.as_ref().set_contents(selection, data)
     }
 }

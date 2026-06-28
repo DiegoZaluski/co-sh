@@ -16,16 +16,17 @@ use super::image::{
     ImageAttachParams, ImageAttachStyle, PlacementInfo, check_image_dimensions, dimensions,
 };
 use crate::term_screen::cell::image::ImageDataType;
+use crate::term_screen::core::error::{self, ContextExt};
 use crate::term_screen::escape_parser::apc::{
     KittyFrameCompositionMode, KittyImage, KittyImageCompression, KittyImageData, KittyImageDelete,
     KittyImageFormat, KittyImageFrame, KittyImageFrameCompose, KittyImagePlacement,
     KittyImageTransmit, KittyImageVerbosity,
 };
 use crate::term_screen::surface::change::ImageData;
+use crate::{ts_bail, ts_ensure};
 use ::image::{
     DynamicImage, GenericImage, GenericImageView, ImageBuffer, RgbImage, Rgba, RgbaImage,
 };
-use anyhow::Context;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
@@ -89,20 +90,21 @@ impl TerminalState {
         image_number: Option<u32>,
         placement: KittyImagePlacement,
         verbosity: KittyImageVerbosity,
-    ) -> anyhow::Result<()> {
+    ) -> error::Result<()> {
         let image_id = match image_id {
             Some(id) => id,
             None => *self
                 .kitty_img
                 .number_to_id
-                .get(
-                    &image_number
-                        .ok_or_else(|| anyhow::anyhow!("no image_id or image_number specified!"))?,
-                )
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "image_number has no matching image id {image_number:?} in number_to_id"
+                .get(&image_number.ok_or_else(|| {
+                    error::TermScreenError::Msg(
+                        "no image_id or image_number specified!".to_string(),
                     )
+                })?)
+                .ok_or_else(|| {
+                    error::TermScreenError::Msg(format!(
+                        "image_number has no matching image id {image_number:?} in number_to_id"
+                    ))
                 })?,
         };
 
@@ -113,9 +115,9 @@ impl TerminalState {
             self.kitty_remove_placement(image_id, placement.placement_id);
         }
         let img = Arc::clone(self.kitty_img.id_to_data.get(&image_id).ok_or_else(|| {
-            anyhow::anyhow!(
+            error::TermScreenError::Msg(format!(
                 "no matching image id {image_id} in id_to_data for image_number {image_number:?}"
-            )
+            ))
         })?);
 
         let (image_width, image_height) = img.data().dimensions()?;
@@ -152,7 +154,7 @@ impl TerminalState {
         Ok(())
     }
 
-    fn kitty_img_inner(&mut self, img: KittyImage) -> anyhow::Result<()> {
+    fn kitty_img_inner(&mut self, img: KittyImage) -> error::Result<()> {
         match self
             .coalesce_kitty_accumulation(img)
             .context("coalesce_kitty_accumulation")?
@@ -174,11 +176,11 @@ impl TerminalState {
                 let image_id = self.kitty_img_transmit(transmit, verbosity)?;
                 self.kitty_img_place(Some(image_id), image_number, placement, verbosity)
             }
-            _ => anyhow::bail!("impossible KittImage variant"),
+            _ => ts_bail!("impossible KittImage variant"),
         }
     }
 
-    pub(crate) fn kitty_img(&mut self, img: KittyImage) -> anyhow::Result<()> {
+    pub(crate) fn kitty_img(&mut self, img: KittyImage) -> error::Result<()> {
         log::trace!("{img:?}");
         if !self.config.enable_kitty_graphics() {
             return Ok(());
@@ -394,7 +396,7 @@ impl TerminalState {
         &mut self,
         frame: KittyImageFrameCompose,
         verbosity: KittyImageVerbosity,
-    ) -> anyhow::Result<()> {
+    ) -> error::Result<()> {
         let image_id = match frame.image_number {
             Some(no) => {
                 if let Some(id) = self.kitty_img.number_to_id.get(&no) {
@@ -407,7 +409,7 @@ impl TerminalState {
                         frame.image_number,
                         "ENOENT".to_string(),
                     );
-                    anyhow::bail!("no such image_number {no}");
+                    ts_bail!("no such image_number {no}");
                 }
             }
             None => frame.image_id.ok_or_else(|| {
@@ -418,7 +420,7 @@ impl TerminalState {
                     frame.image_number,
                     "ENOENT".to_string(),
                 );
-                anyhow::anyhow!("no image_id")
+                error::TermScreenError::Msg("no image_id".to_string())
             })?,
         };
 
@@ -430,7 +432,7 @@ impl TerminalState {
                 frame.image_number,
                 "ENOENT".to_string(),
             );
-            anyhow::anyhow!("missing source frame")
+            error::TermScreenError::Msg("missing source frame".to_string())
         })? as usize;
         let target_frame = frame.target_frame.ok_or_else(|| {
             self.kitty_send_response(
@@ -440,19 +442,18 @@ impl TerminalState {
                 frame.image_number,
                 "ENOENT".to_string(),
             );
-            anyhow::anyhow!("missing target frame")
+            error::TermScreenError::Msg("missing target frame".to_string())
         })? as usize;
 
-        let img = self
-            .kitty_img
-            .id_to_data
-            .get(&image_id)
-            .ok_or_else(|| anyhow::anyhow!("invalid image id {image_id}"))?;
+        let img =
+            self.kitty_img.id_to_data.get(&image_id).ok_or_else(|| {
+                error::TermScreenError::Msg(format!("invalid image id {image_id}"))
+            })?;
 
         let mut img = img.data();
         match &mut *img {
             ImageDataType::EncodedFile(_) => {
-                anyhow::bail!("invalid image type")
+                ts_bail!("invalid image type")
             }
             ImageDataType::Rgba8 {
                 width,
@@ -460,7 +461,7 @@ impl TerminalState {
                 data,
                 hash,
             } => {
-                anyhow::ensure!(
+                ts_ensure!(
                     src_frame == target_frame && src_frame == 1,
                     "src_frame={src_frame} target_frame={target_frame} but there is only a single frame"
                 );
@@ -476,8 +477,9 @@ impl TerminalState {
                 )?;
 
                 let mut dest: ImageBuffer<Rgba<u8>, &mut [u8]> =
-                    ImageBuffer::from_raw(*width, *height, data.as_mut_slice())
-                        .ok_or_else(|| anyhow::anyhow!("ill formed image"))?;
+                    ImageBuffer::from_raw(*width, *height, data.as_mut_slice()).ok_or_else(
+                        || error::TermScreenError::Msg("ill formed image".to_string()),
+                    )?;
 
                 blit(
                     &mut dest,
@@ -496,11 +498,11 @@ impl TerminalState {
                 hashes,
                 ..
             } => {
-                anyhow::ensure!(
+                ts_ensure!(
                     src_frame > 0 && src_frame <= frames.len(),
                     "src_frame {src_frame} is out of range"
                 );
-                anyhow::ensure!(
+                ts_ensure!(
                     target_frame > 0 && target_frame <= frames.len(),
                     "target_frame {target_frame} is out of range"
                 );
@@ -517,7 +519,9 @@ impl TerminalState {
 
                 let mut dest: ImageBuffer<Rgba<u8>, &mut [u8]> =
                     ImageBuffer::from_raw(*width, *height, frames[target_frame - 1].as_mut_slice())
-                        .ok_or_else(|| anyhow::anyhow!("ill formed image"))?;
+                        .ok_or_else(|| {
+                            error::TermScreenError::Msg("ill formed image".to_string())
+                        })?;
 
                 blit(
                     &mut dest,
@@ -539,7 +543,7 @@ impl TerminalState {
         mut transmit: KittyImageTransmit,
         frame: KittyImageFrame,
         verbosity: KittyImageVerbosity,
-    ) -> anyhow::Result<()> {
+    ) -> error::Result<()> {
         if let Some(no) = transmit.image_number.take() {
             match self.kitty_img.number_to_id.get(&no) {
                 Some(id) => {
@@ -560,8 +564,8 @@ impl TerminalState {
                 height,
                 ..
             } => RgbaImage::from_vec(width, height, data)
-                .ok_or_else(|| anyhow::anyhow!("data isn't rgba8"))?,
-            wat => anyhow::bail!("data isn't rgba8 {wat:?}"),
+                .ok_or_else(|| error::TermScreenError::Msg("data isn't rgba8".to_string()))?,
+            wat => ts_bail!("data isn't rgba8 {wat:?}"),
         };
 
         let background_pixel = frame.background_pixel.unwrap_or(0);
@@ -582,7 +586,7 @@ impl TerminalState {
                 image_number,
                 "ENOENT".to_string(),
             );
-            anyhow::bail!(
+            ts_bail!(
                 "no matching image id {image_id} in id_to_data for image_number {image_number:?}"
             )
         };
@@ -597,7 +601,7 @@ impl TerminalState {
 
         match &mut *anim {
             ImageDataType::EncodedFile(_) => {
-                anyhow::bail!("Expected decoded image for image id {image_id}")
+                ts_bail!("Expected decoded image for image id {image_id}")
             }
             ImageDataType::Rgba8 {
                 data,
@@ -608,9 +612,9 @@ impl TerminalState {
                 let base_frame = match frame.base_frame {
                     Some(1) => Some(1),
                     None => None,
-                    Some(n) => anyhow::bail!(
-                        "attempted to copy frame {n} but there is only a single frame"
-                    ),
+                    Some(n) => {
+                        ts_bail!("attempted to copy frame {n} but there is only a single frame")
+                    }
                 };
 
                 match frame.frame_number {
@@ -620,10 +624,10 @@ impl TerminalState {
                         let mut anim_img: ImageBuffer<Rgba<u8>, &mut [u8]> =
                             ImageBuffer::from_raw(*width, *height, data.as_mut_slice())
                                 .ok_or_else(|| {
-                                    anyhow::anyhow!(
+                                    error::TermScreenError::Msg(format!(
                                         "ImageBuffer::from_raw failed for single \
                                          frame of {width}x{height} ({len} bytes)"
-                                    )
+                                    ))
                                 })?;
 
                         blit(&mut anim_img, &img, x, y, frame.composition_mode)?;
@@ -656,9 +660,9 @@ impl TerminalState {
                             hashes,
                         };
                     }
-                    Some(n) => anyhow::bail!(
-                        "attempted to edit frame {n} but there is only a single frame"
-                    ),
+                    Some(n) => {
+                        ts_bail!("attempted to edit frame {n} but there is only a single frame")
+                    }
                 }
             }
             ImageDataType::AnimRgba8 {
@@ -676,7 +680,7 @@ impl TerminalState {
                         None => RgbaImage::from_pixel(*width, *height, background_pixel),
                         Some(n) => {
                             let n = n as usize;
-                            anyhow::ensure!(
+                            ts_ensure!(
                                 n > 0 && n <= frames.len(),
                                 "attempted to copy frame {} which is outside range 1-{}",
                                 n,
@@ -695,7 +699,7 @@ impl TerminalState {
                     hashes.push(new_frame_hash);
                     durations.push(frame_gap);
                 } else {
-                    anyhow::ensure!(
+                    ts_ensure!(
                         frame_no > 0 && frame_no <= frames.len() as u32,
                         "attempted to edit frame {} which is outside range 1-{}",
                         frame_no,
@@ -708,10 +712,10 @@ impl TerminalState {
                     let mut anim_img: ImageBuffer<Rgba<u8>, &mut [u8]> =
                         ImageBuffer::from_raw(*width, *height, frames[frame_no - 1].as_mut_slice())
                             .ok_or_else(|| {
-                                anyhow::anyhow!(
+                                error::TermScreenError::Msg(format!(
                                     "ImageBuffer::from_raw failed for single \
-                                         frame of {width}x{height} ({len} bytes)"
-                                )
+                                             frame of {width}x{height} ({len} bytes)"
+                                ))
                             })?;
 
                     blit(&mut anim_img, &img, x, y, frame.composition_mode)?;
@@ -727,12 +731,12 @@ impl TerminalState {
     fn kitty_img_transmit_inner(
         &mut self,
         transmit: KittyImageTransmit,
-    ) -> anyhow::Result<(u32, Option<u32>, ImageDataType)> {
+    ) -> error::Result<(u32, Option<u32>, ImageDataType)> {
         log::trace!("transmit {transmit:?}");
         let (id, no) = match (transmit.image_id, transmit.image_number) {
             (Some(_), Some(_)) => {
                 // TODO: send an EINVAL error back here
-                anyhow::bail!("cannot use both i= and I= in the same request");
+                ts_bail!("cannot use both i= and I= in the same request");
             }
             (None, None) => {
                 // Assume image id 0
@@ -753,10 +757,10 @@ impl TerminalState {
 
         let data = match transmit.compression {
             KittyImageCompression::None => data,
-            KittyImageCompression::Deflate => {
-                miniz_oxide::inflate::decompress_to_vec_zlib(&data)
-                    .map_err(|e| anyhow::anyhow!("decompressing data: {e:?}"))?
-            }
+            KittyImageCompression::Deflate => miniz_oxide::inflate::decompress_to_vec_zlib(&data)
+                .map_err(|e| {
+                error::TermScreenError::Msg(format!("decompressing data: {e:?}"))
+            })?,
         };
 
         let img = match transmit.format {
@@ -764,7 +768,7 @@ impl TerminalState {
                 let (width, height) = match (transmit.width, transmit.height) {
                     (Some(w), Some(h)) => (w, h),
                     _ => {
-                        anyhow::bail!("missing width/height info for kitty img");
+                        ts_bail!("missing width/height info for kitty img");
                     }
                 };
 
@@ -773,8 +777,9 @@ impl TerminalState {
                 let data = match transmit.format {
                     Some(KittyImageFormat::Rgb) => {
                         let img = DynamicImage::ImageRgb8(
-                            RgbImage::from_vec(width, height, data)
-                                .ok_or_else(|| anyhow::anyhow!("failed to decode image"))?,
+                            RgbImage::from_vec(width, height, data).ok_or_else(|| {
+                                error::TermScreenError::Msg("failed to decode image".to_string())
+                            })?,
                         );
                         let img = img.into_rgba8();
                         img.into_vec()
@@ -782,7 +787,7 @@ impl TerminalState {
                     _ => data,
                 };
 
-                anyhow::ensure!(
+                ts_ensure!(
                     width * height * 4 == data.len() as u32,
                     "transmit data len is {} but it doesn't match width*height*4 {}x{}x4 = {}",
                     data.len(),
@@ -810,7 +815,7 @@ impl TerminalState {
         &mut self,
         transmit: KittyImageTransmit,
         verbosity: KittyImageVerbosity,
-    ) -> anyhow::Result<u32> {
+    ) -> error::Result<u32> {
         let (image_id, image_number, img) = self.kitty_img_transmit_inner(transmit)?;
         self.kitty_img.max_image_id = self.kitty_img.max_image_id.max(image_id);
 
@@ -832,7 +837,7 @@ impl TerminalState {
         Ok(image_id)
     }
 
-    fn coalesce_kitty_accumulation(&mut self, img: KittyImage) -> anyhow::Result<KittyImage> {
+    fn coalesce_kitty_accumulation(&mut self, img: KittyImage) -> error::Result<KittyImage> {
         if self.kitty_img.accumulator.is_empty() {
             Ok(img)
         } else {
@@ -885,7 +890,7 @@ impl TerminalState {
                         }
                     }
                     data => {
-                        anyhow::bail!("expected data chunks to be Direct data, found {data:#?}")
+                        ts_bail!("expected data chunks to be Direct data, found {data:#?}")
                     }
                 }
             }
@@ -920,9 +925,9 @@ fn clip_view(
     src_y: Option<u32>,
     view_width: Option<u32>,
     view_height: Option<u32>,
-) -> anyhow::Result<RgbaImage> {
+) -> error::Result<RgbaImage> {
     let src = ImageBuffer::from_raw(width, height, data)
-        .ok_or_else(|| anyhow::anyhow!("ill formed image"))?;
+        .ok_or_else(|| error::TermScreenError::Msg("ill formed image".to_string()))?;
 
     let src_x = src_x.unwrap_or(0);
     let src_y = src_y.unwrap_or(0);
@@ -946,7 +951,7 @@ fn blit<D, S, P>(
     x: u32,
     y: u32,
     mode: KittyFrameCompositionMode,
-) -> anyhow::Result<()>
+) -> error::Result<()>
 where
     D: GenericImage<Pixel = P>,
     S: GenericImageView<Pixel = P>,

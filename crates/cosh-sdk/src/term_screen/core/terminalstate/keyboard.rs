@@ -1,6 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 use super::super::input::{KeyCode, KeyModifiers};
 use super::TerminalState;
+use crate::term_screen::core::error;
 use crate::term_screen::input_types::{KeyCodeEncodeModes, KeyboardEncoding};
 use std::io::Write;
 
@@ -32,7 +33,7 @@ impl TerminalState {
         key: KeyCode,
         mods: KeyModifiers,
         is_down: bool,
-    ) -> anyhow::Result<()> {
+    ) -> error::Result<()> {
         let encoding = self.effective_keyboard_encoding();
 
         let to_send = key.encode(
@@ -64,11 +65,11 @@ impl TerminalState {
         Ok(())
     }
 
-    pub fn key_up(&mut self, key: KeyCode, mods: KeyModifiers) -> anyhow::Result<()> {
+    pub fn key_up(&mut self, key: KeyCode, mods: KeyModifiers) -> error::Result<()> {
         self.key_up_down(key, mods, false)
     }
 
-    pub fn key_down(&mut self, key: KeyCode, mods: KeyModifiers) -> anyhow::Result<()> {
+    pub fn key_down(&mut self, key: KeyCode, mods: KeyModifiers) -> error::Result<()> {
         self.key_up_down(key, mods, true)
     }
 }
