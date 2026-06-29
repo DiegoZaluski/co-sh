@@ -1,12 +1,17 @@
 use crate::core::syntax_style::{
-    SyntaxStyle, StyleDefinitionInput, ThemeTokenStyle, ThemeTokenStyleInner,
+    StyleDefinitionInput, SyntaxStyle, ThemeTokenStyle, ThemeTokenStyleInner,
     convert_theme_to_styles,
 };
 
 use crate::core::rgba::ColorInput;
 
 const EMPTY_STYLE: StyleDefinitionInput = StyleDefinitionInput {
-    fg: None, bg: None, bold: None, italic: None, underline: None, dim: None,
+    fg: None,
+    bg: None,
+    bold: None,
+    italic: None,
+    underline: None,
+    dim: None,
 };
 
 #[test]
@@ -36,11 +41,17 @@ fn test_register_consecutive_ids() {
 #[test]
 fn test_register_with_colors() {
     let mut ss = SyntaxStyle::create();
-    let _ = ss.register_style("keyword", &StyleDefinitionInput {
-        fg: Some(ColorInput::String("red".into())),
-        bold: Some(true),
-        bg: None, italic: None, underline: None, dim: None,
-    });
+    let _ = ss.register_style(
+        "keyword",
+        &StyleDefinitionInput {
+            fg: Some(ColorInput::String("red".into())),
+            bold: Some(true),
+            bg: None,
+            italic: None,
+            underline: None,
+            dim: None,
+        },
+    );
     let style = ss.get_style("keyword");
     assert!(style.is_some());
     let s = style.unwrap();
@@ -81,11 +92,17 @@ fn test_get_style_with_dot_fallback() {
 #[test]
 fn test_merge_styles_single() {
     let mut ss = SyntaxStyle::create();
-    let _ = ss.register_style("a", &StyleDefinitionInput {
-        fg: Some(ColorInput::String("red".into())),
-        bold: Some(true),
-        bg: None, italic: None, underline: None, dim: None,
-    });
+    let _ = ss.register_style(
+        "a",
+        &StyleDefinitionInput {
+            fg: Some(ColorInput::String("red".into())),
+            bold: Some(true),
+            bg: None,
+            italic: None,
+            underline: None,
+            dim: None,
+        },
+    );
     let merged = ss.merge_styles(&["a"]);
     assert!(merged.fg.is_some());
     assert!(merged.bg.is_none());
@@ -94,15 +111,28 @@ fn test_merge_styles_single() {
 #[test]
 fn test_merge_styles_multiple() {
     let mut ss = SyntaxStyle::create();
-    let _ = ss.register_style("a", &StyleDefinitionInput {
-        fg: Some(ColorInput::String("red".into())),
-        bg: None, bold: None, italic: None, underline: None, dim: None,
-    });
-    let _ = ss.register_style("b", &StyleDefinitionInput {
-        bg: Some(ColorInput::String("blue".into())),
-        italic: Some(true),
-        fg: None, bold: None, underline: None, dim: None,
-    });
+    let _ = ss.register_style(
+        "a",
+        &StyleDefinitionInput {
+            fg: Some(ColorInput::String("red".into())),
+            bg: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            dim: None,
+        },
+    );
+    let _ = ss.register_style(
+        "b",
+        &StyleDefinitionInput {
+            bg: Some(ColorInput::String("blue".into())),
+            italic: Some(true),
+            fg: None,
+            bold: None,
+            underline: None,
+            dim: None,
+        },
+    );
     let merged = ss.merge_styles(&["a", "b"]);
     assert_eq!(merged.fg.unwrap().to_ints(), (255, 0, 0, 255));
     assert_eq!(merged.bg.unwrap().to_ints(), (0, 0, 255, 255));
@@ -185,11 +215,17 @@ fn test_destroyed_panics() {
 fn test_from_styles() {
     let styles = {
         let mut m = std::collections::HashMap::new();
-        m.insert("keyword".into(), StyleDefinitionInput {
-            fg: Some(ColorInput::String("red".into())),
-            bold: Some(true),
-            bg: None, italic: None, underline: None, dim: None,
-        });
+        m.insert(
+            "keyword".into(),
+            StyleDefinitionInput {
+                fg: Some(ColorInput::String("red".into())),
+                bold: Some(true),
+                bg: None,
+                italic: None,
+                underline: None,
+                dim: None,
+            },
+        );
         m
     };
     let ss = SyntaxStyle::from_styles(&styles);
@@ -208,7 +244,10 @@ fn test_convert_theme_to_styles_single() {
         style: ThemeTokenStyleInner {
             foreground: Some(ColorInput::String("red".into())),
             background: None,
-            bold: None, italic: None, underline: None, dim: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            dim: None,
         },
     }];
     let styles = convert_theme_to_styles(&theme);
@@ -224,7 +263,9 @@ fn test_convert_theme_to_styles_multi_scope() {
             foreground: Some(ColorInput::String("blue".into())),
             background: None,
             bold: Some(true),
-            italic: None, underline: None, dim: None,
+            italic: None,
+            underline: None,
+            dim: None,
         },
     }];
     let styles = convert_theme_to_styles(&theme);
@@ -237,7 +278,11 @@ fn test_from_theme() {
         scope: vec!["keyword".into()],
         style: ThemeTokenStyleInner {
             foreground: Some(ColorInput::String("green".into())),
-            background: None, bold: None, italic: None, underline: None, dim: None,
+            background: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            dim: None,
         },
     }];
     let mut ss = SyntaxStyle::from_theme(&theme);

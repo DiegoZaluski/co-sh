@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::core::renderable::Renderable;
-use crate::core::rgba::{parse_color, ColorInput, RGBA};
+use crate::core::rgba::{ColorInput, RGBA, parse_color};
 
 static NEXT_SCROLL_BAR_NUM: AtomicU64 = AtomicU64::new(1);
 
@@ -96,7 +96,11 @@ impl ScrollBarRenderable {
     }
 
     pub fn scroll_by(&mut self, delta: f64, relative: bool) {
-        let step = if relative { delta * self.viewport_size } else { delta };
+        let step = if relative {
+            delta * self.viewport_size
+        } else {
+            delta
+        };
         self.set_scroll_position(self.scroll_position + step);
     }
 
@@ -116,15 +120,17 @@ impl ScrollBarRenderable {
         (self.scroll_position / range).clamp(0.0, 1.0)
     }
 
+    #[allow(clippy::cast_sign_loss)]
     fn thumb_size(&self, render_size: u16) -> u16 {
         let rs = f64::from(render_size);
         if self.scroll_size <= self.viewport_size {
             return render_size;
         }
         let r = self.viewport_size / self.scroll_size;
-        (rs * r).round().max(1.0) as u16
+        (rs * r).round().clamp(1.0, rs) as u16
     }
 
+    #[allow(clippy::cast_sign_loss)]
     fn thumb_start(&self, render_size: u16) -> u16 {
         let rs = f64::from(render_size);
         let ts = f64::from(self.thumb_size(render_size));
@@ -139,6 +145,24 @@ impl ScrollBarRenderable {
 impl Renderable for ScrollBarRenderable {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|c| c.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn crate::core::renderable::Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
     }
 
     fn num(&self) -> u64 {
@@ -173,6 +197,7 @@ impl Renderable for ScrollBarRenderable {
         &self.children
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -186,7 +211,11 @@ impl Renderable for ScrollBarRenderable {
         };
 
         let (tr, tg, tb, ta) = self.thumb_color.to_ints();
-        let thumb_fg = if ta == 0 { Color::Reset } else { Color::Rgb(tr, tg, tb) };
+        let thumb_fg = if ta == 0 {
+            Color::Reset
+        } else {
+            Color::Rgb(tr, tg, tb)
+        };
         let thumb_style = Style::default().fg(thumb_fg).bg(thumb_fg);
 
         match self.orientation {

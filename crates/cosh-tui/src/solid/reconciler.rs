@@ -1,4 +1,7 @@
 use crate::core::renderable::{Renderable, RootRenderable};
+use crate::core::renderables::r#box::BoxRenderable;
+use crate::core::renderables::text::{TextRenderable, string_to_styled_text};
+use crate::solid::elements::catalogue::create_component;
 
 pub type DomNode = Box<dyn Renderable>;
 
@@ -6,21 +9,27 @@ pub struct TextNode;
 
 impl TextNode {
     #[must_use]
-    pub fn from_string(_text: &str, _options: Option<&str>) -> DomNode {
-        Box::new(RootRenderable::new())
+    pub fn from_string(text: &str, _options: Option<&str>) -> DomNode {
+        let styled = string_to_styled_text(text);
+        Box::new(TextRenderable::new(Some(styled)))
     }
 }
 
-pub fn insert_node(parent: &mut RootRenderable, node: DomNode, anchor: Option<&str>) {
+pub fn insert_node(parent: &mut DomNode, node: &mut DomNode, anchor: Option<&str>) {
+    let p: &mut dyn Renderable = parent.as_mut();
     if let Some(anchor_id) = anchor {
-        parent.insert_child_before(node, anchor_id);
+        p.insert_child_before(
+            std::mem::replace(node, Box::new(RootRenderable::new())),
+            anchor_id,
+        );
     } else {
-        parent.add_child(node);
+        p.add_child(std::mem::replace(node, Box::new(RootRenderable::new())));
     }
 }
 
-pub fn remove_node(parent: &mut RootRenderable, node_id: &str) {
-    parent.remove_child(node_id);
+pub fn remove_node(parent: &mut DomNode, node_id: &str) {
+    let p: &mut dyn Renderable = parent.as_mut();
+    p.remove_child(node_id);
 }
 
 #[must_use]
@@ -29,7 +38,10 @@ pub fn create_text_node(value: &str) -> DomNode {
 }
 
 #[must_use]
-pub fn create_element(_tag_name: &str) -> DomNode {
+pub fn create_element(tag_name: &str) -> DomNode {
+    if let Some(node) = create_component(tag_name) {
+        return node;
+    }
     Box::new(RootRenderable::new())
 }
 
@@ -59,18 +71,43 @@ pub fn get_next_sibling(_node: &DomNode) -> Option<&DomNode> {
     None
 }
 
-#[allow(clippy::needless_pass_by_value)]
-pub fn set_property(node: &mut RootRenderable, name: &str, value: &str) {
+pub fn set_property(node: &mut DomNode, name: &str, value: &str) {
+    let n: &mut dyn Renderable = node.as_mut();
     match name {
-        "id" => node.set_id(value.to_string()),
+        "id" => {
+            if let Some(r) = n.as_any_mut().downcast_mut::<RootRenderable>() {
+                r.set_id(value.to_string());
+            }
+        }
         "visible" => {
-            if let Ok(v) = value.parse::<bool>() {
-                node.set_visible(v);
+            if let Ok(v) = value.parse::<bool>()
+                && let Some(r) = n.as_any_mut().downcast_mut::<RootRenderable>()
+            {
+                r.set_visible(v);
             }
         }
         "focusable" => {
-            if let Ok(v) = value.parse::<bool>() {
-                node.set_focusable(v);
+            if let Ok(v) = value.parse::<bool>()
+                && let Some(r) = n.as_any_mut().downcast_mut::<RootRenderable>()
+            {
+                r.set_focusable(v);
+            }
+        }
+        "background" => {
+            if let Some(b) = n.as_any_mut().downcast_mut::<BoxRenderable>() {
+                b.set_background_color(Some(value.into()));
+            }
+        }
+        "border" => {
+            if let Some(b) = n.as_any_mut().downcast_mut::<BoxRenderable>()
+                && let Ok(v) = value.parse::<bool>()
+            {
+                b.set_border(v);
+            }
+        }
+        "title" => {
+            if let Some(b) = n.as_any_mut().downcast_mut::<BoxRenderable>() {
+                b.set_title(Some(value.to_string()));
             }
         }
         _ => {}

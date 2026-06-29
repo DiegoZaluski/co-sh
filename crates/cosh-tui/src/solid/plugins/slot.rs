@@ -62,24 +62,21 @@ impl SlotRegistry {
     }
 
     /// Resolve all entries for a slot name according to the given mode.
+    #[must_use]
     pub fn resolve(&self, slot_name: &str, mode: SlotMode) -> Vec<ResolvedEntry> {
         let Some(entry_list) = self.entries.get(slot_name) else {
             return Vec::new();
         };
 
         match mode {
-            SlotMode::SingleWinner => {
-                entry_list
-                    .first()
-                    .map(|(id, renderer)| {
-                        ResolvedEntry {
-                            id: id.clone(),
-                            renderable: renderer(),
-                        }
-                    })
-                    .into_iter()
-                    .collect()
-            }
+            SlotMode::SingleWinner => entry_list
+                .first()
+                .map(|(id, renderer)| ResolvedEntry {
+                    id: id.clone(),
+                    renderable: renderer(),
+                })
+                .into_iter()
+                .collect(),
             SlotMode::Replace | SlotMode::Append => entry_list
                 .iter()
                 .map(|(id, renderer)| ResolvedEntry {

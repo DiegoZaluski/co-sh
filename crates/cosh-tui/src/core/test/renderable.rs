@@ -107,3 +107,9 @@ fn test_renderable_trait_object() {
     assert_eq!(trait_obj.id(), "__root__");
     assert!(trait_obj.is_visible());
 }
+
+#[test]
+fn test_renderable_layout_node_default() {
+    let root = RootRenderable::new();
+    assert!(root.layout_node().is_none());
+}

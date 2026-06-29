@@ -1,8 +1,8 @@
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -65,21 +65,65 @@ impl Default for SpanRenderable {
 }
 
 impl Renderable for SpanRenderable {
-    fn id(&self) -> &str { &self.id }
-    fn num(&self) -> u64 { self.num }
-    fn is_visible(&self) -> bool { self.visible }
-    fn is_focusable(&self) -> bool { self.focusable }
-    fn is_destroyed(&self) -> bool { self.destroyed }
-    fn parent_num(&self) -> Option<u64> { self.parent_num }
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    fn children(&self) -> &[Box<dyn Renderable>] { &self.children }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn num(&self) -> u64 {
+        self.num
+    }
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+    fn is_focusable(&self) -> bool {
+        self.focusable
+    }
+    fn is_destroyed(&self) -> bool {
+        self.destroyed
+    }
+    fn parent_num(&self) -> Option<u64> {
+        self.parent_num
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn children(&self) -> &[Box<dyn Renderable>] {
+        &self.children
+    }
+    fn add_child(&mut self, child: Box<dyn Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|child| child.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self
+            .children
+            .iter()
+            .position(|existing| existing.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
+    }
 
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         let mut modifier = Modifier::empty();
-        if self.attributes & 1 != 0 { modifier |= Modifier::BOLD; }
-        if self.attributes & 2 != 0 { modifier |= Modifier::ITALIC; }
-        if self.attributes & 4 != 0 { modifier |= Modifier::UNDERLINED; }
+        if self.attributes & 1 != 0 {
+            modifier |= Modifier::BOLD;
+        }
+        if self.attributes & 2 != 0 {
+            modifier |= Modifier::ITALIC;
+        }
+        if self.attributes & 4 != 0 {
+            modifier |= Modifier::UNDERLINED;
+        }
 
         let color = if self.link.is_some() {
             Color::Rgb(66, 133, 244)
@@ -91,7 +135,9 @@ impl Renderable for SpanRenderable {
         let mut x = area.x;
 
         for ch in self.text.chars() {
-            if x >= area.right() { break; }
+            if x >= area.right() {
+                break;
+            }
             if let Some(cell) = buf.cell_mut((x, area.y)) {
                 cell.set_char(ch);
                 cell.set_style(style);
@@ -144,15 +190,53 @@ impl Default for LineBreakRenderable {
 }
 
 impl Renderable for LineBreakRenderable {
-    fn id(&self) -> &str { &self.id }
-    fn num(&self) -> u64 { self.num }
-    fn is_visible(&self) -> bool { self.visible }
-    fn is_focusable(&self) -> bool { self.focusable }
-    fn is_destroyed(&self) -> bool { self.destroyed }
-    fn parent_num(&self) -> Option<u64> { self.parent_num }
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    fn children(&self) -> &[Box<dyn Renderable>] { &self.children }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn num(&self) -> u64 {
+        self.num
+    }
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+    fn is_focusable(&self) -> bool {
+        self.focusable
+    }
+    fn is_destroyed(&self) -> bool {
+        self.destroyed
+    }
+    fn parent_num(&self) -> Option<u64> {
+        self.parent_num
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn children(&self) -> &[Box<dyn Renderable>] {
+        &self.children
+    }
+    fn add_child(&mut self, child: Box<dyn Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|child| child.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self
+            .children
+            .iter()
+            .position(|existing| existing.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
+    }
 
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         if let Some(cell) = buf.cell_mut((area.x, area.y)) {
@@ -180,15 +264,46 @@ impl LinkRenderable {
 }
 
 impl Renderable for LinkRenderable {
-    fn id(&self) -> &str { self.inner.id() }
-    fn num(&self) -> u64 { self.inner.num() }
-    fn is_visible(&self) -> bool { self.inner.is_visible() }
-    fn is_focusable(&self) -> bool { self.inner.is_focusable() }
-    fn is_destroyed(&self) -> bool { self.inner.is_destroyed() }
-    fn parent_num(&self) -> Option<u64> { self.inner.parent_num() }
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    fn children(&self) -> &[Box<dyn Renderable>] { self.inner.children() }
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn num(&self) -> u64 {
+        self.inner.num()
+    }
+    fn is_visible(&self) -> bool {
+        self.inner.is_visible()
+    }
+    fn is_focusable(&self) -> bool {
+        self.inner.is_focusable()
+    }
+    fn is_destroyed(&self) -> bool {
+        self.inner.is_destroyed()
+    }
+    fn parent_num(&self) -> Option<u64> {
+        self.inner.parent_num()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn children(&self) -> &[Box<dyn Renderable>] {
+        self.inner.children()
+    }
+    fn add_child(&mut self, child: Box<dyn Renderable>) -> usize {
+        self.inner.add_child(child)
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.inner.remove_child(id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        self.inner.insert_child_before(child, anchor_id)
+    }
 
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         self.inner.render_self(buf, area);
@@ -200,8 +315,16 @@ type ComponentConstructor = Box<dyn Fn() -> Box<dyn Renderable> + Send + Sync>;
 static COMPONENT_REGISTRY: LazyLock<Mutex<HashMap<&'static str, ComponentConstructor>>> =
     LazyLock::new(|| {
         let mut m: HashMap<&'static str, ComponentConstructor> = HashMap::new();
-        m.insert("span", Box::new(|| -> Box<dyn Renderable> { Box::new(SpanRenderable::new()) }) as ComponentConstructor);
-        m.insert("br", Box::new(|| -> Box<dyn Renderable> { Box::new(LineBreakRenderable::new()) }) as ComponentConstructor);
+        m.insert(
+            "span",
+            Box::new(|| -> Box<dyn Renderable> { Box::new(SpanRenderable::new()) })
+                as ComponentConstructor,
+        );
+        m.insert(
+            "br",
+            Box::new(|| -> Box<dyn Renderable> { Box::new(LineBreakRenderable::new()) })
+                as ComponentConstructor,
+        );
         Mutex::new(m)
     });
 

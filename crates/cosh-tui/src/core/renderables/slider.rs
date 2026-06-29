@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::core::renderable::Renderable;
-use crate::core::rgba::{parse_color, ColorInput, RGBA};
+use crate::core::rgba::{ColorInput, RGBA, parse_color};
 
 static NEXT_SLIDER_NUM: AtomicU64 = AtomicU64::new(1);
 
@@ -129,12 +129,12 @@ impl SliderRenderable {
         self.thumb_color
     }
 
-    fn virtual_track_size(&self, render_size: u16) -> f64 {
+    fn virtual_track_size(render_size: u16) -> f64 {
         f64::from(render_size) * 2.0
     }
 
     fn virtual_thumb_size(&self, render_size: u16) -> f64 {
-        let virtual_track = self.virtual_track_size(render_size);
+        let virtual_track = Self::virtual_track_size(render_size);
         let range = self.max - self.min;
         if range <= 0.0 {
             return virtual_track;
@@ -149,7 +149,7 @@ impl SliderRenderable {
     }
 
     fn virtual_thumb_start(&self, render_size: u16) -> f64 {
-        let virtual_track = self.virtual_track_size(render_size);
+        let virtual_track = Self::virtual_track_size(render_size);
         let range = self.max - self.min;
         if range <= 0.0 {
             return 0.0;
@@ -163,6 +163,24 @@ impl SliderRenderable {
 impl Renderable for SliderRenderable {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|c| c.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn crate::core::renderable::Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
     }
 
     fn num(&self) -> u64 {
@@ -222,7 +240,9 @@ impl SliderRenderable {
         let thumb_style = if fa == 0 {
             Style::default()
         } else {
-            Style::default().fg(Color::Rgb(fr, fg, fb)).bg(Color::Rgb(fr, fg, fb))
+            Style::default()
+                .fg(Color::Rgb(fr, fg, fb))
+                .bg(Color::Rgb(fr, fg, fb))
         };
 
         // Fill track background
@@ -247,7 +267,7 @@ impl SliderRenderable {
         let start_cell = (virtual_thumb_start / 2.0).floor() as i32;
         let end_cell = (virtual_thumb_end / 2.0).ceil() as i32 - 1;
         let start_cell = start_cell.max(0);
-        let end_cell = end_cell.min(area.width as i32 - 1);
+        let end_cell = end_cell.min(i32::from(area.width) - 1);
 
         for real_x in start_cell..=end_cell {
             let virtual_cell_start = f64::from(real_x) * 2.0;
@@ -261,14 +281,10 @@ impl SliderRenderable {
                 '█'
             } else {
                 let is_left_half = (thumb_in_cell_start - virtual_cell_start).abs() < f64::EPSILON;
-                if is_left_half {
-                    '▌'
-                } else {
-                    '▐'
-                }
+                if is_left_half { '▌' } else { '▐' }
             };
 
-            let x = area.x + real_x as u16;
+            let x = area.x + u16::try_from(real_x).expect("thumb x coordinate is non-negative");
             for y in area.y..area.bottom() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
@@ -283,7 +299,9 @@ impl SliderRenderable {
         let thumb_style = if fa == 0 {
             Style::default()
         } else {
-            Style::default().fg(Color::Rgb(fr, fg, fb)).bg(Color::Rgb(fr, fg, fb))
+            Style::default()
+                .fg(Color::Rgb(fr, fg, fb))
+                .bg(Color::Rgb(fr, fg, fb))
         };
 
         // Fill track background
@@ -308,7 +326,7 @@ impl SliderRenderable {
         let start_cell = (virtual_thumb_start / 2.0).floor() as i32;
         let end_cell = (virtual_thumb_end / 2.0).ceil() as i32 - 1;
         let start_cell = start_cell.max(0);
-        let end_cell = end_cell.min(area.height as i32 - 1);
+        let end_cell = end_cell.min(i32::from(area.height) - 1);
 
         for real_y in start_cell..=end_cell {
             let virtual_cell_start = f64::from(real_y) * 2.0;
@@ -331,7 +349,7 @@ impl SliderRenderable {
                 ' '
             };
 
-            let y = area.y + real_y as u16;
+            let y = area.y + u16::try_from(real_y).expect("thumb y coordinate is non-negative");
             for x in area.x..area.right() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);

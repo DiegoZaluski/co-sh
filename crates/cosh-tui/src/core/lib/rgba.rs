@@ -48,10 +48,7 @@ pub struct RGBA {
     slot: u8,
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn to_u8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }

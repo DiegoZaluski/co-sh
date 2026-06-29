@@ -5,11 +5,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use crate::core::border::{
-    border_chars, BorderCharacters, BorderSidesConfig, BorderStyle,
-};
+use crate::core::border::{BorderCharacters, BorderSidesConfig, BorderStyle, border_chars};
 use crate::core::renderable::Renderable;
-use crate::core::rgba::{parse_color, ColorInput, RGBA};
+use crate::core::rgba::{ColorInput, RGBA, parse_color};
 
 static NEXT_BOX_NUM: AtomicU64 = AtomicU64::new(1);
 
@@ -34,6 +32,10 @@ pub struct BoxRenderable {
     title_alignment: TitleAlignment,
     bottom_title: Option<String>,
     bottom_title_alignment: TitleAlignment,
+    gap: Option<f32>,
+    row_gap: Option<f32>,
+    column_gap: Option<f32>,
+    layout_node: Option<taffy::NodeId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,11 +70,16 @@ impl BoxRenderable {
             title_alignment: TitleAlignment::Left,
             bottom_title: None,
             bottom_title_alignment: TitleAlignment::Left,
+            gap: None,
+            row_gap: None,
+            column_gap: None,
+            layout_node: None,
         }
     }
 
     pub fn set_background_color(&mut self, color: Option<ColorInput>) {
-        self.background_color = parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
+        self.background_color =
+            parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
     }
 
     #[must_use]
@@ -119,7 +126,8 @@ impl BoxRenderable {
     }
 
     pub fn set_focused_border_color(&mut self, color: Option<ColorInput>) {
-        self.focused_border_color = parse_color(color.unwrap_or(ColorInput::String("#00AAFF".into())));
+        self.focused_border_color =
+            parse_color(color.unwrap_or(ColorInput::String("#00AAFF".into())));
     }
 
     #[must_use]
@@ -179,6 +187,33 @@ impl BoxRenderable {
     #[must_use]
     pub fn bottom_title_alignment(&self) -> TitleAlignment {
         self.bottom_title_alignment
+    }
+
+    pub fn set_gap(&mut self, value: Option<f32>) {
+        self.gap = value;
+    }
+
+    #[must_use]
+    pub fn gap(&self) -> Option<f32> {
+        self.gap
+    }
+
+    pub fn set_row_gap(&mut self, value: Option<f32>) {
+        self.row_gap = value;
+    }
+
+    #[must_use]
+    pub fn row_gap(&self) -> Option<f32> {
+        self.row_gap
+    }
+
+    pub fn set_column_gap(&mut self, value: Option<f32>) {
+        self.column_gap = value;
+    }
+
+    #[must_use]
+    pub fn column_gap(&self) -> Option<f32> {
+        self.column_gap
     }
 
     pub fn add_child(&mut self, child: Box<dyn Renderable>) -> usize {
@@ -250,26 +285,34 @@ impl BoxRenderable {
             }
         }
 
-        if self.border.top && self.border.left
-            && let Some(cell) = buf.cell_mut((area.x, area.y)) {
-                cell.set_char(chars.top_left);
-                cell.set_style(border_style);
-            }
-        if self.border.top && self.border.right
-            && let Some(cell) = buf.cell_mut((max_x, area.y)) {
-                cell.set_char(chars.top_right);
-                cell.set_style(border_style);
-            }
-        if self.border.bottom && self.border.left
-            && let Some(cell) = buf.cell_mut((area.x, max_y)) {
-                cell.set_char(chars.bottom_left);
-                cell.set_style(border_style);
-            }
-        if self.border.bottom && self.border.right
-            && let Some(cell) = buf.cell_mut((max_x, max_y)) {
-                cell.set_char(chars.bottom_right);
-                cell.set_style(border_style);
-            }
+        if self.border.top
+            && self.border.left
+            && let Some(cell) = buf.cell_mut((area.x, area.y))
+        {
+            cell.set_char(chars.top_left);
+            cell.set_style(border_style);
+        }
+        if self.border.top
+            && self.border.right
+            && let Some(cell) = buf.cell_mut((max_x, area.y))
+        {
+            cell.set_char(chars.top_right);
+            cell.set_style(border_style);
+        }
+        if self.border.bottom
+            && self.border.left
+            && let Some(cell) = buf.cell_mut((area.x, max_y))
+        {
+            cell.set_char(chars.bottom_left);
+            cell.set_style(border_style);
+        }
+        if self.border.bottom
+            && self.border.right
+            && let Some(cell) = buf.cell_mut((max_x, max_y))
+        {
+            cell.set_char(chars.bottom_right);
+            cell.set_style(border_style);
+        }
     }
 
     fn render_background(&self, buf: &mut Buffer, area: Rect) {
@@ -291,86 +334,82 @@ impl BoxRenderable {
         let (_top_inset, _right_inset, _bottom_inset, left_inset) = self.border_inset();
 
         if let Some(ref title) = self.title
-            && self.border.top {
-                let (r, g, b, a) = self
-                    .title_color
-                    .unwrap_or(self.border_color)
-                    .to_ints();
-                let title_style = if a == 0 {
-                    Style::default()
-                } else {
-                    Style::default().fg(Color::Rgb(r, g, b))
-                };
+            && self.border.top
+        {
+            let (r, g, b, a) = self.title_color.unwrap_or(self.border_color).to_ints();
+            let title_style = if a == 0 {
+                Style::default()
+            } else {
+                Style::default().fg(Color::Rgb(r, g, b))
+            };
 
-                let available = area.width.saturating_sub(left_inset).saturating_sub(1);
-                let y = area.y;
-                let x_start = area.x + left_inset + 1;
+            let available = area.width.saturating_sub(left_inset).saturating_sub(1);
+            let y = area.y;
+            let x_start = area.x + left_inset + 1;
 
-                let display_text = if title.len() as u16 > available {
-                    &title[..available as usize]
-                } else {
-                    title
-                };
+            let display_text = if title.len() as u16 > available {
+                &title[..available as usize]
+            } else {
+                title
+            };
 
-                let x = match self.title_alignment {
-                    TitleAlignment::Left => x_start,
-                    TitleAlignment::Center => {
-                        let padding = available.saturating_sub(display_text.len() as u16) / 2;
-                        x_start + padding
-                    }
-                    TitleAlignment::Right => {
-                        x_start + available.saturating_sub(display_text.len() as u16)
-                    }
-                };
+            let x = match self.title_alignment {
+                TitleAlignment::Left => x_start,
+                TitleAlignment::Center => {
+                    let padding = available.saturating_sub(display_text.len() as u16) / 2;
+                    x_start + padding
+                }
+                TitleAlignment::Right => {
+                    x_start + available.saturating_sub(display_text.len() as u16)
+                }
+            };
 
-                for (i, ch) in display_text.chars().enumerate() {
-                    if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
-                        cell.set_char(ch);
-                        cell.set_style(title_style);
-                    }
+            for (i, ch) in display_text.chars().enumerate() {
+                if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
+                    cell.set_char(ch);
+                    cell.set_style(title_style);
                 }
             }
+        }
 
         if let Some(ref bottom_title) = self.bottom_title
-            && self.border.bottom {
-                let max_y = area.bottom().saturating_sub(1);
-                let (r, g, b, a) = self
-                    .title_color
-                    .unwrap_or(self.border_color)
-                    .to_ints();
-                let title_style = if a == 0 {
-                    Style::default()
-                } else {
-                    Style::default().fg(Color::Rgb(r, g, b))
-                };
+            && self.border.bottom
+        {
+            let max_y = area.bottom().saturating_sub(1);
+            let (r, g, b, a) = self.title_color.unwrap_or(self.border_color).to_ints();
+            let title_style = if a == 0 {
+                Style::default()
+            } else {
+                Style::default().fg(Color::Rgb(r, g, b))
+            };
 
-                let available = area.width.saturating_sub(left_inset).saturating_sub(1);
-                let x_start = area.x + left_inset + 1;
+            let available = area.width.saturating_sub(left_inset).saturating_sub(1);
+            let x_start = area.x + left_inset + 1;
 
-                let display_text = if bottom_title.len() as u16 > available {
-                    &bottom_title[..available as usize]
-                } else {
-                    bottom_title
-                };
+            let display_text = if bottom_title.len() as u16 > available {
+                &bottom_title[..available as usize]
+            } else {
+                bottom_title
+            };
 
-                let x = match self.bottom_title_alignment {
-                    TitleAlignment::Left => x_start,
-                    TitleAlignment::Center => {
-                        let padding = available.saturating_sub(display_text.len() as u16) / 2;
-                        x_start + padding
-                    }
-                    TitleAlignment::Right => {
-                        x_start + available.saturating_sub(display_text.len() as u16)
-                    }
-                };
+            let x = match self.bottom_title_alignment {
+                TitleAlignment::Left => x_start,
+                TitleAlignment::Center => {
+                    let padding = available.saturating_sub(display_text.len() as u16) / 2;
+                    x_start + padding
+                }
+                TitleAlignment::Right => {
+                    x_start + available.saturating_sub(display_text.len() as u16)
+                }
+            };
 
-                for (i, ch) in display_text.chars().enumerate() {
-                    if let Some(cell) = buf.cell_mut((x + i as u16, max_y)) {
-                        cell.set_char(ch);
-                        cell.set_style(title_style);
-                    }
+            for (i, ch) in display_text.chars().enumerate() {
+                if let Some(cell) = buf.cell_mut((x + i as u16, max_y)) {
+                    cell.set_char(ch);
+                    cell.set_style(title_style);
                 }
             }
+        }
     }
 }
 
@@ -380,9 +419,60 @@ impl Default for BoxRenderable {
     }
 }
 
+impl BoxRenderable {
+    /// Build a taffy `Style` from the current Box properties (border + gaps).
+    #[must_use]
+    pub fn to_taffy_style(&self) -> taffy::Style {
+        let border = crate::core::layout::border_rect(
+            self.border.top,
+            self.border.right,
+            self.border.bottom,
+            self.border.left,
+        );
+
+        let mut style = crate::core::layout::default_box_style(border);
+
+        if let Some(gap) = self.gap {
+            style.gap = taffy::Size {
+                width: taffy::LengthPercentage::length(gap),
+                height: taffy::LengthPercentage::length(gap),
+            };
+        } else {
+            let row = self.row_gap.unwrap_or(0.0);
+            let col = self.column_gap.unwrap_or(0.0);
+            if row > 0.0 || col > 0.0 {
+                style.gap = taffy::Size {
+                    width: taffy::LengthPercentage::length(col),
+                    height: taffy::LengthPercentage::length(row),
+                };
+            }
+        }
+
+        style
+    }
+}
+
 impl Renderable for BoxRenderable {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|c| c.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn crate::core::renderable::Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
     }
 
     fn num(&self) -> u64 {
@@ -403,6 +493,14 @@ impl Renderable for BoxRenderable {
 
     fn parent_num(&self) -> Option<u64> {
         self.parent_num
+    }
+
+    fn layout_node(&self) -> Option<taffy::NodeId> {
+        self.layout_node
+    }
+
+    fn set_layout_node(&mut self, node: Option<taffy::NodeId>) {
+        self.layout_node = node;
     }
 
     fn as_any(&self) -> &dyn Any {

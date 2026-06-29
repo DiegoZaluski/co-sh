@@ -118,7 +118,12 @@ fn to_hex(r: Option<&str>, g: Option<&str>, b: Option<&str>, hex6: Option<&str>)
         return format!("#{hex}", hex = h.to_lowercase());
     }
     if let (Some(r), Some(g), Some(b)) = (r, g, b) {
-        return format!("#{}{}{}", scale_component(r), scale_component(g), scale_component(b));
+        return format!(
+            "#{}{}{}",
+            scale_component(r),
+            scale_component(g),
+            scale_component(b)
+        );
     }
     "#000000".to_string()
 }
@@ -138,7 +143,9 @@ fn parse_osc4_response(data: &str) -> Vec<(u8, String)> {
     while let Some(pos) = remaining.find("\x1b]4;") {
         remaining = &remaining[(pos + 4)..];
 
-        let Some(semi) = remaining.find(';') else { break; };
+        let Some(semi) = remaining.find(';') else {
+            break;
+        };
         let Ok(index) = remaining[..semi].parse::<u8>() else {
             remaining = &remaining[(semi + 1)..];
             continue;
@@ -179,7 +186,9 @@ fn parse_osc_special_response(data: &str) -> Vec<(u8, String)> {
     while let Some(pos) = remaining.find("\x1b]") {
         remaining = &remaining[(pos + 2)..];
 
-        let Some(semi) = remaining.find(';') else { break; };
+        let Some(semi) = remaining.find(';') else {
+            break;
+        };
         let Ok(index) = remaining[..semi].parse::<u8>() else {
             remaining = &remaining[(semi + 1)..];
             continue;
@@ -300,9 +309,7 @@ pub fn build_terminal_palette_signature(colors: Option<&TerminalColors>) -> Stri
     let palette_sig = palette_sig.join(";");
     let (fg_r, fg_g, fg_b, _) = normalized.default_foreground.to_ints();
     let (bg_r, bg_g, bg_b, _) = normalized.default_background.to_ints();
-    format!(
-        "{palette_sig}|{fg_r},{fg_g},{fg_b}|{bg_r},{bg_g},{bg_b}"
-    )
+    format!("{palette_sig}|{fg_r},{fg_g},{fg_b}|{bg_r},{bg_g},{bg_b}")
 }
 
 pub struct TerminalPalette {
@@ -429,12 +436,10 @@ impl TerminalPalette {
             results.insert(i, None);
         }
 
-        let queries = indices
-            .iter()
-            .fold(String::new(), |mut s, i| {
-                let _ = write!(s, "\x1b]4;{i};?\x07");
-                s
-            });
+        let queries = indices.iter().fold(String::new(), |mut s, i| {
+            let _ = write!(s, "\x1b]4;{i};?\x07");
+            s
+        });
         self.write_osc(&queries, true)
             .map_err(|e| format!("Failed to write palette query: {e}"))?;
 

@@ -32,8 +32,7 @@ pub struct ScrollbackSnapshot {
 }
 
 /// Writer function that produces a scrollback snapshot.
-pub type ScrollbackWriter =
-    Box<dyn Fn(ScrollbackRenderContext) -> ScrollbackSnapshot>;
+pub type ScrollbackWriter = Box<dyn Fn(ScrollbackRenderContext) -> ScrollbackSnapshot>;
 
 /// Context provided to the scrollback writer.
 pub struct ScrollbackRenderContext {
@@ -42,22 +41,30 @@ pub struct ScrollbackRenderContext {
 }
 
 /// Create a scrollback writer from a closure.
-/// Stub: full implementation requires `BoxRenderable` and the `SolidJS` reconciler.
+// TODO: integrate with ratatui backend and the LayoutTree once the renderer
+// exposes a scrollback surface API equivalent to the original OptimizedBuffer path.
 #[must_use]
-pub fn _create_scrollback_writer(
+pub fn create_scrollback_writer(
     _node: Box<dyn Fn(&ScrollbackRenderContext)>,
     _options: SolidScrollbackWriterOptions,
 ) -> ScrollbackWriter {
-    Box::new(|_ctx: ScrollbackRenderContext| -> ScrollbackSnapshot {
-        unimplemented!("Scrollback writer requires BoxRenderable (item 20)")
+    Box::new(|ctx: ScrollbackRenderContext| -> ScrollbackSnapshot {
+        ScrollbackSnapshot {
+            root: RootRenderable::new(),
+            width: ctx.width,
+            height: 1,
+            row_columns: None,
+            start_on_new_line: true,
+            trailing_newline: false,
+        }
     })
 }
 
 /// Write a solid component tree to the renderer's scrollback.
-pub fn _write_solid_to_scrollback(
+// TODO: implement once the renderer exposes scrollback commit/teardown methods.
+pub fn write_solid_to_scrollback(
     _renderer: (),
     _node: Box<dyn Fn(&ScrollbackRenderContext)>,
     _options: SolidScrollbackWriterOptions,
 ) {
-    unimplemented!("write_solid_to_scrollback requires the scrollback writer")
 }

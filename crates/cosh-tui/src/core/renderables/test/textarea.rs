@@ -1,9 +1,10 @@
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use crate::core::renderable::Renderable;
-use crate::core::renderables::textarea::{
-    TextareaRenderable, TextareaOptions,
-};
+use crate::core::renderables::textarea::{TextareaOptions, TextareaRenderable};
 
 #[test]
 fn test_new_creates_empty() {
@@ -129,7 +130,9 @@ fn test_submit_called() {
     let called = Arc::new(AtomicBool::new(false));
     let called_clone = called.clone();
     let mut ta = TextareaRenderable::new(TextareaOptions::default());
-    ta.set_on_submit(Some(Box::new(move || { called_clone.store(true, Ordering::Relaxed); })));
+    ta.set_on_submit(Some(Box::new(move || {
+        called_clone.store(true, Ordering::Relaxed);
+    })));
     ta.submit();
     assert!(called.load(Ordering::Relaxed));
 }

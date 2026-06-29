@@ -13,53 +13,39 @@ pub fn on_resize<B: Backend + 'static>(
 }
 
 /// Register a callback for keyboard events.
-pub fn _on_keyboard(
-    _renderer: &impl HasKeyInput,
-    _callback: impl Fn(&str) + 'static,
-) {
-}
+// TODO: wire to renderer key input once Renderer exposes a key event stream.
+pub fn on_keyboard(_renderer: &impl HasKeyInput, _callback: impl Fn(&str) + 'static) {}
 
 /// Register a callback for paste events.
-pub fn _on_paste(
-    _renderer: &impl HasKeyInput,
-    _callback: impl Fn(&str) + 'static,
-) {
-}
+// TODO: wire to renderer paste events once Renderer exposes paste support.
+pub fn on_paste(_renderer: &impl HasKeyInput, _callback: impl Fn(&str) + 'static) {}
 
 /// Register a callback for focus events.
-pub fn _on_focus<B: Backend>(
-    _renderer: &Renderer<B>,
-    _callback: impl Fn() + 'static,
-) {
-}
+// TODO: wire to renderer focus events once Renderer tracks focused renderable.
+pub fn on_focus<B: Backend>(_renderer: &Renderer<B>, _callback: impl Fn() + 'static) {}
 
 /// Register a callback for blur events.
-pub fn _on_blur<B: Backend>(
-    _renderer: &Renderer<B>,
-    _callback: impl Fn() + 'static,
-) {
-}
+// TODO: wire to renderer blur events once Renderer tracks focused renderable.
+pub fn on_blur<B: Backend>(_renderer: &Renderer<B>, _callback: impl Fn() + 'static) {}
 
 /// Register a callback for selection changes.
-pub fn _on_selection<B: Backend>(
-    _renderer: &Renderer<B>,
-    _callback: impl Fn(&Selection) + 'static,
-) {
+// TODO: wire to renderer selection events once Renderer tracks selection state.
+pub fn on_selection<B: Backend>(_renderer: &Renderer<B>, _callback: impl Fn(&Selection) + 'static) {
 }
 
 /// Placeholder for animation timeline.
-pub struct _Timeline;
+pub struct Timeline;
 
-impl Default for _Timeline {
+impl Default for Timeline {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl _Timeline {
+impl Timeline {
     #[must_use]
     pub fn new() -> Self {
-        _Timeline
+        Timeline
     }
 }
 

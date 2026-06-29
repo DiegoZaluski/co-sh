@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use ratatui::Terminal;
 use ratatui::layout::Rect;
 use ratatui::prelude::Backend;
-use ratatui::Terminal;
 
 use crate::core::renderable::{Renderable, RootRenderable};
 use crate::core::rgba::ColorInput;

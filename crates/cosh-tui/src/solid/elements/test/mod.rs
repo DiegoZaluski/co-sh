@@ -8,8 +8,7 @@
 
 mod hooks_tests {
     use crate::solid::elements::hooks::{
-        on_resize, _on_keyboard, _on_paste, _on_focus, _on_blur, _on_selection,
-        _Timeline, HasKeyInput,
+        HasKeyInput, Timeline, on_blur, on_focus, on_keyboard, on_paste, on_resize, on_selection,
     };
 
     #[test]
@@ -28,64 +27,64 @@ mod hooks_tests {
     }
 
     #[test]
-    fn test_on_keyboard_noop() {
+    fn teston_keyboard_noop() {
         struct Dummy;
         impl HasKeyInput for Dummy {
             fn on_key(&mut self, _key: &str) {}
         }
         let handler = Dummy;
-        _on_keyboard(&handler, |_key: &str| {});
+        on_keyboard(&handler, |_key: &str| {});
     }
 
     #[test]
-    fn test_on_paste_noop() {
+    fn teston_paste_noop() {
         struct Dummy;
         impl HasKeyInput for Dummy {}
         let handler = Dummy;
-        _on_paste(&handler, |_text: &str| {});
+        on_paste(&handler, |_text: &str| {});
     }
 
     #[test]
-    fn test_on_focus_noop() {
+    fn teston_focus_noop() {
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let terminal = ratatui::Terminal::new(backend).unwrap();
         let renderer = crate::core::renderer::Renderer::new(
             terminal,
             crate::core::renderer::RendererConfig::default(),
         );
-        _on_focus(&renderer, || {});
+        on_focus(&renderer, || {});
     }
 
     #[test]
-    fn test_on_blur_noop() {
+    fn teston_blur_noop() {
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let terminal = ratatui::Terminal::new(backend).unwrap();
         let renderer = crate::core::renderer::Renderer::new(
             terminal,
             crate::core::renderer::RendererConfig::default(),
         );
-        _on_blur(&renderer, || {});
+        on_blur(&renderer, || {});
     }
 
     #[test]
-    fn test_on_selection_noop() {
+    fn teston_selection_noop() {
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let terminal = ratatui::Terminal::new(backend).unwrap();
         let renderer = crate::core::renderer::Renderer::new(
             terminal,
             crate::core::renderer::RendererConfig::default(),
         );
-        _on_selection(&renderer, |_sel: &crate::core::types::Selection| {});
+        on_selection(&renderer, |_sel: &crate::core::types::Selection| {});
     }
 
     #[test]
     fn test_timeline_new() {
-        let _t = _Timeline::new();
+        let _t = Timeline::new();
     }
 
     #[test]
     fn test_timeline_default() {
-        let _t = _Timeline::default();
+        let _t = Timeline::default();
     }
 
     #[test]
@@ -110,13 +109,13 @@ mod hooks_tests {
 }
 
 mod catalogue_tests {
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
     use crate::core::renderable::Renderable;
     use crate::solid::elements::catalogue::{
-        BoldSpanRenderable, SpanRenderable, LineBreakRenderable, LinkRenderable,
-        register_component, create_component,
+        BoldSpanRenderable, LineBreakRenderable, LinkRenderable, SpanRenderable, create_component,
+        register_component,
     };
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
 
     #[test]
     fn test_span_renderable_new() {
@@ -153,7 +152,11 @@ mod catalogue_tests {
         span.render_self(&mut buf, Rect::new(0, 0, 10, 1));
         let cell = buf.cell((0, 0)).unwrap();
         assert_eq!(cell.symbol(), "b");
-        assert!(cell.style().add_modifier.intersects(ratatui::style::Modifier::BOLD));
+        assert!(
+            cell.style()
+                .add_modifier
+                .intersects(ratatui::style::Modifier::BOLD)
+        );
     }
 
     #[test]
@@ -204,9 +207,7 @@ mod catalogue_tests {
 
     #[test]
     fn test_register_and_create_component() {
-        register_component("my-widget", Box::new(|| {
-            Box::new(SpanRenderable::new())
-        }));
+        register_component("my-widget", Box::new(|| Box::new(SpanRenderable::new())));
         let result = create_component("my-widget");
         assert!(result.is_some());
         assert!(result.unwrap().id().starts_with("span-"));
@@ -235,9 +236,7 @@ mod catalogue_tests {
     #[test]
     fn test_type_aliases() {
         use crate::solid::elements::catalogue::{
-            BoldSpanRenderable,
-            ItalicSpanRenderable,
-            UnderlineSpanRenderable,
+            BoldSpanRenderable, ItalicSpanRenderable, UnderlineSpanRenderable,
         };
         let _bold = BoldSpanRenderable::new();
         let _italic = ItalicSpanRenderable::new();
@@ -341,7 +340,7 @@ mod extras_tests {
 
 mod slot_tests {
     use crate::core::renderable::Renderable;
-    use crate::solid::elements::slot::{TextSlotRenderable, SlotRenderable};
+    use crate::solid::elements::slot::{SlotRenderable, TextSlotRenderable};
 
     #[test]
     fn test_text_slot_new() {

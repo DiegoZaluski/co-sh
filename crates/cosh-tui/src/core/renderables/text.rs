@@ -196,21 +196,29 @@ impl TextRenderable {
         self.has_manual_styled_text = false;
         self.children.clear();
     }
-
-    pub fn add_child_renderable(&mut self, child: Box<dyn Renderable>) -> usize {
-        let idx = self.children.len();
-        self.children.push(child);
-        idx
-    }
-
-    pub fn remove_child_renderable(&mut self, id: &str) {
-        self.children.retain(|c| c.id() != id);
-    }
 }
 
 impl Renderable for TextRenderable {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|c| c.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn crate::core::renderable::Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
     }
 
     fn num(&self) -> u64 {
@@ -255,12 +263,8 @@ impl Renderable for TextRenderable {
         let mut current_col = x;
 
         for chunk in &self.text.chunks {
-            let fg_color = chunk
-                .fg
-                .unwrap_or(self.default_fg);
-            let bg_color = chunk
-                .bg
-                .unwrap_or(self.default_bg);
+            let fg_color = chunk.fg.unwrap_or(self.default_fg);
+            let bg_color = chunk.bg.unwrap_or(self.default_bg);
 
             let (fr, fg, fb, fa) = fg_color.to_ints();
             let (br, bg, bb, ba) = bg_color.to_ints();

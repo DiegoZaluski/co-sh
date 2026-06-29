@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::core::renderable::Renderable;
-use crate::core::rgba::{parse_color, ColorInput, RGBA};
+use crate::core::rgba::{ColorInput, RGBA, parse_color};
 
 static NEXT_INPUT_NUM: AtomicU64 = AtomicU64::new(1);
 
@@ -131,7 +131,9 @@ impl InputRenderable {
             return false;
         }
         let bytes = self.cursor_offset;
-        let next = self.value.floor_char_boundary((bytes + 1).min(self.value.len()));
+        let next = self
+            .value
+            .floor_char_boundary((bytes + 1).min(self.value.len()));
         self.value.drain(bytes..next);
         true
     }
@@ -141,13 +143,32 @@ impl InputRenderable {
     }
 
     pub fn set_background_color(&mut self, color: Option<ColorInput>) {
-        self.background_color = parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
+        self.background_color =
+            parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
     }
 }
 
 impl Renderable for InputRenderable {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|c| c.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn crate::core::renderable::Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
     }
 
     fn num(&self) -> u64 {
@@ -190,7 +211,11 @@ impl Renderable for InputRenderable {
         };
 
         let (tr, tg, tb, ta) = self.text_color.to_ints();
-        let fg = if ta == 0 { Color::Reset } else { Color::Rgb(tr, tg, tb) };
+        let fg = if ta == 0 {
+            Color::Reset
+        } else {
+            Color::Rgb(tr, tg, tb)
+        };
         let style = Style::default().fg(fg);
 
         let max_x = area.right();

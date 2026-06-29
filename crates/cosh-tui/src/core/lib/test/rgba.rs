@@ -1,8 +1,6 @@
 use crate::core::rgba::{
-    RGBA, ColorInput,
-    ansi256_index_to_rgb,
-    rgb_to_hex, hsv_to_rgb, parse_color,
-    DEFAULT_FOREGROUND_RGB, DEFAULT_BACKGROUND_RGB,
+    ColorInput, DEFAULT_BACKGROUND_RGB, DEFAULT_FOREGROUND_RGB, RGBA, ansi256_index_to_rgb,
+    hsv_to_rgb, parse_color, rgb_to_hex,
 };
 
 #[test]

@@ -69,16 +69,6 @@ impl ScrollBoxRenderable {
         self.content_width = width;
         self.content_height = height;
     }
-
-    pub fn add_child(&mut self, child: Box<dyn Renderable>) -> usize {
-        let idx = self.children.len();
-        self.children.push(child);
-        idx
-    }
-
-    pub fn remove_child(&mut self, id: &str) {
-        self.children.retain(|c| c.id() != id);
-    }
 }
 
 impl Default for ScrollBoxRenderable {
@@ -90,6 +80,24 @@ impl Default for ScrollBoxRenderable {
 impl Renderable for ScrollBoxRenderable {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|c| c.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn crate::core::renderable::Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
     }
 
     fn num(&self) -> u64 {

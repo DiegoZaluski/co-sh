@@ -8,7 +8,7 @@
 //! Unit tests for `solid/renderer/`
 
 mod universal_tests {
-    use crate::solid::renderer::universal::{RendererOptions, Renderer};
+    use crate::solid::renderer::universal::{Renderer, RendererOptions};
 
     struct TestNode {
         tag: String,
@@ -20,15 +20,21 @@ mod universal_tests {
         type Node = TestNode;
 
         fn create_element(&mut self, tag: &str) -> TestNode {
-            TestNode { tag: tag.to_string() }
+            TestNode {
+                tag: tag.to_string(),
+            }
         }
 
         fn create_text_node(&mut self, value: &str) -> TestNode {
-            TestNode { tag: format!("text:{value}") }
+            TestNode {
+                tag: format!("text:{value}"),
+            }
         }
 
         fn create_slot_node(&mut self) -> TestNode {
-            TestNode { tag: "slot".to_string() }
+            TestNode {
+                tag: "slot".to_string(),
+            }
         }
 
         fn replace_text(&mut self, _text_node: &TestNode, _value: &str) {}
@@ -39,13 +45,20 @@ mod universal_tests {
 
         fn set_property<T>(&mut self, _node: &TestNode, _name: &str, _value: T, _prev: Option<T>) {}
 
-        fn insert_node(&mut self, _parent: &TestNode, _node: TestNode, _anchor: Option<&TestNode>) {}
+        fn insert_node(&mut self, _parent: &TestNode, _node: TestNode, _anchor: Option<&TestNode>) {
+        }
 
         fn remove_node(&mut self, _parent: &TestNode, _node: &TestNode) {}
 
-        fn get_parent_node(&self, _node: &TestNode) -> Option<&TestNode> { None }
-        fn get_first_child(&self, _node: &TestNode) -> Option<&TestNode> { None }
-        fn get_next_sibling(&self, _node: &TestNode) -> Option<&TestNode> { None }
+        fn get_parent_node(&self, _node: &TestNode) -> Option<&TestNode> {
+            None
+        }
+        fn get_first_child(&self, _node: &TestNode) -> Option<&TestNode> {
+            None
+        }
+        fn get_next_sibling(&self, _node: &TestNode) -> Option<&TestNode> {
+            None
+        }
     }
 
     #[test]
@@ -87,32 +100,57 @@ mod universal_tests {
         }
 
         fn create_component<T>(_comp: fn(T) -> TestNode, _props: T) -> TestNode {
-            TestNode { tag: "component".to_string() }
+            TestNode {
+                tag: "component".to_string(),
+            }
         }
 
         fn create_element(&mut self, tag: &str) -> TestNode {
-            TestNode { tag: tag.to_string() }
+            TestNode {
+                tag: tag.to_string(),
+            }
         }
 
         fn create_text_node(&mut self, value: &str) -> TestNode {
-            TestNode { tag: format!("text:{value}") }
+            TestNode {
+                tag: format!("text:{value}"),
+            }
         }
 
         fn create_slot_node(&mut self) -> TestNode {
-            TestNode { tag: "slot".to_string() }
+            TestNode {
+                tag: "slot".to_string(),
+            }
         }
 
-        fn insert_node(&mut self, _parent: &TestNode, _node: TestNode, _anchor: Option<&TestNode>) {}
-
-        fn insert<T>(&mut self, _parent: &TestNode, _accessor: fn() -> T, _marker: Option<&TestNode>, _initial: Option<T>) -> TestNode {
-            TestNode { tag: "inserted".to_string() }
+        fn insert_node(&mut self, _parent: &TestNode, _node: TestNode, _anchor: Option<&TestNode>) {
         }
 
-        fn spread<T>(&mut self, _node: &TestNode, _accessor: fn() -> T, _skip_children: Option<bool>) {}
+        fn insert<T>(
+            &mut self,
+            _parent: &TestNode,
+            _accessor: fn() -> T,
+            _marker: Option<&TestNode>,
+            _initial: Option<T>,
+        ) -> TestNode {
+            TestNode {
+                tag: "inserted".to_string(),
+            }
+        }
+
+        fn spread<T>(
+            &mut self,
+            _node: &TestNode,
+            _accessor: fn() -> T,
+            _skip_children: Option<bool>,
+        ) {
+        }
 
         fn set_property<T>(&mut self, _node: &TestNode, _name: &str, _value: T, _prev: Option<T>) {}
 
-        fn set_prop<T>(&mut self, _node: &TestNode, _name: &str, _value: T, _prev: Option<T>) -> T { _value }
+        fn set_prop<T>(&mut self, _node: &TestNode, _name: &str, _value: T, _prev: Option<T>) -> T {
+            _value
+        }
 
         fn merge_props(&mut self, _sources: &[&dyn std::any::Any]) -> Box<dyn std::any::Any> {
             Box::new(())
@@ -140,7 +178,9 @@ mod universal_tests {
     #[test]
     fn test_renderer_create_component() {
         fn my_comp(_props: i32) -> TestNode {
-            TestNode { tag: "comp".to_string() }
+            TestNode {
+                tag: "comp".to_string(),
+            }
         }
         let node = TestRenderer::create_component(my_comp, 42);
         assert_eq!(node.tag, "component");
@@ -150,7 +190,9 @@ mod universal_tests {
     fn test_renderer_render_cleanup() {
         let mut renderer = TestRenderer;
         fn code() -> TestNode {
-            TestNode { tag: "root".to_string() }
+            TestNode {
+                tag: "root".to_string(),
+            }
         }
         let root = renderer.create_element("root");
         let cleanup = renderer.render(code, root);

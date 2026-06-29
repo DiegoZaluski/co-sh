@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::core::renderable::Renderable;
-use crate::core::rgba::{parse_color, ColorInput, RGBA};
+use crate::core::rgba::{ColorInput, RGBA, parse_color};
 
 static NEXT_SELECT_NUM: AtomicU64 = AtomicU64::new(1);
 
@@ -79,9 +79,9 @@ impl SelectRenderable {
 
     pub fn set_options(&mut self, options: Vec<SelectOption>) {
         self.options = options;
-        self.selected_index = self.selected_index.min(
-            self.options.len().saturating_sub(1),
-        );
+        self.selected_index = self
+            .selected_index
+            .min(self.options.len().saturating_sub(1));
         self.update_scroll_offset();
     }
 
@@ -153,7 +153,8 @@ impl SelectRenderable {
     }
 
     pub fn set_background_color(&mut self, color: Option<ColorInput>) {
-        self.background_color = parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
+        self.background_color =
+            parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
     }
 
     pub fn set_text_color(&mut self, color: Option<ColorInput>) {
@@ -161,19 +162,23 @@ impl SelectRenderable {
     }
 
     pub fn set_focused_background_color(&mut self, color: Option<ColorInput>) {
-        self.focused_background_color = parse_color(color.unwrap_or(ColorInput::String("#1a1a1a".into())));
+        self.focused_background_color =
+            parse_color(color.unwrap_or(ColorInput::String("#1a1a1a".into())));
     }
 
     pub fn set_focused_text_color(&mut self, color: Option<ColorInput>) {
-        self.focused_text_color = parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
+        self.focused_text_color =
+            parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
     }
 
     pub fn set_selected_background_color(&mut self, color: Option<ColorInput>) {
-        self.selected_background_color = parse_color(color.unwrap_or(ColorInput::String("#334455".into())));
+        self.selected_background_color =
+            parse_color(color.unwrap_or(ColorInput::String("#334455".into())));
     }
 
     pub fn set_selected_text_color(&mut self, color: Option<ColorInput>) {
-        self.selected_text_color = parse_color(color.unwrap_or(ColorInput::String("#FFFF00".into())));
+        self.selected_text_color =
+            parse_color(color.unwrap_or(ColorInput::String("#FFFF00".into())));
     }
 
     fn lines_per_item(&self) -> u16 {
@@ -201,6 +206,24 @@ impl Default for SelectRenderable {
 impl Renderable for SelectRenderable {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|c| c.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn crate::core::renderable::Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
     }
 
     fn num(&self) -> u64 {
@@ -243,7 +266,8 @@ impl Renderable for SelectRenderable {
         let max_visible = usize::from(area.height) / usize::from(self.lines_per_item());
         let max_visible = max_visible.max(1);
 
-        let visible_range = self.scroll_offset..self.options.len().min(self.scroll_offset + max_visible);
+        let visible_range =
+            self.scroll_offset..self.options.len().min(self.scroll_offset + max_visible);
         let mut y = area.y;
 
         for i in visible_range {
@@ -255,9 +279,17 @@ impl Renderable for SelectRenderable {
             }
 
             let (bg_color, name_color, desc_color) = if is_selected {
-                (self.selected_background_color, self.selected_text_color, self.selected_description_color)
+                (
+                    self.selected_background_color,
+                    self.selected_text_color,
+                    self.selected_description_color,
+                )
             } else {
-                (self.background_color, self.text_color, self.description_color)
+                (
+                    self.background_color,
+                    self.text_color,
+                    self.description_color,
+                )
             };
 
             let (br, bg, bb, ba) = bg_color.to_ints();

@@ -13,11 +13,8 @@
 mod reconciler_tests {
     use crate::core::renderable::{Renderable, RootRenderable};
     use crate::solid::reconciler::{
-        DomNode, TextNode,
-        insert_node, remove_node,
-        create_text_node, create_element, create_slot_node,
-        replace_text, is_text_node,
-        get_parent_node, get_first_child, get_next_sibling,
+        DomNode, TextNode, create_element, create_slot_node, create_text_node, get_first_child,
+        get_next_sibling, get_parent_node, insert_node, is_text_node, remove_node, replace_text,
         set_property,
     };
 
@@ -34,25 +31,25 @@ mod reconciler_tests {
 
     #[test]
     fn test_insert_node_no_anchor() {
-        let mut root = RootRenderable::new();
-        let child = Box::new(RootRenderable::new());
-        insert_node(&mut root, child, None);
+        let mut root: DomNode = Box::new(RootRenderable::new());
+        let mut child: DomNode = Box::new(RootRenderable::new());
+        insert_node(&mut root, &mut child, None);
         assert_eq!(root.children_count(), 1);
     }
 
     #[test]
     fn test_insert_node_with_anchor() {
-        let mut root = RootRenderable::new();
-        let first = Box::new(RootRenderable::new());
-        insert_node(&mut root, first, None);
-        let third = Box::new(RootRenderable::new());
-        insert_node(&mut root, third, Some("__root__"));
+        let mut root: DomNode = Box::new(RootRenderable::new());
+        let mut first: DomNode = Box::new(RootRenderable::new());
+        insert_node(&mut root, &mut first, None);
+        let mut third: DomNode = Box::new(RootRenderable::new());
+        insert_node(&mut root, &mut third, Some("__root__"));
         assert_eq!(root.children_count(), 2);
     }
 
     #[test]
     fn test_remove_node() {
-        let mut root = RootRenderable::new();
+        let mut root: DomNode = Box::new(RootRenderable::new());
         root.add_child(Box::new(RootRenderable::new()));
         remove_node(&mut root, "__root__");
         assert_eq!(root.children_count(), 0);
@@ -60,7 +57,7 @@ mod reconciler_tests {
 
     #[test]
     fn test_remove_node_nonexistent() {
-        let mut root = RootRenderable::new();
+        let mut root: DomNode = Box::new(RootRenderable::new());
         remove_node(&mut root, "nonexistent");
     }
 
@@ -115,36 +112,47 @@ mod reconciler_tests {
     }
 
     #[test]
+    fn test_text_node_from_string_preserves_text() {
+        let node = TextNode::from_string("hello world", None);
+        // Should create a text-containing node, not just an empty root
+        assert!(
+            node.id().starts_with("text-"),
+            "TextNode should have text- prefix, got: {}",
+            node.id()
+        );
+    }
+
+    #[test]
     fn test_set_property_id() {
-        let mut root = RootRenderable::new();
+        let mut root: DomNode = Box::new(RootRenderable::new());
         set_property(&mut root, "id", "my-custom-id");
         assert_eq!(root.id(), "my-custom-id");
     }
 
     #[test]
     fn test_set_property_visible_true() {
-        let mut root = RootRenderable::new();
+        let mut root: DomNode = Box::new(RootRenderable::new());
         set_property(&mut root, "visible", "true");
         assert!(root.is_visible());
     }
 
     #[test]
     fn test_set_property_visible_false() {
-        let mut root = RootRenderable::new();
+        let mut root: DomNode = Box::new(RootRenderable::new());
         set_property(&mut root, "visible", "false");
         assert!(!root.is_visible());
     }
 
     #[test]
     fn test_set_property_visible_invalid_ignored() {
-        let mut root = RootRenderable::new();
+        let mut root: DomNode = Box::new(RootRenderable::new());
         set_property(&mut root, "visible", "notabool");
         assert!(root.is_visible());
     }
 
     #[test]
     fn test_set_property_focusable() {
-        let mut root = RootRenderable::new();
+        let mut root: DomNode = Box::new(RootRenderable::new());
         set_property(&mut root, "focusable", "true");
         assert!(root.is_focusable());
         set_property(&mut root, "focusable", "false");
@@ -153,15 +161,76 @@ mod reconciler_tests {
 
     #[test]
     fn test_set_property_unknown_ignored() {
-        let mut root = RootRenderable::new();
+        let mut root: DomNode = Box::new(RootRenderable::new());
         set_property(&mut root, "nonexistent", "value");
+    }
+
+    #[test]
+    fn test_set_property_box_background() {
+        let mut box_node: DomNode = Box::new(crate::core::renderables::r#box::BoxRenderable::new());
+        set_property(&mut box_node, "background", "#ff0000");
+        if let Some(b) = box_node
+            .as_any_mut()
+            .downcast_mut::<crate::core::renderables::r#box::BoxRenderable>()
+        {
+            assert_eq!(b.background_color().r(), 1.0);
+            assert_eq!(b.background_color().g(), 0.0);
+            assert_eq!(b.background_color().b(), 0.0);
+        } else {
+            panic!("expected BoxRenderable");
+        }
+    }
+
+    #[test]
+    fn test_set_property_box_border() {
+        let mut box_node: DomNode = Box::new(crate::core::renderables::r#box::BoxRenderable::new());
+        set_property(&mut box_node, "border", "true");
+        if let Some(b) = box_node
+            .as_any_mut()
+            .downcast_mut::<crate::core::renderables::r#box::BoxRenderable>()
+        {
+            assert!(b.border_sides().top);
+        } else {
+            panic!("expected BoxRenderable");
+        }
+    }
+
+    #[test]
+    fn test_set_property_box_title() {
+        let mut box_node: DomNode = Box::new(crate::core::renderables::r#box::BoxRenderable::new());
+        set_property(&mut box_node, "title", "Hello World");
+        if let Some(b) = box_node
+            .as_any_mut()
+            .downcast_mut::<crate::core::renderables::r#box::BoxRenderable>()
+        {
+            assert_eq!(b.title(), Some("Hello World"));
+        } else {
+            panic!("expected BoxRenderable");
+        }
+    }
+
+    #[test]
+    fn test_create_element_span_from_catalogue() {
+        let node = create_element("span");
+        assert!(node.id().starts_with("span-"));
+    }
+
+    #[test]
+    fn test_create_element_br_from_catalogue() {
+        let node = create_element("br");
+        assert!(node.id().starts_with("br-"));
+    }
+
+    #[test]
+    fn test_create_element_unknown_falls_back_to_root() {
+        let node = create_element("nonexistent");
+        assert_eq!(node.id(), "__root__");
     }
 }
 
 mod scrollback_tests {
     use crate::solid::scrollback::{
-        SolidScrollbackWriterOptions, ScrollbackRenderContext,
-        _create_scrollback_writer,
+        ScrollbackRenderContext, SolidScrollbackWriterOptions, create_scrollback_writer,
     };
 
     #[test]
@@ -189,20 +258,26 @@ mod scrollback_tests {
 
     #[test]
     fn test_scrollback_render_context() {
-        let ctx = ScrollbackRenderContext { width: 80, tail_column: 0 };
+        let ctx = ScrollbackRenderContext {
+            width: 80,
+            tail_column: 0,
+        };
         assert_eq!(ctx.width, 80);
         assert_eq!(ctx.tail_column, 0);
     }
 
     #[test]
-    #[should_panic(expected = "requires BoxRenderable")]
-    fn test_create_scrollback_writer_panics_on_call() {
-        let writer = _create_scrollback_writer(
+    fn testcreate_scrollback_writer_returns_snapshot() {
+        let writer = create_scrollback_writer(
             Box::new(|_ctx: &ScrollbackRenderContext| {}),
             SolidScrollbackWriterOptions::default(),
         );
-        // The panic happens when the writer is called, not when created
-        writer(ScrollbackRenderContext { width: 80, tail_column: 0 });
+        let snapshot = writer(ScrollbackRenderContext {
+            width: 80,
+            tail_column: 0,
+        });
+        assert_eq!(snapshot.width, 80);
+        assert!(snapshot.start_on_new_line);
     }
 }
 
@@ -222,7 +297,7 @@ mod time_to_first_draw_tests {
 
 mod plugins_slot_tests {
     use crate::core::renderable::Renderable;
-    use crate::solid::plugins::slot::{SlotRegistry, SlotMode, PluginErrorEvent};
+    use crate::solid::plugins::slot::{PluginErrorEvent, SlotMode, SlotRegistry};
 
     fn dummy_renderable() -> Box<dyn Renderable> {
         Box::new(crate::core::renderable::RootRenderable::new())

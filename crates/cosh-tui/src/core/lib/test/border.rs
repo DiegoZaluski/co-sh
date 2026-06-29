@@ -1,8 +1,7 @@
 use crate::core::border::{
-    BorderStyle, BorderSidesConfig, BorderSide,
-    is_valid_border_style, parse_border_style, border_chars,
-    get_border_from_sides, get_border_sides,
-    SINGLE, DOUBLE, ROUNDED, HEAVY, VALID_BORDER_STYLES,
+    BorderSide, BorderSidesConfig, BorderStyle, DOUBLE, HEAVY, ROUNDED, SINGLE,
+    VALID_BORDER_STYLES, border_chars, get_border_from_sides, get_border_sides,
+    is_valid_border_style, parse_border_style,
 };
 
 #[test]
@@ -26,15 +25,30 @@ fn test_valid_border_styles_constant() {
 
 #[test]
 fn test_parse_border_style_valid() {
-    assert_eq!(parse_border_style(Some("single"), BorderStyle::Single), BorderStyle::Single);
-    assert_eq!(parse_border_style(Some("double"), BorderStyle::Rounded), BorderStyle::Double);
-    assert_eq!(parse_border_style(Some("rounded"), BorderStyle::Single), BorderStyle::Rounded);
-    assert_eq!(parse_border_style(Some("heavy"), BorderStyle::Single), BorderStyle::Heavy);
+    assert_eq!(
+        parse_border_style(Some("single"), BorderStyle::Single),
+        BorderStyle::Single
+    );
+    assert_eq!(
+        parse_border_style(Some("double"), BorderStyle::Rounded),
+        BorderStyle::Double
+    );
+    assert_eq!(
+        parse_border_style(Some("rounded"), BorderStyle::Single),
+        BorderStyle::Rounded
+    );
+    assert_eq!(
+        parse_border_style(Some("heavy"), BorderStyle::Single),
+        BorderStyle::Heavy
+    );
 }
 
 #[test]
 fn test_parse_border_style_none_returns_fallback() {
-    assert_eq!(parse_border_style(None, BorderStyle::Rounded), BorderStyle::Rounded);
+    assert_eq!(
+        parse_border_style(None, BorderStyle::Rounded),
+        BorderStyle::Rounded
+    );
 }
 
 #[test]
@@ -101,9 +115,12 @@ fn test_get_border_from_sides_all() {
 
 #[test]
 fn test_get_border_from_sides_some() {
-    let sides = get_border_from_sides(
-        BorderSidesConfig { top: true, right: false, bottom: true, left: false },
-    );
+    let sides = get_border_from_sides(BorderSidesConfig {
+        top: true,
+        right: false,
+        bottom: true,
+        left: false,
+    });
     assert_eq!(sides, vec![BorderSide::Top, BorderSide::Bottom]);
 }
 
@@ -115,6 +132,11 @@ fn test_get_border_from_sides_none() {
 
 #[test]
 fn test_get_border_sides_identity() {
-    let cfg = BorderSidesConfig { top: true, right: false, bottom: true, left: false };
+    let cfg = BorderSidesConfig {
+        top: true,
+        right: false,
+        bottom: true,
+        left: false,
+    };
     assert_eq!(get_border_sides(&cfg), cfg);
 }

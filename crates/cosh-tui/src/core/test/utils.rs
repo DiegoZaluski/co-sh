@@ -1,6 +1,5 @@
 use crate::core::utils::{
-    create_text_attributes, TextAttributeOptions,
-    attributes_with_link, get_link_id,
+    TextAttributeOptions, attributes_with_link, create_text_attributes, get_link_id,
 };
 
 #[test]
@@ -10,15 +9,24 @@ fn test_create_text_attributes_default_is_zero() {
 
 #[test]
 fn test_create_text_attributes_bold() {
-    let opts = TextAttributeOptions { bold: true, ..Default::default() };
+    let opts = TextAttributeOptions {
+        bold: true,
+        ..Default::default()
+    };
     assert_eq!(create_text_attributes(opts), 1);
 }
 
 #[test]
 fn test_create_text_attributes_all() {
     let opts = TextAttributeOptions {
-        bold: true, italic: true, underline: true, dim: true,
-        blink: true, inverse: true, hidden: true, strikethrough: true,
+        bold: true,
+        italic: true,
+        underline: true,
+        dim: true,
+        blink: true,
+        inverse: true,
+        hidden: true,
+        strikethrough: true,
     };
     assert_eq!(create_text_attributes(opts), 0b1111_1111);
 }
@@ -26,7 +34,9 @@ fn test_create_text_attributes_all() {
 #[test]
 fn test_create_text_attributes_selection() {
     let opts = TextAttributeOptions {
-        italic: true, inverse: true, ..Default::default()
+        italic: true,
+        inverse: true,
+        ..Default::default()
     };
     assert_eq!(create_text_attributes(opts), 4 | 32);
 }
@@ -40,7 +50,10 @@ fn test_attributes_with_link() {
 
 #[test]
 fn test_attributes_with_link_preserves_base() {
-    let base = create_text_attributes(TextAttributeOptions { bold: true, ..Default::default() });
+    let base = create_text_attributes(TextAttributeOptions {
+        bold: true,
+        ..Default::default()
+    });
     let linked = attributes_with_link(base, 255);
     assert_eq!(linked & 0xff, 1);
     assert_eq!(get_link_id(linked), 255);

@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::core::renderable::Renderable;
-use crate::core::rgba::{parse_color, ColorInput, RGBA};
+use crate::core::rgba::{ColorInput, RGBA, parse_color};
 
 static NEXT_TAB_SELECT_NUM: AtomicU64 = AtomicU64::new(1);
 
@@ -77,9 +77,9 @@ impl TabSelectRenderable {
 
     pub fn set_options(&mut self, options: Vec<TabSelectOption>) {
         self.options = options;
-        self.selected_index = self.selected_index.min(
-            self.options.len().saturating_sub(1),
-        );
+        self.selected_index = self
+            .selected_index
+            .min(self.options.len().saturating_sub(1));
         self.update_scroll_offset();
     }
 
@@ -139,7 +139,8 @@ impl TabSelectRenderable {
     }
 
     pub fn set_background_color(&mut self, color: Option<ColorInput>) {
-        self.background_color = parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
+        self.background_color =
+            parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
     }
 
     pub fn set_text_color(&mut self, color: Option<ColorInput>) {
@@ -147,19 +148,23 @@ impl TabSelectRenderable {
     }
 
     pub fn set_focused_background_color(&mut self, color: Option<ColorInput>) {
-        self.focused_background_color = parse_color(color.unwrap_or(ColorInput::String("#1a1a1a".into())));
+        self.focused_background_color =
+            parse_color(color.unwrap_or(ColorInput::String("#1a1a1a".into())));
     }
 
     pub fn set_focused_text_color(&mut self, color: Option<ColorInput>) {
-        self.focused_text_color = parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
+        self.focused_text_color =
+            parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
     }
 
     pub fn set_selected_background_color(&mut self, color: Option<ColorInput>) {
-        self.selected_background_color = parse_color(color.unwrap_or(ColorInput::String("#334455".into())));
+        self.selected_background_color =
+            parse_color(color.unwrap_or(ColorInput::String("#334455".into())));
     }
 
     pub fn set_selected_text_color(&mut self, color: Option<ColorInput>) {
-        self.selected_text_color = parse_color(color.unwrap_or(ColorInput::String("#FFFF00".into())));
+        self.selected_text_color =
+            parse_color(color.unwrap_or(ColorInput::String("#FFFF00".into())));
     }
 
     pub fn set_show_description(&mut self, show: bool) {
@@ -208,6 +213,24 @@ impl Renderable for TabSelectRenderable {
         &self.id
     }
 
+    fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|c| c.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn crate::core::renderable::Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
+    }
+
     fn num(&self) -> u64 {
         self.num
     }
@@ -240,6 +263,7 @@ impl Renderable for TabSelectRenderable {
         &self.children
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         if area.width == 0 || area.height == 0 || self.options.is_empty() {
             return;
@@ -288,7 +312,11 @@ impl Renderable for TabSelectRenderable {
             // Draw tab name
             let max_name_width = actual_width.saturating_sub(2);
             let display_name = if option.name.len() > usize::from(max_name_width) {
-                let mut s: String = option.name.chars().take(usize::from(max_name_width.saturating_sub(1))).collect();
+                let mut s: String = option
+                    .name
+                    .chars()
+                    .take(usize::from(max_name_width.saturating_sub(1)))
+                    .collect();
                 s.push('…');
                 s
             } else {
@@ -352,7 +380,11 @@ impl Renderable for TabSelectRenderable {
 
                 let max_desc = area.width.saturating_sub(2);
                 let display_desc = if selected.description.len() > usize::from(max_desc) {
-                    let mut s: String = selected.description.chars().take(usize::from(max_desc.saturating_sub(1))).collect();
+                    let mut s: String = selected
+                        .description
+                        .chars()
+                        .take(usize::from(max_desc.saturating_sub(1)))
+                        .collect();
                     s.push('…');
                     s
                 } else {

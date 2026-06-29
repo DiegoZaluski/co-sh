@@ -1,13 +1,16 @@
 use std::time::Duration;
 
 use crate::core::renderer::{
-    RendererConfig, RendererFrameEvent, RendererStats,
-    ScreenMode, ExternalOutputMode, ConsoleMode, PixelResolution,
+    ConsoleMode, ExternalOutputMode, PixelResolution, RendererConfig, RendererFrameEvent,
+    RendererStats, ScreenMode,
 };
 
 #[test]
 fn test_screen_mode_alternate() {
-    assert!(matches!(ScreenMode::AlternateScreen, ScreenMode::AlternateScreen));
+    assert!(matches!(
+        ScreenMode::AlternateScreen,
+        ScreenMode::AlternateScreen
+    ));
 }
 
 #[test]
@@ -17,12 +20,18 @@ fn test_screen_mode_main() {
 
 #[test]
 fn test_screen_mode_split_footer() {
-    assert!(matches!(ScreenMode::SplitFooter { footer_height: 10 }, ScreenMode::SplitFooter { footer_height: 10 }));
+    assert!(matches!(
+        ScreenMode::SplitFooter { footer_height: 10 },
+        ScreenMode::SplitFooter { footer_height: 10 }
+    ));
 }
 
 #[test]
 fn test_external_output_mode() {
-    assert!(matches!(ExternalOutputMode::CaptureStdout, ExternalOutputMode::CaptureStdout));
+    assert!(matches!(
+        ExternalOutputMode::CaptureStdout,
+        ExternalOutputMode::CaptureStdout
+    ));
 }
 
 #[test]
@@ -51,7 +60,10 @@ fn test_renderer_config_default() {
 
 #[test]
 fn test_pixel_resolution() {
-    let res = PixelResolution { width: 1920, height: 1080 };
+    let res = PixelResolution {
+        width: 1920,
+        height: 1080,
+    };
     assert_eq!(res.width, 1920);
     assert_eq!(res.height, 1080);
 }
@@ -65,9 +77,12 @@ fn test_renderer_frame_event() {
 #[test]
 fn test_renderer_stats() {
     let stats = RendererStats {
-        fps: 30.0, frame_count: 100,
+        fps: 30.0,
+        frame_count: 100,
         frame_times: vec![16.0, 17.0],
-        average_frame_time: 16.5, min_frame_time: 16.0, max_frame_time: 17.0,
+        average_frame_time: 16.5,
+        min_frame_time: 16.0,
+        max_frame_time: 17.0,
     };
     assert!((stats.fps - 30.0).abs() < 0.001);
     assert_eq!(stats.frame_count, 100);

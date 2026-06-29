@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::core::renderable::Renderable;
-use crate::core::rgba::{parse_color, ColorInput, RGBA};
+use crate::core::rgba::{ColorInput, RGBA, parse_color};
 
 static NEXT_TEXTAREA_NUM: AtomicU64 = AtomicU64::new(1);
 
@@ -135,8 +135,16 @@ impl TextareaRenderable {
         let num = NEXT_TEXTAREA_NUM.fetch_add(1, Ordering::Relaxed);
         let opts = options;
 
-        let unfocused_bg = parse_color(opts.background_color.clone().unwrap_or(ColorInput::String("transparent".into())));
-        let unfocused_fg = parse_color(opts.text_color.clone().unwrap_or(ColorInput::String("#FFFFFF".into())));
+        let unfocused_bg = parse_color(
+            opts.background_color
+                .clone()
+                .unwrap_or(ColorInput::String("transparent".into())),
+        );
+        let unfocused_fg = parse_color(
+            opts.text_color
+                .clone()
+                .unwrap_or(ColorInput::String("#FFFFFF".into())),
+        );
         let focused_bg = parse_color(
             opts.focused_background_color
                 .or_else(|| opts.background_color.clone())
@@ -147,7 +155,10 @@ impl TextareaRenderable {
                 .or_else(|| opts.text_color.clone())
                 .unwrap_or(ColorInput::String("#FFFFFF".into())),
         );
-        let placeholder_color = parse_color(opts.placeholder_color.unwrap_or(ColorInput::String("#666666".into())));
+        let placeholder_color = parse_color(
+            opts.placeholder_color
+                .unwrap_or(ColorInput::String("#666666".into())),
+        );
 
         let lines = if let Some(ref val) = opts.initial_value {
             val.split('\n').map(String::from).collect()
@@ -193,8 +204,16 @@ impl TextareaRenderable {
     }
 
     fn update_colors(&mut self) {
-        self.current_bg = if self.is_focused { self.focused_bg } else { self.unfocused_bg };
-        self.current_fg = if self.is_focused { self.focused_fg } else { self.unfocused_fg };
+        self.current_bg = if self.is_focused {
+            self.focused_bg
+        } else {
+            self.unfocused_bg
+        };
+        self.current_fg = if self.is_focused {
+            self.focused_fg
+        } else {
+            self.unfocused_fg
+        };
     }
 
     pub fn focus(&mut self) {
@@ -379,7 +398,9 @@ impl TextareaRenderable {
     }
 
     pub fn goto_line_end(&mut self) -> bool {
-        if self.cursor_col == self.lines[self.cursor_row].len() && self.cursor_row + 1 < self.lines.len() {
+        if self.cursor_col == self.lines[self.cursor_row].len()
+            && self.cursor_row + 1 < self.lines.len()
+        {
             self.cursor_row += 1;
             self.cursor_col = 0;
         } else {
@@ -495,7 +516,8 @@ impl TextareaRenderable {
         let width = area.width as usize;
         let mut result = Vec::new();
 
-        if self.lines.iter().all(std::string::String::is_empty) && self.placeholder.is_some()
+        if self.lines.iter().all(std::string::String::is_empty)
+            && self.placeholder.is_some()
             && !self.is_focused
         {
             let text = self.placeholder.as_deref().unwrap_or("");
@@ -538,6 +560,24 @@ impl TextareaRenderable {
 impl Renderable for TextareaRenderable {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
+        let idx = self.children.len();
+        self.children.push(child);
+        idx
+    }
+    fn remove_child(&mut self, id: &str) {
+        self.children.retain(|c| c.id() != id);
+    }
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn crate::core::renderable::Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
+        self.children.insert(anchor_idx, child);
+        Some(anchor_idx)
     }
 
     fn num(&self) -> u64 {

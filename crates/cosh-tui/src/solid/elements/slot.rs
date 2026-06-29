@@ -32,15 +32,44 @@ impl SlotBaseRenderable {
 }
 
 impl Renderable for SlotBaseRenderable {
-    fn id(&self) -> &str { &self.id }
-    fn num(&self) -> u64 { self.num }
-    fn is_visible(&self) -> bool { self.visible }
-    fn is_focusable(&self) -> bool { false }
-    fn is_destroyed(&self) -> bool { self.destroyed }
-    fn parent_num(&self) -> Option<u64> { self.parent_num }
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    fn children(&self) -> &[Box<dyn Renderable>] { &[] }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn num(&self) -> u64 {
+        self.num
+    }
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+    fn is_focusable(&self) -> bool {
+        false
+    }
+    fn is_destroyed(&self) -> bool {
+        self.destroyed
+    }
+    fn parent_num(&self) -> Option<u64> {
+        self.parent_num
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn children(&self) -> &[Box<dyn Renderable>] {
+        &[]
+    }
+    fn add_child(&mut self, _child: Box<dyn Renderable>) -> usize {
+        0
+    }
+    fn remove_child(&mut self, _id: &str) {}
+    fn insert_child_before(
+        &mut self,
+        _child: Box<dyn Renderable>,
+        _anchor_id: &str,
+    ) -> Option<usize> {
+        Some(0)
+    }
     fn render_self(&self, _buf: &mut Buffer, _area: Rect) {}
 }
 
@@ -105,15 +134,44 @@ impl Default for TextSlotRenderable {
 }
 
 impl Renderable for TextSlotRenderable {
-    fn id(&self) -> &str { self.base.id() }
-    fn num(&self) -> u64 { self.base.num() }
-    fn is_visible(&self) -> bool { self.base.is_visible() }
-    fn is_focusable(&self) -> bool { false }
-    fn is_destroyed(&self) -> bool { self.base.is_destroyed() }
-    fn parent_num(&self) -> Option<u64> { self.base.parent_num() }
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    fn children(&self) -> &[Box<dyn Renderable>] { &[] }
+    fn id(&self) -> &str {
+        self.base.id()
+    }
+    fn num(&self) -> u64 {
+        self.base.num()
+    }
+    fn is_visible(&self) -> bool {
+        self.base.is_visible()
+    }
+    fn is_focusable(&self) -> bool {
+        false
+    }
+    fn is_destroyed(&self) -> bool {
+        self.base.is_destroyed()
+    }
+    fn parent_num(&self) -> Option<u64> {
+        self.base.parent_num()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn children(&self) -> &[Box<dyn Renderable>] {
+        &[]
+    }
+    fn add_child(&mut self, _child: Box<dyn Renderable>) -> usize {
+        0
+    }
+    fn remove_child(&mut self, _id: &str) {}
+    fn insert_child_before(
+        &mut self,
+        _child: Box<dyn Renderable>,
+        _anchor_id: &str,
+    ) -> Option<usize> {
+        Some(0)
+    }
     fn render_self(&self, _buf: &mut Buffer, _area: Rect) {}
 }
 
@@ -172,14 +230,43 @@ impl Default for SlotRenderable {
 }
 
 impl Renderable for SlotRenderable {
-    fn id(&self) -> &str { self.base.id() }
-    fn num(&self) -> u64 { self.base.num() }
-    fn is_visible(&self) -> bool { self.base.is_visible() }
-    fn is_focusable(&self) -> bool { false }
-    fn is_destroyed(&self) -> bool { self.base.is_destroyed() }
-    fn parent_num(&self) -> Option<u64> { self.base.parent_num() }
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    fn children(&self) -> &[Box<dyn Renderable>] { &[] }
+    fn id(&self) -> &str {
+        self.base.id()
+    }
+    fn num(&self) -> u64 {
+        self.base.num()
+    }
+    fn is_visible(&self) -> bool {
+        self.base.is_visible()
+    }
+    fn is_focusable(&self) -> bool {
+        false
+    }
+    fn is_destroyed(&self) -> bool {
+        self.base.is_destroyed()
+    }
+    fn parent_num(&self) -> Option<u64> {
+        self.base.parent_num()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn children(&self) -> &[Box<dyn Renderable>] {
+        &[]
+    }
+    fn add_child(&mut self, _child: Box<dyn Renderable>) -> usize {
+        0
+    }
+    fn remove_child(&mut self, _id: &str) {}
+    fn insert_child_before(
+        &mut self,
+        _child: Box<dyn Renderable>,
+        _anchor_id: &str,
+    ) -> Option<usize> {
+        Some(0)
+    }
     fn render_self(&self, _buf: &mut Buffer, _area: Rect) {}
 }

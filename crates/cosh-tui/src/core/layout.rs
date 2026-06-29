@@ -9,6 +9,11 @@ pub struct LayoutTree {
 }
 
 impl LayoutTree {
+    /// Create a layout tree with a root node.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `taffy` cannot allocate the root node.
     #[must_use]
     pub fn new() -> Self {
         let mut taffy = TaffyTree::new();
@@ -20,11 +25,20 @@ impl LayoutTree {
     }
 
     /// Create a new leaf node from a `Style`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `taffy` rejects the node style or cannot allocate the node.
     pub fn new_leaf(&mut self, style: Style) -> NodeId {
         self.taffy.new_leaf(style).expect("failed to create leaf")
     }
 
     /// Wrap a child in a new container node.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any child node is invalid for this tree or `taffy` cannot
+    /// allocate the container.
     pub fn new_container(&mut self, style: Style, children: &[NodeId]) -> NodeId {
         self.taffy
             .new_with_children(style, children)
@@ -32,6 +46,11 @@ impl LayoutTree {
     }
 
     /// Add an existing child to a parent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either node does not exist in this tree, or if `taffy` rejects
+    /// the parent-child relationship.
     pub fn add_child(&mut self, parent: NodeId, child: NodeId) {
         self.taffy
             .add_child(parent, child)
@@ -39,6 +58,11 @@ impl LayoutTree {
     }
 
     /// Remove a child from a parent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either node does not exist in this tree, or if `child` is not a
+    /// child of `parent`.
     pub fn remove_child(&mut self, parent: NodeId, child: NodeId) {
         self.taffy
             .remove_child(parent, child)
@@ -46,11 +70,19 @@ impl LayoutTree {
     }
 
     /// Remove a node from the tree entirely.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `node` does not exist in this tree.
     pub fn remove(&mut self, node: NodeId) {
         self.taffy.remove(node).expect("failed to remove node");
     }
 
     /// Compute layout for the entire tree starting from the root.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `taffy` cannot compute layout for the current tree.
     pub fn compute_layout(&mut self, width: f32, height: f32) {
         let available = Size {
             width: AvailableSpace::Definite(width),
@@ -62,11 +94,22 @@ impl LayoutTree {
     }
 
     /// Get computed layout for a node.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `node` does not exist in this tree.
+    #[must_use]
     pub fn layout(&self, node: NodeId) -> &taffy::Layout {
-        self.taffy.layout(node).expect("node not found in layout tree")
+        self.taffy
+            .layout(node)
+            .expect("node not found in layout tree")
     }
 
     /// Set style on a node.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `node` does not exist in this tree.
     pub fn set_style(&mut self, node: NodeId, style: Style) {
         self.taffy
             .set_style(node, style)
@@ -74,6 +117,10 @@ impl LayoutTree {
     }
 
     /// Mark a node as dirty (re-layout needed).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `node` does not exist in this tree.
     pub fn mark_dirty(&mut self, node: NodeId) {
         self.taffy.mark_dirty(node).expect("failed to mark dirty");
     }
@@ -91,28 +138,29 @@ impl Default for LayoutTree {
 
 /// Convert a border flag (on/off per side) to a Taffy `Rect<LengthPercentage>`.
 /// Each active border side contributes 1.0 cell of border width.
+#[allow(clippy::fn_params_excessive_bools)]
 #[must_use]
 pub fn border_rect(top: bool, right: bool, bottom: bool, left: bool) -> Rect<LengthPercentage> {
     Rect {
         left: if left {
-            LengthPercentage::Length(1.0)
+            LengthPercentage::length(1.0)
         } else {
-            LengthPercentage::Length(0.0)
+            LengthPercentage::length(0.0)
         },
         right: if right {
-            LengthPercentage::Length(1.0)
+            LengthPercentage::length(1.0)
         } else {
-            LengthPercentage::Length(0.0)
+            LengthPercentage::length(0.0)
         },
         top: if top {
-            LengthPercentage::Length(1.0)
+            LengthPercentage::length(1.0)
         } else {
-            LengthPercentage::Length(0.0)
+            LengthPercentage::length(0.0)
         },
         bottom: if bottom {
-            LengthPercentage::Length(1.0)
+            LengthPercentage::length(1.0)
         } else {
-            LengthPercentage::Length(0.0)
+            LengthPercentage::length(0.0)
         },
     }
 }

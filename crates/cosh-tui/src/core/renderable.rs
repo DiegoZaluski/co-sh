@@ -20,19 +20,53 @@ pub trait Renderable {
     fn children_count(&self) -> usize {
         self.children().len()
     }
+
+    fn request_render(&mut self) {}
+    fn focus(&mut self) {}
+    fn blur(&mut self) {}
+    fn opacity(&self) -> f32 {
+        1.0
+    }
+    fn set_opacity(&mut self, _v: f32) {}
+    fn z_index(&self) -> i32 {
+        0
+    }
+    fn set_z_index(&mut self, _v: i32) {}
+    fn live(&self) -> bool {
+        false
+    }
+    fn set_live(&mut self, _v: bool) {}
+    fn render(&self, buf: &mut Buffer, area: Rect, _delta_time: f64) {
+        self.render_self(buf, area);
+    }
+    fn on_update(&mut self, _delta_time: f64) {}
+    fn on_resize(&mut self, _width: i32, _height: i32) {}
+    fn destroy(&mut self) {}
+
+    fn layout_node(&self) -> Option<taffy::NodeId> {
+        None
+    }
+    fn set_layout_node(&mut self, _node: Option<taffy::NodeId>) {}
+
+    fn add_child(&mut self, child: Box<dyn Renderable>) -> usize;
+    fn remove_child(&mut self, id: &str);
+    fn insert_child_before(&mut self, child: Box<dyn Renderable>, anchor_id: &str)
+    -> Option<usize>;
 }
 
 pub struct RenderableNode {
-    id: String,
-    num: u64,
-    visible: bool,
-    focusable: bool,
-    destroyed: bool,
-    parent_num: Option<u64>,
-    children: Vec<Box<dyn Renderable>>,
+    pub id: String,
+    pub num: u64,
+    pub visible: bool,
+    pub focusable: bool,
+    pub destroyed: bool,
+    pub parent_num: Option<u64>,
+    pub children: Vec<Box<dyn Renderable>>,
+    pub layout_node: Option<taffy::NodeId>,
 }
 
 impl RenderableNode {
+    #[must_use]
     pub fn new(id: Option<String>) -> Self {
         let num = NEXT_RENDERABLE_NUM.fetch_add(1, Ordering::Relaxed);
         RenderableNode {
@@ -43,6 +77,7 @@ impl RenderableNode {
             destroyed: false,
             parent_num: None,
             children: Vec::new(),
+            layout_node: None,
         }
     }
 
@@ -64,6 +99,24 @@ impl RenderableNode {
         let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
         self.children.insert(anchor_idx, child);
         Some(anchor_idx)
+    }
+
+    #[must_use]
+    pub fn children_ref(&self) -> &[Box<dyn Renderable>] {
+        &self.children
+    }
+
+    pub fn children_mut(&mut self) -> &mut Vec<Box<dyn Renderable>> {
+        &mut self.children
+    }
+
+    #[must_use]
+    pub fn layout_node(&self) -> Option<taffy::NodeId> {
+        self.layout_node
+    }
+
+    pub fn set_layout_node(&mut self, node: Option<taffy::NodeId>) {
+        self.layout_node = node;
     }
 }
 
@@ -133,8 +186,16 @@ impl Renderable for RootRenderable {
         self.node.parent_num
     }
 
+    fn layout_node(&self) -> Option<taffy::NodeId> {
+        self.node.layout_node()
+    }
+
+    fn set_layout_node(&mut self, node: Option<taffy::NodeId>) {
+        self.node.set_layout_node(node);
+    }
+
     fn children(&self) -> &[Box<dyn Renderable>] {
-        &self.node.children
+        self.node.children_ref()
     }
 
     fn render_self(&self, _buf: &mut Buffer, _area: Rect) {}
@@ -145,6 +206,22 @@ impl Renderable for RootRenderable {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn add_child(&mut self, child: Box<dyn Renderable>) -> usize {
+        self.node.add_child(child)
+    }
+
+    fn remove_child(&mut self, id: &str) {
+        self.node.remove_child(id);
+    }
+
+    fn insert_child_before(
+        &mut self,
+        child: Box<dyn Renderable>,
+        anchor_id: &str,
+    ) -> Option<usize> {
+        self.node.insert_child_before(child, anchor_id)
     }
 }
 

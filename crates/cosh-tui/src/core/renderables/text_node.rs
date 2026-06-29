@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::core::rgba::{parse_color, ColorInput, RGBA};
+use crate::core::rgba::{ColorInput, RGBA, parse_color};
 use crate::core::text::{StyledText, TextChunk};
 
 static NEXT_TEXT_NODE_NUM: AtomicU64 = AtomicU64::new(1);
@@ -10,8 +10,7 @@ pub struct UrlLink {
     pub url: String,
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TextNodeOptions {
     pub id: Option<String>,
     pub fg: Option<ColorInput>,
@@ -19,7 +18,6 @@ pub struct TextNodeOptions {
     pub attributes: Option<u32>,
     pub link: Option<UrlLink>,
 }
-
 
 #[derive(Debug, Clone)]
 pub enum TextNodeChild {
@@ -172,10 +170,7 @@ impl TextNodeRenderable {
     }
 
     #[must_use]
-    pub fn merge_styles(
-        &self,
-        parent_style: &InheritedStyle,
-    ) -> InheritedStyle {
+    pub fn merge_styles(&self, parent_style: &InheritedStyle) -> InheritedStyle {
         InheritedStyle {
             fg: self.fg.or(parent_style.fg),
             bg: self.bg.or(parent_style.bg),
@@ -184,10 +179,7 @@ impl TextNodeRenderable {
         }
     }
 
-    pub fn gather_with_inherited_style(
-        &mut self,
-        parent_style: &InheritedStyle,
-    ) -> Vec<TextChunk> {
+    pub fn gather_with_inherited_style(&mut self, parent_style: &InheritedStyle) -> Vec<TextChunk> {
         let current_style = self.merge_styles(parent_style);
         let mut chunks = Vec::new();
 
@@ -235,11 +227,7 @@ impl TextNodeRenderable {
     pub fn get_renderable(&self, id: &str) -> Option<&TextNodeRenderable> {
         self.children.iter().find_map(|c| {
             if let TextNodeChild::Node(n) = c {
-                if n.id() == id {
-                    Some(n.as_ref())
-                } else {
-                    None
-                }
+                if n.id() == id { Some(n.as_ref()) } else { None }
             } else {
                 None
             }
@@ -248,9 +236,9 @@ impl TextNodeRenderable {
 
     #[must_use]
     pub fn get_renderable_index(&self, id: &str) -> Option<usize> {
-        self.children.iter().position(|c| {
-            matches!(c, TextNodeChild::Node(n) if n.id() == id)
-        })
+        self.children
+            .iter()
+            .position(|c| matches!(c, TextNodeChild::Node(n) if n.id() == id))
     }
 
     #[must_use]

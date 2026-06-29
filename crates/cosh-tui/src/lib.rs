@@ -12,10 +12,20 @@ pub mod core;
 pub mod solid;
 
 pub use core::border::BorderStyle;
+pub use core::layout::LayoutTree;
+pub use core::renderable::{Renderable, RenderableNode, RootRenderable};
 pub use core::renderables::r#box::BoxRenderable;
 pub use core::renderables::input::InputRenderable;
+pub use core::renderables::scroll_bar::ScrollBarRenderable;
 pub use core::renderables::scroll_box::ScrollBoxRenderable;
+pub use core::renderables::select::SelectRenderable;
+pub use core::renderables::slider::SliderRenderable;
+pub use core::renderables::tab_select::TabSelectRenderable;
 pub use core::renderables::text::TextRenderable;
 pub use core::renderables::text_node::TextNodeRenderable;
 pub use core::renderables::textarea::TextareaRenderable;
-pub use core::renderable::{Renderable, RenderableNode, RootRenderable};
+pub use solid::elements::catalogue::{
+    LineBreakRenderable, LinkRenderable, SpanRenderable, create_component, register_component,
+};
+pub use solid::elements::extras::DynamicRenderable;
+pub use solid::elements::slot::{SlotRenderable, TextSlotRenderable};
