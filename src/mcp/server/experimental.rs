@@ -13,12 +13,15 @@ pub struct VisionTerminalParams {
     /// Raw terminal output to process (supports ANSI/escape sequences).
     pub output: String,
     /// Number of terminal rows (default: 24).
+    #[serde(default = "default_rows")]
     #[schemars(default = "default_rows")]
     pub rows: usize,
     /// Number of terminal columns (default: 80).
+    #[serde(default = "default_cols")]
     #[schemars(default = "default_cols")]
     pub cols: usize,
     /// When true returns plain text only; default false returns full JSON metadata.
+    #[serde(default)]
     #[schemars(default)]
     pub plain: bool,
 }
