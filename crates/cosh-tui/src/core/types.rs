@@ -20,6 +20,7 @@ pub const ATTRIBUTE_BASE_MASK: u32 = 0xff;
 
 /// Extract the base 8 bits of attributes from a u32 attribute value.
 /// Currently we only use the first 8 bits for standard text attributes.
+#[must_use]
 pub fn get_base_attributes(attr: u32) -> u32 {
     attr & ATTRIBUTE_BASE_MASK
 }
@@ -86,6 +87,7 @@ pub struct TerminalInfo {
     pub from_xtversion: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct TerminalCapabilities {
     pub kitty_keyboard: bool,
     pub kitty_graphics: bool,

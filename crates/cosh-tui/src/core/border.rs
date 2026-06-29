@@ -30,10 +30,12 @@ pub const VALID_BORDER_STYLES: [BorderStyle; 4] = [
     BorderStyle::Heavy,
 ];
 
+#[must_use]
 pub fn is_valid_border_style(value: &str) -> bool {
     matches!(value, "single" | "double" | "rounded" | "heavy")
 }
 
+#[must_use]
 pub fn parse_border_style(value: Option<&str>, fallback: BorderStyle) -> BorderStyle {
     match value {
         Some("single") => BorderStyle::Single,
@@ -104,6 +106,7 @@ pub const HEAVY: BorderCharacters = BorderCharacters {
     cross: '╋',
 };
 
+#[must_use]
 pub fn border_chars(style: BorderStyle) -> &'static BorderCharacters {
     match style {
         BorderStyle::Single => &SINGLE,
@@ -146,6 +149,7 @@ pub enum TitleAlignment {
     Right,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BorderSidesConfig {
     pub top: bool,
@@ -178,15 +182,25 @@ pub enum BorderSide {
     Left,
 }
 
+#[must_use]
 pub fn get_border_from_sides(sides: BorderSidesConfig) -> Vec<BorderSide> {
     let mut result = Vec::new();
-    if sides.top { result.push(BorderSide::Top); }
-    if sides.right { result.push(BorderSide::Right); }
-    if sides.bottom { result.push(BorderSide::Bottom); }
-    if sides.left { result.push(BorderSide::Left); }
+    if sides.top {
+        result.push(BorderSide::Top);
+    }
+    if sides.right {
+        result.push(BorderSide::Right);
+    }
+    if sides.bottom {
+        result.push(BorderSide::Bottom);
+    }
+    if sides.left {
+        result.push(BorderSide::Left);
+    }
     result
 }
 
+#[must_use]
 pub fn get_border_sides(border: &BorderSidesConfig) -> BorderSidesConfig {
     *border
 }

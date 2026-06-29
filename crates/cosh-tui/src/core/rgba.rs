@@ -1,5 +1,4 @@
 use std::fmt;
-use std::sync::LazyLock;
 
 pub type RgbTriplet = (u8, u8, u8);
 
@@ -49,10 +48,15 @@ pub struct RGBA {
     slot: u8,
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn to_u8(value: f32) -> u8 {
-    (value.max(0.0).min(1.0) * 255.0).round() as u8
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+#[must_use]
 pub fn ansi256_index_to_rgb(index: u8) -> RgbTriplet {
     let normalized = normalize_indexed_color_index(index);
 
@@ -81,24 +85,13 @@ fn rgba_for_ansi256_index(index: u8) -> RGBA {
     RGBA::from_ints(r, g, b, 255)
 }
 
+#[must_use]
 pub fn normalize_indexed_color_index(index: u8) -> u8 {
     index
 }
 
-#[allow(dead_code)]
-fn get_fallback_ansi256_palette() -> &'static [RGBA; 256] {
-    static PALETTE: LazyLock<[RGBA; 256]> = LazyLock::new(|| {
-        let mut palette = [RGBA::from_ints(0, 0, 0, 255); 256];
-        for i in 0..256u16 {
-            let (r, g, b) = ansi256_index_to_rgb(i as u8);
-            palette[i as usize] = RGBA::from_ints(r, g, b, 255);
-        }
-        palette
-    });
-    &PALETTE
-}
-
 impl RGBA {
+    #[must_use]
     pub fn from_values(r: f32, g: f32, b: f32, a: f32) -> Self {
         RGBA {
             r: to_u8(r),
@@ -110,10 +103,7 @@ impl RGBA {
         }
     }
 
-    pub fn clone(rgba: &RGBA) -> Self {
-        *rgba
-    }
-
+    #[must_use]
     pub fn from_ints(r: u8, g: u8, b: u8, a: u8) -> Self {
         RGBA {
             r,
@@ -125,10 +115,12 @@ impl RGBA {
         }
     }
 
+    #[must_use]
     pub fn from_hex(hex: &str) -> Self {
         hex_to_rgb(hex)
     }
 
+    #[must_use]
     pub fn from_index(index: u8, snapshot: Option<ColorInput>) -> Self {
         let normalized = normalize_indexed_color_index(index);
         let rgba = match snapshot {
@@ -145,10 +137,16 @@ impl RGBA {
         }
     }
 
+    #[must_use]
     pub fn default_foreground(snapshot: Option<ColorInput>) -> Self {
         let rgba = match snapshot {
             Some(input) => parse_color(input),
-            None => RGBA::from_ints(DEFAULT_FOREGROUND_RGB.0, DEFAULT_FOREGROUND_RGB.1, DEFAULT_FOREGROUND_RGB.2, 255),
+            None => RGBA::from_ints(
+                DEFAULT_FOREGROUND_RGB.0,
+                DEFAULT_FOREGROUND_RGB.1,
+                DEFAULT_FOREGROUND_RGB.2,
+                255,
+            ),
         };
         RGBA {
             r: rgba.r,
@@ -160,10 +158,16 @@ impl RGBA {
         }
     }
 
+    #[must_use]
     pub fn default_background(snapshot: Option<ColorInput>) -> Self {
         let rgba = match snapshot {
             Some(input) => parse_color(input),
-            None => RGBA::from_ints(DEFAULT_BACKGROUND_RGB.0, DEFAULT_BACKGROUND_RGB.1, DEFAULT_BACKGROUND_RGB.2, 255),
+            None => RGBA::from_ints(
+                DEFAULT_BACKGROUND_RGB.0,
+                DEFAULT_BACKGROUND_RGB.1,
+                DEFAULT_BACKGROUND_RGB.2,
+                255,
+            ),
         };
         RGBA {
             r: rgba.r,
@@ -175,36 +179,41 @@ impl RGBA {
         }
     }
 
+    #[must_use]
     pub fn to_ints(&self) -> (u8, u8, u8, u8) {
         (self.r, self.g, self.b, self.a)
     }
 
+    #[must_use]
     pub fn r(&self) -> f32 {
-        self.r as f32 / 255.0
+        f32::from(self.r) / 255.0
     }
 
     pub fn set_r(&mut self, value: f32) {
         self.r = to_u8(value);
     }
 
+    #[must_use]
     pub fn g(&self) -> f32 {
-        self.g as f32 / 255.0
+        f32::from(self.g) / 255.0
     }
 
     pub fn set_g(&mut self, value: f32) {
         self.g = to_u8(value);
     }
 
+    #[must_use]
     pub fn b(&self) -> f32 {
-        self.b as f32 / 255.0
+        f32::from(self.b) / 255.0
     }
 
     pub fn set_b(&mut self, value: f32) {
         self.b = to_u8(value);
     }
 
+    #[must_use]
     pub fn a(&self) -> f32 {
-        self.a as f32 / 255.0
+        f32::from(self.a) / 255.0
     }
 
     pub fn set_a(&mut self, value: f32) {
@@ -215,6 +224,7 @@ impl RGBA {
         (f(self.r()), f(self.g()), f(self.b()), f(self.a()))
     }
 
+    #[must_use]
     pub fn equals(&self, other: Option<&RGBA>) -> bool {
         match other {
             Some(other) => self == other,
@@ -225,22 +235,47 @@ impl RGBA {
 
 impl fmt::Display for RGBA {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "rgba({:.2}, {:.2}, {:.2}, {:.2})", self.r(), self.g(), self.b(), self.a())
+        write!(
+            f,
+            "rgba({:.2}, {:.2}, {:.2}, {:.2})",
+            self.r(),
+            self.g(),
+            self.b(),
+            self.a()
+        )
     }
 }
 
+#[must_use]
 pub fn normalize_color_value(value: Option<ColorInput>) -> Option<NormalizedColorValue> {
-    value.map(|v| NormalizedColorValue { rgba: parse_color(v) })
+    value.map(|v| NormalizedColorValue {
+        rgba: parse_color(v),
+    })
 }
 
+#[must_use]
 pub fn hex_to_rgb(hex: &str) -> RGBA {
     let hex = hex.trim_start_matches('#');
 
     let hex = match hex.len() {
-        3 => format!("{}{}{}{}{}{}", &hex[0..1], &hex[0..1], &hex[1..2], &hex[1..2], &hex[2..3], &hex[2..3]),
+        3 => {
+            let h = hex.as_bytes();
+            format!(
+                "{c}{c}{d}{d}{e}{e}",
+                c = h[0] as char,
+                d = h[1] as char,
+                e = h[2] as char,
+            )
+        }
         4 => {
             let h = hex.as_bytes();
-            format!("{}{}{}{}{}{}{}{}", h[0] as char, h[0] as char, h[1] as char, h[1] as char, h[2] as char, h[2] as char, h[3] as char, h[3] as char)
+            format!(
+                "{a}{a}{b}{b}{c}{c}{d}{d}",
+                a = h[0] as char,
+                b = h[1] as char,
+                c = h[2] as char,
+                d = h[3] as char,
+            )
         }
         _ => hex.to_string(),
     };
@@ -261,15 +296,18 @@ pub fn hex_to_rgb(hex: &str) -> RGBA {
     RGBA::from_ints(r, g, b, a)
 }
 
+#[must_use]
 pub fn rgb_to_hex(rgb: &RGBA) -> String {
     let (r, g, b, a) = rgb.to_ints();
     if a == 255 {
-        format!("#{:02x}{:02x}{:02x}", r, g, b)
+        format!("#{r:02x}{g:02x}{b:02x}")
     } else {
-        format!("#{:02x}{:02x}{:02x}{:02x}", r, g, b, a)
+        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
     }
 }
 
+#[allow(clippy::many_single_char_names, clippy::cast_possible_truncation)]
+#[must_use]
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> RGBA {
     let i = (h / 60.0).floor() as i32 % 6;
     let f = h / 60.0 - (h / 60.0).floor();
@@ -320,6 +358,7 @@ const CSS_COLOR_NAMES: &[(&str, &str)] = &[
     ("brightwhite", "#FFFFFF"),
 ];
 
+#[must_use]
 pub fn parse_color(color: ColorInput) -> RGBA {
     match color {
         ColorInput::String(s) => {

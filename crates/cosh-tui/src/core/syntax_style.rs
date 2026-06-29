@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::core::rgba::{parse_color, ColorInput, RGBA};
-use crate::core::utils::create_text_attributes;
+use crate::core::rgba::{ColorInput, RGBA, parse_color};
+use crate::core::utils::{TextAttributeOptions, create_text_attributes};
 
 #[derive(Debug, Clone)]
 pub struct StyleDefinition {
@@ -46,6 +46,7 @@ pub struct ThemeTokenStyleInner {
     pub dim: Option<bool>,
 }
 
+#[must_use]
 pub fn convert_theme_to_styles(theme: &[ThemeTokenStyle]) -> HashMap<String, StyleDefinition> {
     let mut flat_styles = HashMap::new();
 
@@ -96,6 +97,7 @@ pub struct SyntaxStyle {
 }
 
 impl SyntaxStyle {
+    #[must_use]
     pub fn create() -> Self {
         SyntaxStyle {
             next_id: 1,
@@ -106,6 +108,7 @@ impl SyntaxStyle {
         }
     }
 
+    #[must_use]
     pub fn from_theme(theme: &[ThemeTokenStyle]) -> Self {
         let mut style = SyntaxStyle::create();
         let flat_styles = convert_theme_to_styles(theme);
@@ -118,25 +121,25 @@ impl SyntaxStyle {
                 underline: style_def.underline,
                 dim: style_def.dim,
             };
-            style.register_style(&name, &input);
+            let _ = style.register_style(&name, &input);
         }
         style
     }
 
+    #[must_use]
     pub fn from_styles(styles: &HashMap<String, StyleDefinitionInput>) -> Self {
         let mut style = SyntaxStyle::create();
         for (name, style_def) in styles {
-            style.register_style(name, style_def);
+            let _ = style.register_style(name, style_def);
         }
         style
     }
 
     fn guard(&self) {
-        if self.destroyed {
-            panic!("SyntaxStyle is destroyed");
-        }
+        assert!(!self.destroyed, "SyntaxStyle is destroyed");
     }
 
+    #[must_use]
     pub fn register_style(&mut self, name: &str, style: &StyleDefinitionInput) -> u64 {
         self.guard();
 
@@ -162,6 +165,7 @@ impl SyntaxStyle {
         id
     }
 
+    #[must_use]
     pub fn resolve_style_id(&self, name: &str) -> Option<u64> {
         self.guard();
 
@@ -169,6 +173,7 @@ impl SyntaxStyle {
         self.name_cache.get(name).copied()
     }
 
+    #[must_use]
     pub fn get_style_id(&self, name: &str) -> Option<u64> {
         self.guard();
 
@@ -185,6 +190,7 @@ impl SyntaxStyle {
         None
     }
 
+    #[must_use]
     pub fn get_style_count(&self) -> usize {
         self.guard();
         self.style_defs.len()
@@ -194,6 +200,7 @@ impl SyntaxStyle {
         self.name_cache.clear();
     }
 
+    #[must_use]
     pub fn get_style(&self, name: &str) -> Option<&StyleDefinition> {
         self.guard();
 
@@ -209,6 +216,7 @@ impl SyntaxStyle {
         None
     }
 
+    #[must_use]
     pub fn merge_styles(&mut self, style_names: &[&str]) -> MergedStyle {
         self.guard();
 
@@ -249,16 +257,13 @@ impl SyntaxStyle {
             }
         }
 
-        let attributes = create_text_attributes(
-            merged_def.bold.unwrap_or(false),
-            merged_def.italic.unwrap_or(false),
-            merged_def.underline.unwrap_or(false),
-            merged_def.dim.unwrap_or(false),
-            false,
-            false,
-            false,
-            false,
-        );
+        let attributes = create_text_attributes(TextAttributeOptions {
+            bold: merged_def.bold.unwrap_or(false),
+            italic: merged_def.italic.unwrap_or(false),
+            underline: merged_def.underline.unwrap_or(false),
+            dim: merged_def.dim.unwrap_or(false),
+            ..Default::default()
+        });
 
         let merged = MergedStyle {
             fg: merged_def.fg,
@@ -275,16 +280,19 @@ impl SyntaxStyle {
         self.merged_cache.clear();
     }
 
+    #[must_use]
     pub fn get_cache_size(&self) -> usize {
         self.guard();
         self.merged_cache.len()
     }
 
+    #[must_use]
     pub fn get_all_styles(&self) -> HashMap<String, StyleDefinition> {
         self.guard();
         self.style_defs.clone()
     }
 
+    #[must_use]
     pub fn get_registered_names(&self) -> Vec<String> {
         self.guard();
         self.style_defs.keys().cloned().collect()
