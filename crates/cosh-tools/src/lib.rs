@@ -4,6 +4,7 @@ pub mod fs;
 pub mod plan;
 pub mod skills;
 pub mod util;
+pub mod vision;
 pub mod web;
 
 /// MCP Tool description: name, description, and inputSchema as a JSON value.
