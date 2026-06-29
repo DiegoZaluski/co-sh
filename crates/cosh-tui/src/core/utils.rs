@@ -22,6 +22,7 @@ pub fn create_text_attributes(
     attributes
 }
 
+// Link attribute helpers (bits 8-31 encode link_id)
 const ATTRIBUTE_BASE_MASK: u32 = 0xff;
 const LINK_ID_SHIFT: u32 = 8;
 const LINK_ID_PAYLOAD_MASK: u32 = 0xffffff;

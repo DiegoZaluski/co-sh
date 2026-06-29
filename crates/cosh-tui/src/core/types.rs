@@ -3,20 +3,23 @@ use bitflags::bitflags;
 bitflags! {
     pub struct TextAttributes: u32 {
         const NONE = 0;
-        const BOLD = 1 << 0;
-        const DIM = 1 << 1;
-        const ITALIC = 1 << 2;
-        const UNDERLINE = 1 << 3;
-        const BLINK = 1 << 4;
-        const INVERSE = 1 << 5;
-        const HIDDEN = 1 << 6;
-        const STRIKETHROUGH = 1 << 7;
+        const BOLD = 1 << 0; // 1
+        const DIM = 1 << 1; // 2
+        const ITALIC = 1 << 2; // 4
+        const UNDERLINE = 1 << 3; // 8
+        const BLINK = 1 << 4; // 16
+        const INVERSE = 1 << 5; // 32
+        const HIDDEN = 1 << 6; // 64
+        const STRIKETHROUGH = 1 << 7; // 128
     }
 }
 
+// Constants for attribute bit packing
 pub const ATTRIBUTE_BASE_BITS: u32 = 8;
 pub const ATTRIBUTE_BASE_MASK: u32 = 0xff;
 
+/// Extract the base 8 bits of attributes from a u32 attribute value.
+/// Currently we only use the first 8 bits for standard text attributes.
 pub fn get_base_attributes(attr: u32) -> u32 {
     attr & ATTRIBUTE_BASE_MASK
 }
@@ -122,6 +125,7 @@ pub trait RenderContext<TRenderable> {
     fn clear_hit_grid_scissor_rects(&mut self);
     fn width(&self) -> i32;
     fn height(&self) -> i32;
+    /// Monotonic, bumped once per `loop()` iteration. Lets renderables dedupe per-frame work.
     fn frame_id(&self) -> u64;
     fn request_render(&mut self);
     fn set_cursor_position(&mut self, x: i32, y: i32, visible: bool);
@@ -172,10 +176,15 @@ pub struct Highlight {
 }
 
 pub struct LineInfo {
+    /// Display-column offset for each visual line start.
     pub line_start_cols: Vec<i32>,
+    /// Display-column width for each visual line.
     pub line_width_cols: Vec<i32>,
+    /// Maximum display-column width across the reported lines.
     pub line_width_cols_max: i32,
+    /// Source logical line index for each visual line.
     pub line_sources: Vec<i32>,
+    /// Wrap index within each source logical line.
     pub line_wraps: Vec<i32>,
 }
 
