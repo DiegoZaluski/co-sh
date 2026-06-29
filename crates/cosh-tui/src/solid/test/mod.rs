@@ -219,3 +219,114 @@ mod time_to_first_draw_tests {
         let _ttfd = TimeToFirstDrawRenderable::default();
     }
 }
+
+mod plugins_slot_tests {
+    use crate::core::renderable::Renderable;
+    use crate::solid::plugins::slot::{SlotRegistry, SlotMode, PluginErrorEvent};
+
+    fn dummy_renderable() -> Box<dyn Renderable> {
+        Box::new(crate::core::renderable::RootRenderable::new())
+    }
+
+    #[test]
+    fn test_slot_registry_new() {
+        let registry = SlotRegistry::new();
+        assert_eq!(registry.slot_count(), 0);
+    }
+
+    #[test]
+    fn test_slot_registry_register_and_resolve() {
+        let mut registry = SlotRegistry::new();
+        registry.register("header", "plugin-a", Box::new(dummy_renderable));
+        assert!(registry.has_entries("header"));
+        let entries = registry.resolve("header", SlotMode::Append);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "plugin-a");
+    }
+
+    #[test]
+    fn test_slot_registry_resolve_single_winner() {
+        let mut registry = SlotRegistry::new();
+        registry.register("sidebar", "p1", Box::new(dummy_renderable));
+        registry.register("sidebar", "p2", Box::new(dummy_renderable));
+        let entries = registry.resolve("sidebar", SlotMode::SingleWinner);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "p1");
+    }
+
+    #[test]
+    fn test_slot_registry_resolve_replace() {
+        let mut registry = SlotRegistry::new();
+        registry.register("content", "p1", Box::new(dummy_renderable));
+        registry.register("content", "p2", Box::new(dummy_renderable));
+        let entries = registry.resolve("content", SlotMode::Replace);
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_slot_registry_resolve_unknown_slot() {
+        let registry = SlotRegistry::new();
+        let entries = registry.resolve("nonexistent", SlotMode::Append);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_slot_registry_unregister() {
+        let mut registry = SlotRegistry::new();
+        registry.register("footer", "p1", Box::new(dummy_renderable));
+        assert!(registry.has_entries("footer"));
+        registry.unregister("footer");
+        assert!(!registry.has_entries("footer"));
+    }
+
+    #[test]
+    fn test_slot_registry_has_entries_empty_slot() {
+        let registry = SlotRegistry::new();
+        assert!(!registry.has_entries("empty"));
+    }
+
+    #[test]
+    fn test_slot_registry_error_handling() {
+        use std::sync::{Arc, Mutex};
+        let mut registry = SlotRegistry::new();
+        let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let errors_clone = Arc::clone(&errors);
+        registry.on_error(Box::new(move |event: &PluginErrorEvent| {
+            errors_clone.lock().unwrap().push(event.plugin_id.clone());
+        }));
+        registry.report_error(&PluginErrorEvent {
+            plugin_id: "test-plugin".to_string(),
+            slot_name: "test-slot".to_string(),
+            phase: "render".to_string(),
+            source: "test".to_string(),
+            error: "something broke".to_string(),
+        });
+        assert_eq!(errors.lock().unwrap().len(), 1);
+        assert_eq!(errors.lock().unwrap()[0], "test-plugin");
+    }
+
+    #[test]
+    fn test_slot_mode_default() {
+        let mode: SlotMode = Default::default();
+        assert_eq!(mode, SlotMode::Append);
+    }
+
+    #[test]
+    fn test_slot_registry_default() {
+        let registry = SlotRegistry::default();
+        assert_eq!(registry.slot_count(), 0);
+    }
+
+    #[test]
+    fn test_slot_registry_multiple_entries_same_slot() {
+        let mut registry = SlotRegistry::new();
+        registry.register("nav", "p1", Box::new(dummy_renderable));
+        registry.register("nav", "p2", Box::new(dummy_renderable));
+        registry.register("nav", "p3", Box::new(dummy_renderable));
+        let entries = registry.resolve("nav", SlotMode::Append);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].id, "p1");
+        assert_eq!(entries[1].id, "p2");
+        assert_eq!(entries[2].id, "p3");
+    }
+}

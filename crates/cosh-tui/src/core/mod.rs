@@ -24,7 +24,7 @@ pub mod types;
 pub mod utils;
 
 pub use lib::{border, rgba, terminal_palette};
-pub use renderables::{text, text_node, r#box, scroll_box, input, textarea};
+pub use renderables::{text, text_node, r#box, scroll_bar, scroll_box, input, textarea, select, slider, tab_select};
 
 #[cfg(test)]
 pub mod test;

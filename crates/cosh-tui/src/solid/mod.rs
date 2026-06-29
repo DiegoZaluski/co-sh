@@ -3,8 +3,14 @@
 //! ## Module tree
 //! ```text
 //! solid/
-//! ├── elements/          — Component hooks and event callbacks
+//! ├── elements/          — Component hooks, widgets, and catalogue
+//! │   ├── catalogue.rs   — Component registry (Span, BR, Link, etc.)
+//! │   ├── extras.rs      — Dynamic renderable
+//! │   ├── hooks.rs       — Event callbacks
+//! │   ├── slot.rs        — Slot placeholder system
 //! │   └── test/
+//! ├── plugins/           — Slot registry and plugin integration
+//! │   └── slot.rs
 //! ├── renderer/          — SolidJS renderer
 //! │   └── test/
 //! ├── types/             — ElementProps, marker traits
@@ -16,6 +22,7 @@
 //! ```
 
 pub mod elements;
+pub mod plugins;
 pub mod reconciler;
 pub mod renderer;
 pub mod scrollback;
