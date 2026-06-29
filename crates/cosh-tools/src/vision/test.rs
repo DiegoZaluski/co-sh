@@ -9,8 +9,10 @@ fn terminal_processes_simple_output() {
         plain: true,
     })
     .unwrap();
-    assert!(result.contains("hello"));
-    assert!(result.contains("world"));
+    // With newline mode enabled, `\n` should reset to column 0
+    let lines: Vec<&str> = result.lines().collect();
+    assert_eq!(lines[0].trim(), "hello", "first line should start with 'hello'");
+    assert_eq!(lines[1].trim(), "world", "second line should start with 'world'");
 }
 
 #[test]

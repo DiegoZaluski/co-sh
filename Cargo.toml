@@ -11,10 +11,20 @@ version = "0.0.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
-cosh-harness = { path = "crates/cosh-harness" }
-cosh-sdk = { path = "crates/cosh-sdk" }
-cosh-tools = { path = "crates/cosh-tools" }
+[dependencies.cosh-harness]
+path = "crates/cosh-harness"
+
+[dependencies.cosh-sdk]
+path = "crates/cosh-sdk"
+
+[dependencies.cosh-tools]
+path = "crates/cosh-tools"
+
+[dependencies.ratatui]
+version = "0.30.2"
+default-features = false
+features = []
+
 # ---
 [dependencies.tokio]
 version = "1"

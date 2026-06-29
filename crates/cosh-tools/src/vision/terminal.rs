@@ -179,7 +179,15 @@ pub fn terminal(input: &TerminalInput) -> Result<String, String> {
         Box::new(std::io::sink()),
     );
 
-    term.advance_bytes(input.output.as_bytes());
+    // Enable Line Feed/Newline Mode (DECLNM, escape `ESC [ 20 h`)
+    // so that `\n` moves to column 0 on the next row.
+    // Disable auto-wrap (DECAWM, `ESC [ ? 7 l`) so that characters
+    // at the exact right margin don't trigger a premature line wrap
+    // that can shift subsequent output by one row.
+    let mut processed = String::with_capacity(input.output.len() + 8);
+    processed.push_str("\x1b[20h\x1b[?7l");
+    processed.push_str(&input.output);
+    term.advance_bytes(processed.as_bytes());
 
     let screen = term.screen();
     let physical_rows = screen.physical_rows;
