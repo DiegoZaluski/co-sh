@@ -53,7 +53,7 @@ fn to_u8(value: f32) -> u8 {
     (value.max(0.0).min(1.0) * 255.0).round() as u8
 }
 
-fn ansi256_index_to_rgb(index: u8) -> RgbTriplet {
+pub fn ansi256_index_to_rgb(index: u8) -> RgbTriplet {
     let normalized = normalize_indexed_color_index(index);
 
     if (normalized as usize) < ANSI16_RGB.len() {
