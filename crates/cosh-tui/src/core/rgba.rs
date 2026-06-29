@@ -338,7 +338,7 @@ pub fn parse_color(color: ColorInput) -> RGBA {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ColorInput {
     String(String),
     RGBA(RGBA),
