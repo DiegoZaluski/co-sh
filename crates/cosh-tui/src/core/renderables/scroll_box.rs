@@ -42,6 +42,7 @@ impl ScrollBoxRenderable {
         }
     }
 
+    #[must_use]
     pub fn scroll_x(&self) -> i32 {
         self.scroll_x
     }
@@ -50,6 +51,7 @@ impl ScrollBoxRenderable {
         self.scroll_x = value.max(0);
     }
 
+    #[must_use]
     pub fn scroll_y(&self) -> i32 {
         self.scroll_y
     }

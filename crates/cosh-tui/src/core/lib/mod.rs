@@ -1,3 +1,6 @@
 pub mod border;
 pub mod rgba;
 pub mod terminal_palette;
+
+#[cfg(test)]
+pub mod test;

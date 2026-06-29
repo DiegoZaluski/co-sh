@@ -75,6 +75,7 @@ impl BoxRenderable {
         self.background_color = parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
     }
 
+    #[must_use]
     pub fn background_color(&self) -> RGBA {
         self.background_color
     }
@@ -87,6 +88,7 @@ impl BoxRenderable {
         }
     }
 
+    #[must_use]
     pub fn border_sides(&self) -> &BorderSidesConfig {
         &self.border
     }
@@ -99,6 +101,7 @@ impl BoxRenderable {
         }
     }
 
+    #[must_use]
     pub fn border_style(&self) -> BorderStyle {
         self.border_style
     }
@@ -110,6 +113,7 @@ impl BoxRenderable {
         }
     }
 
+    #[must_use]
     pub fn border_color(&self) -> RGBA {
         self.border_color
     }
@@ -118,6 +122,7 @@ impl BoxRenderable {
         self.focused_border_color = parse_color(color.unwrap_or(ColorInput::String("#00AAFF".into())));
     }
 
+    #[must_use]
     pub fn focused_border_color(&self) -> RGBA {
         self.focused_border_color
     }
@@ -126,6 +131,7 @@ impl BoxRenderable {
         self.should_fill = fill;
     }
 
+    #[must_use]
     pub fn should_fill(&self) -> bool {
         self.should_fill
     }
@@ -134,6 +140,7 @@ impl BoxRenderable {
         self.title = title;
     }
 
+    #[must_use]
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
     }
@@ -142,6 +149,7 @@ impl BoxRenderable {
         self.title_color = color.map(parse_color);
     }
 
+    #[must_use]
     pub fn title_color(&self) -> Option<RGBA> {
         self.title_color
     }
@@ -150,6 +158,7 @@ impl BoxRenderable {
         self.title_alignment = align;
     }
 
+    #[must_use]
     pub fn title_alignment(&self) -> TitleAlignment {
         self.title_alignment
     }
@@ -158,6 +167,7 @@ impl BoxRenderable {
         self.bottom_title = title;
     }
 
+    #[must_use]
     pub fn bottom_title(&self) -> Option<&str> {
         self.bottom_title.as_deref()
     }
@@ -166,6 +176,7 @@ impl BoxRenderable {
         self.bottom_title_alignment = align;
     }
 
+    #[must_use]
     pub fn bottom_title_alignment(&self) -> TitleAlignment {
         self.bottom_title_alignment
     }
@@ -185,10 +196,10 @@ impl BoxRenderable {
     }
 
     fn border_inset(&self) -> (u16, u16, u16, u16) {
-        let top = if self.border.top { 1 } else { 0 };
-        let bottom = if self.border.bottom { 1 } else { 0 };
-        let left = if self.border.left { 1 } else { 0 };
-        let right = if self.border.right { 1 } else { 0 };
+        let top = u16::from(self.border.top);
+        let bottom = u16::from(self.border.bottom);
+        let left = u16::from(self.border.left);
+        let right = u16::from(self.border.right);
         (top, right, bottom, left)
     }
 

@@ -50,6 +50,7 @@ impl InputRenderable {
         }
     }
 
+    #[must_use]
     pub fn value(&self) -> &str {
         &self.value
     }
@@ -61,6 +62,7 @@ impl InputRenderable {
         self.cursor_offset = self.value.len();
     }
 
+    #[must_use]
     pub fn placeholder(&self) -> &str {
         &self.placeholder
     }
@@ -69,6 +71,7 @@ impl InputRenderable {
         self.placeholder = placeholder;
     }
 
+    #[must_use]
     pub fn max_length(&self) -> usize {
         self.max_length
     }
@@ -81,6 +84,7 @@ impl InputRenderable {
         }
     }
 
+    #[must_use]
     pub fn min_length(&self) -> usize {
         self.min_length
     }
@@ -89,6 +93,7 @@ impl InputRenderable {
         self.min_length = min;
     }
 
+    #[must_use]
     pub fn cursor_offset(&self) -> usize {
         self.cursor_offset
     }

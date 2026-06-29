@@ -54,14 +54,17 @@ impl TextNodeRenderable {
         }
     }
 
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    #[must_use]
     pub fn num(&self) -> u64 {
         self.num
     }
 
+    #[must_use]
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
@@ -74,6 +77,7 @@ impl TextNodeRenderable {
         self.dirty = true;
     }
 
+    #[must_use]
     pub fn children(&self) -> &[TextNodeChild] {
         &self.children
     }
@@ -82,6 +86,7 @@ impl TextNodeRenderable {
         &mut self.children
     }
 
+    #[must_use]
     pub fn fg(&self) -> Option<RGBA> {
         self.fg
     }
@@ -91,6 +96,7 @@ impl TextNodeRenderable {
         self.mark_dirty();
     }
 
+    #[must_use]
     pub fn bg(&self) -> Option<RGBA> {
         self.bg
     }
@@ -100,6 +106,7 @@ impl TextNodeRenderable {
         self.mark_dirty();
     }
 
+    #[must_use]
     pub fn attributes(&self) -> u32 {
         self.attributes
     }
@@ -109,6 +116,7 @@ impl TextNodeRenderable {
         self.mark_dirty();
     }
 
+    #[must_use]
     pub fn link(&self) -> Option<&UrlLink> {
         self.link.as_ref()
     }
@@ -163,6 +171,7 @@ impl TextNodeRenderable {
         self.mark_dirty();
     }
 
+    #[must_use]
     pub fn merge_styles(
         &self,
         parent_style: &InheritedStyle,
@@ -203,6 +212,7 @@ impl TextNodeRenderable {
         chunks
     }
 
+    #[must_use]
     pub fn get_children(&self) -> Vec<&TextNodeRenderable> {
         self.children
             .iter()
@@ -216,10 +226,12 @@ impl TextNodeRenderable {
             .collect()
     }
 
+    #[must_use]
     pub fn get_children_count(&self) -> usize {
         self.children.len()
     }
 
+    #[must_use]
     pub fn get_renderable(&self, id: &str) -> Option<&TextNodeRenderable> {
         self.children.iter().find_map(|c| {
             if let TextNodeChild::Node(n) = c {
@@ -234,18 +246,21 @@ impl TextNodeRenderable {
         })
     }
 
+    #[must_use]
     pub fn get_renderable_index(&self, id: &str) -> Option<usize> {
         self.children.iter().position(|c| {
             matches!(c, TextNodeChild::Node(n) if n.id() == id)
         })
     }
 
+    #[must_use]
     pub fn from_string(text: &str, options: TextNodeOptions) -> Self {
         let mut node = TextNodeRenderable::new(options);
         node.add(TextNodeAddItem::Text(text.to_string()));
         node
     }
 
+    #[must_use]
     pub fn from_nodes(nodes: Vec<TextNodeRenderable>, options: TextNodeOptions) -> Self {
         let mut root = TextNodeRenderable::new(options);
         for node in nodes {
@@ -275,6 +290,7 @@ pub struct InheritedStyle {
 }
 
 impl InheritedStyle {
+    #[must_use]
     pub fn new() -> Self {
         InheritedStyle {
             fg: None,

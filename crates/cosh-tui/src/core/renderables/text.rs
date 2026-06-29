@@ -105,6 +105,7 @@ impl TextRenderable {
         }
     }
 
+    #[must_use]
     pub fn content(&self) -> &StyledText {
         &self.text
     }
@@ -114,10 +115,12 @@ impl TextRenderable {
         self.text = value;
     }
 
+    #[must_use]
     pub fn chunks(&self) -> &[TextChunk] {
         &self.text.chunks
     }
 
+    #[must_use]
     pub fn fg(&self) -> RGBA {
         self.default_fg
     }
@@ -128,6 +131,7 @@ impl TextRenderable {
         }
     }
 
+    #[must_use]
     pub fn bg(&self) -> RGBA {
         self.default_bg
     }
@@ -138,6 +142,7 @@ impl TextRenderable {
         }
     }
 
+    #[must_use]
     pub fn attributes(&self) -> u32 {
         self.default_attributes
     }
@@ -146,6 +151,7 @@ impl TextRenderable {
         self.default_attributes = value;
     }
 
+    #[must_use]
     pub fn wrap_mode(&self) -> WrapMode {
         self.wrap_mode
     }
@@ -154,6 +160,7 @@ impl TextRenderable {
         self.wrap_mode = value;
     }
 
+    #[must_use]
     pub fn scroll_y(&self) -> i32 {
         self.scroll_y
     }
@@ -162,6 +169,7 @@ impl TextRenderable {
         self.scroll_y = value.max(0);
     }
 
+    #[must_use]
     pub fn scroll_x(&self) -> i32 {
         self.scroll_x
     }
@@ -170,6 +178,7 @@ impl TextRenderable {
         self.scroll_x = value.max(0);
     }
 
+    #[must_use]
     pub fn truncate(&self) -> bool {
         self.truncate
     }
