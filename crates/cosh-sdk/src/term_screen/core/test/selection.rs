@@ -1,5 +1,5 @@
 use super::*;
-use k9::assert_equals as assert_eq;
+
 
 /// Test basic dragging to select some text
 #[test]

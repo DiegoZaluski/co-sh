@@ -29,13 +29,14 @@ fn terminal_processes_cursor_movement() {
 #[test]
 fn vision_terminal_method_works() {
     let vision = super::Vision::new();
-    let result = vision.terminal(&TerminalInput {
-        output: "xyz".into(),
-        rows: 3,
-        cols: 10,
-        plain: false,
-    })
-    .unwrap();
+    let result = vision
+        .terminal(&TerminalInput {
+            output: "xyz".into(),
+            rows: 3,
+            cols: 10,
+            plain: false,
+        })
+        .unwrap();
     assert!(result.contains("\"content\""));
     assert!(result.contains("xyz"));
 }

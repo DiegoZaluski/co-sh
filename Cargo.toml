@@ -15,6 +15,24 @@ version = "0.0.0"
 cosh-harness = { path = "crates/cosh-harness" }
 cosh-sdk = { path = "crates/cosh-sdk" }
 cosh-tools = { path = "crates/cosh-tools" }
+# ---
+[dependencies.tokio]
+version = "1"
+features = ["full"]
+
+[dependencies.rmcp]
+version = "1.8.0"
+features = ["server", "transport-io"]
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[dependencies.schemars]
+version = "1"
+
+[dependencies.anyhow]
+version = "1"
 
 [patch.crates-io]
 tree-sitter-kotlin = { git = "https://github.com/fwcd/tree-sitter-kotlin", rev = "c8ac3d2627240160b999a2c100de3babbdb8f419" }

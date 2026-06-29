@@ -58,9 +58,9 @@ unicode-normalization = "0.1"
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
 url = "2.5"
-k9 = "0.12"
 vtparse = "0.7"
 
 [dev-dependencies]
 env_logger = "0.11"
+insta = { version = "1", features = ["filters"] }
 serial_test = "3"

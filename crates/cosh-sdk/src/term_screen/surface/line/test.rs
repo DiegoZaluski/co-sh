@@ -4,7 +4,6 @@ use super::clusterline::ClusteredLine;
 use super::*;
 use crate::term_screen::cell::{Cell, CellAttributes};
 use crate::term_screen::surface::SEQ_ZERO;
-use k9::assert_equal as assert_eq;
 
 /// There are 4 double-wide graphemes that occupy 2 cells each.
 /// When we join the lines, we must preserve the invisible blank
@@ -33,42 +32,8 @@ fn cluster_representation_basic() {
     let line: Line = "hello".into();
     let mut compressed = line.clone();
     compressed.compress_for_scrollback();
-    k9::snapshot!(
-        &compressed.cells,
-        r#"
-C(
-    ClusteredLine {
-        text: "hello",
-        is_double_wide: None,
-        clusters: [
-            Cluster {
-                cell_width: 5,
-                attrs: CellAttributes {
-                    attributes: 0,
-                    intensity: Normal,
-                    underline: None,
-                    blink: None,
-                    italic: false,
-                    reverse: false,
-                    strikethrough: false,
-                    invisible: false,
-                    wrapped: false,
-                    overline: false,
-                    semantic_type: Output,
-                    foreground: Default,
-                    background: Default,
-                    fat: None,
-                },
-            },
-        ],
-        len: 5,
-        last_cell_width: Some(
-            1,
-        ),
-    },
-)
-"#
-    );
+    insta::assert_debug_snapshot!(&compressed.cells);
+
     compressed.coerce_vec_storage();
     assert_eq!(line, compressed);
 }
@@ -78,54 +43,8 @@ fn cluster_representation_double_width() {
     let line: Line = "❤ 😍🤢he❤ 😍🤢llo❤ 😍🤢".into();
     let mut compressed = line.clone();
     compressed.compress_for_scrollback();
-    k9::snapshot!(
-        &compressed.cells,
-        r#"
-C(
-    ClusteredLine {
-        text: "❤ 😍🤢he❤ 😍🤢llo❤ 😍🤢",
-        is_double_wide: Some(
-            [
-                0,
-                3,
-                5,
-                9,
-                12,
-                14,
-                19,
-                22,
-                24,
-            ],
-        ),
-        clusters: [
-            Cluster {
-                cell_width: 26,
-                attrs: CellAttributes {
-                    attributes: 0,
-                    intensity: Normal,
-                    underline: None,
-                    blink: None,
-                    italic: false,
-                    reverse: false,
-                    strikethrough: false,
-                    invisible: false,
-                    wrapped: false,
-                    overline: false,
-                    semantic_type: Output,
-                    foreground: Default,
-                    background: Default,
-                    fat: None,
-                },
-            },
-        ],
-        len: 26,
-        last_cell_width: Some(
-            1,
-        ),
-    },
-)
-"#
-    );
+    insta::assert_debug_snapshot!(&compressed.cells);
+
     compressed.coerce_vec_storage();
     assert_eq!(line, compressed);
 }
@@ -136,20 +55,8 @@ fn cluster_representation_empty() {
 
     let mut compressed = line.clone();
     compressed.compress_for_scrollback();
-    k9::snapshot!(
-        &compressed.cells,
-        r#"
-C(
-    ClusteredLine {
-        text: "",
-        is_double_wide: None,
-        clusters: [],
-        len: 0,
-        last_cell_width: None,
-    },
-)
-"#
-    );
+    insta::assert_debug_snapshot!(&compressed.cells);
+
     compressed.coerce_vec_storage();
     assert_eq!(line, compressed);
 }
@@ -159,73 +66,7 @@ fn cluster_wrap_last() {
     let mut line: Line = "hello".into();
     line.compress_for_scrollback();
     line.set_last_cell_was_wrapped(true, 1);
-    k9::snapshot!(
-        line,
-        r#"
-Line {
-    cells: C(
-        ClusteredLine {
-            text: "hello",
-            is_double_wide: None,
-            clusters: [
-                Cluster {
-                    cell_width: 4,
-                    attrs: CellAttributes {
-                        attributes: 0,
-                        intensity: Normal,
-                        underline: None,
-                        blink: None,
-                        italic: false,
-                        reverse: false,
-                        strikethrough: false,
-                        invisible: false,
-                        wrapped: false,
-                        overline: false,
-                        semantic_type: Output,
-                        foreground: Default,
-                        background: Default,
-                        fat: None,
-                    },
-                },
-                Cluster {
-                    cell_width: 1,
-                    attrs: CellAttributes {
-                        attributes: 2048,
-                        intensity: Normal,
-                        underline: None,
-                        blink: None,
-                        italic: false,
-                        reverse: false,
-                        strikethrough: false,
-                        invisible: false,
-                        wrapped: true,
-                        overline: false,
-                        semantic_type: Output,
-                        foreground: Default,
-                        background: Default,
-                        fat: None,
-                    },
-                },
-            ],
-            len: 5,
-            last_cell_width: Some(
-                1,
-            ),
-        },
-    ),
-    zones: [],
-    seqno: 1,
-    bits: LineBits(
-        0x0,
-    ),
-    appdata: Mutex {
-        data: None,
-        poisoned: false,
-        ..
-    },
-}
-"#
-    );
+    insta::assert_debug_snapshot!(line);
 }
 
 fn bold() -> CellAttributes {
@@ -249,99 +90,8 @@ fn cluster_representation_attributes() {
 
     let mut compressed = line.clone();
     compressed.compress_for_scrollback();
-    k9::snapshot!(
-        &compressed.cells,
-        r#"
-C(
-    ClusteredLine {
-        text: "abcd",
-        is_double_wide: None,
-        clusters: [
-            Cluster {
-                cell_width: 1,
-                attrs: CellAttributes {
-                    attributes: 0,
-                    intensity: Normal,
-                    underline: None,
-                    blink: None,
-                    italic: false,
-                    reverse: false,
-                    strikethrough: false,
-                    invisible: false,
-                    wrapped: false,
-                    overline: false,
-                    semantic_type: Output,
-                    foreground: Default,
-                    background: Default,
-                    fat: None,
-                },
-            },
-            Cluster {
-                cell_width: 1,
-                attrs: CellAttributes {
-                    attributes: 1,
-                    intensity: Bold,
-                    underline: None,
-                    blink: None,
-                    italic: false,
-                    reverse: false,
-                    strikethrough: false,
-                    invisible: false,
-                    wrapped: false,
-                    overline: false,
-                    semantic_type: Output,
-                    foreground: Default,
-                    background: Default,
-                    fat: None,
-                },
-            },
-            Cluster {
-                cell_width: 1,
-                attrs: CellAttributes {
-                    attributes: 0,
-                    intensity: Normal,
-                    underline: None,
-                    blink: None,
-                    italic: false,
-                    reverse: false,
-                    strikethrough: false,
-                    invisible: false,
-                    wrapped: false,
-                    overline: false,
-                    semantic_type: Output,
-                    foreground: Default,
-                    background: Default,
-                    fat: None,
-                },
-            },
-            Cluster {
-                cell_width: 1,
-                attrs: CellAttributes {
-                    attributes: 1,
-                    intensity: Bold,
-                    underline: None,
-                    blink: None,
-                    italic: false,
-                    reverse: false,
-                    strikethrough: false,
-                    invisible: false,
-                    wrapped: false,
-                    overline: false,
-                    semantic_type: Output,
-                    foreground: Default,
-                    background: Default,
-                    fat: None,
-                },
-            },
-        ],
-        len: 4,
-        last_cell_width: Some(
-            1,
-        ),
-    },
-)
-"#
-    );
+    insta::assert_debug_snapshot!(&compressed.cells);
+
     compressed.coerce_vec_storage();
     assert_eq!(line, compressed);
 }
@@ -354,78 +104,7 @@ fn cluster_append() {
     cl.append(Cell::new_grapheme("l", bold(), None));
     cl.append(Cell::new_grapheme("l", CellAttributes::default(), None));
     cl.append(Cell::new_grapheme("o", CellAttributes::default(), None));
-    k9::snapshot!(
-        cl,
-        r#"
-ClusteredLine {
-    text: "hello",
-    is_double_wide: None,
-    clusters: [
-        Cluster {
-            cell_width: 2,
-            attrs: CellAttributes {
-                attributes: 0,
-                intensity: Normal,
-                underline: None,
-                blink: None,
-                italic: false,
-                reverse: false,
-                strikethrough: false,
-                invisible: false,
-                wrapped: false,
-                overline: false,
-                semantic_type: Output,
-                foreground: Default,
-                background: Default,
-                fat: None,
-            },
-        },
-        Cluster {
-            cell_width: 1,
-            attrs: CellAttributes {
-                attributes: 1,
-                intensity: Bold,
-                underline: None,
-                blink: None,
-                italic: false,
-                reverse: false,
-                strikethrough: false,
-                invisible: false,
-                wrapped: false,
-                overline: false,
-                semantic_type: Output,
-                foreground: Default,
-                background: Default,
-                fat: None,
-            },
-        },
-        Cluster {
-            cell_width: 2,
-            attrs: CellAttributes {
-                attributes: 0,
-                intensity: Normal,
-                underline: None,
-                blink: None,
-                italic: false,
-                reverse: false,
-                strikethrough: false,
-                invisible: false,
-                wrapped: false,
-                overline: false,
-                semantic_type: Output,
-                foreground: Default,
-                background: Default,
-                fat: None,
-            },
-        },
-    ],
-    len: 5,
-    last_cell_width: Some(
-        1,
-    ),
-}
-"#
-    );
+    insta::assert_debug_snapshot!(cl);
 }
 
 #[test]
@@ -452,90 +131,5 @@ fn cluster_line_new() {
         Cell::new_grapheme("o", CellAttributes::default(), None),
         5,
     );
-    k9::snapshot!(
-        line,
-        r#"
-Line {
-    cells: C(
-        ClusteredLine {
-            text: "hello",
-            is_double_wide: None,
-            clusters: [
-                Cluster {
-                    cell_width: 2,
-                    attrs: CellAttributes {
-                        attributes: 0,
-                        intensity: Normal,
-                        underline: None,
-                        blink: None,
-                        italic: false,
-                        reverse: false,
-                        strikethrough: false,
-                        invisible: false,
-                        wrapped: false,
-                        overline: false,
-                        semantic_type: Output,
-                        foreground: Default,
-                        background: Default,
-                        fat: None,
-                    },
-                },
-                Cluster {
-                    cell_width: 1,
-                    attrs: CellAttributes {
-                        attributes: 1,
-                        intensity: Bold,
-                        underline: None,
-                        blink: None,
-                        italic: false,
-                        reverse: false,
-                        strikethrough: false,
-                        invisible: false,
-                        wrapped: false,
-                        overline: false,
-                        semantic_type: Output,
-                        foreground: Default,
-                        background: Default,
-                        fat: None,
-                    },
-                },
-                Cluster {
-                    cell_width: 2,
-                    attrs: CellAttributes {
-                        attributes: 0,
-                        intensity: Normal,
-                        underline: None,
-                        blink: None,
-                        italic: false,
-                        reverse: false,
-                        strikethrough: false,
-                        invisible: false,
-                        wrapped: false,
-                        overline: false,
-                        semantic_type: Output,
-                        foreground: Default,
-                        background: Default,
-                        fat: None,
-                    },
-                },
-            ],
-            len: 5,
-            last_cell_width: Some(
-                1,
-            ),
-        },
-    ),
-    zones: [],
-    seqno: 5,
-    bits: LineBits(
-        0x0,
-    ),
-    appdata: Mutex {
-        data: None,
-        poisoned: false,
-        ..
-    },
-}
-"#
-    );
+    insta::assert_debug_snapshot!(line);
 }

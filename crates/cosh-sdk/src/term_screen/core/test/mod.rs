@@ -11,7 +11,7 @@ use crate::term_screen::core::color::ColorPalette;
 use crate::term_screen::escape_parser::csi::{Edit, EraseInDisplay, EraseInLine};
 use crate::term_screen::escape_parser::{CSI, OneBased, OperatingSystemCommand};
 use crate::term_screen::surface::{CursorShape, CursorVisibility, SEQ_ZERO, SequenceNo};
-use k9::assert_equal as assert_eq;
+
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -323,27 +323,7 @@ fn test_semantic_1539() {
 
     assert_visible_contents(&term, file!(), line!(), &["prompt", "woot", "", "", ""]);
 
-    k9::snapshot!(
-        term.get_semantic_zones().unwrap(),
-        "
-[
-    SemanticZone {
-        start_y: 0,
-        start_x: 0,
-        end_y: 0,
-        end_x: 5,
-        semantic_type: Input,
-    },
-    SemanticZone {
-        start_y: 1,
-        start_x: 0,
-        end_y: 1,
-        end_x: 3,
-        semantic_type: Output,
-    },
-]
-"
-    );
+    insta::assert_debug_snapshot!(term.get_semantic_zones().unwrap());
 }
 
 #[test]
@@ -372,20 +352,7 @@ fn test_semantic() {
         &["hello", "there", "three", "", ""],
     );
 
-    k9::snapshot!(
-        term.get_semantic_zones().unwrap(),
-        "
-[
-    SemanticZone {
-        start_y: 0,
-        start_x: 0,
-        end_y: 2,
-        end_x: 4,
-        semantic_type: Output,
-    },
-]
-"
-    );
+    insta::assert_debug_snapshot!(term.get_semantic_zones().unwrap());
 
     term.print(format!(
         "{}",
@@ -428,41 +395,7 @@ fn test_semantic() {
             .set_semantic_type(SemanticType::Input);
     }
 
-    k9::snapshot!(
-        term.get_semantic_zones().unwrap(),
-        "
-[
-    SemanticZone {
-        start_y: 0,
-        start_x: 0,
-        end_y: 2,
-        end_x: 4,
-        semantic_type: Output,
-    },
-    SemanticZone {
-        start_y: 3,
-        start_x: 0,
-        end_y: 3,
-        end_x: 1,
-        semantic_type: Prompt,
-    },
-    SemanticZone {
-        start_y: 3,
-        start_x: 2,
-        end_y: 3,
-        end_x: 6,
-        semantic_type: Input,
-    },
-    SemanticZone {
-        start_y: 4,
-        start_x: 0,
-        end_y: 4,
-        end_x: 8,
-        semantic_type: Output,
-    },
-]
-"
-    );
+    insta::assert_debug_snapshot!(term.get_semantic_zones().unwrap());
 
     assert_lines_equal(
         file!(),

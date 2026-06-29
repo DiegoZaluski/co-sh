@@ -12,7 +12,8 @@ toml = "1.1"
 chrono = "0.4"
 
 [dependencies.rmcp]
-version= "1.7.0"
+version= "1.8.0"
+
 features = [
     "client",
     "server",

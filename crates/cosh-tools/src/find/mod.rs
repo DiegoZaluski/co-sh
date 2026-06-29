@@ -31,8 +31,8 @@ pub use glob::glob;
 pub use grep::grep;
 pub use types::{ContextEntry, Glob, GlobEntry, GlobOutput, Grep, GrepMatchEntry, GrepOutput};
 
-use types::{Glob as GlobConfig, Grep as GrepConfig};
 use crate::ToolDescription;
+use types::{Glob as GlobConfig, Grep as GrepConfig};
 
 /// Shared-state wrapper for file-search tool operations.
 ///

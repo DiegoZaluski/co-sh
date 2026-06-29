@@ -19,9 +19,9 @@ pub mod test;
 use std::pin::Pin;
 use tokio_stream::Stream;
 
+use crate::ToolDescription;
 use crate::bash::bsh::BashError;
 use crate::bash::bsh::SpawnOutput;
-use crate::ToolDescription;
 
 /// Shared-state wrapper for bash execution.
 ///
