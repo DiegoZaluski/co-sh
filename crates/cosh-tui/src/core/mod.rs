@@ -1,16 +1,13 @@
-pub mod r#box;
-pub mod border;
-pub mod input;
+pub mod lib;
+pub mod renderables;
 pub mod renderable;
 pub mod renderer;
-pub mod rgba;
-pub mod scroll_box;
 pub mod syntax_style;
-pub mod terminal_palette;
-pub mod text;
-pub mod text_node;
 pub mod types;
 pub mod utils;
+
+pub use lib::{border, rgba, terminal_palette};
+pub use renderables::{text, text_node, r#box, scroll_box, input};
 
 #[cfg(test)]
 pub mod test;
