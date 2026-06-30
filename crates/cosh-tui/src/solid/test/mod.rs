@@ -11,7 +11,7 @@
 //!   - time_to_first_draw
 
 mod reconciler_tests {
-    use crate::core::renderable::{Renderable, RootRenderable};
+    use crate::core::renderable::RootRenderable;
     use crate::solid::reconciler::{
         DomNode, TextNode, create_element, create_slot_node, create_text_node, get_first_child,
         get_next_sibling, get_parent_node, insert_node, is_text_node, remove_node, replace_text,

@@ -200,10 +200,7 @@ impl Renderable for TextTableRenderable {
 
         let cell_fg = self.default_fg;
 
-        let cell_w_total: Vec<u16> = col_widths
-            .iter()
-            .map(|&w| w + 2 * self.padding_x)
-            .collect();
+        let cell_w_total: Vec<u16> = col_widths.iter().map(|&w| w + 2 * self.padding_x).collect();
 
         let col_start: Vec<u16> = {
             let mut x = area.x;
@@ -263,11 +260,10 @@ impl Renderable for TextTableRenderable {
                 if y >= max_y {
                     break;
                 }
-                if borders
-                    && let Some(cell) = buf.cell_mut((col_start[0].saturating_sub(1), y)) {
-                        cell.set_char(chars.vertical);
-                        cell.set_style(bstyle);
-                    }
+                if borders && let Some(cell) = buf.cell_mut((col_start[0].saturating_sub(1), y)) {
+                    cell.set_char(chars.vertical);
+                    cell.set_style(bstyle);
+                }
                 for ci in 0..col_count {
                     let sx = col_start[ci];
                     let cw = cell_w_total[ci];
@@ -279,8 +275,11 @@ impl Renderable for TextTableRenderable {
                         if let Some(chunks) = chunks {
                             for chunk in chunks {
                                 let (fr, fgr, fb, fa) = chunk.fg.unwrap_or(cell_fg).to_ints();
-                                let st = Style::default()
-                                    .fg(if fa == 0 { Color::Reset } else { Color::Rgb(fr, fgr, fb) });
+                                let st = Style::default().fg(if fa == 0 {
+                                    Color::Reset
+                                } else {
+                                    Color::Rgb(fr, fgr, fb)
+                                });
                                 for ch in chunk.text.chars() {
                                     if cx >= ex {
                                         break;

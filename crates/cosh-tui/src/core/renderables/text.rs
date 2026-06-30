@@ -5,7 +5,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-pub use crate::core::lib::styled_text::{string_to_styled_text, StyledText, TextChunk, UrlLink};
+pub use crate::core::lib::styled_text::{StyledText, TextChunk, UrlLink, string_to_styled_text};
 use crate::core::renderable::Renderable;
 use crate::core::rgba::RGBA;
 use crate::core::types::TextAttributes;

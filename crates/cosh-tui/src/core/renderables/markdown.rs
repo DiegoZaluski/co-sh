@@ -85,14 +85,7 @@ impl MarkdownRenderable {
         }
     }
 
-    fn render_text(
-        text: &str,
-        buf: &mut Buffer,
-        x: &mut u16,
-        y: u16,
-        max_x: u16,
-        style: Style,
-    ) {
+    fn render_text(text: &str, buf: &mut Buffer, x: &mut u16, y: u16, max_x: u16, style: Style) {
         for ch in text.chars() {
             if *x >= max_x {
                 *x = max_x;
@@ -353,7 +346,6 @@ impl Renderable for MarkdownRenderable {
                     let marker = if checked { "[x] " } else { "[ ] " };
                     Self::render_text(marker, buf, &mut x, y, max_x, default_style);
                 }
-
             }
         }
     }

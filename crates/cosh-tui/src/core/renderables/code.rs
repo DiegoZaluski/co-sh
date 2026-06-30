@@ -157,8 +157,16 @@ impl Renderable for CodeRenderable {
         let (fr, fg_c, fb, fa) = fg.to_ints();
         let (br, bg_c, bb, ba) = bg.to_ints();
 
-        let ratatui_fg = if fa == 0 { Color::Reset } else { Color::Rgb(fr, fg_c, fb) };
-        let ratatui_bg = if ba == 0 { Color::Reset } else { Color::Rgb(br, bg_c, bb) };
+        let ratatui_fg = if fa == 0 {
+            Color::Reset
+        } else {
+            Color::Rgb(fr, fg_c, fb)
+        };
+        let ratatui_bg = if ba == 0 {
+            Color::Reset
+        } else {
+            Color::Rgb(br, bg_c, bb)
+        };
 
         let style = Style::default()
             .fg(ratatui_fg)

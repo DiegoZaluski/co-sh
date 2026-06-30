@@ -76,7 +76,9 @@ impl DiffRenderable {
                 let (r, g, b, _a) = self.added_bg.to_ints();
                 let (sr, sg, sb, _sa) = self.added_sign_color.to_ints();
                 (
-                    Style::default().bg(Color::Rgb(r, g, b)).fg(Color::Rgb(sr, sg, sb)),
+                    Style::default()
+                        .bg(Color::Rgb(r, g, b))
+                        .fg(Color::Rgb(sr, sg, sb)),
                     Style::default().bg(Color::Rgb(r, g, b)),
                 )
             }
@@ -84,19 +86,21 @@ impl DiffRenderable {
                 let (r, g, b, _a) = self.removed_bg.to_ints();
                 let (sr, sg, sb, _sa) = self.removed_sign_color.to_ints();
                 (
-                    Style::default().bg(Color::Rgb(r, g, b)).fg(Color::Rgb(sr, sg, sb)),
+                    Style::default()
+                        .bg(Color::Rgb(r, g, b))
+                        .fg(Color::Rgb(sr, sg, sb)),
                     Style::default().bg(Color::Rgb(r, g, b)),
                 )
             }
-            DiffLineType::Header => {
-                (
-                    Style::default().fg(Color::Rgb(100, 150, 255)).add_modifier(Modifier::BOLD),
-                    Style::default().fg(Color::Rgb(100, 150, 255)).add_modifier(Modifier::BOLD),
-                )
-            }
-            DiffLineType::Context => {
-                (Style::default(), Style::default())
-            }
+            DiffLineType::Header => (
+                Style::default()
+                    .fg(Color::Rgb(100, 150, 255))
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Rgb(100, 150, 255))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            DiffLineType::Context => (Style::default(), Style::default()),
         }
     }
 }

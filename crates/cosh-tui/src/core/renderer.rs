@@ -134,11 +134,7 @@ impl<B: Backend> Renderer<B> {
         let root_id = self.layout_tree.new_leaf(root_style);
         self.root.set_layout_node(Some(root_id));
 
-        fn build_tree(
-            lt: &mut LayoutTree,
-            node: &mut dyn Renderable,
-            parent_id: taffy::NodeId,
-        ) {
+        fn build_tree(lt: &mut LayoutTree, node: &mut dyn Renderable, parent_id: taffy::NodeId) {
             for child in node.children_mut().iter_mut() {
                 let style = child.build_style().unwrap_or_default();
                 let child_id = lt.new_leaf(style);

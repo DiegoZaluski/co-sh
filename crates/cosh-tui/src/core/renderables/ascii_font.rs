@@ -134,12 +134,24 @@ impl Renderable for ASCIIFontRenderable {
     }
 
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
-        let fg = self.color.first().copied().unwrap_or(RGBA::from_ints(255, 255, 255, 255));
+        let fg = self
+            .color
+            .first()
+            .copied()
+            .unwrap_or(RGBA::from_ints(255, 255, 255, 255));
         let (fr, fg_c, fb, fa) = fg.to_ints();
         let (br, bg, bb, ba) = self.background_color.to_ints();
 
-        let ratatui_fg = if fa == 0 { Color::Reset } else { Color::Rgb(fr, fg_c, fb) };
-        let ratatui_bg = if ba == 0 { Color::Reset } else { Color::Rgb(br, bg, bb) };
+        let ratatui_fg = if fa == 0 {
+            Color::Reset
+        } else {
+            Color::Rgb(fr, fg_c, fb)
+        };
+        let ratatui_bg = if ba == 0 {
+            Color::Reset
+        } else {
+            Color::Rgb(br, bg, bb)
+        };
 
         let style = Style::default().fg(ratatui_fg).bg(ratatui_bg);
 

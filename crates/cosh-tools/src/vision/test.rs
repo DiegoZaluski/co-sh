@@ -11,8 +11,16 @@ fn terminal_processes_simple_output() {
     .unwrap();
     // With newline mode enabled, `\n` should reset to column 0
     let lines: Vec<&str> = result.lines().collect();
-    assert_eq!(lines[0].trim(), "hello", "first line should start with 'hello'");
-    assert_eq!(lines[1].trim(), "world", "second line should start with 'world'");
+    assert_eq!(
+        lines[0].trim(),
+        "hello",
+        "first line should start with 'hello'"
+    );
+    assert_eq!(
+        lines[1].trim(),
+        "world",
+        "second line should start with 'world'"
+    );
 }
 
 #[test]
