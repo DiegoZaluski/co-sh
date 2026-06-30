@@ -251,7 +251,7 @@ pub fn normalize_color_value(value: Option<ColorInput>) -> Option<NormalizedColo
 }
 
 fn is_valid_hex(s: &str) -> bool {
-    s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+    s.bytes().all(|b: u8| b.is_ascii_hexdigit())
 }
 
 #[must_use]

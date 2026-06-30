@@ -89,6 +89,7 @@ impl InputRenderable {
         self.min_length
     }
 
+    #[allow(clippy::missing_panics_doc)]
     pub fn set_min_length(&mut self, min: usize) {
         assert!(
             min <= self.max_length,

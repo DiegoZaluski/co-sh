@@ -115,7 +115,7 @@ impl TextTableRenderable {
     }
 
     fn col_count(&self) -> usize {
-        self.content.first().map(|r| r.len()).unwrap_or(0)
+        self.content.first().map_or(0, |r| r.len())
     }
 }
 
@@ -183,6 +183,7 @@ impl Renderable for TextTableRenderable {
         &self.children
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         let col_widths = self.max_col_widths();
         if col_widths.is_empty() || self.row_count() == 0 {
@@ -262,12 +263,11 @@ impl Renderable for TextTableRenderable {
                 if y >= max_y {
                     break;
                 }
-                if borders {
-                    if let Some(cell) = buf.cell_mut((col_start[0].saturating_sub(1), y)) {
+                if borders
+                    && let Some(cell) = buf.cell_mut((col_start[0].saturating_sub(1), y)) {
                         cell.set_char(chars.vertical);
                         cell.set_style(bstyle);
                     }
-                }
                 for ci in 0..col_count {
                     let sx = col_start[ci];
                     let cw = cell_w_total[ci];

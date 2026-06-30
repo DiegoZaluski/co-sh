@@ -196,7 +196,7 @@ impl Renderable for DiffRenderable {
             }
 
             // content
-            let content = if line.len() > 0 { &line[1..] } else { line };
+            let content = if line.is_empty() { line } else { &line[1..] };
             for ch in content.chars() {
                 if x >= max_x {
                     break;

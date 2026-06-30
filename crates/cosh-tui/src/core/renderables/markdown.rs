@@ -171,6 +171,7 @@ impl Renderable for MarkdownRenderable {
         &self.children
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         let max_x = area.x.saturating_add(area.width);
         let max_y = area.y.saturating_add(area.height);
@@ -196,7 +197,7 @@ impl Renderable for MarkdownRenderable {
 
             match event {
                 Event::Start(tag) => match tag {
-                    Tag::Paragraph => {
+                    Tag::Paragraph | Tag::BlockQuote(_) | Tag::Table(_) => {
                         if x != area.x {
                             y += 1;
                             x = area.x;
@@ -208,12 +209,6 @@ impl Renderable for MarkdownRenderable {
                         classes: _classes,
                         attrs: _attrs,
                     } => {
-                        if x != area.x {
-                            y += 1;
-                            x = area.x;
-                        }
-                    }
-                    Tag::BlockQuote(_) => {
                         if x != area.x {
                             y += 1;
                             x = area.x;
@@ -261,91 +256,71 @@ impl Renderable for MarkdownRenderable {
                         };
                         Self::render_text(&bullet, buf, &mut x, y, max_x, default_style);
                     }
-                    Tag::Table(_) => {
-                        if x != area.x {
-                            y += 1;
-                            x = area.x;
-                        }
+                    Tag::TableHead
+                    | Tag::TableRow
+                    | Tag::TableCell
+                    | Tag::FootnoteDefinition(_)
+                    | Tag::DefinitionList
+                    | Tag::DefinitionListTitle
+                    | Tag::DefinitionListDefinition
+                    | Tag::Strikethrough
+                    | Tag::Emphasis
+                    | Tag::Strong
+                    | Tag::Link {
+                        link_type: _,
+                        dest_url: _,
+                        title: _,
+                        id: _,
                     }
-                    Tag::TableHead => {}
-                    Tag::TableRow => {}
-                    Tag::TableCell => {}
-                    Tag::FootnoteDefinition(_) => {}
-                    Tag::DefinitionList => {}
-                    Tag::DefinitionListTitle => {}
-                    Tag::DefinitionListDefinition => {}
-                    Tag::Strikethrough => {}
-                    Tag::Emphasis => {}
-                    Tag::Strong => {}
-                    Tag::Link {
+                    | Tag::Image {
                         link_type: _,
                         dest_url: _,
                         title: _,
                         id: _,
-                    } => {}
-                    Tag::Image {
-                        link_type: _,
-                        dest_url: _,
-                        title: _,
-                        id: _,
-                    } => {}
-                    Tag::MetadataBlock(_) => {}
-                    Tag::HtmlBlock => {}
-                    Tag::Superscript => {}
-                    Tag::Subscript => {}
+                    }
+                    | Tag::MetadataBlock(_)
+                    | Tag::HtmlBlock
+                    | Tag::Superscript
+                    | Tag::Subscript => {}
                 },
                 Event::End(tag_end) => match tag_end {
-                    TagEnd::Paragraph => {
-                        y += 1;
-                        x = area.x;
-                    }
-                    TagEnd::Heading(_) => {
-                        y += 1;
-                        x = area.x;
-                    }
-                    TagEnd::BlockQuote(_) => {
-                        y += 1;
-                        x = area.x;
-                    }
-                    TagEnd::CodeBlock => {
-                        y += 1;
-                        x = area.x;
-                    }
                     TagEnd::List(_) => {
                         list_depth = list_depth.saturating_sub(1);
                         numbered_list_counters.pop();
                     }
-                    TagEnd::Item => {
+                    TagEnd::Paragraph
+                    | TagEnd::Heading(_)
+                    | TagEnd::BlockQuote(_)
+                    | TagEnd::CodeBlock
+                    | TagEnd::Item
+                    | TagEnd::Table
+                    | TagEnd::TableRow => {
                         y += 1;
                         x = area.x;
                     }
-                    TagEnd::Table => {
-                        y += 1;
-                        x = area.x;
-                    }
-                    TagEnd::TableHead => {}
-                    TagEnd::TableRow => {
-                        y += 1;
-                        x = area.x;
-                    }
+                    TagEnd::TableHead
+                    | TagEnd::FootnoteDefinition
+                    | TagEnd::DefinitionList
+                    | TagEnd::DefinitionListTitle
+                    | TagEnd::DefinitionListDefinition
+                    | TagEnd::Strikethrough
+                    | TagEnd::Emphasis
+                    | TagEnd::Strong
+                    | TagEnd::Link
+                    | TagEnd::Image
+                    | TagEnd::MetadataBlock(_)
+                    | TagEnd::HtmlBlock
+                    | TagEnd::Superscript
+                    | TagEnd::Subscript => {}
                     TagEnd::TableCell => {
                         x += 2; // small gap between cells
                     }
-                    TagEnd::FootnoteDefinition => {}
-                    TagEnd::DefinitionList => {}
-                    TagEnd::DefinitionListTitle => {}
-                    TagEnd::DefinitionListDefinition => {}
-                    TagEnd::Strikethrough => {}
-                    TagEnd::Emphasis => {}
-                    TagEnd::Strong => {}
-                    TagEnd::Link => {}
-                    TagEnd::Image => {}
-                    TagEnd::MetadataBlock(_) => {}
-                    TagEnd::HtmlBlock => {}
-                    TagEnd::Superscript => {}
-                    TagEnd::Subscript => {}
                 },
-                Event::Text(text) => {
+                Event::Text(text)
+                | Event::FootnoteReference(text)
+                | Event::InlineMath(text)
+                | Event::DisplayMath(text)
+                | Event::InlineHtml(text) => {
                     Self::render_text(&text, buf, &mut x, y, max_x, default_style);
                 }
                 Event::Code(text) => {
@@ -357,14 +332,7 @@ impl Renderable for MarkdownRenderable {
                 Event::Html(html) => {
                     Self::render_text(&html, buf, &mut x, y, max_x, default_style);
                 }
-                Event::FootnoteReference(text) => {
-                    Self::render_text(&text, buf, &mut x, y, max_x, default_style);
-                }
-                Event::SoftBreak => {
-                    x = area.x;
-                    y += 1;
-                }
-                Event::HardBreak => {
+                Event::SoftBreak | Event::HardBreak => {
                     x = area.x;
                     y += 1;
                 }
@@ -385,11 +353,7 @@ impl Renderable for MarkdownRenderable {
                     let marker = if checked { "[x] " } else { "[ ] " };
                     Self::render_text(marker, buf, &mut x, y, max_x, default_style);
                 }
-                Event::InlineMath(text)
-                | Event::DisplayMath(text)
-                | Event::InlineHtml(text) => {
-                    Self::render_text(&text, buf, &mut x, y, max_x, default_style);
-                }
+
             }
         }
     }

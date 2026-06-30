@@ -126,6 +126,7 @@ impl<B: Backend> Renderer<B> {
         self.frame_count
     }
 
+    #[allow(clippy::items_after_statements)]
     pub fn layout(&mut self, width: f32, height: f32) {
         self.layout_tree = LayoutTree::new();
 
@@ -166,7 +167,7 @@ impl<B: Backend> Renderer<B> {
     #[allow(clippy::missing_errors_doc)]
     pub fn render_frame(&mut self, _delta_time: f64) -> Result<(), B::Error> {
         let area = self.terminal.size()?;
-        self.layout(area.width as f32, area.height as f32);
+        self.layout(f32::from(area.width), f32::from(area.height));
         self.terminal.draw(|frame| {
             let area = frame.area();
             let buf = frame.buffer_mut();
