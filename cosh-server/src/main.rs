@@ -1,6 +1,6 @@
-use rmcp::{transport::stdio, ServiceExt};
+use rmcp::{ServiceExt, transport::stdio};
 
-use cosh::mcp::server::experimental::VisionServer;
+use cosh_server::mcp::experimental::VisionServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

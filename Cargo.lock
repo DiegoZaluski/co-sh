@@ -417,23 +417,12 @@ name = "cosh"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "cosh-harness",
+ "chrono",
  "cosh-sdk",
  "cosh-tools",
  "ratatui",
  "rmcp",
  "schemars",
- "serde",
- "tokio",
-]
-
-[[package]]
-name = "cosh-harness"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "cosh-sdk",
- "rmcp",
  "serde",
  "serde_json",
  "tempfile",
@@ -501,6 +490,20 @@ dependencies = [
  "url",
  "vtparse 0.7.0",
  "xxhash-rust",
+]
+
+[[package]]
+name = "cosh-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cosh-sdk",
+ "cosh-tools",
+ "ratatui",
+ "rmcp",
+ "schemars",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/cosh-harness","crates/cosh-sdk", "crates/cosh-tools", "crates/cosh-tui"]
+members = ["cosh-server", "crates/cosh-sdk", "crates/cosh-tools", "crates/cosh-tui"]
 
 [package]
 description = "Coding agent for the terminal. No UI, no noise."
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 name = "cosh"
 repository = "https://github.com/DiegoZaluski/cosh"
@@ -11,15 +11,13 @@ version = "0.0.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies.cosh-harness]
-path = "crates/cosh-harness"
-
 [dependencies.cosh-sdk]
 path = "crates/cosh-sdk"
 
 [dependencies.cosh-tools]
 path = "crates/cosh-tools"
 
+# ---
 [dependencies.ratatui]
 version = "0.30.2"
 default-features = false
@@ -29,10 +27,6 @@ features = []
 [dependencies.tokio]
 version = "1"
 features = ["full"]
-
-[dependencies.rmcp]
-version = "1.8.0"
-features = ["server", "transport-io"]
 
 [dependencies.serde]
 version = "1"
@@ -46,3 +40,31 @@ version = "1"
 
 [patch.crates-io]
 tree-sitter-kotlin = { git = "https://github.com/fwcd/tree-sitter-kotlin", rev = "c8ac3d2627240160b999a2c100de3babbdb8f419" }
+
+# ---
+[dependencies]
+serde_json = "1.0"
+toml = "1.1"
+chrono = "0.4"
+
+
+[dependencies.rmcp]
+version= "1.8.0"
+features = [
+    "client",
+    "server",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+]
+default-features = false
+
+[dependencies.tokio-stream]
+version = "0.1"
+
+[dependencies.xxhash-rust]
+version = "0.8"
+features = ["xxh32"]
+
+
+[dev-dependencies]
+tempfile = "3"
