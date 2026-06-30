@@ -13,10 +13,14 @@ pub trait Renderable {
     fn is_focusable(&self) -> bool;
     fn is_destroyed(&self) -> bool;
     fn parent_num(&self) -> Option<u64>;
+    fn set_parent_num(&mut self, parent_num: Option<u64>);
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn render_self(&self, buf: &mut Buffer, area: Rect);
     fn children(&self) -> &[Box<dyn Renderable>];
+    fn children_mut(&mut self) -> &mut [Box<dyn Renderable>] {
+        &mut []
+    }
     fn children_count(&self) -> usize {
         self.children().len()
     }
@@ -47,11 +51,38 @@ pub trait Renderable {
         None
     }
     fn set_layout_node(&mut self, _node: Option<taffy::NodeId>) {}
+    fn build_style(&self) -> Option<taffy::Style> {
+        None
+    }
+    fn apply_layout(&mut self, _layout: &taffy::Layout) {}
 
     fn add_child(&mut self, child: Box<dyn Renderable>) -> usize;
     fn remove_child(&mut self, id: &str);
     fn insert_child_before(&mut self, child: Box<dyn Renderable>, anchor_id: &str)
     -> Option<usize>;
+}
+
+pub fn adopt_child(
+    parent_num: u64,
+    children: &mut Vec<Box<dyn Renderable>>,
+    mut child: Box<dyn Renderable>,
+) -> usize {
+    child.set_parent_num(Some(parent_num));
+    let idx = children.len();
+    children.push(child);
+    idx
+}
+
+pub fn adopt_child_before(
+    parent_num: u64,
+    children: &mut Vec<Box<dyn Renderable>>,
+    mut child: Box<dyn Renderable>,
+    anchor_id: &str,
+) -> Option<usize> {
+    let anchor_idx = children.iter().position(|c| c.id() == anchor_id)?;
+    child.set_parent_num(Some(parent_num));
+    children.insert(anchor_idx, child);
+    Some(anchor_idx)
 }
 
 pub struct RenderableNode {
@@ -82,9 +113,7 @@ impl RenderableNode {
     }
 
     pub fn add_child(&mut self, child: Box<dyn Renderable>) -> usize {
-        let idx = self.children.len();
-        self.children.push(child);
-        idx
+        adopt_child(self.num, &mut self.children, child)
     }
 
     pub fn remove_child(&mut self, id: &str) {
@@ -96,9 +125,7 @@ impl RenderableNode {
         child: Box<dyn Renderable>,
         anchor_id: &str,
     ) -> Option<usize> {
-        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
-        self.children.insert(anchor_idx, child);
-        Some(anchor_idx)
+        adopt_child_before(self.num, &mut self.children, child, anchor_id)
     }
 
     #[must_use]
@@ -184,6 +211,10 @@ impl Renderable for RootRenderable {
 
     fn parent_num(&self) -> Option<u64> {
         self.node.parent_num
+    }
+
+    fn set_parent_num(&mut self, parent_num: Option<u64>) {
+        self.node.parent_num = parent_num;
     }
 
     fn layout_node(&self) -> Option<taffy::NodeId> {

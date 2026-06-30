@@ -180,14 +180,17 @@ impl TabSelectRenderable {
     }
 
     fn update_scroll_offset(&mut self) {
-        if self.options.is_empty() || self.max_visible_tabs == 0 {
-            self.scroll_offset = 0;
-            return;
+        self.scroll_offset = self.scroll_offset_for(self.max_visible_tabs);
+    }
+
+    fn scroll_offset_for(&self, max_visible: usize) -> usize {
+        if self.options.is_empty() || max_visible == 0 {
+            return 0;
         }
-        let half_visible = self.max_visible_tabs.saturating_sub(1) / 2;
-        let max_scroll = self.options.len().saturating_sub(self.max_visible_tabs);
+        let half_visible = max_visible.saturating_sub(1) / 2;
+        let max_scroll = self.options.len().saturating_sub(max_visible);
         let target = self.selected_index.saturating_sub(half_visible);
-        self.scroll_offset = target.min(max_scroll);
+        target.min(max_scroll)
     }
 
     fn calculated_height(&self) -> u16 {
@@ -214,9 +217,7 @@ impl Renderable for TabSelectRenderable {
     }
 
     fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
-        let idx = self.children.len();
-        self.children.push(child);
-        idx
+        crate::core::renderable::adopt_child(self.num, &mut self.children, child)
     }
     fn remove_child(&mut self, id: &str) {
         self.children.retain(|c| c.id() != id);
@@ -226,9 +227,7 @@ impl Renderable for TabSelectRenderable {
         child: Box<dyn crate::core::renderable::Renderable>,
         anchor_id: &str,
     ) -> Option<usize> {
-        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
-        self.children.insert(anchor_idx, child);
-        Some(anchor_idx)
+        crate::core::renderable::adopt_child_before(self.num, &mut self.children, child, anchor_id)
     }
 
     fn num(&self) -> u64 {
@@ -251,6 +250,10 @@ impl Renderable for TabSelectRenderable {
         self.parent_num
     }
 
+    fn set_parent_num(&mut self, parent_num: Option<u64>) {
+        self.parent_num = parent_num;
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -271,14 +274,15 @@ impl Renderable for TabSelectRenderable {
 
         let max_visible = usize::from(area.width) / usize::from(self.tab_width);
         let max_visible = max_visible.max(1);
-        let visible_end = (self.scroll_offset + max_visible).min(self.options.len());
+        let scroll_offset = self.scroll_offset_for(max_visible);
+        let visible_end = (scroll_offset + max_visible).min(self.options.len());
         let content_y = area.y;
 
         // Render tab row
-        for i in self.scroll_offset..visible_end {
+        for i in scroll_offset..visible_end {
             let option = &self.options[i];
             let is_selected = i == self.selected_index;
-            let tab_x = area.x + ((i - self.scroll_offset) * usize::from(self.tab_width)) as u16;
+            let tab_x = area.x + ((i - scroll_offset) * usize::from(self.tab_width)) as u16;
             let actual_width = self.tab_width.min(area.right().saturating_sub(tab_x));
 
             let (bg_color, name_color) = if is_selected {
@@ -352,13 +356,13 @@ impl Renderable for TabSelectRenderable {
             let (ar, ag, ab, _aa) = RGBA::from_ints(170, 170, 170, 255).to_ints();
             let arrow_style = Style::default().fg(Color::Rgb(ar, ag, ab));
 
-            if self.scroll_offset > 0
+            if scroll_offset > 0
                 && let Some(cell) = buf.cell_mut((area.x, content_y))
             {
                 cell.set_char('‹');
                 cell.set_style(arrow_style);
             }
-            if self.scroll_offset + max_visible < self.options.len() {
+            if scroll_offset + max_visible < self.options.len() {
                 let right_x = area.right().saturating_sub(1);
                 if let Some(cell) = buf.cell_mut((right_x, content_y)) {
                     cell.set_char('›');

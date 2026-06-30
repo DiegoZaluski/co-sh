@@ -83,9 +83,7 @@ impl Renderable for ScrollBoxRenderable {
     }
 
     fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
-        let idx = self.children.len();
-        self.children.push(child);
-        idx
+        crate::core::renderable::adopt_child(self.num, &mut self.children, child)
     }
     fn remove_child(&mut self, id: &str) {
         self.children.retain(|c| c.id() != id);
@@ -95,9 +93,7 @@ impl Renderable for ScrollBoxRenderable {
         child: Box<dyn crate::core::renderable::Renderable>,
         anchor_id: &str,
     ) -> Option<usize> {
-        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
-        self.children.insert(anchor_idx, child);
-        Some(anchor_idx)
+        crate::core::renderable::adopt_child_before(self.num, &mut self.children, child, anchor_id)
     }
 
     fn num(&self) -> u64 {
@@ -120,6 +116,10 @@ impl Renderable for ScrollBoxRenderable {
         self.parent_num
     }
 
+    fn set_parent_num(&mut self, parent_num: Option<u64>) {
+        self.parent_num = parent_num;
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -131,6 +131,30 @@ impl Renderable for ScrollBoxRenderable {
     fn children(&self) -> &[Box<dyn Renderable>] {
         &self.children
     }
+
+    fn children_mut(&mut self) -> &mut [Box<dyn Renderable>] {
+        &mut self.children
+    }
+
+    fn layout_node(&self) -> Option<taffy::NodeId> {
+        None
+    }
+
+    fn set_layout_node(&mut self, _node: Option<taffy::NodeId>) {}
+
+    fn build_style(&self) -> Option<taffy::Style> {
+        Some(taffy::Style {
+            display: taffy::Display::Flex,
+            flex_direction: taffy::FlexDirection::Column,
+            overflow: taffy::Point {
+                x: taffy::Overflow::Scroll,
+                y: taffy::Overflow::Scroll,
+            },
+            ..taffy::Style::default()
+        })
+    }
+
+    fn apply_layout(&mut self, _layout: &taffy::Layout) {}
 
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         let _ = (buf, area);

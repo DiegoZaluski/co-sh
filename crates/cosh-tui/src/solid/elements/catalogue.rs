@@ -83,6 +83,9 @@ impl Renderable for SpanRenderable {
     fn parent_num(&self) -> Option<u64> {
         self.parent_num
     }
+    fn set_parent_num(&mut self, parent_num: Option<u64>) {
+        self.parent_num = parent_num;
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -93,9 +96,7 @@ impl Renderable for SpanRenderable {
         &self.children
     }
     fn add_child(&mut self, child: Box<dyn Renderable>) -> usize {
-        let idx = self.children.len();
-        self.children.push(child);
-        idx
+        crate::core::renderable::adopt_child(self.num, &mut self.children, child)
     }
     fn remove_child(&mut self, id: &str) {
         self.children.retain(|child| child.id() != id);
@@ -105,12 +106,7 @@ impl Renderable for SpanRenderable {
         child: Box<dyn Renderable>,
         anchor_id: &str,
     ) -> Option<usize> {
-        let anchor_idx = self
-            .children
-            .iter()
-            .position(|existing| existing.id() == anchor_id)?;
-        self.children.insert(anchor_idx, child);
-        Some(anchor_idx)
+        crate::core::renderable::adopt_child_before(self.num, &mut self.children, child, anchor_id)
     }
 
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
@@ -208,6 +204,9 @@ impl Renderable for LineBreakRenderable {
     fn parent_num(&self) -> Option<u64> {
         self.parent_num
     }
+    fn set_parent_num(&mut self, parent_num: Option<u64>) {
+        self.parent_num = parent_num;
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -218,9 +217,7 @@ impl Renderable for LineBreakRenderable {
         &self.children
     }
     fn add_child(&mut self, child: Box<dyn Renderable>) -> usize {
-        let idx = self.children.len();
-        self.children.push(child);
-        idx
+        crate::core::renderable::adopt_child(self.num, &mut self.children, child)
     }
     fn remove_child(&mut self, id: &str) {
         self.children.retain(|child| child.id() != id);
@@ -230,12 +227,7 @@ impl Renderable for LineBreakRenderable {
         child: Box<dyn Renderable>,
         anchor_id: &str,
     ) -> Option<usize> {
-        let anchor_idx = self
-            .children
-            .iter()
-            .position(|existing| existing.id() == anchor_id)?;
-        self.children.insert(anchor_idx, child);
-        Some(anchor_idx)
+        crate::core::renderable::adopt_child_before(self.num, &mut self.children, child, anchor_id)
     }
 
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
@@ -281,6 +273,9 @@ impl Renderable for LinkRenderable {
     }
     fn parent_num(&self) -> Option<u64> {
         self.inner.parent_num()
+    }
+    fn set_parent_num(&mut self, parent_num: Option<u64>) {
+        self.inner.set_parent_num(parent_num);
     }
     fn as_any(&self) -> &dyn Any {
         self

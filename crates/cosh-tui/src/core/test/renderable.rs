@@ -47,6 +47,14 @@ fn test_root_renderable_add_child() {
 }
 
 #[test]
+fn test_root_renderable_add_child_sets_parent_num() {
+    let mut root = RootRenderable::new();
+    let parent_num = root.num();
+    root.add_child(Box::new(RootRenderable::new()));
+    assert_eq!(root.children()[0].parent_num(), Some(parent_num));
+}
+
+#[test]
 fn test_root_renderable_add_children() {
     let mut root = RootRenderable::new();
     root.add_child(Box::new(RootRenderable::new()));
@@ -75,6 +83,18 @@ fn test_root_renderable_insert_child_before() {
     let result = root.insert_child_before(Box::new(RootRenderable::new()), "__root__");
     assert!(result.is_some());
     assert_eq!(root.children().len(), 2);
+}
+
+#[test]
+fn test_root_renderable_insert_child_before_sets_parent_num() {
+    let mut root = RootRenderable::new();
+    root.add_child(Box::new(RootRenderable::new()));
+    let parent_num = root.num();
+
+    let result = root.insert_child_before(Box::new(RootRenderable::new()), "__root__");
+
+    assert_eq!(result, Some(0));
+    assert_eq!(root.children()[0].parent_num(), Some(parent_num));
 }
 
 #[test]

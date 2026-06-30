@@ -52,6 +52,16 @@ fn test_box_border_operations() {
 }
 
 #[test]
+fn test_box_add_child_sets_parent_num() {
+    let mut b = BoxRenderable::new();
+    let parent_num = b.num();
+
+    b.add_child(Box::new(BoxRenderable::new()));
+
+    assert_eq!(b.children()[0].parent_num(), Some(parent_num));
+}
+
+#[test]
 fn test_box_title_operations() {
     let mut b = BoxRenderable::new();
     b.set_title(Some("Hello".into()));

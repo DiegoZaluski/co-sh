@@ -578,7 +578,8 @@ impl TerminalPalette {
         let timeout = opts.timeout_ms;
         let size = opts.size;
 
-        let supported = self.detect_osc_support(timeout)?;
+        let osc_check_timeout = std::cmp::min(timeout, 300);
+        let supported = self.detect_osc_support(osc_check_timeout)?;
 
         if !supported {
             return Ok(TerminalColors {

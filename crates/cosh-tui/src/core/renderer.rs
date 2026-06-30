@@ -4,6 +4,7 @@ use ratatui::Terminal;
 use ratatui::layout::Rect;
 use ratatui::prelude::Backend;
 
+use crate::core::layout::LayoutTree;
 use crate::core::renderable::{Renderable, RootRenderable};
 use crate::core::rgba::ColorInput;
 
@@ -92,6 +93,7 @@ pub struct Renderer<B: Backend> {
     terminal: Terminal<B>,
     config: RendererConfig,
     root: RootRenderable,
+    layout_tree: LayoutTree,
     frame_count: u64,
     destroyed: bool,
 }
@@ -102,6 +104,7 @@ impl<B: Backend> Renderer<B> {
             terminal,
             config,
             root: RootRenderable::new(),
+            layout_tree: LayoutTree::new(),
             frame_count: 0,
             destroyed: false,
         }
@@ -123,8 +126,47 @@ impl<B: Backend> Renderer<B> {
         self.frame_count
     }
 
+    pub fn layout(&mut self, width: f32, height: f32) {
+        self.layout_tree = LayoutTree::new();
+
+        let root_style = self.root.build_style().unwrap_or_default();
+        let root_id = self.layout_tree.new_leaf(root_style);
+        self.root.set_layout_node(Some(root_id));
+
+        fn build_tree(
+            lt: &mut LayoutTree,
+            node: &mut dyn Renderable,
+            parent_id: taffy::NodeId,
+        ) {
+            for child in node.children_mut().iter_mut() {
+                let style = child.build_style().unwrap_or_default();
+                let child_id = lt.new_leaf(style);
+                child.set_layout_node(Some(child_id));
+                lt.add_child(parent_id, child_id);
+                build_tree(lt, child.as_mut(), child_id);
+            }
+        }
+
+        build_tree(&mut self.layout_tree, &mut self.root, root_id);
+        self.layout_tree.compute_layout(width, height);
+
+        fn apply_lt(lt: &LayoutTree, node: &mut dyn Renderable) {
+            if let Some(nid) = node.layout_node() {
+                let layout = lt.layout(nid);
+                node.apply_layout(layout);
+            }
+            for child in node.children_mut().iter_mut() {
+                apply_lt(lt, child.as_mut());
+            }
+        }
+
+        apply_lt(&self.layout_tree, &mut self.root);
+    }
+
     #[allow(clippy::missing_errors_doc)]
     pub fn render_frame(&mut self, _delta_time: f64) -> Result<(), B::Error> {
+        let area = self.terminal.size()?;
+        self.layout(area.width as f32, area.height as f32);
         self.terminal.draw(|frame| {
             let area = frame.area();
             let buf = frame.buffer_mut();

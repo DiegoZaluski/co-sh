@@ -186,14 +186,18 @@ impl SelectRenderable {
     }
 
     fn update_scroll_offset(&mut self) {
+        self.scroll_offset = self.scroll_offset_for(self.max_visible_items);
+    }
+
+    fn scroll_offset_for(&self, max_visible_items: usize) -> usize {
         if self.options.is_empty() {
-            self.scroll_offset = 0;
-            return;
+            return 0;
         }
-        let half_visible = self.max_visible_items.saturating_sub(1) / 2;
-        let max_scroll = self.options.len().saturating_sub(self.max_visible_items);
+        let max_visible_items = max_visible_items.max(1);
+        let half_visible = max_visible_items / 2;
+        let max_scroll = self.options.len().saturating_sub(max_visible_items);
         let target = self.selected_index.saturating_sub(half_visible);
-        self.scroll_offset = target.min(max_scroll);
+        target.min(max_scroll)
     }
 }
 
@@ -209,9 +213,7 @@ impl Renderable for SelectRenderable {
     }
 
     fn add_child(&mut self, child: Box<dyn crate::core::renderable::Renderable>) -> usize {
-        let idx = self.children.len();
-        self.children.push(child);
-        idx
+        crate::core::renderable::adopt_child(self.num, &mut self.children, child)
     }
     fn remove_child(&mut self, id: &str) {
         self.children.retain(|c| c.id() != id);
@@ -221,9 +223,7 @@ impl Renderable for SelectRenderable {
         child: Box<dyn crate::core::renderable::Renderable>,
         anchor_id: &str,
     ) -> Option<usize> {
-        let anchor_idx = self.children.iter().position(|c| c.id() == anchor_id)?;
-        self.children.insert(anchor_idx, child);
-        Some(anchor_idx)
+        crate::core::renderable::adopt_child_before(self.num, &mut self.children, child, anchor_id)
     }
 
     fn num(&self) -> u64 {
@@ -246,6 +246,10 @@ impl Renderable for SelectRenderable {
         self.parent_num
     }
 
+    fn set_parent_num(&mut self, parent_num: Option<u64>) {
+        self.parent_num = parent_num;
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -266,8 +270,8 @@ impl Renderable for SelectRenderable {
         let max_visible = usize::from(area.height) / usize::from(self.lines_per_item());
         let max_visible = max_visible.max(1);
 
-        let visible_range =
-            self.scroll_offset..self.options.len().min(self.scroll_offset + max_visible);
+        let scroll_offset = self.scroll_offset_for(max_visible);
+        let visible_range = scroll_offset..self.options.len().min(scroll_offset + max_visible);
         let mut y = area.y;
 
         for i in visible_range {

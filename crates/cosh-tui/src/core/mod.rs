@@ -10,9 +10,10 @@ pub mod types;
 pub mod utils;
 
 pub use layout::LayoutTree;
-pub use lib::{border, rgba, terminal_palette};
+pub use lib::{border, detect_links, rgba, styled_text, terminal_palette};
 pub use renderables::{
-    r#box, input, scroll_bar, scroll_box, select, slider, tab_select, text, text_node, textarea,
+    ascii_font, r#box, code, diff, input, markdown, scroll_bar, scroll_box, select, slider,
+    tab_select, text, text_node, text_table, textarea,
 };
 
 #[cfg(test)]

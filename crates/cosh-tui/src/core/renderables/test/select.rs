@@ -1,5 +1,7 @@
 use crate::core::renderable::Renderable;
 use crate::core::renderables::select::{SelectOption, SelectRenderable};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 fn make_options(n: usize) -> Vec<SelectOption> {
     (0..n)
@@ -117,4 +119,21 @@ fn test_move_up_fast() {
 fn test_is_focusable() {
     let s = SelectRenderable::new();
     assert!(s.is_focusable());
+}
+
+#[test]
+fn test_render_keeps_selected_item_visible_in_small_area() {
+    let mut s = SelectRenderable::new();
+    s.set_show_description(false);
+    s.set_options(make_options(15));
+    s.set_selected_index(14);
+
+    let area = Rect::new(0, 0, 20, 1);
+    let mut buf = Buffer::empty(area);
+    s.render_self(&mut buf, area);
+
+    let rendered: String = (0..area.width)
+        .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+        .collect();
+    assert!(rendered.contains("▶ Option 14"));
 }

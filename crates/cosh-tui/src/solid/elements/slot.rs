@@ -50,6 +50,9 @@ impl Renderable for SlotBaseRenderable {
     fn parent_num(&self) -> Option<u64> {
         self.parent_num
     }
+    fn set_parent_num(&mut self, parent_num: Option<u64>) {
+        self.parent_num = parent_num;
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -152,6 +155,9 @@ impl Renderable for TextSlotRenderable {
     fn parent_num(&self) -> Option<u64> {
         self.base.parent_num()
     }
+    fn set_parent_num(&mut self, parent_num: Option<u64>) {
+        self.base.set_parent_num(parent_num);
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -247,6 +253,9 @@ impl Renderable for SlotRenderable {
     }
     fn parent_num(&self) -> Option<u64> {
         self.base.parent_num()
+    }
+    fn set_parent_num(&mut self, parent_num: Option<u64>) {
+        self.base.set_parent_num(parent_num);
     }
     fn as_any(&self) -> &dyn Any {
         self

@@ -250,6 +250,10 @@ pub fn normalize_color_value(value: Option<ColorInput>) -> Option<NormalizedColo
     })
 }
 
+fn is_valid_hex(s: &str) -> bool {
+    s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+}
+
 #[must_use]
 pub fn hex_to_rgb(hex: &str) -> RGBA {
     let hex = hex.trim_start_matches('#');
@@ -277,7 +281,7 @@ pub fn hex_to_rgb(hex: &str) -> RGBA {
         _ => hex.to_string(),
     };
 
-    if hex.len() != 6 && hex.len() != 8 {
+    if (hex.len() != 6 && hex.len() != 8) || !is_valid_hex(&hex) {
         return RGBA::from_values(1.0, 0.0, 1.0, 1.0);
     }
 

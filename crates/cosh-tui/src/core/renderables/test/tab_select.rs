@@ -1,5 +1,7 @@
 use crate::core::renderable::Renderable;
 use crate::core::renderables::tab_select::{TabSelectOption, TabSelectRenderable};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 fn make_options(n: usize) -> Vec<TabSelectOption> {
     (0..n)
@@ -88,4 +90,22 @@ fn test_set_tab_width() {
 fn test_is_focusable() {
     let t = TabSelectRenderable::new();
     assert!(t.is_focusable());
+}
+
+#[test]
+fn test_render_keeps_selected_tab_visible_in_small_area() {
+    let mut t = TabSelectRenderable::new();
+    t.set_show_description(false);
+    t.set_show_underline(false);
+    t.set_options(make_options(15));
+    t.set_selected_index(14);
+
+    let area = Rect::new(0, 0, 20, 1);
+    let mut buf = Buffer::empty(area);
+    t.render_self(&mut buf, area);
+
+    let rendered: String = (0..area.width)
+        .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+        .collect();
+    assert!(rendered.contains("Tab 14"));
 }

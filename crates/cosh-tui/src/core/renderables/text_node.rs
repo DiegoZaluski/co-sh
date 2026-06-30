@@ -1,14 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::core::lib::styled_text::{StyledText, TextChunk, UrlLink};
 use crate::core::rgba::{ColorInput, RGBA, parse_color};
-use crate::core::text::{StyledText, TextChunk};
 
 static NEXT_TEXT_NODE_NUM: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Debug, Clone)]
-pub struct UrlLink {
-    pub url: String,
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct TextNodeOptions {
@@ -191,6 +186,7 @@ impl TextNodeRenderable {
                         fg: current_style.fg,
                         bg: current_style.bg,
                         attributes: current_style.attributes,
+                        link: current_style.link.clone(),
                     });
                 }
                 TextNodeChild::Node(node) => {

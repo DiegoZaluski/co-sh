@@ -1,4 +1,9 @@
+pub mod ascii_font;
 pub mod r#box;
+pub mod code;
+pub mod diff;
+pub mod markdown;
+pub mod text_table;
 pub mod input;
 pub mod scroll_bar;
 pub mod scroll_box;

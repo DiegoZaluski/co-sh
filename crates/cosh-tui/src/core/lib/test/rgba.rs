@@ -44,9 +44,15 @@ fn test_from_hex_no_hash() {
 }
 
 #[test]
-fn test_from_hex_invalid_3char_parses_as_shorthand() {
+fn test_from_hex_invalid_3char_returns_magenta() {
     let c = RGBA::from_hex("xyz");
-    assert_eq!(c.to_ints(), (0, 0, 0, 255));
+    assert_eq!(c.to_ints(), (255, 0, 255, 255));
+}
+
+#[test]
+fn test_from_hex_invalid_6digit_non_hex_chars() {
+    let c = RGBA::from_hex("ZZZZZZ");
+    assert_eq!(c.to_ints(), (255, 0, 255, 255));
 }
 
 #[test]
