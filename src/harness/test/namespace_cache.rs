@@ -1,4 +1,4 @@
-use crate::namespace_cache::{CacheError, NamespaceCache, Verification};
+use super::super::namespace_cache::{CacheError, NamespaceCache, Verification};
 use std::error::Error;
 use tempfile::TempDir;
 

@@ -1,4 +1,4 @@
-use crate::harness::Harness;
+use super::super::core::Harness;
 use serde_json::json;
 
 fn make_harness() -> Harness {

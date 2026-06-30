@@ -1,4 +1,4 @@
-use crate::harness::Harness;
+use super::super::core::Harness;
 use cosh_sdk::extract_action::ToolCallData;
 use serde_json::json;
 

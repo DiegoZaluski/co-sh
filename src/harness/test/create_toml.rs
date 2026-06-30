@@ -1,4 +1,4 @@
-use crate::namespace_cache::NamespaceCache;
+use super::super::namespace_cache::NamespaceCache;
 
 #[test]
 fn create_toml() {

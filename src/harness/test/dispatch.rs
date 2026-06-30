@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::harness::{Harness, ServerSession};
+use super::super::core::{Harness, ServerSession};
 use cosh_sdk::extract_action::ToolCallData;
 use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;

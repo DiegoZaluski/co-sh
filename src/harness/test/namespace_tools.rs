@@ -1,5 +1,5 @@
-use crate::harness::{Harness, ServerSession};
-use crate::namespace_cache::CacheData;
+use super::super::core::{Harness, ServerSession};
+use super::super::namespace_cache::CacheData;
 use rmcp::model::Tool;
 use rmcp::service::{RoleClient, serve_directly};
 use rmcp::transport::async_rw::AsyncRwTransport;
