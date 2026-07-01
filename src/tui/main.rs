@@ -10,6 +10,7 @@ mod types;
 mod routes;
 mod component;
 mod ui;
+mod util;
 
 use app::App;
 

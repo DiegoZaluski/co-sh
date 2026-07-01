@@ -19,11 +19,11 @@
 - [x] main.rs
 
 ## Missing files
-- [ ] tool_render.rs
-- [ ] spinner.rs
-- [ ] toast.rs
-- [ ] scroll.rs
-- [ ] markdown.rs
+- [x] tool_render.rs
+- [x] spinner.rs
+- [x] toast.rs
+- [x] scroll.rs
+- [x] markdown.rs
 - [ ] command_palette.rs
 
 ## Missing features
