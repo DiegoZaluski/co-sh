@@ -65,10 +65,10 @@
 
 
 ### System
-- [ ] Toast notifications
-- [ ] Spinner component
-- [ ] Command palette
-- [ ] Dialog stack (replace/show/clear)
+- [x] Toast notifications (welcome toast, tick-based timeout, variant colors)
+- [x] Spinner component (braille spinner in ToolRenderState)
+- [x] Command palette (Ctrl+P overlay with filter/select)
+- [x] Dialog stack (push/pop/replace/clear, Alert + Confirm)
 
 
 ### Future 

@@ -18,7 +18,9 @@ use crate::routes::session::sidebar::SidebarView;
 use crate::routes::session::SessionView;
 use crate::state::AppState;
 use crate::theme::Theme;
+use crate::ui::command_palette::CommandPalette;
 use crate::ui::dialogs::DialogState;
+use crate::ui::toast::ToastState;
 
 fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
@@ -44,6 +46,8 @@ pub struct App {
     pub question_dialog: QuestionDialog,
     pub keymap: KeyMap,
     pub config: TuiConfig,
+    pub toast_state: ToastState,
+    pub command_palette: CommandPalette,
     pub should_quit: bool,
 }
 
@@ -63,8 +67,20 @@ impl App {
             question_dialog: QuestionDialog::new(),
             keymap: KeyMap::default_vim(),
             config: TuiConfig::default(),
+            toast_state: ToastState::new(),
+            command_palette: CommandPalette::new(),
             should_quit: false,
         }
+    }
+
+    pub fn show_welcome_toast(&mut self) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        self.toast_state.show(ToastOptions {
+            title: Some("cosh".to_string()),
+            message: "Welcome! Press Ctrl+P for commands.".to_string(),
+            variant: ToastVariant::Info,
+            duration_ms: 5000,
+        });
     }
 
     fn mode(&self) -> AppMode {
@@ -151,12 +167,16 @@ impl App {
         }
 
         FooterView::render(buf, Rect::new(main_area.x, footer_y, main_area.width, 1), &self.state, &self.theme);
+        self.toast_state.render(buf, area, &self.theme);
         self.dialog.render(buf, area, &self.theme);
         self.permission_dialog.render(buf, area, &self.theme);
         self.question_dialog.render(buf, area, &self.theme);
+        self.command_palette.render(buf, area, &self.theme);
     }
 
     fn handle_events(&mut self) -> io::Result<bool> {
+        self.toast_state.tick(50);
+
         if !event::poll(Duration::from_millis(50))? {
             return Ok(false);
         }
@@ -199,8 +219,8 @@ impl App {
                                 self.question_dialog.visible = false;
                             } else if self.permission_dialog.visible {
                                 self.permission_dialog.visible = false;
-                            } else if self.dialog.visible {
-                                self.dialog.visible = false;
+                            } else if self.dialog.visible() {
+                                self.dialog.pop();
                             }
                         }
                         Some(crate::keymap::Action::ScrollToTop) => {
@@ -238,10 +258,24 @@ impl App {
                         Some(crate::keymap::Action::HistoryDown) => {
                             self.prompt_view.history_down();
                         }
+                        Some(crate::keymap::Action::ToggleCommandPalette) => {
+                            self.command_palette.toggle();
+                        }
                         Some(crate::keymap::Action::NextSession) => {}
                         Some(crate::keymap::Action::PrevSession) => {}
                         Some(crate::keymap::Action::FocusInput) | Some(crate::keymap::Action::Quit) => {}
                         None => {
+                            if self.command_palette.visible {
+                                match key.code {
+                                    KeyCode::Up => { self.command_palette.select_prev(); }
+                                    KeyCode::Down => { self.command_palette.select_next(); }
+                                    KeyCode::Backspace => { self.command_palette.pop_char(); }
+                                    KeyCode::Char(ch) => { self.command_palette.push_char(ch); }
+                                    KeyCode::Esc => { self.command_palette.visible = false; }
+                                    _ => {}
+                                }
+                                return Ok(false);
+                            }
                             match key.code {
                                 KeyCode::Up => {
                                     self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);

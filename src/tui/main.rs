@@ -16,6 +16,7 @@ use app::App;
 
 fn main() {
     let mut app = App::new();
+    app.show_welcome_toast();
     if let Err(e) = app.run() {
         eprintln!("Error: {e}");
     }

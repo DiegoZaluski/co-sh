@@ -25,6 +25,7 @@ pub enum Action {
     PrevAgent,
     HistoryUp,
     HistoryDown,
+    ToggleCommandPalette,
     NextSession,
     PrevSession,
 }
@@ -63,6 +64,7 @@ impl KeyMap {
                 (Action::ToggleToolDetails, KeyBinding { key: Char('d'), modifiers: KeyModifiers::CONTROL }),
                 (Action::ToggleGenericToolOutput, KeyBinding { key: Char('g'), modifiers: KeyModifiers::CONTROL }),
                 (Action::ToggleTimestamps, KeyBinding { key: Char('y'), modifiers: KeyModifiers::CONTROL }),
+                (Action::ToggleCommandPalette, KeyBinding { key: Char('p'), modifiers: KeyModifiers::CONTROL }),
                 (Action::Confirm, KeyBinding { key: Enter, modifiers: KeyModifiers::NONE }),
                 (Action::Cancel, KeyBinding { key: Esc, modifiers: KeyModifiers::NONE }),
                 (Action::Interrupt, KeyBinding { key: Esc, modifiers: KeyModifiers::NONE }),
