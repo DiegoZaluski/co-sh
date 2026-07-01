@@ -99,10 +99,7 @@ async fn maybe_make_executable(_path: &str) -> bool {
 ///
 /// Returns `Err` if the [`FsMetadata`] has inconsistent allowlist/blocklist entries,
 /// or a path is both blocked and allowed simultaneously.
-pub async fn write(
-    metadata: FsMetadata<'_>,
-    tg: FsWrite,
-) -> Result<Vec<WriteResult>, String> {
+pub async fn write(metadata: FsMetadata<'_>, tg: FsWrite) -> Result<Vec<WriteResult>, String> {
     let mut result: Vec<WriteResult> = vec![];
     let fs = DiskFilesystem::new();
     for target in &tg.targets {
@@ -123,7 +120,7 @@ pub async fn write(
             let res = WriteResult {
                 file_hash: String::new(),
                 header: String::new(),
-                path: target.path.to_string(),
+                path: target.path.clone(),
                 warnings: Some(warning),
             };
             result.push(res);
@@ -142,7 +139,7 @@ pub async fn write(
                     let res = WriteResult {
                         file_hash: String::new(),
                         header: String::new(),
-                        path: target.path.to_string(),
+                        path: target.path.clone(),
                         warnings: Some(warning),
                     };
                     result.push(res);
@@ -175,7 +172,7 @@ pub async fn write(
                 let res = WriteResult {
                     file_hash: hash,
                     header,
-                    path: target.path.to_string(),
+                    path: target.path.clone(),
                     warnings: if warnings.is_empty() {
                         None
                     } else {
@@ -197,7 +194,7 @@ pub async fn write(
                 let res = WriteResult {
                     file_hash: String::new(),
                     header: String::new(),
-                    path: target.path.to_string(),
+                    path: target.path.clone(),
                     warnings: Some(warning),
                 };
                 result.push(res);

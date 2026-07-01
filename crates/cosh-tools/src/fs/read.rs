@@ -50,21 +50,21 @@ async fn read_target(
         FsGuard::Allowed(validated_path) => {
             let path = validated_path.to_string_lossy().to_string();
             let target = Target {
-                path: path,
+                path,
                 line: target.line,
                 symbol: target.symbol,
             };
             read_target_impl(fs, target).await
         }
         FsGuard::Denied => vec![ReadResult {
-            path: target.path.to_string(),
+            path: target.path.clone(),
             file_hash: String::new(),
             header: String::new(),
             content: String::new(),
             warnings: Some(format!("read permission denied for `{}`", target.path)),
         }],
         FsGuard::Mismatch(msg) => vec![ReadResult {
-            path: target.path.to_string(),
+            path: target.path.clone(),
             file_hash: String::new(),
             header: String::new(),
             content: String::new(),
@@ -80,7 +80,7 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
 
     if Path::new(&target.path).is_dir() {
         return vec![ReadResult {
-            path: target.path.to_string(),
+            path: target.path.clone(),
             file_hash: String::new(),
             header: String::new(),
             content: String::new(),
@@ -100,7 +100,7 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
         Ok(t) => t,
         Err(e) => {
             return vec![ReadResult {
-                path: target.path.to_string(),
+                path: target.path.clone(),
                 file_hash: String::new(),
                 header: String::new(),
                 content: String::new(),
@@ -121,7 +121,7 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
             Ok(l) => l,
             Err(e) => {
                 return vec![ReadResult {
-                    path: target.path.to_string(),
+                    path: target.path.clone(),
                     file_hash: hash,
                     header,
                     content: body,
@@ -133,7 +133,7 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
             Some(span) => {
                 let block = extract_block(&body, span);
                 vec![ReadResult {
-                    path: target.path.to_string(),
+                    path: target.path.clone(),
                     file_hash: hash,
                     header,
                     content: block,
@@ -141,7 +141,7 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
                 }]
             }
             None => vec![ReadResult {
-                path: target.path.to_string(),
+                path: target.path.clone(),
                 file_hash: hash,
                 header,
                 content: body,
@@ -157,7 +157,7 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
         }
     } else {
         vec![ReadResult {
-            path: target.path.to_string(),
+            path: target.path.clone(),
             file_hash: hash,
             header: header.clone(),
             content: format!("{header}\n{body}"),

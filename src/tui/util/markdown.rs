@@ -1,16 +1,10 @@
+use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::markdown::MarkdownRenderable;
-use cosh_tui::core::lib::rgba::{RGBA, ColorInput};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-pub fn render_markdown(
-    buf: &mut Buffer,
-    area: Rect,
-    content: &str,
-    fg: RGBA,
-    bg: RGBA,
-) {
+pub fn render_markdown(buf: &mut Buffer, area: Rect, content: &str, fg: RGBA, bg: RGBA) {
     if content.is_empty() || area.width == 0 || area.height == 0 {
         return;
     }

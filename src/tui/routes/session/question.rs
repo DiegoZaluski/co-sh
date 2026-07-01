@@ -66,7 +66,14 @@ impl QuestionDialog {
         } else {
             &self.prompt
         };
-        draw_text_line(buf, display_prompt, dialog_x + 2, dialog_y + 1, dialog_w.saturating_sub(4), prompt_style);
+        draw_text_line(
+            buf,
+            display_prompt,
+            dialog_x + 2,
+            dialog_y + 1,
+            dialog_w.saturating_sub(4),
+            prompt_style,
+        );
 
         let input_display = if self.input.is_empty() {
             "Type your answer..."
@@ -83,9 +90,23 @@ impl QuestionDialog {
         input_bg.set_background_color(Some(theme.background_panel.into()));
         let input_area = Rect::new(dialog_x + 2, dialog_y + 3, dialog_w.saturating_sub(4), 1);
         input_bg.render_self(buf, input_area);
-        draw_text_line(buf, input_display, dialog_x + 3, dialog_y + 3, dialog_w.saturating_sub(6), input_style);
+        draw_text_line(
+            buf,
+            input_display,
+            dialog_x + 3,
+            dialog_y + 3,
+            dialog_w.saturating_sub(6),
+            input_style,
+        );
 
         let hint = "Enter submit  Esc cancel";
-        draw_text_line(buf, hint, dialog_x + 2, dialog_y + dialog_h - 1, dialog_w.saturating_sub(2), Style::default().fg(rgba_color(theme.text_muted)));
+        draw_text_line(
+            buf,
+            hint,
+            dialog_x + 2,
+            dialog_y + dialog_h - 1,
+            dialog_w.saturating_sub(2),
+            Style::default().fg(rgba_color(theme.text_muted)),
+        );
     }
 }

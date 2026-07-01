@@ -94,12 +94,15 @@ async fn write_reports_empty_text_inline_and_skips_file() {
     let path = "/home/inky/cosh/cosh_test_empty.txt";
     let _ = std::fs::remove_file(path);
 
-    let result = write(meta(), FsWrite {
-        targets: vec![TargetFile {
-            path: path.to_string(),
-            text: "".to_string(),
-        }],
-    })
+    let result = write(
+        meta(),
+        FsWrite {
+            targets: vec![TargetFile {
+                path: path.to_string(),
+                text: "".to_string(),
+            }],
+        },
+    )
     .await;
     assert!(result.is_ok());
     let results = result.unwrap();

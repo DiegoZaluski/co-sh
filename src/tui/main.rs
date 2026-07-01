@@ -2,13 +2,13 @@
 #![allow(dead_code)]
 
 mod app;
+mod component;
 mod config;
 mod keymap;
+mod routes;
 mod state;
 mod theme;
 mod types;
-mod routes;
-mod component;
 mod ui;
 mod util;
 

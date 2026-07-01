@@ -2,20 +2,20 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::Terminal;
 
 use crate::component::prompt::PromptView;
 use crate::config::TuiConfig;
 use crate::keymap::KeyMap;
 use crate::routes::home::HomeView;
+use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::sidebar::SidebarView;
-use crate::routes::session::SessionView;
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::ui::command_palette::CommandPalette;
@@ -130,28 +130,45 @@ impl App {
             }
         }
 
-        let sidebar_w = if self.sidebar.open {
-            SIDEBAR_WIDTH
-        } else {
-            0
-        };
+        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
 
-        let main_area = Rect::new(area.x + sidebar_w, area.y, area.width.saturating_sub(sidebar_w), area.height);
+        let main_area = Rect::new(
+            area.x + sidebar_w,
+            area.y,
+            area.width.saturating_sub(sidebar_w),
+            area.height,
+        );
 
         if self.sidebar.open {
-            self.sidebar.render(buf, Rect::new(area.x, area.y, sidebar_w, area.height), &self.state, &self.theme);
+            self.sidebar.render(
+                buf,
+                Rect::new(area.x, area.y, sidebar_w, area.height),
+                &self.state,
+                &self.theme,
+            );
         }
 
         let footer_y = main_area.bottom().saturating_sub(1);
         let prompt_h = if matches!(self.mode(), AppMode::Session) {
-            self.prompt_view.required_height(main_area.width.saturating_sub(4))
+            self.prompt_view
+                .required_height(main_area.width.saturating_sub(4))
         } else {
             0
         };
         let prompt_area_y = footer_y.saturating_sub(prompt_h);
-        let prompt_area = Rect::new(main_area.x + 2, prompt_area_y, main_area.width.saturating_sub(4), prompt_h);
+        let prompt_area = Rect::new(
+            main_area.x + 2,
+            prompt_area_y,
+            main_area.width.saturating_sub(4),
+            prompt_h,
+        );
         let session_bottom = prompt_area_y;
-        let session_area = Rect::new(main_area.x, area.y + 1, main_area.width, session_bottom.saturating_sub(area.y + 1));
+        let session_area = Rect::new(
+            main_area.x,
+            area.y + 1,
+            main_area.width,
+            session_bottom.saturating_sub(area.y + 1),
+        );
 
         match self.mode() {
             AppMode::Home => {
@@ -161,12 +178,25 @@ impl App {
                 self.session_view.tool_state.advance_spinner();
                 let unique_agents = self.state.unique_agents();
                 let agent_colors = crate::types::AgentColors::from_theme(&self.theme);
-                self.session_view.render(buf, session_area, &self.state, &self.theme, &self.config);
-                self.prompt_view.render(buf, prompt_area, &self.state, &self.theme, &agent_colors, &unique_agents);
+                self.session_view
+                    .render(buf, session_area, &self.state, &self.theme, &self.config);
+                self.prompt_view.render(
+                    buf,
+                    prompt_area,
+                    &self.state,
+                    &self.theme,
+                    &agent_colors,
+                    &unique_agents,
+                );
             }
         }
 
-        FooterView::render(buf, Rect::new(main_area.x, footer_y, main_area.width, 1), &self.state, &self.theme);
+        FooterView::render(
+            buf,
+            Rect::new(main_area.x, footer_y, main_area.width, 1),
+            &self.state,
+            &self.theme,
+        );
         self.toast_state.render(buf, area, &self.theme);
         self.dialog.render(buf, area, &self.theme);
         self.permission_dialog.render(buf, area, &self.theme);
@@ -174,6 +204,7 @@ impl App {
         self.command_palette.render(buf, area, &self.theme);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_events(&mut self) -> io::Result<bool> {
         self.toast_state.tick(50);
 
@@ -184,7 +215,9 @@ impl App {
         match event::read()? {
             Event::Key(key) => {
                 if key.kind == KeyEventKind::Press {
-                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
                         self.should_quit = true;
                         return Ok(false);
                     }
@@ -207,14 +240,22 @@ impl App {
                         Some(crate::keymap::Action::ToggleSidebar) => {
                             self.sidebar.open = !self.sidebar.open;
                         }
-                        Some(crate::keymap::Action::ToggleHelp) => {
+                        Some(
+                            crate::keymap::Action::ToggleHelp
+                            | crate::keymap::Action::NextSession
+                            | crate::keymap::Action::PrevSession
+                            | crate::keymap::Action::FocusInput
+                            | crate::keymap::Action::Quit,
+                        ) => {
                             // TBD: help overlay
                         }
-                        Some(crate::keymap::Action::SendMessage) | Some(crate::keymap::Action::Confirm) => {
+                        Some(
+                            crate::keymap::Action::SendMessage | crate::keymap::Action::Confirm,
+                        ) => {
                             let _msg = self.prompt_view.send_message();
                             // TODO: actually send msg to session
                         }
-                        Some(crate::keymap::Action::Cancel) | Some(crate::keymap::Action::Interrupt) => {
+                        Some(crate::keymap::Action::Cancel | crate::keymap::Action::Interrupt) => {
                             if self.question_dialog.visible {
                                 self.question_dialog.visible = false;
                             } else if self.permission_dialog.visible {
@@ -239,7 +280,8 @@ impl App {
                             self.config.show_tool_details = !self.config.show_tool_details;
                         }
                         Some(crate::keymap::Action::ToggleGenericToolOutput) => {
-                            self.config.show_generic_tool_output = !self.config.show_generic_tool_output;
+                            self.config.show_generic_tool_output =
+                                !self.config.show_generic_tool_output;
                         }
                         Some(crate::keymap::Action::ToggleTimestamps) => {
                             self.config.show_timestamps = !self.config.show_timestamps;
@@ -261,33 +303,44 @@ impl App {
                         Some(crate::keymap::Action::ToggleCommandPalette) => {
                             self.command_palette.toggle();
                         }
-                        Some(crate::keymap::Action::NextSession) => {}
-                        Some(crate::keymap::Action::PrevSession) => {}
-                        Some(crate::keymap::Action::FocusInput) | Some(crate::keymap::Action::Quit) => {}
                         None => {
                             if self.command_palette.visible {
                                 match key.code {
-                                    KeyCode::Up => { self.command_palette.select_prev(); }
-                                    KeyCode::Down => { self.command_palette.select_next(); }
-                                    KeyCode::Backspace => { self.command_palette.pop_char(); }
-                                    KeyCode::Char(ch) => { self.command_palette.push_char(ch); }
-                                    KeyCode::Esc => { self.command_palette.visible = false; }
+                                    KeyCode::Up => {
+                                        self.command_palette.select_prev();
+                                    }
+                                    KeyCode::Down => {
+                                        self.command_palette.select_next();
+                                    }
+                                    KeyCode::Backspace => {
+                                        self.command_palette.pop_char();
+                                    }
+                                    KeyCode::Char(ch) => {
+                                        self.command_palette.push_char(ch);
+                                    }
+                                    KeyCode::Esc => {
+                                        self.command_palette.visible = false;
+                                    }
                                     _ => {}
                                 }
                                 return Ok(false);
                             }
                             match key.code {
                                 KeyCode::Up => {
-                                    self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
+                                    self.session_view.scroll_y =
+                                        (self.session_view.scroll_y - 3).max(0);
                                 }
                                 KeyCode::Down => {
-                                    self.session_view.scroll_y = (self.session_view.scroll_y + 3).max(0);
+                                    self.session_view.scroll_y =
+                                        (self.session_view.scroll_y + 3).max(0);
                                 }
                                 KeyCode::PageUp => {
-                                    self.session_view.scroll_y = (self.session_view.scroll_y - 10).max(0);
+                                    self.session_view.scroll_y =
+                                        (self.session_view.scroll_y - 10).max(0);
                                 }
                                 KeyCode::PageDown => {
-                                    self.session_view.scroll_y = (self.session_view.scroll_y + 10).max(0);
+                                    self.session_view.scroll_y =
+                                        (self.session_view.scroll_y + 10).max(0);
                                 }
                                 KeyCode::Backspace => {
                                     let pos = self.prompt_view.cursor_pos;

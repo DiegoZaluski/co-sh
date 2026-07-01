@@ -1,4 +1,7 @@
-use crate::types::*;
+use crate::types::{
+    FilePart, Message, MessageRole, Part, ReasoningPart, Session, SessionStatus, TextPart,
+    ToolPart, ToolStatus,
+};
 
 pub struct AppState {
     pub sessions: Vec<Session>,
@@ -46,8 +49,9 @@ impl AppState {
         if let Some(session) = self.current_session() {
             for msg in &session.messages {
                 if let Some(agent) = &msg.agent
-                    && !seen.contains(agent) {
-                        seen.push(agent.clone());
+                    && !seen.contains(agent)
+                {
+                    seen.push(agent.clone());
                 }
             }
         }
@@ -133,7 +137,7 @@ impl AppState {
                         Part::Tool(ToolPart {
                             tool: "grep".to_string(),
                             input: serde_json::json!({"pattern": "serde|clap|json", "path": "Cargo.toml"}),
-                            output: Some("".to_string()),
+                            output: Some(String::new()),
                             status: ToolStatus::Completed,
                             tool_call_id: Some("grep-1".to_string()),
                             is_start: false,
@@ -218,7 +222,7 @@ impl AppState {
                         Part::Tool(ToolPart {
                             tool: "edit".to_string(),
                             input: serde_json::json!({"filePath": "src/main.rs", "oldString": "fn main() {\n    let args = Args::parse();\n    let content = std::fs::read_to_string(&args.file).unwrap();\n    let json: Value = serde_json::from_str(&content).unwrap();\n    if args.pretty {\n        println!(\"{}\", serde_json::to_string_pretty(&json).unwrap());\n    } else {\n        println!(\"{}\", content);\n    }\n}", "newString": "fn main() {\n    let args = Args::parse();\n    let content = std::fs::read_to_string(&args.file)\n        .expect(\"failed to read input file\");\n    let json: Value = serde_json::from_str(&content)\n        .expect(\"input is not valid JSON\");\n    if args.pretty {\n        println!(\"{}\", serde_json::to_string_pretty(&json).unwrap());\n    } else {\n        println!(\"{}\", content);\n    }\n}"}),
-                            output: Some("".to_string()),
+                            output: Some(String::new()),
                             status: ToolStatus::Completed,
                             tool_call_id: Some("edit-2".to_string()),
                             is_start: false,

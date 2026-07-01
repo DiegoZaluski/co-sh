@@ -34,6 +34,7 @@ fn lang_from_name(name: &str) -> Option<Language> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn query_for_language(lang: &str) -> Option<&'static str> {
     Some(match lang {
         "rust" | "rs" => {
@@ -85,7 +86,7 @@ fn query_for_language(lang: &str) -> Option<&'static str> {
              (super) @keyword
              (crate) @keyword"
         }
-         "python" | "py" => {
+        "python" | "py" => {
             "\"def\" @keyword
              \"class\" @keyword
              \"return\" @keyword
@@ -163,13 +164,8 @@ fn query_for_language(lang: &str) -> Option<&'static str> {
              (function_declaration name: (identifier) @function)
              (call_expression function: (identifier) @function)"
         }
-        "c#" | "csharp" | "cs"
-        | "go"
-        | "java"
-        | "haskell" | "hs" | "lhs"
-        | "swift"
-        | "zig" | "zon"
-        | "kotlin" | "kt" | "kts" => {
+        "c#" | "csharp" | "cs" | "go" | "java" | "haskell" | "hs" | "lhs" | "swift" | "zig"
+        | "zon" | "kotlin" | "kt" | "kts" => {
             "(string_literal) @string
              (comment) @comment
              (type_identifier) @type
@@ -210,7 +206,11 @@ pub fn highlight(source: &str, lang: &str) -> Option<Vec<HighlightSpan>> {
                 "builtin" => HighlightCategory::Builtin,
                 _ => continue,
             };
-            spans.push(HighlightSpan { start: range.start, end: range.end, category });
+            spans.push(HighlightSpan {
+                start: range.start,
+                end: range.end,
+                category,
+            });
         }
     }
 
@@ -230,11 +230,14 @@ mod tests {
         let spans = result.unwrap();
         println!("Rust spans: {:?}", spans);
         assert!(!spans.is_empty(), "should have at least one span");
-        
+
         // Check for keyword spans (fn, let)
-        let keywords: Vec<_> = spans.iter().filter(|s| s.category == HighlightCategory::Keyword).collect();
+        let keywords: Vec<_> = spans
+            .iter()
+            .filter(|s| s.category == HighlightCategory::Keyword)
+            .collect();
         assert!(!keywords.is_empty(), "should find keywords like fn and let");
-        
+
         // Check that span positions are valid
         for span in &spans {
             assert!(span.start < span.end, "span start < end");
@@ -256,7 +259,10 @@ mod tests {
     fn test_highlight_javascript() {
         let source = "function hello() {\n    const x = 1;\n    return x;\n}\n";
         let result = highlight(source, "javascript");
-        assert!(result.is_some(), "highlight should return Some for javascript");
+        assert!(
+            result.is_some(),
+            "highlight should return Some for javascript"
+        );
         let spans = result.unwrap();
         println!("JS spans: {:?}", spans);
         assert!(!spans.is_empty(), "should have at least one span");
@@ -266,14 +272,20 @@ mod tests {
     fn test_highlight_unknown_lang() {
         let source = "some text";
         let result = highlight(source, "unknown_lang");
-        assert!(result.is_none(), "highlight should return None for unknown lang");
+        assert!(
+            result.is_none(),
+            "highlight should return None for unknown lang"
+        );
     }
 
     #[test]
     fn test_highlight_empty_lang() {
         let source = "some text";
         let result = highlight(source, "");
-        assert!(result.is_none(), "highlight should return None for empty lang");
+        assert!(
+            result.is_none(),
+            "highlight should return None for empty lang"
+        );
     }
 
     #[test]
@@ -282,13 +294,17 @@ mod tests {
         let source = "fn main() {}";
         let result = highlight(source, "rust");
         assert!(result.is_some(), "highlight should return Some for 'rust'");
-        
+
         let result2 = highlight(source, " rust");
-        assert!(result2.is_none(), "highlight should return None for ' rust' (leading space)");
-        
+        assert!(
+            result2.is_none(),
+            "highlight should return None for ' rust' (leading space)"
+        );
+
         let result3 = highlight(source, "rust ");
-        assert!(result3.is_none(), "highlight should return None for 'rust ' (trailing space)");
+        assert!(
+            result3.is_none(),
+            "highlight should return None for 'rust ' (trailing space)"
+        );
     }
-
-
 }

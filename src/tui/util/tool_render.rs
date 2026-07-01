@@ -2,18 +2,19 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
-use cosh_sdk::tree_sitter::highlight::{highlight, HighlightCategory};
+use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
+use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::diff::DiffRenderable;
-use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 
-use crate::theme::Theme;
-use crate::types::*;
 use crate::component::spinner::SpinnerState;
+use crate::theme::Theme;
+use crate::types::{ToolPart, ToolStatus};
 
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
@@ -69,6 +70,7 @@ fn code_highlight_style(cat: Option<HighlightCategory>, default_fg: Color) -> St
     Style::default().fg(fg)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_highlighted_code(
     buf: &mut Buffer,
     x: u16,
@@ -93,8 +95,8 @@ fn draw_highlighted_code(
 
     if let Some(ref spans) = spans {
         for span in spans {
-            for i in span.start..span.end.min(content.len()) {
-                cat_map[i] = Some(span.category);
+            for item in &mut cat_map[span.start..span.end.min(content.len())] {
+                *item = Some(span.category);
             }
         }
     }
@@ -111,8 +113,7 @@ fn draw_highlighted_code(
             y_pos += 1;
         }
 
-        let mut x_pos = x;
-        for (ci, ch) in line.char_indices() {
+        for (x_pos, (ci, ch)) in (x..).zip(line.char_indices()) {
             if x_pos >= x + max_w {
                 break;
             }
@@ -123,7 +124,6 @@ fn draw_highlighted_code(
                 cell.set_char(ch);
                 cell.set_style(style);
             }
-            x_pos += 1;
         }
         byte_offset += line.len() + 1;
         lines_drawn += 1;
@@ -143,6 +143,7 @@ fn pad_right(text: &str, width: usize) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn render_inline_tool(
     buf: &mut Buffer,
     x: u16,
@@ -162,7 +163,14 @@ fn render_inline_tool(
     let icon_style = Style::default().fg(rgba_color(fg));
 
     if let Some(spinner) = spinner {
-        draw_text_line(buf, &spinner.current_char().to_string(), x, y, 1, icon_style);
+        draw_text_line(
+            buf,
+            &spinner.current_char().to_string(),
+            x,
+            y,
+            1,
+            icon_style,
+        );
         draw_text_line(buf, " ", x + 1, y, 1, icon_style);
         let label_x = x + 2;
         draw_text_line(buf, text, label_x, y, max_w.saturating_sub(2), base_style);
@@ -217,12 +225,27 @@ impl Default for ToolRenderState {
 }
 
 const TOOL_DISPLAYS: &[&str] = &[
-    "bash", "glob", "read", "grep", "webfetch", "websearch",
-    "write", "edit", "task", "apply_patch", "todowrite", "question", "skill",
+    "bash",
+    "glob",
+    "read",
+    "grep",
+    "webfetch",
+    "websearch",
+    "write",
+    "edit",
+    "task",
+    "apply_patch",
+    "todowrite",
+    "question",
+    "skill",
 ];
 
 pub fn tool_display(tool: &str) -> &str {
-    if TOOL_DISPLAYS.contains(&tool) { tool } else { "generic" }
+    if TOOL_DISPLAYS.contains(&tool) {
+        tool
+    } else {
+        "generic"
+    }
 }
 
 pub fn web_search_provider_label(provider: Option<&str>) -> &str {
@@ -242,6 +265,7 @@ fn input_value(input: &serde_json::Value, key: &str) -> Option<String> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_shell(
     buf: &mut Buffer,
     x: u16,
@@ -258,24 +282,72 @@ pub fn render_shell(
     let is_running = matches!(part.status, ToolStatus::Running);
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
-    if !output.is_empty() {
+    if output.is_empty() {
+        let icon = "$";
+        let pending = "Writing command...";
+        let label = if is_completed { &command } else { pending };
+        let fg = if is_completed {
+            theme.text_muted
+        } else if is_running {
+            theme.text
+        } else {
+            theme.text_muted
+        };
+        *line_h = 1;
+        render_inline_tool(
+            buf,
+            x,
+            y,
+            max_w,
+            icon,
+            label,
+            fg,
+            None,
+            false,
+            false,
+            if is_running {
+                Some(&state.spinner)
+            } else {
+                None
+            },
+            false,
+            false,
+        );
+    } else {
         let expanded = state.is_expanded(id);
         let collapsed = crate::util::scroll::collapse_tool_output(&output, 10, 800);
-        let display = if expanded || !collapsed.overflow { &output } else { &collapsed.output };
+        let display = if expanded || !collapsed.overflow {
+            &output
+        } else {
+            &collapsed.output
+        };
 
         let title = format!("$ {command}");
-        let lines = display.lines().count() as u16 + if collapsed.overflow { 1 } else { 0 };
+        let lines = display.lines().count() as u16 + u16::from(collapsed.overflow);
         let area = Rect::new(x, y, max_w.saturating_add(3), lines + 2);
         *line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
         border_box.set_background_color(Some(theme.background_panel.into()));
         border_box.set_border_color(Some(theme.background.into()));
-        border_box.set_border_sides(BorderSidesConfig { left: true, top: false, right: false, bottom: false });
+        border_box.set_border_sides(BorderSidesConfig {
+            left: true,
+            top: false,
+            right: false,
+            bottom: false,
+        });
         border_box.set_custom_border_chars(BorderCharacters {
-            top_left: ' ', top_right: ' ', bottom_left: ' ', bottom_right: ' ',
-            horizontal: ' ', vertical: '┃', top_t: ' ', bottom_t: ' ',
-            left_t: '┃', right_t: ' ', cross: ' ',
+            top_left: ' ',
+            top_right: ' ',
+            bottom_left: ' ',
+            bottom_right: ' ',
+            horizontal: ' ',
+            vertical: '┃',
+            top_t: ' ',
+            bottom_t: ' ',
+            left_t: '┃',
+            right_t: ' ',
+            cross: ' ',
         });
         border_box.render_self(buf, area);
 
@@ -286,25 +358,31 @@ pub fn render_shell(
         let content_style = Style::default().fg(rgba_color(theme.text));
         for (i, line) in display.lines().enumerate() {
             let ly = y + 1 + i as u16;
-            if ly >= area.bottom() { break; }
+            if ly >= area.bottom() {
+                break;
+            }
             draw_text_line(buf, line, x_off, ly, max_w.saturating_sub(3), content_style);
         }
         if collapsed.overflow {
             let hint_y = y + 1 + display.lines().count() as u16;
-            let hint = if expanded { "Click to collapse" } else { "Click to expand" };
-            draw_text_line(buf, hint, x_off, hint_y, max_w.saturating_sub(3), Style::default().fg(rgba_color(theme.text_muted)));
+            let hint = if expanded {
+                "Click to collapse"
+            } else {
+                "Click to expand"
+            };
+            draw_text_line(
+                buf,
+                hint,
+                x_off,
+                hint_y,
+                max_w.saturating_sub(3),
+                Style::default().fg(rgba_color(theme.text_muted)),
+            );
         }
-    } else {
-        let icon = "$";
-        let pending = "Writing command...";
-        let label = if is_completed { &command } else { pending };
-        let fg = if is_completed { theme.text_muted } else if is_running { theme.text } else { theme.text_muted };
-        *line_h = 1;
-        render_inline_tool(buf, x, y, max_w, icon, label, fg, None, false, false,
-            if is_running { Some(&state.spinner) } else { None }, false, false);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_write(
     buf: &mut Buffer,
     x: u16,
@@ -328,11 +406,24 @@ pub fn render_write(
         let mut border_box = BoxRenderable::new();
         border_box.set_background_color(Some(theme.background_panel.into()));
         border_box.set_border_color(Some(theme.background.into()));
-        border_box.set_border_sides(BorderSidesConfig { left: true, top: false, right: false, bottom: false });
+        border_box.set_border_sides(BorderSidesConfig {
+            left: true,
+            top: false,
+            right: false,
+            bottom: false,
+        });
         border_box.set_custom_border_chars(BorderCharacters {
-            top_left: ' ', top_right: ' ', bottom_left: ' ', bottom_right: ' ',
-            horizontal: ' ', vertical: '┃', top_t: ' ', bottom_t: ' ',
-            left_t: '┃', right_t: ' ', cross: ' ',
+            top_left: ' ',
+            top_right: ' ',
+            bottom_left: ' ',
+            bottom_right: ' ',
+            horizontal: ' ',
+            vertical: '┃',
+            top_t: ' ',
+            bottom_t: ' ',
+            left_t: '┃',
+            right_t: ' ',
+            cross: ' ',
         });
         border_box.render_self(buf, area);
 
@@ -343,16 +434,32 @@ pub fn render_write(
         let max_w_inner = max_w.saturating_sub(3);
         let default_fg = rgba_color(theme.text);
         let lang = lang_name_from_path(&filepath);
-        draw_highlighted_code(buf, x + 3, y + 1, max_w_inner, &content, lang, default_fg, max_lines);
+        draw_highlighted_code(
+            buf,
+            x + 3,
+            y + 1,
+            max_w_inner,
+            &content,
+            lang,
+            default_fg,
+            max_lines,
+        );
     } else {
         let icon = "\u{2190}";
         let label = format!("Write {filepath}");
-        let fg = if is_completed { theme.text_muted } else { theme.text };
+        let fg = if is_completed {
+            theme.text_muted
+        } else {
+            theme.text
+        };
         *line_h = 1;
-        render_inline_tool(buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false);
+        render_inline_tool(
+            buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
+        );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_edit(
     buf: &mut Buffer,
     x: u16,
@@ -375,11 +482,24 @@ pub fn render_edit(
         let mut border_box = BoxRenderable::new();
         border_box.set_background_color(Some(theme.background_panel.into()));
         border_box.set_border_color(Some(theme.background.into()));
-        border_box.set_border_sides(BorderSidesConfig { left: true, top: false, right: false, bottom: false });
+        border_box.set_border_sides(BorderSidesConfig {
+            left: true,
+            top: false,
+            right: false,
+            bottom: false,
+        });
         border_box.set_custom_border_chars(BorderCharacters {
-            top_left: ' ', top_right: ' ', bottom_left: ' ', bottom_right: ' ',
-            horizontal: ' ', vertical: '┃', top_t: ' ', bottom_t: ' ',
-            left_t: '┃', right_t: ' ', cross: ' ',
+            top_left: ' ',
+            top_right: ' ',
+            bottom_left: ' ',
+            bottom_right: ' ',
+            horizontal: ' ',
+            vertical: '┃',
+            top_t: ' ',
+            bottom_t: ' ',
+            left_t: '┃',
+            right_t: ' ',
+            cross: ' ',
         });
         border_box.render_self(buf, area);
 
@@ -393,12 +513,19 @@ pub fn render_edit(
     } else {
         let icon = "\u{2190}";
         let label = format!("Edit {filepath}");
-        let fg = if is_completed { theme.text_muted } else { theme.text };
+        let fg = if is_completed {
+            theme.text_muted
+        } else {
+            theme.text
+        };
         *line_h = 1;
-        render_inline_tool(buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false);
+        render_inline_tool(
+            buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
+        );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_glob(
     buf: &mut Buffer,
     x: u16,
@@ -415,15 +542,22 @@ pub fn render_glob(
 
     let mut label = format!("Glob \"{pattern}\"");
     if let Some(p) = path {
-        label.push_str(&format!(" in {p}"));
+        let _ = write!(label, " in {p}");
     }
 
     let icon = "\u{2731}";
-    let fg = if is_completed { theme.text_muted } else { theme.text };
+    let fg = if is_completed {
+        theme.text_muted
+    } else {
+        theme.text
+    };
     *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false);
+    render_inline_tool(
+        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_read(
     buf: &mut Buffer,
     x: u16,
@@ -440,12 +574,34 @@ pub fn render_read(
 
     let icon = "\u{2192}";
     let label = format!("Read {filepath}");
-    let fg = if is_completed { theme.text_muted } else { theme.text };
+    let fg = if is_completed {
+        theme.text_muted
+    } else {
+        theme.text
+    };
     *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, icon, &label, fg, None, false, false,
-        if is_running { Some(&state.spinner) } else { None }, false, false);
+    render_inline_tool(
+        buf,
+        x,
+        y,
+        max_w,
+        icon,
+        &label,
+        fg,
+        None,
+        false,
+        false,
+        if is_running {
+            Some(&state.spinner)
+        } else {
+            None
+        },
+        false,
+        false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_grep(
     buf: &mut Buffer,
     x: u16,
@@ -462,15 +618,22 @@ pub fn render_grep(
 
     let mut label = format!("Grep \"{pattern}\"");
     if let Some(p) = path {
-        label.push_str(&format!(" in {p}"));
+        let _ = write!(label, " in {p}");
     }
 
     let icon = "\u{2731}";
-    let fg = if is_completed { theme.text_muted } else { theme.text };
+    let fg = if is_completed {
+        theme.text_muted
+    } else {
+        theme.text
+    };
     *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false);
+    render_inline_tool(
+        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_webfetch(
     buf: &mut Buffer,
     x: u16,
@@ -486,11 +649,18 @@ pub fn render_webfetch(
 
     let label = format!("WebFetch {url}");
     let icon = "%";
-    let fg = if is_completed { theme.text_muted } else { theme.text };
+    let fg = if is_completed {
+        theme.text_muted
+    } else {
+        theme.text
+    };
     *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false);
+    render_inline_tool(
+        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_websearch(
     buf: &mut Buffer,
     x: u16,
@@ -508,11 +678,18 @@ pub fn render_websearch(
     let provider_label = web_search_provider_label(provider.as_deref());
     let label = format!("{provider_label} \"{query}\"");
     let icon = "\u{25c8}";
-    let fg = if is_completed { theme.text_muted } else { theme.text };
+    let fg = if is_completed {
+        theme.text_muted
+    } else {
+        theme.text
+    };
     *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false);
+    render_inline_tool(
+        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_task(
     buf: &mut Buffer,
     x: u16,
@@ -534,12 +711,34 @@ pub fn render_task(
     };
 
     let icon = if is_completed { "\u{2713}" } else { "\u{2502}" };
-    let fg = if is_completed { theme.text_muted } else { theme.text };
+    let fg = if is_completed {
+        theme.text_muted
+    } else {
+        theme.text
+    };
     *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, icon, &content, fg, None, false, false,
-        if is_running && !is_completed { Some(&state.spinner) } else { None }, false, false);
+    render_inline_tool(
+        buf,
+        x,
+        y,
+        max_w,
+        icon,
+        &content,
+        fg,
+        None,
+        false,
+        false,
+        if is_running && !is_completed {
+            Some(&state.spinner)
+        } else {
+            None
+        },
+        false,
+        false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_question_tool(
     buf: &mut Buffer,
     x: u16,
@@ -554,11 +753,18 @@ pub fn render_question_tool(
 
     let label = "Asking questions...".to_string();
     let icon = "\u{2192}";
-    let fg = if is_completed { theme.text_muted } else { theme.text };
+    let fg = if is_completed {
+        theme.text_muted
+    } else {
+        theme.text
+    };
     *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false);
+    render_inline_tool(
+        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_generic(
     buf: &mut Buffer,
     x: u16,
@@ -573,16 +779,23 @@ pub fn render_generic(
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
     let label = if is_completed {
-        format!("{tool_name}")
+        tool_name.clone()
     } else {
         format!("Writing {tool_name}...")
     };
     let icon = "\u{2699}";
-    let fg = if is_completed { theme.text_muted } else { theme.text };
+    let fg = if is_completed {
+        theme.text_muted
+    } else {
+        theme.text
+    };
     *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false);
+    render_inline_tool(
+        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_tool(
     buf: &mut Buffer,
     x: u16,

@@ -378,7 +378,7 @@ impl Harness {
                 Item::ToolCall(tc) if !self.handle_internal_tool(&tc) => {
                     self.tool_issuer.push_back(tc);
                 }
-                _ => {}
+                Item::ToolCall(_) => {}
             }
         }
         output
@@ -538,7 +538,7 @@ impl Harness {
         let text = text.join("\n");
 
         let ts = chrono::Local::now().format("%H:%M:%S");
-        self.server_response.push(format!("[{}] {}", ts, text));
+        self.server_response.push(format!("[{ts}] {text}"));
 
         Ok(text) // !?!
     }

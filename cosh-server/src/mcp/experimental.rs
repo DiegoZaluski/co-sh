@@ -3,8 +3,8 @@
 //! Run with: `cargo run --bin cosh`
 
 use rmcp::{
-    handler::server::wrapper::Parameters, model::*, schemars, tool, tool_router,
-    ErrorData as McpError,
+    ErrorData as McpError, handler::server::wrapper::Parameters, model::*, schemars, tool,
+    tool_router,
 };
 
 /// Parameters for the vision_terminal tool.

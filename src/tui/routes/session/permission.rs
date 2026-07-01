@@ -58,29 +58,68 @@ impl PermissionDialog {
 
         if let Some(request) = &self.request {
             let title_style = Style::default().fg(rgba_color(theme.text));
-            draw_text_line(buf, &request.tool, dialog_x + 2, dialog_y + 1, dialog_w.saturating_sub(4), title_style);
+            draw_text_line(
+                buf,
+                &request.tool,
+                dialog_x + 2,
+                dialog_y + 1,
+                dialog_w.saturating_sub(4),
+                title_style,
+            );
 
             let desc_style = Style::default().fg(rgba_color(theme.text_muted));
-            draw_text_line(buf, &request.description, dialog_x + 2, dialog_y + 2, dialog_w.saturating_sub(4), desc_style);
+            draw_text_line(
+                buf,
+                &request.description,
+                dialog_x + 2,
+                dialog_y + 2,
+                dialog_w.saturating_sub(4),
+                desc_style,
+            );
 
             let args_style = Style::default().fg(rgba_color(theme.warning));
-            draw_text_line(buf, &request.args, dialog_x + 2, dialog_y + 3, dialog_w.saturating_sub(4), args_style);
+            draw_text_line(
+                buf,
+                &request.args,
+                dialog_x + 2,
+                dialog_y + 3,
+                dialog_w.saturating_sub(4),
+                args_style,
+            );
 
             let options = ["Allow", "Deny", "Allow Once"];
             for (i, opt) in options.iter().enumerate() {
                 let oy = dialog_y + 5 + i as u16;
-                let prefix = if i == self.selected { "\u{25b8} " } else { "  " };
-                let text = format!("{}{}", prefix, opt);
+                let prefix = if i == self.selected {
+                    "\u{25b8} "
+                } else {
+                    "  "
+                };
+                let text = format!("{prefix}{opt}");
                 let style = if i == self.selected {
                     Style::default().fg(rgba_color(theme.primary))
                 } else {
                     Style::default().fg(rgba_color(theme.text_muted))
                 };
-                draw_text_line(buf, &text, dialog_x + 3, oy, dialog_w.saturating_sub(6), style);
+                draw_text_line(
+                    buf,
+                    &text,
+                    dialog_x + 3,
+                    oy,
+                    dialog_w.saturating_sub(6),
+                    style,
+                );
             }
 
             let hint = "\u{2191}\u{2195} navigate  Enter confirm  Esc cancel";
-            draw_text_line(buf, hint, dialog_x + 2, dialog_y + dialog_h - 1, dialog_w.saturating_sub(2), Style::default().fg(rgba_color(theme.text_muted)));
+            draw_text_line(
+                buf,
+                hint,
+                dialog_x + 2,
+                dialog_y + dialog_h - 1,
+                dialog_w.saturating_sub(2),
+                Style::default().fg(rgba_color(theme.text_muted)),
+            );
         }
     }
 }

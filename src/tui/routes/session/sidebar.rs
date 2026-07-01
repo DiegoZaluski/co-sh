@@ -50,7 +50,14 @@ impl SidebarView {
         bg_box.render_self(buf, area);
 
         let header_style = Style::default().fg(rgba_color(theme.text_muted));
-        draw_text_line(buf, " Sessions", area.x + 1, area.y, area.width.saturating_sub(2), header_style);
+        draw_text_line(
+            buf,
+            " Sessions",
+            area.x + 1,
+            area.y,
+            area.width.saturating_sub(2),
+            header_style,
+        );
 
         let separator_style = Style::default().fg(rgba_color(theme.border));
         if let Some(cell) = buf.cell_mut((area.x + 1, area.y + 1)) {
@@ -72,7 +79,14 @@ impl SidebarView {
 
             let prefix = if is_active { "\u{25b8} " } else { "  " };
             let label = format!("{}{}", prefix, session.title);
-            draw_text_line(buf, &label, area.x + 1, y, area.width.saturating_sub(2), style);
+            draw_text_line(
+                buf,
+                &label,
+                area.x + 1,
+                y,
+                area.width.saturating_sub(2),
+                style,
+            );
         }
     }
 }

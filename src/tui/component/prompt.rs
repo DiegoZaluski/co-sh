@@ -8,7 +8,7 @@ use ratatui::style::{Color, Style};
 
 use crate::state::AppState;
 use crate::theme::Theme;
-use crate::types::*;
+use crate::types::AgentColors;
 
 const BASE_H: u16 = 2;
 const AGENT_H: u16 = 1;
@@ -86,11 +86,11 @@ impl PromptView {
             return;
         }
         if self.history_index == -1 {
-            self.history_index = self.history.len() as i32 - 1;
+            self.history_index = i32::try_from(self.history.len()).unwrap_or(i32::MAX) - 1;
         } else if self.history_index > 0 {
             self.history_index -= 1;
         }
-        self.input = self.history[self.history_index as usize].clone();
+        self.input = self.history[usize::try_from(self.history_index).unwrap_or(0)].clone();
         self.cursor_pos = self.input.len();
     }
 
@@ -99,22 +99,26 @@ impl PromptView {
             return;
         }
         self.history_index += 1;
-        if self.history_index >= self.history.len() as i32 {
+        if self.history_index >= i32::try_from(self.history.len()).unwrap_or(i32::MAX) {
             self.history_index = -1;
             self.input.clear();
         } else {
-            self.input = self.history[self.history_index as usize].clone();
+            self.input = self.history[usize::try_from(self.history_index).unwrap_or(0)].clone();
         }
         self.cursor_pos = self.input.len();
     }
 
     pub fn next_agent(&mut self, num_agents: usize) {
-        if num_agents == 0 { return; }
+        if num_agents == 0 {
+            return;
+        }
         self.selected_agent_index = (self.selected_agent_index + 1) % num_agents;
     }
 
     pub fn prev_agent(&mut self, num_agents: usize) {
-        if num_agents == 0 { return; }
+        if num_agents == 0 {
+            return;
+        }
         self.selected_agent_index = if self.selected_agent_index == 0 {
             num_agents - 1
         } else {
@@ -141,11 +145,7 @@ impl PromptView {
         let mut s = input;
         while !s.is_empty() {
             let line_len = s.chars().take(max_w).count();
-            let split = s
-                .char_indices()
-                .nth(line_len)
-                .map(|(i, _)| i)
-                .unwrap_or(s.len());
+            let split = s.char_indices().nth(line_len).map_or(s.len(), |(i, _)| i);
             lines.push(&s[..split]);
             s = &s[split..];
         }
@@ -185,7 +185,9 @@ impl PromptView {
         let agent_name = if unique_agents.is_empty() {
             "build".to_string()
         } else {
-            let idx = self.selected_agent_index.min(unique_agents.len().saturating_sub(1));
+            let idx = self
+                .selected_agent_index
+                .min(unique_agents.len().saturating_sub(1));
             unique_agents[idx].clone()
         };
 

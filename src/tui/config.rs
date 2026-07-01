@@ -1,3 +1,4 @@
+#[allow(clippy::struct_excessive_bools)]
 pub struct TuiConfig {
     pub scroll_acceleration: f64,
     pub show_scrollbar: bool,

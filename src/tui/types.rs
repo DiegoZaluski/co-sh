@@ -73,7 +73,10 @@ pub struct FilePart {
 pub enum SessionStatus {
     Idle,
     Working,
-    Retry { message: String, action: Option<serde_json::Value> },
+    Retry {
+        message: String,
+        action: Option<serde_json::Value>,
+    },
 }
 
 pub struct AgentColors {

@@ -63,18 +63,34 @@ impl HomeView {
 
         let tagline_y = logo_start_y + LOGO.len() as u16 + 1;
         let tagline_x = cx.saturating_sub(TAGLINE.len() as u16 / 2);
-        draw_text_line(buf, TAGLINE, tagline_x, tagline_y, area.width, Style::default().fg(muted));
+        draw_text_line(
+            buf,
+            TAGLINE,
+            tagline_x,
+            tagline_y,
+            area.width,
+            Style::default().fg(muted),
+        );
 
         if state.sessions.is_empty() {
             let prompt_y = tagline_y + 3;
             let prompt_header = "Try one of these:";
             let ph_x = cx.saturating_sub(prompt_header.len() as u16 / 2);
-            draw_text_line(buf, prompt_header, ph_x, prompt_y, area.width, Style::default().fg(muted));
+            draw_text_line(
+                buf,
+                prompt_header,
+                ph_x,
+                prompt_y,
+                area.width,
+                Style::default().fg(muted),
+            );
 
             for (i, prompt) in PLACEHOLDER_PROMPTS.iter().enumerate() {
                 let py = prompt_y + 2 + i as u16;
-                if py >= area.bottom() { break; }
-                let entry = format!("  \u{25b6}  {}", prompt);
+                if py >= area.bottom() {
+                    break;
+                }
+                let entry = format!("  \u{25b6}  {prompt}");
                 let ex = cx.saturating_sub(entry.len() as u16 / 2);
                 draw_text_line(buf, &entry, ex, py, area.width, Style::default().fg(text));
             }
@@ -82,15 +98,29 @@ impl HomeView {
             let recent_y = tagline_y + 2;
             let recent_label = "Recent Sessions";
             let rl_x = cx.saturating_sub(recent_label.len() as u16 / 2);
-            draw_text_line(buf, recent_label, rl_x, recent_y, area.width, Style::default().fg(muted));
+            draw_text_line(
+                buf,
+                recent_label,
+                rl_x,
+                recent_y,
+                area.width,
+                Style::default().fg(muted),
+            );
 
             for (i, session) in state.sessions.iter().enumerate() {
                 let sy = recent_y + 2 + i as u16;
-                if sy >= area.bottom() { break; }
+                if sy >= area.bottom() {
+                    break;
+                }
 
                 let is_active = Some(session.id.as_str()) == state.current_session_id.as_deref();
                 let marker = if is_active { "\u{25b8}" } else { " " };
-                let entry = format!(" {}  {} ({} msgs)", marker, session.title, session.messages.len());
+                let entry = format!(
+                    " {}  {} ({} msgs)",
+                    marker,
+                    session.title,
+                    session.messages.len()
+                );
                 let entry_style = if is_active {
                     Style::default().fg(primary)
                 } else {
@@ -103,6 +133,13 @@ impl HomeView {
 
         let key_hints = "n: new session  q: quit  ?: help";
         let hint_x = cx.saturating_sub(key_hints.len() as u16 / 2);
-        draw_text_line(buf, key_hints, hint_x, area.bottom().saturating_sub(2), area.width, Style::default().fg(muted));
+        draw_text_line(
+            buf,
+            key_hints,
+            hint_x,
+            area.bottom().saturating_sub(2),
+            area.width,
+            Style::default().fg(muted),
+        );
     }
 }

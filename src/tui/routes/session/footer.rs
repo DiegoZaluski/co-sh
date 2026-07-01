@@ -51,19 +51,37 @@ impl FooterView {
                 session.title,
                 session.messages.len()
             );
-            draw_text_line(buf, &left, area.x + 1, area.y, area.width.saturating_sub(2), muted);
+            draw_text_line(
+                buf,
+                &left,
+                area.x + 1,
+                area.y,
+                area.width.saturating_sub(2),
+                muted,
+            );
 
             let mut rx = area.right().saturating_sub(2);
 
-            let dir_str = format!(" {}", dir_display);
+            let dir_str = format!(" {dir_display}");
             rx = rx.saturating_sub(dir_str.len() as u16);
             draw_text_line(buf, &dir_str, rx, area.y, dir_str.len() as u16, muted);
 
-            let conn_indicator = if state.connected { "\u{25cf}" } else { "\u{25cb}" };
-            let conn_str = format!(" {}", conn_indicator);
+            let conn_indicator = if state.connected {
+                "\u{25cf}"
+            } else {
+                "\u{25cb}"
+            };
+            let conn_str = format!(" {conn_indicator}");
             rx = rx.saturating_sub(conn_str.len() as u16);
             let conn_style = if state.connected { success } else { warning };
-            draw_text_line(buf, &conn_str, rx, area.y, conn_str.len() as u16, conn_style);
+            draw_text_line(
+                buf,
+                &conn_str,
+                rx,
+                area.y,
+                conn_str.len() as u16,
+                conn_style,
+            );
 
             if state.permission_count > 0 {
                 let s = format!("  perm:{}", state.permission_count);
@@ -88,7 +106,14 @@ impl FooterView {
             }
         } else {
             let text = " \u{2302} Home";
-            draw_text_line(buf, text, area.x + 1, area.y, area.width.saturating_sub(2), muted);
+            draw_text_line(
+                buf,
+                text,
+                area.x + 1,
+                area.y,
+                area.width.saturating_sub(2),
+                muted,
+            );
         }
     }
 }

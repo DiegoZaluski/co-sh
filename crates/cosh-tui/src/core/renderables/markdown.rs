@@ -6,7 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use cosh_sdk::tree_sitter::highlight::{highlight, HighlightCategory};
+use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
 
 use crate::core::renderable::Renderable;
 use crate::core::rgba::{ColorInput, RGBA, parse_color};
@@ -226,9 +226,7 @@ impl Renderable for MarkdownRenderable {
                             for cx in area.x..max_x {
                                 if let Some(cell) = buf.cell_mut((cx, y)) {
                                     cell.set_style(
-                                        default_style
-                                            .bg(code_bg)
-                                            .add_modifier(Modifier::DIM),
+                                        default_style.bg(code_bg).add_modifier(Modifier::DIM),
                                     );
                                 }
                             }
@@ -327,8 +325,8 @@ impl Renderable for MarkdownRenderable {
                         let mut cat_map: Vec<Option<HighlightCategory>> = vec![None; text.len()];
                         if let Some(ref spans) = spans {
                             for span in spans {
-                                for i in span.start..span.end.min(text.len()) {
-                                    cat_map[i] = Some(span.category);
+                                for item in &mut cat_map[span.start..span.end.min(text.len())] {
+                                    *item = Some(span.category);
                                 }
                             }
                         }
@@ -344,9 +342,7 @@ impl Renderable for MarkdownRenderable {
                             for cx in area.x..max_x {
                                 if let Some(cell) = buf.cell_mut((cx, y)) {
                                     cell.set_style(
-                                        default_style
-                                            .bg(code_bg)
-                                            .add_modifier(Modifier::DIM),
+                                        default_style.bg(code_bg).add_modifier(Modifier::DIM),
                                     );
                                 }
                             }
@@ -486,10 +482,16 @@ mod tests {
         }
 
         let result = highlight(&code_text, &code_lang);
-        assert!(result.is_some(), "highlight should return Some for code block content");
+        assert!(
+            result.is_some(),
+            "highlight should return Some for code block content"
+        );
         let spans = result.unwrap();
         assert!(!spans.is_empty(), "should have at least one highlight span");
-        let keywords: Vec<_> = spans.iter().filter(|s| s.category == HighlightCategory::Keyword).collect();
+        let keywords: Vec<_> = spans
+            .iter()
+            .filter(|s| s.category == HighlightCategory::Keyword)
+            .collect();
         assert!(!keywords.is_empty(), "should find keywords (fn)");
     }
 
@@ -531,7 +533,7 @@ mod tests {
         use ratatui::layout::Rect;
 
         let md_content = "```rust\nfn main() {\n    let x = 1;\n}\n```\n";
-        let mut md = super::MarkdownRenderable::new(Some(md_content.to_string()));
+        let md = super::MarkdownRenderable::new(Some(md_content.to_string()));
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 20));
         let area = Rect::new(0, 0, 60, 20);
@@ -544,10 +546,20 @@ mod tests {
         assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "n");
 
         // Line 1 should be "    let x = 1;" starting at x=0, y=1
-        let line1: String = (0..14u16).map(|cx| {
-            buf.cell((cx, 1)).unwrap().symbol().chars().next().unwrap_or(' ')
-        }).collect();
-        assert!(line1.contains("let x = 1"), "line 1 should contain the code");
+        let line1: String = (0..14u16)
+            .map(|cx| {
+                buf.cell((cx, 1))
+                    .unwrap()
+                    .symbol()
+                    .chars()
+                    .next()
+                    .unwrap_or(' ')
+            })
+            .collect();
+        assert!(
+            line1.contains("let x = 1"),
+            "line 1 should contain the code"
+        );
 
         // Check 'f' at (0,0) has Keyword color (orange)
         let keyword_color = Some(Color::Rgb(255, 180, 100));
@@ -574,7 +586,13 @@ mod tests {
         assert_eq!(buf.cell((0, 0)).unwrap().style().bg, code_bg);
 
         // Check DIM modifier is applied
-        assert!(buf.cell((0, 0)).unwrap().style().add_modifier.contains(Modifier::DIM));
+        assert!(
+            buf.cell((0, 0))
+                .unwrap()
+                .style()
+                .add_modifier
+                .contains(Modifier::DIM)
+        );
     }
 
     #[test]
@@ -604,6 +622,9 @@ mod tests {
         }
 
         let result = highlight(&code_text, &code_lang);
-        assert!(result.is_none(), "highlight should return None for empty lang");
+        assert!(
+            result.is_none(),
+            "highlight should return None for empty lang"
+        );
     }
 }

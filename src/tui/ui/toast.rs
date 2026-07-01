@@ -2,12 +2,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::lib::border::BorderSidesConfig;
+use cosh_tui::core::lib::rgba::RGBA;
+use cosh_tui::core::lib::styled_text::string_to_styled_text;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::text::TextRenderable;
-use cosh_tui::core::lib::styled_text::string_to_styled_text;
 use cosh_tui::core::types::TextAttributes;
 
 use crate::theme::Theme;
@@ -84,10 +84,7 @@ impl ToastState {
     }
 
     pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
-        let toast = match &self.current {
-            Some(t) => t,
-            None => return,
-        };
+        let Some(toast) = &self.current else { return };
 
         let max_w = 60u16.min(area.width.saturating_sub(6));
         let toast_w = max_w;

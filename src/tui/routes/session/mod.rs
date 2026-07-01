@@ -17,14 +17,22 @@ use cosh_tui::core::renderables::scroll_bar::{ScrollBarOrientation, ScrollBarRen
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::Theme;
-use crate::types::*;
+use crate::types::{AgentColors, FilePart, Message, MessageRole, Part, ReasoningPart, ToolStatus};
 use crate::util::tool_render::{self, ToolRenderState};
 
 fn left_border_chars() -> BorderCharacters {
     BorderCharacters {
-        top_left: ' ', top_right: ' ', bottom_left: ' ', bottom_right: ' ',
-        horizontal: ' ', vertical: '┃', top_t: ' ', bottom_t: ' ',
-        left_t: '┃', right_t: ' ', cross: ' ',
+        top_left: ' ',
+        top_right: ' ',
+        bottom_left: ' ',
+        bottom_right: ' ',
+        horizontal: ' ',
+        vertical: '┃',
+        top_t: ' ',
+        bottom_t: ' ',
+        left_t: '┃',
+        right_t: ' ',
+        cross: ' ',
     }
 }
 
@@ -37,7 +45,9 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     let right = x + max_w;
     for (i, ch) in text.chars().enumerate() {
         let cx = x + i as u16;
-        if cx >= right { break; }
+        if cx >= right {
+            break;
+        }
         if let Some(cell) = buf.cell_mut((cx, y)) {
             cell.set_char(ch);
             cell.set_style(style);
@@ -74,7 +84,14 @@ impl SessionView {
         }
     }
 
-    fn render_file_badge(buf: &mut Buffer, x: u16, y: u16, max_w: u16, theme: &Theme, file: &FilePart) {
+    fn render_file_badge(
+        buf: &mut Buffer,
+        x: u16,
+        y: u16,
+        max_w: u16,
+        theme: &Theme,
+        file: &FilePart,
+    ) {
         let is_dir = file.mime == "application/x-directory";
         let tag = if is_dir { " Directory " } else { " File " };
         let label = format!("{tag}{}", file.filename);
@@ -83,6 +100,7 @@ impl SessionView {
         draw_text_line(buf, &label, x, y, max_w, style);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_reasoning(
         buf: &mut Buffer,
         x: u16,
@@ -102,7 +120,9 @@ impl SessionView {
         if expanded && !part.text.is_empty() {
             let md_h = part.text.lines().count().min(10) as u16 + 1;
             let md_area = Rect::new(x + 2, y + 1, max_w.saturating_sub(2), md_h);
-            let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(Some(part.text.clone()));
+            let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(Some(
+                part.text.clone(),
+            ));
             md.set_fg(Some(ColorInput::RGBA(theme.text_muted)));
             md.set_bg(Some(ColorInput::RGBA(theme.background)));
             md.render_self(buf, md_area);
@@ -110,6 +130,7 @@ impl SessionView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_parts(
         buf: &mut Buffer,
         x: u16,
@@ -117,32 +138,48 @@ impl SessionView {
         max_w: u16,
         max_h: u16,
         parts: &[Part],
-        role: MessageRole,
+        role: &MessageRole,
         theme: &Theme,
         tool_state: &ToolRenderState,
         config: &TuiConfig,
     ) -> u16 {
         let mut y = y_start;
         let bottom = y_start + max_h;
-        let fg_color = if config.conceal { theme.text_muted } else { theme.text };
+        let fg_color = if config.conceal {
+            theme.text_muted
+        } else {
+            theme.text
+        };
 
         for part in parts {
-            if y >= bottom { break; }
+            if y >= bottom {
+                break;
+            }
 
             match part {
-                Part::Text(t) if !t.synthetic && role == MessageRole::Assistant => {
-                    let content = if config.conceal { conceal_text(&t.text) } else { t.text.clone() };
+                Part::Text(t) if !t.synthetic && *role == MessageRole::Assistant => {
+                    let content = if config.conceal {
+                        conceal_text(&t.text)
+                    } else {
+                        t.text.clone()
+                    };
                     let lines = content.lines().count().max(1) as u16;
                     let h = lines.min(bottom - y);
                     let area = Rect::new(x, y, max_w, h);
-                    let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(Some(content));
+                    let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
+                        Some(content),
+                    );
                     md.set_fg(Some(ColorInput::RGBA(fg_color)));
                     md.set_bg(Some(ColorInput::RGBA(theme.background)));
                     md.render_self(buf, area);
                     y += h;
                 }
                 Part::Text(t) if !t.synthetic => {
-                    let content = if config.conceal { conceal_text(&t.text) } else { t.text.clone() };
+                    let content = if config.conceal {
+                        conceal_text(&t.text)
+                    } else {
+                        t.text.clone()
+                    };
                     let lines = content.lines().count().max(1) as u16;
                     let h = lines.min(bottom - y).max(1);
                     if h > 0 {
@@ -156,16 +193,28 @@ impl SessionView {
                         y += 1;
                         continue;
                     }
-                    if !config.show_generic_tool_output && tool_render::tool_display(&tool.tool) == "generic" {
+                    if !config.show_generic_tool_output
+                        && tool_render::tool_display(&tool.tool) == "generic"
+                    {
                         y += 1;
                         continue;
                     }
                     let mut line_h = 0u16;
-                    tool_render::dispatch_tool(buf, x, y, &mut line_h, max_w, tool, tool_state, theme);
+                    tool_render::dispatch_tool(
+                        buf,
+                        x,
+                        y,
+                        &mut line_h,
+                        max_w,
+                        tool,
+                        tool_state,
+                        theme,
+                    );
                     y += line_h.max(1);
                 }
                 Part::Reasoning(r) => {
-                    let expanded = config.thinking_mode || tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
+                    let expanded = config.thinking_mode
+                        || tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
                     let mut line_h = 0u16;
                     Self::render_reasoning(buf, x, y, &mut line_h, max_w, r, expanded, theme);
                     y += line_h.max(1);
@@ -174,7 +223,7 @@ impl SessionView {
                     Self::render_file_badge(buf, x, y, max_w, theme, f);
                     y += 1;
                 }
-                _ => {}
+                Part::Text(_) => {}
             }
         }
 
@@ -183,14 +232,14 @@ impl SessionView {
 
     fn estimate_part_height(part: &Part, _max_w: u16, config: &TuiConfig) -> u16 {
         match part {
-            Part::Text(t) if !t.synthetic => {
-                t.text.lines().count().max(1) as u16
-            }
+            Part::Text(t) if !t.synthetic => t.text.lines().count().max(1) as u16,
             Part::Tool(t) => {
                 if !config.show_tool_details && matches!(t.status, ToolStatus::Completed) {
                     return 1;
                 }
-                if !config.show_generic_tool_output && tool_render::tool_display(&t.tool) == "generic" {
+                if !config.show_generic_tool_output
+                    && tool_render::tool_display(&t.tool) == "generic"
+                {
                     return 1;
                 }
                 let is_block = t.output.is_some()
@@ -204,10 +253,14 @@ impl SessionView {
                 }
             }
             Part::Reasoning(r) => {
-                if r.text.is_empty() { 1 } else { (r.text.lines().count().min(10) as u16) + 2 }
+                if r.text.is_empty() {
+                    1
+                } else {
+                    (r.text.lines().count().min(10) as u16) + 2
+                }
             }
             Part::File(_) => 1,
-            _ => 0,
+            Part::Text(_) => 0,
         }
     }
 
@@ -238,6 +291,7 @@ impl SessionView {
         draw_text_line(buf, &format!(" [{ts_str}]"), x, y, 12, ts_style);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_user_message(
         buf: &mut Buffer,
         area: Rect,
@@ -253,7 +307,10 @@ impl SessionView {
         border_box.set_background_color(Some(theme.background_panel.into()));
         border_box.set_border_color(Some(agent_color.into()));
         border_box.set_border_sides(BorderSidesConfig {
-            left: true, top: false, right: false, bottom: false,
+            left: true,
+            top: false,
+            right: false,
+            bottom: false,
         });
         border_box.set_custom_border_chars(left_border_chars());
         border_box.render_self(buf, area);
@@ -266,10 +323,21 @@ impl SessionView {
             Self::render_compaction_banner(buf, x_off, area.y + 1, max_w, theme);
         }
 
-        let inner_y = area.y + 1 + if is_compacted { 1 } else { 0 };
-        let remaining = inner_h.saturating_sub(if is_compacted { 1 } else { 0 });
+        let inner_y = area.y + 1 + u16::from(is_compacted);
+        let remaining = inner_h.saturating_sub(u16::from(is_compacted));
 
-        Self::render_parts(buf, x_off, inner_y, max_w, remaining, &msg.parts, MessageRole::User, theme, tool_state, config);
+        Self::render_parts(
+            buf,
+            x_off,
+            inner_y,
+            max_w,
+            remaining,
+            &msg.parts,
+            &MessageRole::User,
+            theme,
+            tool_state,
+            config,
+        );
 
         if is_queued {
             Self::render_queued_badge(buf, x_off, area.y, theme);
@@ -280,6 +348,7 @@ impl SessionView {
         }
     }
 
+    #[allow(clippy::too_many_arguments, clippy::cast_sign_loss)]
     fn render_assistant_message(
         buf: &mut Buffer,
         area: Rect,
@@ -296,10 +365,21 @@ impl SessionView {
         let x_off = area.x + 3;
         let max_w = area.width.saturating_sub(6);
 
-        let banner_h = if is_compacted { 1 } else { 0 };
+        let banner_h = u16::from(is_compacted);
         let inner_y = area.y + banner_h;
 
-        Self::render_parts(buf, x_off, inner_y, max_w, area.height.saturating_sub(banner_h), &msg.parts, MessageRole::Assistant, theme, tool_state, config);
+        Self::render_parts(
+            buf,
+            x_off,
+            inner_y,
+            max_w,
+            area.height.saturating_sub(banner_h),
+            &msg.parts,
+            &MessageRole::Assistant,
+            theme,
+            tool_state,
+            config,
+        );
 
         if is_compacted {
             Self::render_compaction_banner(buf, x_off, area.y, max_w, theme);
@@ -328,12 +408,20 @@ impl SessionView {
                     cell.set_char('\u{25a3}');
                     cell.set_style(icon_style);
                 }
-                let rest = format!(" chat \u{b7} {}", model_name);
-                draw_text_line(buf, &rest, x_off + 1, meta_y, max_w.saturating_sub(1), muted_style);
+                let rest = format!(" chat \u{b7} {model_name}");
+                draw_text_line(
+                    buf,
+                    &rest,
+                    x_off + 1,
+                    meta_y,
+                    max_w.saturating_sub(1),
+                    muted_style,
+                );
             }
         }
     }
 
+    #[allow(clippy::cast_sign_loss)]
     pub fn render(
         &mut self,
         buf: &mut Buffer,
@@ -342,9 +430,8 @@ impl SessionView {
         theme: &Theme,
         config: &TuiConfig,
     ) -> i32 {
-        let session = match state.current_session() {
-            Some(s) => s,
-            None => return 0,
+        let Some(session) = state.current_session() else {
+            return 0;
         };
 
         let margin = 2;
@@ -361,10 +448,10 @@ impl SessionView {
 
         let mut total_height: i32 = 0;
         for (idx, msg) in session.messages.iter().enumerate() {
-            let gap = if idx > 0 { 1 } else { 0 };
+            let gap = i32::from(idx > 0);
             let mut msg_h = 2i32;
             for part in &msg.parts {
-                msg_h += Self::estimate_part_height(part, max_w, config) as i32;
+                msg_h += i32::from(Self::estimate_part_height(part, max_w, config));
             }
             if idx == session.messages.len() - 1 && msg.role == MessageRole::Assistant {
                 msg_h += 2;
@@ -372,7 +459,7 @@ impl SessionView {
             total_height += gap + msg_h;
         }
 
-        let visible_height = inner_area.height as i32;
+        let visible_height = i32::from(inner_area.height);
         let max_scroll = (total_height - visible_height).max(0);
         self.scroll_y = self.scroll_y.clamp(0, max_scroll);
 
@@ -384,29 +471,31 @@ impl SessionView {
                 inner_area.height,
             );
             let mut scrollbar = ScrollBarRenderable::new(ScrollBarOrientation::Vertical);
-            scrollbar.set_scroll_size(total_height as f64);
-            scrollbar.set_viewport_size(visible_height as f64);
-            scrollbar.set_scroll_position(self.scroll_y as f64);
+            scrollbar.set_scroll_size(f64::from(total_height));
+            scrollbar.set_viewport_size(f64::from(visible_height));
+            scrollbar.set_scroll_position(f64::from(self.scroll_y));
             scrollbar.set_track_color(Some(theme.background.into()));
             scrollbar.set_thumb_color(Some(theme.text_muted.into()));
             scrollbar.render_self(buf, scrollbar_area);
         }
 
-        let mut y = inner_area.y as i32 - self.scroll_y;
+        let mut y = i32::from(inner_area.y) - self.scroll_y;
 
         for (idx, msg) in session.messages.iter().enumerate() {
-            if idx > 0 { y += 1; }
+            if idx > 0 {
+                y += 1;
+            }
 
             let mut msg_h = 2i32;
             for part in &msg.parts {
-                msg_h += Self::estimate_part_height(part, max_w, config) as i32;
+                msg_h += i32::from(Self::estimate_part_height(part, max_w, config));
             }
             let is_last = idx == session.messages.len() - 1;
             if is_last && msg.role == MessageRole::Assistant {
                 msg_h += 2;
             }
 
-            let msg_y = y.max(inner_area.y as i32 - 1) as u16;
+            let msg_y = y.max(i32::from(inner_area.y) - 1) as u16;
             let visible_bottom = inner_area.bottom();
 
             if msg_y < visible_bottom {
@@ -414,18 +503,38 @@ impl SessionView {
                     inner_area.x,
                     msg_y,
                     inner_area.width,
-                    msg_h.min((visible_bottom - msg_y) as i32) as u16,
+                    msg_h.min(i32::from(visible_bottom - msg_y)) as u16,
                 );
 
                 match msg.role {
                     MessageRole::User => {
                         let agent_name = msg.agent.as_deref().unwrap_or("default");
                         let agent_color = agent_colors.get(agent_name, &unique_agents);
-                        Self::render_user_message(buf, msg_area, msg, theme, agent_color, &self.tool_state, config, false, false);
+                        Self::render_user_message(
+                            buf,
+                            msg_area,
+                            msg,
+                            theme,
+                            agent_color,
+                            &self.tool_state,
+                            config,
+                            false,
+                            false,
+                        );
                     }
                     MessageRole::Assistant => {
                         Self::render_assistant_message(
-                            buf, msg_area, msg, theme, &agent_colors, is_last, &unique_agents, &self.tool_state, config, false, false,
+                            buf,
+                            msg_area,
+                            msg,
+                            theme,
+                            &agent_colors,
+                            is_last,
+                            &unique_agents,
+                            &self.tool_state,
+                            config,
+                            false,
+                            false,
                         );
                     }
                 }

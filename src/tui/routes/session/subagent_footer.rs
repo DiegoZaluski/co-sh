@@ -32,9 +32,8 @@ pub struct SubagentFooterView;
 
 impl SubagentFooterView {
     pub fn render(buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
-        let _session = match state.current_session() {
-            Some(s) => s,
-            None => return,
+        let Some(_session) = state.current_session() else {
+            return;
         };
 
         let mut bg = BoxRenderable::new();
@@ -49,6 +48,13 @@ impl SubagentFooterView {
         };
 
         let style = Style::default().fg(rgba_color(theme.text_muted));
-        draw_text_line(buf, &label, area.x + 1, area.y, area.width.saturating_sub(2), style);
+        draw_text_line(
+            buf,
+            &label,
+            area.x + 1,
+            area.y,
+            area.width.saturating_sub(2),
+            style,
+        );
     }
 }

@@ -45,9 +45,7 @@ pub struct DialogState {
 
 impl DialogState {
     pub fn new() -> Self {
-        DialogState {
-            stack: Vec::new(),
-        }
+        DialogState { stack: Vec::new() }
     }
 
     pub fn show(&mut self, dialog_type: DialogType) {
@@ -83,9 +81,8 @@ impl DialogState {
     }
 
     pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
-        let instance = match self.stack.last() {
-            Some(i) => i,
-            None => return,
+        let Some(instance) = self.stack.last() else {
+            return;
         };
 
         let dialog_w = 50.min(area.width.saturating_sub(4));
@@ -102,12 +99,26 @@ impl DialogState {
                 bg.set_border_color(Some(theme.border_active.into()));
                 bg.render_self(buf, dialog_area);
 
-                draw_text_line(buf, message, dialog_x + 2, dialog_y + 1, dialog_w.saturating_sub(4), Style::default().fg(rgba_color(theme.text)));
+                draw_text_line(
+                    buf,
+                    message,
+                    dialog_x + 2,
+                    dialog_y + 1,
+                    dialog_w.saturating_sub(4),
+                    Style::default().fg(rgba_color(theme.text)),
+                );
 
                 let ok_text = "[ OK ]";
                 let ok_x = dialog_x + (dialog_w - ok_text.len() as u16) / 2;
                 let ok_style = Style::default().fg(rgba_color(theme.primary));
-                draw_text_line(buf, ok_text, ok_x, dialog_y + 3, dialog_w.saturating_sub(2), ok_style);
+                draw_text_line(
+                    buf,
+                    ok_text,
+                    ok_x,
+                    dialog_y + 3,
+                    dialog_w.saturating_sub(2),
+                    ok_style,
+                );
             }
             DialogType::Confirm { message } => {
                 let dialog_h = 6;
@@ -119,19 +130,37 @@ impl DialogState {
                 bg.set_border_color(Some(theme.border_active.into()));
                 bg.render_self(buf, dialog_area);
 
-                draw_text_line(buf, message, dialog_x + 2, dialog_y + 1, dialog_w.saturating_sub(4), Style::default().fg(rgba_color(theme.text)));
+                draw_text_line(
+                    buf,
+                    message,
+                    dialog_x + 2,
+                    dialog_y + 1,
+                    dialog_w.saturating_sub(4),
+                    Style::default().fg(rgba_color(theme.text)),
+                );
 
                 let options = ["Yes", "No"];
                 for (i, opt) in options.iter().enumerate() {
                     let oy = dialog_y + 3 + i as u16;
-                    let prefix = if i == instance.selected { "\u{25b8} " } else { "  " };
-                    let text = format!("{}{}", prefix, opt);
+                    let prefix = if i == instance.selected {
+                        "\u{25b8} "
+                    } else {
+                        "  "
+                    };
+                    let text = format!("{prefix}{opt}");
                     let style = if i == instance.selected {
                         Style::default().fg(rgba_color(theme.primary))
                     } else {
                         Style::default().fg(rgba_color(theme.text_muted))
                     };
-                    draw_text_line(buf, &text, dialog_x + 3, oy, dialog_w.saturating_sub(6), style);
+                    draw_text_line(
+                        buf,
+                        &text,
+                        dialog_x + 3,
+                        oy,
+                        dialog_w.saturating_sub(6),
+                        style,
+                    );
                 }
             }
         }
