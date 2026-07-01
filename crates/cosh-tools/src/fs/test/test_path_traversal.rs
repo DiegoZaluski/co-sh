@@ -35,13 +35,14 @@ fn meta() -> FsMetadata<'static> {
 #[tokio::test]
 async fn read_gap_absolute_path_no_guard() {
     let results = read(
-        &FsRead,
         meta(),
-        vec![Target {
-            path: "/etc/hostname",
-            line: None,
-            symbol: None,
-        }],
+        FsRead {
+            targets: vec![Target {
+                path: "/etc/hostname".to_string(),
+                line: None,
+                symbol: None,
+            }],
+        },
     )
     .await;
     assert!(!results.is_empty(), "read should return results");
@@ -62,13 +63,14 @@ async fn read_gap_absolute_path_no_guard() {
 #[tokio::test]
 async fn read_gap_dotdot_traversal_no_guard() {
     let results = read(
-        &FsRead,
         meta(),
-        vec![Target {
-            path: "/home/inky/cosh/../../../etc/hostname",
-            line: None,
-            symbol: None,
-        }],
+        FsRead {
+            targets: vec![Target {
+                path: "/home/inky/cosh/../../../etc/hostname".to_string(),
+                line: None,
+                symbol: None,
+            }],
+        },
     )
     .await;
     assert!(!results.is_empty(), "read should return results");
@@ -87,13 +89,14 @@ async fn read_gap_dotdot_traversal_no_guard() {
 #[tokio::test]
 async fn read_absolute_path_outside_root_is_denied() {
     let results = read(
-        &FsRead,
         meta(),
-        vec![Target {
-            path: "/etc/hostname",
-            line: None,
-            symbol: None,
-        }],
+        FsRead {
+            targets: vec![Target {
+                path: "/etc/hostname".to_string(),
+                line: None,
+                symbol: None,
+            }],
+        },
     )
     .await;
     assert!(!results.is_empty(), "read should return results");
@@ -115,13 +118,14 @@ async fn read_traversal_relative_path_escapes_denied() {
     let traversal = format!("{parents}/etc/hostname");
 
     let results = read(
-        &FsRead,
         meta(),
-        vec![Target {
-            path: &traversal,
-            line: None,
-            symbol: None,
-        }],
+        FsRead {
+            targets: vec![Target {
+                path: traversal,
+                line: None,
+                symbol: None,
+            }],
+        },
     )
     .await;
     assert!(!results.is_empty(), "read should return results");
@@ -140,19 +144,20 @@ async fn write_traversal_via_dotdot_is_denied() {
     let resolved = "/tmp/cosh_traversal_write.txt";
     let _ = std::fs::remove_file(resolved);
 
-    let metadata = FsMetadata {
+    let _metadata = FsMetadata {
         root: Path::new(PROJECT_ROOT),
         allowlist: None,
         blocklist: None,
     };
 
     let result = write(
-        &FsWrite,
-        metadata,
-        vec![TargetFile {
-            path: traversal_path,
-            text: "TRAVERSAL_WRITE",
-        }],
+        _metadata,
+        FsWrite {
+            targets: vec![TargetFile {
+                path: traversal_path.to_string(),
+                text: "TRAVERSAL_WRITE".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok(), "write should not fail at outer level");
@@ -188,12 +193,13 @@ async fn write_traversal_blocklist_respected_after_normalization() {
     };
 
     let result = write(
-        &FsWrite,
         metadata,
-        vec![TargetFile {
-            path: traversal_path,
-            text: "BLOCKLIST_BYPASS",
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: traversal_path.to_string(),
+                text: "BLOCKLIST_BYPASS".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok(), "write should not fail at outer level");
@@ -236,12 +242,13 @@ async fn write_gap_symlink_escape() {
     let symlink_target = format!("{symlink_path}/evil.txt");
 
     let result = write(
-        &FsWrite,
         metadata,
-        vec![TargetFile {
-            path: &symlink_target,
-            text: "ESCAPED",
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: symlink_target.clone(),
+                text: "ESCAPED".to_string(),
+            }],
+        },
     )
     .await;
 

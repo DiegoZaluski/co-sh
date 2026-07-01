@@ -14,20 +14,21 @@ fn meta() -> FsMetadata<'static> {
 #[tokio::test]
 async fn test_function_search() {
     let results = read(
-        &FsRead,
         meta(),
-        vec![
-            Target {
-                path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/tokenizer.rs",
-                line: None,
-                symbol: Some("tokenize"),
-            },
-            Target {
-                path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/types.rs",
-                line: None,
-                symbol: None,
-            },
-        ],
+        FsRead {
+            targets: vec![
+                Target {
+                    path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/tokenizer.rs".to_string(),
+                    line: None,
+                    symbol: Some("tokenize".to_string()),
+                },
+                Target {
+                    path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/types.rs".to_string(),
+                    line: None,
+                    symbol: None,
+                },
+            ],
+        },
     )
     .await;
     assert!(!results.is_empty(), "expected at least one result");
@@ -42,13 +43,14 @@ async fn test_function_search() {
 #[tokio::test]
 async fn test_line_block() {
     let results = read(
-        &FsRead,
         meta(),
-        vec![Target {
-            path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/tokenizer.rs",
-            line: Some(5),
-            symbol: None,
-        }],
+        FsRead {
+            targets: vec![Target {
+                path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/tokenizer.rs".to_string(),
+                line: Some(5),
+                symbol: None,
+            }],
+        },
     )
     .await;
     assert!(!results.is_empty(), "expected one result");

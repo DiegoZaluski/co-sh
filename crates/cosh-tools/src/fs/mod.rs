@@ -9,7 +9,7 @@
 //! use cosh_tools::fs::Fs;
 //!
 //! let fs = Fs::new().cwd("/home/user/project");
-//! fs.write(vec![TargetFile { path: "foo.txt", text: "hello" }]).await;
+//! fs.write(vec![TargetFile { path: "foo.txt".to_string(), text: "hello".to_string() }]).await;
 //! ```
 
 pub mod edit;
@@ -259,8 +259,8 @@ impl Fs {
     /// Read one or more files / symbols.
     ///
     /// See [`read`] for details.
-    pub async fn read(&self, targets: Vec<Target<'_>>) -> Vec<ReadResult> {
-        read(&FsRead, self.metadata(), targets).await
+    pub async fn read(&self, targets: Vec<Target>) -> Vec<ReadResult> {
+        read(self.metadata(), FsRead { targets }).await
     }
 
     /// Write content to one or more files.
@@ -270,8 +270,8 @@ impl Fs {
     /// # Errors
     ///
     /// Returns an error if the allowlist/blocklist configuration is invalid.
-    pub async fn write(&self, targets: Vec<TargetFile<'_>>) -> Result<Vec<WriteResult>, String> {
-        write(&FsWrite, self.metadata(), targets).await
+    pub async fn write(&self, targets: Vec<TargetFile>) -> Result<Vec<WriteResult>, String> {
+        write(self.metadata(), FsWrite { targets }).await
     }
 
     /// Apply edits to one or more files.

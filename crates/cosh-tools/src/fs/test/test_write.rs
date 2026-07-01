@@ -13,12 +13,13 @@ fn meta() -> FsMetadata<'static> {
 #[tokio::test]
 async fn write_creates_file_and_returns_hash_header() {
     let result = write(
-        &FsWrite,
         meta(),
-        vec![TargetFile {
-            path: "/home/inky/cosh/ftest.txt",
-            text: "hello world",
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: "/home/inky/cosh/ftest.txt".to_string(),
+                text: "hello world".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -32,18 +33,19 @@ async fn write_creates_file_and_returns_hash_header() {
 #[tokio::test]
 async fn write_creates_multiple_files_in_single_call() {
     let result = write(
-        &FsWrite,
         meta(),
-        vec![
-            TargetFile {
-                path: "/home/inky/cosh/ftest.txt",
-                text: "hello world",
-            },
-            TargetFile {
-                path: "/home/inky/cosh/ftst2.txt",
-                text: "test",
-            },
-        ],
+        FsWrite {
+            targets: vec![
+                TargetFile {
+                    path: "/home/inky/cosh/ftest.txt".to_string(),
+                    text: "hello world".to_string(),
+                },
+                TargetFile {
+                    path: "/home/inky/cosh/ftst2.txt".to_string(),
+                    text: "test".to_string(),
+                },
+            ],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -66,12 +68,13 @@ async fn write_denied_when_path_is_in_blocklist() {
     };
 
     let result = write(
-        &FsWrite,
         metadata,
-        vec![TargetFile {
-            path: "/home/inky/cosh/ftest.txt",
-            text: "should not be written",
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: "/home/inky/cosh/ftest.txt".to_string(),
+                text: "should not be written".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -91,7 +94,13 @@ async fn write_reports_empty_text_inline_and_skips_file() {
     let path = "/home/inky/cosh/cosh_test_empty.txt";
     let _ = std::fs::remove_file(path);
 
-    let result = write(&FsWrite, meta(), vec![TargetFile { path, text: "" }]).await;
+    let result = write(meta(), FsWrite {
+        targets: vec![TargetFile {
+            path: path.to_string(),
+            text: "".to_string(),
+        }],
+    })
+    .await;
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
@@ -115,12 +124,13 @@ async fn write_allowed_outside_root_when_path_in_allowlist() {
     };
 
     let result = write(
-        &FsWrite,
         metadata,
-        vec![TargetFile {
-            path,
-            text: "outside root but explicitly allowed",
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: path.to_string(),
+                text: "outside root but explicitly allowed".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -143,12 +153,13 @@ async fn write_errors_on_inconsistent_blocklist_and_allowlist() {
     };
 
     let result = write(
-        &FsWrite,
         metadata,
-        vec![TargetFile {
-            path: "/home/inky/cosh/ftest.txt",
-            text: "should never be written",
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: "/home/inky/cosh/ftest.txt".to_string(),
+                text: "should never be written".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_err());
@@ -161,12 +172,13 @@ async fn write_strips_hashline_prefixes_and_reports_warning() {
     let content = "[main.rs#ABCD]\n42: fn main() {\n43:     println!(\"hello\");\n44: }";
 
     let result = write(
-        &FsWrite,
         meta(),
-        vec![TargetFile {
-            path,
-            text: content,
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: path.to_string(),
+                text: content.to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -194,12 +206,13 @@ async fn write_strips_hashline_prefixes_without_bracket_header() {
     let content = "42: fn main() {\n43:     println!(\"hello\");\n44: }";
 
     let result = write(
-        &FsWrite,
         meta(),
-        vec![TargetFile {
-            path,
-            text: content,
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: path.to_string(),
+                text: content.to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -225,12 +238,13 @@ async fn write_does_not_strip_normal_content() {
     let content = "fn main() {\n    println!(\"hello\");\n}";
 
     let result = write(
-        &FsWrite,
         meta(),
-        vec![TargetFile {
-            path,
-            text: content,
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: path.to_string(),
+                text: content.to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -252,12 +266,13 @@ async fn write_chmods_executable_for_shebang() {
     let content = "#!/usr/bin/env bash\necho hello";
 
     let result = write(
-        &FsWrite,
         meta(),
-        vec![TargetFile {
-            path,
-            text: content,
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: path.to_string(),
+                text: content.to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -288,12 +303,13 @@ async fn write_does_not_chmod_without_shebang() {
     let content = "plain text file";
 
     let result = write(
-        &FsWrite,
         meta(),
-        vec![TargetFile {
-            path,
-            text: content,
-        }],
+        FsWrite {
+            targets: vec![TargetFile {
+                path: path.to_string(),
+                text: content.to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());

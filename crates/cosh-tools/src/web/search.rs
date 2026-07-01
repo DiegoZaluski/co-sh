@@ -16,6 +16,7 @@ const EXA_API: &str = "https://api.exa.ai/search";
 pub struct WebSearch {
     /// Number of results to request (max 10).
     pub num_results: u32,
+    pub query: String,
 }
 
 #[derive(Serialize)]
@@ -55,15 +56,15 @@ struct ApiResult {
 ///
 /// Returns `Err` if validation fails, the search fails, or all fallback
 /// methods are exhausted.
-pub async fn search(search: &WebSearch, query: &str) -> Result<String, String> {
-    if query.is_empty() {
+pub async fn search(search: &WebSearch) -> Result<String, String> {
+    if search.query.is_empty() {
         return Err("query required".into());
     }
     if search.num_results == 0 {
         return Err("num_results must be >= 1".into());
     }
 
-    let q = query;
+    let q = &search.query;
     let n = search.num_results.min(10);
 
     if let Ok(key) = std::env::var("EXA_API_KEY")

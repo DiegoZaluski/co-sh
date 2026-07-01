@@ -104,8 +104,8 @@ impl Web {
     /// # Errors
     ///
     /// Returns `Err` if the fetch fails or all fallback methods are exhausted.
-    pub async fn fetch(&self, url: &str) -> Result<String, String> {
-        fetch(&WebFetch, url).await
+    pub async fn fetch(&self, fetch: WebFetch) -> Result<String, String> {
+        fetch::fetch(&fetch).await
     }
 
     /// Search the web, returning clean markdown for LLM context.
@@ -117,12 +117,10 @@ impl Web {
     /// Returns `Err` if the query is empty, validation fails, or the search
     /// itself fails.
     pub async fn search(&self, query: &str) -> Result<String, String> {
-        search(
-            &WebSearch {
-                num_results: self.num_results,
-            },
-            query,
-        )
+        search(&WebSearch {
+            num_results: self.num_results,
+            query: query.to_string(),
+        })
         .await
     }
 }

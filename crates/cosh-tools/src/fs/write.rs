@@ -14,7 +14,7 @@
 //! Individual file write failures are reported inline in the returned string
 //! rather than aborting the batch.
 use super::types;
-use super::types::{FsMetadata, FsWrite, TargetFile};
+use super::types::{FsMetadata, FsWrite};
 
 use cosh_sdk::hashline::{
     format,
@@ -100,15 +100,13 @@ async fn maybe_make_executable(_path: &str) -> bool {
 /// Returns `Err` if the [`FsMetadata`] has inconsistent allowlist/blocklist entries,
 /// or a path is both blocked and allowed simultaneously.
 pub async fn write(
-    config: &FsWrite,
     metadata: FsMetadata<'_>,
-    targets: Vec<TargetFile<'_>>,
+    tg: FsWrite,
 ) -> Result<Vec<WriteResult>, String> {
-    let _ = config;
     let mut result: Vec<WriteResult> = vec![];
     let fs = DiskFilesystem::new();
-    for target in &targets {
-        let (clean_text, stripped) = strip_write_content(target.text);
+    for target in &tg.targets {
+        let (clean_text, stripped) = strip_write_content(&target.text);
 
         if clean_text.trim().is_empty() {
             let warning = if stripped {
@@ -132,7 +130,7 @@ pub async fn write(
             continue;
         }
 
-        match metadata.fs_guard(target.path) {
+        match metadata.fs_guard(&target.path) {
             types::FsGuard::Allowed(validated_path) => {
                 let path_str = validated_path.to_string_lossy();
                 if let Ok(current) = fs.read_text(&path_str).await {

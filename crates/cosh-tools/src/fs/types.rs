@@ -3,24 +3,28 @@ use std::path::{Path, PathBuf};
 use crate::util::guards::{GuardResult, normalize_path, validate_path};
 
 /// A single read specification.
-pub struct Target<'a> {
-    pub path: &'a str,
+pub struct Target {
+    pub path: String,
     pub line: Option<usize>,
-    pub symbol: Option<&'a str>,
+    pub symbol: Option<String>,
 }
 
 /// Configuration for file read operations.
 #[derive(Default)]
-pub struct FsRead;
+pub struct FsRead {
+    pub targets: Vec<Target>,
+}
 
-pub struct TargetFile<'a> {
-    pub text: &'a str,
-    pub path: &'a str,
+pub struct TargetFile {
+    pub text: String,
+    pub path: String,
 }
 
 /// Configuration for file write operations.
 #[derive(Default)]
-pub struct FsWrite;
+pub struct FsWrite {
+    pub targets: Vec<TargetFile>,
+}
 
 #[derive(Debug, Clone)]
 pub struct FsMetadata<'a> {

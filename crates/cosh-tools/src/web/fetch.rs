@@ -12,7 +12,9 @@ const EXA_MCP: &str = "https://mcp.exa.ai/mcp";
 const EXA_FIRST: bool = true;
 
 #[derive(Debug, Clone, Default)]
-pub struct WebFetch;
+pub struct WebFetch {
+    pub url: String,
+}
 
 /// Fetch a URL, returning clean markdown for LLM context.
 ///
@@ -22,9 +24,8 @@ pub struct WebFetch;
 /// # Errors
 ///
 /// Returns `Err` if the fetch fails or all fallback methods are exhausted.
-pub async fn fetch(fetch: &WebFetch, url: &str) -> Result<String, String> {
-    let _ = fetch;
-    fetch_url(url).await
+pub async fn fetch(fetch: &WebFetch) -> Result<String, String> {
+    fetch_url(&fetch.url).await
 }
 
 async fn fetch_url(url: &str) -> Result<String, String> {

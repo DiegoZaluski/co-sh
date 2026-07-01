@@ -29,16 +29,11 @@ pub struct ReadResult {
 /// Each target produces one or more [`ReadResult`] entries. Errors and
 /// incomplete reads are recorded as warnings inside each result instead of
 /// aborting the entire operation.
-pub async fn read(
-    config: &FsRead,
-    metadata: FsMetadata<'_>,
-    targets: Vec<Target<'_>>,
-) -> Vec<ReadResult> {
-    let _ = config;
+pub async fn read(metadata: FsMetadata<'_>, tg: FsRead) -> Vec<ReadResult> {
     let fs = DiskFilesystem::new();
     let mut results: Vec<ReadResult> = Vec::new();
 
-    for target in targets {
+    for target in tg.targets {
         results.extend(read_target(fs.clone(), target, &metadata).await);
     }
 
@@ -47,15 +42,15 @@ pub async fn read(
 
 async fn read_target(
     fs: DiskFilesystem,
-    target: Target<'_>,
+    target: Target,
     metadata: &FsMetadata<'_>,
 ) -> Vec<ReadResult> {
     use super::types::FsGuard;
-    match metadata.fs_guard(target.path) {
+    match metadata.fs_guard(&target.path) {
         FsGuard::Allowed(validated_path) => {
             let path = validated_path.to_string_lossy().to_string();
             let target = Target {
-                path: &path,
+                path: path,
                 line: target.line,
                 symbol: target.symbol,
             };
@@ -78,12 +73,12 @@ async fn read_target(
     }
 }
 
-async fn read_target_impl(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadResult> {
+async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult> {
     if let Some(name) = target.symbol {
-        return search_symbol(&fs, target.path, name).await;
+        return search_symbol(&fs, &target.path, &name).await;
     }
 
-    if Path::new(target.path).is_dir() {
+    if Path::new(&target.path).is_dir() {
         return vec![ReadResult {
             path: target.path.to_string(),
             file_hash: String::new(),
@@ -101,7 +96,7 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadRes
         }];
     }
 
-    let text = match read_normalized(&fs, target.path).await {
+    let text = match read_normalized(&fs, &target.path).await {
         Ok(t) => t,
         Err(e) => {
             return vec![ReadResult {
@@ -114,10 +109,10 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadRes
         }
     };
 
-    let _ = rollback::record(target.path, &text);
+    let _ = rollback::record(&target.path, &text);
 
     let hash = format::compute_file_hash(&text);
-    let header = format::format_hashline_header(target.path, &hash);
+    let header = format::format_hashline_header(&target.path, &hash);
     let body = format::format_numbered_lines(&text, 1);
 
     if let Some(line) = target.line {
@@ -134,7 +129,7 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target<'_>) -> Vec<ReadRes
                 }];
             }
         };
-        match ts.resolve_block(target.path, &body, ln) {
+        match ts.resolve_block(&target.path, &body, ln) {
             Some(span) => {
                 let block = extract_block(&body, span);
                 vec![ReadResult {
