@@ -23,6 +23,8 @@ pub enum Action {
     Interrupt,
     NextAgent,
     PrevAgent,
+    HistoryUp,
+    HistoryDown,
     NextSession,
     PrevSession,
 }
@@ -66,6 +68,8 @@ impl KeyMap {
                 (Action::Interrupt, KeyBinding { key: Esc, modifiers: KeyModifiers::NONE }),
                 (Action::NextAgent, KeyBinding { key: Tab, modifiers: KeyModifiers::NONE }),
                 (Action::PrevAgent, KeyBinding { key: BackTab, modifiers: KeyModifiers::NONE }),
+                (Action::HistoryUp, KeyBinding { key: Up, modifiers: KeyModifiers::CONTROL }),
+                (Action::HistoryDown, KeyBinding { key: Down, modifiers: KeyModifiers::CONTROL }),
                 (Action::NextSession, KeyBinding { key: Char('n'), modifiers: KeyModifiers::NONE }),
                 (Action::PrevSession, KeyBinding { key: Char('p'), modifiers: KeyModifiers::NONE }),
             ],

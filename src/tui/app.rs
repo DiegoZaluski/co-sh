@@ -191,8 +191,8 @@ impl App {
                             // TBD: help overlay
                         }
                         Some(crate::keymap::Action::SendMessage) | Some(crate::keymap::Action::Confirm) => {
-                            self.prompt_view.input.clear();
-                            self.prompt_view.cursor_pos = 0;
+                            let _msg = self.prompt_view.send_message();
+                            // TODO: actually send msg to session
                         }
                         Some(crate::keymap::Action::Cancel) | Some(crate::keymap::Action::Interrupt) => {
                             if self.question_dialog.visible {
@@ -224,12 +224,23 @@ impl App {
                         Some(crate::keymap::Action::ToggleTimestamps) => {
                             self.config.show_timestamps = !self.config.show_timestamps;
                         }
-                        Some(crate::keymap::Action::FocusInput) => {}
-                        Some(crate::keymap::Action::NextAgent) => {}
-                        Some(crate::keymap::Action::PrevAgent) => {}
+                        Some(crate::keymap::Action::NextAgent) => {
+                            let agents = self.state.unique_agents();
+                            self.prompt_view.next_agent(agents.len().max(1));
+                        }
+                        Some(crate::keymap::Action::PrevAgent) => {
+                            let agents = self.state.unique_agents();
+                            self.prompt_view.prev_agent(agents.len().max(1));
+                        }
+                        Some(crate::keymap::Action::HistoryUp) => {
+                            self.prompt_view.history_up();
+                        }
+                        Some(crate::keymap::Action::HistoryDown) => {
+                            self.prompt_view.history_down();
+                        }
                         Some(crate::keymap::Action::NextSession) => {}
                         Some(crate::keymap::Action::PrevSession) => {}
-                        Some(crate::keymap::Action::Quit) => {}
+                        Some(crate::keymap::Action::FocusInput) | Some(crate::keymap::Action::Quit) => {}
                         None => {
                             match key.code {
                                 KeyCode::Up => {
@@ -243,10 +254,6 @@ impl App {
                                 }
                                 KeyCode::PageDown => {
                                     self.session_view.scroll_y = (self.session_view.scroll_y + 10).max(0);
-                                }
-                                KeyCode::Enter => {
-                                    self.prompt_view.input.clear();
-                                    self.prompt_view.cursor_pos = 0;
                                 }
                                 KeyCode::Backspace => {
                                     let pos = self.prompt_view.cursor_pos;

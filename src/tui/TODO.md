@@ -48,9 +48,9 @@
 - [x] Compaction banner
 
 ### Prompt
-- [ ] Agent selector cycling
-- [ ] History navigation
-- [ ] Placeholder text
+- [x] Agent selector cycling (Tab/Shift+Tab)
+- [x] History navigation (Ctrl+Up/Ctrl+Down)
+- [x] Placeholder text ("Type a message...")
 
 ### Footer
 - [ ] Directory display

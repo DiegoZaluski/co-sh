@@ -14,6 +14,7 @@ const BASE_H: u16 = 2;
 const AGENT_H: u16 = 1;
 const CAP_H: u16 = 1;
 const FOOTER_H: u16 = 1;
+const PLACEHOLDER: &str = "Type a message...";
 
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
@@ -53,6 +54,9 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
 pub struct PromptView {
     pub input: String,
     pub cursor_pos: usize,
+    pub history: Vec<String>,
+    pub history_index: i32,
+    pub selected_agent_index: usize,
 }
 
 impl PromptView {
@@ -60,7 +64,62 @@ impl PromptView {
         PromptView {
             input: String::new(),
             cursor_pos: 0,
+            history: Vec::new(),
+            history_index: -1,
+            selected_agent_index: 0,
         }
+    }
+
+    pub fn send_message(&mut self) -> String {
+        let msg = self.input.clone();
+        if !msg.is_empty() {
+            self.history.push(msg.clone());
+        }
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.history_index = -1;
+        msg
+    }
+
+    pub fn history_up(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        if self.history_index == -1 {
+            self.history_index = self.history.len() as i32 - 1;
+        } else if self.history_index > 0 {
+            self.history_index -= 1;
+        }
+        self.input = self.history[self.history_index as usize].clone();
+        self.cursor_pos = self.input.len();
+    }
+
+    pub fn history_down(&mut self) {
+        if self.history_index == -1 {
+            return;
+        }
+        self.history_index += 1;
+        if self.history_index >= self.history.len() as i32 {
+            self.history_index = -1;
+            self.input.clear();
+        } else {
+            self.input = self.history[self.history_index as usize].clone();
+        }
+        self.cursor_pos = self.input.len();
+    }
+
+    pub fn next_agent(&mut self, num_agents: usize) {
+        if num_agents == 0 { return; }
+        self.selected_agent_index = (self.selected_agent_index + 1) % num_agents;
+    }
+
+    pub fn prev_agent(&mut self, num_agents: usize) {
+        if num_agents == 0 { return; }
+        self.selected_agent_index = if self.selected_agent_index == 0 {
+            num_agents - 1
+        } else {
+            self.selected_agent_index - 1
+        };
     }
 
     pub fn required_height(&self, area_width: u16) -> u16 {
@@ -97,16 +156,23 @@ impl PromptView {
         &self,
         buf: &mut Buffer,
         area: Rect,
-        state: &AppState,
+        _state: &AppState,
         theme: &Theme,
         agent_colors: &AgentColors,
         unique_agents: &[String],
     ) {
         let text_w = area.width.saturating_sub(5) as usize;
-        let display_lines = if self.input.is_empty() {
+        let display_placeholder = self.input.is_empty();
+        let display_text = if display_placeholder {
+            PLACEHOLDER
+        } else {
+            &self.input
+        };
+
+        let display_lines = if display_text.is_empty() {
             vec![""]
         } else {
-            Self::wrapped_lines(&self.input, text_w)
+            Self::wrapped_lines(display_text, text_w)
         };
         let n = display_lines.len() as u16;
 
@@ -116,15 +182,12 @@ impl PromptView {
         let cap_area = Rect::new(area.x, cap_y, area.width, CAP_H);
         let footer_y = cap_y + CAP_H;
 
-        let agent_name = state
-            .current_session()
-            .and_then(|s| {
-                s.messages
-                    .iter()
-                    .find(|m| m.role == MessageRole::User)
-                    .and_then(|m| m.agent.clone())
-            })
-            .unwrap_or_else(|| "build".to_string());
+        let agent_name = if unique_agents.is_empty() {
+            "build".to_string()
+        } else {
+            let idx = self.selected_agent_index.min(unique_agents.len().saturating_sub(1));
+            unique_agents[idx].clone()
+        };
 
         let agent_color = agent_colors.get(&agent_name, unique_agents);
 
@@ -151,11 +214,6 @@ impl PromptView {
 
         let x_off = input_area.x + 3;
         let text_start = input_area.y + 1;
-        let input_style_base = if self.input.is_empty() {
-            Style::default().fg(rgba_color(theme.text_muted))
-        } else {
-            Style::default().fg(rgba_color(theme.text))
-        };
         let max_line_w = input_area.width.saturating_sub(5) as u16;
 
         for (i, line) in display_lines.iter().enumerate() {
@@ -163,10 +221,10 @@ impl PromptView {
             if ly >= input_area.bottom() {
                 break;
             }
-            let style = if self.input.is_empty() && i == 0 {
+            let style = if display_placeholder && i == 0 {
                 Style::default().fg(rgba_color(theme.text_muted))
             } else {
-                input_style_base
+                Style::default().fg(rgba_color(theme.text))
             };
             draw_text_line(buf, line, x_off, ly, max_line_w, style);
         }

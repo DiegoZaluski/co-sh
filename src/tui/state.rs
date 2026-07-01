@@ -91,7 +91,7 @@ impl AppState {
                 Message {
                     id: "msg-3".to_string(),
                     role: MessageRole::User,
-                    agent: Some("build".to_string()),
+                    agent: Some("editor".to_string()),
                     model: None,
                     parts: vec![Part::Text(TextPart {
                         text: "Let me read the current main.rs to understand the structure.".to_string(),
