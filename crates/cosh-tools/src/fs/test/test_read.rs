@@ -1,11 +1,11 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 use super::super::read::read;
 use super::super::types::{FsMetadata, FsRead, Target};
 
-fn meta() -> FsMetadata<'static> {
+fn meta() -> FsMetadata {
     FsMetadata {
-        root: Path::new("/home/inky/cosh"),
+        root: PathBuf::from("/home/inky/cosh"),
         allowlist: None,
         blocklist: None,
     }

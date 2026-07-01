@@ -8,7 +8,7 @@
 //! The `_gap` suffix tests assert corrected behavior for previously
 //! unpatched vulnerabilities (closed by sandbox integrity fixes).
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use super::super::edit::edit;
 use super::super::read::read;
@@ -21,9 +21,9 @@ use cosh_sdk::hashline::format::compute_file_hash;
 
 const PROJECT_ROOT: &str = "/home/inky/cosh";
 
-fn meta() -> FsMetadata<'static> {
+fn meta() -> FsMetadata {
     FsMetadata {
-        root: Path::new(PROJECT_ROOT),
+        root: PathBuf::from(PROJECT_ROOT),
         allowlist: None,
         blocklist: None,
     }
@@ -145,7 +145,7 @@ async fn write_traversal_via_dotdot_is_denied() {
     let _ = std::fs::remove_file(resolved);
 
     let _metadata = FsMetadata {
-        root: Path::new(PROJECT_ROOT),
+        root: PathBuf::from(PROJECT_ROOT),
         allowlist: None,
         blocklist: None,
     };
@@ -175,7 +175,7 @@ async fn write_traversal_via_dotdot_is_denied() {
     );
 
     assert!(
-        !Path::new(resolved).exists(),
+        !PathBuf::from(resolved).exists(),
         "traversal path must not write outside root"
     );
 }
@@ -187,9 +187,9 @@ async fn write_traversal_blocklist_respected_after_normalization() {
     let _ = std::fs::remove_file(resolved);
 
     let metadata = FsMetadata {
-        root: Path::new(PROJECT_ROOT),
+        root: PathBuf::from(PROJECT_ROOT),
         allowlist: None,
-        blocklist: Some(vec![Path::new("/tmp")]),
+        blocklist: Some(vec![PathBuf::from("/tmp")]),
     };
 
     let result = write(
@@ -211,7 +211,7 @@ async fn write_traversal_blocklist_respected_after_normalization() {
     );
 
     assert!(
-        !Path::new(resolved).exists(),
+        !PathBuf::from(resolved).exists(),
         "file must not be written despite blocklist"
     );
 }
@@ -234,7 +234,7 @@ async fn write_gap_symlink_escape() {
     std::os::unix::fs::symlink(outside_dir, &symlink_path).unwrap();
 
     let metadata = FsMetadata {
-        root: Path::new(PROJECT_ROOT),
+        root: PathBuf::from(PROJECT_ROOT),
         allowlist: None,
         blocklist: None,
     };
@@ -266,7 +266,7 @@ async fn write_gap_symlink_escape() {
     );
 
     assert!(
-        !Path::new(&outside_file).exists(),
+        !PathBuf::from(&outside_file).exists(),
         "file must NOT exist — write was denied via symlink escape"
     );
 
@@ -295,17 +295,18 @@ async fn edit_gap_symlink_escape() {
     let symlink_target = format!("{symlink_path}/target.txt");
 
     let result = edit(
-        &FsEdit,
         FsMetadata {
-            root: Path::new(PROJECT_ROOT),
+            root: PathBuf::from(PROJECT_ROOT),
             allowlist: None,
             blocklist: None,
         },
-        vec![EditTarget {
-            path: &symlink_target,
-            file_hash: &hash,
-            ops: "replace 1..1:\n+EDITED",
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: symlink_target,
+                file_hash: hash,
+                ops: "replace 1..1:\n+EDITED".to_string(),
+            }],
+        },
     )
     .await;
 
@@ -337,17 +338,18 @@ async fn edit_traversal_via_dotdot_resolves_inside_root_and_succeeds() {
     let traversal_path = "/home/inky/cosh/../cosh/cosh_traversal_edit_target.txt";
 
     let result = edit(
-        &FsEdit,
         FsMetadata {
-            root: Path::new(PROJECT_ROOT),
+            root: PathBuf::from(PROJECT_ROOT),
             allowlist: None,
             blocklist: None,
         },
-        vec![EditTarget {
-            path: traversal_path,
-            file_hash: &hash,
-            ops: "replace 1..1:\n+EDITED",
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: traversal_path.to_string(),
+                file_hash: hash,
+                ops: "replace 1..1:\n+EDITED".to_string(),
+            }],
+        },
     )
     .await;
 
@@ -371,17 +373,18 @@ async fn edit_traversal_escape_via_dotdot_is_denied() {
     let resolved = "/tmp/cosh_traversal_edit_escape.txt";
 
     let result = edit(
-        &FsEdit,
         FsMetadata {
-            root: Path::new(PROJECT_ROOT),
+            root: PathBuf::from(PROJECT_ROOT),
             allowlist: None,
             blocklist: None,
         },
-        vec![EditTarget {
-            path: escape_path,
-            file_hash: "",
-            ops: "replace 1..1:\n+EDITED",
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: escape_path.to_string(),
+                file_hash: "".to_string(),
+                ops: "replace 1..1:\n+EDITED".to_string(),
+            }],
+        },
     )
     .await;
 
@@ -414,7 +417,7 @@ async fn rollback_traversal_via_dotdot_resolves_inside_root_and_succeeds() {
     let result = rollback(
         &FsRollback,
         FsMetadata {
-            root: Path::new(PROJECT_ROOT),
+            root: PathBuf::from(PROJECT_ROOT),
             allowlist: None,
             blocklist: None,
         },
@@ -445,7 +448,7 @@ async fn rollback_traversal_escape_via_dotdot_is_denied() {
     let result = rollback(
         &FsRollback,
         FsMetadata {
-            root: Path::new(PROJECT_ROOT),
+            root: PathBuf::from(PROJECT_ROOT),
             allowlist: None,
             blocklist: None,
         },

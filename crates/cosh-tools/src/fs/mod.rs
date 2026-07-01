@@ -238,19 +238,13 @@ impl Fs {
     }
 
     /// Build an [`FsMetadata`] from the current owned state.
-    fn metadata(&self) -> FsMetadata<'_> {
-        let allowlist = self
-            .allowlist
-            .as_ref()
-            .map(|v| v.iter().map(PathBuf::as_path).collect());
+    fn metadata(&self) -> FsMetadata {
+        let allowlist = self.allowlist.clone();
 
-        let blocklist = self
-            .blocklist
-            .as_ref()
-            .map(|v| v.iter().map(PathBuf::as_path).collect());
+        let blocklist = self.blocklist.clone();
 
         FsMetadata {
-            root: &self.root,
+            root: self.root.clone(),
             allowlist,
             blocklist,
         }
@@ -282,8 +276,8 @@ impl Fs {
     ///
     /// Returns an error if a file hash doesn't match, edit operations fail
     /// to parse, or write permissions are denied.
-    pub async fn edit(&self, targets: Vec<EditTarget<'_>>) -> Result<Vec<EditResult>, String> {
-        edit(&FsEdit, self.metadata(), targets).await
+    pub async fn edit(&self, targets: Vec<EditTarget>) -> Result<Vec<EditResult>, String> {
+        edit(self.metadata(), FsEdit { targets }).await
     }
 
     /// Roll back a file to a previously recorded session version.

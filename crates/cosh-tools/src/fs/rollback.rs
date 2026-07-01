@@ -44,7 +44,7 @@ pub struct RollbackResult {
 /// - A disk write error occurs.
 pub async fn rollback(
     config: &FsRollback,
-    metadata: FsMetadata<'_>,
+    metadata: FsMetadata,
     path: &str,
     hash: &str,
 ) -> Result<RollbackResult, String> {

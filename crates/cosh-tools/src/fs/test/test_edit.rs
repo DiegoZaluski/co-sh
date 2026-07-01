@@ -1,11 +1,11 @@
 use super::super::edit::edit;
 use super::super::types::{EditTarget, FsEdit, FsMetadata};
 use cosh_sdk::hashline::format::compute_file_hash;
-use std::path::Path;
+use std::path::PathBuf;
 
-fn make_metadata() -> FsMetadata<'static> {
+fn make_metadata() -> FsMetadata {
     FsMetadata {
-        root: Path::new("/home/inky/cosh"),
+        root: PathBuf::from("/home/inky/cosh"),
         allowlist: None,
         blocklist: None,
     }
@@ -23,13 +23,14 @@ async fn edit_replaces_single_line_in_file() {
     let file_hash = hash_file(path);
 
     let result = edit(
-        &FsEdit,
         make_metadata(),
-        vec![EditTarget {
-            path,
-            file_hash: &file_hash,
-            ops: "replace 2..2:\n+REPLACED",
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: path.to_string(),
+                file_hash: file_hash,
+                ops: "replace 2..2:\n+REPLACED".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -49,13 +50,14 @@ async fn edit_replaces_multi_line_range() {
     let file_hash = hash_file(path);
 
     let result = edit(
-        &FsEdit,
         make_metadata(),
-        vec![EditTarget {
-            path,
-            file_hash: &file_hash,
-            ops: "replace 2..4:\n+X\n+Y",
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: path.to_string(),
+                file_hash: file_hash,
+                ops: "replace 2..4:\n+X\n+Y".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -74,13 +76,14 @@ async fn edit_inserts_before_and_after_anchor() {
     let ops = "insert before 2:\n+BEFORE\ninsert after 2:\n+AFTER";
 
     let result = edit(
-        &FsEdit,
         make_metadata(),
-        vec![EditTarget {
-            path,
-            file_hash: &file_hash,
-            ops,
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: path.to_string(),
+                file_hash: file_hash,
+                ops: ops.to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -99,13 +102,14 @@ async fn edit_inserts_at_head_and_tail() {
     let ops = "insert head:\n+HEAD\ninsert tail:\n+TAIL";
 
     let result = edit(
-        &FsEdit,
         make_metadata(),
-        vec![EditTarget {
-            path,
-            file_hash: &file_hash,
-            ops,
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: path.to_string(),
+                file_hash: file_hash,
+                ops: ops.to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -122,13 +126,14 @@ async fn edit_deletes_range_of_lines() {
     let file_hash = hash_file(path);
 
     let result = edit(
-        &FsEdit,
         make_metadata(),
-        vec![EditTarget {
-            path,
-            file_hash: &file_hash,
-            ops: "delete 2..3",
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: path.to_string(),
+                file_hash: file_hash,
+                ops: "delete 2..3".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -145,13 +150,14 @@ async fn edit_replaces_syntactic_block_in_rust_file() {
     let file_hash = hash_file(path);
 
     let result = edit(
-        &FsEdit,
         make_metadata(),
-        vec![EditTarget {
-            path,
-            file_hash: &file_hash,
-            ops: "replace block 1:\n+fn main() {\n+    println!(\"hello\");\n+}",
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: path.to_string(),
+                file_hash: file_hash,
+                ops: "replace block 1:\n+fn main() {\n+    println!(\"hello\");\n+}".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -171,20 +177,21 @@ async fn edit_processes_multiple_files_in_single_call() {
     let hash_b = hash_file(path_b);
 
     let result = edit(
-        &FsEdit,
         make_metadata(),
-        vec![
-            EditTarget {
-                path: path_a,
-                file_hash: &hash_a,
-                ops: "replace 1..1:\n+ALPHA",
-            },
-            EditTarget {
-                path: path_b,
-                file_hash: &hash_b,
-                ops: "replace 1..1:\n+BETA",
-            },
-        ],
+        FsEdit {
+            targets: vec![
+                EditTarget {
+                    path: path_a.to_string(),
+                    file_hash: hash_a,
+                    ops: "replace 1..1:\n+ALPHA".to_string(),
+                },
+                EditTarget {
+                    path: path_b.to_string(),
+                    file_hash: hash_b,
+                    ops: "replace 1..1:\n+BETA".to_string(),
+                },
+            ],
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -203,13 +210,14 @@ async fn edit_returns_error_on_hash_mismatch() {
     std::fs::write(path, "original\n").unwrap();
 
     let result = edit(
-        &FsEdit,
         make_metadata(),
-        vec![EditTarget {
-            path,
-            file_hash: "BEEF",
-            ops: "replace 1..1:\n+changed",
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: path.to_string(),
+                file_hash: "BEEF".to_string(),
+                ops: "replace 1..1:\n+changed".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_err());
@@ -224,13 +232,14 @@ async fn edit_returns_error_when_file_not_found() {
     let _ = std::fs::remove_file(path);
 
     let result = edit(
-        &FsEdit,
         make_metadata(),
-        vec![EditTarget {
-            path,
-            file_hash: "BEEF",
-            ops: "replace 1..1:\n+anything",
-        }],
+        FsEdit {
+            targets: vec![EditTarget {
+                path: path.to_string(),
+                file_hash: "BEEF".to_string(),
+                ops: "replace 1..1:\n+anything".to_string(),
+            }],
+        },
     )
     .await;
     assert!(result.is_err());

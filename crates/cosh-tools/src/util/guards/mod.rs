@@ -52,8 +52,8 @@ pub fn normalize_path(path: &Path, root: &Path) -> PathBuf {
 pub fn validate_path(
     path: &str,
     root: &Path,
-    allowlist: Option<&[&Path]>,
-    blocklist: Option<&[&Path]>,
+    allowlist: Option<&[PathBuf]>,
+    blocklist: Option<&[PathBuf]>,
 ) -> GuardResult {
     let path = Path::new(path);
     let normalized = normalize_path(path, root);

@@ -1,10 +1,10 @@
 use super::super::types::{FsMetadata, FsWrite, TargetFile};
 use super::super::write::write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-fn meta() -> FsMetadata<'static> {
+fn meta() -> FsMetadata {
     FsMetadata {
-        root: Path::new("/home/inky/cosh"),
+        root: PathBuf::from("/home/inky/cosh"),
         allowlist: None,
         blocklist: None,
     }
@@ -62,9 +62,9 @@ async fn write_creates_multiple_files_in_single_call() {
 #[tokio::test]
 async fn write_denied_when_path_is_in_blocklist() {
     let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh"),
+        root: Path::new("/home/inky/cosh").to_path_buf(),
         allowlist: None,
-        blocklist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
+        blocklist: Some(vec![PathBuf::from("/home/inky/cosh/ftest.txt")]),
     };
 
     let result = write(
@@ -121,8 +121,8 @@ async fn write_reports_empty_text_inline_and_skips_file() {
 async fn write_allowed_outside_root_when_path_in_allowlist() {
     let path = "/tmp/cosh_test_allowlist_write.txt";
     let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh"),
-        allowlist: Some(vec![Path::new(path)]),
+        root: PathBuf::from("/home/inky/cosh"),
+        allowlist: Some(vec![PathBuf::from(path)]),
         blocklist: None,
     };
 
@@ -150,9 +150,9 @@ async fn write_allowed_outside_root_when_path_in_allowlist() {
 #[tokio::test]
 async fn write_errors_on_inconsistent_blocklist_and_allowlist() {
     let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh"),
-        allowlist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
-        blocklist: Some(vec![Path::new("/home/inky/cosh/ftest.txt")]),
+        root: PathBuf::from("/home/inky/cosh"),
+        allowlist: Some(vec![PathBuf::from("/home/inky/cosh/ftest.txt")]),
+        blocklist: Some(vec![PathBuf::from("/home/inky/cosh/ftest.txt")]),
     };
 
     let result = write(

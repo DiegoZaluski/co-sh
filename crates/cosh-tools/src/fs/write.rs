@@ -22,9 +22,11 @@ use cosh_sdk::hashline::{
 };
 use cosh_sdk::rollback;
 use regex::Regex;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WriteResult {
     pub path: String,
     pub file_hash: String,
@@ -99,7 +101,7 @@ async fn maybe_make_executable(_path: &str) -> bool {
 ///
 /// Returns `Err` if the [`FsMetadata`] has inconsistent allowlist/blocklist entries,
 /// or a path is both blocked and allowed simultaneously.
-pub async fn write(metadata: FsMetadata<'_>, tg: FsWrite) -> Result<Vec<WriteResult>, String> {
+pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>, String> {
     let mut result: Vec<WriteResult> = vec![];
     let fs = DiskFilesystem::new();
     for target in &tg.targets {

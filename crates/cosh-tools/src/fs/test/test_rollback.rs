@@ -15,9 +15,9 @@ fn tmp(label: &str) -> String {
     format!("{ROOT}/cosh_test_rb_{label}_{id}.txt")
 }
 
-fn meta() -> FsMetadata<'static> {
+fn meta() -> FsMetadata {
     FsMetadata {
-        root: Path::new(ROOT),
+        root: Path::new(ROOT).to_path_buf(),
         allowlist: None,
         blocklist: None,
     }
@@ -59,9 +59,9 @@ async fn rollback_denied_when_path_is_in_blocklist() {
     let _ = record(&path, "v2\n");
 
     let blocked_meta = FsMetadata {
-        root: Path::new(ROOT),
+        root: Path::new(ROOT).to_path_buf(),
         allowlist: None,
-        blocklist: Some(vec![Path::new(ROOT)]),
+        blocklist: Some(vec![Path::new(ROOT).to_path_buf()]),
     };
 
     let err = rollback(&FsRollback, blocked_meta, &path, "")
@@ -82,9 +82,9 @@ async fn rollback_returns_error_on_blocklist_allowlist_mismatch() {
     let _ = record(&path, "content\n");
 
     let mismatch_meta = FsMetadata {
-        root: Path::new(ROOT),
-        allowlist: Some(vec![Path::new(&path)]),
-        blocklist: Some(vec![Path::new(&path)]),
+        root: Path::new(ROOT).to_path_buf(),
+        allowlist: Some(vec![Path::new(&path).to_path_buf()]),
+        blocklist: Some(vec![Path::new(&path).to_path_buf()]),
     };
 
     let result = rollback(&FsRollback, mismatch_meta, &path, "").await;
@@ -104,8 +104,8 @@ async fn rollback_allowed_outside_root_when_path_in_allowlist() {
     let _ = record(&outside, "v2\n");
 
     let allowed_meta = FsMetadata {
-        root: Path::new(ROOT),
-        allowlist: Some(vec![Path::new(&outside)]),
+        root: Path::new(ROOT).to_path_buf(),
+        allowlist: Some(vec![Path::new(&outside).to_path_buf()]),
         blocklist: None,
     };
 

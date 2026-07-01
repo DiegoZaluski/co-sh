@@ -13,9 +13,11 @@ use cosh_sdk::hashline::{
     types::BlockSpan,
 };
 use cosh_sdk::rollback;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadResult {
     pub path: String,
     pub file_hash: String,
@@ -29,7 +31,7 @@ pub struct ReadResult {
 /// Each target produces one or more [`ReadResult`] entries. Errors and
 /// incomplete reads are recorded as warnings inside each result instead of
 /// aborting the entire operation.
-pub async fn read(metadata: FsMetadata<'_>, tg: FsRead) -> Vec<ReadResult> {
+pub async fn read(metadata: FsMetadata, tg: FsRead) -> Vec<ReadResult> {
     let fs = DiskFilesystem::new();
     let mut results: Vec<ReadResult> = Vec::new();
 
@@ -40,11 +42,7 @@ pub async fn read(metadata: FsMetadata<'_>, tg: FsRead) -> Vec<ReadResult> {
     results
 }
 
-async fn read_target(
-    fs: DiskFilesystem,
-    target: Target,
-    metadata: &FsMetadata<'_>,
-) -> Vec<ReadResult> {
+async fn read_target(fs: DiskFilesystem, target: Target, metadata: &FsMetadata) -> Vec<ReadResult> {
     use super::types::FsGuard;
     match metadata.fs_guard(&target.path) {
         FsGuard::Allowed(validated_path) => {

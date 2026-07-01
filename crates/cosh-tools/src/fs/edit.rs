@@ -28,16 +28,11 @@ fn resolve_block_fn(req: BlockResolverRequest) -> Option<BlockSpan> {
 ///
 /// Returns `Err` if a file hash doesn't match, edit operations fail to parse,
 /// or the underlying filesystem returns an error.
-pub async fn edit(
-    config: &FsEdit,
-    metadata: FsMetadata<'_>,
-    targets: Vec<EditTarget<'_>>,
-) -> Result<Vec<EditResult>, String> {
-    let _ = config;
+pub async fn edit(metadata: FsMetadata, tg: FsEdit) -> Result<Vec<EditResult>, String> {
     let fs = DiskFilesystem::new();
     let mut results = Vec::new();
 
-    for target in targets.clone() {
+    for target in tg.targets.clone() {
         let result = edit_target(fs.clone(), target, metadata.clone()).await?;
         results.push(result);
     }
@@ -48,10 +43,10 @@ pub async fn edit(
 use super::types;
 async fn edit_target(
     fs: DiskFilesystem,
-    target: EditTarget<'_>,
-    metadata: FsMetadata<'_>,
+    target: EditTarget,
+    metadata: FsMetadata,
 ) -> Result<EditResult, String> {
-    let validated_path = match metadata.fs_guard(target.path) {
+    let validated_path = match metadata.fs_guard(&target.path) {
         types::FsGuard::Allowed(path) => path,
         types::FsGuard::Denied => {
             return Err(format!("write permissions denied for `{}`", target.path));

@@ -75,11 +75,11 @@ fn validate_path_denies_relative_traversal_via_dotdot() {
 
 #[test]
 fn validate_path_denies_blocked_path() {
-    let root = Path::new("/home/user/project");
-    let blocklist = [Path::new("/home/user/project/secret")];
+    let root = Path::new("/home/user/project").to_path_buf();
+    let blocklist = [PathBuf::from("/home/user/project/secret")];
     let result = validate_path(
         "/home/user/project/secret/keys.txt",
-        root,
+        &root,
         None,
         Some(&blocklist),
     );
@@ -89,7 +89,7 @@ fn validate_path_denies_blocked_path() {
 #[test]
 fn validate_path_allows_allowlisted_path_outside_root() {
     let root = Path::new("/home/user/project");
-    let allowlist = [Path::new("/tmp/allowed")];
+    let allowlist = [PathBuf::from("/tmp/allowed")];
     let result = validate_path("/tmp/allowed", root, Some(&allowlist), None);
     assert!(matches!(result, GuardResult::Allowed(_)));
 }
@@ -97,8 +97,8 @@ fn validate_path_allows_allowlisted_path_outside_root() {
 #[test]
 fn validate_path_mismatch_when_both_blocked_and_allowed() {
     let root = Path::new("/home/user/project");
-    let allowlist = [Path::new("/tmp/conflict")];
-    let blocklist = [Path::new("/tmp/conflict")];
+    let allowlist = [PathBuf::from("/tmp/conflict")];
+    let blocklist = [PathBuf::from("/tmp/conflict")];
     let result = validate_path("/tmp/conflict", root, Some(&allowlist), Some(&blocklist));
     assert!(matches!(result, GuardResult::Mismatch(_)));
 }
@@ -108,7 +108,7 @@ fn validate_path_blocklist_check_is_normalized() {
     // The blocklist entry and the path both use `..` but after normalization
     // they refer to the same location.
     let root = Path::new("/home/user/project");
-    let blocklist = [Path::new("/tmp")];
+    let blocklist = [PathBuf::from("/tmp")];
     // Path with `..` that resolves to /tmp/evil
     let result = validate_path(
         "/home/user/project/../../../tmp/evil",

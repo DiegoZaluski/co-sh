@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -18,36 +18,38 @@ pub struct Target {
 pub struct FsRead {
     pub targets: Vec<Target>,
 }
-
+#[derive(Default, Debug, Deserialize, JsonSchema)]
 pub struct TargetFile {
     pub text: String,
     pub path: String,
 }
 
 /// Configuration for file write operations.
-#[derive(Default)]
+#[derive(Default, Debug, Deserialize, JsonSchema)]
 pub struct FsWrite {
     pub targets: Vec<TargetFile>,
 }
 
-#[derive(Debug, Clone)]
-pub struct FsMetadata<'a> {
-    pub root: &'a Path,
-    pub allowlist: Option<Vec<&'a Path>>,
-    pub blocklist: Option<Vec<&'a Path>>,
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FsMetadata {
+    pub root: PathBuf,
+    pub allowlist: Option<Vec<PathBuf>>,
+    pub blocklist: Option<Vec<PathBuf>>,
 }
 
 // ___
 #[derive(Debug, Clone, Default)]
-pub struct EditTarget<'a> {
-    pub path: &'a str,
-    pub file_hash: &'a str,
-    pub ops: &'a str,
+pub struct EditTarget {
+    pub path: String,
+    pub file_hash: String,
+    pub ops: String,
 }
 
 /// Configuration for file edit operations.
 #[derive(Debug, Clone, Default)]
-pub struct FsEdit;
+pub struct FsEdit {
+    pub targets: Vec<EditTarget>,
+}
 
 /// Configuration for file rollback operations.
 #[derive(Default)]
@@ -61,18 +63,18 @@ pub(crate) enum FsGuard {
     Mismatch(String),
 }
 
-impl FsMetadata<'_> {
+impl FsMetadata {
     pub(crate) fn fs_guard(&self, path: &str) -> FsGuard {
         let allowlist = self.allowlist.as_deref();
         let blocklist = self.blocklist.as_deref();
 
-        match validate_path(path, self.root, allowlist, blocklist) {
+        match validate_path(path, &self.root, allowlist, blocklist) {
             GuardResult::Allowed(normalized) => {
                 let Ok(root_canon) = self.root.canonicalize() else {
                     return FsGuard::Denied;
                 };
 
-                let root_norm = normalize_path(self.root, self.root);
+                let root_norm = normalize_path(&self.root, &self.root);
                 let in_root = normalized.starts_with(&root_norm);
 
                 let resolved = match normalized.canonicalize() {
