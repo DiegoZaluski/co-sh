@@ -17,11 +17,21 @@ path = "crates/cosh-sdk"
 [dependencies.cosh-tools]
 path = "crates/cosh-tools"
 
+[dependencies.cosh-tui]
+path = "crates/cosh-tui"
+
+[[bin]]
+name = "tui"
+path = "src/tui/main.rs"
+
 # ---
 [dependencies.ratatui]
 version = "0.30.2"
 default-features = false
-features = []
+features = ["crossterm"]
+
+[dependencies.crossterm]
+version = "0.28"
 
 # ---
 [dependencies.tokio]
