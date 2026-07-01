@@ -100,6 +100,14 @@ impl BoxRenderable {
         &self.border
     }
 
+    pub fn set_border_sides(&mut self, sides: BorderSidesConfig) {
+        self.border = sides;
+    }
+
+    pub fn set_custom_border_chars(&mut self, chars: BorderCharacters) {
+        self.custom_border_chars = Some(chars);
+    }
+
     pub fn set_border_style(&mut self, style: BorderStyle) {
         self.border_style = style;
         self.custom_border_chars = None;
