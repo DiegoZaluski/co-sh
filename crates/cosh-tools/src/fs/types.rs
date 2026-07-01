@@ -1,8 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use schemars::JsonSchema;
+use serde::Deserialize;
+
 use crate::util::guards::{GuardResult, normalize_path, validate_path};
 
 /// A single read specification.
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct Target {
     pub path: String,
     pub line: Option<usize>,
@@ -10,7 +14,7 @@ pub struct Target {
 }
 
 /// Configuration for file read operations.
-#[derive(Default)]
+#[derive(Default, Debug, Deserialize, JsonSchema)] // #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FsRead {
     pub targets: Vec<Target>,
 }

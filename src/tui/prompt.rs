@@ -110,9 +110,9 @@ impl PromptView {
         };
         let n = display_lines.len() as u16;
 
-        let input_h = BASE_H + n;
+        let input_h = BASE_H + n + AGENT_H;
         let input_area = Rect::new(area.x, area.y, area.width, input_h);
-        let cap_y = area.y + input_h + AGENT_H;
+        let cap_y = input_area.bottom();
         let cap_area = Rect::new(area.x, cap_y, area.width, CAP_H);
         let footer_y = cap_y + CAP_H;
 
@@ -173,10 +173,8 @@ impl PromptView {
 
         let agent_label = capitalize(&agent_name);
         let label_style = Style::default().fg(rgba_color(agent_color));
-        let label_y = input_area.bottom();
-        if label_y < area.bottom() {
-            draw_text_line(buf, &agent_label, x_off, label_y, max_line_w, label_style);
-        }
+        let label_y = input_area.y + BASE_H + n;
+        draw_text_line(buf, &agent_label, x_off, label_y, max_line_w, label_style);
 
         let mut cap_border_box = BoxRenderable::new();
         cap_border_box.set_border_color(Some(agent_color.into()));
