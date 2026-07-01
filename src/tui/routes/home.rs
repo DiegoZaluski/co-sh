@@ -26,55 +26,83 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
+const LOGO: &[&str] = &[
+    r"        __                 ",
+    r"  _____/ /_  ____  _____   ",
+    r" / ___/ __ \/ __ \/ ___/   ",
+    r"/ /__/ / / / /_/ (__  )    ",
+    r"\___/_/ /_/\____/____/     ",
+];
+
+const TAGLINE: &str = "Terminal AI Agent";
+
+const PLACEHOLDER_PROMPTS: &[&str] = &[
+    "Write a Rust CLI tool that processes JSON files",
+    "Explain how async/await works in Python",
+    "Help me debug a memory leak in C",
+    "Create a React component with TypeScript",
+    "Optimize this SQL query",
+];
+
 pub struct HomeView;
 
 impl HomeView {
     pub fn render(buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
         let cx = area.x + area.width / 2;
 
-        let logo = "cosh";
-        let logo_style = Style::default().fg(rgba_color(theme.primary));
-        let logo_x = cx.saturating_sub(logo.len() as u16 / 2);
-        draw_text_line(buf, logo, logo_x, area.y + 2, area.width, logo_style);
+        let primary = rgba_color(theme.primary);
+        let muted = rgba_color(theme.text_muted);
+        let text = rgba_color(theme.text);
 
-        let tagline = "Terminal AI Agent";
-        let tagline_style = Style::default().fg(rgba_color(theme.text_muted));
-        let tagline_x = cx.saturating_sub(tagline.len() as u16 / 2);
-        draw_text_line(buf, tagline, tagline_x, area.y + 4, area.width, tagline_style);
+        let logo_start_y = area.y + 2;
+        for (i, line) in LOGO.iter().enumerate() {
+            let ly = logo_start_y + i as u16;
+            let lx = cx.saturating_sub(line.len() as u16 / 2);
+            draw_text_line(buf, line, lx, ly, area.width, Style::default().fg(primary));
+        }
+
+        let tagline_y = logo_start_y + LOGO.len() as u16 + 1;
+        let tagline_x = cx.saturating_sub(TAGLINE.len() as u16 / 2);
+        draw_text_line(buf, TAGLINE, tagline_x, tagline_y, area.width, Style::default().fg(muted));
 
         if state.sessions.is_empty() {
-            let new_session = "Start a new session";
-            let new_style = Style::default().fg(rgba_color(theme.text));
-            let new_x = cx.saturating_sub(new_session.len() as u16 / 2);
-            draw_text_line(buf, new_session, new_x, area.y + 8, area.width, new_style);
+            let prompt_y = tagline_y + 3;
+            let prompt_header = "Try one of these:";
+            let ph_x = cx.saturating_sub(prompt_header.len() as u16 / 2);
+            draw_text_line(buf, prompt_header, ph_x, prompt_y, area.width, Style::default().fg(muted));
+
+            for (i, prompt) in PLACEHOLDER_PROMPTS.iter().enumerate() {
+                let py = prompt_y + 2 + i as u16;
+                if py >= area.bottom() { break; }
+                let entry = format!("  \u{25b6}  {}", prompt);
+                let ex = cx.saturating_sub(entry.len() as u16 / 2);
+                draw_text_line(buf, &entry, ex, py, area.width, Style::default().fg(text));
+            }
         } else {
-            let recent = "Recent Sessions";
-            let recent_style = Style::default().fg(rgba_color(theme.text));
-            let recent_x = cx.saturating_sub(recent.len() as u16 / 2);
-            draw_text_line(buf, recent, recent_x, area.y + 7, area.width, recent_style);
+            let recent_y = tagline_y + 2;
+            let recent_label = "Recent Sessions";
+            let rl_x = cx.saturating_sub(recent_label.len() as u16 / 2);
+            draw_text_line(buf, recent_label, rl_x, recent_y, area.width, Style::default().fg(muted));
 
             for (i, session) in state.sessions.iter().enumerate() {
-                let sy = area.y + 9 + i as u16;
-                if sy >= area.bottom() {
-                    break;
-                }
+                let sy = recent_y + 2 + i as u16;
+                if sy >= area.bottom() { break; }
 
                 let is_active = Some(session.id.as_str()) == state.current_session_id.as_deref();
                 let marker = if is_active { "\u{25b8}" } else { " " };
                 let entry = format!(" {}  {} ({} msgs)", marker, session.title, session.messages.len());
                 let entry_style = if is_active {
-                    Style::default().fg(rgba_color(theme.primary))
+                    Style::default().fg(primary)
                 } else {
-                    Style::default().fg(rgba_color(theme.text))
+                    Style::default().fg(text)
                 };
-                let entry_x = cx.saturating_sub(entry.len() as u16 / 2);
-                draw_text_line(buf, &entry, entry_x, sy, area.width, entry_style);
+                let ex = cx.saturating_sub(entry.len() as u16 / 2);
+                draw_text_line(buf, &entry, ex, sy, area.width, entry_style);
             }
         }
 
         let key_hints = "n: new session  q: quit  ?: help";
-        let hint_style = Style::default().fg(rgba_color(theme.text_muted));
         let hint_x = cx.saturating_sub(key_hints.len() as u16 / 2);
-        draw_text_line(buf, key_hints, hint_x, area.bottom().saturating_sub(2), area.width, hint_style);
+        draw_text_line(buf, key_hints, hint_x, area.bottom().saturating_sub(2), area.width, Style::default().fg(muted));
     }
 }

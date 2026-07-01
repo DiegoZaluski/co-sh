@@ -60,12 +60,16 @@
 - [x] Permissions count
 
 ### Home
-- [ ] Full ASCII logo
-- [ ] Placeholder prompts
-- [ ] Session list with active indicator
+- [x] Full ASCII logo (5-line "cosh" art)
+- [x] Placeholder prompts (5 suggested queries)
+
 
 ### System
 - [ ] Toast notifications
 - [ ] Spinner component
 - [ ] Command palette
 - [ ] Dialog stack (replace/show/clear)
+
+
+### Future 
+- [ ] Session list with active indicator
