@@ -125,7 +125,7 @@ impl SessionView {
             let mut text_r = TextRenderable::new(Some(string_to_styled_text(line)));
             text_r.set_fg(theme.text);
             text_r.set_bg(theme.background_panel);
-            let line_area = Rect::new(x_off, y, area.width.saturating_sub(4), 1);
+            let line_area = Rect::new(x_off, y, area.width.saturating_sub(5), 1);
             text_r.render_self(buf, line_area);
         }
     }
@@ -163,7 +163,7 @@ impl SessionView {
             let mut text_r = TextRenderable::new(Some(string_to_styled_text(line)));
             text_r.set_fg(theme.text);
             text_r.set_bg(theme.background);
-            let line_area = Rect::new(x_off, y, area.width.saturating_sub(4), 1);
+            let line_area = Rect::new(x_off, y, area.width.saturating_sub(5), 1);
             text_r.render_self(buf, line_area);
         }
 
@@ -183,7 +183,7 @@ impl SessionView {
                     cell.set_style(icon_style);
                 }
                 let rest = format!(" chat \u{b7} {}", model_name);
-                let text_w = area.width.saturating_sub(4);
+                let text_w = area.width.saturating_sub(5);
                 draw_text_line(buf, &rest, x_off + 1, meta_y, text_w.saturating_sub(1), muted_style);
             }
         }
