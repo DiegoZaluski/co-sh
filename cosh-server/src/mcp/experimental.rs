@@ -7,7 +7,7 @@ use rmcp::{
     tool_router,
 };
 
-/// Parameters for the vision_terminal tool.
+/// Parameters for the `vision_terminal` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct VisionTerminalParams {
     /// Raw terminal output to process (supports ANSI/escape sequences).

@@ -1,21 +1,38 @@
-use cosh_tool::{
+use cosh_tools::{
     bash::Bash,
-    fs::{Fs, FsMetadata},
+    fs::{Fs, FsMetadata, FsRead, FsWrite},
     plan::Plan,
     vision::Vision,
     web::Web,
 };
-use mcp::{ServerHandler, model::*, tools, tools_router};
+use rmcp::{handler::server::wrapper::Parameters, model::*, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
+#[allow(dead_code)]
 struct Server {
     fs: Fs,
-    fs_metadata: FsMetadata,
     web: Web,
     plan: Plan,
     bash: Bash,
     vision: Vision,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ParametersFsRead {
+    metadata: FsMetadata,
+    targets: FsRead,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ParametersFsWrite {
+    metadata: FsMetadata,
+    targets: FsWrite,
+}
+
+#[allow(dead_code)]
 #[tool_router]
 impl Server {
     pub fn new() -> Self {
@@ -28,23 +45,38 @@ impl Server {
         }
     }
 
-    // ............................... CONTROL SETTERS...
-
-    fn dir_root(&self) {
-        todo!()
-    }
     // ............................... TOOLS SECTION ...
 
     // --- FILESYSTEM ---
 
     #[tool]
-    pub fn fs_read(&self) {
-        self.fs.read();
+    pub async fn fs_read(
+        &self,
+        Parameters(params): Parameters<ParametersFsRead>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let results = self.fs.read(params.targets.targets).await;
+        Ok(CallToolResult::success(
+            results
+                .into_iter()
+                .map(|r| Content::text(serde_json::to_string(&r).unwrap_or_default()))
+                .collect(),
+        ))
     }
 
     #[tool]
-    pub fn fs_write() {
-        todo!()
+    pub async fn fs_write(
+        &self,
+        Parameters(params): Parameters<ParametersFsWrite>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match self.fs.write(params.targets.targets).await {
+            Ok(results) => Ok(CallToolResult::success(
+                results
+                    .into_iter()
+                    .map(|r| Content::text(serde_json::to_string(&r).unwrap_or_default()))
+                    .collect(),
+            )),
+            Err(err) => Err(ErrorData::new(ErrorCode::INTERNAL_ERROR, err, None)),
+        }
     }
 
     #[tool]

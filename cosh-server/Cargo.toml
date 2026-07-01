@@ -9,6 +9,13 @@ path = "../crates/cosh-sdk"
 [dependencies.cosh-tools]
 path = "../crates/cosh-tools"
 
+[dependencies]
+anyhow = "1"
+schemars = "1"
+
+[dependencies.serde_json]
+version = "1"
+
 [dependencies.ratatui]
 version = "0.30.2"
 default-features = false
@@ -26,9 +33,3 @@ features = ["server", "transport-io"]
 [dependencies.serde]
 version = "1"
 features = ["derive"]
-
-[dependencies.schemars]
-version = "1"
-
-[dependencies.anyhow]
-version = "1"
