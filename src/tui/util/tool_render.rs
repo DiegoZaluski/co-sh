@@ -2,7 +2,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use std::collections::HashMap;
+use std::path::Path;
 
+use cosh_sdk::tree_sitter::highlight::{highlight, HighlightCategory};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
@@ -30,6 +32,104 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
             cell.set_style(style);
         }
     }
+}
+
+fn lang_name_from_path(filepath: &str) -> Option<&'static str> {
+    let ext = Path::new(filepath)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    Some(match ext {
+        "rs" => "rust",
+        "py" => "python",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "cs" => "csharp",
+        "go" => "go",
+        "java" => "java",
+        "hs" | "lhs" => "haskell",
+        "swift" => "swift",
+        "zig" | "zon" => "zig",
+        "kt" | "kts" => "kotlin",
+        _ => return None,
+    })
+}
+
+fn code_highlight_style(cat: Option<HighlightCategory>, default_fg: Color) -> Style {
+    let fg = match cat {
+        Some(HighlightCategory::Keyword) => Color::Rgb(255, 180, 100),
+        Some(HighlightCategory::String) => Color::Rgb(150, 200, 150),
+        Some(HighlightCategory::Comment) => Color::Rgb(130, 130, 140),
+        Some(HighlightCategory::Type) => Color::Rgb(100, 180, 255),
+        Some(HighlightCategory::Function) => Color::Rgb(200, 180, 255),
+        Some(HighlightCategory::Number) => Color::Rgb(255, 200, 100),
+        Some(HighlightCategory::Builtin) => Color::Rgb(100, 200, 255),
+        None => default_fg,
+    };
+    Style::default().fg(fg)
+}
+
+fn draw_highlighted_code(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    max_w: u16,
+    content: &str,
+    lang: Option<&str>,
+    default_fg: Color,
+    max_lines: u16,
+) -> u16 {
+    let Some(lang) = lang else {
+        // Fallback to plain text
+        let style = Style::default().fg(default_fg);
+        for (i, line) in content.lines().enumerate().take(max_lines as usize) {
+            draw_text_line(buf, line, x, y + i as u16, max_w, style);
+        }
+        return content.lines().count().min(max_lines as usize) as u16;
+    };
+
+    let spans = highlight(content, lang);
+    let mut cat_map: Vec<Option<HighlightCategory>> = vec![None; content.len()];
+
+    if let Some(ref spans) = spans {
+        for span in spans {
+            for i in span.start..span.end.min(content.len()) {
+                cat_map[i] = Some(span.category);
+            }
+        }
+    }
+
+    let mut y_pos = y;
+    let mut byte_offset = 0;
+    let mut lines_drawn = 0u16;
+
+    for (i, line) in content.lines().enumerate() {
+        if lines_drawn >= max_lines {
+            break;
+        }
+        if i > 0 {
+            y_pos += 1;
+        }
+
+        let mut x_pos = x;
+        for (ci, ch) in line.char_indices() {
+            if x_pos >= x + max_w {
+                break;
+            }
+            let byte_pos = byte_offset + ci;
+            let cat = cat_map.get(byte_pos).copied().flatten();
+            let style = code_highlight_style(cat, default_fg);
+            if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
+                cell.set_char(ch);
+                cell.set_style(style);
+            }
+            x_pos += 1;
+        }
+        byte_offset += line.len() + 1;
+        lines_drawn += 1;
+    }
+
+    lines_drawn
 }
 
 fn pad_right(text: &str, width: usize) -> String {
@@ -220,8 +320,9 @@ pub fn render_write(
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
     if is_completed && !content.is_empty() {
+        let max_lines = 20u16;
         let lines = content.lines().count() as u16;
-        let area = Rect::new(x, y, max_w.saturating_add(3), lines.min(20) + 2);
+        let area = Rect::new(x, y, max_w.saturating_add(3), lines.min(max_lines) + 2);
         *line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
@@ -239,12 +340,10 @@ pub fn render_write(
         let title_style = Style::default().fg(rgba_color(theme.text_muted));
         draw_text_line(buf, &title, x + 3, y, max_w.saturating_sub(3), title_style);
 
-        let content_style = Style::default().fg(rgba_color(theme.text));
-        for (i, line) in content.lines().enumerate().take(20) {
-            let ly = y + 1 + i as u16;
-            if ly >= area.bottom() { break; }
-            draw_text_line(buf, line, x + 3, ly, max_w.saturating_sub(3), content_style);
-        }
+        let max_w_inner = max_w.saturating_sub(3);
+        let default_fg = rgba_color(theme.text);
+        let lang = lang_name_from_path(&filepath);
+        draw_highlighted_code(buf, x + 3, y + 1, max_w_inner, &content, lang, default_fg, max_lines);
     } else {
         let icon = "\u{2190}";
         let label = format!("Write {filepath}");

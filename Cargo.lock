@@ -534,6 +534,7 @@ name = "cosh-tui"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.0",
+ "cosh-sdk",
  "pulldown-cmark",
  "ratatui",
  "taffy",

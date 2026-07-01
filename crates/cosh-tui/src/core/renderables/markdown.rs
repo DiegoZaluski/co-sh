@@ -6,6 +6,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
+use cosh_sdk::tree_sitter::highlight::{highlight, HighlightCategory};
+
 use crate::core::renderable::Renderable;
 use crate::core::rgba::{ColorInput, RGBA, parse_color};
 use crate::core::syntax_style::SyntaxStyle;
@@ -180,6 +182,9 @@ impl Renderable for MarkdownRenderable {
         let mut x = area.x;
         let mut list_depth: usize = 0;
         let mut numbered_list_counters: Vec<usize> = Vec::new();
+        let mut in_code_block = false;
+        let mut code_block_lang = String::new();
+        let code_bg = Color::Rgb(45, 45, 60);
 
         let parser = pulldown_cmark::Parser::new(&self.content);
 
@@ -212,18 +217,17 @@ impl Renderable for MarkdownRenderable {
                             y += 1;
                             x = area.x;
                         }
-                        // read code lang if fenced
-                        let _lang = match kind {
+                        in_code_block = true;
+                        code_block_lang = match kind {
                             CodeBlockKind::Fenced(info) => info.to_string(),
                             CodeBlockKind::Indented => String::new(),
                         };
-                        // code will be rendered as text, in a dim block
                         if y < max_y {
                             for cx in area.x..max_x {
                                 if let Some(cell) = buf.cell_mut((cx, y)) {
                                     cell.set_style(
                                         default_style
-                                            .bg(Color::Rgb(30, 30, 30))
+                                            .bg(code_bg)
                                             .add_modifier(Modifier::DIM),
                                     );
                                 }
@@ -239,7 +243,6 @@ impl Renderable for MarkdownRenderable {
                             y += 1;
                             x = area.x;
                         }
-                        // draw bullet
                         let bullet = if let Some(counter) = numbered_list_counters.last_mut() {
                             let marker = format!("{}. ", *counter);
                             *counter += 1;
@@ -284,10 +287,15 @@ impl Renderable for MarkdownRenderable {
                     TagEnd::Paragraph
                     | TagEnd::Heading(_)
                     | TagEnd::BlockQuote(_)
-                    | TagEnd::CodeBlock
                     | TagEnd::Item
                     | TagEnd::Table
                     | TagEnd::TableRow => {
+                        y += 1;
+                        x = area.x;
+                    }
+                    TagEnd::CodeBlock => {
+                        in_code_block = false;
+                        code_block_lang.clear();
                         y += 1;
                         x = area.x;
                     }
@@ -306,7 +314,7 @@ impl Renderable for MarkdownRenderable {
                     | TagEnd::Superscript
                     | TagEnd::Subscript => {}
                     TagEnd::TableCell => {
-                        x += 2; // small gap between cells
+                        x += 2;
                     }
                 },
                 Event::Text(text)
@@ -314,7 +322,52 @@ impl Renderable for MarkdownRenderable {
                 | Event::InlineMath(text)
                 | Event::DisplayMath(text)
                 | Event::InlineHtml(text) => {
-                    Self::render_text(&text, buf, &mut x, y, max_x, default_style);
+                    if in_code_block {
+                        let spans = highlight(&text, &code_block_lang);
+                        let mut cat_map: Vec<Option<HighlightCategory>> = vec![None; text.len()];
+                        if let Some(ref spans) = spans {
+                            for span in spans {
+                                for i in span.start..span.end.min(text.len()) {
+                                    cat_map[i] = Some(span.category);
+                                }
+                            }
+                        }
+                        let mut byte_offset = 0;
+                        for (i, line) in text.lines().enumerate() {
+                            if i > 0 {
+                                y += 1;
+                                x = area.x;
+                            }
+                            if y >= max_y {
+                                break;
+                            }
+                            for cx in area.x..max_x {
+                                if let Some(cell) = buf.cell_mut((cx, y)) {
+                                    cell.set_style(
+                                        default_style
+                                            .bg(code_bg)
+                                            .add_modifier(Modifier::DIM),
+                                    );
+                                }
+                            }
+                            for (ci, ch) in line.char_indices() {
+                                if x >= max_x {
+                                    break;
+                                }
+                                let byte_pos = byte_offset + ci;
+                                let cat = cat_map.get(byte_pos).copied().flatten();
+                                let style = highlight_style(cat, fg_color, code_bg);
+                                if let Some(cell) = buf.cell_mut((x, y)) {
+                                    cell.set_char(ch);
+                                    cell.set_style(style);
+                                }
+                                x += 1;
+                            }
+                            byte_offset += line.len() + 1;
+                        }
+                    } else {
+                        Self::render_text(&text, buf, &mut x, y, max_x, default_style);
+                    }
                 }
                 Event::Code(text) => {
                     let code_style = default_style
@@ -348,5 +401,209 @@ impl Renderable for MarkdownRenderable {
                 }
             }
         }
+    }
+}
+
+fn highlight_style(cat: Option<HighlightCategory>, default_fg: Color, bg: Color) -> Style {
+    let fg = match cat {
+        Some(HighlightCategory::Keyword) => Color::Rgb(255, 180, 100),
+        Some(HighlightCategory::String) => Color::Rgb(150, 200, 150),
+        Some(HighlightCategory::Comment) => Color::Rgb(130, 130, 140),
+        Some(HighlightCategory::Type) => Color::Rgb(100, 180, 255),
+        Some(HighlightCategory::Function) => Color::Rgb(200, 180, 255),
+        Some(HighlightCategory::Number) => Color::Rgb(255, 200, 100),
+        Some(HighlightCategory::Builtin) => Color::Rgb(100, 200, 255),
+        None => default_fg,
+    };
+    Style::default().fg(fg).bg(bg).add_modifier(Modifier::DIM)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosh_sdk::tree_sitter::highlight::highlight;
+
+    #[test]
+    fn test_pulldown_code_block_info_string() {
+        let md = "```rust\nfn main() {}\n```\n";
+        let parser = pulldown_cmark::Parser::new(md);
+        let mut info_str = String::new();
+        for event in parser {
+            if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(kind)) = event {
+                match kind {
+                    pulldown_cmark::CodeBlockKind::Fenced(info) => {
+                        info_str = info.to_string();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(info_str, "rust");
+    }
+
+    #[test]
+    fn test_pulldown_code_block_with_space_before_lang() {
+        let md = "``` rust\nfn main() {}\n```\n";
+        let parser = pulldown_cmark::Parser::new(md);
+        let mut info_str = String::new();
+        for event in parser {
+            if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(kind)) = event {
+                match kind {
+                    pulldown_cmark::CodeBlockKind::Fenced(info) => {
+                        info_str = info.to_string();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(info_str, "rust", "pulldown trims leading whitespace");
+    }
+
+    #[test]
+    fn test_pulldown_code_block_text_content() {
+        let md = "```rust\nfn main() {}\n```\n";
+        let parser = pulldown_cmark::Parser::new(md);
+        let mut in_code = false;
+        let mut code_text = String::new();
+        let mut code_lang = String::new();
+
+        for event in parser {
+            match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(kind)) => {
+                    in_code = true;
+                    if let pulldown_cmark::CodeBlockKind::Fenced(info) = kind {
+                        code_lang = info.to_string();
+                    }
+                }
+                pulldown_cmark::Event::Text(text) if in_code => {
+                    code_text = text.to_string();
+                }
+                pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
+                    in_code = false;
+                }
+                _ => {}
+            }
+        }
+
+        let result = highlight(&code_text, &code_lang);
+        assert!(result.is_some(), "highlight should return Some for code block content");
+        let spans = result.unwrap();
+        assert!(!spans.is_empty(), "should have at least one highlight span");
+        let keywords: Vec<_> = spans.iter().filter(|s| s.category == HighlightCategory::Keyword).collect();
+        assert!(!keywords.is_empty(), "should find keywords (fn)");
+    }
+
+    #[test]
+    fn test_pulldown_multi_line_code_block() {
+        let md = "```rust\nfn main() {\n    let x = 1;\n    println!(\"hello\");\n}\n```\n";
+        let parser = pulldown_cmark::Parser::new(md);
+        let mut in_code = false;
+        let mut code_text = String::new();
+        let mut code_lang = String::new();
+
+        for event in parser {
+            match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(kind)) => {
+                    in_code = true;
+                    if let pulldown_cmark::CodeBlockKind::Fenced(info) = kind {
+                        code_lang = info.to_string();
+                    }
+                }
+                pulldown_cmark::Event::Text(text) if in_code => {
+                    code_text = text.to_string();
+                }
+                pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
+                    in_code = false;
+                }
+                _ => {}
+            }
+        }
+
+        let result = highlight(&code_text, &code_lang);
+        assert!(result.is_some(), "highlight should return Some");
+        let spans = result.unwrap();
+        assert!(!spans.is_empty(), "should have spans");
+    }
+
+    #[test]
+    fn test_render_rust_code_block_colors() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let md_content = "```rust\nfn main() {\n    let x = 1;\n}\n```\n";
+        let mut md = super::MarkdownRenderable::new(Some(md_content.to_string()));
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 20));
+        let area = Rect::new(0, 0, 60, 20);
+
+        md.render_self(&mut buf, area);
+
+        // Verify the rendered characters at correct positions
+        // Line 0 should be "fn main() {" starting at x=0
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "f");
+        assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "n");
+
+        // Line 1 should be "    let x = 1;" starting at x=0, y=1
+        let line1: String = (0..14u16).map(|cx| {
+            buf.cell((cx, 1)).unwrap().symbol().chars().next().unwrap_or(' ')
+        }).collect();
+        assert!(line1.contains("let x = 1"), "line 1 should contain the code");
+
+        // Check 'f' at (0,0) has Keyword color (orange)
+        let keyword_color = Some(Color::Rgb(255, 180, 100));
+        assert_eq!(buf.cell((0, 0)).unwrap().style().fg, keyword_color);
+        assert_eq!(buf.cell((1, 0)).unwrap().style().fg, keyword_color);
+
+        // Check 'm' at (3,0) has Function color (purple)
+        let function_color = Some(Color::Rgb(200, 180, 255));
+        assert_eq!(buf.cell((3, 0)).unwrap().style().fg, function_color);
+
+        // Check 'l' at (4,1) has Keyword color
+        assert_eq!(buf.cell((4, 1)).unwrap().style().fg, keyword_color);
+
+        // Check '1' at (12,1) has Number color (gold)
+        let number_color = Some(Color::Rgb(255, 200, 100));
+        assert_eq!(buf.cell((12, 1)).unwrap().style().fg, number_color);
+
+        // Check non-keyword chars have default foreground
+        let default_fg = Some(Color::Rgb(220, 220, 220));
+        assert_eq!(buf.cell((2, 0)).unwrap().style().fg, default_fg);
+
+        // Check code_bg is applied
+        let code_bg = Some(Color::Rgb(45, 45, 60));
+        assert_eq!(buf.cell((0, 0)).unwrap().style().bg, code_bg);
+
+        // Check DIM modifier is applied
+        assert!(buf.cell((0, 0)).unwrap().style().add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn test_code_block_without_language() {
+        let md = "```\nplain code\n```\n";
+        let parser = pulldown_cmark::Parser::new(md);
+        let mut in_code = false;
+        let mut code_text = String::new();
+        let mut code_lang = String::new();
+
+        for event in parser {
+            match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(kind)) => {
+                    in_code = true;
+                    if let pulldown_cmark::CodeBlockKind::Fenced(info) = kind {
+                        code_lang = info.to_string();
+                    }
+                }
+                pulldown_cmark::Event::Text(text) if in_code => {
+                    code_text = text.to_string();
+                }
+                pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
+                    in_code = false;
+                }
+                _ => {}
+            }
+        }
+
+        let result = highlight(&code_text, &code_lang);
+        assert!(result.is_none(), "highlight should return None for empty lang");
     }
 }

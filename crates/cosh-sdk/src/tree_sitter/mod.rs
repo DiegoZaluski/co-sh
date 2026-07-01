@@ -6,6 +6,7 @@
 //!
 //! Finally, uses the resulting tree to resolve the `BlockSpan` for the given line.
 pub mod block;
+pub mod highlight;
 pub mod language;
 
 use crate::hashline::types::BlockSpan;

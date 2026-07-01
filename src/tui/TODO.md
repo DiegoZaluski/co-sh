@@ -24,7 +24,7 @@
 - [x] toast.rs
 - [x] scroll.rs
 - [x] markdown.rs
-- [ ] command_palette.rs
+- [x] command_palette.rs
 
 ## Missing features
 
@@ -70,6 +70,14 @@
 - [x] Command palette (Ctrl+P overlay with filter/select)
 - [x] Dialog stack (push/pop/replace/clear, Alert + Confirm)
 
+### Syntax highlighting (new)
+- [x] Tree-sitter based syntax highlighting for markdown code blocks
+- [x] Rust: keywords, strings, comments, types, functions, numbers
+- [x] Python: keywords, strings, comments, functions, numbers
+- [x] JavaScript/TypeScript: keywords, strings, comments, functions, numbers
+- [x] Code block background (dimmed, dark blue-ish tint)
+- [x] Language detection from fenced code block info string
+- [x] Extended color palette: keyword (orange), string (green), comment (gray), type (blue), function (purple), number (gold), builtin (cyan)
 
-### Future 
+### Future
 - [ ] Session list with active indicator
