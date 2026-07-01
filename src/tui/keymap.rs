@@ -39,8 +39,7 @@ impl KeyMap {
 
         KeyMap {
             bindings: vec![
-                (Action::Quit, KeyBinding { key: Char('q'), modifiers: KeyModifiers::NONE }),
-                (Action::Quit, KeyBinding { key: Esc, modifiers: KeyModifiers::NONE }),
+
                 (Action::ScrollUp, KeyBinding { key: Up, modifiers: KeyModifiers::NONE }),
                 (Action::ScrollUp, KeyBinding { key: Char('k'), modifiers: KeyModifiers::NONE }),
                 (Action::ScrollDown, KeyBinding { key: Down, modifiers: KeyModifiers::NONE }),

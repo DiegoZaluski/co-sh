@@ -125,7 +125,7 @@ impl SessionView {
             let mut text_r = TextRenderable::new(Some(string_to_styled_text(line)));
             text_r.set_fg(theme.text);
             text_r.set_bg(theme.background_panel);
-            let line_area = Rect::new(x_off, y, area.width.saturating_sub(5), 1);
+            let line_area = Rect::new(x_off, y, area.width.saturating_sub(6), 1);
             text_r.render_self(buf, line_area);
         }
     }
@@ -163,7 +163,7 @@ impl SessionView {
             let mut text_r = TextRenderable::new(Some(string_to_styled_text(line)));
             text_r.set_fg(theme.text);
             text_r.set_bg(theme.background);
-            let line_area = Rect::new(x_off, y, area.width.saturating_sub(5), 1);
+            let line_area = Rect::new(x_off, y, area.width.saturating_sub(6), 1);
             text_r.render_self(buf, line_area);
         }
 
@@ -172,7 +172,7 @@ impl SessionView {
             let agent = msg.agent.as_deref().unwrap_or("default");
             let agent_color = agent_colors.get(agent, unique_agents);
 
-            let meta_y = text_y + text_content.lines().count() as u16;
+            let meta_y = text_y + text_content.lines().count() as u16 + 1;
             if meta_y < area.bottom() {
                 let muted_style = Style::default().fg(rgba_color(theme.text_muted));
                 let icon_style = Style::default()
@@ -183,7 +183,7 @@ impl SessionView {
                     cell.set_style(icon_style);
                 }
                 let rest = format!(" chat \u{b7} {}", model_name);
-                let text_w = area.width.saturating_sub(5);
+                let text_w = area.width.saturating_sub(6);
                 draw_text_line(buf, &rest, x_off + 1, meta_y, text_w.saturating_sub(1), muted_style);
             }
         }
@@ -231,7 +231,7 @@ impl SessionView {
 
             let mut msg_h = lines + 2;
             if idx == session.messages.len() - 1 && msg.role == MessageRole::Assistant {
-                msg_h += 1;
+                msg_h += 2;
             }
 
             let gap = if idx > 0 { 1 } else { 0 };

@@ -24,7 +24,6 @@ fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
     Color::Rgb(r, g, b)
 }
 
-const PROMPT_HEIGHT: u16 = 6;
 const SIDEBAR_WIDTH: u16 = 24;
 const FOOTER_HEIGHT: u16 = 1;
 
@@ -125,8 +124,13 @@ impl App {
         }
 
         let footer_y = main_area.bottom().saturating_sub(1);
-        let prompt_area_y = footer_y.saturating_sub(PROMPT_HEIGHT);
-        let prompt_area = Rect::new(main_area.x + 2, prompt_area_y, main_area.width.saturating_sub(4), PROMPT_HEIGHT);
+        let prompt_h = if matches!(self.mode(), AppMode::Session) {
+            self.prompt_view.required_height(main_area.width.saturating_sub(4))
+        } else {
+            0
+        };
+        let prompt_area_y = footer_y.saturating_sub(prompt_h);
+        let prompt_area = Rect::new(main_area.x + 2, prompt_area_y, main_area.width.saturating_sub(4), prompt_h);
         let session_bottom = prompt_area_y;
         let session_area = Rect::new(main_area.x, area.y + 1, main_area.width, session_bottom.saturating_sub(area.y + 1));
 
@@ -164,9 +168,6 @@ impl App {
                     let action = self.keymap.lookup(key.code, key.modifiers).cloned();
 
                     match action {
-                        Some(crate::keymap::Action::Quit) => {
-                            self.should_quit = true;
-                        }
                         Some(crate::keymap::Action::ScrollUp) => {
                             self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
                         }
@@ -209,6 +210,7 @@ impl App {
                         Some(crate::keymap::Action::PrevAgent) => {}
                         Some(crate::keymap::Action::NextSession) => {}
                         Some(crate::keymap::Action::PrevSession) => {}
+                        Some(crate::keymap::Action::Quit) => {}
                         None => {
                             match key.code {
                                 KeyCode::Up => {
