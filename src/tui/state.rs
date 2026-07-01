@@ -6,6 +6,12 @@ pub struct AppState {
     pub status: SessionStatus,
     pub scroll_y: i32,
     pub content_height: i32,
+    pub working_directory: String,
+    pub connected: bool,
+    pub lsp_count: usize,
+    pub mcp_count: usize,
+    pub mcp_errors: usize,
+    pub permission_count: usize,
 }
 
 impl AppState {
@@ -16,6 +22,12 @@ impl AppState {
             status: SessionStatus::Idle,
             scroll_y: 0,
             content_height: 0,
+            working_directory: String::new(),
+            connected: false,
+            lsp_count: 0,
+            mcp_count: 0,
+            mcp_errors: 0,
+            permission_count: 0,
         }
     }
 
@@ -228,5 +240,11 @@ impl AppState {
         };
         self.sessions.push(session);
         self.current_session_id = Some("demo-1".to_string());
+        self.working_directory = "~/cosh".to_string();
+        self.connected = true;
+        self.lsp_count = 2;
+        self.mcp_count = 3;
+        self.mcp_errors = 0;
+        self.permission_count = 1;
     }
 }

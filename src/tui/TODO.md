@@ -53,11 +53,11 @@
 - [x] Placeholder text ("Type a message...")
 
 ### Footer
-- [ ] Directory display
-- [ ] Connection status
-- [ ] LSP count
-- [ ] MCP count + status
-- [ ] Permissions count
+- [x] Directory display
+- [x] Connection status (●/○ with color)
+- [x] LSP count
+- [x] MCP count + status
+- [x] Permissions count
 
 ### Home
 - [ ] Full ASCII logo
