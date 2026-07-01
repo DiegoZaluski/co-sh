@@ -8,6 +8,7 @@ use ratatui::style::{Color, Style};
 use ratatui::Terminal;
 
 use crate::component::prompt::PromptView;
+use crate::config::TuiConfig;
 use crate::keymap::KeyMap;
 use crate::routes::home::HomeView;
 use crate::routes::session::footer::FooterView;
@@ -42,6 +43,7 @@ pub struct App {
     pub permission_dialog: PermissionDialog,
     pub question_dialog: QuestionDialog,
     pub keymap: KeyMap,
+    pub config: TuiConfig,
     pub should_quit: bool,
 }
 
@@ -60,6 +62,7 @@ impl App {
             permission_dialog: PermissionDialog::new(),
             question_dialog: QuestionDialog::new(),
             keymap: KeyMap::default_vim(),
+            config: TuiConfig::default(),
             should_quit: false,
         }
     }
@@ -139,9 +142,10 @@ impl App {
                 HomeView::render(buf, session_area, &self.state, &self.theme);
             }
             AppMode::Session => {
+                self.session_view.tool_state.advance_spinner();
                 let unique_agents = self.state.unique_agents();
                 let agent_colors = crate::types::AgentColors::from_theme(&self.theme);
-                self.session_view.render(buf, session_area, &self.state, &self.theme);
+                self.session_view.render(buf, session_area, &self.state, &self.theme, &self.config);
                 self.prompt_view.render(buf, prompt_area, &self.state, &self.theme, &agent_colors, &unique_agents);
             }
         }
@@ -204,6 +208,21 @@ impl App {
                         }
                         Some(crate::keymap::Action::ScrollToBottom) => {
                             self.session_view.scroll_y = self.state.max_scroll();
+                        }
+                        Some(crate::keymap::Action::ToggleConceal) => {
+                            self.config.conceal = !self.config.conceal;
+                        }
+                        Some(crate::keymap::Action::ToggleThinking) => {
+                            self.config.thinking_mode = !self.config.thinking_mode;
+                        }
+                        Some(crate::keymap::Action::ToggleToolDetails) => {
+                            self.config.show_tool_details = !self.config.show_tool_details;
+                        }
+                        Some(crate::keymap::Action::ToggleGenericToolOutput) => {
+                            self.config.show_generic_tool_output = !self.config.show_generic_tool_output;
+                        }
+                        Some(crate::keymap::Action::ToggleTimestamps) => {
+                            self.config.show_timestamps = !self.config.show_timestamps;
                         }
                         Some(crate::keymap::Action::FocusInput) => {}
                         Some(crate::keymap::Action::NextAgent) => {}

@@ -29,23 +29,23 @@
 ## Missing features
 
 ### Session / Chat
-- [ ] Tool part rendering (shell, glob, read, grep, write, edit, task, webfetch, websearch, apply_patch, todowrite, question, skill, generic)
-- [ ] Inline tool (icon + text, spinner, status colors)
-- [ ] Block tool (border box, title, expand/collapse output)
-- [ ] Reasoning part (collapsible header + markdown body)
-- [ ] File part (file/directory badge)
-- [ ] Markdown rendering in text parts
-- [ ] Diff rendering in edit/apply_patch tools
-- [ ] Assistant metadata footer (mode · model · duration)
-- [ ] Agent color per message (border + icon)
-- [ ] Session scrollbar
-- [ ] Timestamps toggle
-- [ ] Conceal mode toggle
-- [ ] Thinking mode toggle
-- [ ] Tool details toggle
-- [ ] Generic tool output toggle
-- [ ] Queued message indicator
-- [ ] Compaction banner
+- [x] Tool part rendering (shell, glob, read, grep, write, edit, task, webfetch, websearch, apply_patch, todowrite, question, skill, generic)
+- [x] Inline tool (icon + text, spinner, status colors)
+- [x] Block tool (border box, title, expand/collapse output)
+- [x] Reasoning part (collapsible header + markdown body)
+- [x] File part (file/directory badge)
+- [x] Markdown rendering in text parts
+- [x] Diff rendering in edit/apply_patch tools
+- [x] Assistant metadata footer (mode · model · duration)
+- [x] Agent color per message (border + icon)
+- [x] Session scrollbar
+- [x] Timestamps toggle (Ctrl+Y)
+- [x] Conceal mode toggle (Ctrl+C)
+- [x] Thinking mode toggle (Ctrl+T)
+- [x] Tool details toggle (Ctrl+D)
+- [x] Generic tool output toggle (Ctrl+G)
+- [x] Queued message indicator
+- [x] Compaction banner
 
 ### Prompt
 - [ ] Agent selector cycling
