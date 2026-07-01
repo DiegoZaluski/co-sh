@@ -7,17 +7,17 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::Terminal;
 
-use crate::dialogs::DialogState;
-use crate::footer::FooterView;
-use crate::home::HomeView;
+use crate::component::prompt::PromptView;
 use crate::keymap::KeyMap;
-use crate::permission::PermissionDialog;
-use crate::prompt::PromptView;
-use crate::question::QuestionDialog;
-use crate::session::SessionView;
-use crate::sidebar::SidebarView;
+use crate::routes::home::HomeView;
+use crate::routes::session::footer::FooterView;
+use crate::routes::session::permission::PermissionDialog;
+use crate::routes::session::question::QuestionDialog;
+use crate::routes::session::sidebar::SidebarView;
+use crate::routes::session::SessionView;
 use crate::state::AppState;
 use crate::theme::Theme;
+use crate::ui::dialogs::DialogState;
 
 fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();

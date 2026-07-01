@@ -1,3 +1,9 @@
+pub mod footer;
+pub mod permission;
+pub mod question;
+pub mod sidebar;
+pub mod subagent_footer;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};

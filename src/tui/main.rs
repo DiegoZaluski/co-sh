@@ -3,19 +3,13 @@
 
 mod app;
 mod config;
-mod dialogs;
-mod footer;
-mod home;
 mod keymap;
-mod permission;
-mod prompt;
-mod question;
-mod session;
-mod sidebar;
 mod state;
-mod subagent_footer;
 mod theme;
 mod types;
+mod routes;
+mod component;
+mod ui;
 
 use app::App;
 
