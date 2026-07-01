@@ -128,37 +128,22 @@ impl PromptView {
             left: true,
             top: false,
             right: false,
-            bottom: false,
+            bottom: true,
         });
         cap_border_box.set_custom_border_chars(prompt_border_chars());
         cap_border_box.render_self(buf, cap_area);
 
-        // Cap fill box (▀ line)
-        let cap_fill_area = Rect::new(cap_area.x + 1, cap_area.y, cap_area.width.saturating_sub(1), cap_area.height);
-        let mut cap_fill_box = BoxRenderable::new();
-        cap_fill_box.set_border_color(Some(theme.background_element.into()));
-        cap_fill_box.set_border_sides(BorderSidesConfig {
-            left: false,
-            top: false,
-            right: false,
-            bottom: true,
-        });
-        cap_fill_box.set_custom_border_chars({
-            BorderCharacters {
-                top_left: ' ',
-                top_right: ' ',
-                bottom_left: ' ',
-                bottom_right: ' ',
-                horizontal: '\u{2580}',
-                vertical: ' ',
-                top_t: ' ',
-                bottom_t: ' ',
-                left_t: ' ',
-                right_t: ' ',
-                cross: ' ',
+        let cap_fill_x = cap_area.x + 1;
+        let cap_fill_right = cap_area.right();
+        let cap_style = Style::default()
+            .fg(rgba_color(theme.background_element))
+            .bg(rgba_color(theme.background));
+        for cx in cap_fill_x..cap_fill_right {
+            if let Some(cell) = buf.cell_mut((cx, cap_area.y)) {
+                cell.set_char('\u{2580}');
+                cell.set_style(cap_style);
             }
-        });
-        cap_fill_box.render_self(buf, cap_fill_area);
+        }
 
         // Footer — "esc interrupt"
         let muted_style = Style::default().fg(rgba_color(theme.text_muted));

@@ -274,7 +274,9 @@ impl BoxRenderable {
         }
 
         if self.border.left {
-            for y in (area.y + 1)..max_y {
+            let y0 = if self.border.top { area.y + 1 } else { area.y };
+            let y1 = if self.border.bottom { max_y } else { max_y + 1 };
+            for y in y0..y1 {
                 if let Some(cell) = buf.cell_mut((area.x, y)) {
                     cell.set_char(chars.vertical);
                     cell.set_style(border_style);
@@ -283,7 +285,9 @@ impl BoxRenderable {
         }
 
         if self.border.right {
-            for y in (area.y + 1)..max_y {
+            let y0 = if self.border.top { area.y + 1 } else { area.y };
+            let y1 = if self.border.bottom { max_y } else { max_y + 1 };
+            for y in y0..y1 {
                 if let Some(cell) = buf.cell_mut((max_x, y)) {
                     cell.set_char(chars.vertical);
                     cell.set_style(border_style);
