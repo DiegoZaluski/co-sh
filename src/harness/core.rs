@@ -419,9 +419,10 @@ impl Harness {
                 }
 
                 // Peek at tool info before dispatch_next consumes the item
-                let info = self.tool_issuer.front().map(|tc| {
-                    (tc.name.clone(), tc.arguments.clone())
-                });
+                let info = self
+                    .tool_issuer
+                    .front()
+                    .map(|tc| (tc.name.clone(), tc.arguments.clone()));
 
                 if let Some((ref name, ref args)) = info {
                     let _ = tx.send(HarnessEvent::ToolCall {

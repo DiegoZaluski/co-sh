@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use cosh::harness::HarnessEvent;
 
 use crate::component::prompt::PromptView;
-use crate::config::TuiConfig;
+use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
 use crate::routes::home::HomeView;
 use crate::routes::session::SessionView;
@@ -56,6 +56,7 @@ pub struct App {
     pub tokio_handle: Handle,
     pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
     event_rx: mpsc::UnboundedReceiver<HarnessEvent>,
+    llm_config: LlmConfig,
 }
 
 impl App {
@@ -82,6 +83,7 @@ impl App {
             tokio_handle: Handle::current(),
             event_tx,
             event_rx,
+            llm_config: LlmConfig::from_env(),
         }
     }
 
@@ -266,8 +268,72 @@ impl App {
                         Some(
                             crate::keymap::Action::SendMessage | crate::keymap::Action::Confirm,
                         ) => {
-                            let _msg = self.prompt_view.send_message();
-                            // TODO: actually send msg to session
+                            if self.state.status == crate::types::SessionStatus::Working {
+                                return Ok(false);
+                            }
+
+                            let msg = self.prompt_view.send_message();
+                            if msg.is_empty() {
+                                return Ok(false);
+                            }
+
+                            if self.state.current_session_id.is_none() {
+                                let id = format!("session-{}", self.state.sessions.len());
+                                let title: String = msg.chars().take(40).collect();
+                                self.state.sessions.push(crate::types::Session {
+                                    id: id.clone(),
+                                    title,
+                                    messages: vec![],
+                                });
+                                self.state.current_session_id = Some(id);
+                            }
+
+                            if let Some(session) = self.state.current_session_mut() {
+                                session.messages.push(crate::types::Message {
+                                    id: format!("msg-{}", session.messages.len()),
+                                    role: crate::types::MessageRole::User,
+                                    parts: vec![crate::types::Part::Text(crate::types::TextPart {
+                                        text: msg.clone(),
+                                        synthetic: false,
+                                    })],
+                                    created_at: 0,
+                                    agent: None,
+                                    model: None,
+                                });
+                            }
+
+                            self.state.status = crate::types::SessionStatus::Working;
+
+                            let event_tx = self.event_tx.clone();
+                            let provider = self.llm_config.provider.clone();
+                            let model = self.llm_config.model.clone();
+                            let cwd = std::env::current_dir().map_or_else(
+                                |_| ".".to_string(),
+                                |p| p.to_string_lossy().to_string(),
+                            );
+                            let input = msg;
+
+                            self.tokio_handle.spawn(async move {
+                                use cosh::harness::Harness;
+                                use cosh_sdk::connector::Connector;
+
+                                let connector = match Connector::new(&provider) {
+                                    Ok(c) => c,
+                                    Err(e) => {
+                                        let _ = event_tx
+                                            .send(HarnessEvent::Error(format!("connector: {e}")));
+                                        return;
+                                    }
+                                };
+                                let connector = if let Some(ref m) = model {
+                                    connector.with_model(m)
+                                } else {
+                                    connector
+                                };
+
+                                let mut harness = Harness::new(connector, &cwd);
+                                harness.run_agent_loop(&input, event_tx).await;
+                            });
                         }
                         Some(crate::keymap::Action::Cancel | crate::keymap::Action::Interrupt) => {
                             if self.question_dialog.visible {
@@ -381,6 +447,7 @@ impl App {
         Ok(false)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn poll_events(&mut self) {
         use crate::types::{
             Message, MessageRole, Part, ReasoningPart, SessionStatus, TextPart, ToolPart,
@@ -391,9 +458,8 @@ impl App {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 HarnessEvent::Token { text } => {
-                    let session = match self.state.current_session_mut() {
-                        Some(s) => s,
-                        None => continue,
+                    let Some(session) = self.state.current_session_mut() else {
+                        continue;
                     };
                     match session.messages.last_mut() {
                         Some(msg) if msg.role == MessageRole::Assistant => {
@@ -420,9 +486,8 @@ impl App {
                 }
 
                 HarnessEvent::ToolCall { tool, input } => {
-                    let session = match self.state.current_session_mut() {
-                        Some(s) => s,
-                        None => continue,
+                    let Some(session) = self.state.current_session_mut() else {
+                        continue;
                     };
                     let part = Part::Tool(ToolPart {
                         tool: tool.clone(),
@@ -447,50 +512,37 @@ impl App {
                 }
 
                 HarnessEvent::ToolResult { output } => {
-                    let session = match self.state.current_session_mut() {
-                        Some(s) => s,
-                        None => continue,
+                    let Some(session) = self.state.current_session_mut() else {
+                        continue;
                     };
-                    for part in session
-                        .messages
-                        .iter_mut()
-                        .rev()
-                        .flat_map(|m| &mut m.parts)
-                    {
-                        if let Part::Tool(tp) = part {
-                            if tp.status == ToolStatus::Running {
-                                tp.status = ToolStatus::Completed;
-                                tp.output = Some(output.clone());
-                                break;
-                            }
+                    for part in session.messages.iter_mut().rev().flat_map(|m| &mut m.parts) {
+                        if let Part::Tool(tp) = part
+                            && tp.status == ToolStatus::Running
+                        {
+                            tp.status = ToolStatus::Completed;
+                            tp.output = Some(output.clone());
+                            break;
                         }
                     }
                 }
 
                 HarnessEvent::ToolError { error } => {
-                    let session = match self.state.current_session_mut() {
-                        Some(s) => s,
-                        None => continue,
+                    let Some(session) = self.state.current_session_mut() else {
+                        continue;
                     };
-                    for part in session
-                        .messages
-                        .iter_mut()
-                        .rev()
-                        .flat_map(|m| &mut m.parts)
-                    {
-                        if let Part::Tool(tp) = part {
-                            if tp.status == ToolStatus::Running {
-                                tp.status = ToolStatus::Failed(error.clone());
-                                break;
-                            }
+                    for part in session.messages.iter_mut().rev().flat_map(|m| &mut m.parts) {
+                        if let Part::Tool(tp) = part
+                            && tp.status == ToolStatus::Running
+                        {
+                            tp.status = ToolStatus::Failed(error.clone());
+                            break;
                         }
                     }
                 }
 
                 HarnessEvent::Reasoning { text } => {
-                    let session = match self.state.current_session_mut() {
-                        Some(s) => s,
-                        None => continue,
+                    let Some(session) = self.state.current_session_mut() else {
+                        continue;
                     };
                     let part = Part::Reasoning(ReasoningPart {
                         text: text.clone(),

@@ -22,3 +22,17 @@ impl Default for TuiConfig {
         }
     }
 }
+
+pub struct LlmConfig {
+    pub provider: String,
+    pub model: Option<String>,
+}
+
+impl LlmConfig {
+    pub fn from_env() -> Self {
+        LlmConfig {
+            provider: std::env::var("COSH_PROVIDER").unwrap_or_else(|_| "openai".into()),
+            model: std::env::var("COSH_MODEL").ok(),
+        }
+    }
+}

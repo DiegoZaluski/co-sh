@@ -5,28 +5,17 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub enum HarnessEvent {
     /// A text token streamed from the LLM.
-    Token {
-        text: String,
-    },
+    Token { text: String },
     /// A complete tool call extracted from the LLM response.
-    ToolCall {
-        tool: String,
-        input: Value,
-    },
+    ToolCall { tool: String, input: Value },
     /// Successful result of a dispatched tool call.
     /// Ordered sequentially — the Nth `ToolResult` matches the Nth `ToolCall`.
-    ToolResult {
-        output: String,
-    },
+    ToolResult { output: String },
     /// A tool call that failed during dispatch.
     /// Ordered sequentially — the Nth `ToolError` matches the Nth `ToolCall`.
-    ToolError {
-        error: String,
-    },
+    ToolError { error: String },
     /// A reasoning block from the LLM.
-    Reasoning {
-        text: String,
-    },
+    Reasoning { text: String },
     /// The agent loop finished normally (no more tool calls).
     Done,
     /// The agent loop was interrupted by a stop request.
