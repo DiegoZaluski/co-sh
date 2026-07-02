@@ -370,6 +370,93 @@ impl Harness {
         Ok("done".into())
     }
 
+    /// Run the full agent loop: stream LLM response, dispatch tool calls,
+    /// feed results back to the LLM, and repeat — until the model finishes
+    /// without requesting tools or [`request_stop`](Self::request_stop) is called.
+    ///
+    /// Events are sent through `tx` so the caller (typically the TUI) can
+    /// render tokens, tool calls, and results in real time.
+    pub async fn run_agent_loop(
+        &mut self,
+        input: &str,
+        tx: tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) {
+        use super::events::HarnessEvent;
+
+        let mut current_input = input.to_string();
+
+        loop {
+            if self.stop {
+                let _ = tx.send(HarnessEvent::Stopped);
+                break;
+            }
+
+            // Phase 1: stream the LLM response
+            let result = self
+                .stream_chat(&current_input, |token| {
+                    let _ = tx.send(HarnessEvent::Token {
+                        text: token.to_string(),
+                    });
+                })
+                .await;
+
+            if let Err(e) = result {
+                let _ = tx.send(HarnessEvent::Error(e));
+                break;
+            }
+
+            if self.stop {
+                let _ = tx.send(HarnessEvent::Stopped);
+                break;
+            }
+
+            // Phase 2: dispatch all pending tool calls
+            let had_tools = self.has_pending_tools();
+
+            while self.has_pending_tools() {
+                if self.stop {
+                    break;
+                }
+
+                // Peek at tool info before dispatch_next consumes the item
+                let info = self.tool_issuer.front().map(|tc| {
+                    (tc.name.clone(), tc.arguments.clone())
+                });
+
+                if let Some((ref name, ref args)) = info {
+                    let _ = tx.send(HarnessEvent::ToolCall {
+                        tool: name.clone(),
+                        input: args.clone(),
+                    });
+                }
+
+                match self.dispatch_next().await {
+                    Ok(output) => {
+                        let _ = tx.send(HarnessEvent::ToolResult { output });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(HarnessEvent::ToolError { error: e });
+                    }
+                }
+            }
+
+            if self.stop {
+                let _ = tx.send(HarnessEvent::Stopped);
+                break;
+            }
+
+            if !had_tools {
+                // No tool calls were made — the conversation is complete
+                let _ = tx.send(HarnessEvent::Done);
+                break;
+            }
+
+            // Tool results were accumulated in server_response
+            // Next iteration sends an empty prompt with results in context
+            current_input.clear();
+        }
+    }
+
     /// Dequeue and dispatch the next pending tool call through the
     /// three-tier dispatch: cosh tools → MCP servers.
     ///
