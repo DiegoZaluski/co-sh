@@ -26,13 +26,15 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
+const LOGO_WIDTH: usize = 28;
+
 const LOGO: &[&str] = &[
-    r"                           ",
-    r" █████ ██████ █████ ██     ",
-    r" ██    ██  ██ ██    ██████ ",
-    r" ██    ██  ██    ██ ██  ██ ",
-    r" █████ ██████ █████ ██  ██ ",
-    r"                           ",
+    "                            ",
+    " █████ ██████ █████ ██      ",
+    " ██    ██  ██ ██    ██████ ",
+    " ██    ██  ██    ██ ██  ██  ",
+    " █████ ██████ █████ ██  ██ ",
+    "                            ",
 ];
 
 const TAGLINE: &str = "Terminal AI Agent";
@@ -58,7 +60,7 @@ impl HomeView {
         let logo_start_y = area.y + 2;
         for (i, line) in LOGO.iter().enumerate() {
             let ly = logo_start_y + i as u16;
-            let lx = cx.saturating_sub(line.len() as u16 / 2);
+            let lx = cx.saturating_sub(LOGO_WIDTH as u16 / 2);
             draw_text_line(buf, line, lx, ly, area.width, Style::default().fg(primary));
         }
 
@@ -86,14 +88,20 @@ impl HomeView {
                 Style::default().fg(muted),
             );
 
+            let max_entry_len = PLACEHOLDER_PROMPTS
+                .iter()
+                .map(|p| format!("\u{25b6}  {p}").len())
+                .max()
+                .unwrap_or(0);
+            let prompt_left = cx.saturating_sub((max_entry_len / 2 + 2) as u16);
+
             for (i, prompt) in PLACEHOLDER_PROMPTS.iter().enumerate() {
                 let py = prompt_y + 2 + i as u16;
                 if py >= area.bottom() {
                     break;
                 }
-                let entry = format!("  \u{25b6}  {prompt}");
-                let ex = cx.saturating_sub(entry.len() as u16 / 2);
-                draw_text_line(buf, &entry, ex, py, area.width, Style::default().fg(text));
+                let entry = format!("\u{25b6}  {prompt}");
+                draw_text_line(buf, &entry, prompt_left, py, area.width, Style::default().fg(text));
             }
         } else {
             let recent_y = tagline_y + 2;
