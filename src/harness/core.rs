@@ -135,6 +135,34 @@ impl Harness {
         self
     }
 
+    /// Signal the agent loop to stop at the next safe opportunity.
+    pub fn request_stop(&mut self) {
+        self.stop = true;
+    }
+
+    /// Check whether a stop has been requested.
+    #[must_use]
+    pub fn is_stopped(&self) -> bool {
+        self.stop
+    }
+
+    /// Reset the stop flag so the harness can be reused for a new cycle.
+    pub fn reset_stop(&mut self) {
+        self.stop = false;
+    }
+
+    /// Check whether there are pending tool calls awaiting dispatch.
+    #[must_use]
+    pub fn has_pending_tools(&self) -> bool {
+        !self.tool_issuer.is_empty()
+    }
+
+    /// How many tool calls are currently queued.
+    #[must_use]
+    pub fn pending_tool_count(&self) -> usize {
+        self.tool_issuer.len()
+    }
+
     /// Builds the system header for the LLM.
     ///
     /// Concatenates system prompts, harness tools, system tools, and MCP server tools
