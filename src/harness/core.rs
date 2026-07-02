@@ -188,12 +188,7 @@ impl Harness {
 
         if let Some(ref cosh) = self.cosh_tools {
             let _ = write!(out, "## System Tools\n\n");
-            for desc in cosh.tool_descriptions() {
-                let name = desc["name"].as_str().unwrap_or_default();
-                let description = desc["description"].as_str().unwrap_or_default();
-                let schema = serde_json::to_string_pretty(&desc["inputSchema"]).unwrap_or_default();
-                let _ = write!(out, "- **{name}**: {description}\n  Schema: {schema}\n");
-            }
+            cosh.write_tool_descriptions(&mut out);
         }
 
         for session in &self.sessions {

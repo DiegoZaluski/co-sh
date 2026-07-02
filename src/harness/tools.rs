@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::sync::Mutex;
 
 use cosh_sdk::extract_action::ToolSchema;
@@ -24,6 +25,14 @@ use tokio_stream::StreamExt;
 pub trait Tools: Send + Sync {
     fn schemas(&self) -> Vec<ToolSchema>;
     fn tool_descriptions(&self) -> Vec<serde_json::Value>;
+    fn write_tool_descriptions(&self, out: &mut String) {
+        for desc in self.tool_descriptions() {
+            let name = desc["name"].as_str().unwrap_or_default();
+            let description = desc["description"].as_str().unwrap_or_default();
+            let schema = serde_json::to_string_pretty(&desc["inputSchema"]).unwrap_or_default();
+            let _ = write!(out, "- **{name}**: {description}\n  Schema: {schema}\n");
+        }
+    }
     async fn dispatch(&self, name: &str, args: serde_json::Value) -> Result<String, String>;
 }
 
@@ -60,7 +69,39 @@ fn extract_schema(desc: &serde_json::Value) -> ToolSchema {
 }
 
 #[allow(clippy::too_many_lines)]
+fn write_single_tool(out: &mut String, desc: &serde_json::Value) {
+    let name = desc["name"].as_str().unwrap_or_default();
+    let description = desc["description"].as_str().unwrap_or_default();
+    let schema = serde_json::to_string_pretty(&desc["inputSchema"]).unwrap_or_default();
+    let _ = write!(out, "- **{name}**: {description}\n  Schema: {schema}\n");
+}
+
 impl Tools for CoshTools {
+    fn write_tool_descriptions(&self, out: &mut String) {
+        write_single_tool(out, &self.bash.description_run);
+        write_single_tool(out, &self.fs.description_read);
+        write_single_tool(out, &self.fs.description_write);
+        write_single_tool(out, &self.fs.description_edit);
+        write_single_tool(out, &self.fs.description_rollback);
+        write_single_tool(out, &self.find.description_glob);
+        write_single_tool(out, &self.find.description_grep);
+        write_single_tool(out, &self.web.description_fetch);
+        write_single_tool(out, &self.web.description_search);
+        write_single_tool(out, &self.vision.description_terminal);
+        {
+            let plan = self.plan.lock().unwrap();
+            write_single_tool(out, &plan.description_todo_write);
+            write_single_tool(out, &plan.description_todo_edit);
+            write_single_tool(out, &plan.description_todo_cross_off);
+            write_single_tool(out, &plan.description_todo_read);
+            write_single_tool(out, &plan.description_load_from_md);
+        }
+        write_single_tool(out, &self.skills.description_list);
+        write_single_tool(out, &self.skills.description_read);
+        write_single_tool(out, &self.skills.description_read_asset);
+        write_single_tool(out, &self.skills.description_match_skills);
+    }
+
     fn tool_descriptions(&self) -> Vec<serde_json::Value> {
         vec![
             self.bash.description_run.clone(),

@@ -337,6 +337,7 @@ impl App {
                                 };
 
                                 let mut harness = Harness::new(connector, &cwd);
+                                harness.format_header_context();
                                 harness.run_agent_loop(&input, event_tx, stop_signal).await;
                             });
                         }
