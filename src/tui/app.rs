@@ -382,16 +382,159 @@ impl App {
     }
 
     fn poll_events(&mut self) {
+        use crate::types::{
+            Message, MessageRole, Part, ReasoningPart, SessionStatus, TextPart, ToolPart,
+            ToolStatus,
+        };
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                HarnessEvent::Token { .. }
-                | HarnessEvent::ToolCall { .. }
-                | HarnessEvent::ToolResult { .. }
-                | HarnessEvent::ToolError { .. }
-                | HarnessEvent::Reasoning { .. }
-                | HarnessEvent::Done
-                | HarnessEvent::Stopped
-                | HarnessEvent::Error(_) => {}
+                HarnessEvent::Token { text } => {
+                    let session = match self.state.current_session_mut() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    match session.messages.last_mut() {
+                        Some(msg) if msg.role == MessageRole::Assistant => {
+                            match msg.parts.last_mut() {
+                                Some(Part::Text(tp)) => tp.text.push_str(&text),
+                                _ => msg.parts.push(Part::Text(TextPart {
+                                    text: text.clone(),
+                                    synthetic: false,
+                                })),
+                            }
+                        }
+                        _ => session.messages.push(Message {
+                            id: format!("msg-{}", session.messages.len()),
+                            role: MessageRole::Assistant,
+                            parts: vec![Part::Text(TextPart {
+                                text: text.clone(),
+                                synthetic: false,
+                            })],
+                            created_at: 0,
+                            agent: None,
+                            model: None,
+                        }),
+                    }
+                }
+
+                HarnessEvent::ToolCall { tool, input } => {
+                    let session = match self.state.current_session_mut() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let part = Part::Tool(ToolPart {
+                        tool: tool.clone(),
+                        input,
+                        output: None,
+                        status: ToolStatus::Running,
+                        tool_call_id: None,
+                        is_start: true,
+                        is_streaming: false,
+                    });
+                    match session.messages.last_mut() {
+                        Some(msg) if msg.role == MessageRole::Assistant => msg.parts.push(part),
+                        _ => session.messages.push(Message {
+                            id: format!("msg-{}", session.messages.len()),
+                            role: MessageRole::Assistant,
+                            parts: vec![part],
+                            created_at: 0,
+                            agent: None,
+                            model: None,
+                        }),
+                    }
+                }
+
+                HarnessEvent::ToolResult { output } => {
+                    let session = match self.state.current_session_mut() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    for part in session
+                        .messages
+                        .iter_mut()
+                        .rev()
+                        .flat_map(|m| &mut m.parts)
+                    {
+                        if let Part::Tool(tp) = part {
+                            if tp.status == ToolStatus::Running {
+                                tp.status = ToolStatus::Completed;
+                                tp.output = Some(output.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                HarnessEvent::ToolError { error } => {
+                    let session = match self.state.current_session_mut() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    for part in session
+                        .messages
+                        .iter_mut()
+                        .rev()
+                        .flat_map(|m| &mut m.parts)
+                    {
+                        if let Part::Tool(tp) = part {
+                            if tp.status == ToolStatus::Running {
+                                tp.status = ToolStatus::Failed(error.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                HarnessEvent::Reasoning { text } => {
+                    let session = match self.state.current_session_mut() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let part = Part::Reasoning(ReasoningPart {
+                        text: text.clone(),
+                        collapsed: true,
+                    });
+                    match session.messages.last_mut() {
+                        Some(msg) if msg.role == MessageRole::Assistant => msg.parts.push(part),
+                        _ => session.messages.push(Message {
+                            id: format!("msg-{}", session.messages.len()),
+                            role: MessageRole::Assistant,
+                            parts: vec![part],
+                            created_at: 0,
+                            agent: None,
+                            model: None,
+                        }),
+                    }
+                }
+
+                HarnessEvent::Done => {
+                    self.state.status = SessionStatus::Idle;
+                }
+
+                HarnessEvent::Stopped => {
+                    self.state.status = SessionStatus::Idle;
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Interrupted".into()),
+                        message: "Agent loop was stopped.".into(),
+                        variant: ToastVariant::Warning,
+                        duration_ms: 3000,
+                    });
+                }
+
+                HarnessEvent::Error(msg) => {
+                    self.state.status = SessionStatus::Retry {
+                        message: msg.clone(),
+                        action: None,
+                    };
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Error".into()),
+                        message: msg,
+                        variant: ToastVariant::Error,
+                        duration_ms: 5000,
+                    });
+                }
             }
         }
     }

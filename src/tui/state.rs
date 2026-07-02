@@ -40,6 +40,12 @@ impl AppState {
             .and_then(|id| self.sessions.iter().find(|s| s.id == *id))
     }
 
+    pub fn current_session_mut(&mut self) -> Option<&mut Session> {
+        self.current_session_id
+            .as_ref()
+            .and_then(|id| self.sessions.iter_mut().find(|s| s.id == *id))
+    }
+
     pub fn max_scroll(&self) -> i32 {
         (self.content_height - 10).max(0)
     }
