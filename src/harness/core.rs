@@ -7,6 +7,8 @@ use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub struct ServerSession {
     pub name_server: String,
@@ -372,22 +374,37 @@ impl Harness {
 
     /// Run the full agent loop: stream LLM response, dispatch tool calls,
     /// feed results back to the LLM, and repeat — until the model finishes
-    /// without requesting tools or [`request_stop`](Self::request_stop) is called.
+    /// without requesting tools, [`request_stop`](Self::request_stop) is called,
+    /// or `stop_signal` is set to `true`.
     ///
     /// Events are sent through `tx` so the caller (typically the TUI) can
     /// render tokens, tool calls, and results in real time.
+    ///
+    /// The `stop_signal` is an external flag (usually an `Arc<AtomicBool>`)
+    /// that allows the caller to interrupt the loop from another thread.
     pub async fn run_agent_loop(
         &mut self,
         input: &str,
         tx: tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+        stop_signal: Arc<AtomicBool>,
     ) {
         use super::events::HarnessEvent;
 
         let mut current_input = input.to_string();
 
+        macro_rules! check_stop {
+            () => {
+                if self.stop || stop_signal.load(Ordering::Relaxed) {
+                    let _ = tx.send(HarnessEvent::Stopped);
+                    true
+                } else {
+                    false
+                }
+            };
+        }
+
         loop {
-            if self.stop {
-                let _ = tx.send(HarnessEvent::Stopped);
+            if check_stop!() {
                 break;
             }
 
@@ -405,8 +422,7 @@ impl Harness {
                 break;
             }
 
-            if self.stop {
-                let _ = tx.send(HarnessEvent::Stopped);
+            if check_stop!() {
                 break;
             }
 
@@ -414,7 +430,7 @@ impl Harness {
             let had_tools = self.has_pending_tools();
 
             while self.has_pending_tools() {
-                if self.stop {
+                if check_stop!() {
                     break;
                 }
 
@@ -441,8 +457,7 @@ impl Harness {
                 }
             }
 
-            if self.stop {
-                let _ = tx.send(HarnessEvent::Stopped);
+            if check_stop!() {
                 break;
             }
 

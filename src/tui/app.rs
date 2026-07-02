@@ -1,4 +1,6 @@
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -57,6 +59,7 @@ pub struct App {
     pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
     event_rx: mpsc::UnboundedReceiver<HarnessEvent>,
     llm_config: LlmConfig,
+    stop_signal: Arc<AtomicBool>,
 }
 
 impl App {
@@ -84,6 +87,7 @@ impl App {
             event_tx,
             event_rx,
             llm_config: LlmConfig::from_env(),
+            stop_signal: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -302,6 +306,7 @@ impl App {
                                 });
                             }
 
+                            self.stop_signal.store(false, Ordering::Relaxed);
                             self.state.status = crate::types::SessionStatus::Working;
 
                             let event_tx = self.event_tx.clone();
@@ -312,6 +317,7 @@ impl App {
                                 |p| p.to_string_lossy().to_string(),
                             );
                             let input = msg;
+                            let stop_signal = self.stop_signal.clone();
 
                             self.tokio_handle.spawn(async move {
                                 use cosh::harness::Harness;
@@ -332,10 +338,21 @@ impl App {
                                 };
 
                                 let mut harness = Harness::new(connector, &cwd);
-                                harness.run_agent_loop(&input, event_tx).await;
+                                harness.run_agent_loop(&input, event_tx, stop_signal).await;
                             });
                         }
-                        Some(crate::keymap::Action::Cancel | crate::keymap::Action::Interrupt) => {
+                        Some(crate::keymap::Action::Interrupt) => {
+                            if self.state.status == crate::types::SessionStatus::Working {
+                                self.stop_signal.store(true, Ordering::Relaxed);
+                            } else if self.question_dialog.visible {
+                                self.question_dialog.visible = false;
+                            } else if self.permission_dialog.visible {
+                                self.permission_dialog.visible = false;
+                            } else if self.dialog.visible() {
+                                self.dialog.pop();
+                            }
+                        }
+                        Some(crate::keymap::Action::Cancel) => {
                             if self.question_dialog.visible {
                                 self.question_dialog.visible = false;
                             } else if self.permission_dialog.visible {
