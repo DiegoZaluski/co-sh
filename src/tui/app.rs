@@ -1,6 +1,6 @@
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -64,8 +64,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let mut state = AppState::new();
-        state.add_demo_data();
+        let state = AppState::new();
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
