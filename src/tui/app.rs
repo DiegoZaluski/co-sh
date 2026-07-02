@@ -256,8 +256,7 @@ impl App {
                                 if let Some(cmd) = self.slash_menu.get_selected_command() {
                                     let cmd_name = format!("/{} ", cmd.name);
                                     self.prompt_view.input = cmd_name;
-                                    self.prompt_view.cursor_pos =
-                                        self.prompt_view.input.len();
+                                    self.prompt_view.cursor_pos = self.prompt_view.input.len();
                                     self.slash_menu.visible = false;
                                 }
                             }
@@ -281,8 +280,8 @@ impl App {
                                 self.slash_menu.update(&self.prompt_view.input);
                                 if was_visible
                                     && !self.slash_menu.visible
-                                    && self.prompt_view.input.starts_with('/'
-                                ) {
+                                    && self.prompt_view.input.starts_with('/')
+                                {
                                     self.prompt_view.input.remove(0);
                                     self.prompt_view.cursor_pos =
                                         self.prompt_view.cursor_pos.saturating_sub(1);
@@ -481,7 +480,8 @@ impl App {
                                         if let Some(cmd) = self.slash_menu.get_selected_command() {
                                             let cmd_name = format!("/{} ", cmd.name);
                                             self.prompt_view.input = cmd_name;
-                                            self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                            self.prompt_view.cursor_pos =
+                                                self.prompt_view.input.len();
                                             self.slash_menu.visible = false;
                                         }
                                     }
@@ -547,7 +547,7 @@ impl App {
                                     let pos = self.prompt_view.cursor_pos;
                                     self.prompt_view.input.insert(pos, ch);
                                     self.prompt_view.cursor_pos = pos + 1;
-                                    
+
                                     // Check if "/" menu should open
                                     self.slash_menu.update(&self.prompt_view.input);
                                 }

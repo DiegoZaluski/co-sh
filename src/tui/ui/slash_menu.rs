@@ -1,7 +1,7 @@
+use cosh_tui::core::lib::rgba::RGBA;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use cosh_tui::core::lib::rgba::RGBA;
 
 use crate::theme::Theme;
 
@@ -166,7 +166,11 @@ impl SlashMenu {
         }
 
         let idxs = self.filtered_indices();
-        let max_rows = if idxs.is_empty() { 1 } else { 6.min(idxs.len()) };
+        let max_rows = if idxs.is_empty() {
+            1
+        } else {
+            6.min(idxs.len())
+        };
 
         // Render just above the prompt input area
         let menu_y_start = prompt_area.y.saturating_sub(max_rows as u16);
@@ -190,7 +194,11 @@ impl SlashMenu {
                 let i = idxs[row];
                 let cmd = &self.commands[i];
                 let is_selected = i == self.selected;
-                let row_bg = if is_selected { rgba_color(theme.primary) } else { menu_bg };
+                let row_bg = if is_selected {
+                    rgba_color(theme.primary)
+                } else {
+                    menu_bg
+                };
                 let cmd_text = format!("/{}", cmd.name);
                 let desc_text = format!(" {}", cmd.desc);
                 let selected_fg = selected_foreground_color(theme.primary, theme.background);
@@ -215,11 +223,21 @@ impl SlashMenu {
             // Draw left/right border lines with base background so the menu has a visible gap
             if let Some(cell) = buf.cell_mut((prompt_area.x, row_y)) {
                 cell.set_char('┃');
-                cell.set_style(Style::default().fg(border_fg).bg(rgba_color(theme.background)));
+                cell.set_style(
+                    Style::default()
+                        .fg(border_fg)
+                        .bg(rgba_color(theme.background)),
+                );
             }
-            if menu_width > 1 && let Some(cell) = buf.cell_mut((prompt_area.x + menu_width - 1, row_y)) {
+            if menu_width > 1
+                && let Some(cell) = buf.cell_mut((prompt_area.x + menu_width - 1, row_y))
+            {
                 cell.set_char('┃');
-                cell.set_style(Style::default().fg(border_fg).bg(rgba_color(theme.background)));
+                cell.set_style(
+                    Style::default()
+                        .fg(border_fg)
+                        .bg(rgba_color(theme.background)),
+                );
             }
 
             let text_x = content_x + 1; // internal padding like OpenCode's paddingLeft

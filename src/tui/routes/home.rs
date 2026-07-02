@@ -101,7 +101,14 @@ impl HomeView {
                     break;
                 }
                 let entry = format!("\u{25b6}  {prompt}");
-                draw_text_line(buf, &entry, prompt_left, py, area.width, Style::default().fg(text));
+                draw_text_line(
+                    buf,
+                    &entry,
+                    prompt_left,
+                    py,
+                    area.width,
+                    Style::default().fg(text),
+                );
             }
         } else {
             let recent_y = tagline_y + 2;
