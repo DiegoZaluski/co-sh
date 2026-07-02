@@ -119,7 +119,7 @@ async fn edit_target(
     let _ = rollback::record(&path_str, &after);
 
     Ok(EditResult {
-        path: target.path.to_string(),
+        path: target.path.clone(),
         file_hash: new_hash,
         header,
         first_changed_line: apply_result.first_changed_line,

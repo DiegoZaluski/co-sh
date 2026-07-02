@@ -2,10 +2,34 @@
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // Public types
+
+/// Input for `skills_read`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SkillsReadInput {
+    /// Name of the skill to read.
+    pub name: String,
+}
+
+/// Input for `skills_read_asset`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SkillsReadAssetInput {
+    /// Name of the skill that owns the asset.
+    pub name: String,
+    /// Relative path to the asset file within the skill directory.
+    pub asset_path: String,
+}
+
+/// Input for `skills_match_skills`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SkillsMatchInput {
+    /// File paths to match against skill glob patterns.
+    pub match_paths: Vec<String>,
+}
 
 /// Lightweight metadata returned in list / match results and system prompts.
 #[derive(Debug, Clone, Serialize)]

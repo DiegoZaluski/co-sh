@@ -10,13 +10,14 @@ use cosh_sdk::term_screen::{
     surface::{CursorShape, CursorVisibility, line::Line},
 };
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Schema the model passes to the vision tool.
 ///
 /// Defaults to 24 rows, 80 columns, full metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TerminalInput {
     /// Raw terminal output to process (supports ANSI/escape sequences).
     pub output: String,

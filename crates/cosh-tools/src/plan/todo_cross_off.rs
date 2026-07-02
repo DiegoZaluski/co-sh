@@ -1,5 +1,10 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use super::types::{Nag, PlanError, TodoList, TodoStatus, TodoWriteOutput};
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
 pub enum TodoCrossOff {
     Complete { id: String },
     Cancel { id: String },

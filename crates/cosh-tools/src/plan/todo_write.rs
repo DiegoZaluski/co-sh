@@ -1,7 +1,12 @@
 use std::fmt::Write;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use super::types::{Nag, PlanError, TodoItem, TodoList, TodoStatus, TodoWriteOutput};
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
 pub enum TodoWriteAction {
     Add {
         group: String,

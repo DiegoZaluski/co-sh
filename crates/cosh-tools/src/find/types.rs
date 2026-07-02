@@ -1,5 +1,58 @@
 //! Input and output types shared by all `find` tools.
 
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+/// Parameters for `find_glob`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GlobInput {
+    /// The glob pattern to match (e.g. "**/*.rs", "src/**", "*.toml").
+    pub pattern: String,
+    /// The root directory to search within.
+    pub path: String,
+    /// Restrict results to a filesystem kind: `"file"`, `"dir"`, or `"symlink"`.
+    pub file_type: Option<String>,
+    /// Search subdirectories recursively (default: `true`).
+    pub recursive: Option<bool>,
+    /// Include hidden files and directories whose names start with `.` (default: `false`).
+    pub hidden: Option<bool>,
+    /// Maximum number of entries to return.
+    pub max_results: Option<u32>,
+    /// Respect `.gitignore` rules (default: `true`).
+    pub gitignore: Option<bool>,
+    /// Sort results by modification time, most recent first (default: `false`).
+    pub sort_by_mtime: Option<bool>,
+    /// Abort the search after this many milliseconds.
+    pub timeout_ms: Option<u32>,
+}
+
+/// Parameters for `find_grep`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GrepInput {
+    /// The regex pattern to search for in file contents.
+    pub pattern: String,
+    /// The root directory to search within.
+    pub path: String,
+    /// Restrict the search to files whose names match this glob (e.g., `"*.rs"`).
+    pub glob: Option<String>,
+    /// Restrict the search to files of a given language type (e.g., `"rust"`, `"py"`, `"js"`).
+    pub file_type: Option<String>,
+    /// Case-insensitive matching (default: `false`).
+    pub ignore_case: Option<bool>,
+    /// Maximum total number of matches to return across all files.
+    pub max_count: Option<u32>,
+    /// Lines of context to include before each match.
+    pub context_before: Option<u32>,
+    /// Lines of context to include after each match.
+    pub context_after: Option<u32>,
+    /// Include hidden files (default: `true`).
+    pub hidden: Option<bool>,
+    /// Respect `.gitignore` rules (default: `true`).
+    pub gitignore: Option<bool>,
+    /// Abort the search after this many milliseconds.
+    pub timeout_ms: Option<u32>,
+}
+
 /// Configuration for the [`glob`](super::glob::glob) tool.
 ///
 /// Fields are optional — use `Glob::default()` for sensible defaults.

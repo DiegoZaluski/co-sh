@@ -1,9 +1,46 @@
-#[derive(Debug, Clone, Copy, PartialEq)]
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use super::todo_cross_off::TodoCrossOff;
+use super::todo_edit::TodoEdit;
+use super::todo_write::TodoWriteAction;
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum TodoStatus {
     Pending,
     InProgress,
     Completed,
     Cancelled,
+}
+
+/// Input for `plan_todo_read`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TodoReadInput {
+    pub action: TodoReadAction,
+}
+
+/// Input for `plan_todo_write`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TodoWriteInput {
+    pub action: TodoWriteAction,
+}
+
+/// Input for `plan_todo_edit`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TodoEditInput {
+    pub edit: TodoEdit,
+}
+
+/// Input for `plan_todo_cross_off`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TodoCrossOffInput {
+    pub action: TodoCrossOff,
+}
+
+/// Input for `plan_load_from_md`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TodoLoadFromMdInput {
+    pub path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -30,7 +67,8 @@ pub struct TodoList {
     pub groups: Vec<TaskGroup>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
 pub enum TodoReadAction {
     List {
         group: Option<String>,

@@ -25,7 +25,9 @@ use std::path::PathBuf;
 pub use edit::{EditResult, edit};
 pub use read::{ReadResult, read};
 pub use rollback::{RollbackResult, rollback};
-pub use types::{EditTarget, FsEdit, FsMetadata, FsRead, FsRollback, FsWrite, Target, TargetFile};
+pub use types::{
+    EditTarget, FsEdit, FsMetadata, FsRead, FsRollback, FsRollbackInput, FsWrite, Target, TargetFile,
+};
 pub use write::{WriteResult, write};
 
 use crate::ToolDescription;
@@ -33,7 +35,7 @@ use crate::ToolDescription;
 /// Shared-state wrapper for file-system tool operations.
 ///
 /// Use the builder methods after [`new`](Self::new) to configure the
-/// project root and write-scope guards, then call the operation methods
+/// project root and scope guards, then call the operation methods
 /// directly.
 pub struct Fs {
     root: PathBuf,
@@ -42,6 +44,14 @@ pub struct Fs {
     /// Your frontend should request confirmation before setting this field.
     allowlist: Option<Vec<PathBuf>>,
     blocklist: Option<Vec<PathBuf>>,
+
+    /// Read-only path allowlist (optional, falls back to `allowlist`).
+    /// Paths listed here are readable but not writable.
+    /// Set this to grant read access outside the project root without
+    /// granting write access to the same paths.
+    read_allowlist: Option<Vec<PathBuf>>,
+    /// Read-only path blocklist (optional, falls back to `blocklist`).
+    read_blocklist: Option<Vec<PathBuf>>,
 
     /// MCP Tool description for `read`.
     pub description_read: ToolDescription,
@@ -70,6 +80,8 @@ impl Fs {
             root: PathBuf::new(),
             allowlist: None,
             blocklist: None,
+            read_allowlist: None,
+            read_blocklist: None,
             description_read: serde_json::json!({
                 "name": "fs_read",
                 "description": concat!(
@@ -237,16 +249,44 @@ impl Fs {
         self
     }
 
-    /// Build an [`FsMetadata`] from the current owned state.
+    /// Set the read-only path allowlist (falls back to [`allowlist`](Self::allowlist) when `None`).
+    #[must_use]
+    pub fn read_allowlist(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
+        self.read_allowlist = Some(paths.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Set the read-only path blocklist (falls back to [`blocklist`](Self::blocklist) when `None`).
+    #[must_use]
+    pub fn read_blocklist(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
+        self.read_blocklist = Some(paths.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Build a write-scope [`FsMetadata`] from the current owned state.
     fn metadata(&self) -> FsMetadata {
-        let allowlist = self.allowlist.clone();
-
-        let blocklist = self.blocklist.clone();
-
         FsMetadata {
             root: self.root.clone(),
-            allowlist,
-            blocklist,
+            allowlist: self.allowlist.clone(),
+            blocklist: self.blocklist.clone(),
+        }
+    }
+
+    /// Build a read-scope [`FsMetadata`] from the current owned state.
+    ///
+    /// Uses `read_allowlist`/`read_blocklist` when set, falling back to
+    /// the write-scope guards.
+    fn read_metadata(&self) -> FsMetadata {
+        FsMetadata {
+            root: self.root.clone(),
+            allowlist: self
+                .read_allowlist
+                .clone()
+                .or_else(|| self.allowlist.clone()),
+            blocklist: self
+                .read_blocklist
+                .clone()
+                .or_else(|| self.blocklist.clone()),
         }
     }
 
@@ -254,7 +294,7 @@ impl Fs {
     ///
     /// See [`read`] for details.
     pub async fn read(&self, targets: Vec<Target>) -> Vec<ReadResult> {
-        read(self.metadata(), FsRead { targets }).await
+        read(self.read_metadata(), FsRead { targets }).await
     }
 
     /// Write content to one or more files.

@@ -14,7 +14,8 @@ pub use todo_edit::{TodoEdit, todo_edit};
 pub use todo_read::todo_read;
 pub use todo_write::{TodoWriteAction, todo_write};
 pub use types::{
-    Nag, PlanError, TaskGroup, TodoItem, TodoList, TodoReadAction, TodoReadOutput, TodoStatus,
+    Nag, PlanError, TaskGroup, TodoCrossOffInput, TodoEditInput, TodoItem, TodoList,
+    TodoLoadFromMdInput, TodoReadAction, TodoReadInput, TodoReadOutput, TodoStatus, TodoWriteInput,
     TodoWriteOutput,
 };
 

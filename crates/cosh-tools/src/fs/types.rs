@@ -38,7 +38,7 @@ pub struct FsMetadata {
 }
 
 // ___
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct EditTarget {
     pub path: String,
     pub file_hash: String,
@@ -46,9 +46,16 @@ pub struct EditTarget {
 }
 
 /// Configuration for file edit operations.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct FsEdit {
     pub targets: Vec<EditTarget>,
+}
+
+/// Parameters for file rollback operations.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct FsRollbackInput {
+    pub path: String,
+    pub hash: String,
 }
 
 /// Configuration for file rollback operations.

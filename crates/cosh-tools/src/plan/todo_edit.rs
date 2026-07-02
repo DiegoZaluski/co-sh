@@ -1,6 +1,10 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use super::types::{Nag, PlanError, TodoList, TodoWriteOutput};
 
 /// Edit the metadata of an existing task.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TodoEdit {
     pub id: String,
     pub description: Option<String>,

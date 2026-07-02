@@ -15,11 +15,13 @@
 
 pub mod fetch;
 pub mod search;
+pub mod types;
 #[cfg(test)]
 mod test;
 
 pub use fetch::{WebFetch, fetch};
 pub use search::{WebSearch, search};
+pub use types::{WebFetchInput, WebSearchInput};
 
 use crate::ToolDescription;
 

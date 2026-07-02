@@ -14,10 +14,14 @@
 //! ```
 
 pub mod bsh;
+#[cfg(test)]
 pub mod test;
+pub mod types;
 
 use std::pin::Pin;
 use tokio_stream::Stream;
+
+pub use types::BashRunInput;
 
 use crate::ToolDescription;
 use crate::bash::bsh::BashError;
