@@ -54,6 +54,7 @@ pub struct App {
     pub config: TuiConfig,
     pub toast_state: ToastState,
     pub command_palette: CommandPalette,
+    pub slash_menu: crate::ui::slash_menu::SlashMenu,
     pub should_quit: bool,
     pub tokio_handle: Handle,
     pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
@@ -81,6 +82,7 @@ impl App {
             config: TuiConfig::default(),
             toast_state: ToastState::new(),
             command_palette: CommandPalette::new(),
+            slash_menu: crate::ui::slash_menu::SlashMenu::new(),
             should_quit: false,
             tokio_handle: Handle::current(),
             event_tx,
@@ -221,6 +223,8 @@ impl App {
         self.permission_dialog.render(buf, area, &self.theme);
         self.question_dialog.render(buf, area, &self.theme);
         self.command_palette.render(buf, area, &self.theme);
+        // Render slash menu inline above prompt
+        self.slash_menu.render(buf, prompt_area, &self.theme);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -242,6 +246,52 @@ impl App {
                     }
 
                     let action = self.keymap.lookup(key.code, key.modifiers).cloned();
+
+                    // If slash menu is visible, arrow keys should move selection there
+                    if self.slash_menu.visible {
+                        match key.code {
+                            KeyCode::Up => self.slash_menu.select_prev(),
+                            KeyCode::Down => self.slash_menu.select_next(),
+                            KeyCode::Enter => {
+                                if let Some(cmd) = self.slash_menu.get_selected_command() {
+                                    let cmd_name = format!("/{} ", cmd.name);
+                                    self.prompt_view.input = cmd_name;
+                                    self.prompt_view.cursor_pos =
+                                        self.prompt_view.input.len();
+                                    self.slash_menu.visible = false;
+                                }
+                            }
+                            KeyCode::Esc => {
+                                self.prompt_view.input.clear();
+                                self.prompt_view.cursor_pos = 0;
+                                self.slash_menu.visible = false;
+                            }
+                            KeyCode::Backspace => {
+                                if !self.prompt_view.input.is_empty() {
+                                    self.prompt_view.input.pop();
+                                    self.prompt_view.cursor_pos =
+                                        self.prompt_view.cursor_pos.saturating_sub(1);
+                                    self.slash_menu.update(&self.prompt_view.input);
+                                }
+                            }
+                            KeyCode::Char(ch) => {
+                                self.prompt_view.input.push(ch);
+                                self.prompt_view.cursor_pos += 1;
+                                let was_visible = self.slash_menu.visible;
+                                self.slash_menu.update(&self.prompt_view.input);
+                                if was_visible
+                                    && !self.slash_menu.visible
+                                    && self.prompt_view.input.starts_with('/'
+                                ) {
+                                    self.prompt_view.input.remove(0);
+                                    self.prompt_view.cursor_pos =
+                                        self.prompt_view.cursor_pos.saturating_sub(1);
+                                }
+                            }
+                            _ => {}
+                        }
+                        return Ok(false);
+                    }
 
                     match action {
                         Some(crate::keymap::Action::ScrollUp) => {
@@ -422,6 +472,52 @@ impl App {
                                 }
                                 return Ok(false);
                             }
+
+                            if self.slash_menu.visible {
+                                match key.code {
+                                    KeyCode::Up => self.slash_menu.select_prev(),
+                                    KeyCode::Down => self.slash_menu.select_next(),
+                                    KeyCode::Enter => {
+                                        if let Some(cmd) = self.slash_menu.get_selected_command() {
+                                            let cmd_name = format!("/{} ", cmd.name);
+                                            self.prompt_view.input = cmd_name;
+                                            self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                            self.slash_menu.visible = false;
+                                        }
+                                    }
+                                    KeyCode::Esc => {
+                                        self.prompt_view.input.clear();
+                                        self.prompt_view.cursor_pos = 0;
+                                        self.slash_menu.visible = false;
+                                    }
+                                    KeyCode::Backspace => {
+                                        if !self.prompt_view.input.is_empty() {
+                                            self.prompt_view.input.pop();
+                                            self.prompt_view.cursor_pos =
+                                                self.prompt_view.cursor_pos.saturating_sub(1);
+                                            self.slash_menu.update(&self.prompt_view.input);
+                                        }
+                                    }
+                                    KeyCode::Char(ch) => {
+                                        self.prompt_view.input.push(ch);
+                                        self.prompt_view.cursor_pos += 1;
+                                        let was_visible = self.slash_menu.visible;
+                                        self.slash_menu.update(&self.prompt_view.input);
+                                        // If menu closed (e.g., user typed space), remove the leading "/"
+                                        if was_visible
+                                            && !self.slash_menu.visible
+                                            && self.prompt_view.input.starts_with('/')
+                                        {
+                                            self.prompt_view.input.remove(0);
+                                            self.prompt_view.cursor_pos =
+                                                self.prompt_view.cursor_pos.saturating_sub(1);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                return Ok(false);
+                            }
+
                             match key.code {
                                 KeyCode::Up => {
                                     self.session_view.scroll_y =
@@ -447,9 +543,13 @@ impl App {
                                     }
                                 }
                                 KeyCode::Char(ch) => {
+                                    // Insert character normally
                                     let pos = self.prompt_view.cursor_pos;
                                     self.prompt_view.input.insert(pos, ch);
                                     self.prompt_view.cursor_pos = pos + 1;
+                                    
+                                    // Check if "/" menu should open
+                                    self.slash_menu.update(&self.prompt_view.input);
                                 }
                                 _ => {}
                             }

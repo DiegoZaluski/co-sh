@@ -150,6 +150,7 @@ impl Tools for CoshTools {
         ]
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn dispatch(&self, name: &str, args: serde_json::Value) -> Result<String, String> {
         match name {
             "bash_run" => {
