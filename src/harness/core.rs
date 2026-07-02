@@ -162,10 +162,7 @@ impl Harness {
                 let name = desc["name"].as_str().unwrap_or_default();
                 let description = desc["description"].as_str().unwrap_or_default();
                 let schema = serde_json::to_string_pretty(&desc["inputSchema"]).unwrap_or_default();
-                let _ = write!(
-                    out,
-                    "- **{name}**: {description}\n  Schema: {schema}\n"
-                );
+                let _ = write!(out, "- **{name}**: {description}\n  Schema: {schema}\n");
             }
         }
 
@@ -174,7 +171,11 @@ impl Harness {
             for tool in &session.tools {
                 let desc = tool.description.as_deref().unwrap_or_default();
                 let schema = serde_json::to_string_pretty(&*tool.input_schema).unwrap_or_default();
-                let _ = write!(out, "- **{name}**: {desc}\n  Schema: {schema}\n", name = tool.name);
+                let _ = write!(
+                    out,
+                    "- **{name}**: {desc}\n  Schema: {schema}\n",
+                    name = tool.name
+                );
             }
         }
 

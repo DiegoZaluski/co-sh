@@ -6,6 +6,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
+use tokio::runtime::Handle;
 
 use crate::component::prompt::PromptView;
 use crate::config::TuiConfig;
@@ -49,6 +50,7 @@ pub struct App {
     pub toast_state: ToastState,
     pub command_palette: CommandPalette,
     pub should_quit: bool,
+    pub tokio_handle: Handle,
 }
 
 impl App {
@@ -70,6 +72,7 @@ impl App {
             toast_state: ToastState::new(),
             command_palette: CommandPalette::new(),
             should_quit: false,
+            tokio_handle: Handle::current(),
         }
     }
 

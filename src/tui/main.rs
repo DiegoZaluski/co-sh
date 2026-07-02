@@ -14,7 +14,8 @@ mod util;
 
 use app::App;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut app = App::new();
     app.show_welcome_toast();
     if let Err(e) = app.run() {

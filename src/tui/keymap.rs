@@ -42,6 +42,7 @@ pub struct KeyMap {
 }
 
 impl KeyMap {
+    #[allow(clippy::too_many_lines)]
     pub fn default_vim() -> Self {
         use KeyCode::{BackTab, Char, Down, End, Enter, Esc, Home, PageDown, PageUp, Tab, Up};
 

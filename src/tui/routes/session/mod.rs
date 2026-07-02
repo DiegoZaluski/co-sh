@@ -421,7 +421,7 @@ impl SessionView {
         }
     }
 
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
     pub fn render(
         &mut self,
         buf: &mut Buffer,
