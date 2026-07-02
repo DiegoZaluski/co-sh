@@ -7,6 +7,9 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use tokio::runtime::Handle;
+use tokio::sync::mpsc;
+
+use cosh::harness::HarnessEvent;
 
 use crate::component::prompt::PromptView;
 use crate::config::TuiConfig;
@@ -51,12 +54,16 @@ pub struct App {
     pub command_palette: CommandPalette,
     pub should_quit: bool,
     pub tokio_handle: Handle,
+    pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
+    event_rx: mpsc::UnboundedReceiver<HarnessEvent>,
 }
 
 impl App {
     pub fn new() -> Self {
         let mut state = AppState::new();
         state.add_demo_data();
+
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         App {
             state,
@@ -73,6 +80,8 @@ impl App {
             command_palette: CommandPalette::new(),
             should_quit: false,
             tokio_handle: Handle::current(),
+            event_tx,
+            event_rx,
         }
     }
 
@@ -107,6 +116,8 @@ impl App {
             if self.handle_events()? {
                 break;
             }
+
+            self.poll_events();
         }
 
         restore_terminal()?;
@@ -368,6 +379,21 @@ impl App {
         }
 
         Ok(false)
+    }
+
+    fn poll_events(&mut self) {
+        while let Ok(event) = self.event_rx.try_recv() {
+            match event {
+                HarnessEvent::Token { .. }
+                | HarnessEvent::ToolCall { .. }
+                | HarnessEvent::ToolResult { .. }
+                | HarnessEvent::ToolError { .. }
+                | HarnessEvent::Reasoning { .. }
+                | HarnessEvent::Done
+                | HarnessEvent::Stopped
+                | HarnessEvent::Error(_) => {}
+            }
+        }
     }
 }
 
