@@ -7,34 +7,24 @@ fn make_harness() -> Harness {
 }
 
 #[test]
-fn handle_internal_tool_consumes_expand_namespace() {
-    let mut h = make_harness();
-    let tc = ToolCallData {
-        name: "expand_namespace".into(),
-        arguments: json!({"server": "my-server", "namespace": "my-ns"}),
-    };
-
-    assert!(h.handle_internal_tool(&tc));
-}
-
-#[test]
-fn handle_internal_tool_rejects_unknown_tool() {
+fn handle_harness_tool_rejects_unknown_tool() {
     let mut h = make_harness();
     let tc = ToolCallData {
         name: "mcp.tool".into(),
         arguments: json!({}),
     };
 
-    assert!(!h.handle_internal_tool(&tc));
+    assert!(!h.handle_harness_tool(&tc));
 }
 
 #[test]
-fn handle_internal_tool_populates_expanded_namespaces() {
+fn handle_harness_tool_consumes_stop_agent_loop() {
     let mut h = make_harness();
     let tc = ToolCallData {
-        name: "expand_namespace".into(),
-        arguments: json!({"server": "s1", "namespace": "ns1"}),
+        name: "stop_agent_loop".into(),
+        arguments: json!({}),
     };
 
-    h.handle_internal_tool(&tc);
+    assert!(h.handle_harness_tool(&tc));
+    assert!(h.stop);
 }
