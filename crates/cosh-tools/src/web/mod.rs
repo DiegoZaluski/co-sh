@@ -15,9 +15,9 @@
 
 pub mod fetch;
 pub mod search;
-pub mod types;
 #[cfg(test)]
 mod test;
+pub mod types;
 
 pub use fetch::{WebFetch, fetch};
 pub use search::{WebSearch, search};

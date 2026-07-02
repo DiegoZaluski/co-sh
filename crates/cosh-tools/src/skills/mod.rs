@@ -31,7 +31,7 @@ mod test;
 pub use actions::execute;
 pub use types::{
     EmbeddedSkill, SkillAction, SkillContent, SkillError, SkillInfo, SkillOutput, SkillSchema,
-    SkillsMatchInput, SkillsReadAssetInput, SkillsReadInput, SkillSource,
+    SkillSource, SkillsMatchInput, SkillsReadAssetInput, SkillsReadInput,
 };
 
 use crate::ToolDescription;

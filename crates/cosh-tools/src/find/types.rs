@@ -1,7 +1,7 @@
 //! Input and output types shared by all `find` tools.
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Parameters for `find_glob`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -75,6 +75,7 @@ pub struct Glob {
 }
 
 /// A single filesystem entry matched by a glob search.
+#[derive(Serialize)]
 pub struct GlobEntry {
     /// Path relative to the search root, using forward slashes.
     pub path: String,
@@ -87,6 +88,7 @@ pub struct GlobEntry {
 }
 
 /// Result returned by the [`glob`](super::glob::glob) tool.
+#[derive(Serialize)]
 pub struct GlobOutput {
     /// Matched filesystem entries.
     pub matches: Vec<GlobEntry>,
@@ -120,6 +122,7 @@ pub struct Grep {
 }
 
 /// A context line adjacent to a grep match.
+#[derive(Serialize)]
 pub struct ContextEntry {
     /// 1-indexed line number in the source file.
     pub line_number: u32,
@@ -128,6 +131,7 @@ pub struct ContextEntry {
 }
 
 /// A single match found by the grep tool.
+#[derive(Serialize)]
 pub struct GrepMatchEntry {
     /// File path where the match was found.
     pub path: String,
@@ -142,6 +146,7 @@ pub struct GrepMatchEntry {
 }
 
 /// Result returned by the [`grep`](super::grep::grep) tool.
+#[derive(Serialize)]
 pub struct GrepOutput {
     /// All matches found, ordered by file path.
     pub matches: Vec<GrepMatchEntry>,

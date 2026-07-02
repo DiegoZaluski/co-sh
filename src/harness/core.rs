@@ -1,3 +1,4 @@
+use super::tools::{CoshTools, Tools};
 use cosh_sdk::connector::Connector;
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use rmcp::ServiceExt;
@@ -35,6 +36,7 @@ fn default_harness_tools() -> Vec<HarnessTool> {
     }]
 }
 
+#[allow(clippy::struct_field_names)]
 pub struct Harness {
     connector: Connector,
     sessions: Vec<ServerSession>,
@@ -42,6 +44,7 @@ pub struct Harness {
     header_context: String,
     system_prompts: Vec<PromptSystem>,
     harness_tools: Vec<HarnessTool>,
+    cosh_tools: Option<CoshTools>,
     /// To stop the agent loop.
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
@@ -57,7 +60,7 @@ pub struct Harness {
 
 impl Harness {
     #[must_use]
-    pub fn new(connector: Connector) -> Self {
+    pub fn new(connector: Connector, cwd: &str) -> Self {
         Self {
             connector,
             sessions: Vec::new(),
@@ -65,6 +68,7 @@ impl Harness {
             header_context: String::new(),
             system_prompts: Vec::new(),
             harness_tools: default_harness_tools(),
+            cosh_tools: Some(CoshTools::new(cwd)),
             stop: false,
             tool_issuer: VecDeque::new(),
             server_response: Vec::new(),
@@ -133,7 +137,7 @@ impl Harness {
 
     /// Builds the system header for the LLM.
     ///
-    /// Concatenates system prompts, harness internal tools, and MCP server tools
+    /// Concatenates system prompts, harness tools, system tools, and MCP server tools
     /// — all rendered inline with full name, description, and input schema.
     pub fn format_header_context(&mut self) -> &str {
         let mut out = String::new();
@@ -142,7 +146,7 @@ impl Harness {
             let _ = write!(out, "## System: {}\n{}\n\n", prompt.title, prompt.text);
         }
 
-            let _ = write!(out, "## Harness Tools\n\n");
+        let _ = write!(out, "## Harness Tools\n\n");
         for tool in &self.harness_tools {
             let schema = serde_json::to_string_pretty(&tool.input_schema).unwrap_or_default();
             let _ = write!(
@@ -152,12 +156,25 @@ impl Harness {
             );
         }
 
+        if let Some(ref cosh) = self.cosh_tools {
+            let _ = write!(out, "## System Tools\n\n");
+            for desc in cosh.tool_descriptions() {
+                let name = desc["name"].as_str().unwrap_or_default();
+                let description = desc["description"].as_str().unwrap_or_default();
+                let schema = serde_json::to_string_pretty(&desc["inputSchema"]).unwrap_or_default();
+                let _ = write!(
+                    out,
+                    "- **{name}**: {description}\n  Schema: {schema}\n"
+                );
+            }
+        }
+
         for session in &self.sessions {
             let _ = write!(out, "## MCP Server: {}\n\n", session.name_server);
             for tool in &session.tools {
                 let desc = tool.description.as_deref().unwrap_or_default();
                 let schema = serde_json::to_string_pretty(&*tool.input_schema).unwrap_or_default();
-                let _ = write!(out, "- **{}**: {}\n  Schema: {}\n", tool.name, desc, schema,);
+                let _ = write!(out, "- **{name}**: {desc}\n  Schema: {schema}\n", name = tool.name);
             }
         }
 
@@ -165,7 +182,7 @@ impl Harness {
         &self.header_context
     }
 
-    /// Build an extractor with all registered MCP and internal tools.
+    /// Build an extractor with all registered MCP, cosh, and internal tools.
     fn build_extractor(&self) -> ExtractAction {
         let mut extractor = ExtractAction::new();
         for session in &self.sessions {
@@ -174,6 +191,11 @@ impl Harness {
                     name: tool.name.to_string(),
                     input_schema: serde_json::Value::Object((*tool.input_schema).clone()),
                 });
+            }
+        }
+        if let Some(ref cosh) = self.cosh_tools {
+            for schema in cosh.schemas() {
+                extractor.add_tool(schema);
             }
         }
         for tool in &self.harness_tools {
@@ -319,18 +341,18 @@ impl Harness {
         Ok("done".into())
     }
 
-    /// Dequeue and dispatch the next pending tool call to its MCP server.
+    /// Dequeue and dispatch the next pending tool call through the
+    /// three-tier dispatch: cosh tools → MCP servers.
     ///
     /// Returns the text content of the tool response on success.
     /// Returns an error if the queue is empty, the tool is not found,
-    /// arguments are malformed, or the server call fails.
+    /// arguments are malformed, or the execution fails.
     ///
     /// # Errors
     ///
     /// Returns an error if the queue is empty, the tool is unknown,
-    /// arguments are not a JSON object, or the MCP server call fails.
+    /// arguments are not a JSON object, or the execution fails.
     pub async fn dispatch_next(&mut self) -> Result<String, String> {
-        // Peek at the front without consuming — item stays on failure.
         let (tool_name, args_map) = {
             let tc = self
                 .tool_issuer
@@ -344,6 +366,22 @@ impl Harness {
             (tc.name.clone(), args_map.clone())
         };
 
+        // Tier 1: cosh tools
+        if let Some(ref cosh) = self.cosh_tools {
+            let args = serde_json::Value::Object(args_map.clone());
+            match cosh.dispatch(&tool_name, args).await {
+                Ok(result) => {
+                    self.tool_issuer.pop_front();
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    self.server_response.push(format!("[{ts}] {result}"));
+                    return Ok(result);
+                }
+                Err(err) if err.starts_with("unknown cosh tool") => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        // Tier 2: MCP sessions
         let idx = self
             .sessions
             .iter()
@@ -358,7 +396,6 @@ impl Harness {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Only remove on success — item stays queued for retry on error.
         self.tool_issuer.pop_front();
 
         let text: Vec<String> = result
@@ -372,7 +409,7 @@ impl Harness {
         let ts = chrono::Local::now().format("%H:%M:%S");
         self.server_response.push(format!("[{ts}] {text}"));
 
-        Ok(text) // !?!
+        Ok(text)
     }
 }
 
@@ -387,6 +424,7 @@ impl Harness {
             header_context: String::new(),
             system_prompts: Vec::new(),
             harness_tools: default_harness_tools(),
+            cosh_tools: None,
             stop: false,
             server_response: Vec::new(),
             tool_issuer: VecDeque::new(),

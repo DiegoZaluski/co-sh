@@ -11,7 +11,7 @@ const EXA_MCP: &str = "https://mcp.exa.ai/mcp";
 
 const EXA_FIRST: bool = true;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct WebFetch {
     pub url: String,
 }

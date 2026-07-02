@@ -26,7 +26,8 @@ pub use edit::{EditResult, edit};
 pub use read::{ReadResult, read};
 pub use rollback::{RollbackResult, rollback};
 pub use types::{
-    EditTarget, FsEdit, FsMetadata, FsRead, FsRollback, FsRollbackInput, FsWrite, Target, TargetFile,
+    EditTarget, FsEdit, FsMetadata, FsRead, FsRollback, FsRollbackInput, FsWrite, Target,
+    TargetFile,
 };
 pub use write::{WriteResult, write};
 

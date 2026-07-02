@@ -43,7 +43,7 @@ pub struct TodoLoadFromMdInput {
     pub path: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TodoItem {
     pub id: String,
     pub description: String,
@@ -52,7 +52,7 @@ pub struct TodoItem {
 }
 
 /// A named group of tasks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TaskGroup {
     pub title: String,
     pub items: Vec<TodoItem>,
@@ -62,7 +62,7 @@ pub struct TaskGroup {
 }
 
 /// The full mutable state of the todo system.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct TodoList {
     pub groups: Vec<TaskGroup>,
 }
@@ -79,20 +79,20 @@ pub enum TodoReadAction {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Nag {
     pub message: String,
 }
 
 /// Output produced by mutation operations (`todo_write`, `todo_edit`, `todo_cross_off`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TodoWriteOutput {
     pub list: TodoList,
     pub nags: Vec<Nag>,
 }
 
 /// Output produced by `todo_read`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TodoReadOutput {
     pub groups: Vec<TaskGroup>,
     pub nags: Vec<Nag>,

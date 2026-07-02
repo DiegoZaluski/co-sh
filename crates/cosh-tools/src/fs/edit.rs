@@ -8,7 +8,8 @@ use cosh_sdk::hashline::{
 
 use super::types::{EditTarget, FsEdit, FsMetadata};
 use cosh_sdk::rollback;
-#[derive(Debug)]
+use serde::Serialize;
+#[derive(Debug, Serialize)]
 pub struct EditResult {
     pub path: String,
     pub file_hash: String,

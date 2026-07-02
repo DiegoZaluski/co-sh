@@ -7,8 +7,10 @@ use cosh_sdk::rollback::{RestoreInput, restore};
 
 use super::types::{FsMetadata, FsRollback};
 
+use serde::Serialize;
+
 /// Result of a successful rollback.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct RollbackResult {
     /// Path of the restored file.
     pub path: String,
