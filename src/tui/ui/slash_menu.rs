@@ -83,6 +83,10 @@ impl SlashMenu {
                 name: "help".into(),
                 desc: "Show help".into(),
             },
+            SlashCommand {
+                name: "themes".into(),
+                desc: "Change color theme".into(),
+            },
         ];
 
         SlashMenu {

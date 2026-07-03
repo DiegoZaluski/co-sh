@@ -25,9 +25,9 @@ use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::sidebar::SidebarView;
 use crate::state::AppState;
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeRegistry};
 use crate::ui::command_palette::CommandPalette;
-use crate::ui::dialogs::DialogState;
+use crate::ui::dialogs::{DialogState, DialogType};
 use crate::ui::toast::ToastState;
 
 fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
@@ -46,6 +46,7 @@ enum AppMode {
 pub struct App {
     pub state: AppState,
     pub theme: Theme,
+    pub theme_registry: ThemeRegistry,
     pub session_view: SessionView,
     pub prompt_view: PromptView,
     pub sidebar: SidebarView,
@@ -64,6 +65,8 @@ pub struct App {
     llm_config: LlmConfig,
     stop_signal: Arc<AtomicBool>,
     terminal_focused: bool,
+    /// Stores the theme name that was active when the theme dialog opened (for cancel/restore)
+    theme_dialog_original: Option<String>,
 }
 
 impl App {
@@ -72,9 +75,13 @@ impl App {
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
+        let theme_registry = ThemeRegistry::new();
+        let theme = theme_registry.default_theme().clone();
+
         App {
             state,
-            theme: Theme::dark(),
+            theme_registry,
+            theme,
             session_view: SessionView::new(),
             prompt_view: PromptView::new(),
             sidebar: SidebarView::new(),
@@ -86,6 +93,7 @@ impl App {
             toast_state: ToastState::new(),
             command_palette: CommandPalette::new(),
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
+            theme_dialog_original: None,
             should_quit: false,
             tokio_handle: Handle::current(),
             event_tx,
@@ -104,6 +112,156 @@ impl App {
             variant: ToastVariant::Info,
             duration_ms: 5000,
         });
+    }
+
+    fn open_theme_dialog(&mut self) {
+        let mut themes: Vec<String> = self.theme_registry.names().into_iter().map(|s| s.to_string()).collect();
+        themes.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+
+        let current = self.theme_registry
+            .names()
+            .iter()
+            .find(|&&name| self.theme_registry.get(name).map_or(false, |t| t == &self.theme))
+            .map(|&s| s.to_string())
+            .unwrap_or_else(|| "opencode".to_string());
+
+        // Store the theme name so we can restore on cancel
+        self.theme_dialog_original = Some(current.clone());
+
+        self.dialog.replace(DialogType::ThemeList {
+            themes,
+            current,
+            filter: String::new(),
+        });
+    }
+
+    fn is_theme_dialog_visible(&self) -> bool {
+        self.dialog.visible() && matches!(
+            self.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::ThemeList { .. })
+        )
+    }
+
+    fn handle_theme_dialog_key(&mut self, key: KeyCode) -> bool {
+        if !self.is_theme_dialog_visible() {
+            return false;
+        }
+
+        match key {
+            KeyCode::Up => {
+                // Compute filtered indices and move selection up
+                let filtered = self.theme_dialog_filtered();
+                if !filtered.is_empty() {
+                    if let Some(d) = self.dialog.current_mut() {
+                        d.selected = if d.selected == 0 {
+                            filtered.len() - 1
+                        } else {
+                            d.selected.saturating_sub(1)
+                        };
+                        // Preview theme on move
+                        self.apply_filtered_theme_preview();
+                    }
+                }
+                true
+            }
+            KeyCode::Down => {
+                let filtered = self.theme_dialog_filtered();
+                if !filtered.is_empty() {
+                    if let Some(d) = self.dialog.current_mut() {
+                        d.selected = (d.selected + 1).min(filtered.len() - 1);
+                        // Preview theme on move
+                        self.apply_filtered_theme_preview();
+                    }
+                }
+                true
+            }
+            KeyCode::Enter => {
+                let filtered = self.theme_dialog_filtered();
+                if !filtered.is_empty() {
+                    let name = filtered[self.dialog.current().map_or(0, |d| d.selected.min(filtered.len().saturating_sub(1)))].to_string();
+                    if let Some(t) = self.theme_registry.get(&name) {
+                        self.theme = t.clone();
+                    }
+                }
+                self.theme_dialog_original = None;
+                self.dialog.pop();
+                true
+            }
+            KeyCode::Esc => {
+                // Restore original theme
+                if let Some(ref orig) = self.theme_dialog_original {
+                    if let Some(t) = self.theme_registry.get(orig) {
+                        self.theme = t.clone();
+                    }
+                }
+                self.theme_dialog_original = None;
+                self.dialog.pop();
+                true
+            }
+            KeyCode::Backspace => {
+                let is_empty = {
+                    let Some(d) = self.dialog.current_mut() else { return true; };
+                    let DialogType::ThemeList { filter, .. } = &mut d.dialog_type else { return true; };
+                    filter.pop();
+                    d.selected = 0;
+                    filter.is_empty()
+                };
+                if is_empty {
+                    // Restore original theme when filter becomes empty (matches opencode)
+                    if let Some(ref orig) = self.theme_dialog_original {
+                        if let Some(t) = self.theme_registry.get(orig) {
+                            self.theme = t.clone();
+                        }
+                    }
+                } else {
+                    self.apply_filtered_theme_preview();
+                }
+                true
+            }
+            KeyCode::Char(ch) => {
+                self.theme_dialog_push_filter(ch);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Get the list of filtered theme names from the current dialog
+    fn theme_dialog_filtered(&self) -> Vec<String> {
+        self.dialog.current().map_or(Vec::new(), |d| {
+            if let DialogType::ThemeList { themes, filter, .. } = &d.dialog_type {
+                if filter.is_empty() {
+                    themes.clone()
+                } else {
+                    let lower = filter.to_lowercase();
+                    themes.iter().filter(|t| t.to_lowercase().contains(&lower)).cloned().collect()
+                }
+            } else {
+                Vec::new()
+            }
+        })
+    }
+
+    /// Preview the currently selected theme from the filtered list
+    fn apply_filtered_theme_preview(&mut self) {
+        let filtered = self.theme_dialog_filtered();
+        let sel = self.dialog.current().map_or(0, |d| d.selected.min(filtered.len().saturating_sub(1)));
+        if sel < filtered.len() {
+            if let Some(t) = self.theme_registry.get(&filtered[sel]) {
+                self.theme = t.clone();
+            }
+        }
+    }
+
+    /// Add a character to the theme filter and reset selection
+    fn theme_dialog_push_filter(&mut self, ch: char) {
+        if let Some(d) = self.dialog.current_mut() {
+            if let DialogType::ThemeList { filter, .. } = &mut d.dialog_type {
+                filter.push(ch);
+            }
+            d.selected = 0;
+        }
+        self.apply_filtered_theme_preview();
     }
 
     fn mode(&self) -> AppMode {
@@ -261,22 +419,32 @@ impl App {
                         return Ok(false);
                     }
 
+                    // Check theme dialog FIRST, before action lookup
+                    if self.is_theme_dialog_visible() {
+                        if self.handle_theme_dialog_key(key.code) {
+                            return Ok(false);
+                        }
+                    }
+
                     let action = self.keymap.lookup(key.code, key.modifiers).cloned();
 
                     // If slash menu is visible, arrow keys should move selection there
                     if self.slash_menu.visible {
                         match key.code {
                             KeyCode::Up => self.slash_menu.select_prev(),
-                            KeyCode::Down => self.slash_menu.select_next(),
-                            KeyCode::Enter => {
-                                self.prompt_view.note_activity();
-                                if let Some(cmd) = self.slash_menu.get_selected_command() {
-                                    let cmd_name = format!("/{} ", cmd.name);
-                                    self.prompt_view.input = cmd_name;
-                                    self.prompt_view.cursor_pos = self.prompt_view.input.len();
-                                    self.slash_menu.visible = false;
-                                }
-                            }
+                            KeyCode::Down => self.slash_menu.select_next(),                                                    KeyCode::Enter => {
+                                                        self.prompt_view.note_activity();
+                                                        if let Some(cmd) = self.slash_menu.get_selected_command() {
+                                                            if cmd.name == "themes" {
+                                                                self.open_theme_dialog();
+                                                            } else {
+                                                                let cmd_name = format!("/{} ", cmd.name);
+                                                                self.prompt_view.input = cmd_name;
+                                                                self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                                            }
+                                                            self.slash_menu.visible = false;
+                                                        }
+                                                    }
                             KeyCode::Esc => {
                                 self.prompt_view.note_activity();
                                 self.prompt_view.input.clear();
@@ -502,10 +670,14 @@ impl App {
                                     KeyCode::Enter => {
                                         self.prompt_view.note_activity();
                                         if let Some(cmd) = self.slash_menu.get_selected_command() {
-                                            let cmd_name = format!("/{} ", cmd.name);
-                                            self.prompt_view.input = cmd_name;
-                                            self.prompt_view.cursor_pos =
-                                                self.prompt_view.input.len();
+                                            if cmd.name == "themes" {
+                                                self.open_theme_dialog();
+                                            } else {
+                                                let cmd_name = format!("/{} ", cmd.name);
+                                                self.prompt_view.input = cmd_name;
+                                                self.prompt_view.cursor_pos =
+                                                    self.prompt_view.input.len();
+                                            }
                                             self.slash_menu.visible = false;
                                         }
                                     }
