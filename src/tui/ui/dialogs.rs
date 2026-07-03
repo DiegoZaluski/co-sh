@@ -593,19 +593,21 @@ impl DialogState {
                     let mut visual_index = 0;
                     let mut model_index = 0;
                     for item in &visual_items {
-                        if visual_index >= scroll_offset && (visual_index - scroll_offset) < max_visible {
-                            match item {
-                                VisualItem::Header(provider) => {
+                        match item {
+                            VisualItem::Header(provider) => {
+                                if visual_index >= scroll_offset && (visual_index - scroll_offset) < max_visible {
                                     let header_style = Style::default()
                                         .fg(rgba_color(theme.text_muted))
                                         .add_modifier(Modifier::BOLD);
                                     draw_text_line(buf, provider, list_x, current_y, list_w, header_style);
                                     current_y += 1;
                                 }
-                                VisualItem::Model(entry) => {
-                                    let is_current = entry.model == current.as_str();
-                                    let is_selected = model_index == selection;
-
+                            }
+                            VisualItem::Model(entry) => {
+                                let is_current = entry.model == current.as_str();
+                                let is_selected = model_index == selection;
+                                
+                                if visual_index >= scroll_offset && (visual_index - scroll_offset) < max_visible {
                                     // Draw full row background first
                                     if is_selected {
                                         for cx in list_x..list_x + list_w {
@@ -660,8 +662,8 @@ impl DialogState {
                                     draw_text_line(buf, &entry.model, list_x + 2, current_y, list_w.saturating_sub(2), Style::default().fg(name_fg).bg(name_bg));
 
                                     current_y += 1;
-                                    model_index += 1;
                                 }
+                                model_index += 1;
                             }
                         }
                         visual_index += 1;
