@@ -140,8 +140,8 @@ impl App {
 
     fn open_model_dialog(&mut self) {
         use cosh_sdk::connector::Connector;
+        use cosh::harness::events::ModelEntry;
 
-        let provider = self.llm_config.provider.clone();
         let current = self.llm_config.model.clone().unwrap_or_default();
 
         // Store the current model so we can restore on cancel
@@ -151,30 +151,41 @@ impl App {
 
         // Show a loading state first
         self.dialog.replace(DialogType::ModelList {
-            models: vec!["Loading...".to_string()],
+            models: vec![],
             current: current.clone(),
             filter: String::new(),
         });
 
-        // Fetch models asynchronously
-        self.tokio_handle.spawn(async move {
-            let connector = match Connector::new(&provider) {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = dialog_tx.send(HarnessEvent::Error(format!("Failed to create connector: {e}")));
-                    return;
-                }
-            };
+        // Fetch models from all available providers asynchronously
+        let providers_to_check = vec!["groq", "openrouter", "openai", "deepseek", "perplexity"];
+        let dialog_tx_clone = dialog_tx.clone();
 
-            match connector.list_models().await {
-                Ok(output) => {
-                    let models: Vec<String> = output.models().iter().map(|m| m.id().to_string()).collect();
-                    let _ = dialog_tx.send(HarnessEvent::ModelsLoaded { models, current });
-                }
-                Err(e) => {
-                    let _ = dialog_tx.send(HarnessEvent::Error(format!("Failed to load models: {e}")));
+        self.tokio_handle.spawn(async move {
+            let mut all_models: Vec<ModelEntry> = Vec::new();
+
+            for provider in providers_to_check {
+                if let Ok(connector) = Connector::new(provider) {
+                    match connector.list_models().await {
+                        Ok(output) => {
+                            for model_info in output.models() {
+                                all_models.push(ModelEntry {
+                                    provider: provider.to_string(),
+                                    model: model_info.id().to_string(),
+                                });
+                            }
+                        }
+                        Err(_) => {
+                            // Skip providers that fail to load models
+                            continue;
+                        }
+                    }
                 }
             }
+
+            let _ = dialog_tx_clone.send(HarnessEvent::ModelsLoaded {
+                models: all_models,
+                current,
+            });
         });
     }
 
@@ -325,33 +336,82 @@ impl App {
 
         match key {
             KeyCode::Up => {
-                // Compute filtered indices and move selection up
-                let filtered = self.model_dialog_filtered();
-                if !filtered.is_empty() {
-                    if let Some(d) = self.dialog.current_mut() {
-                        d.selected = if d.selected == 0 {
-                            filtered.len() - 1
+                // Get the models from the dialog
+                if let Some(d) = self.dialog.current() {
+                    if let DialogType::ModelList { models, filter, .. } = &d.dialog_type {
+                        // Build filtered indices
+                        let filtered_indices: Vec<usize> = if filter.is_empty() {
+                            (0..models.len()).collect()
                         } else {
-                            d.selected.saturating_sub(1)
+                            let lower = filter.to_lowercase();
+                            models.iter().enumerate()
+                                .filter(|(_, m)| m.model.to_lowercase().contains(&lower))
+                                .map(|(i, _)| i)
+                                .collect()
                         };
+                        
+                        if !filtered_indices.is_empty() {
+                            if let Some(d_mut) = self.dialog.current_mut() {
+                                let current_pos = filtered_indices.iter().position(|&i| i == d_mut.selected);
+                                if let Some(current_idx) = current_pos {
+                                    d_mut.selected = if current_idx == 0 {
+                                        *filtered_indices.last().unwrap()
+                                    } else {
+                                        filtered_indices[current_idx - 1]
+                                    };
+                                } else {
+                                    // If current selection is not in filtered list, select first
+                                    d_mut.selected = filtered_indices[0];
+                                }
+                            }
+                        }
                     }
                 }
                 true
             }
             KeyCode::Down => {
-                let filtered = self.model_dialog_filtered();
-                if !filtered.is_empty() {
-                    if let Some(d) = self.dialog.current_mut() {
-                        d.selected = (d.selected + 1).min(filtered.len() - 1);
+                if let Some(d) = self.dialog.current() {
+                    if let DialogType::ModelList { models, filter, .. } = &d.dialog_type {
+                        // Build filtered indices
+                        let filtered_indices: Vec<usize> = if filter.is_empty() {
+                            (0..models.len()).collect()
+                        } else {
+                            let lower = filter.to_lowercase();
+                            models.iter().enumerate()
+                                .filter(|(_, m)| m.model.to_lowercase().contains(&lower))
+                                .map(|(i, _)| i)
+                                .collect()
+                        };
+                        
+                        if !filtered_indices.is_empty() {
+                            if let Some(d_mut) = self.dialog.current_mut() {
+                                let current_pos = filtered_indices.iter().position(|&i| i == d_mut.selected);
+                                if let Some(current_idx) = current_pos {
+                                    if current_idx + 1 < filtered_indices.len() {
+                                        d_mut.selected = filtered_indices[current_idx + 1];
+                                    } else {
+                                        d_mut.selected = filtered_indices[0];
+                                    }
+                                } else {
+                                    // If current selection is not in filtered list, select first
+                                    d_mut.selected = filtered_indices[0];
+                                }
+                            }
+                        }
                     }
                 }
                 true
             }
             KeyCode::Enter => {
-                let filtered = self.model_dialog_filtered();
-                if !filtered.is_empty() {
-                    let name = filtered[self.dialog.current().map_or(0, |d| d.selected.min(filtered.len().saturating_sub(1)))].to_string();
-                    self.llm_config.model = Some(name.clone());
+                if let Some(d) = self.dialog.current() {
+                    if let DialogType::ModelList { models, .. } = &d.dialog_type {
+                        if !models.is_empty() {
+                            let selected_idx = d.selected.min(models.len().saturating_sub(1));
+                            let selected_entry = &models[selected_idx];
+                            self.llm_config.model = Some(selected_entry.model.clone());
+                            self.llm_config.provider = selected_entry.provider.clone();
+                        }
+                    }
                 }
                 self.model_dialog_original = None;
                 self.dialog.pop();
@@ -386,21 +446,6 @@ impl App {
         }
     }
 
-    /// Get the list of filtered model names from the current dialog
-    fn model_dialog_filtered(&self) -> Vec<String> {
-        self.dialog.current().map_or(Vec::new(), |d| {
-            if let DialogType::ModelList { models, filter, .. } = &d.dialog_type {
-                if filter.is_empty() {
-                    models.clone()
-                } else {
-                    let lower = filter.to_lowercase();
-                    models.iter().filter(|t| t.to_lowercase().contains(&lower)).cloned().collect()
-                }
-            } else {
-                Vec::new()
-            }
-        })
-    }
 
     /// Add a character to the model filter and reset selection
     fn model_dialog_push_filter(&mut self, ch: char) {

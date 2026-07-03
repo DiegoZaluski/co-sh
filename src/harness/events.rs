@@ -1,5 +1,12 @@
 use serde_json::Value;
 
+/// Represents a model entry with its provider
+#[derive(Debug, Clone)]
+pub struct ModelEntry {
+    pub provider: String,
+    pub model: String,
+}
+
 /// Events emitted by [`Harness::run_agent_loop`](super::Harness) for the TUI
 /// to consume and render in real time.
 #[derive(Debug, Clone)]
@@ -23,5 +30,5 @@ pub enum HarnessEvent {
     /// A fatal error occurred.
     Error(String),
     /// Models list loaded from the provider.
-    ModelsLoaded { models: Vec<String>, current: String },
+    ModelsLoaded { models: Vec<ModelEntry>, current: String },
 }
