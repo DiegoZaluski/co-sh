@@ -30,8 +30,22 @@ pub struct LlmConfig {
 
 impl LlmConfig {
     pub fn from_env() -> Self {
+        // Try to get provider from env, otherwise auto-detect from available API keys
+        let provider = std::env::var("COSH_PROVIDER").ok().or_else(|| {
+            // Auto-detect provider from available API keys
+            if std::env::var("GROQ_API_KEY").is_ok() {
+                Some("groq".to_string())
+            } else if std::env::var("OPENROUTER_API_KEY").is_ok() {
+                Some("openrouter".to_string())
+            } else if std::env::var("OPENAI_API_KEY").is_ok() {
+                Some("openai".to_string())
+            } else {
+                None
+            }
+        }).unwrap_or("openai".to_string());
+
         LlmConfig {
-            provider: std::env::var("COSH_PROVIDER").unwrap_or_else(|_| "openai".into()),
+            provider,
             model: std::env::var("COSH_MODEL").ok(),
         }
     }

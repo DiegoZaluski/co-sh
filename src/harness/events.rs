@@ -22,4 +22,6 @@ pub enum HarnessEvent {
     Stopped,
     /// A fatal error occurred.
     Error(String),
+    /// Models list loaded from the provider.
+    ModelsLoaded { models: Vec<String>, current: String },
 }

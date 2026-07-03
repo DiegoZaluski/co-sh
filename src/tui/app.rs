@@ -67,6 +67,8 @@ pub struct App {
     terminal_focused: bool,
     /// Stores the theme name that was active when the theme dialog opened (for cancel/restore)
     theme_dialog_original: Option<String>,
+    /// Stores the model that was active when the model dialog opened (for cancel/restore)
+    model_dialog_original: Option<String>,
 }
 
 impl App {
@@ -94,6 +96,7 @@ impl App {
             command_palette: CommandPalette::new(),
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
             theme_dialog_original: None,
+            model_dialog_original: None,
             should_quit: false,
             tokio_handle: Handle::current(),
             event_tx,
@@ -135,10 +138,57 @@ impl App {
         });
     }
 
+    fn open_model_dialog(&mut self) {
+        use cosh_sdk::connector::Connector;
+
+        let provider = self.llm_config.provider.clone();
+        let current = self.llm_config.model.clone().unwrap_or_default();
+
+        // Store the current model so we can restore on cancel
+        self.model_dialog_original = Some(current.clone());
+
+        let dialog_tx = self.event_tx.clone();
+
+        // Show a loading state first
+        self.dialog.replace(DialogType::ModelList {
+            models: vec!["Loading...".to_string()],
+            current: current.clone(),
+            filter: String::new(),
+        });
+
+        // Fetch models asynchronously
+        self.tokio_handle.spawn(async move {
+            let connector = match Connector::new(&provider) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = dialog_tx.send(HarnessEvent::Error(format!("Failed to create connector: {e}")));
+                    return;
+                }
+            };
+
+            match connector.list_models().await {
+                Ok(output) => {
+                    let models: Vec<String> = output.models().iter().map(|m| m.id().to_string()).collect();
+                    let _ = dialog_tx.send(HarnessEvent::ModelsLoaded { models, current });
+                }
+                Err(e) => {
+                    let _ = dialog_tx.send(HarnessEvent::Error(format!("Failed to load models: {e}")));
+                }
+            }
+        });
+    }
+
     fn is_theme_dialog_visible(&self) -> bool {
         self.dialog.visible() && matches!(
             self.dialog.current().map(|d| &d.dialog_type),
             Some(DialogType::ThemeList { .. })
+        )
+    }
+
+    fn is_model_dialog_visible(&self) -> bool {
+        self.dialog.visible() && matches!(
+            self.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::ModelList { .. })
         )
     }
 
@@ -266,6 +316,102 @@ impl App {
             d.blink_start = std::time::SystemTime::now();
         }
         self.apply_filtered_theme_preview();
+    }
+
+    fn handle_model_dialog_key(&mut self, key: KeyCode) -> bool {
+        if !self.is_model_dialog_visible() {
+            return false;
+        }
+
+        match key {
+            KeyCode::Up => {
+                // Compute filtered indices and move selection up
+                let filtered = self.model_dialog_filtered();
+                if !filtered.is_empty() {
+                    if let Some(d) = self.dialog.current_mut() {
+                        d.selected = if d.selected == 0 {
+                            filtered.len() - 1
+                        } else {
+                            d.selected.saturating_sub(1)
+                        };
+                    }
+                }
+                true
+            }
+            KeyCode::Down => {
+                let filtered = self.model_dialog_filtered();
+                if !filtered.is_empty() {
+                    if let Some(d) = self.dialog.current_mut() {
+                        d.selected = (d.selected + 1).min(filtered.len() - 1);
+                    }
+                }
+                true
+            }
+            KeyCode::Enter => {
+                let filtered = self.model_dialog_filtered();
+                if !filtered.is_empty() {
+                    let name = filtered[self.dialog.current().map_or(0, |d| d.selected.min(filtered.len().saturating_sub(1)))].to_string();
+                    self.llm_config.model = Some(name.clone());
+                }
+                self.model_dialog_original = None;
+                self.dialog.pop();
+                true
+            }
+            KeyCode::Esc => {
+                // Restore original model
+                if let Some(ref orig) = self.model_dialog_original {
+                    self.llm_config.model = if orig.is_empty() { None } else { Some(orig.clone()) };
+                }
+                self.model_dialog_original = None;
+                self.dialog.pop();
+                true
+            }
+            KeyCode::Backspace => {
+                let _is_empty = {
+                    let Some(d) = self.dialog.current_mut() else { return true; };
+                    let DialogType::ModelList { filter, .. } = &mut d.dialog_type else { return true; };
+                    filter.pop();
+                    d.selected = 0;
+                    d.last_filter_at = std::time::SystemTime::now();
+                    d.blink_start = std::time::SystemTime::now();
+                    filter.is_empty()
+                };
+                true
+            }
+            KeyCode::Char(ch) => {
+                self.model_dialog_push_filter(ch);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Get the list of filtered model names from the current dialog
+    fn model_dialog_filtered(&self) -> Vec<String> {
+        self.dialog.current().map_or(Vec::new(), |d| {
+            if let DialogType::ModelList { models, filter, .. } = &d.dialog_type {
+                if filter.is_empty() {
+                    models.clone()
+                } else {
+                    let lower = filter.to_lowercase();
+                    models.iter().filter(|t| t.to_lowercase().contains(&lower)).cloned().collect()
+                }
+            } else {
+                Vec::new()
+            }
+        })
+    }
+
+    /// Add a character to the model filter and reset selection
+    fn model_dialog_push_filter(&mut self, ch: char) {
+        if let Some(d) = self.dialog.current_mut() {
+            if let DialogType::ModelList { filter, .. } = &mut d.dialog_type {
+                filter.push(ch);
+            }
+            d.selected = 0;
+            d.last_filter_at = std::time::SystemTime::now();
+            d.blink_start = std::time::SystemTime::now();
+        }
     }
 
     fn mode(&self) -> AppMode {
@@ -431,25 +577,35 @@ impl App {
                         }
                     }
 
+                    // Check model dialog SECOND, before action lookup
+                    if self.is_model_dialog_visible() {
+                        if self.handle_model_dialog_key(key.code) {
+                            return Ok(false);
+                        }
+                    }
+
                     let action = self.keymap.lookup(key.code, key.modifiers).cloned();
 
                     // If slash menu is visible, arrow keys should move selection there
                     if self.slash_menu.visible {
                         match key.code {
                             KeyCode::Up => self.slash_menu.select_prev(),
-                            KeyCode::Down => self.slash_menu.select_next(),                                                    KeyCode::Enter => {
-                                                        self.prompt_view.note_activity();
-                                                        if let Some(cmd) = self.slash_menu.get_selected_command() {
-                                                            if cmd.name == "themes" {
-                                                                self.open_theme_dialog();
-                                                            } else {
-                                                                let cmd_name = format!("/{} ", cmd.name);
-                                                                self.prompt_view.input = cmd_name;
-                                                                self.prompt_view.cursor_pos = self.prompt_view.input.len();
-                                                            }
-                                                            self.slash_menu.visible = false;
-                                                        }
-                                                    }
+                            KeyCode::Down => self.slash_menu.select_next(),
+                            KeyCode::Enter => {
+                                self.prompt_view.note_activity();
+                                if let Some(cmd) = self.slash_menu.get_selected_command() {
+                                    if cmd.name == "themes" {
+                                        self.open_theme_dialog();
+                                    } else if cmd.name == "models" {
+                                        self.open_model_dialog();
+                                    } else {
+                                        let cmd_name = format!("/{} ", cmd.name);
+                                        self.prompt_view.input = cmd_name;
+                                        self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                    }
+                                    self.slash_menu.visible = false;
+                                }
+                            }
                             KeyCode::Esc => {
                                 self.prompt_view.note_activity();
                                 self.prompt_view.input.clear();
@@ -677,6 +833,8 @@ impl App {
                                         if let Some(cmd) = self.slash_menu.get_selected_command() {
                                             if cmd.name == "themes" {
                                                 self.open_theme_dialog();
+                                            } else if cmd.name == "models" {
+                                                self.open_model_dialog();
                                             } else {
                                                 let cmd_name = format!("/{} ", cmd.name);
                                                 self.prompt_view.input = cmd_name;
@@ -915,6 +1073,16 @@ impl App {
                         variant: ToastVariant::Error,
                         duration_ms: 5000,
                     });
+                }
+
+                HarnessEvent::ModelsLoaded { models, current } => {
+                    // Update the dialog with the loaded models
+                    if let Some(d) = self.dialog.current_mut() {
+                        if let DialogType::ModelList { models: dialog_models, current: dialog_current, .. } = &mut d.dialog_type {
+                            *dialog_models = models;
+                            *dialog_current = current;
+                        }
+                    }
                 }
             }
         }

@@ -13,9 +13,11 @@ mod ui;
 mod util;
 
 use app::App;
+use dotenvy::dotenv;
 
 #[tokio::main]
 async fn main() {
+    dotenv().ok();
     let mut app = App::new();
     app.show_welcome_toast();
     if let Err(e) = app.run() {
