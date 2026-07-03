@@ -136,7 +136,6 @@ impl App {
     fn render(&mut self, frame: &mut Frame<'_>) {
         let area = frame.area();
 
-        // Scope for buffer rendering
         {
             let buf = frame.buffer_mut();
 
@@ -201,11 +200,11 @@ impl App {
 
             match self.mode() {
                 AppMode::Home => {
-                    self.prompt_view.is_focused = false;
+                    self.prompt_view.blur();
                     HomeView::render(buf, session_area, &self.state, &self.theme);
                 }
                 AppMode::Session => {
-                    self.prompt_view.is_focused = true;
+                    self.prompt_view.focus();
                     self.prompt_view.terminal_focused = self.terminal_focused;
                     self.session_view.tool_state.advance_spinner();
                     let unique_agents = self.state.unique_agents();
@@ -226,22 +225,22 @@ impl App {
                         &unique_agents,
                         std::time::SystemTime::now(),
                     );
-
-                    FooterView::render(
-                        buf,
-                        Rect::new(main_area.x, footer_y, main_area.width, 1),
-                        &self.state,
-                        &self.theme,
-                    );
-                    self.toast_state.render(buf, area, &self.theme);
-                    self.dialog.render(buf, area, &self.theme);
-                    self.permission_dialog.render(buf, area, &self.theme);
-                    self.question_dialog.render(buf, area, &self.theme);
-                    self.command_palette.render(buf, area, &self.theme);
-                    self.slash_menu.render(buf, prompt_area, &self.theme);
                 }
             }
-        }; // buf is dropped here
+
+            FooterView::render(
+                buf,
+                Rect::new(main_area.x, footer_y, main_area.width, 1),
+                &self.state,
+                &self.theme,
+            );
+            self.toast_state.render(buf, area, &self.theme);
+            self.dialog.render(buf, area, &self.theme);
+            self.permission_dialog.render(buf, area, &self.theme);
+            self.question_dialog.render(buf, area, &self.theme);
+            self.command_palette.render(buf, area, &self.theme);
+            self.slash_menu.render(buf, prompt_area, &self.theme);
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -748,8 +747,11 @@ impl App {
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    write!(stdout, "\x1b[?1049h\x1b[?25h\x1b[?12h\x1b[1 q")?;
-    crossterm::execute!(stdout, crossterm::event::EnableFocusChange)?;
+    crossterm::execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableFocusChange,
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -757,8 +759,12 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 fn restore_terminal() -> io::Result<()> {
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, crossterm::event::DisableFocusChange)?;
-    write!(stdout, "\x1b[?1049l\x1b[?25h")?;
+    crossterm::execute!(
+        stdout,
+        crossterm::event::DisableFocusChange,
+        crossterm::terminal::LeaveAlternateScreen,
+    )?;
+    stdout.flush()?;
     crossterm::terminal::disable_raw_mode()?;
     Ok(())
 }

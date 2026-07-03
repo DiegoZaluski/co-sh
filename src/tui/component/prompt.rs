@@ -314,7 +314,9 @@ impl PromptView {
                 {
                     if self.terminal_focused {
                         // Steady cursor while typing; blink after 500ms idle
-                        let idle_ms = self.last_input_at.elapsed().map_or(0, |d| d.as_millis());
+                        let idle_ms = now
+                            .duration_since(self.last_input_at)
+                            .map_or(0, |d| d.as_millis());
                         let show = if idle_ms < 500 {
                             true
                         } else {
