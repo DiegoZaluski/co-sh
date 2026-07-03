@@ -204,6 +204,8 @@ impl App {
                     let DialogType::ThemeList { filter, .. } = &mut d.dialog_type else { return true; };
                     filter.pop();
                     d.selected = 0;
+                    d.last_filter_at = std::time::SystemTime::now();
+                    d.blink_start = std::time::SystemTime::now();
                     filter.is_empty()
                 };
                 if is_empty {
@@ -260,6 +262,8 @@ impl App {
                 filter.push(ch);
             }
             d.selected = 0;
+            d.last_filter_at = std::time::SystemTime::now();
+            d.blink_start = std::time::SystemTime::now();
         }
         self.apply_filtered_theme_preview();
     }
@@ -392,8 +396,9 @@ impl App {
                 &self.state,
                 &self.theme,
             );
+            let now = std::time::SystemTime::now();
             self.toast_state.render(buf, area, &self.theme);
-            self.dialog.render(buf, area, &self.theme);
+            self.dialog.render(buf, area, &self.theme, now);
             self.permission_dialog.render(buf, area, &self.theme);
             self.question_dialog.render(buf, area, &self.theme);
             self.command_palette.render(buf, area, &self.theme);

@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -42,6 +44,8 @@ pub enum DialogType {
 pub struct DialogInstance {
     pub dialog_type: DialogType,
     pub selected: usize,
+    pub last_filter_at: SystemTime,
+    pub blink_start: SystemTime,
 }
 
 pub struct DialogState {
@@ -57,6 +61,8 @@ impl DialogState {
         self.stack.push(DialogInstance {
             dialog_type,
             selected: 0,
+            last_filter_at: SystemTime::now(),
+            blink_start: SystemTime::now(),
         });
     }
 
@@ -85,7 +91,7 @@ impl DialogState {
         self.stack.last_mut()
     }
 
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime) {
         let Some(instance) = self.stack.last() else {
             return;
         };
@@ -189,15 +195,13 @@ impl DialogState {
                 let dialog_x = area.x + (area.width - dialog_w) / 2;
 
                 // Fit list to available height
-                let max_rows_possible = (area.height.saturating_sub(3)) as usize;
-                let max_visible = max_rows_possible.min(filtered.len().max(1)).max(1);
-
-                // Layout matches original DialogSelect:
-                //   line 0: title + "esc" label  (paddingLeft=4, paddingRight=4)
-                //   line 1: filter input
-                //   line 2..N: theme list (scrollbox paddingLeft=1, paddingRight=1)
-                let dialog_h = (max_visible + 2) as u16;
-                let dialog_y = area.y + ((area.height).saturating_sub(dialog_h)) / 2;
+                // Layout: 1 title + 1 filter + 1 gap + max_visible items + 1 paddingBottom = max_visible + 4
+                let max_visible_height = (area.height.saturating_sub(4)) as usize;
+                let max_visible = max_visible_height.min(filtered.len().max(1)).max(1).min(10);
+                let dialog_h = (max_visible + 4) as u16;
+                let dialog_y = area.y.saturating_add(
+                    (area.height.saturating_sub(dialog_h)) / 2
+                );
                 let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
                 // Fill background (NO border - original DialogSelect has no border)
@@ -238,17 +242,36 @@ impl DialogState {
                         cell.set_style(Style::default().bg(bg_element));
                     }
                 }
+
+                // Blink cursor logic: steady for 500ms after typing, then blink 500ms on/off
+                let idle_ms = now
+                    .duration_since(instance.last_filter_at)
+                    .map_or(0, |d| d.as_millis());
+                let cursor_visible = if idle_ms < 500 {
+                    true // steady after typing
+                } else {
+                    let elapsed_ms = now
+                        .duration_since(instance.blink_start)
+                        .map_or(0, |d| d.as_millis() % 1000);
+                    elapsed_ms < 500
+                };
+
                 // Show "Search" when empty, otherwise show filter text + cursor
                 let has_filter = !filter.is_empty();
                 if has_filter {
                     draw_text_line(buf, filter.as_str(), header_x, dialog_y + 1, header_w,
                         Style::default().fg(rgba_color(theme.text)).bg(bg_element));
-                    // Blinking cursor at end of filter text (using theme.primary)
+                    // Blinking cursor at end of filter text
                     let cursor_x = header_x + filter.len() as u16;
                     if cursor_x < header_x + header_w {
                         if let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1)) {
-                            cell.set_char('\u{2588}'); // full block
-                            cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
+                            if cursor_visible {
+                                cell.set_char('\u{2588}');
+                                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
+                            } else {
+                                cell.set_char(' ');
+                                cell.set_style(Style::default().bg(bg_element));
+                            }
                         }
                     }
                 } else {
@@ -260,13 +283,22 @@ impl DialogState {
                     let cursor_x = header_x + search_label.len() as u16;
                     if cursor_x < header_x + header_w {
                         if let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1)) {
-                            cell.set_char('\u{2588}');
-                            cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
+                            if cursor_visible {
+                                cell.set_char('\u{2588}');
+                                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
+                            } else {
+                                cell.set_char(' ');
+                                cell.set_style(Style::default().bg(bg_element));
+                            }
                         }
                     }
                 }
 
-                // Lines 2+: Theme list (paddingLeft=1, paddingRight=1 like original scrollbox)
+                // Line 2: Gap (empty, matches original gap={1})
+
+                // Lines 3+: Theme list (paddingLeft=1, paddingRight=1 like original scrollbox)
+                // After list: paddingBottom=1 (line dialog_y + 3 + max_visible)
+                let list_top = dialog_y + 3;
                 let list_pad = 1; // original scrollbox paddingLeft=1
                 let list_x = dialog_x + list_pad;
                 let list_w = dialog_w.saturating_sub(list_pad * 2);
@@ -276,7 +308,7 @@ impl DialogState {
                         buf,
                         "No matching themes",
                         list_x,
-                        dialog_y + 2,
+                        list_top,
                         list_w,
                         Style::default().fg(rgba_color(theme.text_muted)),
                     );
@@ -290,7 +322,7 @@ impl DialogState {
                     };
                     let scroll_offset = scroll_offset.min(filtered.len().saturating_sub(max_visible));
                     for (vis_idx, &theme_name) in filtered.iter().enumerate().skip(scroll_offset).take(max_visible) {
-                        let ry = dialog_y + 2 + (vis_idx - scroll_offset) as u16;
+                        let ry = list_top + (vis_idx - scroll_offset) as u16;
                         let is_current = theme_name == current.as_str();
                         let is_selected = vis_idx == selection;
 
@@ -352,6 +384,7 @@ impl DialogState {
                         draw_text_line(buf, theme_name, list_x + 2, ry, list_w.saturating_sub(2), Style::default().fg(name_fg).bg(name_bg));
                     }
                 }
+                // Lines after list: paddingBottom=1 (already filled with background)
                 // NO footer, NO separator - matching original DialogSelect
             }
         }
