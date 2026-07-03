@@ -1,9 +1,11 @@
 use std::io;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -61,6 +63,7 @@ pub struct App {
     event_rx: mpsc::UnboundedReceiver<HarnessEvent>,
     llm_config: LlmConfig,
     stop_signal: Arc<AtomicBool>,
+    terminal_focused: bool,
 }
 
 impl App {
@@ -89,6 +92,7 @@ impl App {
             event_rx,
             llm_config: LlmConfig::from_env(),
             stop_signal: Arc::new(AtomicBool::new(false)),
+            terminal_focused: true,
         }
     }
 
@@ -115,9 +119,7 @@ impl App {
 
         while !self.should_quit {
             terminal.draw(|frame| {
-                let area = frame.area();
-                let buf = frame.buffer_mut();
-                self.render(buf, area);
+                self.render(frame);
             })?;
 
             if self.handle_events()? {
@@ -131,100 +133,115 @@ impl App {
         Ok(())
     }
 
-    fn render(&mut self, buf: &mut ratatui::buffer::Buffer, area: Rect) {
-        let bg_color = rgba_color(self.theme.background);
-        for y in area.y..area.bottom() {
-            for x in area.x..area.right() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_style(Style::default().bg(bg_color));
-                    cell.set_char(' ');
+    fn render(&mut self, frame: &mut Frame<'_>) {
+        let area = frame.area();
+
+        // Scope for buffer rendering
+        {
+            let buf = frame.buffer_mut();
+
+            let bg_color = rgba_color(self.theme.background);
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_style(Style::default().bg(bg_color));
+                        cell.set_char(' ');
+                    }
                 }
             }
-        }
 
-        let header_style = Style::default().fg(rgba_color(self.theme.text_muted));
-        let title_chars: Vec<char> = "cosh".chars().collect();
-        for (i, ch) in title_chars.iter().enumerate() {
-            if let Some(cell) = buf.cell_mut((area.x + 1 + i as u16, area.y)) {
-                cell.set_char(*ch);
-                cell.set_style(header_style);
+            let header_style = Style::default().fg(rgba_color(self.theme.text_muted));
+            let title_chars: Vec<char> = "cosh".chars().collect();
+            for (i, ch) in title_chars.iter().enumerate() {
+                if let Some(cell) = buf.cell_mut((area.x + 1 + i as u16, area.y)) {
+                    cell.set_char(*ch);
+                    cell.set_style(header_style);
+                }
             }
-        }
 
-        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
 
-        let main_area = Rect::new(
-            area.x + sidebar_w,
-            area.y,
-            area.width.saturating_sub(sidebar_w),
-            area.height,
-        );
-
-        if self.sidebar.open {
-            self.sidebar.render(
-                buf,
-                Rect::new(area.x, area.y, sidebar_w, area.height),
-                &self.state,
-                &self.theme,
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
             );
-        }
 
-        let footer_y = main_area.bottom().saturating_sub(1);
-        let prompt_h = if matches!(self.mode(), AppMode::Session) {
-            self.prompt_view
-                .required_height(main_area.width.saturating_sub(4))
-        } else {
-            0
-        };
-        let prompt_area_y = footer_y.saturating_sub(prompt_h);
-        let prompt_area = Rect::new(
-            main_area.x + 2,
-            prompt_area_y,
-            main_area.width.saturating_sub(4),
-            prompt_h,
-        );
-        let session_bottom = prompt_area_y;
-        let session_area = Rect::new(
-            main_area.x,
-            area.y + 1,
-            main_area.width,
-            session_bottom.saturating_sub(area.y + 1),
-        );
-
-        match self.mode() {
-            AppMode::Home => {
-                HomeView::render(buf, session_area, &self.state, &self.theme);
-            }
-            AppMode::Session => {
-                self.session_view.tool_state.advance_spinner();
-                let unique_agents = self.state.unique_agents();
-                let agent_colors = crate::types::AgentColors::from_theme(&self.theme);
-                self.session_view
-                    .render(buf, session_area, &self.state, &self.theme, &self.config);
-                self.prompt_view.render(
+            if self.sidebar.open {
+                self.sidebar.render(
                     buf,
-                    prompt_area,
+                    Rect::new(area.x, area.y, sidebar_w, area.height),
                     &self.state,
                     &self.theme,
-                    &agent_colors,
-                    &unique_agents,
                 );
             }
-        }
 
-        FooterView::render(
-            buf,
-            Rect::new(main_area.x, footer_y, main_area.width, 1),
-            &self.state,
-            &self.theme,
-        );
-        self.toast_state.render(buf, area, &self.theme);
-        self.dialog.render(buf, area, &self.theme);
-        self.permission_dialog.render(buf, area, &self.theme);
-        self.question_dialog.render(buf, area, &self.theme);
-        self.command_palette.render(buf, area, &self.theme);
-        // Render slash menu inline above prompt
-        self.slash_menu.render(buf, prompt_area, &self.theme);
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let prompt_h = if matches!(self.mode(), AppMode::Session) {
+                self.prompt_view
+                    .required_height(main_area.width.saturating_sub(4))
+            } else {
+                0
+            };
+            let prompt_area_y = footer_y.saturating_sub(prompt_h);
+            let prompt_area = Rect::new(
+                main_area.x + 2,
+                prompt_area_y,
+                main_area.width.saturating_sub(4),
+                prompt_h,
+            );
+            let session_bottom = prompt_area_y;
+            let session_area = Rect::new(
+                main_area.x,
+                area.y + 1,
+                main_area.width,
+                session_bottom.saturating_sub(area.y + 1),
+            );
+
+            match self.mode() {
+                AppMode::Home => {
+                    self.prompt_view.is_focused = false;
+                    HomeView::render(buf, session_area, &self.state, &self.theme);
+                }
+                AppMode::Session => {
+                    self.prompt_view.is_focused = true;
+                    self.prompt_view.terminal_focused = self.terminal_focused;
+                    self.session_view.tool_state.advance_spinner();
+                    let unique_agents = self.state.unique_agents();
+                    let agent_colors = crate::types::AgentColors::from_theme(&self.theme);
+                    self.session_view.render(
+                        buf,
+                        session_area,
+                        &self.state,
+                        &self.theme,
+                        &self.config,
+                    );
+                    self.prompt_view.render(
+                        buf,
+                        prompt_area,
+                        &self.state,
+                        &self.theme,
+                        &agent_colors,
+                        &unique_agents,
+                        std::time::SystemTime::now(),
+                    );
+
+                    FooterView::render(
+                        buf,
+                        Rect::new(main_area.x, footer_y, main_area.width, 1),
+                        &self.state,
+                        &self.theme,
+                    );
+                    self.toast_state.render(buf, area, &self.theme);
+                    self.dialog.render(buf, area, &self.theme);
+                    self.permission_dialog.render(buf, area, &self.theme);
+                    self.question_dialog.render(buf, area, &self.theme);
+                    self.command_palette.render(buf, area, &self.theme);
+                    self.slash_menu.render(buf, prompt_area, &self.theme);
+                }
+            }
+        }; // buf is dropped here
     }
 
     #[allow(clippy::too_many_lines)]
@@ -253,6 +270,7 @@ impl App {
                             KeyCode::Up => self.slash_menu.select_prev(),
                             KeyCode::Down => self.slash_menu.select_next(),
                             KeyCode::Enter => {
+                                self.prompt_view.note_activity();
                                 if let Some(cmd) = self.slash_menu.get_selected_command() {
                                     let cmd_name = format!("/{} ", cmd.name);
                                     self.prompt_view.input = cmd_name;
@@ -261,11 +279,13 @@ impl App {
                                 }
                             }
                             KeyCode::Esc => {
+                                self.prompt_view.note_activity();
                                 self.prompt_view.input.clear();
                                 self.prompt_view.cursor_pos = 0;
                                 self.slash_menu.visible = false;
                             }
                             KeyCode::Backspace => {
+                                self.prompt_view.note_activity();
                                 if !self.prompt_view.input.is_empty() {
                                     self.prompt_view.input.pop();
                                     self.prompt_view.cursor_pos =
@@ -274,6 +294,7 @@ impl App {
                                 }
                             }
                             KeyCode::Char(ch) => {
+                                self.prompt_view.note_activity();
                                 self.prompt_view.input.push(ch);
                                 self.prompt_view.cursor_pos += 1;
                                 let was_visible = self.slash_menu.visible;
@@ -320,6 +341,7 @@ impl App {
                         Some(
                             crate::keymap::Action::SendMessage | crate::keymap::Action::Confirm,
                         ) => {
+                            self.prompt_view.note_activity();
                             if self.state.status == crate::types::SessionStatus::Working {
                                 return Ok(false);
                             }
@@ -441,9 +463,11 @@ impl App {
                             self.prompt_view.prev_agent(agents.len().max(1));
                         }
                         Some(crate::keymap::Action::HistoryUp) => {
+                            self.prompt_view.note_activity();
                             self.prompt_view.history_up();
                         }
                         Some(crate::keymap::Action::HistoryDown) => {
+                            self.prompt_view.note_activity();
                             self.prompt_view.history_down();
                         }
                         Some(crate::keymap::Action::ToggleCommandPalette) => {
@@ -477,6 +501,7 @@ impl App {
                                     KeyCode::Up => self.slash_menu.select_prev(),
                                     KeyCode::Down => self.slash_menu.select_next(),
                                     KeyCode::Enter => {
+                                        self.prompt_view.note_activity();
                                         if let Some(cmd) = self.slash_menu.get_selected_command() {
                                             let cmd_name = format!("/{} ", cmd.name);
                                             self.prompt_view.input = cmd_name;
@@ -486,11 +511,13 @@ impl App {
                                         }
                                     }
                                     KeyCode::Esc => {
+                                        self.prompt_view.note_activity();
                                         self.prompt_view.input.clear();
                                         self.prompt_view.cursor_pos = 0;
                                         self.slash_menu.visible = false;
                                     }
                                     KeyCode::Backspace => {
+                                        self.prompt_view.note_activity();
                                         if !self.prompt_view.input.is_empty() {
                                             self.prompt_view.input.pop();
                                             self.prompt_view.cursor_pos =
@@ -499,6 +526,7 @@ impl App {
                                         }
                                     }
                                     KeyCode::Char(ch) => {
+                                        self.prompt_view.note_activity();
                                         self.prompt_view.input.push(ch);
                                         self.prompt_view.cursor_pos += 1;
                                         let was_visible = self.slash_menu.visible;
@@ -536,6 +564,7 @@ impl App {
                                         (self.session_view.scroll_y + 10).max(0);
                                 }
                                 KeyCode::Backspace => {
+                                    self.prompt_view.note_activity();
                                     let pos = self.prompt_view.cursor_pos;
                                     if pos > 0 {
                                         self.prompt_view.input.remove(pos - 1);
@@ -543,6 +572,7 @@ impl App {
                                     }
                                 }
                                 KeyCode::Char(ch) => {
+                                    self.prompt_view.note_activity();
                                     // Insert character normally
                                     let pos = self.prompt_view.cursor_pos;
                                     self.prompt_view.input.insert(pos, ch);
@@ -556,6 +586,12 @@ impl App {
                         }
                     }
                 }
+            }
+            Event::FocusGained => {
+                self.terminal_focused = true;
+            }
+            Event::FocusLost => {
+                self.terminal_focused = false;
             }
             Event::Resize(_w, _h) => {}
             _ => {}
@@ -712,15 +748,17 @@ impl App {
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    write!(stdout, "\x1b[?1049h\x1b[?25h\x1b[?12h\x1b[1 q")?;
+    crossterm::execute!(stdout, crossterm::event::EnableFocusChange)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
 }
 
 fn restore_terminal() -> io::Result<()> {
-    crossterm::terminal::disable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::LeaveAlternateScreen)?;
+    crossterm::execute!(stdout, crossterm::event::DisableFocusChange)?;
+    write!(stdout, "\x1b[?1049l\x1b[?25h")?;
+    crossterm::terminal::disable_raw_mode()?;
     Ok(())
 }

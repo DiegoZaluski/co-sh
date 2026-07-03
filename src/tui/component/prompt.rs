@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
@@ -57,6 +59,10 @@ pub struct PromptView {
     pub history: Vec<String>,
     pub history_index: i32,
     pub selected_agent_index: usize,
+    pub is_focused: bool,
+    pub terminal_focused: bool,
+    pub last_input_at: SystemTime,
+    pub blink_start: SystemTime,
 }
 
 impl PromptView {
@@ -67,7 +73,19 @@ impl PromptView {
             history: Vec::new(),
             history_index: -1,
             selected_agent_index: 0,
+            is_focused: true,
+            terminal_focused: true,
+            last_input_at: SystemTime::now(),
+            blink_start: SystemTime::now(),
         }
+    }
+
+    pub fn focus(&mut self) {
+        self.is_focused = true;
+    }
+
+    pub fn blur(&mut self) {
+        self.is_focused = false;
     }
 
     pub fn send_message(&mut self) -> String {
@@ -115,6 +133,11 @@ impl PromptView {
         self.selected_agent_index = (self.selected_agent_index + 1) % num_agents;
     }
 
+    pub fn note_activity(&mut self) {
+        self.last_input_at = SystemTime::now();
+        self.blink_start = SystemTime::now();
+    }
+
     pub fn prev_agent(&mut self, num_agents: usize) {
         if num_agents == 0 {
             return;
@@ -152,6 +175,8 @@ impl PromptView {
         lines
     }
 
+    /// Render the prompt and draw a blinking cursor if focused.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn render(
         &self,
         buf: &mut Buffer,
@@ -160,6 +185,7 @@ impl PromptView {
         theme: &Theme,
         agent_colors: &AgentColors,
         unique_agents: &[String],
+        now: SystemTime,
     ) {
         let text_w = area.width.saturating_sub(5) as usize;
         let display_placeholder = self.input.is_empty();
@@ -268,6 +294,61 @@ impl PromptView {
             area.width.saturating_sub(2),
             muted_style,
         );
+
+        // Draw cursor if focused
+        if self.is_focused {
+            let text_w_val = text_w.max(1);
+            let cursor_pos_for_calc = if display_placeholder {
+                0
+            } else {
+                self.cursor_pos.min(self.input.chars().count())
+            };
+            let cursor_line_idx = cursor_pos_for_calc / text_w_val;
+            let cursor_col_idx = cursor_pos_for_calc % text_w_val;
+
+            let cursor_y = text_start + cursor_line_idx as u16;
+            if cursor_y < input_area.bottom() && cursor_line_idx < display_lines.len() {
+                let cursor_x = x_off + cursor_col_idx as u16;
+                if cursor_x < input_area.right()
+                    && let Some(cell) = buf.cell_mut((cursor_x, cursor_y))
+                {
+                    if self.terminal_focused {
+                        // Steady cursor while typing; blink after 500ms idle
+                        let idle_ms = self.last_input_at.elapsed().map_or(0, |d| d.as_millis());
+                        let show = if idle_ms < 500 {
+                            true
+                        } else {
+                            let elapsed_ms = now
+                                .duration_since(self.blink_start)
+                                .map_or(0, |d| d.as_millis() % 1000);
+                            elapsed_ms < 500
+                        };
+                        if show {
+                            // ON: transparent cursor (invert colors)
+                            cell.set_style(
+                                Style::default()
+                                    .fg(rgba_color(theme.background))
+                                    .bg(rgba_color(theme.text)),
+                            );
+                        } else {
+                            // OFF: dimmed visible state (not invisible)
+                            cell.set_style(
+                                Style::default()
+                                    .fg(rgba_color(theme.text_muted))
+                                    .bg(rgba_color(theme.background)),
+                            );
+                        }
+                    } else {
+                        // Terminal unfocused: transparent dark
+                        cell.set_style(
+                            Style::default()
+                                .fg(rgba_color(theme.text_muted))
+                                .bg(rgba_color(theme.background)),
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
