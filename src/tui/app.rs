@@ -756,14 +756,8 @@ impl App {
                             let event_tx = self.event_tx.clone();
                             let provider = self.llm_config.provider.clone();
                             let model = self.llm_config.model.clone();
-                            let cwd = std::env::current_dir().map_or_else(
-                                |_| ".".to_string(),
-                                |p| p.to_string_lossy().to_string(),
-                            );
                             let input = msg;
-                            let stop_signal = self.stop_signal.clone();
 
-                            // TEMPORARY: use non-streaming chat() to bypass the streaming bug
                             std::thread::spawn(move || {
                                 use cosh_sdk::connector::Connector;
                                 use std::panic::AssertUnwindSafe;
