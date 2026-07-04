@@ -163,8 +163,7 @@ impl SessionView {
                     } else {
                         t.text.clone()
                     };
-                    let lines = content.lines().count().max(1) as u16;
-                    let h = lines.min(bottom - y);
+                    let h = Self::estimate_part_height(part, max_w, config).min(bottom - y);
                     let area = Rect::new(x, y, max_w, h);
                     let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
                         Some(content),
@@ -180,13 +179,10 @@ impl SessionView {
                     } else {
                         t.text.clone()
                     };
-                    let lines = content.lines().count().max(1) as u16;
-                    let h = lines.min(bottom - y).max(1);
-                    if h > 0 {
-                        let text_style = Style::default().fg(rgba_color(fg_color));
-                        draw_text_line(buf, &content, x, y, max_w, text_style);
-                    }
-                    y += h;
+                    let h = Self::estimate_part_height(part, max_w, config).min(bottom - y).max(1);
+                    let text_style = Style::default().fg(rgba_color(fg_color));
+                    let rendered = Self::draw_text_wrap(buf, &content, x, y, max_w, h, text_style);
+                    y += rendered;
                 }
                 Part::Tool(tool) => {
                     if !config.show_tool_details && matches!(tool.status, ToolStatus::Completed) {
@@ -228,6 +224,31 @@ impl SessionView {
         }
 
         y - y_start
+    }
+
+    fn draw_text_wrap(buf: &mut Buffer, text: &str, x: u16, y_: u16, max_w: u16, max_h: u16, style: Style) -> u16 {
+        let right = x + max_w;
+        let bottom = y_ + max_h;
+        let mut y = y_;
+        let mut cx = x;
+        for ch in text.chars() {
+            if cx >= right {
+                y += 1;
+                cx = x;
+                if y >= bottom {
+                    break;
+                }
+                if ch == ' ' {
+                    continue;
+                }
+            }
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                cell.set_char(ch);
+                cell.set_style(style);
+            }
+            cx += 1;
+        }
+        (y - y_).max(1)
     }
 
     fn estimate_part_height(part: &Part, max_w: u16, config: &TuiConfig) -> u16 {
@@ -416,9 +437,8 @@ impl SessionView {
                     line_y += 1;
                     continue;
                 }
-                // ratatui panics on control chars, so only allow printable characters
-                #[allow(clippy::non_ascii_literal)]
-                if !matches!(ch, ' '..='~') {
+                // ratatui panics on control chars, so filter those out
+                if ch.is_control() && ch != '\n' && ch != '\t' {
                     continue;
                 }
                 if line_x >= x_off + max_w {
