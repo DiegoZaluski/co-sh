@@ -730,14 +730,14 @@ impl App {
                                 if !self.prompt_view.input.is_empty() {
                                     self.prompt_view.input.pop();
                                     self.prompt_view.cursor_pos =
-                                        self.prompt_view.cursor_pos.saturating_sub(1);
+                                        self.prompt_view.input.len();
                                     self.slash_menu.update(&self.prompt_view.input);
                                 }
                             }
                             KeyCode::Char(ch) => {
                                 self.prompt_view.note_activity();
                                 self.prompt_view.input.push(ch);
-                                self.prompt_view.cursor_pos += 1;
+                                self.prompt_view.cursor_pos += ch.len_utf8();
                                 let was_visible = self.slash_menu.visible;
                                 self.slash_menu.update(&self.prompt_view.input);
                                 if was_visible
@@ -1035,19 +1035,19 @@ impl App {
                                         self.prompt_view.cursor_pos = 0;
                                         self.slash_menu.visible = false;
                                     }
-                                    KeyCode::Backspace => {
-                                        self.prompt_view.note_activity();
-                                        if !self.prompt_view.input.is_empty() {
-                                            self.prompt_view.input.pop();
-                                            self.prompt_view.cursor_pos =
-                                                self.prompt_view.cursor_pos.saturating_sub(1);
-                                            self.slash_menu.update(&self.prompt_view.input);
-                                        }
+                                KeyCode::Backspace => {
+                                    self.prompt_view.note_activity();
+                                    if !self.prompt_view.input.is_empty() {
+                                        self.prompt_view.input.pop();
+                                        self.prompt_view.cursor_pos =
+                                            self.prompt_view.input.len();
+                                        self.slash_menu.update(&self.prompt_view.input);
                                     }
+                                }
                                     KeyCode::Char(ch) => {
                                         self.prompt_view.note_activity();
                                         self.prompt_view.input.push(ch);
-                                        self.prompt_view.cursor_pos += 1;
+                                        self.prompt_view.cursor_pos += ch.len_utf8();
                                         let was_visible = self.slash_menu.visible;
                                         self.slash_menu.update(&self.prompt_view.input);
                                         // If menu closed (e.g., user typed space), remove the leading "/"
@@ -1086,8 +1086,13 @@ impl App {
                                     self.prompt_view.note_activity();
                                     let pos = self.prompt_view.cursor_pos;
                                     if pos > 0 {
-                                        self.prompt_view.input.remove(pos - 1);
-                                        self.prompt_view.cursor_pos = pos - 1;
+                                        // Use floor_char_boundary to safely handle multi-byte chars
+                                        // (e.g. á, é, emoji). remove() panics if called at a
+                                        // non-char-boundary position.
+                                        let char_start =
+                                            self.prompt_view.input.floor_char_boundary(pos - 1);
+                                        self.prompt_view.input.remove(char_start);
+                                        self.prompt_view.cursor_pos = char_start;
                                     }
                                 }
                                 KeyCode::Char(ch) => {
@@ -1109,7 +1114,9 @@ impl App {
                                     // Insert character normally
                                     let pos = self.prompt_view.cursor_pos;
                                     self.prompt_view.input.insert(pos, ch);
-                                    self.prompt_view.cursor_pos = pos + 1;
+                                    // Use len_utf8() so cursor stays on a valid UTF-8 boundary
+                                    // for multi-byte chars (e.g. á, é, emoji).
+                                    self.prompt_view.cursor_pos = pos + ch.len_utf8();
 
                                     // Check if "/" menu should open
                                     self.slash_menu.update(&self.prompt_view.input);
