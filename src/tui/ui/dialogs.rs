@@ -1,10 +1,11 @@
 use std::time::SystemTime;
+use std::collections::BTreeMap;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use cosh::harness::events::ModelEntry;
+use cosh::ModelEntry;
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
@@ -402,7 +403,6 @@ impl DialogState {
             }
             DialogType::ModelList { models, current, filter } => {
                 // Group models by provider and filter
-                use std::collections::BTreeMap;
 
                 let mut grouped: BTreeMap<String, Vec<&ModelEntry>> = BTreeMap::new();
                 for entry in models.iter() {

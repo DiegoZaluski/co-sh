@@ -1,5 +1,7 @@
 /target
 .opencode/*
+.devin
+.crush
 /linetime
 TODO.md
 .env

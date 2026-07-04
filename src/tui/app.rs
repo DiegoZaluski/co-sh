@@ -139,8 +139,9 @@ impl App {
     }
 
     fn open_model_dialog(&mut self) {
+        use cosh::ModelEntry;
         use cosh_sdk::connector::Connector;
-        use cosh::harness::events::ModelEntry;
+        use cosh_sdk::connector::known_providers;
 
         let current = self.llm_config.model.clone().unwrap_or_default();
 
@@ -156,8 +157,8 @@ impl App {
             filter: String::new(),
         });
 
-        // Fetch models from all available providers asynchronously
-        let providers_to_check = vec!["groq", "openrouter", "openai", "deepseek", "perplexity"];
+        // Fetch models from all known providers asynchronously
+        let providers_to_check: Vec<&str> = known_providers().collect();
         let dialog_tx_clone = dialog_tx.clone();
 
         self.tokio_handle.spawn(async move {
