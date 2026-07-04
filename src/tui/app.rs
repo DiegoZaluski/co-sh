@@ -636,7 +636,12 @@ impl App {
                     if key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
-                        self.should_quit = true;
+                        self.dialog.show(DialogType::Confirm {
+                            message: "Quit cosh?".into(),
+                        });
+                        if let Some(d) = self.dialog.current_mut() {
+                            d.selected = 1;
+                        }
                         return Ok(false);
                     }
 
