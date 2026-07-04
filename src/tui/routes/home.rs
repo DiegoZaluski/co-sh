@@ -39,18 +39,43 @@ const LOGO: &[&str] = &[
 
 const TAGLINE: &str = "Terminal AI Agent";
 
-const PLACEHOLDER_PROMPTS: &[&str] = &[
-    "Write a Rust CLI tool that processes JSON files",
-    "Explain how async/await works in Python",
-    "Help me debug a memory leak in C",
-    "Create a React component with TypeScript",
-    "Optimize this SQL query",
-];
+pub const MENU_ITEMS: &[&str] = &["Start a New Session", "Browse Session History"];
 
-pub struct HomeView;
+#[derive(Clone, Copy, PartialEq)]
+pub enum HomeAction {
+    NewSession,
+    ToggleSidebar,
+}
+
+pub struct HomeView {
+    pub selected_index: usize,
+}
 
 impl HomeView {
-    pub fn render(buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
+    pub fn new() -> Self {
+        HomeView { selected_index: 0 }
+    }
+
+    pub fn select_next(&mut self) {
+        self.selected_index = (self.selected_index + 1) % MENU_ITEMS.len();
+    }
+
+    pub fn select_prev(&mut self) {
+        self.selected_index = if self.selected_index == 0 {
+            MENU_ITEMS.len() - 1
+        } else {
+            self.selected_index - 1
+        };
+    }
+
+    pub fn selected_action(&self) -> HomeAction {
+        match self.selected_index {
+            0 => HomeAction::NewSession,
+            _ => HomeAction::ToggleSidebar,
+        }
+    }
+
+    pub fn render(&self, buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
         let cx = area.x + area.width / 2;
 
         let primary = rgba_color(theme.primary);
@@ -76,39 +101,29 @@ impl HomeView {
         );
 
         if state.sessions.is_empty() {
-            let prompt_y = tagline_y + 3;
-            let prompt_header = "Try one of these:";
-            let ph_x = cx.saturating_sub(prompt_header.len() as u16 / 2);
-            draw_text_line(
-                buf,
-                prompt_header,
-                ph_x,
-                prompt_y,
-                area.width,
-                Style::default().fg(muted),
-            );
+            let menu_y = tagline_y + 4;
 
-            let max_entry_len = PLACEHOLDER_PROMPTS
+            let max_entry_len = MENU_ITEMS
                 .iter()
-                .map(|p| format!("\u{25b6}  {p}").len())
+                .map(|p| format!("  {p}").len())
                 .max()
                 .unwrap_or(0);
-            let prompt_left = cx.saturating_sub((max_entry_len / 2 + 2) as u16);
+            let menu_left = cx.saturating_sub((max_entry_len / 2) as u16);
 
-            for (i, prompt) in PLACEHOLDER_PROMPTS.iter().enumerate() {
-                let py = prompt_y + 2 + i as u16;
-                if py >= area.bottom() {
+            for (i, item) in MENU_ITEMS.iter().enumerate() {
+                let my = menu_y + i as u16;
+                if my >= area.bottom() {
                     break;
                 }
-                let entry = format!("\u{25b6}  {prompt}");
-                draw_text_line(
-                    buf,
-                    &entry,
-                    prompt_left,
-                    py,
-                    area.width,
-                    Style::default().fg(text),
-                );
+                let is_selected = i == self.selected_index;
+                let prefix = if is_selected { "> " } else { "  " };
+                let entry = format!("{prefix}{item}");
+                let style = if is_selected {
+                    Style::default().fg(primary)
+                } else {
+                    Style::default().fg(text)
+                };
+                draw_text_line(buf, &entry, menu_left, my, area.width, style);
             }
         } else {
             let recent_y = tagline_y + 2;
@@ -129,7 +144,8 @@ impl HomeView {
                     break;
                 }
 
-                let is_active = Some(session.id.as_str()) == state.current_session_id.as_deref();
+                let is_active =
+                    Some(session.id.as_str()) == state.current_session_id.as_deref();
                 let marker = if is_active { "\u{25b8}" } else { " " };
                 let entry = format!(
                     " {}  {} ({} msgs)",
@@ -147,7 +163,7 @@ impl HomeView {
             }
         }
 
-        let key_hints = "n: new session  q: quit  ?: help";
+        let key_hints = "\u{2191}\u{2193} navigate  enter select  q quit";
         let hint_x = cx.saturating_sub(key_hints.len() as u16 / 2);
         draw_text_line(
             buf,
