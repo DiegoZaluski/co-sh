@@ -87,13 +87,29 @@ impl MarkdownRenderable {
         }
     }
 
-    fn render_text(text: &str, buf: &mut Buffer, x: &mut u16, y: u16, max_x: u16, style: Style) {
+    fn render_text(
+        text: &str,
+        buf: &mut Buffer,
+        x: &mut u16,
+        y: &mut u16,
+        area_x: u16,
+        max_x: u16,
+        max_y: u16,
+        style: Style,
+    ) {
         for ch in text.chars() {
             if *x >= max_x {
-                *x = max_x;
-                break;
+                *y += 1;
+                *x = area_x;
+                if *y >= max_y {
+                    break;
+                }
+                // Skip leading space when wrapping to avoid indent
+                if ch == ' ' {
+                    continue;
+                }
             }
-            if let Some(cell) = buf.cell_mut((*x, y)) {
+            if let Some(cell) = buf.cell_mut((*x, *y)) {
                 cell.set_char(ch);
                 cell.set_style(style);
             }
@@ -248,7 +264,7 @@ impl Renderable for MarkdownRenderable {
                         } else {
                             "• ".to_string()
                         };
-                        Self::render_text(&bullet, buf, &mut x, y, max_x, default_style);
+                        Self::render_text(&bullet, buf, &mut x, &mut y, area.x, max_x, max_y, default_style);
                     }
                     Tag::TableHead
                     | Tag::TableRow
@@ -362,17 +378,17 @@ impl Renderable for MarkdownRenderable {
                             byte_offset += line.len() + 1;
                         }
                     } else {
-                        Self::render_text(&text, buf, &mut x, y, max_x, default_style);
+                        Self::render_text(&text, buf, &mut x, &mut y, area.x, max_x, max_y, default_style);
                     }
                 }
                 Event::Code(text) => {
                     let code_style = default_style
                         .bg(Color::Rgb(40, 40, 40))
                         .fg(Color::Rgb(200, 150, 100));
-                    Self::render_text(&text, buf, &mut x, y, max_x, code_style);
+                    Self::render_text(&text, buf, &mut x, &mut y, area.x, max_x, max_y, code_style);
                 }
                 Event::Html(html) => {
-                    Self::render_text(&html, buf, &mut x, y, max_x, default_style);
+                    Self::render_text(&html, buf, &mut x, &mut y, area.x, max_x, max_y, default_style);
                 }
                 Event::SoftBreak | Event::HardBreak => {
                     x = area.x;
@@ -393,7 +409,7 @@ impl Renderable for MarkdownRenderable {
                 }
                 Event::TaskListMarker(checked) => {
                     let marker = if checked { "[x] " } else { "[ ] " };
-                    Self::render_text(marker, buf, &mut x, y, max_x, default_style);
+                    Self::render_text(marker, buf, &mut x, &mut y, area.x, max_x, max_y, default_style);
                 }
             }
         }

@@ -233,17 +233,17 @@ impl SessionView {
     fn estimate_part_height(part: &Part, max_w: u16, config: &TuiConfig) -> u16 {
         match part {
             Part::Text(t) if !t.synthetic => {
-                // Error messages are rendered as wrapped plain text, not markdown
-                if t.text.starts_with("Error: ") {
-                    let chars_per_line = max_w as usize;
-                    if chars_per_line > 0 {
-                        let char_count = t.text.chars().count();
-                        char_count.div_ceil(chars_per_line).max(1) as u16
-                    } else {
-                        1
+                // Estimate wrapped height: each line can hold up to max_w chars
+                let chars_per_line = max_w as usize;
+                if chars_per_line > 0 {
+                    let mut total_lines: usize = 0;
+                    for line in t.text.lines() {
+                        let line_len = line.chars().count();
+                        total_lines += if line_len == 0 { 1 } else { line_len.div_ceil(chars_per_line) };
                     }
+                    total_lines.max(1) as u16
                 } else {
-                    t.text.lines().count().max(1) as u16
+                    1
                 }
             }
             Part::Tool(t) => {
