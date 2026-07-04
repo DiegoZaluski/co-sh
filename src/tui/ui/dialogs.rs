@@ -223,6 +223,7 @@ impl DialogState {
                 for y in dialog_area.y..dialog_area.bottom() {
                     for x in dialog_area.x..dialog_area.right() {
                         if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
                             cell.set_style(Style::default().bg(bg_color));
                         }
                     }
@@ -253,6 +254,7 @@ impl DialogState {
                 let bg_element = rgba_color(theme.background_element);
                 for cx in header_x..header_x + header_w {
                     if let Some(cell) = buf.cell_mut((cx, dialog_y + 1)) {
+                        cell.set_char(' ');
                         cell.set_style(Style::default().bg(bg_element));
                     }
                 }
@@ -344,6 +346,7 @@ impl DialogState {
                         if is_selected {
                             for cx in list_x..list_x + list_w {
                                 if let Some(cell) = buf.cell_mut((cx, ry)) {
+                                    cell.set_char(' ');
                                     cell.set_style(Style::default().bg(rgba_color(theme.primary)));
                                 }
                             }
@@ -351,6 +354,7 @@ impl DialogState {
                             // Match dialog background — NOT Color::Reset (which is terminal black)
                             for cx in list_x..list_x + list_w {
                                 if let Some(cell) = buf.cell_mut((cx, ry)) {
+                                    cell.set_char(' ');
                                     cell.set_style(Style::default().bg(bg_element));
                                 }
                             }
@@ -442,6 +446,7 @@ impl DialogState {
                 for y in dialog_area.y..dialog_area.bottom() {
                     for x in dialog_area.x..dialog_area.right() {
                         if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
                             cell.set_style(Style::default().bg(bg_color));
                         }
                     }
@@ -472,6 +477,7 @@ impl DialogState {
                 let bg_element = rgba_color(theme.background_element);
                 for cx in header_x..header_x + header_w {
                     if let Some(cell) = buf.cell_mut((cx, dialog_y + 1)) {
+                        cell.set_char(' ');
                         cell.set_style(Style::default().bg(bg_element));
                     }
                 }
@@ -612,12 +618,14 @@ impl DialogState {
                                     if is_selected {
                                         for cx in list_x..list_x + list_w {
                                             if let Some(cell) = buf.cell_mut((cx, current_y)) {
+                                                cell.set_char(' ');
                                                 cell.set_style(Style::default().bg(rgba_color(theme.primary)));
                                             }
                                         }
                                     } else {
                                         for cx in list_x..list_x + list_w {
                                             if let Some(cell) = buf.cell_mut((cx, current_y)) {
+                                                cell.set_char(' ');
                                                 cell.set_style(Style::default().bg(bg_element));
                                             }
                                         }

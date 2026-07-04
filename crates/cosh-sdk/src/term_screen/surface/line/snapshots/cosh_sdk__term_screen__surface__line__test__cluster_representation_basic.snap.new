@@ -1,0 +1,36 @@
+---
+source: crates/cosh-sdk/src/term_screen/surface/line/test.rs
+assertion_line: 35
+expression: "&compressed.cells"
+---
+C(
+    ClusteredLine {
+        text: "hello",
+        is_double_wide: None,
+        clusters: [
+            Cluster {
+                cell_width: 5,
+                attrs: CellAttributes {
+                    attributes: 0,
+                    intensity: Normal,
+                    underline: None,
+                    blink: None,
+                    italic: false,
+                    reverse: false,
+                    strikethrough: false,
+                    invisible: false,
+                    wrapped: false,
+                    overline: false,
+                    semantic_type: Output,
+                    foreground: Default,
+                    background: Default,
+                    fat: None,
+                },
+            },
+        ],
+        len: 5,
+        last_cell_width: Some(
+            1,
+        ),
+    },
+)
