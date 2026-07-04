@@ -310,3 +310,27 @@ pub(crate) fn get_api_key(provider: &str) -> Option<String> {
         .map_or("OPENAI_API_KEY", |(_, var)| *var);
     std::env::var(env_var).ok()
 }
+
+/// Return all known provider names.
+///
+/// Useful for enumerating providers in the TUI front-end or for batch
+/// operations (e.g. fetching model lists from every provider).
+pub fn known_providers() -> impl Iterator<Item = &'static str> {
+    PROVIDERS.iter().map(|(name, _)| *name)
+}
+
+/// Return the first provider whose API-key environment variable is set.
+///
+/// The iteration order follows the registration order in the provider table.
+pub fn detect_provider() -> Option<&'static str> {
+    for (name, _) in PROVIDERS {
+        let env_var = API_KEY_ENVS
+            .iter()
+            .find(|(key, _)| *key == *name)
+            .map_or("OPENAI_API_KEY", |(_, var)| *var);
+        if std::env::var(env_var).is_ok() {
+            return Some(name);
+        }
+    }
+    None
+}
