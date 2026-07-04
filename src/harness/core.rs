@@ -363,7 +363,6 @@ impl Harness {
             let chunk = content.map_err(|err| err.to_string())?;
             self.process_stream_chunk(chunk.token(), &mut extractor, &mut on_token);
         }
-
         Ok("done".into())
     }
 

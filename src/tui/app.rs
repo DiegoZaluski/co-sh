@@ -787,34 +787,73 @@ impl App {
                             let event_tx = self.event_tx.clone();
                             let provider = self.llm_config.provider.clone();
                             let model = self.llm_config.model.clone();
-                            let cwd = std::env::current_dir().map_or_else(
-                                |_| ".".to_string(),
-                                |p| p.to_string_lossy().to_string(),
-                            );
                             let input = msg;
-                            let stop_signal = self.stop_signal.clone();
 
-                            self.tokio_handle.spawn(async move {
-                                use cosh::harness::Harness;
+                            std::thread::spawn(move || {
                                 use cosh_sdk::connector::Connector;
+                                use std::panic::AssertUnwindSafe;
+                                use tokio::runtime::Builder;
 
-                                let connector = match Connector::new(&provider) {
-                                    Ok(c) => c,
+                                let event_tx_panic = event_tx.clone();
+
+                                let rt = match Builder::new_current_thread()
+                                    .enable_all()
+                                    .build()
+                                {
+                                    Ok(rt) => rt,
                                     Err(e) => {
-                                        let _ = event_tx
-                                            .send(HarnessEvent::Error(format!("connector: {e}")));
+                                        let _ = event_tx_panic.send(HarnessEvent::Error(
+                                            format!("runtime: {e}"),
+                                        ));
                                         return;
                                     }
                                 };
-                                let connector = if let Some(ref m) = model {
-                                    connector.with_model(m)
-                                } else {
-                                    connector
-                                };
 
-                                let mut harness = Harness::new(connector, &cwd);
-                                harness.format_header_context();
-                                harness.run_agent_loop(&input, event_tx, stop_signal).await;
+                                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                    rt.block_on(async {
+                                        let connector = match Connector::new(&provider) {
+                                            Ok(c) => c,
+                                            Err(e) => {
+                                                let _ = event_tx.send(HarnessEvent::Error(
+                                                    format!("connector: {e}"),
+                                                ));
+                                                return;
+                                            }
+                                        };
+
+                                        let connector = if let Some(ref m) = model {
+                                            connector.with_model(m)
+                                        } else {
+                                            connector
+                                        };
+
+                                        // Use NON-STREAMING chat instead of streaming
+                                        match connector.chat_with_system(&input, "").await {
+                                            Ok(output) => {
+                                                let _ = event_tx.send(HarnessEvent::Token {
+                                                    text: output.message().to_string(),
+                                                });
+                                                let _ = event_tx.send(HarnessEvent::Done);
+                                            }
+                                            Err(e) => {
+                                                let _ = event_tx.send(HarnessEvent::Error(
+                                                    format!("chat error: {e}"),
+                                                ));
+                                            }
+                                        }
+                                    })
+                                }));
+
+                                if let Err(panic) = result {
+                                    let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                                        s.to_string()
+                                    } else if let Some(s) = panic.downcast_ref::<String>() {
+                                        s.clone()
+                                    } else {
+                                        "unknown panic".to_string()
+                                    };
+                                    let _ = event_tx_panic.send(HarnessEvent::Error(format!("panic: {msg}")));
+                                }
                             });
                         }
                         Some(crate::keymap::Action::Interrupt) => {
