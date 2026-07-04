@@ -263,14 +263,6 @@ impl PromptView {
         let label_y = input_area.y + BASE_H + n;
         draw_text_line(buf, &agent_label, x_off, label_y, max_line_w, label_style);
 
-        // Model name on the right side of the same line
-        if !model_name.is_empty() {
-            let model_text = format!(" {}", model_name);
-            let model_x = input_area.right().saturating_sub(model_text.len() as u16);
-            let muted_style = Style::default().fg(rgba_color(theme.text_muted));
-            draw_text_line(buf, &model_text, model_x, label_y, model_text.len() as u16, muted_style);
-        }
-
         let mut cap_border_box = BoxRenderable::new();
         cap_border_box.set_border_color(Some(agent_color.into()));
         cap_border_box.set_border_sides(BorderSidesConfig {
@@ -303,6 +295,13 @@ impl PromptView {
             area.width.saturating_sub(2),
             muted_style,
         );
+
+        // Model name on the right side of the footer line
+        if !model_name.is_empty() {
+            let model_text = format!(" {}", model_name);
+            let model_x = area.right().saturating_sub(model_text.len() as u16);
+            draw_text_line(buf, &model_text, model_x, footer_y, model_text.len() as u16, muted_style);
+        }
 
         // Draw cursor if focused
         if self.is_focused {
