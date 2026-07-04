@@ -238,7 +238,7 @@ impl SessionView {
                     let chars_per_line = max_w as usize;
                     if chars_per_line > 0 {
                         let char_count = t.text.chars().count();
-                        ((char_count + chars_per_line - 1) / chars_per_line).max(1) as u16
+                        char_count.div_ceil(chars_per_line).max(1) as u16
                     } else {
                         1
                     }

@@ -105,6 +105,7 @@ impl DialogState {
         self.stack.last_mut()
     }
 
+    #[allow(clippy::too_many_lines, clippy::similar_names)]
     pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime) {
         let Some(instance) = self.stack.last() else {
             return;
@@ -247,10 +248,10 @@ impl DialogState {
             DialogType::ThemeList { themes, current, filter } => {
                 // Compute filtered list (like fuzzysort in original)
                 let filtered: Vec<&str> = if filter.is_empty() {
-                    themes.iter().map(|s| s.as_str()).collect()
+                    themes.iter().map(String::as_str).collect()
                 } else {
                     let lower = filter.to_lowercase();
-                    themes.iter().filter(|t| t.to_lowercase().contains(&lower)).map(|s| s.as_str()).collect()
+                    themes.iter().filter(|t| t.to_lowercase().contains(&lower)).map(String::as_str).collect()
                 };
 
                 let selection = if instance.selected >= filtered.len() {
@@ -267,7 +268,7 @@ impl DialogState {
                 // Fit list to available height
                 // Layout: 1 title + 1 filter + 1 gap + max_visible items + 1 paddingBottom = max_visible + 4
                 let max_visible_height = (area.height.saturating_sub(4)) as usize;
-                let max_visible = max_visible_height.min(filtered.len().max(1)).max(1).min(10);
+                let max_visible = max_visible_height.min(filtered.len().max(1)).clamp(1, 10);
                 let dialog_h = (max_visible + 4) as u16;
                 let dialog_y = area.y.saturating_add(
                     (area.height.saturating_sub(dialog_h)) / 2
@@ -335,15 +336,15 @@ impl DialogState {
                         Style::default().fg(rgba_color(theme.text)).bg(bg_element));
                     // Blinking cursor at end of filter text
                     let cursor_x = header_x + filter.len() as u16;
-                    if cursor_x < header_x + header_w {
-                        if let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1)) {
-                            if cursor_visible {
-                                cell.set_char('\u{2588}');
-                                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
-                            } else {
-                                cell.set_char(' ');
-                                cell.set_style(Style::default().bg(bg_element));
-                            }
+                    if cursor_x < header_x + header_w
+                        && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
+                    {
+                        if cursor_visible {
+                            cell.set_char('\u{2588}');
+                            cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
+                        } else {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(bg_element));
                         }
                     }
                 } else {
@@ -353,15 +354,15 @@ impl DialogState {
                         Style::default().fg(rgba_color(theme.text_muted)).bg(bg_element));
                     // Cursor AFTER "Search" (at position 6)
                     let cursor_x = header_x + search_label.len() as u16;
-                    if cursor_x < header_x + header_w {
-                        if let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1)) {
-                            if cursor_visible {
-                                cell.set_char('\u{2588}');
-                                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
-                            } else {
-                                cell.set_char(' ');
-                                cell.set_style(Style::default().bg(bg_element));
-                            }
+                    if cursor_x < header_x + header_w
+                        && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
+                    {
+                        if cursor_visible {
+                            cell.set_char('\u{2588}');
+                            cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
+                        } else {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(bg_element));
                         }
                     }
                 }
@@ -465,14 +466,14 @@ impl DialogState {
                 // Group models by provider and filter
 
                 let mut grouped: BTreeMap<String, Vec<&ModelEntry>> = BTreeMap::new();
-                for entry in models.iter() {
+                for entry in models {
                     if filter.is_empty() || entry.model.to_lowercase().contains(&filter.to_lowercase()) {
                         grouped.entry(entry.provider.clone()).or_default().push(entry);
                     }
                 }
 
                 // Flatten grouped models into a single list for selection
-                let flat_entries: Vec<&ModelEntry> = grouped.values().flatten().cloned().collect();
+                let flat_entries: Vec<&ModelEntry> = grouped.values().flatten().copied().collect();
 
                 let selection = if instance.selected >= flat_entries.len() {
                     flat_entries.len().saturating_sub(1)
@@ -558,15 +559,15 @@ impl DialogState {
                         Style::default().fg(rgba_color(theme.text)).bg(bg_element));
                     // Blinking cursor at end of filter text
                     let cursor_x = header_x + filter.len() as u16;
-                    if cursor_x < header_x + header_w {
-                        if let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1)) {
-                            if cursor_visible {
-                                cell.set_char('\u{2588}');
-                                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
-                            } else {
-                                cell.set_char(' ');
-                                cell.set_style(Style::default().bg(bg_element));
-                            }
+                    if cursor_x < header_x + header_w
+                        && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
+                    {
+                        if cursor_visible {
+                            cell.set_char('\u{2588}');
+                            cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
+                        } else {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(bg_element));
                         }
                     }
                 } else {
@@ -576,15 +577,15 @@ impl DialogState {
                         Style::default().fg(rgba_color(theme.text_muted)).bg(bg_element));
                     // Cursor AFTER "Search" (at position 6)
                     let cursor_x = header_x + search_label.len() as u16;
-                    if cursor_x < header_x + header_w {
-                        if let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1)) {
-                            if cursor_visible {
-                                cell.set_char('\u{2588}');
-                                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
-                            } else {
-                                cell.set_char(' ');
-                                cell.set_style(Style::default().bg(bg_element));
-                            }
+                    if cursor_x < header_x + header_w
+                        && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
+                    {
+                        if cursor_visible {
+                            cell.set_char('\u{2588}');
+                            cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_element));
+                        } else {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(bg_element));
                         }
                     }
                 }
@@ -614,7 +615,7 @@ impl DialogState {
                     // Each visual item is either a header or a model
                     // We need to map selection (model index) to visual index
                     let mut visual_items: Vec<VisualItem> = Vec::new();
-                    for (provider, entries) in grouped.iter() {
+                    for (provider, entries) in &grouped {
                         visual_items.push(VisualItem::Header(provider.clone()));
                         for entry in entries {
                             visual_items.push(VisualItem::Model((*entry).clone()));
@@ -652,9 +653,8 @@ impl DialogState {
                     scroll_offset = scroll_offset.min(visual_items.len().saturating_sub(max_visible));
 
                     // Draw visible items
-                    let mut visual_index = 0;
                     let mut model_index = 0;
-                    for item in &visual_items {
+                    for (visual_index, item) in visual_items.iter().enumerate() {
                         match item {
                             VisualItem::Header(provider) => {
                                 if visual_index >= scroll_offset && (visual_index - scroll_offset) < max_visible {
@@ -730,7 +730,6 @@ impl DialogState {
                                 model_index += 1;
                             }
                         }
-                        visual_index += 1;
                     }
                 }
                 // Lines after list: paddingBottom=1 (already filled with background)

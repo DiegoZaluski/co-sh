@@ -4,6 +4,7 @@ use ratatui::style::{Color, Style};
 
 use cosh_tui::core::lib::rgba::RGBA;
 
+use crate::state::AppState;
 use crate::theme::Theme;
 
 fn rgba_color(rgba: RGBA) -> Color {
@@ -74,7 +75,7 @@ impl HomeView {
         }
     }
 
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+    pub fn render(&self, buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
         let cx = area.x + area.width / 2;
 
         let primary = rgba_color(theme.primary);
@@ -99,30 +100,67 @@ impl HomeView {
             Style::default().fg(muted),
         );
 
-        // Always show menu
-        let menu_y = tagline_y + 4;
+        if state.sessions.is_empty() {
+            let menu_y = tagline_y + 4;
 
-        let max_entry_len = MENU_ITEMS
-            .iter()
-            .map(|p| format!("  {p}").len())
-            .max()
-            .unwrap_or(0);
-        let menu_left = cx.saturating_sub((max_entry_len / 2) as u16);
+            let max_entry_len = MENU_ITEMS
+                .iter()
+                .map(|p| format!("  {p}").len())
+                .max()
+                .unwrap_or(0);
+            let menu_left = cx.saturating_sub((max_entry_len / 2) as u16);
 
-        for (i, item) in MENU_ITEMS.iter().enumerate() {
-            let my = menu_y + i as u16;
-            if my >= area.bottom() {
-                break;
+            for (i, item) in MENU_ITEMS.iter().enumerate() {
+                let my = menu_y + i as u16;
+                if my >= area.bottom() {
+                    break;
+                }
+                let is_selected = i == self.selected_index;
+                let prefix = if is_selected { "> " } else { "  " };
+                let entry = format!("{prefix}{item}");
+                let style = if is_selected {
+                    Style::default().fg(primary)
+                } else {
+                    Style::default().fg(text)
+                };
+                draw_text_line(buf, &entry, menu_left, my, area.width, style);
             }
-            let is_selected = i == self.selected_index;
-            let prefix = if is_selected { "> " } else { "  " };
-            let entry = format!("{prefix}{item}");
-            let style = if is_selected {
-                Style::default().fg(primary)
-            } else {
-                Style::default().fg(text)
-            };
-            draw_text_line(buf, &entry, menu_left, my, area.width, style);
+        } else {
+            let recent_y = tagline_y + 2;
+            let recent_label = "Recent Sessions";
+            let rl_x = cx.saturating_sub(recent_label.len() as u16 / 2);
+            draw_text_line(
+                buf,
+                recent_label,
+                rl_x,
+                recent_y,
+                area.width,
+                Style::default().fg(muted),
+            );
+
+            for (i, session) in state.sessions.iter().enumerate() {
+                let sy = recent_y + 2 + i as u16;
+                if sy >= area.bottom() {
+                    break;
+                }
+
+                let is_active =
+                    Some(session.id.as_str()) == state.current_session_id.as_deref();
+                let marker = if is_active { "\u{25b8}" } else { " " };
+                let entry = format!(
+                    " {}  {} ({} msgs)",
+                    marker,
+                    session.title,
+                    session.messages.len()
+                );
+                let entry_style = if is_active {
+                    Style::default().fg(primary)
+                } else {
+                    Style::default().fg(text)
+                };
+                let ex = cx.saturating_sub(entry.len() as u16 / 2);
+                draw_text_line(buf, &entry, ex, sy, area.width, entry_style);
+            }
         }
 
         let key_hints = "\u{2191}\u{2193} navigate  enter select  q quit";

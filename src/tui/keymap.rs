@@ -55,13 +55,8 @@ impl KeyMap {
                         modifiers: KeyModifiers::NONE,
                     },
                 ),
-                (
-                    Action::ScrollUp,
-                    KeyBinding {
-                        key: Char('k'),
-                        modifiers: KeyModifiers::NONE,
-                    },
-                ),
+                // Note: 'k' for scroll-up is handled dynamically in handle_events
+                // (only when prompt is empty, otherwise typed normally)
                 (
                     Action::ScrollDown,
                     KeyBinding {
@@ -69,13 +64,8 @@ impl KeyMap {
                         modifiers: KeyModifiers::NONE,
                     },
                 ),
-                (
-                    Action::ScrollDown,
-                    KeyBinding {
-                        key: Char('j'),
-                        modifiers: KeyModifiers::NONE,
-                    },
-                ),
+                // Note: 'j' for scroll-down is handled dynamically in handle_events
+                // (only when prompt is empty, otherwise typed normally)
                 (
                     Action::ScrollUpPage,
                     KeyBinding {
@@ -118,13 +108,9 @@ impl KeyMap {
                         modifiers: KeyModifiers::CONTROL,
                     },
                 ),
-                (
-                    Action::ToggleHelp,
-                    KeyBinding {
-                        key: Char('?'),
-                        modifiers: KeyModifiers::NONE,
-                    },
-                ),
+                // '?' for ToggleHelp is intentionally omitted — it would block
+                // typing the '?' character in the prompt (most terminals send
+                // '?' with NONE modifier since shift is encoded in the char).
                 (
                     Action::ToggleConceal,
                     KeyBinding {
@@ -216,20 +202,8 @@ impl KeyMap {
                         modifiers: KeyModifiers::CONTROL,
                     },
                 ),
-                (
-                    Action::NextSession,
-                    KeyBinding {
-                        key: Char('n'),
-                        modifiers: KeyModifiers::NONE,
-                    },
-                ),
-                (
-                    Action::PrevSession,
-                    KeyBinding {
-                        key: Char('p'),
-                        modifiers: KeyModifiers::NONE,
-                    },
-                ),
+                // 'n'/'p' for NextSession/PrevSession intentionally omitted
+                // to avoid blocking normal typing of these characters.
             ],
         }
     }
