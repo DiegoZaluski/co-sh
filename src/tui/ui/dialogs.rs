@@ -181,21 +181,21 @@ impl DialogState {
                     }
                 }
 
-                // Corners
+                // Corners (rounded)
                 if let Some(cell) = buf.cell_mut((dialog_x, dialog_y)) {
-                    cell.set_char('\u{250C}');
+                    cell.set_char('\u{256D}');
                     cell.set_style(Style::default().fg(border_color));
                 }
                 if let Some(cell) = buf.cell_mut((max_x, dialog_y)) {
-                    cell.set_char('\u{2510}');
+                    cell.set_char('\u{256E}');
                     cell.set_style(Style::default().fg(border_color));
                 }
                 if let Some(cell) = buf.cell_mut((dialog_x, max_y)) {
-                    cell.set_char('\u{2514}');
+                    cell.set_char('\u{2570}');
                     cell.set_style(Style::default().fg(border_color));
                 }
                 if let Some(cell) = buf.cell_mut((max_x, max_y)) {
-                    cell.set_char('\u{2518}');
+                    cell.set_char('\u{256F}');
                     cell.set_style(Style::default().fg(border_color));
                 }
 
