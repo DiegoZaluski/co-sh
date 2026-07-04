@@ -974,12 +974,26 @@ impl App {
                                             connector
                                         };
 
-                                        // Use NON-STREAMING chat instead of streaming
-                                        match connector.chat_with_system(&input, &header_context).await {
-                                            Ok(output) => {
-                                                let _ = event_tx.send(HarnessEvent::Token {
-                                                    text: output.message().to_string(),
-                                                });
+                                        // Use STREAMING chat for real-time token delivery
+                                        match connector.stream_chat_with_system(&input, &header_context).await {
+                                            Ok(mut stream) => {
+                                                use tokio_stream::StreamExt;
+                                                while let Some(chunk) = stream.next().await {
+                                                    match chunk {
+                                                        Ok(chunk) => {
+                                                            let token = chunk.token().to_string();
+                                                            if !token.is_empty() {
+                                                                let _ = event_tx.send(HarnessEvent::Token { text: token });
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = event_tx.send(HarnessEvent::Error(
+                                                                format!("stream error: {e}"),
+                                                            ));
+                                                            break;
+                                                        }
+                                                    }
+                                                }
                                                 let _ = event_tx.send(HarnessEvent::Done);
                                             }
                                             Err(e) => {
