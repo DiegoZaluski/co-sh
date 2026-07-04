@@ -1115,10 +1115,26 @@ impl App {
                     };
                     self.toast_state.show(ToastOptions {
                         title: Some("Error".into()),
-                        message: msg,
+                        message: msg.clone(),
                         variant: ToastVariant::Error,
                         duration_ms: 5000,
                     });
+
+                    // Push error as an assistant message so it appears inline in the chat
+                    let error_text = format!("Error: {msg}");
+                    if let Some(session) = self.state.current_session_mut() {
+                        session.messages.push(Message {
+                            id: format!("msg-err-{}", session.messages.len()),
+                            role: MessageRole::Assistant,
+                            parts: vec![Part::Text(TextPart {
+                                text: error_text,
+                                synthetic: false,
+                            })],
+                            created_at: 0,
+                            agent: None,
+                            model: self.llm_config.model.clone(),
+                        });
+                    }
                 }
 
                 HarnessEvent::ModelsLoaded { models, current } => {

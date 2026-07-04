@@ -322,6 +322,7 @@ pub fn known_providers() -> impl Iterator<Item = &'static str> {
 /// Return the first provider whose API-key environment variable is set.
 ///
 /// The iteration order follows the registration order in the provider table.
+#[must_use]
 pub fn detect_provider() -> Option<&'static str> {
     for (name, _) in PROVIDERS {
         let env_var = API_KEY_ENVS

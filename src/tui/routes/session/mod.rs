@@ -230,9 +230,22 @@ impl SessionView {
         y - y_start
     }
 
-    fn estimate_part_height(part: &Part, _max_w: u16, config: &TuiConfig) -> u16 {
+    fn estimate_part_height(part: &Part, max_w: u16, config: &TuiConfig) -> u16 {
         match part {
-            Part::Text(t) if !t.synthetic => t.text.lines().count().max(1) as u16,
+            Part::Text(t) if !t.synthetic => {
+                // Error messages are rendered as wrapped plain text, not markdown
+                if t.text.starts_with("Error: ") {
+                    let chars_per_line = max_w as usize;
+                    if chars_per_line > 0 {
+                        let char_count = t.text.chars().count();
+                        ((char_count + chars_per_line - 1) / chars_per_line).max(1) as u16
+                    } else {
+                        1
+                    }
+                } else {
+                    t.text.lines().count().max(1) as u16
+                }
+            }
             Part::Tool(t) => {
                 if !config.show_tool_details && matches!(t.status, ToolStatus::Completed) {
                     return 1;
@@ -362,11 +375,67 @@ impl SessionView {
         is_queued: bool,
         is_compacted: bool,
     ) {
+        let is_error = msg.id.starts_with("msg-err-");
         let x_off = area.x + 3;
         let max_w = area.width.saturating_sub(6);
 
         let banner_h = u16::from(is_compacted);
-        let inner_y = area.y + banner_h;
+        let inner_y = if is_error {
+            area.y + 2 // vertical padding + border line
+        } else {
+            area.y + banner_h
+        };
+
+        if is_error {
+            // Error messages get a red left border
+            let mut border_box = BoxRenderable::new();
+            border_box.set_background_color(Some(theme.background_panel.into()));
+            border_box.set_border_color(Some(theme.error.into()));
+            border_box.set_border_sides(BorderSidesConfig {
+                left: true,
+                top: false,
+                right: false,
+                bottom: false,
+            });
+            border_box.set_custom_border_chars(left_border_chars());
+            border_box.render_self(buf, area);
+
+            // Render error text character by character with wrap (safe for multi-byte UTF-8)
+            let error_style = Style::default().fg(rgba_color(theme.text_muted));
+            let error_text: String = msg.parts.iter()
+                .filter_map(|p| {
+                    if let crate::types::Part::Text(t) = p { Some(t.text.as_str()) } else { None }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut line_x = x_off;
+            let mut line_y = area.y + 2;
+            for ch in error_text.chars() {
+                if ch == '\n' {
+                    line_x = x_off;
+                    line_y += 1;
+                    continue;
+                }
+                // ratatui panics on control chars, so only allow printable characters
+                #[allow(clippy::non_ascii_literal)]
+                if !matches!(ch, ' '..='~') {
+                    continue;
+                }
+                if line_x >= x_off + max_w {
+                    line_x = x_off;
+                    line_y += 1;
+                }
+                if line_y >= area.bottom() {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((line_x, line_y)) {
+                    cell.set_char(ch);
+                    cell.set_style(error_style);
+                }
+                line_x += 1;
+            }
+            return;
+        }
 
         Self::render_parts(
             buf,
@@ -393,7 +462,7 @@ impl SessionView {
             Self::render_timestamp(buf, x_off, area.y, msg.created_at, theme);
         }
 
-        if is_last {
+        if is_last && !is_error {
             let last_part_end = inner_y + area.height.saturating_sub(banner_h);
             let meta_y = last_part_end;
             if meta_y < area.bottom() {
