@@ -18,7 +18,7 @@ use cosh::harness::HarnessEvent;
 use crate::component::prompt::PromptView;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
-use crate::routes::home::HomeView;
+use crate::routes::home::{HomeAction, HomeView};
 use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
@@ -53,6 +53,7 @@ pub struct App {
     pub dialog: DialogState,
     pub permission_dialog: PermissionDialog,
     pub question_dialog: QuestionDialog,
+    pub home_view: HomeView,
     pub keymap: KeyMap,
     pub config: TuiConfig,
     pub toast_state: ToastState,
@@ -85,6 +86,7 @@ impl App {
             theme_registry,
             theme,
             session_view: SessionView::new(),
+            home_view: HomeView::new(),
             prompt_view: PromptView::new(),
             sidebar: SidebarView::new(),
             dialog: DialogState::new(),
@@ -555,7 +557,7 @@ impl App {
             match self.mode() {
                 AppMode::Home => {
                     self.prompt_view.blur();
-                    HomeView::render(buf, session_area, &self.state, &self.theme);
+                    self.home_view.render(buf, session_area, &self.state, &self.theme);
                 }
                 AppMode::Session => {
                     self.prompt_view.focus();
@@ -631,6 +633,35 @@ impl App {
                     }
 
                     let action = self.keymap.lookup(key.code, key.modifiers).cloned();
+
+                    // Home mode: navigation keys
+                    if matches!(self.mode(), AppMode::Home) {
+                        match key.code {
+                            KeyCode::Up => {
+                                self.home_view.select_prev();
+                            }
+                            KeyCode::Down => {
+                                self.home_view.select_next();
+                            }
+                            KeyCode::Enter => {
+                                match self.home_view.selected_action() {
+                                    HomeAction::NewSession => {
+                                        self.state.sessions.push(crate::types::Session {
+                                            id: format!("session-{}", self.state.sessions.len()),
+                                            title: "New Session".to_string(),
+                                            messages: vec![],
+                                        });
+                                        self.state.current_session_id =
+                                            Some(self.state.sessions.last().unwrap().id.clone());
+                                    }
+                                    HomeAction::ToggleSidebar => {
+                                        self.sidebar.open = !self.sidebar.open;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
 
                     // If slash menu is visible, arrow keys should move selection there
                     if self.slash_menu.visible {
@@ -721,7 +752,7 @@ impl App {
                             }
 
                             let msg = self.prompt_view.send_message();
-                            if msg.is_empty() {
+                            if msg.trim().is_empty() {
                                 return Ok(false);
                             }
 
@@ -991,6 +1022,9 @@ impl App {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 HarnessEvent::Token { text } => {
+                    if text.trim().is_empty() {
+                        continue;
+                    }
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
