@@ -79,12 +79,8 @@ impl MarkdownRenderable {
     }
 
     fn rgba_to_ratatui(rgba: RGBA) -> Color {
-        let (r, g, b, a) = rgba.to_ints();
-        if a == 0 {
-            Color::Reset
-        } else {
-            Color::Rgb(r, g, b)
-        }
+        let (r, g, b, _a) = rgba.to_ints();
+        Color::Rgb(r, g, b)
     }
 
     fn render_text(
@@ -193,6 +189,16 @@ impl Renderable for MarkdownRenderable {
         let bg_color = Self::rgba_to_ratatui(bg);
 
         let default_style = Style::default().fg(fg_color).bg(bg_color);
+
+        // Pre-fill entire area with background color so there's no gap between characters
+        for row in area.y..max_y {
+            for col in area.x..max_x {
+                if let Some(cell) = buf.cell_mut((col, row)) {
+                    cell.set_style(Style::default().bg(bg_color));
+                    cell.set_char(' ');
+                }
+            }
+        }
 
         let mut y = area.y;
         let mut x = area.x;

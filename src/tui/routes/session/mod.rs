@@ -180,7 +180,7 @@ impl SessionView {
                         t.text.clone()
                     };
                     let h = Self::estimate_part_height(part, max_w, config).min(bottom - y).max(1);
-                    let text_style = Style::default().fg(rgba_color(fg_color));
+                    let text_style = Style::default().fg(rgba_color(fg_color)).bg(rgba_color(theme.background));
                     let rendered = Self::draw_text_wrap(buf, &content, x, y, max_w, h, text_style);
                     y += rendered;
                 }
@@ -229,6 +229,15 @@ impl SessionView {
     fn draw_text_wrap(buf: &mut Buffer, text: &str, x: u16, y_: u16, max_w: u16, max_h: u16, style: Style) -> u16 {
         let right = x + max_w;
         let bottom = y_ + max_h;
+        // Pre-fill area with bg so there's no gap between characters
+        for row in y_..bottom {
+            for col in x..right {
+                if let Some(cell) = buf.cell_mut((col, row)) {
+                    cell.set_style(style);
+                    cell.set_char(' ');
+                }
+            }
+        }
         let mut y = y_;
         let mut cx = x;
         for ch in text.chars() {
@@ -422,7 +431,7 @@ impl SessionView {
             border_box.render_self(buf, area);
 
             // Render error text character by character with wrap (safe for multi-byte UTF-8)
-            let error_style = Style::default().fg(rgba_color(theme.text_muted));
+            let error_style = Style::default().fg(rgba_color(theme.text_muted)).bg(rgba_color(theme.background));
             let error_text: String = msg.parts.iter()
                 .filter_map(|p| {
                     if let crate::types::Part::Text(t) = p { Some(t.text.as_str()) } else { None }
