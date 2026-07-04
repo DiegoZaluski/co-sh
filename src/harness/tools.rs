@@ -12,6 +12,7 @@ use cosh_tools::{
             TodoCrossOffInput, TodoEditInput, TodoLoadFromMdInput, TodoReadInput, TodoWriteInput,
         },
     },
+    question::{Question, types::QuestionInput},
     skills::{
         Skills,
         types::{SkillsMatchInput, SkillsReadAssetInput, SkillsReadInput},
@@ -43,6 +44,7 @@ pub struct CoshTools {
     web: Web,
     vision: Vision,
     plan: Mutex<Plan>,
+    question: Question,
     skills: Skills,
 }
 
@@ -56,6 +58,7 @@ impl CoshTools {
             web: Web::new(),
             vision: Vision::new(),
             plan: Mutex::new(Plan::new()),
+            question: Question::new(),
             skills: Skills::new(),
         }
     }
@@ -96,6 +99,7 @@ impl Tools for CoshTools {
             write_single_tool(out, &plan.description_todo_read);
             write_single_tool(out, &plan.description_load_from_md);
         }
+        write_single_tool(out, &self.question.description_ask);
         write_single_tool(out, &self.skills.description_list);
         write_single_tool(out, &self.skills.description_read);
         write_single_tool(out, &self.skills.description_read_asset);
@@ -119,6 +123,7 @@ impl Tools for CoshTools {
             self.plan.lock().unwrap().description_todo_cross_off.clone(),
             self.plan.lock().unwrap().description_todo_read.clone(),
             self.plan.lock().unwrap().description_load_from_md.clone(),
+            self.question.description_ask.clone(),
             self.skills.description_list.clone(),
             self.skills.description_read.clone(),
             self.skills.description_read_asset.clone(),
@@ -143,6 +148,7 @@ impl Tools for CoshTools {
             extract_schema(&self.plan.lock().unwrap().description_todo_cross_off),
             extract_schema(&self.plan.lock().unwrap().description_todo_read),
             extract_schema(&self.plan.lock().unwrap().description_load_from_md),
+            extract_schema(&self.question.description_ask),
             extract_schema(&self.skills.description_list),
             extract_schema(&self.skills.description_read),
             extract_schema(&self.skills.description_read_asset),
@@ -317,6 +323,13 @@ impl Tools for CoshTools {
                     .skills
                     .match_skills(input.match_paths)
                     .map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "ask_questions" => {
+                let input: QuestionInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = self.question.ask(&input).map_err(|e| e.to_string())?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 

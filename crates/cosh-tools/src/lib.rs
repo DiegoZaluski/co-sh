@@ -2,6 +2,7 @@ pub mod bash;
 pub mod find;
 pub mod fs;
 pub mod plan;
+pub mod question;
 pub mod skills;
 pub mod util;
 pub mod vision;
