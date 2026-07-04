@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use cosh::harness::HarnessEvent;
 
+use crate::component::agent_spinner::AgentSpinner;
 use crate::component::prompt::PromptView;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
@@ -68,6 +69,7 @@ pub struct App {
     llm_config: LlmConfig,
     stop_signal: Arc<AtomicBool>,
     terminal_focused: bool,
+    agent_spinner: Option<AgentSpinner>,
     /// Stores the theme name that was active when the theme dialog opened (for cancel/restore)
     theme_dialog_original: Option<String>,
     /// Stores the model that was active when the model dialog opened (for cancel/restore)
@@ -110,6 +112,7 @@ impl App {
             llm_config: LlmConfig::from_env(),
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
+            agent_spinner: None,
         }
     }
 
@@ -570,7 +573,20 @@ impl App {
             };
 
             let prompt_area_y = footer_y.saturating_sub(prompt_h);
-            let question_area_y = prompt_area_y.saturating_sub(question_h);
+
+            // Spinner line (1 row when the agent loop is active)
+            let spinner_h = if is_session
+                && self.state.status == crate::types::SessionStatus::Working
+                && self.agent_spinner.is_some()
+            {
+                1
+            } else {
+                0
+            };
+            let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
+
+            // Question dialog inline (between messages and spinner), only during session
+            let question_area_y = spinner_area_y.saturating_sub(question_h);
             let session_bottom = question_area_y;
 
             let prompt_area = Rect::new(
@@ -578,6 +594,12 @@ impl App {
                 prompt_area_y,
                 main_area.width.saturating_sub(4),
                 prompt_h,
+            );
+            let spinner_area = Rect::new(
+                main_area.x + 2,
+                spinner_area_y,
+                main_area.width.saturating_sub(4),
+                spinner_h,
             );
             let question_area = Rect::new(
                 main_area.x + 2,
@@ -601,6 +623,14 @@ impl App {
                     self.prompt_view.focus();
                     self.prompt_view.terminal_focused = self.terminal_focused;
                     self.session_view.tool_state.advance_spinner();
+
+                    // Advance the agent spinner when working
+                    if self.state.status == crate::types::SessionStatus::Working {
+                        if let Some(spinner) = &mut self.agent_spinner {
+                            spinner.advance();
+                        }
+                    }
+
                     let unique_agents = self.state.unique_agents();
                     let agent_colors = crate::types::AgentColors::from_theme(&self.theme);
                     self.session_view.render(
@@ -613,6 +643,12 @@ impl App {
                     // Question dialog rendered inline between messages and prompt (like OpenCode)
                     if self.question_dialog.visible {
                         self.question_dialog.render(buf, question_area, &self.theme);
+                    }
+                    // Agent spinner rendered above the prompt when the loop is active
+                    if let Some(spinner) = &self.agent_spinner {
+                        if self.state.status == crate::types::SessionStatus::Working {
+                            spinner.render(buf, spinner_area.x + 1, spinner_area.y);
+                        }
                     }
                     self.prompt_view.render(
                         buf,
@@ -863,6 +899,10 @@ impl App {
 
                             self.stop_signal.store(false, Ordering::Relaxed);
                             self.state.status = crate::types::SessionStatus::Working;
+                            self.agent_spinner = Some(AgentSpinner::new(
+                                "Working",
+                                &self.theme,
+                            ));
 
                             let event_tx = self.event_tx.clone();
                             let provider = self.llm_config.provider.clone();
@@ -1312,10 +1352,12 @@ impl App {
 
                 HarnessEvent::Done => {
                     self.state.status = SessionStatus::Idle;
+                    self.agent_spinner = None;
                 }
 
                 HarnessEvent::Stopped => {
                     self.state.status = SessionStatus::Idle;
+                    self.agent_spinner = None;
                     self.toast_state.show(ToastOptions {
                         title: Some("Interrupted".into()),
                         message: "Agent loop was stopped.".into(),
@@ -1329,6 +1371,7 @@ impl App {
                         message: msg.clone(),
                         action: None,
                     };
+                    self.agent_spinner = None;
                     self.toast_state.show(ToastOptions {
                         title: Some("Error".into()),
                         message: msg.clone(),
