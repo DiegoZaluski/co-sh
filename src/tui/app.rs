@@ -18,7 +18,7 @@ use cosh::harness::HarnessEvent;
 use crate::component::prompt::PromptView;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
-use crate::routes::home::HomeView;
+use crate::routes::home::{HomeAction, HomeView};
 use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
@@ -53,6 +53,7 @@ pub struct App {
     pub dialog: DialogState,
     pub permission_dialog: PermissionDialog,
     pub question_dialog: QuestionDialog,
+    pub home_view: HomeView,
     pub keymap: KeyMap,
     pub config: TuiConfig,
     pub toast_state: ToastState,
@@ -88,6 +89,7 @@ impl App {
             theme_registry,
             theme,
             session_view: SessionView::new(),
+            home_view: HomeView::new(),
             prompt_view: PromptView::new(),
             sidebar: SidebarView::new(),
             dialog: DialogState::new(),
@@ -571,7 +573,7 @@ impl App {
             match self.mode() {
                 AppMode::Home => {
                     self.prompt_view.blur();
-                    HomeView::render(buf, session_area, &self.state, &self.theme);
+                    self.home_view.render(buf, session_area, &self.state, &self.theme);
                 }
                 AppMode::Session => {
                     self.prompt_view.focus();
@@ -668,6 +670,35 @@ impl App {
 
                     let action = self.keymap.lookup(key.code, key.modifiers).cloned();
 
+                    // Home mode: navigation keys
+                    if matches!(self.mode(), AppMode::Home) {
+                        match key.code {
+                            KeyCode::Up => {
+                                self.home_view.select_prev();
+                            }
+                            KeyCode::Down => {
+                                self.home_view.select_next();
+                            }
+                            KeyCode::Enter => {
+                                match self.home_view.selected_action() {
+                                    HomeAction::NewSession => {
+                                        self.state.sessions.push(crate::types::Session {
+                                            id: format!("session-{}", self.state.sessions.len()),
+                                            title: "New Session".to_string(),
+                                            messages: vec![],
+                                        });
+                                        self.state.current_session_id =
+                                            Some(self.state.sessions.last().unwrap().id.clone());
+                                    }
+                                    HomeAction::ToggleSidebar => {
+                                        self.sidebar.open = !self.sidebar.open;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // If slash menu is visible, arrow keys should move selection there
                     if self.slash_menu.visible {
                         match key.code {
@@ -757,7 +788,7 @@ impl App {
                             }
 
                             let msg = self.prompt_view.send_message();
-                            if msg.is_empty() {
+                            if msg.trim().is_empty() {
                                 return Ok(false);
                             }
 
@@ -792,38 +823,100 @@ impl App {
                             let event_tx = self.event_tx.clone();
                             let provider = self.llm_config.provider.clone();
                             let model = self.llm_config.model.clone();
-                            let cwd = std::env::current_dir().map_or_else(
-                                |_| ".".to_string(),
-                                |p| p.to_string_lossy().to_string(),
-                            );
                             let input = msg;
-                            let stop_signal = self.stop_signal.clone();
 
-                            // Create a fresh answer channel for this agent loop
-                            let (new_answer_tx, answer_rx) = mpsc::unbounded_channel();
-                            self.answer_tx = new_answer_tx;
+                            // TEMPORARY: Build header context with tool descriptions so the LLM
+                            // knows what tools are available. Remove this once proper context
+                            // window management is implemented (the Harness::run_agent_loop
+                            // already handles this via build_chat_context()).
+                            // TODO: Replace with context window management that tracks
+                            // token usage across multiple turns.
+                            use std::fmt::Write as FmtWrite;
+                            let mut header_context = String::new();
+                            {
+                                use cosh::harness::tools::{CoshTools, Tools};
+                                let cosh = CoshTools::new(".");
+                                let _ = write!(header_context, "## System Tools\n\n");
+                                cosh.write_tool_descriptions(&mut header_context);
+                                let _ = write!(
+                                    header_context,
+                                    "\n## Harness Tools\n\n"
+                                );
+                                let _ = write!(
+                                    header_context,
+                                    "- **stop_agent_loop**: Stop running the agent loop\n"
+                                );
+                                let _ = write!(
+                                    header_context,
+                                    "  Schema: {{\"type\": \"object\", \"properties\": {{}}}}\n"
+                                );
+                            }
 
-                            self.tokio_handle.spawn(async move {
-                                use cosh::harness::Harness;
+                            std::thread::spawn(move || {
                                 use cosh_sdk::connector::Connector;
+                                use std::panic::AssertUnwindSafe;
+                                use tokio::runtime::Builder;
 
-                                let connector = match Connector::new(&provider) {
-                                    Ok(c) => c,
+                                let event_tx_panic = event_tx.clone();
+
+                                let rt = match Builder::new_current_thread()
+                                    .enable_all()
+                                    .build()
+                                {
+                                    Ok(rt) => rt,
                                     Err(e) => {
-                                        let _ = event_tx
-                                            .send(HarnessEvent::Error(format!("connector: {e}")));
+                                        let _ = event_tx_panic.send(HarnessEvent::Error(
+                                            format!("runtime: {e}"),
+                                        ));
                                         return;
                                     }
                                 };
-                                let connector = if let Some(ref m) = model {
-                                    connector.with_model(m)
-                                } else {
-                                    connector
-                                };
 
-                                let mut harness = Harness::new(connector, &cwd);
-                                harness.format_header_context();
-                                harness.run_agent_loop(&input, event_tx, answer_rx, stop_signal).await;
+                                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                    rt.block_on(async {
+                                        let connector = match Connector::new(&provider) {
+                                            Ok(c) => c,
+                                            Err(e) => {
+                                                let _ = event_tx.send(HarnessEvent::Error(
+                                                    format!("connector: {e}"),
+                                                ));
+                                                return;
+                                            }
+                                        };
+
+                                        let connector = if let Some(ref m) = model {
+                                            connector.with_model(m)
+                                        } else {
+                                            connector
+                                        };
+
+                                        // Use NON-STREAMING chat instead of streaming
+                                        match connector.chat_with_system(&input, &header_context).await {
+                                            Ok(output) => {
+                                                let _ = event_tx.send(HarnessEvent::Token {
+                                                    text: output.message().to_string(),
+                                                });
+                                                let _ = event_tx.send(HarnessEvent::Done);
+                                            }
+                                            Err(e) => {
+                                                let _ = event_tx.send(HarnessEvent::Error(
+                                                    format!("chat error: {e}"),
+                                                ));
+                                            }
+                                        }
+                                    })
+                                }));
+
+                                if let Err(panic) = result {
+                                    let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                                        s.to_string()
+                                    } else if let Some(s) = panic.downcast_ref::<String>() {
+                                        s.clone()
+                                    } else {
+                                        "unknown panic".to_string()
+                                    };
+                                    let _ = event_tx_panic.send(HarnessEvent::Error(format!("panic: {msg}")));
+                                }
                             });
                         }
                         Some(crate::keymap::Action::Interrupt) => {
@@ -999,6 +1092,20 @@ impl App {
                                 }
                                 KeyCode::Char(ch) => {
                                     self.prompt_view.note_activity();
+
+                                    // Vim-style scroll only when prompt is empty
+                                    // (otherwise these chars are typed normally)
+                                    if ch == 'j' && self.prompt_view.input.is_empty() {
+                                        self.session_view.scroll_y =
+                                            (self.session_view.scroll_y + 3).max(0);
+                                        return Ok(false);
+                                    }
+                                    if ch == 'k' && self.prompt_view.input.is_empty() {
+                                        self.session_view.scroll_y =
+                                            (self.session_view.scroll_y - 3).max(0);
+                                        return Ok(false);
+                                    }
+
                                     // Insert character normally
                                     let pos = self.prompt_view.cursor_pos;
                                     self.prompt_view.input.insert(pos, ch);
@@ -1037,6 +1144,9 @@ impl App {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 HarnessEvent::Token { text } => {
+                    if text.trim().is_empty() {
+                        continue;
+                    }
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
