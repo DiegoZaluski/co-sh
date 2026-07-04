@@ -206,7 +206,7 @@ impl Renderable for MarkdownRenderable {
         let mut numbered_list_counters: Vec<usize> = Vec::new();
         let mut in_code_block = false;
         let mut code_block_lang = String::new();
-        let code_bg = Color::Rgb(45, 45, 60);
+        let code_bg = bg_color;
 
         let parser = pulldown_cmark::Parser::new(&self.content);
 
@@ -603,8 +603,8 @@ mod tests {
         let default_fg = Some(Color::Rgb(220, 220, 220));
         assert_eq!(buf.cell((2, 0)).unwrap().style().fg, default_fg);
 
-        // Check code_bg is applied
-        let code_bg = Some(Color::Rgb(45, 45, 60));
+        // Check code_bg matches default background (no bg set)
+        let code_bg = Some(Color::Rgb(0, 0, 0));
         assert_eq!(buf.cell((0, 0)).unwrap().style().bg, code_bg);
 
         // Check DIM modifier is applied
