@@ -111,12 +111,12 @@ impl DialogState {
         };
 
         let dialog_w = 50.min(area.width.saturating_sub(4));
-        let dialog_x = area.x + (area.width - dialog_w) / 2;
+        let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
         match &instance.dialog_type {
             DialogType::Alert { message } => {
                 let dialog_h = 5;
-                let dialog_y = area.y + (area.height - dialog_h) / 2;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
                 let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
                 let mut bg = BoxRenderable::new();
@@ -134,7 +134,7 @@ impl DialogState {
                 );
 
                 let ok_text = "[ OK ]";
-                let ok_x = dialog_x + (dialog_w - ok_text.len() as u16) / 2;
+                let ok_x = dialog_x + dialog_w.saturating_sub(ok_text.len() as u16) / 2;
                 let ok_style = Style::default().fg(rgba_color(theme.primary));
                 draw_text_line(
                     buf,
@@ -146,47 +146,103 @@ impl DialogState {
                 );
             }
             DialogType::Confirm { message } => {
-                let dialog_h = 6;
-                let dialog_y = area.y + (area.height - dialog_h) / 2;
-                let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+                // Box dimensions: border OUTER edge
+                let dialog_w = 30u16.min(area.width.saturating_sub(4)).max(16);
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_h = 7;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
 
-                let mut bg = BoxRenderable::new();
-                bg.set_background_color(Some(theme.background_element.into()));
-                bg.set_border_color(Some(theme.border_active.into()));
-                bg.render_self(buf, dialog_area);
+                // Draw purple-blue border at the OUTER edge of the box (no background fill)
+                let border_color = Color::Rgb(128, 96, 224);
+                let max_x = dialog_x + dialog_w - 1;
+                let max_y = dialog_y + dialog_h - 1;
 
+                // Top & bottom horizontal lines
+                for x in (dialog_x + 1)..max_x {
+                    if let Some(cell) = buf.cell_mut((x, dialog_y)) {
+                        cell.set_char('\u{2500}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                    if let Some(cell) = buf.cell_mut((x, max_y)) {
+                        cell.set_char('\u{2500}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                }
+
+                // Left & right vertical lines
+                for y in (dialog_y + 1)..max_y {
+                    if let Some(cell) = buf.cell_mut((dialog_x, y)) {
+                        cell.set_char('\u{2502}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                    if let Some(cell) = buf.cell_mut((max_x, y)) {
+                        cell.set_char('\u{2502}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                }
+
+                // Corners
+                if let Some(cell) = buf.cell_mut((dialog_x, dialog_y)) {
+                    cell.set_char('\u{250C}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((max_x, dialog_y)) {
+                    cell.set_char('\u{2510}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((dialog_x, max_y)) {
+                    cell.set_char('\u{2514}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((max_x, max_y)) {
+                    cell.set_char('\u{2518}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+
+                // Content is INSIDE the border (1 row padding top/bottom)
+                // Center the message at row dialog_y + 2
+                let msg_x = dialog_x + (dialog_w.saturating_sub(message.len() as u16)) / 2;
                 draw_text_line(
                     buf,
                     message,
-                    dialog_x + 2,
-                    dialog_y + 1,
-                    dialog_w.saturating_sub(4),
+                    msg_x,
+                    dialog_y + 2,
+                    dialog_w.saturating_sub(2),
                     Style::default().fg(rgba_color(theme.text)),
                 );
 
-                let options = ["Yes", "No"];
-                for (i, opt) in options.iter().enumerate() {
-                    let oy = dialog_y + 3 + i as u16;
-                    let prefix = if i == instance.selected {
-                        "\u{25b8} "
-                    } else {
-                        "  "
-                    };
-                    let text = format!("{prefix}{opt}");
-                    let style = if i == instance.selected {
-                        Style::default().fg(rgba_color(theme.primary))
-                    } else {
-                        Style::default().fg(rgba_color(theme.text_muted))
-                    };
-                    draw_text_line(
-                        buf,
-                        &text,
-                        dialog_x + 3,
-                        oy,
-                        dialog_w.saturating_sub(6),
-                        style,
-                    );
-                }
+                // Yes / No side by side, centered at row dialog_y + 4
+                let opt_yes = "Yes";
+                let opt_no = "No";
+                let gap: u16 = 4;
+                let total_w = opt_yes.len() as u16 + gap + opt_no.len() as u16;
+                let opts_x = dialog_x + dialog_w.saturating_sub(total_w) / 2;
+                let opts_y = dialog_y + 4;
+
+                let yes_style = if instance.selected == 0 {
+                    Style::default()
+                        .fg(rgba_color(theme.primary))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(rgba_color(theme.text_muted))
+                };
+                draw_text_line(buf, opt_yes, opts_x, opts_y, opt_yes.len() as u16, yes_style);
+
+                let no_style = if instance.selected == 1 {
+                    Style::default()
+                        .fg(rgba_color(theme.primary))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(rgba_color(theme.text_muted))
+                };
+                draw_text_line(
+                    buf,
+                    opt_no,
+                    opts_x + opt_yes.len() as u16 + gap,
+                    opts_y,
+                    opt_no.len() as u16,
+                    no_style,
+                );
             }
             DialogType::ThemeList { themes, current, filter } => {
                 // Compute filtered list (like fuzzysort in original)
@@ -206,7 +262,7 @@ impl DialogState {
                 // Responsive sizing: shrink with terminal, minimum 24 cols
                 let max_w = 40u16.min(area.width.saturating_sub(4));
                 let dialog_w = max_w.max(24).min(area.width.saturating_sub(2));
-                let dialog_x = area.x + (area.width - dialog_w) / 2;
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
                 // Fit list to available height
                 // Layout: 1 title + 1 filter + 1 gap + max_visible items + 1 paddingBottom = max_visible + 4
@@ -427,7 +483,7 @@ impl DialogState {
                 // Responsive sizing: shrink with terminal, minimum 24 cols
                 let max_w = 50u16.min(area.width.saturating_sub(4));
                 let dialog_w = max_w.max(30).min(area.width.saturating_sub(2));
-                let dialog_x = area.x + (area.width - dialog_w) / 2;
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
                 // Calculate total items (models + provider headers)
                 let total_items = flat_entries.len() + grouped.len();

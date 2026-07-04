@@ -332,6 +332,28 @@ impl App {
         self.apply_filtered_theme_preview();
     }
 
+    fn is_confirm_dialog_visible(&self) -> bool {
+        self.dialog.visible() && matches!(
+            self.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::Confirm { .. })
+        )
+    }
+
+    fn handle_confirm_dialog_key(&mut self, key: KeyCode) -> bool {
+        if !self.is_confirm_dialog_visible() {
+            return false;
+        }
+        match key {
+            KeyCode::Left | KeyCode::Right => {
+                if let Some(d) = self.dialog.current_mut() {
+                    d.selected ^= 1;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn handle_model_dialog_key(&mut self, key: KeyCode) -> bool {
         if !self.is_model_dialog_visible() {
             return false;
@@ -632,10 +654,17 @@ impl App {
                         }
                     }
 
+                    // Check Confirm dialog for arrow navigation
+                    if self.is_confirm_dialog_visible() {
+                        if self.handle_confirm_dialog_key(key.code) {
+                            return Ok(false);
+                        }
+                    }
+
                     let action = self.keymap.lookup(key.code, key.modifiers).cloned();
 
-                    // Home mode: navigation keys
-                    if matches!(self.mode(), AppMode::Home) {
+                    // Home mode: navigation keys (skip when dialog is visible)
+                    if matches!(self.mode(), AppMode::Home) && !self.dialog.visible() {
                         match key.code {
                             KeyCode::Up => {
                                 self.home_view.select_prev();
@@ -746,6 +775,16 @@ impl App {
                         Some(
                             crate::keymap::Action::SendMessage | crate::keymap::Action::Confirm,
                         ) => {
+                            if let Some(dialog) = self.dialog.current() {
+                                if matches!(dialog.dialog_type, DialogType::Confirm { .. }) {
+                                    if dialog.selected == 0 {
+                                        self.should_quit = true;
+                                    } else {
+                                        self.dialog.pop();
+                                    }
+                                    return Ok(false);
+                                }
+                            }
                             self.prompt_view.note_activity();
                             if self.state.status == crate::types::SessionStatus::Working {
                                 return Ok(false);
@@ -874,6 +913,15 @@ impl App {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
                                 self.dialog.pop();
+                            } else if matches!(self.mode(), AppMode::Session) {
+                                self.state.current_session_id = None;
+                            } else if matches!(self.mode(), AppMode::Home) {
+                                self.dialog.show(DialogType::Confirm {
+                                    message: "Quit cosh?".into(),
+                                });
+                                if let Some(d) = self.dialog.current_mut() {
+                                    d.selected = 1;
+                                }
                             }
                         }
                         Some(crate::keymap::Action::ScrollToTop) => {
