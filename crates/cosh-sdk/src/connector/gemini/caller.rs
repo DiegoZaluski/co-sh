@@ -6,6 +6,7 @@ use super::super::provider::{ProviderConfig, get_api_key};
 
 use async_stream::stream;
 use std::pin::Pin;
+use std::time::Duration;
 use tokio_stream::Stream;
 
 #[derive(serde::Serialize)]
@@ -398,11 +399,15 @@ pub(crate) async fn chat_stream(
             let mut response = response;
             let mut buf = SseBuffer::new();
             loop {
-                let chunk = match response.chunk().await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => break,
-                    Err(e) => {
+                let chunk = match tokio::time::timeout(Duration::from_secs(30), response.chunk()).await {
+                    Ok(Ok(Some(c))) => c,
+                    Ok(Ok(None)) => break,
+                    Ok(Err(e)) => {
                         yield Err(ConnectorError::Network(e.to_string()));
+                        return;
+                    }
+                    Err(_) => {
+                        yield Err(ConnectorError::Network("stream timed out after 30s".to_string()));
                         return;
                     }
                 };
