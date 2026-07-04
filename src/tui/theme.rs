@@ -107,6 +107,7 @@ impl ThemeRegistry {
 // ═══════════════════════════════════════════════
 
 // Helper to build full Theme
+#[allow(clippy::too_many_arguments, clippy::similar_names)]
 fn full_theme(
     bg: &str, bp: &str, be: &str, b: &str, ba: &str, bs: &str,
     tx: &str, tm: &str, pr: &str, se: &str, ac: &str,

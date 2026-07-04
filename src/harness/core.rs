@@ -375,12 +375,20 @@ impl Harness {
     /// Events are sent through `tx` so the caller (typically the TUI) can
     /// render tokens, tool calls, and results in real time.
     ///
+    /// When the LLM calls `ask_questions`, the tool is intercepted: the
+    /// questions are sent to the TUI via `QuestionRequest` and the loop
+    /// waits for an answer on `answer_rx`. The TUI must send back the
+    /// user's answers (or an error) before the loop continues.
+    ///
     /// The `stop_signal` is an external flag (usually an `Arc<AtomicBool>`)
     /// that allows the caller to interrupt the loop from another thread.
     pub async fn run_agent_loop(
         &mut self,
         input: &str,
         tx: tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+        mut answer_rx: tokio::sync::mpsc::UnboundedReceiver<
+            Result<Vec<cosh_tools::question::types::AnswerItem>, String>
+        >,
         stop_signal: Arc<AtomicBool>,
     ) {
         use super::events::HarnessEvent;
@@ -429,7 +437,7 @@ impl Harness {
                     break;
                 }
 
-                // Peek at tool info before dispatch_next consumes the item
+                // Peek at tool info before consuming the item
                 let info = self
                     .tool_issuer
                     .front()
@@ -442,12 +450,65 @@ impl Harness {
                     });
                 }
 
-                match self.dispatch_next().await {
-                    Ok(output) => {
-                        let _ = tx.send(HarnessEvent::ToolResult { output });
+                // Intercept `ask_questions` — send to TUI, wait for user answer
+                if info.as_ref().map_or(false, |(n, _)| n == "ask_questions") {
+                    use cosh_tools::question::types::{QuestionInput, QuestionOutput};
+
+                    let input: Result<QuestionInput, String> = info
+                        .map(|(_, args)| args)
+                        .ok_or_else(|| "missing tool arguments".to_string())
+                        .and_then(|args| serde_json::from_value(args).map_err(|e| e.to_string()));
+
+                    self.tool_issuer.pop_front();
+
+                    match input {
+                        Ok(q_input) => {
+                            let _ = tx.send(HarnessEvent::QuestionRequest {
+                                questions: q_input.questions.clone(),
+                            });
+
+                            // Wait for the TUI to send back answers
+                            let answer = answer_rx.recv().await;
+                            match answer {
+                                Some(Ok(answers)) => {
+                                    let output = QuestionOutput {
+                                        questions: q_input.questions,
+                                        answers,
+                                    };
+                                    let json = serde_json::to_string(&output)
+                                        .unwrap_or_else(|_| "{}".to_string());
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    self.server_response
+                                        .push(format!("[{ts}] {json}"));
+                                    let _ = tx
+                                        .send(HarnessEvent::ToolResult { output: json });
+                                }
+                                Some(Err(e)) => {
+                                    let _ = tx
+                                        .send(HarnessEvent::ToolError { error: e });
+                                }
+                                None => {
+                                    let _ = tx.send(HarnessEvent::ToolError {
+                                        error:
+                                            "Internal error: question channel closed"
+                                                .to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(HarnessEvent::ToolError { error: e });
+                        }
                     }
-                    Err(e) => {
-                        let _ = tx.send(HarnessEvent::ToolError { error: e });
+                } else {
+                    // Normal dispatch for all other tools
+                    match self.dispatch_next().await {
+                        Ok(output) => {
+                            let _ = tx.send(HarnessEvent::ToolResult { output });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(HarnessEvent::ToolError { error: e });
+                        }
                     }
                 }
             }

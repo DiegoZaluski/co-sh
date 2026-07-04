@@ -62,6 +62,8 @@ pub struct App {
     pub tokio_handle: Handle,
     pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
     event_rx: mpsc::UnboundedReceiver<HarnessEvent>,
+    /// Sender for question answers back to the harness.
+    answer_tx: mpsc::UnboundedSender<Result<Vec<cosh_tools::question::types::AnswerItem>, String>>,
     llm_config: LlmConfig,
     stop_signal: Arc<AtomicBool>,
     terminal_focused: bool,
@@ -76,6 +78,7 @@ impl App {
         let state = AppState::new();
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
 
         let theme_registry = ThemeRegistry::new();
         let theme = theme_registry.default_theme().clone();
@@ -101,6 +104,7 @@ impl App {
             tokio_handle: Handle::current(),
             event_tx,
             event_rx,
+            answer_tx,
             llm_config: LlmConfig::from_env(),
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
@@ -118,15 +122,14 @@ impl App {
     }
 
     fn open_theme_dialog(&mut self) {
-        let mut themes: Vec<String> = self.theme_registry.names().into_iter().map(|s| s.to_string()).collect();
-        themes.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        let mut themes: Vec<String> = self.theme_registry.names().into_iter().map(str::to_string).collect();
+        themes.sort_by_key(|a| a.to_lowercase());
 
         let current = self.theme_registry
             .names()
             .iter()
-            .find(|&&name| self.theme_registry.get(name).map_or(false, |t| t == &self.theme))
-            .map(|&s| s.to_string())
-            .unwrap_or_else(|| "opencode".to_string());
+            .find(|&&name| self.theme_registry.get(name) == Some(&self.theme))
+            .map_or_else(|| "opencode".to_string(), |&s| s.to_string());
 
         // Store the theme name so we can restore on cancel
         self.theme_dialog_original = Some(current.clone());
@@ -165,20 +168,14 @@ impl App {
             let mut all_models: Vec<ModelEntry> = Vec::new();
 
             for provider in providers_to_check {
-                if let Ok(connector) = Connector::new(provider) {
-                    match connector.list_models().await {
-                        Ok(output) => {
-                            for model_info in output.models() {
-                                all_models.push(ModelEntry {
-                                    provider: provider.to_string(),
-                                    model: model_info.id().to_string(),
-                                });
-                            }
-                        }
-                        Err(_) => {
-                            // Skip providers that fail to load models
-                            continue;
-                        }
+                if let Ok(connector) = Connector::new(provider)
+                    && let Ok(output) = connector.list_models().await
+                {
+                    for model_info in output.models() {
+                        all_models.push(ModelEntry {
+                            provider: provider.to_string(),
+                            model: model_info.id().to_string(),
+                        });
                     }
                 }
             }
@@ -213,34 +210,34 @@ impl App {
             KeyCode::Up => {
                 // Compute filtered indices and move selection up
                 let filtered = self.theme_dialog_filtered();
-                if !filtered.is_empty() {
-                    if let Some(d) = self.dialog.current_mut() {
-                        d.selected = if d.selected == 0 {
-                            filtered.len() - 1
-                        } else {
-                            d.selected.saturating_sub(1)
-                        };
-                        // Preview theme on move
-                        self.apply_filtered_theme_preview();
-                    }
+                if !filtered.is_empty()
+                    && let Some(d) = self.dialog.current_mut()
+                {
+                    d.selected = if d.selected == 0 {
+                        filtered.len() - 1
+                    } else {
+                        d.selected.saturating_sub(1)
+                    };
+                    // Preview theme on move
+                    self.apply_filtered_theme_preview();
                 }
                 true
             }
             KeyCode::Down => {
                 let filtered = self.theme_dialog_filtered();
-                if !filtered.is_empty() {
-                    if let Some(d) = self.dialog.current_mut() {
-                        d.selected = (d.selected + 1).min(filtered.len() - 1);
-                        // Preview theme on move
-                        self.apply_filtered_theme_preview();
-                    }
+                if !filtered.is_empty()
+                    && let Some(d) = self.dialog.current_mut()
+                {
+                    d.selected = (d.selected + 1).min(filtered.len() - 1);
+                    // Preview theme on move
+                    self.apply_filtered_theme_preview();
                 }
                 true
             }
             KeyCode::Enter => {
                 let filtered = self.theme_dialog_filtered();
                 if !filtered.is_empty() {
-                    let name = filtered[self.dialog.current().map_or(0, |d| d.selected.min(filtered.len().saturating_sub(1)))].to_string();
+                    let name = filtered[self.dialog.current().map_or(0, |d| d.selected.min(filtered.len().saturating_sub(1)))].clone();
                     if let Some(t) = self.theme_registry.get(&name) {
                         self.theme = t.clone();
                     }
@@ -251,10 +248,10 @@ impl App {
             }
             KeyCode::Esc => {
                 // Restore original theme
-                if let Some(ref orig) = self.theme_dialog_original {
-                    if let Some(t) = self.theme_registry.get(orig) {
-                        self.theme = t.clone();
-                    }
+                if let Some(ref orig) = self.theme_dialog_original
+                    && let Some(t) = self.theme_registry.get(orig)
+                {
+                    self.theme = t.clone();
                 }
                 self.theme_dialog_original = None;
                 self.dialog.pop();
@@ -272,10 +269,10 @@ impl App {
                 };
                 if is_empty {
                     // Restore original theme when filter becomes empty (matches opencode)
-                    if let Some(ref orig) = self.theme_dialog_original {
-                        if let Some(t) = self.theme_registry.get(orig) {
-                            self.theme = t.clone();
-                        }
+                    if let Some(ref orig) = self.theme_dialog_original
+                        && let Some(t) = self.theme_registry.get(orig)
+                    {
+                        self.theme = t.clone();
                     }
                 } else {
                     self.apply_filtered_theme_preview();
@@ -310,10 +307,10 @@ impl App {
     fn apply_filtered_theme_preview(&mut self) {
         let filtered = self.theme_dialog_filtered();
         let sel = self.dialog.current().map_or(0, |d| d.selected.min(filtered.len().saturating_sub(1)));
-        if sel < filtered.len() {
-            if let Some(t) = self.theme_registry.get(&filtered[sel]) {
-                self.theme = t.clone();
-            }
+        if sel < filtered.len()
+            && let Some(t) = self.theme_registry.get(&filtered[sel])
+        {
+            self.theme = t.clone();
         }
     }
 
@@ -330,6 +327,7 @@ impl App {
         self.apply_filtered_theme_preview();
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_model_dialog_key(&mut self, key: KeyCode) -> bool {
         if !self.is_model_dialog_visible() {
             return false;
@@ -338,81 +336,80 @@ impl App {
         match key {
             KeyCode::Up => {
                 // Get the models from the dialog
-                if let Some(d) = self.dialog.current() {
-                    if let DialogType::ModelList { models, filter, .. } = &d.dialog_type {
-                        // Build filtered indices
-                        let filtered_indices: Vec<usize> = if filter.is_empty() {
-                            (0..models.len()).collect()
+                if let Some(d) = self.dialog.current()
+                    && let DialogType::ModelList { models, filter, .. } = &d.dialog_type
+                {
+                    // Build filtered indices
+                    let filtered_indices: Vec<usize> = if filter.is_empty() {
+                        (0..models.len()).collect()
+                    } else {
+                        let lower = filter.to_lowercase();
+                        models.iter().enumerate()
+                            .filter(|(_, m)| m.model.to_lowercase().contains(&lower))
+                            .map(|(i, _)| i)
+                            .collect()
+                    };
+                    
+                    if !filtered_indices.is_empty()
+                        && let Some(d_mut) = self.dialog.current_mut()
+                    {
+                        let current_pos = filtered_indices.iter().position(|&i| i == d_mut.selected);
+                        if let Some(current_idx) = current_pos {
+                            d_mut.selected = if current_idx == 0 {
+                                *filtered_indices.last().unwrap()
+                            } else {
+                                filtered_indices[current_idx - 1]
+                            };
                         } else {
-                            let lower = filter.to_lowercase();
-                            models.iter().enumerate()
-                                .filter(|(_, m)| m.model.to_lowercase().contains(&lower))
-                                .map(|(i, _)| i)
-                                .collect()
-                        };
-                        
-                        if !filtered_indices.is_empty() {
-                            if let Some(d_mut) = self.dialog.current_mut() {
-                                let current_pos = filtered_indices.iter().position(|&i| i == d_mut.selected);
-                                if let Some(current_idx) = current_pos {
-                                    d_mut.selected = if current_idx == 0 {
-                                        *filtered_indices.last().unwrap()
-                                    } else {
-                                        filtered_indices[current_idx - 1]
-                                    };
-                                } else {
-                                    // If current selection is not in filtered list, select first
-                                    d_mut.selected = filtered_indices[0];
-                                }
-                            }
+                            // If current selection is not in filtered list, select first
+                            d_mut.selected = filtered_indices[0];
                         }
                     }
                 }
                 true
             }
             KeyCode::Down => {
-                if let Some(d) = self.dialog.current() {
-                    if let DialogType::ModelList { models, filter, .. } = &d.dialog_type {
-                        // Build filtered indices
-                        let filtered_indices: Vec<usize> = if filter.is_empty() {
-                            (0..models.len()).collect()
-                        } else {
-                            let lower = filter.to_lowercase();
-                            models.iter().enumerate()
-                                .filter(|(_, m)| m.model.to_lowercase().contains(&lower))
-                                .map(|(i, _)| i)
-                                .collect()
-                        };
-                        
-                        if !filtered_indices.is_empty() {
-                            if let Some(d_mut) = self.dialog.current_mut() {
-                                let current_pos = filtered_indices.iter().position(|&i| i == d_mut.selected);
-                                if let Some(current_idx) = current_pos {
-                                    if current_idx + 1 < filtered_indices.len() {
-                                        d_mut.selected = filtered_indices[current_idx + 1];
-                                    } else {
-                                        d_mut.selected = filtered_indices[0];
-                                    }
-                                } else {
-                                    // If current selection is not in filtered list, select first
-                                    d_mut.selected = filtered_indices[0];
-                                }
+                if let Some(d) = self.dialog.current()
+                    && let DialogType::ModelList { models, filter, .. } = &d.dialog_type
+                {
+                    // Build filtered indices
+                    let filtered_indices: Vec<usize> = if filter.is_empty() {
+                        (0..models.len()).collect()
+                    } else {
+                        let lower = filter.to_lowercase();
+                        models.iter().enumerate()
+                            .filter(|(_, m)| m.model.to_lowercase().contains(&lower))
+                            .map(|(i, _)| i)
+                            .collect()
+                    };
+                    
+                    if !filtered_indices.is_empty()
+                        && let Some(d_mut) = self.dialog.current_mut()
+                    {
+                        let current_pos = filtered_indices.iter().position(|&i| i == d_mut.selected);
+                        if let Some(current_idx) = current_pos {
+                            if current_idx + 1 < filtered_indices.len() {
+                                d_mut.selected = filtered_indices[current_idx + 1];
+                            } else {
+                                d_mut.selected = filtered_indices[0];
                             }
+                        } else {
+                            // If current selection is not in filtered list, select first
+                            d_mut.selected = filtered_indices[0];
                         }
                     }
                 }
                 true
             }
             KeyCode::Enter => {
-                if let Some(d) = self.dialog.current() {
-                    if let DialogType::ModelList { models, .. } = &d.dialog_type {
-                        if !models.is_empty() {
-                            let selected_idx = d.selected.min(models.len().saturating_sub(1));
-                            let selected_entry = &models[selected_idx];
-                            self.llm_config.model = Some(selected_entry.model.clone());
-                            self.llm_config.provider = selected_entry.provider.clone();
-                        }
-                    }
+                if let Some(d) = self.dialog.current()
+                    && let DialogType::ModelList { models, .. } = &d.dialog_type
+                    && !models.is_empty()
+                {
+                    let selected_idx = d.selected.min(models.len().saturating_sub(1));
+                    let selected_entry = &models[selected_idx];
+                    self.llm_config.model = Some(selected_entry.model.clone());
+                    self.llm_config.provider = selected_entry.provider.clone();
                 }
                 self.model_dialog_original = None;
                 self.dialog.pop();
@@ -487,6 +484,7 @@ impl App {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render(&mut self, frame: &mut Frame<'_>) {
         let area = frame.area();
 
@@ -542,7 +540,7 @@ impl App {
 
             // Question dialog inline (between messages and prompt), only during session
             let question_h = if is_session && self.question_dialog.visible {
-                12 // mock height
+                self.question_dialog.required_height(main_area.width.saturating_sub(4))
             } else {
                 0
             };
@@ -638,22 +636,32 @@ impl App {
                     }
 
                     // Check theme dialog FIRST, before action lookup
-                    if self.is_theme_dialog_visible() {
-                        if self.handle_theme_dialog_key(key.code) {
-                            return Ok(false);
-                        }
+                    if self.is_theme_dialog_visible()
+                        && self.handle_theme_dialog_key(key.code)
+                    {
+                        return Ok(false);
                     }
 
                     // Check model dialog SECOND, before action lookup
-                    if self.is_model_dialog_visible() {
-                        if self.handle_model_dialog_key(key.code) {
-                            return Ok(false);
-                        }
+                    if self.is_model_dialog_visible()
+                        && self.handle_model_dialog_key(key.code)
+                    {
+                        return Ok(false);
                     }
 
-                    // Check question dialog THIRD (inline mock)
-                    if self.question_dialog.visible && matches!(self.mode(), AppMode::Session) {
-                        if self.question_dialog.handle_key(key.code) {
+                    // Check question dialog THIRD (inline)
+                    if self.question_dialog.visible
+                        && matches!(self.mode(), AppMode::Session)
+                    {
+                        let consumed = self.question_dialog.handle_key(key.code);
+                        if consumed {
+                            // Check if user submitted answers (Enter on confirm tab)
+                            if self.question_dialog.submitted {
+                                let answers = self.question_dialog.build_answers();
+                                let _ = self.answer_tx.send(Ok(answers));
+                                self.question_dialog.visible = false;
+                                self.question_dialog.submitted = false;
+                            }
                             return Ok(false);
                         }
                     }
@@ -791,6 +799,10 @@ impl App {
                             let input = msg;
                             let stop_signal = self.stop_signal.clone();
 
+                            // Create a fresh answer channel for this agent loop
+                            let (new_answer_tx, answer_rx) = mpsc::unbounded_channel();
+                            self.answer_tx = new_answer_tx;
+
                             self.tokio_handle.spawn(async move {
                                 use cosh::harness::Harness;
                                 use cosh_sdk::connector::Connector;
@@ -811,7 +823,7 @@ impl App {
 
                                 let mut harness = Harness::new(connector, &cwd);
                                 harness.format_header_context();
-                                harness.run_agent_loop(&input, event_tx, stop_signal).await;
+                                harness.run_agent_loop(&input, event_tx, answer_rx, stop_signal).await;
                             });
                         }
                         Some(crate::keymap::Action::Interrupt) => {
@@ -819,6 +831,9 @@ impl App {
                                 self.stop_signal.store(true, Ordering::Relaxed);
                             } else if self.question_dialog.visible {
                                 self.question_dialog.visible = false;
+                                let _ = self.answer_tx.send(
+                                    Err("User dismissed the question dialog".into())
+                                );
                             } else if self.permission_dialog.visible {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
@@ -828,6 +843,9 @@ impl App {
                         Some(crate::keymap::Action::Cancel) => {
                             if self.question_dialog.visible {
                                 self.question_dialog.visible = false;
+                                let _ = self.answer_tx.send(
+                                    Err("User dismissed the question dialog".into())
+                                );
                             } else if self.permission_dialog.visible {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
@@ -1167,12 +1185,17 @@ impl App {
 
                 HarnessEvent::ModelsLoaded { models, current } => {
                     // Update the dialog with the loaded models
-                    if let Some(d) = self.dialog.current_mut() {
-                        if let DialogType::ModelList { models: dialog_models, current: dialog_current, .. } = &mut d.dialog_type {
-                            *dialog_models = models;
-                            *dialog_current = current;
-                        }
+                    if let Some(d) = self.dialog.current_mut()
+                        && let DialogType::ModelList { models: dialog_models, current: dialog_current, .. } = &mut d.dialog_type
+                    {
+                        *dialog_models = models;
+                        *dialog_current = current;
                     }
+                }
+
+                HarnessEvent::QuestionRequest { questions } => {
+                    // Show the question dialog with real questions from the harness
+                    self.question_dialog.show_questions(questions);
                 }
             }
         }

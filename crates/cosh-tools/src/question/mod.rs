@@ -176,14 +176,14 @@ impl Question {
                     }
                 }
                 types::QuestionType::YesNo => {
-                    if let Some(ref opts) = q.options {
-                        if !opts.is_empty() {
-                            return Err(format!(
-                                "Question '{}' is YesNo but has custom options. \
-                                 YesNo uses built-in 'Yes' and 'No'.",
-                                q.id
-                            ));
-                        }
+                    if let Some(ref opts) = q.options
+                        && !opts.is_empty()
+                    {
+                        return Err(format!(
+                            "Question '{}' is YesNo but has custom options. \
+                             YesNo uses built-in 'Yes' and 'No'.",
+                            q.id
+                        ));
                     }
                 }
                 types::QuestionType::Text => {
