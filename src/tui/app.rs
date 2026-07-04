@@ -531,20 +531,38 @@ impl App {
             }
 
             let footer_y = main_area.bottom().saturating_sub(1);
-            let prompt_h = if matches!(self.mode(), AppMode::Session) {
+            let is_session = matches!(self.mode(), AppMode::Session);
+
+            let prompt_h = if is_session {
                 self.prompt_view
                     .required_height(main_area.width.saturating_sub(4))
             } else {
                 0
             };
+
+            // Question dialog inline (between messages and prompt), only during session
+            let question_h = if is_session && self.question_dialog.visible {
+                12 // mock height
+            } else {
+                0
+            };
+
             let prompt_area_y = footer_y.saturating_sub(prompt_h);
+            let question_area_y = prompt_area_y.saturating_sub(question_h);
+            let session_bottom = question_area_y;
+
             let prompt_area = Rect::new(
                 main_area.x + 2,
                 prompt_area_y,
                 main_area.width.saturating_sub(4),
                 prompt_h,
             );
-            let session_bottom = prompt_area_y;
+            let question_area = Rect::new(
+                main_area.x + 2,
+                question_area_y,
+                main_area.width.saturating_sub(4),
+                question_h,
+            );
             let session_area = Rect::new(
                 main_area.x,
                 area.y + 1,
@@ -570,6 +588,10 @@ impl App {
                         &self.theme,
                         &self.config,
                     );
+                    // Question dialog rendered inline between messages and prompt (like OpenCode)
+                    if self.question_dialog.visible {
+                        self.question_dialog.render(buf, question_area, &self.theme);
+                    }
                     self.prompt_view.render(
                         buf,
                         prompt_area,
@@ -592,7 +614,6 @@ impl App {
             self.toast_state.render(buf, area, &self.theme);
             self.dialog.render(buf, area, &self.theme, now);
             self.permission_dialog.render(buf, area, &self.theme);
-            self.question_dialog.render(buf, area, &self.theme);
             self.command_palette.render(buf, area, &self.theme);
             self.slash_menu.render(buf, prompt_area, &self.theme);
         }
@@ -626,6 +647,13 @@ impl App {
                     // Check model dialog SECOND, before action lookup
                     if self.is_model_dialog_visible() {
                         if self.handle_model_dialog_key(key.code) {
+                            return Ok(false);
+                        }
+                    }
+
+                    // Check question dialog THIRD (inline mock)
+                    if self.question_dialog.visible && matches!(self.mode(), AppMode::Session) {
+                        if self.question_dialog.handle_key(key.code) {
                             return Ok(false);
                         }
                     }
