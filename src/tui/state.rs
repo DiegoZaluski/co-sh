@@ -3,6 +3,8 @@ use crate::types::{
     ToolPart, ToolStatus,
 };
 
+const MAX_SESSIONS: usize = 20;
+
 pub struct AppState {
     pub sessions: Vec<Session>,
     pub current_session_id: Option<String>,
@@ -32,6 +34,21 @@ impl AppState {
             mcp_errors: 0,
             permission_count: 0,
         }
+    }
+
+    /// Add a session, evicting the oldest non-current session if at cap.
+    pub fn add_session(&mut self, session: Session) {
+        if self.sessions.len() >= MAX_SESSIONS {
+            // Evict the oldest session that isn't the current one
+            if let Some(idx) = self
+                .sessions
+                .iter()
+                .position(|s| Some(&s.id) != self.current_session_id.as_ref())
+            {
+                self.sessions.remove(idx);
+            }
+        }
+        self.sessions.push(session);
     }
 
     pub fn current_session(&self) -> Option<&Session> {
@@ -248,7 +265,7 @@ impl AppState {
                 },
             ],
         };
-        self.sessions.push(session);
+        self.add_session(session);
         self.current_session_id = Some("demo-1".to_string());
         self.working_directory = "~/cosh".to_string();
         self.connected = true;

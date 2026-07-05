@@ -802,7 +802,7 @@ impl App {
                             KeyCode::Enter => {
                                 match self.home_view.selected_action() {
                                     HomeAction::NewSession => {
-                                        self.state.sessions.push(crate::types::Session {
+                                        self.state.add_session(crate::types::Session {
                                             id: format!("session-{}", self.state.sessions.len()),
                                             title: "New Session".to_string(),
                                             messages: vec![],
@@ -926,7 +926,7 @@ impl App {
                             if self.state.current_session_id.is_none() {
                                 let id = format!("session-{}", self.state.sessions.len());
                                 let title: String = msg.chars().take(40).collect();
-                                self.state.sessions.push(crate::types::Session {
+                                self.state.add_session(crate::types::Session {
                                     id: id.clone(),
                                     title,
                                     messages: vec![],
@@ -1966,7 +1966,7 @@ impl App {
             if let Some(action) = self.home_view.handle_mouse(&mouse, session_area) {
                 match action {
                     crate::routes::home::HomeAction::NewSession => {
-                        self.state.sessions.push(crate::types::Session {
+                        self.state.add_session(crate::types::Session {
                             id: format!("session-{}", self.state.sessions.len()),
                             title: "New Session".to_string(),
                             messages: vec![],

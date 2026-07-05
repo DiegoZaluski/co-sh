@@ -2,6 +2,7 @@
 //! display helpers. These are the single source of truth for the parser, the
 //! tokenizer, the prompt, and the formal grammar.
 use super::types::Cursor;
+use std::fmt::Write;
 use xxhash_rust::xxh32::xxh32;
 
 /// File-section header prefix: `¶path#hash`.
@@ -203,11 +204,13 @@ pub fn format_numbered_line(line_number: u32, line: &str) -> String {
 /// Panics if `start_line` plus the line index overflows a `u32`.
 #[must_use]
 pub fn format_numbered_lines(text: &str, start_line: u32) -> String {
-    let lines: Vec<&str> = text.split('\n').collect();
-    lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| format_numbered_line(start_line + u32::try_from(i).unwrap(), line))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let line_count = text.lines().count();
+    let mut result = String::with_capacity(text.len() + line_count * 5);
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+        let _ = write!(result, "{start_line}{HL_LINE_BODY_SEP}{line}", start_line = start_line + i as u32);
+    }
+    result
 }

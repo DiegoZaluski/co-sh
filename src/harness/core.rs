@@ -347,7 +347,7 @@ impl Harness {
         mut on_token: impl FnMut(&str),
     ) -> Result<String, String> {
         #[cfg(test)]
-        if let Some(response) = self.mock_stream_response.clone() {
+        if let Some(response) = self.mock_stream_response.take() {
             match response {
                 Ok(tokens) => {
                     let mut extractor = self.build_extractor();
@@ -560,6 +560,7 @@ impl Harness {
                 .ok_or_else(|| "no pending tool calls".to_string())?;
 
             let serde_json::Value::Object(ref args_map) = tc.arguments else {
+                self.tool_issuer.pop_front();
                 return Err("tool arguments must be a JSON object".to_string());
             };
 
@@ -585,8 +586,15 @@ impl Harness {
         let idx = self
             .sessions
             .iter()
-            .position(|s| s.tools.iter().any(|t| t.name == tool_name))
-            .ok_or_else(|| format!("no server found for tool '{tool_name}'"))?;
+            .position(|s| s.tools.iter().any(|t| t.name == tool_name));
+
+        let idx = match idx {
+            Some(i) => i,
+            None => {
+                self.tool_issuer.pop_front();
+                return Err(format!("no server found for tool '{tool_name}'"));
+            }
+        };
 
         let params = CallToolRequestParams::new(tool_name).with_arguments(args_map);
 
