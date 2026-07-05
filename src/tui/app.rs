@@ -1780,7 +1780,7 @@ impl App {
             }
         }
 
-        // 8. Home view
+        // 8. Home view (same area computation as render: skip header row + footer)
         if matches!(self.mode(), AppMode::Home) && !self.dialog.visible() {
             let area = self.terminal_size();
             let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
@@ -1790,7 +1790,14 @@ impl App {
                 area.width.saturating_sub(sidebar_w),
                 area.height,
             );
-            if let Some(action) = self.home_view.handle_mouse(&mouse, main_area) {
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let session_area = Rect::new(
+                main_area.x,
+                area.y + 1,
+                main_area.width,
+                footer_y.saturating_sub(area.y + 1),
+            );
+            if let Some(action) = self.home_view.handle_mouse(&mouse, session_area) {
                 match action {
                     crate::routes::home::HomeAction::NewSession => {
                         self.state.sessions.push(crate::types::Session {
