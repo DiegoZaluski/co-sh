@@ -26,6 +26,50 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
+fn dim_color(color: Color, brightness: f64) -> Color {
+    let (r, g, b) = match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0, 0, 0),
+    };
+    Color::Rgb(
+        (r as f64 * brightness) as u8,
+        (g as f64 * brightness) as u8,
+        (b as f64 * brightness) as u8,
+    )
+}
+
+fn render_logo(buf: &mut Buffer, area: Rect, cx: u16, logo_start_y: u16, frame: u64, primary: Color) {
+    let t = frame as f64 * 0.025;
+    let center_x: f64 = 14.0;
+    let center_y: f64 = 2.5;
+
+    let max_dist = (center_x.powi(2) + center_y.powi(2)).sqrt();
+    let pulse_radius = (t * 0.8).sin().abs() * max_dist;
+
+    for (row, line) in LOGO.iter().enumerate() {
+        let ly = logo_start_y + row as u16;
+        let lx = cx.saturating_sub(LOGO_WIDTH as u16 / 2);
+        let right = (lx + LOGO_WIDTH as u16).min(area.right());
+
+        for (col, ch) in line.chars().enumerate() {
+            let cx_pos = lx + col as u16;
+            if cx_pos >= right || ch == ' ' {
+                continue;
+            }
+
+            let dist = ((col as f64 - center_x).powi(2) + (row as f64 - center_y).powi(2)).sqrt();
+            let ring = (dist - pulse_radius).abs();
+            let brightness = (-ring * 0.6).exp();
+            let bri = (0.15 + brightness * 0.85).min(1.0);
+
+            if let Some(cell) = buf.cell_mut((cx_pos, ly)) {
+                cell.set_char(ch);
+                cell.set_style(Style::default().fg(dim_color(primary, bri)));
+            }
+        }
+    }
+}
+
 const LOGO_WIDTH: usize = 28;
 
 const LOGO: &[&str] = &[
@@ -49,11 +93,29 @@ pub enum HomeAction {
 
 pub struct HomeView {
     pub selected_index: usize,
+    pub frame: u64,
+    pub anim_active: bool,
+    pub anim_total_frames: u64,
 }
 
 impl HomeView {
     pub fn new() -> Self {
-        HomeView { selected_index: 0 }
+        HomeView {
+            selected_index: 0,
+            frame: 0,
+            anim_active: true,
+            anim_total_frames: 850,
+        }
+    }
+
+    pub fn advance(&mut self) {
+        if !self.anim_active {
+            return;
+        }
+        self.frame += 1;
+        if self.frame >= self.anim_total_frames {
+            self.anim_active = false;
+        }
     }
 
     pub fn select_next(&mut self) {
@@ -104,19 +166,17 @@ impl HomeView {
         None
     }
 
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme) {
         let cx = area.x + area.width / 2;
+
+        self.advance();
 
         let primary = rgba_color(theme.primary);
         let muted = rgba_color(theme.text_muted);
         let text = rgba_color(theme.text);
 
         let logo_start_y = area.y + 2;
-        for (i, line) in LOGO.iter().enumerate() {
-            let ly = logo_start_y + i as u16;
-            let lx = cx.saturating_sub(LOGO_WIDTH as u16 / 2);
-            draw_text_line(buf, line, lx, ly, area.width, Style::default().fg(primary));
-        }
+        render_logo(buf, area, cx, logo_start_y, self.frame, primary);
 
         let tagline_y = logo_start_y + LOGO.len() as u16 + 1;
         let tagline_x = cx.saturating_sub(TAGLINE.len() as u16 / 2);
