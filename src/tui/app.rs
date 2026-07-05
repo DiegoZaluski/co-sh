@@ -617,7 +617,7 @@ impl App {
             match self.mode() {
                 AppMode::Home => {
                     self.prompt_view.blur();
-                    self.home_view.render(buf, session_area, &self.state, &self.theme);
+                    self.home_view.render(buf, session_area, &self.theme);
                 }
                 AppMode::Session => {
                     self.prompt_view.focus();
