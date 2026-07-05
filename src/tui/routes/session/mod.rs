@@ -675,11 +675,6 @@ impl SessionView {
 
             if msg_y < visible_bottom {
                 // Account for border offsets based on message type.
-                // - User messages: render_user_message draws a left border at area.y,
-                //   content starts at area.y + 1  →  border_offset = 1
-                // - Assistant error messages (msg-err-*): render_assistant_message
-                //   draws a red left border, content starts at area.y + 2 → border_offset = 2
-                // - Regular assistant messages: content starts at area.y → border_offset = 0
                 let border_offset = if msg.role == MessageRole::User {
                     1
                 } else if msg.id.starts_with("msg-err-") {
@@ -693,22 +688,56 @@ impl SessionView {
                     let part_h = i32::from(Self::estimate_part_height(part, max_w, config).max(1));
                     let p_y1 = part_y;
                     let p_y2 = part_y + part_h;
+                    let vp_y1 = p_y1.max(i32::from(inner_area.y)) as u16;
+                    let vp_y2 = p_y2.min(i32::from(inner_area.bottom())) as u16;
+                    if vp_y1 >= vp_y2 {
+                        part_y += part_h;
+                        continue;
+                    }
 
                     match part {
                         crate::types::Part::Text(t) if !t.synthetic => {
                             let content = if config.conceal { conceal_text(&t.text) } else { t.text.clone() };
-                            if !content.chars().all(|c| c.is_whitespace()) {
-                                self.text_regions.push(TextRegion {
-                                    y1: p_y1.max(i32::from(inner_area.y)) as u16,
-                                    y2: p_y2.min(i32::from(inner_area.bottom())) as u16,
-                                    x1: x_off,
-                                    x2: x_off + max_w,
-                                    text: content,
-                                });
+                            if content.chars().all(|c| c.is_whitespace()) {
+                                part_y += part_h;
+                                continue;
+                            }
+                            // Split content into visual wrapped lines, exactly like
+                            // draw_text_wrap displays them: each screen line is at
+                            // most `max_w` chars. Store each visual line as its
+                            // own TextRegion with 1-line height so get_text_in_region
+                            // can precisely slice characters by x-coordinate.
+                            let max_w_usize = max_w as usize;
+                            let mut line_y = vp_y1;
+                            for logical_line in content.lines() {
+                                if logical_line.is_empty() {
+                                    if line_y < vp_y2 {
+                                        self.text_regions.push(TextRegion {
+                                            y1: line_y, y2: line_y + 1,
+                                            x1: x_off, x2: x_off + max_w,
+                                            text: String::new(),
+                                        });
+                                        line_y += 1;
+                                    }
+                                    continue;
+                                }
+                                let mut remaining = logical_line;
+                                while !remaining.is_empty() && line_y < vp_y2 {
+                                    let n = remaining.chars().take(max_w_usize).count();
+                                    let split = remaining.char_indices().nth(n)
+                                        .map_or(remaining.len(), |(i, _)| i);
+                                    let visual_line = &remaining[..split];
+                                    self.text_regions.push(TextRegion {
+                                        y1: line_y, y2: line_y + 1,
+                                        x1: x_off, x2: x_off + max_w,
+                                        text: visual_line.to_string(),
+                                    });
+                                    line_y += 1;
+                                    remaining = &remaining[split..];
+                                }
                             }
                         }
                         crate::types::Part::Tool(t) => {
-                            // Mirror the same skip logic as render_parts.
                             if !config.show_generic_tool_output
                                 && crate::util::tool_render::tool_display(&t.tool) == "generic"
                             {
@@ -726,13 +755,18 @@ impl SessionView {
                                         crate::util::scroll::collapse_tool_output(trimmed, 10, 800)
                                             .output
                                     };
-                                    self.text_regions.push(TextRegion {
-                                        y1: p_y1.max(i32::from(inner_area.y)) as u16,
-                                        y2: p_y2.min(i32::from(inner_area.bottom())) as u16,
-                                        x1: x_off,
-                                        x2: x_off + max_w,
-                                        text: display,
-                                    });
+                                    // Store each line of tool output separately.
+                                    let mut line_y = vp_y1;
+                                    for display_line in display.lines() {
+                                        if line_y < vp_y2 {
+                                            self.text_regions.push(TextRegion {
+                                                y1: line_y, y2: line_y + 1,
+                                                x1: x_off, x2: x_off + max_w,
+                                                text: display_line.to_string(),
+                                            });
+                                            line_y += 1;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -740,23 +774,26 @@ impl SessionView {
                             let expanded = config.thinking_mode
                                 || self.tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
                             let header = if expanded { "- Thought" } else { "+ Thought" };
-                            self.text_regions.push(TextRegion {
-                                y1: p_y1.max(i32::from(inner_area.y)) as u16,
-                                y2: (p_y1 + 1).min(i32::from(inner_area.bottom())) as u16,
-                                x1: x_off,
-                                x2: x_off + max_w,
-                                text: header.to_string(),
-                            });
-                            if expanded && !r.text.is_empty() {
-                                let body = &r.text[..r.text.lines().take(10).collect::<Vec<_>>().join("\n").len()];
-                                let body_lines = body.lines().count().min(10).max(1) as i32;
+                            if vp_y1 < vp_y2 {
                                 self.text_regions.push(TextRegion {
-                                    y1: (p_y1 + 1).max(i32::from(inner_area.y)) as u16,
-                                    y2: (p_y1 + 1 + body_lines).min(i32::from(inner_area.bottom())) as u16,
-                                    x1: x_off + 2,
-                                    x2: x_off + max_w,
-                                    text: body.to_string(),
+                                    y1: vp_y1, y2: vp_y1 + 1,
+                                    x1: x_off, x2: x_off + max_w,
+                                    text: header.to_string(),
                                 });
+                            }
+                            if expanded && !r.text.is_empty() {
+                                let mut line_y = vp_y1 + 1;
+                                let truncated = r.text.lines().take(10).collect::<Vec<_>>().join("\n");
+                                for line in truncated.lines() {
+                                    if line_y < vp_y2 && !line.is_empty() {
+                                        self.text_regions.push(TextRegion {
+                                            y1: line_y, y2: line_y + 1,
+                                            x1: x_off + 2, x2: x_off + max_w,
+                                            text: line.to_string(),
+                                        });
+                                        line_y += 1;
+                                    }
+                                }
                             }
                         }
                         _ => {}
@@ -771,38 +808,40 @@ impl SessionView {
     }
 
     /// Return the text within a screen-coordinate rectangle (inclusive-exclusive).
-    pub fn get_text_in_region(&self, y1: u16, y2: u16, _x1: u16, _x2: u16) -> String {
+    /// Each TextRegion now stores exactly 1 visual line, so x-coordinates can
+    /// be used to slice individual characters from each line.
+    pub fn get_text_in_region(&self, y1: u16, y2: u16, x1: u16, x2: u16) -> String {
         let mut result = String::new();
         for region in &self.text_regions {
-            let overlap_y1 = region.y1.max(y1);
-            let overlap_y2 = region.y2.min(y2);
-            if overlap_y1 < overlap_y2 {
-                // Determine which lines of the region's text to extract.
-                let lines: Vec<&str> = region.text.lines().collect();
-                let line_count = lines.len() as u16;
-                let region_height = region.y2 - region.y1;
+            // Check y overlap.
+            if region.y1 >= y2 || region.y2 <= y1 {
+                continue;
+            }
+            // Check x overlap.
+            let ox1 = region.x1.max(x1);
+            let ox2 = region.x2.min(x2);
+            if ox1 >= ox2 {
+                continue;
+            }
 
-                // Map the overlap to line range.
-                let line_start = if region_height > 0 {
-                    ((overlap_y1 - region.y1) * line_count / region_height) as usize
-                } else {
-                    0
-                };
-                let line_end = if region_height > 0 {
-                    ((overlap_y2 - region.y1) * line_count / region_height) as usize
-                } else {
-                    line_count as usize
-                };
-                let line_end = line_end.min(line_count as usize);
+            // Map x overlap to character columns within this visual line.
+            let col_start = (ox1 - region.x1) as usize;
+            let col_end = (ox2 - region.x1) as usize;
 
-                for i in line_start..line_end {
-                    if let Some(line) = lines.get(i) {
-                        if !result.is_empty() {
-                            result.push('\n');
-                        }
-                        result.push_str(line);
-                    }
+            let chars: Vec<char> = region.text.chars().collect();
+            let line_len = chars.len();
+
+            if col_start >= line_len {
+                continue;
+            }
+            let end = col_end.min(line_len);
+
+            let sliced: String = chars[col_start..end].iter().collect();
+            if !sliced.is_empty() {
+                if !result.is_empty() {
+                    result.push('\n');
                 }
+                result.push_str(&sliced);
             }
         }
         result
