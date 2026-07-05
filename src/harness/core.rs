@@ -463,7 +463,7 @@ impl Harness {
                 }
 
                 // Intercept `ask_questions` — send to TUI, wait for user answer
-                if info.as_ref().map_or(false, |(n, _)| n == "ask_questions") {
+                if info.as_ref().is_some_and(|(n, _)| n == "ask_questions") {
                     use cosh_tools::question::types::{QuestionInput, QuestionOutput};
 
                     let input: Result<QuestionInput, String> = info

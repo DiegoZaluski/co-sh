@@ -172,6 +172,16 @@ impl TextRenderable {
         self.has_manual_styled_text = false;
         self.children.clear();
     }
+
+    /// Return the plain text content (concatenating all chunks).
+    #[must_use]
+    pub fn plain_text(&self) -> String {
+        let mut out = String::new();
+        for chunk in &self.text.chunks {
+            out.push_str(&chunk.text);
+        }
+        out
+    }
 }
 
 impl Renderable for TextRenderable {

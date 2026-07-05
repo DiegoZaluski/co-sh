@@ -35,6 +35,7 @@ use crate::types::SessionStatus;
 use crate::ui::command_palette::CommandPalette;
 use crate::ui::dialogs::{DialogAction, DialogState, DialogType};
 use crate::ui::toast::ToastState;
+use crate::util::selection;
 
 fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
@@ -79,6 +80,12 @@ pub struct App {
     theme_dialog_original: Option<String>,
     /// Stores the model that was active when the model dialog opened (for cancel/restore)
     model_dialog_original: Option<String>,
+
+    // ── Mouse drag / selection tracking ───────────────────────────────────────────
+    /// Position where the mouse was pressed down (for detecting drag selections).
+    mouse_down_pos: Option<(u16, u16)>,
+    /// Whether a drag-selection is in progress.
+    mouse_drag_active: bool,
 }
 
 impl App {
@@ -118,6 +125,8 @@ impl App {
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
             agent_spinner: None,
+            mouse_down_pos: None,
+            mouse_drag_active: false,
         }
     }
 
@@ -695,9 +704,26 @@ impl App {
         match event::read()? {
             Event::Key(key) => {
                 if key.kind == KeyEventKind::Press {
+                    // Escape clears selection if there is one.
+                    if key.code == KeyCode::Esc {
+                        if self.prompt_view.has_selection() {
+                            self.prompt_view.clear_selection();
+                            return Ok(false);
+                        }
+                    }
+
                     if key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
+                        // If there is text selected in the prompt, copy it instead of quitting.
+                        if matches!(self.mode(), AppMode::Session)
+                            && self.prompt_view.has_selection()
+                        {
+                            let text = self.prompt_view.selected_text();
+                            selection::copy_selection(&text, &mut self.toast_state);
+                            self.prompt_view.clear_selection();
+                            return Ok(false);
+                        }
                         self.dialog.show(DialogType::Confirm {
                             message: "Quit cosh?".into(),
                         });
@@ -1560,6 +1586,108 @@ impl App {
                 return Ok(true);
             }
         };
+
+        // ── Selection / drag tracking ─────────────────────────────────────────
+        match (event_type, button) {
+            (MouseEventType::Down, MouseButton::Left) => {
+                self.mouse_down_pos = Some((x, y));
+                self.mouse_drag_active = false;
+                // Let normal click handling proceed (we only track potential drags)
+            }
+            (MouseEventType::Drag, MouseButton::Left) => {
+                if self.mouse_down_pos.is_some() {
+                    self.mouse_drag_active = true;
+                }
+                return Ok(true);
+            }
+            (MouseEventType::Up, MouseButton::Left) => {
+                let drag_start = self.mouse_down_pos.take();
+                let is_drag = self.mouse_drag_active
+                    || drag_start.map_or(false, |(sx, sy)| sx != x || sy != y);
+                self.mouse_drag_active = false;
+
+                if is_drag {
+                    // Auto-copy prompt selection on mouse release after drag.
+                    if self.prompt_view.has_selection() {
+                        let text = self.prompt_view.selected_text();
+                        selection::copy_selection(&text, &mut self.toast_state);
+                        self.prompt_view.clear_selection();
+                        return Ok(true);
+                    }
+
+                    // Extract selected text from the session view by drag region.
+                    // Must use the exact same session_area / inner_area calculation
+                    // as in SessionView::render() so that text y-coordinates match.
+                    if matches!(self.mode(), AppMode::Session)
+                        && let Some((sx, sy)) = drag_start
+                    {
+                        let area = self.terminal_size();
+                        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+                        let main_area = Rect::new(
+                            area.x + sidebar_w,
+                            area.y,
+                            area.width.saturating_sub(sidebar_w),
+                            area.height,
+                        );
+                        let prompt_h = self.prompt_view
+                            .required_height(main_area.width.saturating_sub(4));
+                        let question_h = if self.question_dialog.visible {
+                            self.question_dialog.required_height(main_area.width.saturating_sub(4))
+                        } else {
+                            0
+                        };
+                        let spinner_h = if matches!(self.state.status, SessionStatus::Working)
+                            && self.agent_spinner.is_some()
+                        {
+                            1
+                        } else {
+                            0
+                        };
+                        let footer_y = main_area.bottom().saturating_sub(1);
+                        let prompt_area_y = footer_y.saturating_sub(prompt_h);
+                        let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
+                        let question_area_y = spinner_area_y.saturating_sub(question_h);
+                        let session_bottom = question_area_y;
+                        let session_area = Rect::new(
+                            main_area.x,
+                            area.y + 1,
+                            main_area.width,
+                            session_bottom.saturating_sub(area.y + 1),
+                        );
+
+                        // Same inner_area calculation as SessionView::render()
+                        let margin = 2u16;
+                        let inner_area = Rect::new(
+                            session_area.x + margin,
+                            session_area.y,
+                            session_area.width.saturating_sub(margin * 2),
+                            session_area.height,
+                        );
+                        let max_w = inner_area.width.saturating_sub(6);
+
+                        if let Some(session) = self.state.current_session() {
+                            self.session_view.build_text_regions(
+                                session,
+                                inner_area,
+                                max_w,
+                                &self.config,
+                            );
+                        }
+
+                        let y1 = sy.min(y);
+                        let y2 = sy.max(y) + 1;
+                        let x1 = sx.min(x);
+                        let x2 = sx.max(x) + 1;
+                        let text = self.session_view.get_text_in_region(y1, y2, x1, x2);
+                        if !text.is_empty() {
+                            selection::copy_selection(&text, &mut self.toast_state);
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
 
         // Only handle left-click UP events (standard "click" action)
         if event_type != MouseEventType::Up || button != MouseButton::Left {

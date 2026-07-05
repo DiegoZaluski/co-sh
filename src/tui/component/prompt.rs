@@ -65,6 +65,8 @@ pub struct PromptView {
     pub terminal_focused: bool,
     pub last_input_at: SystemTime,
     pub blink_start: SystemTime,
+    sel_start: Option<usize>,
+    sel_end: Option<usize>,
 }
 
 impl PromptView {
@@ -80,6 +82,8 @@ impl PromptView {
             terminal_focused: true,
             last_input_at: SystemTime::now(),
             blink_start: SystemTime::now(),
+            sel_start: None,
+            sel_end: None,
         }
     }
 
@@ -139,6 +143,27 @@ impl PromptView {
     pub fn note_activity(&mut self) {
         self.last_input_at = SystemTime::now();
         self.blink_start = SystemTime::now();
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.sel_start.is_some() && self.sel_end.is_some() && self.sel_start != self.sel_end
+    }
+
+    pub fn selected_text(&self) -> String {
+        match (self.sel_start, self.sel_end) {
+            (Some(s), Some(e)) if s != e => {
+                let start = s.min(e);
+                let end = s.max(e);
+                let end = end.min(self.input.len());
+                self.input[start..end].to_string()
+            }
+            _ => String::new(),
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.sel_start = None;
+        self.sel_end = None;
     }
 
     pub fn prev_agent(&mut self, num_agents: usize) {

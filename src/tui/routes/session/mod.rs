@@ -72,9 +72,25 @@ fn conceal_text(text: &str) -> String {
     text.chars().map(concealed_char).collect()
 }
 
+/// A rectangular region of text on screen with its content.
+struct TextRegion {
+    /// Top y-coordinate (inclusive).
+    y1: u16,
+    /// Bottom y-coordinate (exclusive).
+    y2: u16,
+    /// Left x-coordinate (inclusive).
+    x1: u16,
+    /// Right x-coordinate (exclusive).
+    x2: u16,
+    /// The plain text content displayed in this region.
+    text: String,
+}
+
 pub struct SessionView {
     pub scroll_y: i32,
     pub tool_state: ToolRenderState,
+    /// Text regions from the last render pass, used for mouse-based selection.
+    text_regions: Vec<TextRegion>,
 }
 
 impl SessionView {
@@ -82,6 +98,7 @@ impl SessionView {
         SessionView {
             scroll_y: 0,
             tool_state: ToolRenderState::new(),
+            text_regions: Vec::new(),
         }
     }
 
@@ -622,6 +639,171 @@ impl SessionView {
         false
     }
 
+    /// Build the list of text regions for mouse-based selection.
+    pub fn build_text_regions(
+        &mut self,
+        session: &crate::types::Session,
+        inner_area: Rect,
+        max_w: u16,
+        config: &TuiConfig,
+    ) {
+        self.text_regions.clear();
+
+        let scroll = self.scroll_y;
+        let x_off = inner_area.x + 3;
+
+        let mut y = i32::from(inner_area.y) - scroll;
+
+        for (idx, msg) in session.messages.iter().enumerate() {
+            if idx > 0 {
+                y += 1;
+            }
+
+            // In build_text_regions we don't add +2 for the last assistant message's
+            // metadata footer because we don't capture that footer text as regions.
+            let mut msg_h = 2i32;
+            for part in &msg.parts {
+                msg_h += i32::from(Self::estimate_part_height(part, max_w, config));
+            }
+
+            let msg_y = y.max(i32::from(inner_area.y) - 1) as u16;
+            let visible_bottom = inner_area.bottom();
+
+            if msg_y < visible_bottom {
+                // Account for border offsets based on message type.
+                // - User messages: render_user_message draws a left border at area.y,
+                //   content starts at area.y + 1  →  border_offset = 1
+                // - Assistant error messages (msg-err-*): render_assistant_message
+                //   draws a red left border, content starts at area.y + 2 → border_offset = 2
+                // - Regular assistant messages: content starts at area.y → border_offset = 0
+                let border_offset = if msg.role == MessageRole::User {
+                    1
+                } else if msg.id.starts_with("msg-err-") {
+                    2
+                } else {
+                    0
+                };
+                let mut part_y = i32::from(msg_y) + border_offset;
+
+                for part in &msg.parts {
+                    let part_h = i32::from(Self::estimate_part_height(part, max_w, config).max(1));
+                    let p_y1 = part_y;
+                    let p_y2 = part_y + part_h;
+
+                    match part {
+                        crate::types::Part::Text(t) if !t.synthetic => {
+                            let content = if config.conceal { conceal_text(&t.text) } else { t.text.clone() };
+                            if !content.chars().all(|c| c.is_whitespace()) {
+                                self.text_regions.push(TextRegion {
+                                    y1: p_y1.max(i32::from(inner_area.y)) as u16,
+                                    y2: p_y2.min(i32::from(inner_area.bottom())) as u16,
+                                    x1: x_off,
+                                    x2: x_off + max_w,
+                                    text: content,
+                                });
+                            }
+                        }
+                        crate::types::Part::Tool(t) => {
+                            // Mirror the same skip logic as render_parts.
+                            if !config.show_generic_tool_output
+                                && crate::util::tool_render::tool_display(&t.tool) == "generic"
+                            {
+                                part_y += part_h;
+                                continue;
+                            }
+                            if let Some(ref output) = t.output {
+                                let trimmed = output.trim();
+                                if !trimmed.is_empty() {
+                                    let display = if config.show_tool_details
+                                        || !matches!(t.status, crate::types::ToolStatus::Completed)
+                                    {
+                                        trimmed.to_string()
+                                    } else {
+                                        crate::util::scroll::collapse_tool_output(trimmed, 10, 800)
+                                            .output
+                                    };
+                                    self.text_regions.push(TextRegion {
+                                        y1: p_y1.max(i32::from(inner_area.y)) as u16,
+                                        y2: p_y2.min(i32::from(inner_area.bottom())) as u16,
+                                        x1: x_off,
+                                        x2: x_off + max_w,
+                                        text: display,
+                                    });
+                                }
+                            }
+                        }
+                        crate::types::Part::Reasoning(r) => {
+                            let expanded = config.thinking_mode
+                                || self.tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
+                            let header = if expanded { "- Thought" } else { "+ Thought" };
+                            self.text_regions.push(TextRegion {
+                                y1: p_y1.max(i32::from(inner_area.y)) as u16,
+                                y2: (p_y1 + 1).min(i32::from(inner_area.bottom())) as u16,
+                                x1: x_off,
+                                x2: x_off + max_w,
+                                text: header.to_string(),
+                            });
+                            if expanded && !r.text.is_empty() {
+                                let body = &r.text[..r.text.lines().take(10).collect::<Vec<_>>().join("\n").len()];
+                                let body_lines = body.lines().count().min(10).max(1) as i32;
+                                self.text_regions.push(TextRegion {
+                                    y1: (p_y1 + 1).max(i32::from(inner_area.y)) as u16,
+                                    y2: (p_y1 + 1 + body_lines).min(i32::from(inner_area.bottom())) as u16,
+                                    x1: x_off + 2,
+                                    x2: x_off + max_w,
+                                    text: body.to_string(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    part_y += part_h;
+                }
+            }
+
+            y += msg_h;
+        }
+    }
+
+    /// Return the text within a screen-coordinate rectangle (inclusive-exclusive).
+    pub fn get_text_in_region(&self, y1: u16, y2: u16, _x1: u16, _x2: u16) -> String {
+        let mut result = String::new();
+        for region in &self.text_regions {
+            let overlap_y1 = region.y1.max(y1);
+            let overlap_y2 = region.y2.min(y2);
+            if overlap_y1 < overlap_y2 {
+                // Determine which lines of the region's text to extract.
+                let lines: Vec<&str> = region.text.lines().collect();
+                let line_count = lines.len() as u16;
+                let region_height = region.y2 - region.y1;
+
+                // Map the overlap to line range.
+                let line_start = if region_height > 0 {
+                    ((overlap_y1 - region.y1) * line_count / region_height) as usize
+                } else {
+                    0
+                };
+                let line_end = if region_height > 0 {
+                    ((overlap_y2 - region.y1) * line_count / region_height) as usize
+                } else {
+                    line_count as usize
+                };
+                let line_end = line_end.min(line_count as usize);
+
+                for i in line_start..line_end {
+                    if let Some(line) = lines.get(i) {
+                        if !result.is_empty() {
+                            result.push('\n');
+                        }
+                        result.push_str(line);
+                    }
+                }
+            }
+        }
+        result
+    }
+
     #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
     pub fn render(
         &mut self,
@@ -663,6 +845,9 @@ impl SessionView {
         let visible_height = i32::from(inner_area.height);
         let max_scroll = (total_height - visible_height).max(0);
         self.scroll_y = self.scroll_y.clamp(0, max_scroll);
+
+        // Build text regions for mouse-based selection.
+        self.build_text_regions(session, inner_area, max_w, config);
 
         if config.show_scrollbar {
             let scrollbar_area = Rect::new(

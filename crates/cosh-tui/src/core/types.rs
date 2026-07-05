@@ -118,7 +118,72 @@ pub struct MemorySnapshot {
     pub array_buffers: u64,
 }
 
-pub struct Selection;
+/// Represents a text selection in the TUI, tracking the anchor (start) and focus (end) points.
+pub struct Selection {
+    /// The x-coordinate of the anchor (where the selection started).
+    pub anchor_x: i32,
+    /// The y-coordinate of the anchor (where the selection started).
+    pub anchor_y: i32,
+    /// The x-coordinate of the focus (current endpoint of the selection).
+    pub focus_x: i32,
+    /// The y-coordinate of the focus (current endpoint of the selection).
+    pub focus_y: i32,
+    /// Whether the user is currently dragging to extend/resize the selection.
+    pub is_dragging: bool,
+    /// Whether the selection is active (non-empty).
+    pub is_active: bool,
+}
+
+impl Selection {
+    /// Create a new selection starting at the given position.
+    #[must_use]
+    pub fn new(x: i32, y: i32) -> Self {
+        Self {
+            anchor_x: x,
+            anchor_y: y,
+            focus_x: x,
+            focus_y: y,
+            is_dragging: true,
+            is_active: false,
+        }
+    }
+
+    /// Update the focus point (called during drag).
+    pub fn update(&mut self, x: i32, y: i32) {
+        self.focus_x = x;
+        self.focus_y = y;
+        self.is_active = true;
+    }
+
+    /// Finish the selection (called on mouse up).
+    pub fn finish(&mut self) {
+        self.is_dragging = false;
+        self.is_active = true;
+    }
+
+    /// Clear the selection.
+    pub fn clear(&mut self) {
+        self.is_active = false;
+        self.is_dragging = false;
+    }
+
+    /// Returns `(min_x, min_y, max_x, max_y)` in screen coordinates,
+    /// where `min` is the top-left of the selection and `max` is the bottom-right.
+    #[must_use]
+    pub fn bounds(&self) -> (i32, i32, i32, i32) {
+        let min_x = self.anchor_x.min(self.focus_x);
+        let min_y = self.anchor_y.min(self.focus_y);
+        let max_x = self.anchor_x.max(self.focus_x);
+        let max_y = self.anchor_y.max(self.focus_y);
+        (min_x, min_y, max_x, max_y)
+    }
+
+    /// Returns `true` if the selection spans a non-zero area.
+    #[must_use]
+    pub fn has_non_zero_area(&self) -> bool {
+        self.is_active && (self.anchor_x != self.focus_x || self.anchor_y != self.focus_y)
+    }
+}
 
 // ── Mouse event types ──────────────────────────────────────────────────────────
 

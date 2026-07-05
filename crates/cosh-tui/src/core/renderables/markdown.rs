@@ -70,6 +70,12 @@ impl MarkdownRenderable {
         self.conceal = value;
     }
 
+    /// Return the raw markdown content.
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
     fn default_fg(&self) -> RGBA {
         self.fg.unwrap_or(RGBA::from_ints(220, 220, 220, 255))
     }
@@ -83,6 +89,7 @@ impl MarkdownRenderable {
         Color::Rgb(r, g, b)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_text(
         text: &str,
         buf: &mut Buffer,
