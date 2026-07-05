@@ -153,8 +153,8 @@ impl DialogState {
                 let dialog_h = 7;
                 let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
 
-                // Draw purple-blue border at the OUTER edge of the box (no background fill)
-                let border_color = Color::Rgb(128, 96, 224);
+                // Draw border using theme color
+                let border_color = rgba_color(theme.border_active);
                 let max_x = dialog_x + dialog_w - 1;
                 let max_y = dialog_y + dialog_h - 1;
 
