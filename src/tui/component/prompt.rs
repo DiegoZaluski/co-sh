@@ -186,6 +186,7 @@ impl PromptView {
         agent_colors: &AgentColors,
         unique_agents: &[String],
         now: SystemTime,
+        model_name: &str,
     ) {
         let text_w = area.width.saturating_sub(5) as usize;
         let display_placeholder = self.input.is_empty();
@@ -294,6 +295,13 @@ impl PromptView {
             area.width.saturating_sub(2),
             muted_style,
         );
+
+        // Model name on the right side of the footer line
+        if !model_name.is_empty() {
+            let model_text = format!(" {}", model_name);
+            let model_x = area.right().saturating_sub(model_text.len() as u16);
+            draw_text_line(buf, &model_text, model_x, footer_y, model_text.len() as u16, muted_style);
+        }
 
         // Draw cursor if focused
         if self.is_focused {

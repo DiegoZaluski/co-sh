@@ -650,6 +650,7 @@ impl App {
                             spinner.render(buf, spinner_area.x + 1, spinner_area.y);
                         }
                     }
+                    let model_name = self.llm_config.model.as_deref().unwrap_or("");
                     self.prompt_view.render(
                         buf,
                         prompt_area,
@@ -658,6 +659,7 @@ impl App {
                         &agent_colors,
                         &unique_agents,
                         std::time::SystemTime::now(),
+                        model_name,
                     );
                 }
             }
