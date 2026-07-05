@@ -3,6 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use cosh_tui::core::lib::rgba::RGBA;
+use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::Theme;
 
@@ -74,6 +75,35 @@ impl HomeView {
         }
     }
 
+    pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<HomeAction> {
+        let cx = area.x + area.width / 2;
+        let logo_start_y = area.y + 2;
+        let tagline_y = logo_start_y + LOGO.len() as u16 + 1;
+        let menu_y = tagline_y + 4;
+
+        let max_entry_len = MENU_ITEMS
+            .iter()
+            .map(|p| format!("  {p}").len())
+            .max()
+            .unwrap_or(0);
+        let menu_left = cx.saturating_sub((max_entry_len / 2) as u16);
+
+        let my = mouse.y;
+        let mx = mouse.x;
+
+        for (i, _item) in MENU_ITEMS.iter().enumerate() {
+            let item_y = menu_y + i as u16;
+            if my == item_y && mx >= menu_left && mx < menu_left + max_entry_len as u16 {
+                return Some(match i {
+                    0 => HomeAction::NewSession,
+                    _ => HomeAction::ToggleSidebar,
+                });
+            }
+        }
+
+        None
+    }
+
     pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
         let cx = area.x + area.width / 2;
 
@@ -115,7 +145,7 @@ impl HomeView {
                 break;
             }
             let is_selected = i == self.selected_index;
-            let prefix = if is_selected { "> " } else { "  " };
+            let prefix = if is_selected { "🞴 " } else { "  " };
             let entry = format!("{prefix}{item}");
             let style = if is_selected {
                 Style::default().fg(primary)

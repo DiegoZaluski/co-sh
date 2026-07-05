@@ -1,4 +1,5 @@
 use cosh_tui::core::lib::rgba::RGBA;
+use cosh_tui::core::types::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -159,6 +160,36 @@ impl SlashMenu {
         }
         let pos = idxs.iter().position(|&i| i == self.selected)?;
         Some(&self.commands[idxs[pos]])
+    }
+
+    /// Handle a mouse click on the slash menu. Returns true if the click selected a command.
+    /// `prompt_area` is the same area passed to `render()`.
+    pub fn handle_mouse(&mut self, mouse: &MouseEvent, prompt_area: Rect, _theme: &Theme) -> bool {
+        if !self.visible {
+            return false;
+        }
+        let idxs = self.filtered_indices();
+        let max_rows = if idxs.is_empty() { 1 } else { 6.min(idxs.len()) };
+        let menu_y_start = prompt_area.y.saturating_sub(max_rows as u16);
+        let menu_width = prompt_area.width;
+
+        let x = mouse.x;
+        let y = mouse.y;
+
+        // Check if click is within menu bounds
+        if x < prompt_area.x || x >= prompt_area.x + menu_width {
+            return false;
+        }
+        if y < menu_y_start || y >= menu_y_start + max_rows as u16 {
+            return false;
+        }
+
+        let row = (y - menu_y_start) as usize;
+        if row < idxs.len() {
+            self.selected = idxs[row];
+        }
+
+        true
     }
 
     /// Render autocomplete menu inline above prompt (like `OpenCode`).

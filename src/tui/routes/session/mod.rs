@@ -13,6 +13,7 @@ use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::scroll_bar::{ScrollBarOrientation, ScrollBarRenderable};
+use cosh_tui::core::types::MouseEvent;
 
 use crate::config::TuiConfig;
 use crate::state::AppState;
@@ -517,6 +518,108 @@ impl SessionView {
                 );
             }
         }
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
+    /// Handle a mouse click on the session view.
+    /// Returns true if the click was consumed (e.g., toggled a tool expand/collapse).
+    pub fn handle_mouse(
+        &mut self,
+        mouse: &MouseEvent,
+        area: Rect,
+        state: &AppState,
+        config: &TuiConfig,
+    ) -> bool {
+        let Some(session) = state.current_session() else {
+            return false;
+        };
+
+        let margin = 2;
+        let inner_area = Rect::new(
+            area.x + margin,
+            area.y,
+            area.width.saturating_sub(margin * 2),
+            area.height,
+        );
+        let max_w = inner_area.width.saturating_sub(6);
+        let x_off = inner_area.x + 3;
+
+        let mut y = i32::from(inner_area.y) - self.scroll_y;
+        let visible_bottom = inner_area.bottom();
+        let click_x = mouse.x;
+        let click_y = mouse.y;
+
+        for (idx, msg) in session.messages.iter().enumerate() {
+            if idx > 0 {
+                y += 1;
+            }
+
+            let mut msg_h = 2i32;
+            for part in &msg.parts {
+                msg_h += i32::from(Self::estimate_part_height(part, max_w, config));
+            }
+            let is_last = idx == session.messages.len() - 1;
+            if is_last && msg.role == crate::types::MessageRole::Assistant {
+                msg_h += 2;
+            }
+
+            let msg_y = y.max(i32::from(inner_area.y) - 1) as u16;
+
+            if click_y >= msg_y && msg_y < visible_bottom {
+                // Check if click is on this message
+                // Iterate through parts to find the click target
+                let mut part_y = msg_y + 2; // offset for message border
+
+                for part in &msg.parts {
+                    let part_h = Self::estimate_part_height(part, max_w, config).max(1);
+
+                    if click_y >= part_y && click_y < part_y + part_h {
+                        // Click is within this part
+                        if let crate::types::Part::Tool(tool) = part {
+                            // Check for shell tool expand/collapse
+                            if tool_render::tool_display(&tool.tool) == "bash" {
+                                let output = tool.output.as_deref().unwrap_or("").trim().to_string();
+                                if !output.is_empty() {
+                                    let id = tool.tool_call_id.as_deref().unwrap_or("shell");
+                                    let collapsed = crate::util::scroll::collapse_tool_output(&output, 10, 800);
+                                    if collapsed.overflow {
+                                        let expanded = self.tool_state.is_expanded(id);
+                                        let display = if expanded { &output } else { &collapsed.output };
+                                        let hint_y = part_y + 1 + display.lines().count() as u16;
+
+                                        if click_y == hint_y && click_x >= x_off && click_x < x_off + max_w {
+                                            self.tool_state.toggle_expanded(id);
+                                            return true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Check reasoning part click
+                        if let crate::types::Part::Reasoning(r) = part {
+                            let part_id = &r.text[..r.text.len().min(32)];
+                            if click_y == part_y {
+                                // Click on the reasoning header to toggle
+                                let header_x_end = x_off + 8; // "+ Thought" or "- Thought"
+                                if click_x >= x_off && click_x < header_x_end {
+                                    self.tool_state.toggle_expanded(part_id);
+                                    return true;
+                                }
+                            }
+                        }
+
+                        return true; // Click consumed even if not on a clickable region
+                    }
+
+                    part_y += part_h;
+                }
+            }
+
+            y += msg_h;
+        }
+
+        false
     }
 
     #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]

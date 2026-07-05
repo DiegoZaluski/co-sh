@@ -5,6 +5,7 @@ use ratatui::style::{Color, Style};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
+use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::Theme;
 
@@ -13,6 +14,7 @@ fn rgba_color(rgba: RGBA) -> Color {
     Color::Rgb(r, g, b)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PermissionAction {
     Allow,
     Deny,
@@ -38,6 +40,43 @@ impl PermissionDialog {
             request: None,
             selected: 0,
         }
+    }
+
+    /// Handle a mouse click on the permission dialog.
+    /// Returns the action if the user clicked an option, or None if outside/not visible.
+    pub fn handle_mouse(&mut self, mouse: &MouseEvent, area: Rect, _theme: &Theme) -> Option<PermissionAction> {
+        if !self.visible {
+            return None;
+        }
+
+        let dialog_w = 50.min(area.width.saturating_sub(4));
+        let dialog_h = 10.min(area.height.saturating_sub(4));
+        let dialog_x = area.x + (area.width - dialog_w) / 2;
+        let dialog_y = area.y + (area.height - dialog_h) / 2;
+
+        let x = mouse.x;
+        let y_click = mouse.y;
+
+        // Check if click is within dialog area
+        if x < dialog_x || x >= dialog_x + dialog_w || y_click < dialog_y || y_click >= dialog_y + dialog_h {
+            return None;
+        }
+
+        let options = ["Allow", "Deny", "Allow Once"];
+        for (i, _opt) in options.iter().enumerate() {
+            let oy = dialog_y + 5 + i as u16;
+            if y_click == oy {
+                self.selected = i;
+                let action = match i {
+                    0 => PermissionAction::Allow,
+                    1 => PermissionAction::Deny,
+                    _ => PermissionAction::AllowOnce,
+                };
+                return Some(action);
+            }
+        }
+
+        None
     }
 
     pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {

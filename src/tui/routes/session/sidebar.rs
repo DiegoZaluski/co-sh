@@ -1,6 +1,7 @@
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
+use cosh_tui::core::types::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -38,6 +39,21 @@ impl SidebarView {
             open: false,
             width: 24,
         }
+    }
+
+    /// Handle a mouse click on the sidebar. Returns the session ID to switch to if any.
+    pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect, state: &AppState) -> Option<String> {
+        if !self.open {
+            return None;
+        }
+        let my = mouse.y;
+        for (i, session) in state.sessions.iter().enumerate() {
+            let item_y = area.y + 2 + i as u16;
+            if my == item_y {
+                return Some(session.id.clone());
+            }
+        }
+        None
     }
 
     pub fn render(&self, buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {

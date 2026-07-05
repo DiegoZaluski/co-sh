@@ -9,6 +9,7 @@ use cosh::ModelEntry;
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
+use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::Theme;
 
@@ -66,6 +67,19 @@ pub struct DialogState {
     pub stack: Vec<DialogInstance>,
 }
 
+/// Result of a mouse event handled by the dialog system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogAction {
+    /// Click was not on the dialog.
+    None,
+    /// Click was consumed (selection changed, etc.).
+    Consumed,
+    /// User confirmed a selection (clicked an item or Yes/No).
+    Confirmed,
+    /// User dismissed the dialog (clicked "esc" or outside).
+    Dismissed,
+}
+
 impl DialogState {
     pub fn new() -> Self {
         DialogState { stack: Vec::new() }
@@ -106,6 +120,233 @@ impl DialogState {
     }
 
     #[allow(clippy::too_many_lines, clippy::similar_names)]
+    /// Handle a mouse click on the current dialog.
+    /// The dialog state is modified (selection changed), but the dialog is NOT popped.
+    /// Returns what action the caller should take.
+    pub fn handle_mouse(&mut self, mouse: &MouseEvent, area: Rect, _theme: &Theme) -> DialogAction {
+        let Some(instance) = self.stack.last_mut() else {
+            return DialogAction::None;
+        };
+
+        let x = mouse.x;
+        let y_click = mouse.y;
+
+        match &instance.dialog_type {
+            DialogType::Alert { message: _ } => {
+                // Click anywhere on alert → dismiss
+                DialogAction::Dismissed
+            }
+            DialogType::Confirm { message: _ } => {
+                let dialog_w = 30u16.min(area.width.saturating_sub(4)).max(16);
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_h = 7;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+
+                let opt_yes = "Yes";
+                let opt_no = "No";
+                let gap: u16 = 4;
+                let total_w = opt_yes.len() as u16 + gap + opt_no.len() as u16;
+                let opts_x = dialog_x + dialog_w.saturating_sub(total_w) / 2;
+                let opts_y = dialog_y + 4;
+
+                // Check within dialog bounds
+                if x < dialog_x || x >= dialog_x + dialog_w
+                    || y_click < dialog_y || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+
+                // Check Yes
+                if y_click == opts_y {
+                    if x >= opts_x && x < opts_x + opt_yes.len() as u16 {
+                        instance.selected = 0;
+                        return DialogAction::Confirmed;
+                    }
+                    // Check No
+                    let no_x = opts_x + opt_yes.len() as u16 + gap;
+                    if x >= no_x && x < no_x + opt_no.len() as u16 {
+                        instance.selected = 1;
+                        return DialogAction::Confirmed;
+                    }
+                }
+
+                DialogAction::Consumed
+            }
+            DialogType::ThemeList { themes, current: _, filter } => {
+                // Recompute dialog geometry (same as render)
+                let filtered: Vec<&str> = if filter.is_empty() {
+                    themes.iter().map(String::as_str).collect()
+                } else {
+                    let lower = filter.to_lowercase();
+                    themes.iter().filter(|t| t.to_lowercase().contains(&lower)).map(String::as_str).collect()
+                };
+
+                let selection = if instance.selected >= filtered.len() {
+                    filtered.len().saturating_sub(1)
+                } else {
+                    instance.selected
+                };
+
+                let max_w = 40u16.min(area.width.saturating_sub(4));
+                let dialog_w = max_w.max(24).min(area.width.saturating_sub(2));
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+
+                let max_visible_height = (area.height.saturating_sub(4)) as usize;
+                let max_visible = max_visible_height.min(filtered.len().max(1)).clamp(1, 10);
+                let dialog_h = (max_visible + 4) as u16;
+                let dialog_y = area.y.saturating_add(
+                    (area.height.saturating_sub(dialog_h)) / 2
+                );
+
+                // Check outside dialog
+                if x < dialog_x || x >= dialog_x + dialog_w
+                    || y_click < dialog_y || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+
+                // Check "esc" label (top-right)
+                let header_pad = 4;
+                let header_x = dialog_x + header_pad;
+                let header_w = dialog_w.saturating_sub(header_pad * 2);
+                let esc_label = "esc";
+                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
+                // esc is on first line (dialog_y)
+                if y_click == dialog_y && x >= esc_x && x < esc_x + esc_label.len() as u16 {
+                    return DialogAction::Dismissed;
+                }
+
+                // Check list items
+                let list_top = dialog_y + 3;
+
+                let scroll_offset = if selection >= max_visible {
+                    selection - max_visible + 1
+                } else {
+                    0
+                };
+                let scroll_offset = scroll_offset.min(filtered.len().saturating_sub(max_visible));
+
+                if y_click >= list_top {
+                    let row = (y_click - list_top) as usize;
+                    if row < max_visible {
+                        let item_idx = scroll_offset + row;
+                        if item_idx < filtered.len() {
+                            instance.selected = item_idx;
+                            return DialogAction::Confirmed;
+                        }
+                    }
+                }
+
+                DialogAction::Consumed
+            }
+            DialogType::ModelList { models, current: _, filter } => {
+                // Group models by provider (same as render)
+                let mut grouped: BTreeMap<String, Vec<&ModelEntry>> = BTreeMap::new();
+                for entry in models {
+                    if filter.is_empty() || entry.model.to_lowercase().contains(&filter.to_lowercase()) {
+                        grouped.entry(entry.provider.clone()).or_default().push(entry);
+                    }
+                }
+                let flat_entries: Vec<&ModelEntry> = grouped.values().flatten().copied().collect();
+                let selection = if instance.selected >= flat_entries.len() {
+                    flat_entries.len().saturating_sub(1)
+                } else {
+                    instance.selected
+                };
+
+                let max_w = 50u16.min(area.width.saturating_sub(4));
+                let dialog_w = max_w.max(30).min(area.width.saturating_sub(2));
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+
+                let total_items = flat_entries.len() + grouped.len();
+                let max_visible_height = (area.height.saturating_sub(4)) as usize;
+                let max_visible = max_visible_height.min(total_items.max(1)).max(1);
+                let dialog_h = (max_visible + 4) as u16;
+                let dialog_y = area.y.saturating_add(
+                    (area.height.saturating_sub(dialog_h)) / 2
+                );
+
+                // Check outside dialog
+                if x < dialog_x || x >= dialog_x + dialog_w
+                    || y_click < dialog_y || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+
+                // Check "esc" label (top-right)
+                let header_pad = 4;
+                let header_x = dialog_x + header_pad;
+                let header_w = dialog_w.saturating_sub(header_pad * 2);
+                let esc_label = "esc";
+                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
+                if y_click == dialog_y && x >= esc_x && x < esc_x + esc_label.len() as u16 {
+                    return DialogAction::Dismissed;
+                }
+
+                // Build visual items (headers + models) to map Y to model index
+                let mut visual_list: Vec<(&str, bool)> = Vec::new(); // (label, is_model)
+                for (provider, entries) in &grouped {
+                    visual_list.push((provider.as_str(), false));
+                    for entry in entries {
+                        visual_list.push((&entry.model, true));
+                    }
+                }
+
+                let list_top = dialog_y + 3;
+
+                // Compute scroll offset based on visual_selection
+                // Simplify: just iterate visible rows
+                // We need to map the visual list to rows, accounting for scroll
+                if y_click >= list_top {
+                    let row = (y_click - list_top) as usize;
+                    if row < max_visible {
+                        // Compute scroll offset by finding the visual row of current selection
+                        let mut model_idx = 0;
+                        let mut visual_to_model = Vec::new();
+                        for (_, is_model) in &visual_list {
+                            if *is_model {
+                                visual_to_model.push(model_idx);
+                                model_idx += 1;
+                            } else {
+                                visual_to_model.push(usize::MAX); // header
+                            }
+                        }
+
+                        let visual_selection = {
+                            let mut pos = 0;
+                            let mut seen = 0;
+                            for (_, is_model) in &visual_list {
+                                if *is_model {
+                                    if seen == selection {
+                                        break;
+                                    }
+                                    seen += 1;
+                                }
+                                pos += 1;
+                            }
+                            pos.min(visual_list.len().saturating_sub(1))
+                        };
+
+                        let scroll_offset = if visual_selection >= max_visible && max_visible < visual_list.len() {
+                            visual_selection.saturating_sub(max_visible - 1)
+                        } else {
+                            0
+                        };
+                        let scroll_offset = scroll_offset.min(visual_list.len().saturating_sub(max_visible));
+
+                        let vis_idx = scroll_offset + row;
+                        if vis_idx < visual_list.len() && visual_to_model[vis_idx] != usize::MAX {
+                            instance.selected = visual_to_model[vis_idx];
+                            return DialogAction::Confirmed;
+                        }
+                    }
+                }
+
+                DialogAction::Consumed
+            }
+        }
+    }
+
     pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime) {
         let Some(instance) = self.stack.last() else {
             return;

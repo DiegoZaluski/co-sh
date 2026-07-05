@@ -5,6 +5,7 @@ use ratatui::style::{Color, Style};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
+use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::Theme;
 
@@ -146,6 +147,45 @@ impl CommandPalette {
     pub fn pop_char(&mut self) {
         self.filter.pop();
         self.selected = self.filtered_indices().first().copied().unwrap_or(0);
+    }
+
+    pub fn handle_mouse(&mut self, mouse: &MouseEvent, area: Rect, _theme: &Theme) -> bool {
+        if !self.visible {
+            return false;
+        }
+        let palette_w = 50.min(area.width.saturating_sub(8));
+        let palette_h = (self.commands.len() as u16).min(area.height.saturating_sub(4));
+        let palette_x = area.x + (area.width - palette_w) / 2;
+        let palette_y = area.y + (area.height - palette_h) / 2;
+
+        let x = mouse.x;
+        let y = mouse.y;
+
+        // Check if click is within palette area
+        if x < palette_x || x >= palette_x + palette_w || y < palette_y || y >= palette_y + palette_h {
+            // Click outside -> close
+            self.visible = false;
+            return true;
+        }
+
+        // Click on filter row
+        if y == palette_y + 2 {
+            return true;
+        }
+
+        // Click on an item
+        let indices = self.filtered_indices();
+        let start_y = palette_y + 4;
+        let max_rows = palette_h.saturating_sub(5);
+        if y >= start_y && y < start_y + max_rows {
+            let row = (y - start_y) as usize;
+            if row < indices.len() {
+                self.selected = indices[row];
+                self.visible = false;
+            }
+        }
+
+        true
     }
 
     pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {

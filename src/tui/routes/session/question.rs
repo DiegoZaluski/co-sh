@@ -8,6 +8,7 @@ use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
+use cosh_tui::core::types::MouseEvent;
 
 use super::super::super::theme::Theme;
 
@@ -323,6 +324,159 @@ impl QuestionDialog {
         }
 
         false
+    }
+
+    /// Handle a mouse click on the question dialog.
+    /// `area` is the area passed to `render()`.
+    pub fn handle_mouse(&mut self, mouse: &MouseEvent, area: Rect) -> bool {
+        if !self.visible {
+            return false;
+        }
+
+        let x = mouse.x;
+        let y_click = mouse.y;
+
+        // Check if click is within our bounds
+        let height = self.required_height(area.width).min(area.height);
+        if x < area.x || x >= area.x + area.width || y_click < area.y || y_click >= area.y + height {
+            return false;
+        }
+
+        let tab_count = self.tab_count();
+        let is_confirm = self.is_confirm();
+
+        // --- Hit-test the footer action labels ---
+        let inner_x = area.x + 3;
+        let _inner_w = area.width.saturating_sub(5);
+        let footer_y = area.y + height - 1;
+
+        // "esc" footer label
+        let esc_label = "esc";
+        if y_click == footer_y {
+            // Determine the x position of the "esc" label in the footer
+            let mut fx = inner_x;
+            if tab_count > 1 {
+                fx += 4 + 4; // "⇆" + "tab"
+            }
+            if !is_confirm {
+                fx += 4 + 7; // "↑↓" + "select"
+            }
+            fx += 6; // "enter"
+            fx += if is_confirm { "submit".len() as u16 } else { "select".len() as u16 };
+            fx += 2;
+            // Now fx points to "esc"
+            let esc_x = fx;
+            if x >= esc_x && x < esc_x + esc_label.len() as u16 {
+                self.visible = false;
+                return true;
+            }
+        }
+
+        // --- Hit-test the tab bar ---
+        if tab_count > 1 {
+            let mut tab_x = inner_x;
+            let tab_y = area.y + 1;
+            if y_click == tab_y {
+                for (i, _q) in self.questions.iter().enumerate() {
+                    let label = format!(" {} ", _q.id);
+                    let label_len = label.len() as u16;
+                    if x >= tab_x && x < tab_x + label_len {
+                        self.current_tab = i;
+                        self.selected_row = 0;
+                        self.text_mode = false;
+                        return true;
+                    }
+                    tab_x += label_len + 1;
+                }
+                // Confirm tab
+                let confirm_label = " Confirm ";
+                if x >= tab_x && x < tab_x + confirm_label.len() as u16 {
+                    self.current_tab = self.questions.len();
+                    self.selected_row = 0;
+                    self.text_mode = false;
+                    return true;
+                }
+                return true;
+            }
+        }
+
+        // --- Hit-test options ---
+        if !is_confirm {
+            let y_pos = area.y + 1 + u16::from(tab_count > 1) + 1; // after tabs + separator
+
+            // Skip question text line
+            // y_pos + 1 for question text
+            // +1 if purpose is shown
+            let mut option_y = y_pos + 1;
+            if let Some(q) = self.questions.get(self.current_tab) {
+                if q.purpose.is_some() {
+                    option_y += 1;
+                }
+
+                let row_count = self.row_count(self.current_tab);
+                // Check if click is within the option rows
+                if y_click >= option_y && y_click < option_y + row_count as u16 {
+                    let row = (y_click - option_y) as usize;
+                    if row < row_count {
+                        self.selected_row = row;
+                        match q.question_type {
+                            QuestionType::Text => {
+                                self.text_mode = true;
+                                return true;
+                            }
+                            QuestionType::SingleChoice | QuestionType::YesNo => {
+                                if let Some(s) = self.state.get_mut(self.current_tab) {
+                                    s.single_selection = Some(row);
+                                    s.answered = true;
+                                }
+                                // Move to next tab
+                                if tab_count > 1 {
+                                    self.current_tab = (self.current_tab + 1) % tab_count;
+                                    self.selected_row = 0;
+                                }
+                                return true;
+                            }
+                            QuestionType::MultiChoice => {
+                                if let Some(s) = self.state.get_mut(self.current_tab) {
+                                    if let Some(pos) = s.multi_selection.iter().position(|&i| i == row) {
+                                        s.multi_selection.remove(pos);
+                                    } else {
+                                        s.multi_selection.push(row);
+                                    }
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if click is on the "enter select" area
+            if y_click == footer_y {
+                // The "enter" label is at fx position (same computation)
+                let mut fx = inner_x;
+                if tab_count > 1 {
+                    fx += 4 + 4;
+                }
+                if !is_confirm {
+                    fx += 4 + 7;
+                }
+                let enter_x = fx;
+                let enter_label = "enter";
+                if x >= enter_x && x < enter_x + enter_label.len() as u16 {
+                    // "select" action
+                    return self.handle_key(KeyCode::Enter);
+                }
+            }
+        } else {
+            // Confirm tab: clicking anywhere on the confirm tab can submit
+            if y_click >= area.y + 1 && y_click < footer_y {
+                self.submitted = true;
+                return true;
+            }
+        }
+
+        true
     }
 
     /// Calculate the required height for the dialog.
