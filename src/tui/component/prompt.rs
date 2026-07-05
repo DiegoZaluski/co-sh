@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::time::SystemTime;
 
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
@@ -56,6 +57,7 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
 pub struct PromptView {
     pub input: String,
     pub cursor_pos: usize,
+    pub input_text_width: Cell<usize>,
     pub history: Vec<String>,
     pub history_index: i32,
     pub selected_agent_index: usize,
@@ -70,6 +72,7 @@ impl PromptView {
         PromptView {
             input: String::new(),
             cursor_pos: 0,
+            input_text_width: Cell::new(0),
             history: Vec::new(),
             history_index: -1,
             selected_agent_index: 0,
@@ -149,30 +152,135 @@ impl PromptView {
         };
     }
 
+    pub fn cursor_up(&mut self, text_w: usize) {
+        if self.input.is_empty() || text_w == 0 {
+            return;
+        }
+        let lines: Vec<&str> = self.input.split('\n').collect();
+        let cols = text_w.max(1);
+
+        let char_pos = self.input[..self.cursor_pos].chars().count();
+        let mut acc = 0usize;
+        let mut byte_off = 0usize;
+        for (li, line) in lines.iter().enumerate() {
+            let line_chars = line.chars().count();
+            let visual_lines = line_chars.div_ceil(cols).max(1);
+            let visual_chars = visual_lines * cols;
+            if char_pos < acc + visual_chars {
+                let offset = char_pos - acc;
+                let visual_line = offset / cols;
+                if visual_line == 0 {
+                    if li == 0 {
+                        return; // already top
+                    }
+                    // move to end of previous logical line
+                    let prev = byte_off.saturating_sub(1); // position of '\n'
+                    self.cursor_pos = prev;
+                    return;
+                }
+                let visual_col = offset % cols;
+                let target = (visual_line - 1) * cols + visual_col.min(cols - 1);
+                let target_byte = line
+                    .char_indices()
+                    .nth(target)
+                    .map(|(i, _)| i)
+                    .unwrap_or(line.len());
+                self.cursor_pos = byte_off + target_byte;
+                return;
+            }
+            acc += visual_chars;
+            byte_off += line.len() + 1; // +1 for '\n'
+        }
+    }
+
+    pub fn cursor_down(&mut self, text_w: usize) {
+        if self.input.is_empty() || text_w == 0 {
+            return;
+        }
+        let lines: Vec<&str> = self.input.split('\n').collect();
+        let cols = text_w.max(1);
+
+        let char_pos = self.input[..self.cursor_pos].chars().count();
+        let mut acc = 0usize;
+        let mut byte_off = 0usize;
+        for (li, line) in lines.iter().enumerate() {
+            let line_chars = line.chars().count();
+            let visual_lines = line_chars.div_ceil(cols).max(1);
+            let visual_chars = visual_lines * cols;
+            if char_pos < acc + visual_chars {
+                let offset = char_pos - acc;
+                let visual_line = offset / cols;
+                let visual_col = offset % cols;
+                if visual_line + 1 >= visual_lines {
+                    // move to next logical line
+                    if li + 1 >= lines.len() {
+                        return;
+                    }
+                    let next = lines[li + 1];
+                    let next_chars = next.chars().count();
+                    let target_col = visual_col.min(cols.saturating_sub(1));
+                    let target_char_idx = target_col.min(next_chars.saturating_sub(1));
+                    let next_start = byte_off + line.len() + 1;
+                    self.cursor_pos = next_start
+                        + next
+                            .char_indices()
+                            .nth(target_char_idx)
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                    return;
+                }
+                // move down one visual line within same logical line
+                let target = (visual_line + 1) * cols + visual_col.min(cols - 1);
+                let target_byte = line
+                    .char_indices()
+                    .nth(target)
+                    .map(|(i, _)| i)
+                    .unwrap_or(line.len());
+                self.cursor_pos = byte_off + target_byte;
+                return;
+            }
+            acc += visual_chars;
+            byte_off += line.len() + 1;
+        }
+    }
+
     pub fn required_height(&self, area_width: u16) -> u16 {
         let text_w = area_width.saturating_sub(5) as usize;
         let lines = if self.input.is_empty() || text_w == 0 {
             1
         } else {
-            let n = self.input.chars().count();
-            n.div_ceil(text_w)
+            self.input.split('\n')
+                .map(|line| {
+                    let n = line.chars().count();
+                    n.div_ceil(text_w).max(1)
+                })
+                .sum()
         };
         BASE_H + lines as u16 + AGENT_H + CAP_H + FOOTER_H
     }
 
     fn wrapped_lines(input: &str, max_w: usize) -> Vec<&str> {
         if input.is_empty() || max_w == 0 {
-            return vec![""];
+            return vec![input];
         }
-        let mut lines = Vec::new();
-        let mut s = input;
-        while !s.is_empty() {
-            let line_len = s.chars().take(max_w).count();
-            let split = s.char_indices().nth(line_len).map_or(s.len(), |(i, _)| i);
-            lines.push(&s[..split]);
-            s = &s[split..];
+        let mut result = Vec::new();
+        for line in input.split('\n') {
+            if line.is_empty() {
+                result.push(line);
+                continue;
+            }
+            let mut s = line;
+            while !s.is_empty() {
+                let line_len = s.chars().take(max_w).count();
+                let split = s.char_indices().nth(line_len).map_or(s.len(), |(i, _)| i);
+                result.push(&s[..split]);
+                s = &s[split..];
+            }
         }
-        lines
+        if result.is_empty() {
+            result.push(input);
+        }
+        result
     }
 
     /// Render the prompt and draw a blinking cursor if focused.
@@ -189,6 +297,7 @@ impl PromptView {
         model_name: &str,
     ) {
         let text_w = area.width.saturating_sub(5) as usize;
+        self.input_text_width.set(text_w);
         let display_placeholder = self.input.is_empty();
         let display_text = if display_placeholder {
             PLACEHOLDER
@@ -305,14 +414,35 @@ impl PromptView {
 
         // Draw cursor if focused
         if self.is_focused {
-            let text_w_val = text_w.max(1);
-            let cursor_pos_for_calc = if display_placeholder {
+            let cursor_char = if display_placeholder || self.input.is_empty() {
                 0
             } else {
-                self.cursor_pos.min(self.input.chars().count())
+                self.input[..self.cursor_pos].chars().count()
             };
-            let cursor_line_idx = cursor_pos_for_calc / text_w_val;
-            let cursor_col_idx = cursor_pos_for_calc % text_w_val;
+
+            // Walk display_lines, accumulating char counts to find which
+            // visual line and column the cursor falls on.
+            // Each display line is a sub-slice of self.input (or the empty
+            // string from split), so we can count chars directly.
+            let mut cursor_line_idx = 0usize;
+            let mut cursor_col_idx = 0usize;
+            let mut acc = 0usize;
+
+            for (li, line) in display_lines.iter().enumerate() {
+                let n = line.chars().count();
+                if cursor_char < acc + n || (cursor_char == acc + n && li + 1 >= display_lines.len()) {
+                    cursor_line_idx = li;
+                    cursor_col_idx = cursor_char - acc;
+                    break;
+                }
+                acc += n;
+                // If the next byte in self.input is \n, account for it
+                if let Some((byte_idx, _)) = self.input.char_indices().nth(acc) {
+                    if byte_idx < self.input.len() && self.input.as_bytes()[byte_idx] == b'\n' {
+                        acc += 1;
+                    }
+                }
+            }
 
             let cursor_y = text_start + cursor_line_idx as u16;
             if cursor_y < input_area.bottom() && cursor_line_idx < display_lines.len() {

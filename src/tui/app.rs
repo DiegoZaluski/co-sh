@@ -740,6 +740,17 @@ impl App {
                         }
                     }
 
+                    // Shift/Ctrl/Alt+Enter inserts a newline instead of sending.
+                    if key.code == KeyCode::Enter
+                        && key.modifiers != KeyModifiers::NONE
+                    {
+                        self.prompt_view.note_activity();
+                        let pos = self.prompt_view.cursor_pos;
+                        self.prompt_view.input.insert(pos, '\n');
+                        self.prompt_view.cursor_pos = pos + 1;
+                        return Ok(false);
+                    }
+
                     let action = self.keymap.lookup(key.code, key.modifiers).cloned();
 
                     // Home mode: navigation keys (skip when dialog is visible)
@@ -1176,12 +1187,60 @@ impl App {
 
                             match key.code {
                                 KeyCode::Up => {
-                                    self.session_view.scroll_y =
-                                        (self.session_view.scroll_y - 3).max(0);
+                                    if self.prompt_view.input.is_empty() {
+                                        self.session_view.scroll_y =
+                                            (self.session_view.scroll_y - 3).max(0);
+                                    } else {
+                                        self.prompt_view.note_activity();
+                                        self.prompt_view.cursor_up(self.prompt_view.input_text_width.get().max(1));
+                                    }
                                 }
                                 KeyCode::Down => {
-                                    self.session_view.scroll_y =
-                                        (self.session_view.scroll_y + 3).max(0);
+                                    if self.prompt_view.input.is_empty() {
+                                        self.session_view.scroll_y =
+                                            (self.session_view.scroll_y + 3).max(0);
+                                    } else {
+                                        self.prompt_view.note_activity();
+                                        self.prompt_view.cursor_down(self.prompt_view.input_text_width.get().max(1));
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    self.prompt_view.note_activity();
+                                    if self.prompt_view.cursor_pos > 0 {
+                                        self.prompt_view.cursor_pos = self.prompt_view
+                                            .input
+                                            .floor_char_boundary(self.prompt_view.cursor_pos - 1);
+                                    }
+                                }
+                                KeyCode::Right => {
+                                    self.prompt_view.note_activity();
+                                    let len = self.prompt_view.input.len();
+                                    if self.prompt_view.cursor_pos < len {
+                                        self.prompt_view.cursor_pos = self.prompt_view
+                                            .input
+                                            .floor_char_boundary(self.prompt_view.cursor_pos + 1)
+                                            .min(len);
+                                    }
+                                }
+                                KeyCode::Home => {
+                                    self.prompt_view.note_activity();
+                                    self.prompt_view.cursor_pos = 0;
+                                }
+                                KeyCode::End => {
+                                    self.prompt_view.note_activity();
+                                    self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                }
+                                KeyCode::Delete => {
+                                    self.prompt_view.note_activity();
+                                    let pos = self.prompt_view.cursor_pos;
+                                    let len = self.prompt_view.input.len();
+                                    if pos < len {
+                                        let next = self.prompt_view
+                                            .input
+                                            .floor_char_boundary(pos + 1)
+                                            .min(len);
+                                        self.prompt_view.input.drain(pos..next);
+                                    }
                                 }
                                 KeyCode::PageUp => {
                                     self.session_view.scroll_y =
@@ -1206,6 +1265,14 @@ impl App {
                                 }
                                 KeyCode::Char(ch) => {
                                     self.prompt_view.note_activity();
+
+                                    // Ctrl+J is the universal newline (^J = \n) — works in every terminal
+                                    if ch == 'j' && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                        let pos = self.prompt_view.cursor_pos;
+                                        self.prompt_view.input.insert(pos, '\n');
+                                        self.prompt_view.cursor_pos = pos + 1;
+                                        return Ok(false);
+                                    }
 
                                     // Vim-style scroll only when prompt is empty
                                     // (otherwise these chars are typed normally)
@@ -1448,6 +1515,9 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableFocusChange,
         crossterm::event::EnableBracketedPaste,
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ),
     )?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -1460,6 +1530,7 @@ fn restore_terminal() -> io::Result<()> {
         stdout,
         crossterm::event::DisableFocusChange,
         crossterm::event::DisableBracketedPaste,
+        crossterm::event::PopKeyboardEnhancementFlags,
         crossterm::terminal::LeaveAlternateScreen,
     )?;
     stdout.flush()?;

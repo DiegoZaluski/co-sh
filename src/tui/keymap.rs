@@ -44,28 +44,10 @@ pub struct KeyMap {
 impl KeyMap {
     #[allow(clippy::too_many_lines)]
     pub fn default_vim() -> Self {
-        use KeyCode::{BackTab, Char, Down, End, Enter, Esc, Home, PageDown, PageUp, Tab, Up};
+        use KeyCode::{BackTab, Char, Down, Enter, Esc, PageDown, PageUp, Tab, Up};
 
         KeyMap {
             bindings: vec![
-                (
-                    Action::ScrollUp,
-                    KeyBinding {
-                        key: Up,
-                        modifiers: KeyModifiers::NONE,
-                    },
-                ),
-                // Note: 'k' for scroll-up is handled dynamically in handle_events
-                // (only when prompt is empty, otherwise typed normally)
-                (
-                    Action::ScrollDown,
-                    KeyBinding {
-                        key: Down,
-                        modifiers: KeyModifiers::NONE,
-                    },
-                ),
-                // Note: 'j' for scroll-down is handled dynamically in handle_events
-                // (only when prompt is empty, otherwise typed normally)
                 (
                     Action::ScrollUpPage,
                     KeyBinding {
@@ -77,20 +59,6 @@ impl KeyMap {
                     Action::ScrollDownPage,
                     KeyBinding {
                         key: PageDown,
-                        modifiers: KeyModifiers::NONE,
-                    },
-                ),
-                (
-                    Action::ScrollToTop,
-                    KeyBinding {
-                        key: Home,
-                        modifiers: KeyModifiers::NONE,
-                    },
-                ),
-                (
-                    Action::ScrollToBottom,
-                    KeyBinding {
-                        key: End,
                         modifiers: KeyModifiers::NONE,
                     },
                 ),
