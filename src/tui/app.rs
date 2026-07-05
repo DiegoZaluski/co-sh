@@ -782,6 +782,7 @@ impl App {
                                         self.sidebar.open = !self.sidebar.open;
                                     }
                                 }
+                                return Ok(false);
                             }
                             _ => {}
                         }
