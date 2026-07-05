@@ -4,7 +4,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton as CrosstermMouseButton,
+    MouseEvent as CrosstermMouseEvent, MouseEventKind,
+};
+use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -27,8 +31,9 @@ use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::sidebar::SidebarView;
 use crate::state::AppState;
 use crate::theme::{Theme, ThemeRegistry};
+use crate::types::SessionStatus;
 use crate::ui::command_palette::CommandPalette;
-use crate::ui::dialogs::{DialogState, DialogType};
+use crate::ui::dialogs::{DialogAction, DialogState, DialogType};
 use crate::ui::toast::ToastState;
 
 fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
@@ -1319,7 +1324,9 @@ impl App {
                 self.prompt_view.cursor_pos = pos + cleaned.len();
                 self.slash_menu.update(&self.prompt_view.input);
             }
-            _ => {}
+            Event::Mouse(crossterm_mouse) => {
+                self.handle_mouse_event(crossterm_mouse)?;
+            }
         }
 
         Ok(false)
@@ -1505,6 +1512,344 @@ impl App {
             }
         }
     }
+
+    /// Handle a crossterm mouse event by converting it to a cosh-tui MouseEvent
+    /// and dispatching to the appropriate component based on current layout.
+    fn handle_mouse_event(&mut self, evt: CrosstermMouseEvent) -> io::Result<bool> {
+        let x = evt.column;
+        let y = evt.row;
+
+        let modifiers = MouseModifiers {
+            shift: evt.modifiers.contains(KeyModifiers::SHIFT),
+            alt: evt.modifiers.contains(KeyModifiers::ALT),
+            ctrl: evt.modifiers.contains(KeyModifiers::CONTROL),
+        };
+
+        let (button, event_type) = match evt.kind {
+            MouseEventKind::Down(btn) | MouseEventKind::Drag(btn) => {
+                let b = match btn {
+                    CrosstermMouseButton::Left => MouseButton::Left,
+                    CrosstermMouseButton::Right => MouseButton::Right,
+                    CrosstermMouseButton::Middle => MouseButton::Middle,
+                };
+                let t = match evt.kind {
+                    MouseEventKind::Down(_) => MouseEventType::Down,
+                    _ => MouseEventType::Drag,
+                };
+                (b, t)
+            }
+            MouseEventKind::Up(btn) => {
+                let b = match btn {
+                    CrosstermMouseButton::Left => MouseButton::Left,
+                    CrosstermMouseButton::Right => MouseButton::Right,
+                    CrosstermMouseButton::Middle => MouseButton::Middle,
+                };
+                (b, MouseEventType::Up)
+            }
+            MouseEventKind::Moved => {
+                (MouseButton::Left, MouseEventType::Move)
+            }
+            MouseEventKind::ScrollDown => {
+                (MouseButton::Left, MouseEventType::ScrollDown)
+            }
+            MouseEventKind::ScrollUp => {
+                (MouseButton::Left, MouseEventType::ScrollUp)
+            }
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+                return Ok(true);
+            }
+        };
+
+        // Only handle left-click UP events (standard "click" action)
+        if event_type != MouseEventType::Up || button != MouseButton::Left {
+            return Ok(true);
+        }
+
+        let mouse = MouseEvent::new(event_type, button, x, y, modifiers);
+
+        // 1. Dialogs (highest z-order)
+        if self.dialog.visible() {
+            let area = self.terminal_size();
+            match self.dialog.handle_mouse(&mouse, area, &self.theme) {
+                DialogAction::Confirmed if self.is_confirm_dialog_visible() => {
+                    if let Some(d) = self.dialog.current() {
+                        if d.selected == 0 {
+                            self.should_quit = true;
+                        }
+                        self.dialog.pop();
+                    }
+                    return Ok(true);
+                }
+                DialogAction::Confirmed => {
+                    if let Some(d) = self.dialog.current() {
+                        match &d.dialog_type {
+                            DialogType::ThemeList { .. } => {
+                                self.apply_filtered_theme_preview();
+                                self.theme_dialog_original = None;
+                            }
+                            DialogType::ModelList { .. } => {
+                                let models = if let DialogType::ModelList { models, .. } = &d.dialog_type {
+                                    models.clone()
+                                } else {
+                                    vec![]
+                                };
+                                let selected_idx = d.selected.min(models.len().saturating_sub(1));
+                                if let Some(entry) = models.get(selected_idx) {
+                                    self.llm_config.model = Some(entry.model.clone());
+                                    self.llm_config.provider = entry.provider.clone();
+                                }
+                                self.model_dialog_original = None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.dialog.pop();
+                    return Ok(true);
+                }
+                DialogAction::Dismissed => {
+                    // Restore original if needed
+                    if self.is_theme_dialog_visible()
+                        && let Some(ref orig) = self.theme_dialog_original
+                        && let Some(t) = self.theme_registry.get(orig)
+                    {
+                        self.theme = t.clone();
+                    }
+                    if self.is_model_dialog_visible()
+                        && let Some(ref orig) = self.model_dialog_original
+                    {
+                        self.llm_config.model = if orig.is_empty() { None } else { Some(orig.clone()) };
+                    }
+                    self.theme_dialog_original = None;
+                    self.model_dialog_original = None;
+                    self.dialog.pop();
+                    return Ok(true);
+                }
+                DialogAction::Consumed => {
+                    // Selection changed, apply preview for theme dialog
+                    if self.is_theme_dialog_visible() {
+                        self.apply_filtered_theme_preview();
+                    }
+                    return Ok(true);
+                }
+                DialogAction::None => {}
+            }
+        }
+
+        // 2. Command palette
+        if self.command_palette.visible {
+            let area = self.terminal_size();
+            if self.command_palette.handle_mouse(&mouse, area, &self.theme) {
+                return Ok(true);
+            }
+        }
+
+        // 3. Slash menu
+        if self.slash_menu.visible && matches!(self.mode(), AppMode::Session) {
+            let is_session = matches!(self.mode(), AppMode::Session);
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            let prompt_h = if is_session {
+                self.prompt_view
+                    .required_height(main_area.width.saturating_sub(4))
+            } else {
+                0
+            };
+            let prompt_area = Rect::new(
+                main_area.x + 2,
+                main_area.bottom().saturating_sub(1).saturating_sub(prompt_h),
+                main_area.width.saturating_sub(4),
+                prompt_h,
+            );
+            if self.slash_menu.handle_mouse(&mouse, prompt_area, &self.theme) {
+                self.prompt_view.note_activity();
+                if let Some(cmd) = self.slash_menu.get_selected_command() {
+                    if cmd.name == "themes" {
+                        self.open_theme_dialog();
+                    } else if cmd.name == "models" {
+                        self.open_model_dialog();
+                    } else {
+                        let cmd_name = format!("/{} ", cmd.name);
+                        self.prompt_view.input = cmd_name;
+                        self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                    }
+                    self.slash_menu.visible = false;
+                }
+                return Ok(true);
+            }
+        }
+
+        // 4. Question dialog (inline, between session and prompt)
+        if self.question_dialog.visible && matches!(self.mode(), AppMode::Session) {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            let prompt_h = self.prompt_view
+                .required_height(main_area.width.saturating_sub(4));
+            let question_h = self.question_dialog.required_height(main_area.width.saturating_sub(4));
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let prompt_area_y = footer_y.saturating_sub(prompt_h);
+            let question_area_y = prompt_area_y.saturating_sub(question_h);
+            let question_area = Rect::new(
+                main_area.x + 2,
+                question_area_y,
+                main_area.width.saturating_sub(4),
+                question_h,
+            );
+            let consumed = self.question_dialog.handle_mouse(&mouse, question_area);
+            if consumed {
+                if self.question_dialog.submitted {
+                    let answers = self.question_dialog.build_answers();
+                    let _ = self.answer_tx.send(Ok(answers));
+                    self.question_dialog.visible = false;
+                    self.question_dialog.submitted = false;
+                }
+                return Ok(true);
+            }
+        }
+
+        // 5. Permission dialog
+        if self.permission_dialog.visible {
+            let area = self.terminal_size();
+            if self.permission_dialog.handle_mouse(&mouse, area, &self.theme).is_some() {
+                return Ok(true);
+            }
+        }
+
+        // 6. Sidebar
+        if self.sidebar.open {
+            let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
+            if let Some(session_id) = self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
+                self.state.current_session_id = Some(session_id);
+                return Ok(true);
+            }
+        }
+
+        // 7. Session view (tool expand/collapse)
+        if matches!(self.mode(), AppMode::Session) {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            let prompt_h = self.prompt_view
+                .required_height(main_area.width.saturating_sub(4));
+            let question_h = if self.question_dialog.visible {
+                self.question_dialog.required_height(main_area.width.saturating_sub(4))
+            } else {
+                0
+            };
+            let spinner_h = if matches!(self.state.status, SessionStatus::Working)
+                && self.agent_spinner.is_some()
+            {
+                1
+            } else {
+                0
+            };
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let prompt_area_y = footer_y.saturating_sub(prompt_h);
+            let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
+            let question_area_y = spinner_area_y.saturating_sub(question_h);
+            let session_bottom = question_area_y;
+            let session_area = Rect::new(
+                main_area.x,
+                area.y + 1,
+                main_area.width,
+                session_bottom.saturating_sub(area.y + 1),
+            );
+            if self.session_view.handle_mouse(
+                &mouse,
+                session_area,
+                &self.state,
+                &self.config,
+            ) {
+                return Ok(true);
+            }
+        }
+
+        // 8. Home view
+        if matches!(self.mode(), AppMode::Home) && !self.dialog.visible() {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            if let Some(action) = self.home_view.handle_mouse(&mouse, main_area) {
+                match action {
+                    crate::routes::home::HomeAction::NewSession => {
+                        self.state.sessions.push(crate::types::Session {
+                            id: format!("session-{}", self.state.sessions.len()),
+                            title: "New Session".to_string(),
+                            messages: vec![],
+                        });
+                        self.state.current_session_id =
+                            Some(self.state.sessions.last().unwrap().id.clone());
+                    }
+                    crate::routes::home::HomeAction::ToggleSidebar => {
+                        self.sidebar.open = !self.sidebar.open;
+                    }
+                }
+                return Ok(true);
+            }
+        }
+
+        // 9. Prompt area - click to focus
+        if matches!(self.mode(), AppMode::Session) {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            let prompt_h = self.prompt_view
+                .required_height(main_area.width.saturating_sub(4));
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let prompt_area_y = footer_y.saturating_sub(prompt_h);
+            let prompt_area = Rect::new(
+                main_area.x + 2,
+                prompt_area_y,
+                main_area.width.saturating_sub(4),
+                prompt_h,
+            );
+            if x >= prompt_area.x && x < prompt_area.right()
+                && y >= prompt_area.y && y < prompt_area.bottom()
+            {
+                self.prompt_view.focus();
+                return Ok(true);
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn terminal_size(&self) -> Rect {
+        // We don't store the terminal size, but ratatui's Terminal::size is not accessible here.
+        // Use a reasonable fallback: assume crossterm's terminal size.
+        let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+        Rect::new(0, 0, w, h)
+    }
+
+    fn terminal_height(&self) -> u16 {
+        self.terminal_size().height
+    }
 }
 
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
@@ -1515,6 +1860,7 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableFocusChange,
         crossterm::event::EnableBracketedPaste,
+        crossterm::event::EnableMouseCapture,
         crossterm::event::PushKeyboardEnhancementFlags(
             crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
         ),
@@ -1528,6 +1874,7 @@ fn restore_terminal() -> io::Result<()> {
     let mut stdout = io::stdout();
     crossterm::execute!(
         stdout,
+        crossterm::event::DisableMouseCapture,
         crossterm::event::DisableFocusChange,
         crossterm::event::DisableBracketedPaste,
         crossterm::event::PopKeyboardEnhancementFlags,
