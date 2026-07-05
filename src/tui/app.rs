@@ -1243,6 +1243,15 @@ impl App {
                 self.terminal_focused = false;
             }
             Event::Resize(_w, _h) => {}
+            Event::Paste(text) => {
+                self.prompt_view.note_activity();
+                // Strip newlines/carriage returns so paste doesn't trigger submission
+                let cleaned: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
+                let pos = self.prompt_view.cursor_pos;
+                self.prompt_view.input.insert_str(pos, &cleaned);
+                self.prompt_view.cursor_pos = pos + cleaned.len();
+                self.slash_menu.update(&self.prompt_view.input);
+            }
             _ => {}
         }
 
@@ -1438,6 +1447,7 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
         stdout,
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableFocusChange,
+        crossterm::event::EnableBracketedPaste,
     )?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -1449,6 +1459,7 @@ fn restore_terminal() -> io::Result<()> {
     crossterm::execute!(
         stdout,
         crossterm::event::DisableFocusChange,
+        crossterm::event::DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen,
     )?;
     stdout.flush()?;

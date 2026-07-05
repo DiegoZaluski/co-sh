@@ -37,7 +37,7 @@ chrono = "0.4"
 dotenvy = "0.15.7"
 anyhow = "1"
 schemars = "1"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["bracketed-paste"] }
 
 # ---
 [dependencies.ratatui]
