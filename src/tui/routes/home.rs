@@ -7,6 +7,9 @@ use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::Theme;
 
+/// How many frames between each pixel reveal during logo animation
+const ANIM_REVEAL_INTERVAL: u64 = 3;
+
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
@@ -26,25 +29,64 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
-fn dim_color(color: Color, brightness: f64) -> Color {
-    let (r, g, b) = match color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        _ => (0, 0, 0),
-    };
-    Color::Rgb(
-        (r as f64 * brightness) as u8,
-        (g as f64 * brightness) as u8,
-        (b as f64 * brightness) as u8,
-    )
+fn build_pixels() -> Vec<(u16, u16)> {
+    let mut pixels = Vec::new();
+    for (row, line) in LOGO.iter().enumerate() {
+        for (col, ch) in line.chars().enumerate() {
+            if ch != ' ' {
+                pixels.push((row as u16, col as u16));
+            }
+        }
+    }
+    pixels
 }
 
-fn render_logo(buf: &mut Buffer, area: Rect, cx: u16, logo_start_y: u16, frame: u64, primary: Color) {
-    let t = frame as f64 * 0.025;
-    let center_x: f64 = 14.0;
-    let center_y: f64 = 2.5;
+fn shuffled_order(len: usize, seed: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..len).collect();
+    let mut state = seed;
+    for i in (1..len).rev() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let j = (state >> 33) as usize % (i + 1);
+        order.swap(i, j);
+    }
+    order
+}
 
-    let max_dist = (center_x.powi(2) + center_y.powi(2)).sqrt();
-    let pulse_radius = (t * 0.8).sin().abs() * max_dist;
+fn flicker_brightness(idx: usize, frame: u64) -> f64 {
+    let h = idx as u64 * 374761393 + frame.wrapping_mul(668265263);
+    let h = h.wrapping_mul(h.wrapping_add(12345));
+    let r = (h >> 16) & 0xff;
+    if r > 200 {
+        0.0
+    } else if r > 150 {
+        0.08
+    } else if r > 100 {
+        0.2
+    } else if r > 50 {
+        0.4
+    } else {
+        0.6
+    }
+}
+
+fn render_logo_glitch(
+    buf: &mut Buffer,
+    area: Rect,
+    cx: u16,
+    logo_start_y: u16,
+    frame: u64,
+    primary: Color,
+    active: bool,
+    pixels: &[(u16, u16)],
+    order: &[usize],
+    revealed_count: usize,
+) {
+    let mut revealed_set = vec![false; pixels.len()];
+    for &idx in &order[..revealed_count] {
+        revealed_set[idx] = true;
+    }
 
     for (row, line) in LOGO.iter().enumerate() {
         let ly = logo_start_y + row as u16;
@@ -57,14 +99,25 @@ fn render_logo(buf: &mut Buffer, area: Rect, cx: u16, logo_start_y: u16, frame: 
                 continue;
             }
 
-            let dist = ((col as f64 - center_x).powi(2) + (row as f64 - center_y).powi(2)).sqrt();
-            let ring = (dist - pulse_radius).abs();
-            let brightness = (-ring * 0.6).exp();
-            let bri = (0.15 + brightness * 0.85).min(1.0);
+            let style = if !active {
+                Style::default().fg(primary)
+            } else {
+                let pixel_idx = pixels
+                    .iter()
+                    .position(|&(r, c)| r == row as u16 && c == col as u16);
+                match pixel_idx {
+                    Some(idx) if revealed_set[idx] => Style::default().fg(primary),
+                    Some(idx) => {
+                        let bri = flicker_brightness(idx, frame);
+                        Style::default().fg(dim_color(primary, bri))
+                    }
+                    None => Style::default().fg(primary),
+                }
+            };
 
             if let Some(cell) = buf.cell_mut((cx_pos, ly)) {
                 cell.set_char(ch);
-                cell.set_style(Style::default().fg(dim_color(primary, bri)));
+                cell.set_style(style);
             }
         }
     }
@@ -95,16 +148,22 @@ pub struct HomeView {
     pub selected_index: usize,
     pub frame: u64,
     pub anim_active: bool,
-    pub anim_total_frames: u64,
+    pixels: Vec<(u16, u16)>,
+    order: Vec<usize>,
+    revealed_count: usize,
 }
 
 impl HomeView {
     pub fn new() -> Self {
+        let pixels = build_pixels();
+        let order = shuffled_order(pixels.len(), 42);
         HomeView {
             selected_index: 0,
             frame: 0,
             anim_active: true,
-            anim_total_frames: 850,
+            revealed_count: 0,
+            pixels,
+            order,
         }
     }
 
@@ -113,7 +172,10 @@ impl HomeView {
             return;
         }
         self.frame += 1;
-        if self.frame >= self.anim_total_frames {
+        if self.frame % ANIM_REVEAL_INTERVAL == 0 && self.revealed_count < self.pixels.len() {
+            self.revealed_count += 1;
+        }
+        if self.revealed_count >= self.pixels.len() {
             self.anim_active = false;
         }
     }
@@ -176,7 +238,18 @@ impl HomeView {
         let text = rgba_color(theme.text);
 
         let logo_start_y = area.y + 2;
-        render_logo(buf, area, cx, logo_start_y, self.frame, primary);
+        render_logo_glitch(
+            buf,
+            area,
+            cx,
+            logo_start_y,
+            self.frame,
+            primary,
+            self.anim_active,
+            &self.pixels,
+            &self.order,
+            self.revealed_count,
+        );
 
         let tagline_y = logo_start_y + LOGO.len() as u16 + 1;
         let tagline_x = cx.saturating_sub(TAGLINE.len() as u16 / 2);
@@ -226,4 +299,16 @@ impl HomeView {
             Style::default().fg(muted),
         );
     }
+}
+
+fn dim_color(color: Color, brightness: f64) -> Color {
+    let (r, g, b) = match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0, 0, 0),
+    };
+    Color::Rgb(
+        (r as f64 * brightness) as u8,
+        (g as f64 * brightness) as u8,
+        (b as f64 * brightness) as u8,
+    )
 }

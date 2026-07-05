@@ -190,7 +190,7 @@ fn cosh() -> Theme {
         text: RGBA::from_hex("#eeeeee"),
         text_muted: RGBA::from_hex("#808080"),
         selected_list_item_text: RGBA::from_hex("#0a0a0a"),
-        primary: RGBA::from_hex("#EC5B2B"),
+        primary: RGBA::from_hex("#FF6B30"),
         secondary: RGBA::from_hex("#EE7948"),
         accent: RGBA::from_hex("#FFF7F1"),
         success: RGBA::from_hex("#6ba1e6"),
