@@ -86,8 +86,10 @@ pub struct App {
     mouse_down_pos: Option<(u16, u16)>,
     /// Whether a drag-selection is in progress.
     mouse_drag_active: bool,
-    /// Normalised selection rectangle (x1, y1, x2, y2) — used for visual highlight.
-    drag_selection_rect: Option<(u16, u16, u16, u16)>,
+    /// Visual highlight: anchor (sx,sy) and focus (x,y) — stored without normalisation
+    /// so the renderer can apply flow-based selection highlighting (top line from start_x
+    /// to end, bottom line from start to end_x, middle lines fully highlighted).
+    drag_selection: Option<(u16, u16, u16, u16)>,
 }
 
 impl App {
@@ -129,7 +131,7 @@ impl App {
             agent_spinner: None,
             mouse_down_pos: None,
             mouse_drag_active: false,
-            drag_selection_rect: None,
+            drag_selection: None,
         }
     }
 
@@ -639,7 +641,7 @@ impl App {
                 AppMode::Session => {
                     self.prompt_view.focus();
                     self.prompt_view.terminal_focused = self.terminal_focused;
-                    self.session_view.drag_selection = self.drag_selection_rect;
+                    self.session_view.drag_selection = self.drag_selection;
                     self.session_view.tool_state.advance_spinner();
 
                     // Advance the agent spinner when working
@@ -1598,7 +1600,7 @@ impl App {
             (MouseEventType::Down, MouseButton::Left) => {
                 self.mouse_down_pos = Some((x, y));
                 self.mouse_drag_active = false;
-                self.drag_selection_rect = None;
+                self.drag_selection = None;
 
                 // If the click is inside the prompt area, start a text selection.
                 if matches!(self.mode(), AppMode::Session) {
@@ -1622,10 +1624,9 @@ impl App {
                     self.mouse_drag_active = true;
                     // Update visual selection rectangle.
                     if let Some((sx, sy)) = self.mouse_down_pos {
-                        self.drag_selection_rect = Some((
-                            sx.min(x), sy.min(y),
-                            sx.max(x), sy.max(y),
-                        ));
+                        // Store anchor (sx,sy) and focus (x,y) WITHOUT normalising,
+                        // so the renderer can apply flow-based selection highlighting.
+                        self.drag_selection = Some((sx, sy, x, y));
                     }
                     // If drag is within the prompt area, extend the text selection.
                     if matches!(self.mode(), AppMode::Session) && self.prompt_view.sel_start.is_some() {
@@ -1642,7 +1643,7 @@ impl App {
                 return Ok(true);
             }
             (MouseEventType::Up, MouseButton::Left) => {
-                let _rect = self.drag_selection_rect.take();
+                let _rect = self.drag_selection.take();
                 let drag_start = self.mouse_down_pos.take();
                 let is_drag = self.mouse_drag_active
                     || drag_start.map_or(false, |(sx, sy)| sx != x || sy != y);
@@ -1713,11 +1714,8 @@ impl App {
                             );
                         }
 
-                        let y1 = sy.min(y);
-                        let y2 = sy.max(y) + 1;
-                        let x1 = sx.min(x);
-                        let x2 = sx.max(x) + 1;
-                        let text = self.session_view.get_text_in_region(y1, y2, x1, x2);
+                        // Pass anchor (sx,sy) and focus (x,y) directly for flow selection.
+                        let text = self.session_view.get_text_in_region(sx, sy, x, y);
                         if !text.is_empty() {
                             selection::copy_selection(&text, &mut self.toast_state);
                             return Ok(true);

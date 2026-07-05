@@ -91,7 +91,9 @@ pub struct SessionView {
     pub tool_state: ToolRenderState,
     /// Text regions from the last render pass, used for mouse-based selection.
     text_regions: Vec<TextRegion>,
-    /// Active drag selection rectangle in screen coordinates (x1, y1, x2, y2).
+    /// Active drag selection: (anchor_x, anchor_y, focus_x, focus_y) in screen coordinates.
+    /// Stored WITHOUT normalisation so the renderer can apply flow-based highlighting:
+    /// top line from start_x to end, bottom line from start to end_x, middle lines fully highlighted.
     /// Set before render() to enable visual selection highlight.
     pub drag_selection: Option<(u16, u16, u16, u16)>,
 }
@@ -807,24 +809,66 @@ impl SessionView {
         }
     }
 
-    /// Return the text within a screen-coordinate rectangle (inclusive-exclusive).
-    /// Each TextRegion now stores exactly 1 visual line, so x-coordinates can
-    /// be used to slice individual characters from each line.
-    pub fn get_text_in_region(&self, y1: u16, y2: u16, x1: u16, x2: u16) -> String {
+    /// Return the text selected by a flow-based selection from `anchor` to `focus`.
+    /// Unlike a rectangular selection, flow selection follows the text direction:
+    ///   - If selecting top-to-bottom: top line selects from anchor_x to end,
+    ///     bottom line selects from 0 to focus_x, middle lines are fully selected.
+    ///   - If selecting bottom-to-top: top line selects from 0 to focus_x,
+    ///     bottom line selects from anchor_x to end, middle lines are fully selected.
+    /// Each TextRegion stores exactly 1 visual line, so x-coordinates are
+    /// used to slice individual characters from each line.
+    pub fn get_text_in_region(
+        &self,
+        anchor_x: u16,
+        anchor_y: u16,
+        focus_x: u16,
+        focus_y: u16,
+    ) -> String {
+        let start_y = anchor_y.min(focus_y);
+        let end_y = anchor_y.max(focus_y);
+
+        // start_x is the x-coordinate on the topmost line;
+        // end_x is the x-coordinate on the bottommost line.
+        let (start_x, end_x) = if anchor_y == start_y {
+            // Anchor is at top (or on same line), focus is at bottom
+            (anchor_x, focus_x)
+        } else {
+            // Focus is at top, anchor is at bottom
+            (focus_x, anchor_x)
+        };
+
         let mut result = String::new();
         for region in &self.text_regions {
-            // Check y overlap.
-            if region.y1 >= y2 || region.y2 <= y1 {
+            // Y-range check: does this visual line fall within the selection?
+            if region.y1 > end_y || region.y2 <= start_y {
                 continue;
             }
-            // Check x overlap.
-            let ox1 = region.x1.max(x1);
-            let ox2 = region.x2.min(x2);
+
+            let line_y = region.y1; // Each region is exactly 1 line high
+
+            // Determine the x-range for this specific line based on flow selection.
+            let (lx1, lx2) = if start_y == end_y {
+                // Single line: just the range between start and end.
+                (start_x.min(end_x), start_x.max(end_x))
+            } else if line_y == start_y {
+                // Topmost selected line: from start_x to end of this line.
+                (start_x, region.x2)
+            } else if line_y == end_y {
+                // Bottommost selected line: from start of this line to end_x.
+                (region.x1, end_x)
+            } else {
+                // Middle line: select the entire line.
+                (region.x1, region.x2)
+            };
+
+            // Clamp to the actual region's x bounds.
+            let ox1 = region.x1.max(lx1);
+            let ox2 = region.x2.min(lx2);
             if ox1 >= ox2 {
                 continue;
             }
 
-            // Map x overlap to character columns within this visual line.
+            // Map screen x-coordinates to character indices.
             let col_start = (ox1 - region.x1) as usize;
             let col_end = (ox2 - region.x1) as usize;
 
@@ -972,12 +1016,44 @@ impl SessionView {
             y += msg_h;
         }
 
-        // ── Visual selection highlight ──────────────────────────────────────
+        // ── Visual selection highlight (flow-based) ────────────────────────
         // After rendering all messages, apply inverted colors to non-space cells
-        // within the active drag selection rectangle.
-        if let Some((sel_x1, sel_y1, sel_x2, sel_y2)) = self.drag_selection {
-            for cy in sel_y1..=sel_y2 {
-                for cx in sel_x1..=sel_x2 {
+        // within the flow-based selection region. Uses the same anchor/focus
+        // logic as get_text_in_region() so the visual highlight exactly matches
+        // what will be copied.
+        if let Some((anchor_x, anchor_y, focus_x, focus_y)) = self.drag_selection {
+            let start_y = anchor_y.min(focus_y);
+            let end_y = anchor_y.max(focus_y);
+
+            let (start_x, end_x) = if anchor_y == start_y {
+                (anchor_x, focus_x)
+            } else {
+                (focus_x, anchor_x)
+            };
+
+            // Bounds for "full width" highlight: the session area's right edge.
+            let max_x = area.right().saturating_sub(1);
+            let min_x = area.x;
+
+            // Apply highlight per-line, matching flow selection boundaries.
+            for cy in start_y..=end_y {
+                let (lx1, lx2) = if start_y == end_y {
+                    // Single line.
+                    let a = start_x.min(end_x);
+                    let b = start_x.max(end_x);
+                    (a.min(max_x), b.min(max_x))
+                } else if cy == start_y {
+                    // Topmost selected line: from start_x to end.
+                    (start_x.min(max_x), max_x)
+                } else if cy == end_y {
+                    // Bottommost selected line: from start to end_x.
+                    (min_x, end_x.min(max_x))
+                } else {
+                    // Middle line: highlight entire row within session area.
+                    (min_x, max_x)
+                };
+
+                for cx in lx1..=lx2 {
                     if let Some(cell) = buf.cell_mut((cx, cy)) {
                         if cell.symbol() != " " {
                             let fg = cell.fg;
