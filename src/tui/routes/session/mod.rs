@@ -91,6 +91,9 @@ pub struct SessionView {
     pub tool_state: ToolRenderState,
     /// Text regions from the last render pass, used for mouse-based selection.
     text_regions: Vec<TextRegion>,
+    /// Active drag selection rectangle in screen coordinates (x1, y1, x2, y2).
+    /// Set before render() to enable visual selection highlight.
+    pub drag_selection: Option<(u16, u16, u16, u16)>,
 }
 
 impl SessionView {
@@ -99,6 +102,7 @@ impl SessionView {
             scroll_y: 0,
             tool_state: ToolRenderState::new(),
             text_regions: Vec::new(),
+            drag_selection: None,
         }
     }
 
@@ -927,6 +931,24 @@ impl SessionView {
             }
 
             y += msg_h;
+        }
+
+        // ── Visual selection highlight ──────────────────────────────────────
+        // After rendering all messages, apply inverted colors to non-space cells
+        // within the active drag selection rectangle.
+        if let Some((sel_x1, sel_y1, sel_x2, sel_y2)) = self.drag_selection {
+            for cy in sel_y1..=sel_y2 {
+                for cx in sel_x1..=sel_x2 {
+                    if let Some(cell) = buf.cell_mut((cx, cy)) {
+                        if cell.symbol() != " " {
+                            let fg = cell.fg;
+                            let bg = cell.bg;
+                            cell.set_fg(bg);
+                            cell.set_bg(fg);
+                        }
+                    }
+                }
+            }
         }
 
         total_height

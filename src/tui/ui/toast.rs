@@ -107,12 +107,16 @@ impl ToastState {
         let toast_area = Rect::new(toast_x, toast_y, toast_w, inner_h);
         bg.render_self(buf, toast_area);
 
+        let padding_x = 2u16;
+        let inner_w = toast_w.saturating_sub(padding_x * 2);
+
         let mut y = toast_y;
         if let Some(ref title) = toast.title {
             let mut t = TextRenderable::new(Some(string_to_styled_text(title)));
             t.set_fg(theme.text);
+            t.set_bg(theme.background_panel);
             t.set_attributes(TextAttributes::BOLD.bits());
-            let title_area = Rect::new(toast_x + 1, y, toast_w.saturating_sub(2), 1);
+            let title_area = Rect::new(toast_x + padding_x, y, inner_w, 1);
             t.render_self(buf, title_area);
             y += 1;
         }
@@ -120,7 +124,7 @@ impl ToastState {
         let mut msg = TextRenderable::new(Some(string_to_styled_text(&toast.message)));
         msg.set_fg(theme.text);
         msg.set_bg(theme.background_panel);
-        let msg_area = Rect::new(toast_x + 1, y, toast_w.saturating_sub(2), 1);
+        let msg_area = Rect::new(toast_x + padding_x, y, inner_w, 1);
         msg.render_self(buf, msg_area);
     }
 }

@@ -86,6 +86,8 @@ pub struct App {
     mouse_down_pos: Option<(u16, u16)>,
     /// Whether a drag-selection is in progress.
     mouse_drag_active: bool,
+    /// Normalised selection rectangle (x1, y1, x2, y2) — used for visual highlight.
+    drag_selection_rect: Option<(u16, u16, u16, u16)>,
 }
 
 impl App {
@@ -127,6 +129,7 @@ impl App {
             agent_spinner: None,
             mouse_down_pos: None,
             mouse_drag_active: false,
+            drag_selection_rect: None,
         }
     }
 
@@ -636,6 +639,7 @@ impl App {
                 AppMode::Session => {
                     self.prompt_view.focus();
                     self.prompt_view.terminal_focused = self.terminal_focused;
+                    self.session_view.drag_selection = self.drag_selection_rect;
                     self.session_view.tool_state.advance_spinner();
 
                     // Advance the agent spinner when working
@@ -1588,19 +1592,57 @@ impl App {
         };
 
         // ── Selection / drag tracking ─────────────────────────────────────────
+        // We must handle Down and Drag events for the prompt area INSIDE this match
+        // because they return early below and never reach the component dispatch section.
         match (event_type, button) {
             (MouseEventType::Down, MouseButton::Left) => {
                 self.mouse_down_pos = Some((x, y));
                 self.mouse_drag_active = false;
-                // Let normal click handling proceed (we only track potential drags)
+                self.drag_selection_rect = None;
+
+                // If the click is inside the prompt area, start a text selection.
+                if matches!(self.mode(), AppMode::Session) {
+                    if let Some(prompt_area) = self.compute_prompt_area() {
+                        if x >= prompt_area.x && x < prompt_area.right()
+                            && y >= prompt_area.y && y < prompt_area.bottom()
+                        {
+                            self.prompt_view.focus();
+                            if let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, prompt_area) {
+                                self.prompt_view.cursor_pos = pos;
+                                self.prompt_view.sel_start = Some(pos);
+                                self.prompt_view.sel_end = Some(pos);
+                            }
+                            return Ok(true);
+                        }
+                    }
+                }
             }
             (MouseEventType::Drag, MouseButton::Left) => {
                 if self.mouse_down_pos.is_some() {
                     self.mouse_drag_active = true;
+                    // Update visual selection rectangle.
+                    if let Some((sx, sy)) = self.mouse_down_pos {
+                        self.drag_selection_rect = Some((
+                            sx.min(x), sy.min(y),
+                            sx.max(x), sy.max(y),
+                        ));
+                    }
+                    // If drag is within the prompt area, extend the text selection.
+                    if matches!(self.mode(), AppMode::Session) && self.prompt_view.sel_start.is_some() {
+                        if let Some(prompt_area) = self.compute_prompt_area() {
+                            if y >= prompt_area.y && y < prompt_area.bottom() {
+                                if let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, prompt_area) {
+                                    self.prompt_view.cursor_pos = pos;
+                                    self.prompt_view.sel_end = Some(pos);
+                                }
+                            }
+                        }
+                    }
                 }
                 return Ok(true);
             }
             (MouseEventType::Up, MouseButton::Left) => {
+                let _rect = self.drag_selection_rect.take();
                 let drag_start = self.mouse_down_pos.take();
                 let is_drag = self.mouse_drag_active
                     || drag_start.map_or(false, |(sx, sy)| sx != x || sy != y);
@@ -1616,8 +1658,6 @@ impl App {
                     }
 
                     // Extract selected text from the session view by drag region.
-                    // Must use the exact same session_area / inner_area calculation
-                    // as in SessionView::render() so that text y-coordinates match.
                     if matches!(self.mode(), AppMode::Session)
                         && let Some((sx, sy)) = drag_start
                     {
@@ -1655,7 +1695,6 @@ impl App {
                             session_bottom.saturating_sub(area.y + 1),
                         );
 
-                        // Same inner_area calculation as SessionView::render()
                         let margin = 2u16;
                         let inner_area = Rect::new(
                             session_area.x + margin,
@@ -1945,7 +1984,7 @@ impl App {
             }
         }
 
-        // 9. Prompt area - click to focus
+        // 9. Prompt area - click/drag to focus and select text
         if matches!(self.mode(), AppMode::Session) {
             let area = self.terminal_size();
             let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
@@ -1974,6 +2013,31 @@ impl App {
         }
 
         Ok(true)
+    }
+
+    /// Compute the prompt area rectangle (same calculation as in render()).
+    fn compute_prompt_area(&self) -> Option<Rect> {
+        if !matches!(self.mode(), AppMode::Session) {
+            return None;
+        }
+        let area = self.terminal_size();
+        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+        let main_area = Rect::new(
+            area.x + sidebar_w,
+            area.y,
+            area.width.saturating_sub(sidebar_w),
+            area.height,
+        );
+        let prompt_h = self.prompt_view
+            .required_height(main_area.width.saturating_sub(4));
+        let footer_y = main_area.bottom().saturating_sub(1);
+        let prompt_area_y = footer_y.saturating_sub(prompt_h);
+        Some(Rect::new(
+            main_area.x + 2,
+            prompt_area_y,
+            main_area.width.saturating_sub(4),
+            prompt_h,
+        ))
     }
 
     fn terminal_size(&self) -> Rect {

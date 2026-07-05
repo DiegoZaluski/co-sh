@@ -65,8 +65,8 @@ pub struct PromptView {
     pub terminal_focused: bool,
     pub last_input_at: SystemTime,
     pub blink_start: SystemTime,
-    sel_start: Option<usize>,
-    sel_end: Option<usize>,
+    pub sel_start: Option<usize>,
+    pub sel_end: Option<usize>,
 }
 
 impl PromptView {
@@ -306,6 +306,57 @@ impl PromptView {
             result.push(input);
         }
         result
+    }
+
+    /// Map a screen-space mouse coordinate (x, y) to a character index in `self.input`.
+    /// Returns `None` if the position is outside the text area of the prompt.
+    pub fn char_pos_at_mouse(&self, x: u16, y: u16, area: Rect) -> Option<usize> {
+        let text_w = area.width.saturating_sub(5) as usize;
+        if text_w == 0 {
+            return None;
+        }
+        let text_start = area.y + 1; // first content line
+        let x_off = area.x + 3;      // left margin within border
+        let n = if self.input.is_empty() {
+            1
+        } else {
+            self.input.split('\n')
+                .map(|line| line.chars().count().div_ceil(text_w).max(1))
+                .sum::<usize>() as u16
+        };
+        let bottom = text_start + n;
+
+        if y < text_start || y >= bottom || x < x_off {
+            return None;
+        }
+
+        let visual_line = (y - text_start) as usize;
+        let col = (x - x_off) as usize;
+
+        let display_lines = if self.input.is_empty() {
+            vec![""]
+        } else {
+            Self::wrapped_lines(&self.input, text_w)
+        };
+
+        if visual_line >= display_lines.len() {
+            return None;
+        }
+
+        let line = display_lines[visual_line];
+        let col = col.min(line.chars().count());
+
+        // Compute byte offset of the visual line in the original input.
+        let mut byte_off = 0usize;
+        for li in 0..visual_line {
+            byte_off += display_lines[li].len();
+        }
+        // Add the column within the visual line.
+        if let Some((off, _)) = line.char_indices().nth(col) {
+            Some(byte_off + off)
+        } else {
+            Some(byte_off + line.len())
+        }
     }
 
     /// Render the prompt and draw a blinking cursor if focused.
