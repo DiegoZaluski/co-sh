@@ -120,6 +120,88 @@ pub struct MemorySnapshot {
 
 pub struct Selection;
 
+// ── Mouse event types ──────────────────────────────────────────────────────────
+
+/// Mouse buttons, matching crossterm's convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left = 0,
+    Middle = 1,
+    Right = 2,
+}
+
+/// Types of mouse event that can be dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseEventType {
+    Down,
+    Up,
+    Drag,
+    Move,
+    ScrollDown,
+    ScrollUp,
+}
+
+/// Modifier keys held during a mouse event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseModifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+}
+
+impl MouseModifiers {
+    #[must_use]
+    pub fn none() -> Self {
+        MouseModifiers { shift: false, alt: false, ctrl: false }
+    }
+}
+
+/// A mouse event dispatched by the renderer or application.
+#[derive(Debug, Clone)]
+pub struct MouseEvent {
+    pub event_type: MouseEventType,
+    pub button: MouseButton,
+    pub x: u16,
+    pub y: u16,
+    pub modifiers: MouseModifiers,
+    pub(crate) propagation_stopped: bool,
+    pub(crate) default_prevented: bool,
+}
+
+impl MouseEvent {
+    #[must_use]
+    pub fn new(
+        event_type: MouseEventType,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        modifiers: MouseModifiers,
+    ) -> Self {
+        MouseEvent {
+            event_type,
+            button,
+            x,
+            y,
+            modifiers,
+            propagation_stopped: false,
+            default_prevented: false,
+        }
+    }
+
+    pub fn stop_propagation(&mut self) {
+        self.propagation_stopped = true;
+    }
+
+    pub fn prevent_default(&mut self) {
+        self.default_prevented = true;
+    }
+
+    #[must_use]
+    pub fn is_left_click(&self) -> bool {
+        self.button == MouseButton::Left && self.event_type == MouseEventType::Up
+    }
+}
+
 pub trait RenderContext<TRenderable> {
     fn add_to_hit_grid(&mut self, x: i32, y: i32, width: i32, height: i32, id: i32);
     fn push_hit_grid_scissor_rect(&mut self, x: i32, y: i32, width: i32, height: i32);

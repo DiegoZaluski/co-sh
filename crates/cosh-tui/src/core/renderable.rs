@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
+use super::types::MouseEvent;
+
 static NEXT_RENDERABLE_NUM: AtomicU64 = AtomicU64::new(1);
 
 pub trait Renderable {
@@ -60,6 +62,12 @@ pub trait Renderable {
     fn remove_child(&mut self, id: &str);
     fn insert_child_before(&mut self, child: Box<dyn Renderable>, anchor_id: &str)
     -> Option<usize>;
+
+    /// Process a mouse event targeting this renderable.
+    /// Returns `true` if the event was handled.
+    fn process_mouse_event(&mut self, _event: &MouseEvent) -> bool {
+        false
+    }
 }
 
 pub fn adopt_child(
