@@ -73,8 +73,8 @@ const KNOWN_KEYS: &[&str] = &[
     "description",
 ];
 
-fn is_known_key(key: &str) -> bool {
-    KNOWN_KEYS.contains(&key)
+fn is_known_key(key: &str, tool_keys: &[String]) -> bool {
+    KNOWN_KEYS.contains(&key) || tool_keys.iter().any(|k| k == key)
 }
 
 /// Extractor that detects and validates tool calls embedded in LLM text output.
@@ -84,7 +84,18 @@ fn is_known_key(key: &str) -> bool {
 /// structure and the per-tool input schema.
 pub struct ExtractAction {
     tools: Vec<ToolSchema>,
+    tool_keys: Vec<String>,
     state: StreamState,
+}
+
+fn extract_tool_property_keys(schema: &JsonValue) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+        for key in properties.keys() {
+            keys.push(key.clone());
+        }
+    }
+    keys
 }
 
 impl ExtractAction {
@@ -95,6 +106,7 @@ impl ExtractAction {
     pub fn new() -> Self {
         Self {
             tools: Vec::new(),
+            tool_keys: Vec::new(),
             state: StreamState::default(),
         }
     }
@@ -102,12 +114,16 @@ impl ExtractAction {
     /// Register a tool schema (builder-style).
     #[must_use]
     pub fn with_tool(mut self, schema: ToolSchema) -> Self {
+        self.tool_keys
+            .extend(extract_tool_property_keys(&schema.input_schema));
         self.tools.push(schema);
         self
     }
 
     /// Register a tool schema.
     pub fn add_tool(&mut self, schema: ToolSchema) {
+        self.tool_keys
+            .extend(extract_tool_property_keys(&schema.input_schema));
         self.tools.push(schema);
     }
 
@@ -269,7 +285,7 @@ impl ExtractAction {
                 ':' => {
                     if self.state.depth == 1 {
                         if let Some(ref key) = self.state.pending_key.take()
-                            && !is_known_key(key)
+                            && !is_known_key(key, &self.tool_keys)
                         {
                             self.state.early_exit = true;
                         }
@@ -316,7 +332,7 @@ impl Default for ExtractAction {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn find_json_objects(text: &str) -> Vec<(usize, usize)> {
+pub fn find_json_objects(text: &str) -> Vec<(usize, usize)> {
     let mut results = Vec::new();
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -396,28 +412,49 @@ fn jsonish_value_to_json(value: &jsonish::Value) -> Option<JsonValue> {
 fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCallData> {
     let obj = value.as_object()?;
 
-    let name = obj
+    // Standard tool call envelope: {"name": "...", "arguments": {...}}
+    if let Some(name) = obj
         .get("name")
         .or_else(|| obj.get("tool"))
         .or_else(|| obj.get("function"))
-        .and_then(|v| v.as_str())?;
+        .and_then(|v| v.as_str())
+    {
+        let tool = tools.iter().find(|t| t.name == name)?;
 
-    let tool = tools.iter().find(|t| t.name == name)?;
+        let args = obj
+            .get("arguments")
+            .or_else(|| obj.get("input"))
+            .or_else(|| obj.get("args"))
+            .or_else(|| obj.get("parameters"))?;
 
-    let args = obj
-        .get("arguments")
-        .or_else(|| obj.get("input"))
-        .or_else(|| obj.get("args"))
-        .or_else(|| obj.get("parameters"))?;
+        if !validate_against_schema(args, &tool.input_schema) {
+            return None;
+        }
 
-    if !validate_against_schema(args, &tool.input_schema) {
-        return None;
+        return Some(ToolCallData {
+            name: name.to_string(),
+            arguments: args.clone(),
+        });
     }
 
-    Some(ToolCallData {
-        name: name.to_string(),
-        arguments: args.clone(),
-    })
+    // Bare-arguments fallback: if the JSON has no name/tool/function field
+    // but matches exactly one registered tool's input schema, treat it
+    // as a bare tool call (arguments only). This catches cases where the
+    // LLM outputs the arguments directly without an envelope.
+    let mut matches: Vec<&ToolSchema> = Vec::new();
+    for tool in tools {
+        if validate_against_schema(value, &tool.input_schema) {
+            matches.push(tool);
+        }
+    }
+    if matches.len() == 1 {
+        return Some(ToolCallData {
+            name: matches[0].name.clone(),
+            arguments: value.clone(),
+        });
+    }
+
+    None
 }
 
 fn validate_against_schema(value: &JsonValue, schema: &JsonValue) -> bool {

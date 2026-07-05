@@ -407,3 +407,85 @@ fn stream_nested_objects_do_not_confuse_depth() {
         other => panic!("expected ToolCall, got {other:?}"),
     }
 }
+
+#[test]
+fn batch_ask_questions_tool_call() {
+    let ask_schema = ToolSchema {
+        name: "ask_questions".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "question": { "type": "string" },
+                            "type": { "type": "string", "enum": ["Text", "SingleChoice", "MultiChoice", "YesNo"] },
+                            "purpose": { "type": "string" },
+                            "options": { "type": "array", "items": { "type": "string" } },
+                            "required": { "type": "boolean" }
+                        },
+                        "required": ["id", "question", "type"]
+                    }
+                }
+            },
+            "required": ["questions"]
+        }),
+    };
+
+    let ex = ExtractAction::new().with_tool(ask_schema);
+
+    // Standard envelope
+    let text = r#"Some thoughts {"name": "ask_questions", "arguments": {"questions": [{"id": "lang", "question": "What language?", "type": "SingleChoice", "required": true, "options": ["Python", "Rust"]}]}} trailing"#;
+    
+    let result = ex.extract_batch(text);
+    
+    let tool_items: Vec<_> = result.items.iter().filter_map(|i| {
+        if let Item::ToolCall(tc) = i { Some(tc) } else { None }
+    }).collect();
+    
+    assert!(!tool_items.is_empty(), "Expected at least one tool call, got: {result:?}");
+    assert_eq!(tool_items[0].name, "ask_questions");
+    assert!(tool_items[0].arguments.get("questions").is_some());
+}
+
+#[test]
+fn batch_ask_questions_bare_args() {
+    let ask_schema = ToolSchema {
+        name: "ask_questions".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "question": { "type": "string" },
+                            "type": { "type": "string" }
+                        },
+                        "required": ["id", "question", "type"]
+                    }
+                }
+            },
+            "required": ["questions"]
+        }),
+    };
+
+    let ex = ExtractAction::new().with_tool(ask_schema);
+
+    // Bare arguments (no envelope) — triggers the "bare-arguments fallback"
+    let text = r#"{"questions": [{"id": "lang", "question": "What?", "type": "Text"}]}"#;
+    let result = ex.extract_batch(text);
+    
+    let tool_items: Vec<_> = result.items.iter().filter_map(|i| {
+        if let Item::ToolCall(tc) = i { Some(tc) } else { None }
+    }).collect();
+    
+    // With the bare-arguments fallback, this should work
+    assert!(!tool_items.is_empty(), "Expected at least one tool call, got: {result:?}");
+    assert_eq!(tool_items[0].name, "ask_questions");
+}

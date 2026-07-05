@@ -16,6 +16,17 @@ pub struct ServerSession {
     pub client: RunningService<RoleClient, ()>,
 }
 
+pub const INSTRUCTIONS: &str = concat!(
+    "You are an AI assistant with access to tools. ",
+    "You MUST use the tools below to accomplish tasks. ",
+    "To call a tool, respond with a JSON object in this exact format:\n\n",
+    "{\"name\": \"tool_name\", \"arguments\": { ... }}\n\n",
+    "Replace \"tool_name\" with the actual tool name and { ... } with the ",
+    "required arguments shown in the tool's Schema below. ",
+    "If tools are available, USE THEM. Do not just describe the schema — ",
+    "respond with an actual tool call.\n\n"
+);
+
 pub struct PromptSystem {
     pub title: String,
     pub text: String,
@@ -171,6 +182,8 @@ impl Harness {
     /// — all rendered inline with full name, description, and input schema.
     pub fn format_header_context(&mut self) -> &str {
         let mut out = String::new();
+
+        let _ = write!(out, "{}", INSTRUCTIONS);
 
         for prompt in &self.system_prompts {
             let _ = write!(out, "## System: {}\n{}\n\n", prompt.title, prompt.text);
