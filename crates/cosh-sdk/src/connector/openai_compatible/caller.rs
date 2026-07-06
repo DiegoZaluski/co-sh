@@ -249,8 +249,10 @@ pub(crate) async fn chat_stream(
     let url = format!("{base_url}/chat/completions");
 
     let auth = format!("Bearer {api_key}");
+    log::debug!("chat_stream: sending request to {}", url);
     let response =
         send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
+    log::debug!("chat_stream: got response status={}", response.status());
 
     let buf = SseBuffer::new();
 
@@ -260,8 +262,12 @@ pub(crate) async fn chat_stream(
             let mut buf = buf;
             loop {
                 let chunk = match tokio::time::timeout(Duration::from_secs(30), response.chunk()).await {
-                    Ok(Ok(Some(c))) => c,
-                    Ok(Ok(None)) => break,
+                    Ok(Ok(Some(c))) => {
+                        c
+                    }
+                    Ok(Ok(None)) => {
+                        break;
+                    }
                     Ok(Err(e)) => {
                         yield Err(ConnectorError::Network(e.to_string()));
                         return;
@@ -284,11 +290,15 @@ pub(crate) async fn chat_stream(
                             let finish_reason = ccr.choices.first()
                                 .and_then(|c| c.finish_reason.as_deref())
                                 .map(String::from);
+                            let should_stop = finish_reason.is_some();
                             yield Ok(StreamChunk {
                                 raw: data,
                                 token,
                                 finish_reason,
                             });
+                            if should_stop {
+                                return;
+                            }
                         }
                         Err(e) => {
                             yield Err(ConnectorError::Deserialization(e.to_string()));

@@ -18,6 +18,11 @@ use dotenvy::dotenv;
 #[tokio::main]
 async fn main() {
     dotenv().ok();
+
+    // Initialize debug file logger (no-op in release builds).
+    // Logs are written to /tmp/cosh_debug.log.
+    cosh::util::logger::init();
+
     crate::util::selection::init_clipboard();
     let mut app = App::new();
     app.show_welcome_toast();

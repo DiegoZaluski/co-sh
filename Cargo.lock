@@ -450,6 +450,7 @@ dependencies = [
  "cosh-tui",
  "crossterm 0.28.1",
  "dotenvy",
+ "log",
  "ratatui",
  "rmcp",
  "schemars",
