@@ -278,11 +278,12 @@ async fn dispatch_next_preserves_item_on_server_error() {
         "expected server error, got: {err}"
     );
 
-    // Item should STILL be in queue — dispatch_next preserves on failure.
+    // Item should be removed from queue — dispatch_next pops even on failure
+    // to avoid infinite loops in Phase 2.
     let err2 = h.dispatch_next().await.unwrap_err();
     assert!(
-        err2.contains("server crashed"),
-        "item should still be in queue, got: {err2}"
+        err2.contains("no pending"),
+        "expected empty queue error, got: {err2}"
     );
 
     drop(h);

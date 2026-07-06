@@ -132,7 +132,7 @@ impl Tools for CoshTools {
     }
 
     fn schemas(&self) -> Vec<ToolSchema> {
-        vec![
+        let mut v = vec![
             extract_schema(&self.bash.description_run),
             extract_schema(&self.fs.description_read),
             extract_schema(&self.fs.description_write),
@@ -143,17 +143,18 @@ impl Tools for CoshTools {
             extract_schema(&self.web.description_fetch),
             extract_schema(&self.web.description_search),
             extract_schema(&self.vision.description_terminal),
-            extract_schema(&self.plan.lock().unwrap().description_todo_write),
-            extract_schema(&self.plan.lock().unwrap().description_todo_edit),
-            extract_schema(&self.plan.lock().unwrap().description_todo_cross_off),
-            extract_schema(&self.plan.lock().unwrap().description_todo_read),
-            extract_schema(&self.plan.lock().unwrap().description_load_from_md),
-            extract_schema(&self.question.description_ask),
-            extract_schema(&self.skills.description_list),
-            extract_schema(&self.skills.description_read),
-            extract_schema(&self.skills.description_read_asset),
-            extract_schema(&self.skills.description_match_skills),
-        ]
+        ];
+        v.push(extract_schema(&self.plan.lock().unwrap().description_todo_write));
+        v.push(extract_schema(&self.plan.lock().unwrap().description_todo_edit));
+        v.push(extract_schema(&self.plan.lock().unwrap().description_todo_cross_off));
+        v.push(extract_schema(&self.plan.lock().unwrap().description_todo_read));
+        v.push(extract_schema(&self.plan.lock().unwrap().description_load_from_md));
+        v.push(extract_schema(&self.question.description_ask));
+        v.push(extract_schema(&self.skills.description_list));
+        v.push(extract_schema(&self.skills.description_read));
+        v.push(extract_schema(&self.skills.description_read_asset));
+        v.push(extract_schema(&self.skills.description_match_skills));
+        v
     }
 
     #[allow(clippy::too_many_lines)]
