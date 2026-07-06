@@ -241,6 +241,7 @@ impl Harness {
 
     /// Build an extractor with all registered MCP, cosh, and internal tools.
     fn build_extractor(&self) -> ExtractAction {
+        log::debug!("build_extractor: sessions={}", self.sessions.len());
         let mut extractor = ExtractAction::new();
         for session in &self.sessions {
             for tool in &session.tools {
@@ -251,7 +252,9 @@ impl Harness {
             }
         }
         if let Some(ref cosh) = self.cosh_tools {
-            for schema in cosh.schemas() {
+            let schemas = cosh.schemas();
+            log::debug!("build_extractor: cosh.schemas() returned {} tools", schemas.len());
+            for schema in schemas {
                 extractor.add_tool(schema);
             }
         }
@@ -342,12 +345,18 @@ impl Harness {
         extractor: &mut ExtractAction,
         on_token: &mut dyn FnMut(&str),
     ) {
-        match extractor.extract_stream(token) {
-            StreamAction::Text(text) => on_token(&text),
+        let action = extractor.extract_stream(token);
+        match action {
+            StreamAction::Text(text) => {
+                on_token(&text);
+            }
             StreamAction::ToolCall(tc) if !self.handle_harness_tool(&tc) => {
                 self.tool_issuer.push_back(tc);
             }
-            _ => {}
+            StreamAction::ToolCall(_) => {
+                // harness tool consumed
+            }
+            StreamAction::Pending => {}
         }
     }
 
@@ -374,26 +383,52 @@ impl Harness {
                     }
                     return Ok("done".into());
                 }
-                Err(msg) => return Err(msg),
+                Err(msg) => {
+                    return Err(msg);
+                }
             }
         }
 
         use tokio_stream::StreamExt;
 
         let context = self.build_chat_context();
+        log::debug!("stream_chat context_len={}", context.len());
 
-        let mut stream = self
+        let mut stream = match self
             .connector
             .stream_chat_with_system(input, &context)
             .await
-            .map_err(|e| e.to_string())?;
+        {
+            Ok(s) => s,
+            Err(e) => {
+                log::debug!("stream_chat CONNECTOR_ERR={}", e);
+                return Err(e.to_string());
+            }
+        };
 
         let mut extractor = self.build_extractor();
+        let mut token_count = 0u64;
 
         while let Some(content) = stream.next().await {
-            let chunk = content.map_err(|err| err.to_string())?;
-            self.process_stream_chunk(chunk.token(), &mut extractor, &mut on_token);
+            let chunk = match content {
+                Ok(c) => c,
+                Err(e) => {
+                    log::debug!("stream_chat STREAM_ERR={}", e);
+                    return Err(e.to_string());
+                }
+            };
+            let token = chunk.token();
+            let fr = chunk.finish_reason();
+            token_count += 1;
+            if token_count <= 5 || token_count % 100 == 0 || !token.is_empty() || fr.is_some() {
+                log::debug!("stream_chat token#{} len={} fr={:?} first_50={:?}",
+                    token_count, token.len(), fr,
+                    &token[..token.len().min(50)]);
+            }
+            self.process_stream_chunk(token, &mut extractor, &mut on_token);
         }
+
+        log::debug!("stream_chat DONE total_tokens={}", token_count);
         Ok("done".into())
     }
 
@@ -424,10 +459,14 @@ impl Harness {
         use super::events::HarnessEvent;
 
         let mut current_input = input.to_string();
+        let mut iteration = 0u64;
+
+        log::debug!("run_agent_loop ENTER input={:?}", &input[..input.len().min(80)]);
 
         macro_rules! check_stop {
             () => {
                 if self.stop || stop_signal.load(Ordering::Relaxed) {
+                    log::debug!("run_agent_loop STOPPED");
                     let _ = tx.send(HarnessEvent::Stopped);
                     true
                 } else {
@@ -437,11 +476,16 @@ impl Harness {
         }
 
         loop {
+            iteration += 1;
+            log::debug!("run_agent_loop ITERATION={} input_len={} pending_tools={} server_responses={}",
+                iteration, current_input.len(), self.tool_issuer.len(), self.server_response.len());
+
             if check_stop!() {
                 break;
             }
 
             // Phase 1: stream the LLM response
+            log::debug!("run_agent_loop PHASE1_START iteration={}", iteration);
             let result = self
                 .stream_chat(&current_input, |token| {
                     let _ = tx.send(HarnessEvent::Token {
@@ -449,8 +493,10 @@ impl Harness {
                     });
                 })
                 .await;
+            log::debug!("run_agent_loop PHASE1_END iteration={} result_ok={}", iteration, result.is_ok());
 
             if let Err(e) = result {
+                log::debug!("run_agent_loop PHASE1_ERR={}", e);
                 let _ = tx.send(HarnessEvent::Error(e));
                 break;
             }
@@ -461,6 +507,7 @@ impl Harness {
 
             // Phase 2: dispatch all pending tool calls
             let had_tools = self.has_pending_tools();
+            log::debug!("run_agent_loop PHASE2 had_tools={}", had_tools);
 
             while self.has_pending_tools() {
                 if check_stop!() {
@@ -474,6 +521,7 @@ impl Harness {
                     .map(|tc| (tc.name.clone(), tc.arguments.clone()));
 
                 if let Some((ref name, ref args)) = info {
+                    log::debug!("run_agent_loop DISPATCH tool={}", name);
                     let _ = tx.send(HarnessEvent::ToolCall {
                         tool: name.clone(),
                         input: args.clone(),
@@ -482,6 +530,7 @@ impl Harness {
 
                 // Intercept `ask_questions` — send to TUI, wait for user answer
                 if info.as_ref().is_some_and(|(n, _)| n == "ask_questions") {
+                    log::debug!("run_agent_loop ASK_QUESTIONS intercepted");
                     use cosh_tools::question::types::{QuestionInput, QuestionOutput};
 
                     let input: Result<QuestionInput, String> = info
@@ -497,8 +546,10 @@ impl Harness {
                                 questions: q_input.questions.clone(),
                             });
 
+                            log::debug!("run_agent_loop WAITING for answer_rx");
                             // Wait for the TUI to send back answers
                             let answer = answer_rx.recv().await;
+                            log::debug!("run_agent_loop GOT answer={:?}", answer.is_some());
                             match answer {
                                 Some(Ok(answers)) => {
                                     let output = QuestionOutput {
@@ -518,6 +569,7 @@ impl Harness {
                                         .send(HarnessEvent::ToolError { error: e });
                                 }
                                 None => {
+                                    log::debug!("run_agent_loop answer_rx CLOSED");
                                     let _ = tx.send(HarnessEvent::ToolError {
                                         error:
                                             "Internal error: question channel closed"
@@ -532,11 +584,14 @@ impl Harness {
                     }
                 } else {
                     // Normal dispatch for all other tools
+                    log::debug!("run_agent_loop dispatch_next start");
                     match self.dispatch_next().await {
                         Ok(output) => {
+                            log::debug!("run_agent_loop dispatch_next OK len={}", output.len());
                             let _ = tx.send(HarnessEvent::ToolResult { output });
                         }
                         Err(e) => {
+                            log::debug!("run_agent_loop dispatch_next ERR={}", e);
                             let _ = tx.send(HarnessEvent::ToolError { error: e });
                         }
                     }
@@ -549,14 +604,17 @@ impl Harness {
 
             if !had_tools {
                 // No tool calls were made — the conversation is complete
+                log::debug!("run_agent_loop DONE (no tools)");
                 let _ = tx.send(HarnessEvent::Done);
                 break;
             }
 
+            log::debug!("run_agent_loop RESTARTING with tool results");
             // Tool results were accumulated in server_response
             // Next iteration sends an empty prompt with results in context
             current_input.clear();
         }
+        log::debug!("run_agent_loop EXIT");
     }
 
     /// Dequeue and dispatch the next pending tool call through the
@@ -596,7 +654,10 @@ impl Harness {
                     return Ok(result);
                 }
                 Err(err) if err.starts_with("unknown cosh tool") => {}
-                Err(err) => return Err(err),
+                Err(err) => {
+                    self.tool_issuer.pop_front();
+                    return Err(err);
+                }
             }
         }
 
@@ -614,6 +675,7 @@ impl Harness {
             }
         };
 
+        self.tool_issuer.pop_front();
         let params = CallToolRequestParams::new(tool_name).with_arguments(args_map);
 
         let result = self.sessions[idx]
@@ -621,8 +683,6 @@ impl Harness {
             .call_tool(params)
             .await
             .map_err(|e| e.to_string())?;
-
-        self.tool_issuer.pop_front();
 
         let text: Vec<String> = result
             .content
