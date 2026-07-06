@@ -46,8 +46,8 @@ fn shuffled_order(len: usize, seed: u64) -> Vec<usize> {
     let mut state = seed;
     for i in (1..len).rev() {
         state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         let j = (state >> 33) as usize % (i + 1);
         order.swap(i, j);
     }
@@ -55,7 +55,7 @@ fn shuffled_order(len: usize, seed: u64) -> Vec<usize> {
 }
 
 fn flicker_brightness(idx: usize, frame: u64) -> f64 {
-    let h = idx as u64 * 374761393 + frame.wrapping_mul(668265263);
+    let h = idx as u64 * 374_761_393 + frame.wrapping_mul(668_265_263);
     let h = h.wrapping_mul(h.wrapping_add(12345));
     let r = (h >> 16) & 0xff;
     if r > 200 {
@@ -71,6 +71,7 @@ fn flicker_brightness(idx: usize, frame: u64) -> f64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_logo_glitch(
     buf: &mut Buffer,
     area: Rect,
@@ -99,9 +100,7 @@ fn render_logo_glitch(
                 continue;
             }
 
-            let style = if !active {
-                Style::default().fg(primary)
-            } else {
+            let style = if active {
                 let pixel_idx = pixels
                     .iter()
                     .position(|&(r, c)| r == row as u16 && c == col as u16);
@@ -113,6 +112,8 @@ fn render_logo_glitch(
                     }
                     None => Style::default().fg(primary),
                 }
+            } else {
+                Style::default().fg(primary)
             };
 
             if let Some(cell) = buf.cell_mut((cx_pos, ly)) {
@@ -172,7 +173,9 @@ impl HomeView {
             return;
         }
         self.frame += 1;
-        if self.frame % ANIM_REVEAL_INTERVAL == 0 && self.revealed_count < self.pixels.len() {
+        if self.frame.is_multiple_of(ANIM_REVEAL_INTERVAL)
+            && self.revealed_count < self.pixels.len()
+        {
             self.revealed_count += 1;
         }
         if self.revealed_count >= self.pixels.len() {
@@ -199,6 +202,7 @@ impl HomeView {
         }
     }
 
+    #[allow(clippy::unused_self)]
     pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<HomeAction> {
         let cx = area.x + area.width / 2;
         let logo_start_y = area.y + 2;
@@ -301,14 +305,15 @@ impl HomeView {
     }
 }
 
+#[allow(clippy::cast_sign_loss)]
 fn dim_color(color: Color, brightness: f64) -> Color {
     let (r, g, b) = match color {
         Color::Rgb(r, g, b) => (r, g, b),
         _ => (0, 0, 0),
     };
     Color::Rgb(
-        (r as f64 * brightness) as u8,
-        (g as f64 * brightness) as u8,
-        (b as f64 * brightness) as u8,
+        (f64::from(r) * brightness) as u8,
+        (f64::from(g) * brightness) as u8,
+        (f64::from(b) * brightness) as u8,
     )
 }

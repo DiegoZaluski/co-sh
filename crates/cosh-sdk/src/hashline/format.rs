@@ -210,7 +210,11 @@ pub fn format_numbered_lines(text: &str, start_line: u32) -> String {
         if i > 0 {
             result.push('\n');
         }
-        let _ = write!(result, "{start_line}{HL_LINE_BODY_SEP}{line}", start_line = start_line + i as u32);
+        let _ = write!(
+            result,
+            "{start_line}{HL_LINE_BODY_SEP}{line}",
+            start_line = start_line + u32::try_from(i).unwrap_or(u32::MAX)
+        );
     }
     result
 }

@@ -73,8 +73,7 @@ pub fn init() {
         file: Mutex::new(file),
     };
 
-    log::set_boxed_logger(Box::new(logger))
-        .expect("logger already initialized");
+    log::set_boxed_logger(Box::new(logger)).expect("logger already initialized");
 
     #[cfg(debug_assertions)]
     log::set_max_level(log::LevelFilter::Debug);

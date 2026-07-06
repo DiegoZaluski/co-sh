@@ -277,7 +277,16 @@ impl Renderable for MarkdownRenderable {
                         } else {
                             "• ".to_string()
                         };
-                        Self::render_text(&bullet, buf, &mut x, &mut y, area.x, max_x, max_y, default_style);
+                        Self::render_text(
+                            &bullet,
+                            buf,
+                            &mut x,
+                            &mut y,
+                            area.x,
+                            max_x,
+                            max_y,
+                            default_style,
+                        );
                     }
                     Tag::TableHead
                     | Tag::TableRow
@@ -391,7 +400,16 @@ impl Renderable for MarkdownRenderable {
                             byte_offset += line.len() + 1;
                         }
                     } else {
-                        Self::render_text(&text, buf, &mut x, &mut y, area.x, max_x, max_y, default_style);
+                        Self::render_text(
+                            &text,
+                            buf,
+                            &mut x,
+                            &mut y,
+                            area.x,
+                            max_x,
+                            max_y,
+                            default_style,
+                        );
                     }
                 }
                 Event::Code(text) => {
@@ -401,7 +419,16 @@ impl Renderable for MarkdownRenderable {
                     Self::render_text(&text, buf, &mut x, &mut y, area.x, max_x, max_y, code_style);
                 }
                 Event::Html(html) => {
-                    Self::render_text(&html, buf, &mut x, &mut y, area.x, max_x, max_y, default_style);
+                    Self::render_text(
+                        &html,
+                        buf,
+                        &mut x,
+                        &mut y,
+                        area.x,
+                        max_x,
+                        max_y,
+                        default_style,
+                    );
                 }
                 Event::SoftBreak | Event::HardBreak => {
                     x = area.x;
@@ -422,7 +449,16 @@ impl Renderable for MarkdownRenderable {
                 }
                 Event::TaskListMarker(checked) => {
                     let marker = if checked { "[x] " } else { "[ ] " };
-                    Self::render_text(marker, buf, &mut x, &mut y, area.x, max_x, max_y, default_style);
+                    Self::render_text(
+                        marker,
+                        buf,
+                        &mut x,
+                        &mut y,
+                        area.x,
+                        max_x,
+                        max_y,
+                        default_style,
+                    );
                 }
             }
         }

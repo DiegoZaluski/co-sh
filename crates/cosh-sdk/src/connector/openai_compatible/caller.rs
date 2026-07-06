@@ -249,15 +249,15 @@ pub(crate) async fn chat_stream(
     let url = format!("{base_url}/chat/completions");
 
     let auth = format!("Bearer {api_key}");
-    log::debug!("chat_stream: sending request to {}", url);
+    log::debug!("chat_stream: sending request to {url}");
     let response =
         send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
     log::debug!("chat_stream: got response status={}", response.status());
 
     let buf = SseBuffer::new();
 
-    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =
-        Box::pin(stream! {
+    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> = Box::pin(
+        stream! {
             let mut response = response;
             let mut buf = buf;
             loop {
@@ -309,7 +309,8 @@ pub(crate) async fn chat_stream(
             }
             // Stream ended without [DONE]
             yield Err(ConnectorError::StreamTerminated);
-        });
+        },
+    );
 
     Ok(ChatStream::new(inner))
 }

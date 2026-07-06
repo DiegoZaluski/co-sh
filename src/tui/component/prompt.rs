@@ -208,8 +208,7 @@ impl PromptView {
                 let target_byte = line
                     .char_indices()
                     .nth(target)
-                    .map(|(i, _)| i)
-                    .unwrap_or(line.len());
+                    .map_or(line.len(), |(i, _)| i);
                 self.cursor_pos = byte_off + target_byte;
                 return;
             }
@@ -250,8 +249,7 @@ impl PromptView {
                         + next
                             .char_indices()
                             .nth(target_char_idx)
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
+                            .map_or(0, |(i, _)| i);
                     return;
                 }
                 // move down one visual line within same logical line
@@ -259,8 +257,7 @@ impl PromptView {
                 let target_byte = line
                     .char_indices()
                     .nth(target)
-                    .map(|(i, _)| i)
-                    .unwrap_or(line.len());
+                    .map_or(line.len(), |(i, _)| i);
                 self.cursor_pos = byte_off + target_byte;
                 return;
             }
@@ -274,7 +271,8 @@ impl PromptView {
         let lines = if self.input.is_empty() || text_w == 0 {
             1
         } else {
-            self.input.split('\n')
+            self.input
+                .split('\n')
                 .map(|line| {
                     let n = line.chars().count();
                     n.div_ceil(text_w).max(1)
@@ -316,11 +314,12 @@ impl PromptView {
             return None;
         }
         let text_start = area.y + 1; // first content line
-        let x_off = area.x + 3;      // left margin within border
+        let x_off = area.x + 3; // left margin within border
         let n = if self.input.is_empty() {
             1
         } else {
-            self.input.split('\n')
+            self.input
+                .split('\n')
                 .map(|line| line.chars().count().div_ceil(text_w).max(1))
                 .sum::<usize>() as u16
         };
@@ -348,8 +347,8 @@ impl PromptView {
 
         // Compute byte offset of the visual line in the original input.
         let mut byte_off = 0usize;
-        for li in 0..visual_line {
-            byte_off += display_lines[li].len();
+        for line in display_lines.iter().take(visual_line) {
+            byte_off += line.len();
         }
         // Add the column within the visual line.
         if let Some((off, _)) = line.char_indices().nth(col) {
@@ -483,9 +482,16 @@ impl PromptView {
 
         // Model name on the right side of the footer line
         if !model_name.is_empty() {
-            let model_text = format!(" {}", model_name);
+            let model_text = format!(" {model_name}");
             let model_x = area.right().saturating_sub(model_text.len() as u16);
-            draw_text_line(buf, &model_text, model_x, footer_y, model_text.len() as u16, muted_style);
+            draw_text_line(
+                buf,
+                &model_text,
+                model_x,
+                footer_y,
+                model_text.len() as u16,
+                muted_style,
+            );
         }
 
         // Draw cursor if focused
@@ -506,17 +512,20 @@ impl PromptView {
 
             for (li, line) in display_lines.iter().enumerate() {
                 let n = line.chars().count();
-                if cursor_char < acc + n || (cursor_char == acc + n && li + 1 >= display_lines.len()) {
+                if cursor_char < acc + n
+                    || (cursor_char == acc + n && li + 1 >= display_lines.len())
+                {
                     cursor_line_idx = li;
                     cursor_col_idx = cursor_char - acc;
                     break;
                 }
                 acc += n;
                 // If the next byte in self.input is \n, account for it
-                if let Some((byte_idx, _)) = self.input.char_indices().nth(acc) {
-                    if byte_idx < self.input.len() && self.input.as_bytes()[byte_idx] == b'\n' {
-                        acc += 1;
-                    }
+                if let Some((byte_idx, _)) = self.input.char_indices().nth(acc)
+                    && byte_idx < self.input.len()
+                    && self.input.as_bytes()[byte_idx] == b'\n'
+                {
+                    acc += 1;
                 }
             }
 

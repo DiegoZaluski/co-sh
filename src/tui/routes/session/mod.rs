@@ -91,10 +91,10 @@ pub struct SessionView {
     pub tool_state: ToolRenderState,
     /// Text regions from the last render pass, used for mouse-based selection.
     text_regions: Vec<TextRegion>,
-    /// Active drag selection: (anchor_x, anchor_y, focus_x, focus_y) in screen coordinates.
+    /// Active drag selection: (`anchor_x`, `anchor_y`, `focus_x`, `focus_y`) in screen coordinates.
     /// Stored WITHOUT normalisation so the renderer can apply flow-based highlighting:
-    /// top line from start_x to end, bottom line from start to end_x, middle lines fully highlighted.
-    /// Set before render() to enable visual selection highlight.
+    /// top line from `start_x` to end, bottom line from start to `end_x`, middle lines fully highlighted.
+    /// Set before `render()` to enable visual selection highlight.
     pub drag_selection: Option<(u16, u16, u16, u16)>,
 }
 
@@ -203,8 +203,12 @@ impl SessionView {
                     } else {
                         t.text.clone()
                     };
-                    let h = Self::estimate_part_height(part, max_w, config).min(bottom - y).max(1);
-                    let text_style = Style::default().fg(rgba_color(fg_color)).bg(rgba_color(theme.background));
+                    let h = Self::estimate_part_height(part, max_w, config)
+                        .min(bottom - y)
+                        .max(1);
+                    let text_style = Style::default()
+                        .fg(rgba_color(fg_color))
+                        .bg(rgba_color(theme.background));
                     let rendered = Self::draw_text_wrap(buf, &content, x, y, max_w, h, text_style);
                     y += rendered;
                 }
@@ -250,7 +254,15 @@ impl SessionView {
         y - y_start
     }
 
-    fn draw_text_wrap(buf: &mut Buffer, text: &str, x: u16, y_: u16, max_w: u16, max_h: u16, style: Style) -> u16 {
+    fn draw_text_wrap(
+        buf: &mut Buffer,
+        text: &str,
+        x: u16,
+        y_: u16,
+        max_w: u16,
+        max_h: u16,
+        style: Style,
+    ) -> u16 {
         let right = x + max_w;
         let bottom = y_ + max_h;
         // Pre-fill area with bg so there's no gap between characters
@@ -293,7 +305,11 @@ impl SessionView {
                     let mut total_lines: usize = 0;
                     for line in t.text.lines() {
                         let line_len = line.chars().count();
-                        total_lines += if line_len == 0 { 1 } else { line_len.div_ceil(chars_per_line) };
+                        total_lines += if line_len == 0 {
+                            1
+                        } else {
+                            line_len.div_ceil(chars_per_line)
+                        };
                     }
                     total_lines.max(1) as u16
                 } else {
@@ -455,10 +471,18 @@ impl SessionView {
             border_box.render_self(buf, area);
 
             // Render error text character by character with wrap (safe for multi-byte UTF-8)
-            let error_style = Style::default().fg(rgba_color(theme.text_muted)).bg(rgba_color(theme.background));
-            let error_text: String = msg.parts.iter()
+            let error_style = Style::default()
+                .fg(rgba_color(theme.text_muted))
+                .bg(rgba_color(theme.background));
+            let error_text: String = msg
+                .parts
+                .iter()
                 .filter_map(|p| {
-                    if let crate::types::Part::Text(t) = p { Some(t.text.as_str()) } else { None }
+                    if let crate::types::Part::Text(t) = p {
+                        Some(t.text.as_str())
+                    } else {
+                        None
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -601,16 +625,22 @@ impl SessionView {
                         if let crate::types::Part::Tool(tool) = part {
                             // Check for shell tool expand/collapse
                             if tool_render::tool_display(&tool.tool) == "bash" {
-                                let output = tool.output.as_deref().unwrap_or("").trim().to_string();
+                                let output =
+                                    tool.output.as_deref().unwrap_or("").trim().to_string();
                                 if !output.is_empty() {
                                     let id = tool.tool_call_id.as_deref().unwrap_or("shell");
-                                    let collapsed = crate::util::scroll::collapse_tool_output(&output, 10, 800);
+                                    let collapsed =
+                                        crate::util::scroll::collapse_tool_output(&output, 10, 800);
                                     if collapsed.overflow {
                                         let expanded = self.tool_state.is_expanded(id);
-                                        let display = if expanded { &output } else { &collapsed.output };
+                                        let display =
+                                            if expanded { &output } else { &collapsed.output };
                                         let hint_y = part_y + 1 + display.lines().count() as u16;
 
-                                        if click_y == hint_y && click_x >= x_off && click_x < x_off + max_w {
+                                        if click_y == hint_y
+                                            && click_x >= x_off
+                                            && click_x < x_off + max_w
+                                        {
                                             self.tool_state.toggle_expanded(id);
                                             return true;
                                         }
@@ -646,6 +676,7 @@ impl SessionView {
     }
 
     /// Build the list of text regions for mouse-based selection.
+    #[allow(clippy::too_many_lines, clippy::cast_sign_loss)]
     pub fn build_text_regions(
         &mut self,
         session: &crate::types::Session,
@@ -699,8 +730,12 @@ impl SessionView {
 
                     match part {
                         crate::types::Part::Text(t) if !t.synthetic => {
-                            let content = if config.conceal { conceal_text(&t.text) } else { t.text.clone() };
-                            if content.chars().all(|c| c.is_whitespace()) {
+                            let content = if config.conceal {
+                                conceal_text(&t.text)
+                            } else {
+                                t.text.clone()
+                            };
+                            if content.chars().all(char::is_whitespace) {
                                 part_y += part_h;
                                 continue;
                             }
@@ -715,8 +750,10 @@ impl SessionView {
                                 if logical_line.is_empty() {
                                     if line_y < vp_y2 {
                                         self.text_regions.push(TextRegion {
-                                            y1: line_y, y2: line_y + 1,
-                                            x1: x_off, x2: x_off + max_w,
+                                            y1: line_y,
+                                            y2: line_y + 1,
+                                            x1: x_off,
+                                            x2: x_off + max_w,
                                             text: String::new(),
                                         });
                                         line_y += 1;
@@ -726,12 +763,16 @@ impl SessionView {
                                 let mut remaining = logical_line;
                                 while !remaining.is_empty() && line_y < vp_y2 {
                                     let n = remaining.chars().take(max_w_usize).count();
-                                    let split = remaining.char_indices().nth(n)
+                                    let split = remaining
+                                        .char_indices()
+                                        .nth(n)
                                         .map_or(remaining.len(), |(i, _)| i);
                                     let visual_line = &remaining[..split];
                                     self.text_regions.push(TextRegion {
-                                        y1: line_y, y2: line_y + 1,
-                                        x1: x_off, x2: x_off + max_w,
+                                        y1: line_y,
+                                        y2: line_y + 1,
+                                        x1: x_off,
+                                        x2: x_off + max_w,
                                         text: visual_line.to_string(),
                                     });
                                     line_y += 1;
@@ -762,8 +803,10 @@ impl SessionView {
                                     for display_line in display.lines() {
                                         if line_y < vp_y2 {
                                             self.text_regions.push(TextRegion {
-                                                y1: line_y, y2: line_y + 1,
-                                                x1: x_off, x2: x_off + max_w,
+                                                y1: line_y,
+                                                y2: line_y + 1,
+                                                x1: x_off,
+                                                x2: x_off + max_w,
                                                 text: display_line.to_string(),
                                             });
                                             line_y += 1;
@@ -778,19 +821,24 @@ impl SessionView {
                             let header = if expanded { "- Thought" } else { "+ Thought" };
                             if vp_y1 < vp_y2 {
                                 self.text_regions.push(TextRegion {
-                                    y1: vp_y1, y2: vp_y1 + 1,
-                                    x1: x_off, x2: x_off + max_w,
+                                    y1: vp_y1,
+                                    y2: vp_y1 + 1,
+                                    x1: x_off,
+                                    x2: x_off + max_w,
                                     text: header.to_string(),
                                 });
                             }
                             if expanded && !r.text.is_empty() {
                                 let mut line_y = vp_y1 + 1;
-                                let truncated = r.text.lines().take(10).collect::<Vec<_>>().join("\n");
+                                let truncated =
+                                    r.text.lines().take(10).collect::<Vec<_>>().join("\n");
                                 for line in truncated.lines() {
                                     if line_y < vp_y2 && !line.is_empty() {
                                         self.text_regions.push(TextRegion {
-                                            y1: line_y, y2: line_y + 1,
-                                            x1: x_off + 2, x2: x_off + max_w,
+                                            y1: line_y,
+                                            y2: line_y + 1,
+                                            x1: x_off + 2,
+                                            x2: x_off + max_w,
                                             text: line.to_string(),
                                         });
                                         line_y += 1;
@@ -811,12 +859,12 @@ impl SessionView {
 
     /// Return the text selected by a flow-based selection from `anchor` to `focus`.
     /// Unlike a rectangular selection, flow selection follows the text direction:
-    ///   - If selecting top-to-bottom: top line selects from anchor_x to end,
-    ///     bottom line selects from 0 to focus_x, middle lines are fully selected.
-    ///   - If selecting bottom-to-top: top line selects from 0 to focus_x,
-    ///     bottom line selects from anchor_x to end, middle lines are fully selected.
-    /// Each TextRegion stores exactly 1 visual line, so x-coordinates are
-    /// used to slice individual characters from each line.
+    ///   - If selecting top-to-bottom: top line selects from `anchor_x` to end,
+    ///     bottom line selects from 0 to `focus_x`, middle lines are fully selected.
+    ///   - If selecting bottom-to-top: top line selects from 0 to `focus_x`,
+    ///     bottom line selects from `anchor_x` to end, middle lines are fully selected.
+    ///     Each `TextRegion` stores exactly 1 visual line, so x-coordinates are
+    ///     used to slice individual characters from each line.
     pub fn get_text_in_region(
         &self,
         anchor_x: u16,
@@ -1054,13 +1102,13 @@ impl SessionView {
                 };
 
                 for cx in lx1..=lx2 {
-                    if let Some(cell) = buf.cell_mut((cx, cy)) {
-                        if cell.symbol() != " " {
-                            let fg = cell.fg;
-                            let bg = cell.bg;
-                            cell.set_fg(bg);
-                            cell.set_bg(fg);
-                        }
+                    if let Some(cell) = buf.cell_mut((cx, cy))
+                        && cell.symbol() != " "
+                    {
+                        let fg = cell.fg;
+                        let bg = cell.bg;
+                        cell.set_fg(bg);
+                        cell.set_bg(fg);
                     }
                 }
             }

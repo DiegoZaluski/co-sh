@@ -332,6 +332,7 @@ impl Default for ExtractAction {
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[must_use]
 pub fn find_json_objects(text: &str) -> Vec<(usize, usize)> {
     let mut results = Vec::new();
     let bytes = text.as_bytes();

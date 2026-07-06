@@ -31,7 +31,8 @@ pub struct LlmConfig {
 impl LlmConfig {
     pub fn from_env() -> Self {
         // Try to get provider from env, otherwise auto-detect from available API keys
-        let provider = std::env::var("COSH_PROVIDER").ok()
+        let provider = std::env::var("COSH_PROVIDER")
+            .ok()
             .or_else(|| cosh_sdk::connector::detect_provider().map(String::from))
             .unwrap_or_else(|| "openai".to_string());
 

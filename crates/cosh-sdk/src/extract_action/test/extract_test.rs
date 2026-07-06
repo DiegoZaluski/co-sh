@@ -439,14 +439,25 @@ fn batch_ask_questions_tool_call() {
 
     // Standard envelope
     let text = r#"Some thoughts {"name": "ask_questions", "arguments": {"questions": [{"id": "lang", "question": "What language?", "type": "SingleChoice", "required": true, "options": ["Python", "Rust"]}]}} trailing"#;
-    
+
     let result = ex.extract_batch(text);
-    
-    let tool_items: Vec<_> = result.items.iter().filter_map(|i| {
-        if let Item::ToolCall(tc) = i { Some(tc) } else { None }
-    }).collect();
-    
-    assert!(!tool_items.is_empty(), "Expected at least one tool call, got: {result:?}");
+
+    let tool_items: Vec<_> = result
+        .items
+        .iter()
+        .filter_map(|i| {
+            if let Item::ToolCall(tc) = i {
+                Some(tc)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        !tool_items.is_empty(),
+        "Expected at least one tool call, got: {result:?}"
+    );
     assert_eq!(tool_items[0].name, "ask_questions");
     assert!(tool_items[0].arguments.get("questions").is_some());
 }
@@ -480,12 +491,23 @@ fn batch_ask_questions_bare_args() {
     // Bare arguments (no envelope) — triggers the "bare-arguments fallback"
     let text = r#"{"questions": [{"id": "lang", "question": "What?", "type": "Text"}]}"#;
     let result = ex.extract_batch(text);
-    
-    let tool_items: Vec<_> = result.items.iter().filter_map(|i| {
-        if let Item::ToolCall(tc) = i { Some(tc) } else { None }
-    }).collect();
-    
+
+    let tool_items: Vec<_> = result
+        .items
+        .iter()
+        .filter_map(|i| {
+            if let Item::ToolCall(tc) = i {
+                Some(tc)
+            } else {
+                None
+            }
+        })
+        .collect();
+
     // With the bare-arguments fallback, this should work
-    assert!(!tool_items.is_empty(), "Expected at least one tool call, got: {result:?}");
+    assert!(
+        !tool_items.is_empty(),
+        "Expected at least one tool call, got: {result:?}"
+    );
     assert_eq!(tool_items[0].name, "ask_questions");
 }

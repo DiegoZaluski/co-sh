@@ -34,6 +34,4 @@ pub use solid::elements::catalogue::{
 pub use solid::elements::extras::DynamicRenderable;
 pub use solid::elements::slot::{SlotRenderable, TextSlotRenderable};
 
-pub use core::types::{
-    MouseButton, MouseEvent, MouseEventType, MouseModifiers,
-};
+pub use core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};

@@ -41,7 +41,7 @@ pub(crate) async fn send_get_request(
     headers: &[(&str, &str)],
 ) -> Result<String, ConnectorError> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_mins(1))
         .build()
         .map_err(|e| ConnectorError::Network(e.to_string()))?;
     let mut request_builder = client.get(url);
@@ -95,10 +95,13 @@ pub(crate) async fn send_request_stream(
     }
 
     let json_body = serde_json::to_string(body)?;
-    let response = tokio::time::timeout(Duration::from_secs(60), request_builder.body(json_body).send())
-        .await
-        .map_err(|_| ConnectorError::Network("request timed out after 60s".to_string()))?
-        .map_err(ConnectorError::from)?;
+    let response = tokio::time::timeout(
+        Duration::from_mins(1),
+        request_builder.body(json_body).send(),
+    )
+    .await
+    .map_err(|_| ConnectorError::Network("request timed out after 60s".to_string()))?
+    .map_err(ConnectorError::from)?;
 
     let status = response.status();
     if !status.is_success() {

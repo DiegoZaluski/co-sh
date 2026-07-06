@@ -26,9 +26,8 @@ const PRERENDERED_FRAMES: usize = 10;
 
 /// Characters used in the scrambled animation.
 const AVAILABLE_RUNES: &[char] = &[
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-    'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', 'F',
-    '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '+', '=',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C',
+    'D', 'E', 'F', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '+', '=',
 ];
 
 /// Ellipsis animation frames.
@@ -45,6 +44,7 @@ fn rgba_color(rgba: RGBA) -> Color {
 }
 
 /// Linear interpolation between two RGBA colours in RGB space.
+#[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]
 fn lerp_color(a: RGBA, b: RGBA, t: f32) -> RGBA {
     let t = t.clamp(0.0, 1.0);
     let (ar, ag, ab, _) = a.to_ints();
@@ -58,6 +58,7 @@ fn lerp_color(a: RGBA, b: RGBA, t: f32) -> RGBA {
 }
 
 /// Generate a gradient ramp of `size` steps from colour `a` to colour `b`.
+#[allow(clippy::cast_precision_loss)]
 fn make_gradient_ramp(a: RGBA, b: RGBA, size: usize) -> Vec<RGBA> {
     if size == 0 {
         return vec![];
@@ -80,7 +81,8 @@ fn make_gradient_ramp(a: RGBA, b: RGBA, size: usize) -> Vec<RGBA> {
 fn seeded_rng(seed: u64) -> impl Iterator<Item = u64> {
     let mut state = seed;
     std::iter::from_fn(move || {
-        state = state.wrapping_mul(63_641_362_238_467_930_05)
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         Some(state)
     })
@@ -134,14 +136,13 @@ impl AgentSpinner {
         let label_width = label.chars().count();
 
         // ── Gradient colours ───────────────────────────────────────────
-        let gradient_colors =
-            make_gradient_ramp(gradient_a, gradient_b, cycling_char_width);
+        let gradient_colors = make_gradient_ramp(gradient_a, gradient_b, cycling_char_width);
 
         // ── Pre-compute cycling characters for each frame ──────────────
         // Seed the RNG off the label so output is deterministic per label.
-        let seed: u64 = label
-            .bytes()
-            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(u64::from(b)));
+        let seed: u64 = label.bytes().fold(0u64, |acc, b| {
+            acc.wrapping_mul(31).wrapping_add(u64::from(b))
+        });
         let mut rng = seeded_rng(seed);
 
         let mut cycling_chars = Vec::with_capacity(PRERENDERED_FRAMES);
@@ -159,9 +160,7 @@ impl AgentSpinner {
         // ── Pre-compute birth steps (staggered entrance) ───────────────
         let mut birth_rng = seeded_rng(seed.wrapping_add(42));
         let birth_steps: Vec<u32> = (0..cycling_char_width)
-            .map(|_| {
-                (birth_rng.next().unwrap() % u64::from(BIRTH_DELAY_MAX)) as u32
-            })
+            .map(|_| (birth_rng.next().unwrap() % u64::from(BIRTH_DELAY_MAX)) as u32)
             .collect();
 
         Self {
@@ -191,8 +190,8 @@ impl AgentSpinner {
 
         // Advance ellipsis (only after initialization and if there's a label)
         if self.initialized && self.label_width > 0 {
-            self.ellipsis_step = (self.ellipsis_step + 1)
-                % (ELLIPSIS_ANIM_SPEED * ELLIPSIS_FRAMES.len() as u32);
+            self.ellipsis_step =
+                (self.ellipsis_step + 1) % (ELLIPSIS_ANIM_SPEED * ELLIPSIS_FRAMES.len() as u32);
         }
     }
 
@@ -217,11 +216,7 @@ impl AgentSpinner {
             w += 1; // gap
             w += self.label_width;
             // Widest ellipsis frame
-            w += ELLIPSIS_FRAMES
-                .iter()
-                .map(|f| f.len())
-                .max()
-                .unwrap_or(0);
+            w += ELLIPSIS_FRAMES.iter().map(|f| f.len()).max().unwrap_or(0);
         }
         w
     }
@@ -248,18 +243,13 @@ impl AgentSpinner {
                 .unwrap_or_else(|| RGBA::from_ints(255, 255, 255, 255));
             let style = Style::default().fg(rgba_color(color));
 
-            if !self.initialized
-                && col < self.birth_steps.len()
-                && frames < self.birth_steps[col]
-            {
+            if !self.initialized && col < self.birth_steps.len() && frames < self.birth_steps[col] {
                 // Birth phase — show the initial character
                 if let Some(cell) = buf.cell_mut((cell_x, y)) {
                     cell.set_char(BIRTH_CHAR);
                     cell.set_style(style);
                 }
-            } else if step < self.cycling_chars.len()
-                && col < self.cycling_chars[step].len()
-            {
+            } else if step < self.cycling_chars.len() && col < self.cycling_chars[step].len() {
                 // Normal phase — show the cycling scrambled char
                 if let Some(cell) = buf.cell_mut((cell_x, y)) {
                     cell.set_char(self.cycling_chars[step][col]);

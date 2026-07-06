@@ -162,7 +162,11 @@ impl CommandPalette {
         let y = mouse.y;
 
         // Check if click is within palette area
-        if x < palette_x || x >= palette_x + palette_w || y < palette_y || y >= palette_y + palette_h {
+        if x < palette_x
+            || x >= palette_x + palette_w
+            || y < palette_y
+            || y >= palette_y + palette_h
+        {
             // Click outside -> close
             self.visible = false;
             return true;

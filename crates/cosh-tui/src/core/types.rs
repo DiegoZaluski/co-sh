@@ -217,7 +217,11 @@ pub struct MouseModifiers {
 impl MouseModifiers {
     #[must_use]
     pub fn none() -> Self {
-        MouseModifiers { shift: false, alt: false, ctrl: false }
+        MouseModifiers {
+            shift: false,
+            alt: false,
+            ctrl: false,
+        }
     }
 }
 

@@ -44,7 +44,12 @@ impl PermissionDialog {
 
     /// Handle a mouse click on the permission dialog.
     /// Returns the action if the user clicked an option, or None if outside/not visible.
-    pub fn handle_mouse(&mut self, mouse: &MouseEvent, area: Rect, _theme: &Theme) -> Option<PermissionAction> {
+    pub fn handle_mouse(
+        &mut self,
+        mouse: &MouseEvent,
+        area: Rect,
+        _theme: &Theme,
+    ) -> Option<PermissionAction> {
         if !self.visible {
             return None;
         }
@@ -58,7 +63,11 @@ impl PermissionDialog {
         let y_click = mouse.y;
 
         // Check if click is within dialog area
-        if x < dialog_x || x >= dialog_x + dialog_w || y_click < dialog_y || y_click >= dialog_y + dialog_h {
+        if x < dialog_x
+            || x >= dialog_x + dialog_w
+            || y_click < dialog_y
+            || y_click >= dialog_y + dialog_h
+        {
             return None;
         }
 

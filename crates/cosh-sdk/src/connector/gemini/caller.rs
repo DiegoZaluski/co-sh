@@ -394,8 +394,8 @@ pub(crate) async fn chat_stream(
     )
     .await?;
 
-    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =
-        Box::pin(stream! {
+    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> = Box::pin(
+        stream! {
             let mut response = response;
             let mut buf = SseBuffer::new();
             loop {
@@ -439,7 +439,8 @@ pub(crate) async fn chat_stream(
                     }
                 }
             }
-        });
+        },
+    );
 
     Ok(ChatStream::new(inner))
 }

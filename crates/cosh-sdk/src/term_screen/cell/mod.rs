@@ -612,7 +612,10 @@ impl Drop for TeenyString {
     fn drop(&mut self) {
         if !Self::is_marker_bit_set(self.0) {
             debug_assert!(
-                self.0 != 0 && (self.0 as *mut usize).cast::<TeenyStringHeap>() as usize & (align_of::<TeenyStringHeap>() - 1) == 0,
+                self.0 != 0
+                    && (self.0 as *mut usize).cast::<TeenyStringHeap>() as usize
+                        & (align_of::<TeenyStringHeap>() - 1)
+                        == 0,
                 "TeenyString heap pointer is null or misaligned; possible bitwise copy"
             );
             let vec = unsafe { Box::from_raw((self.0 as *mut usize).cast::<TeenyStringHeap>()) };

@@ -1,5 +1,5 @@
-use super::types::{QuestionInput, QuestionItem, QuestionType};
 use super::Question;
+use super::types::{QuestionInput, QuestionItem, QuestionType};
 
 #[test]
 fn new_creates_tool_with_description() {
@@ -147,7 +147,10 @@ fn ask_valid_single_choice() {
     };
     let output = q.ask(&input).unwrap();
     assert_eq!(output.questions.len(), 1);
-    assert_eq!(output.questions[0].question_type, QuestionType::SingleChoice);
+    assert_eq!(
+        output.questions[0].question_type,
+        QuestionType::SingleChoice
+    );
 }
 
 #[test]
@@ -159,7 +162,11 @@ fn ask_valid_multi_choice() {
             question: "Pizza toppings?".into(),
             question_type: QuestionType::MultiChoice,
             purpose: None,
-            options: Some(vec!["Cheese".into(), "Pepperoni".into(), "Mushrooms".into()]),
+            options: Some(vec![
+                "Cheese".into(),
+                "Pepperoni".into(),
+                "Mushrooms".into(),
+            ]),
             required: false,
         }],
     };

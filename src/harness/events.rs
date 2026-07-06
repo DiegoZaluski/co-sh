@@ -31,7 +31,10 @@ pub enum HarnessEvent {
     /// A fatal error occurred.
     Error(String),
     /// Models list loaded from the provider.
-    ModelsLoaded { models: Vec<ModelEntry>, current: String },
+    ModelsLoaded {
+        models: Vec<ModelEntry>,
+        current: String,
+    },
     /// The agent wants to ask the user questions. The TUI should show a dialog
     /// and send answers back via the answer channel.
     QuestionRequest { questions: Vec<QuestionItem> },

@@ -169,7 +169,11 @@ impl SlashMenu {
             return false;
         }
         let idxs = self.filtered_indices();
-        let max_rows = if idxs.is_empty() { 1 } else { 6.min(idxs.len()) };
+        let max_rows = if idxs.is_empty() {
+            1
+        } else {
+            6.min(idxs.len())
+        };
         let menu_y_start = prompt_area.y.saturating_sub(max_rows as u16);
         let menu_width = prompt_area.width;
 

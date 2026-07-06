@@ -5,20 +5,16 @@ use arboard::Clipboard;
 use crate::ui::toast::{ToastOptions, ToastState, ToastVariant};
 
 /// Global clipboard instance, lazily initialised.
-static CLIPBOARD: LazyLock<Mutex<Option<Clipboard>>> =
-    LazyLock::new(|| Mutex::new(None));
+static CLIPBOARD: LazyLock<Mutex<Option<Clipboard>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Initialise the system clipboard. Call once at startup.
 pub fn init_clipboard() {
-    match Clipboard::new() {
-        Ok(cb) => {
-            if let Ok(mut guard) = CLIPBOARD.lock() {
-                *guard = Some(cb);
-            }
+    if let Ok(cb) = Clipboard::new() {
+        if let Ok(mut guard) = CLIPBOARD.lock() {
+            *guard = Some(cb);
         }
-        Err(_) => {
-            // Clipboard not available – writes will be silently ignored.
-        }
+    } else {
+        // Clipboard not available – writes will be silently ignored.
     }
 }
 
@@ -43,10 +39,7 @@ pub fn clipboard_available() -> bool {
 
 /// Copy the current selection to clipboard and show a toast notification.
 /// Returns `true` if text was copied.
-pub fn copy_selection(
-    text: &str,
-    toast: &mut ToastState,
-) -> bool {
+pub fn copy_selection(text: &str, toast: &mut ToastState) -> bool {
     if text.is_empty() {
         return false;
     }
