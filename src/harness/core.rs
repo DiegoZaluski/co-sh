@@ -423,7 +423,7 @@ impl Harness {
             if token_count <= 5 || token_count % 100 == 0 || !token.is_empty() || fr.is_some() {
                 log::debug!("stream_chat token#{} len={} fr={:?} first_50={:?}",
                     token_count, token.len(), fr,
-                    &token[..token.len().min(50)]);
+                    &token[..token.floor_char_boundary(token.len().min(50))]);
             }
             self.process_stream_chunk(token, &mut extractor, &mut on_token);
         }
@@ -461,7 +461,7 @@ impl Harness {
         let mut current_input = input.to_string();
         let mut iteration = 0u64;
 
-        log::debug!("run_agent_loop ENTER input={:?}", &input[..input.len().min(80)]);
+        log::debug!("run_agent_loop ENTER input={:?}", &input[..input.floor_char_boundary(input.len().min(80))]);
 
         macro_rules! check_stop {
             () => {
