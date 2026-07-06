@@ -422,11 +422,15 @@ pub(crate) async fn chat_stream(
                             let finish_reason = ccr.candidates.first()
                                 .and_then(|c| c.finish_reason.as_deref())
                                 .map(String::from);
+                            let should_stop = finish_reason.is_some();
                             yield Ok(StreamChunk {
                                 raw: data,
                                 token,
                                 finish_reason,
                             });
+                            if should_stop {
+                                return;
+                            }
                         }
                         Err(e) => {
                             yield Err(ConnectorError::Deserialization(e.to_string()));
