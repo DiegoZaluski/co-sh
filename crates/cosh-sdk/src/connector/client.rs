@@ -260,6 +260,39 @@ impl Connector {
         }
     }
 
+    /// Extract completion tokens from a raw API response (chat or stream).
+    ///
+    /// Dispatches to the correct provider-family extractor based on the
+    /// configured [`Family`](super::provider::Family):
+    /// - `OpenAICompatible` → `usage.completion_tokens`
+    /// - `Claude` → `usage.output_tokens`
+    /// - `Gemini` → `usageMetadata.candidatesTokenCount`
+    ///
+    /// Returns `None` when the field is absent or the raw JSON is malformed.
+    #[must_use]
+    pub fn tokens(&self, raw: &str) -> Option<u32> {
+        let provider = self.provider().ok()?;
+        match provider.family {
+            Family::OpenAICompatible => openai_compatible::extract_tokens(raw),
+            Family::Claude => claude::extract_tokens(raw),
+            Family::Gemini => gemini::extract_tokens(raw),
+        }
+    }
+
+    /// The provider name (e.g. `"openai"`, `"claude"`, `"gemini"`).
+    ///
+    /// Returns `None` if the connector was not properly initialised via [`new`](Self::new).
+    #[must_use]
+    pub fn provider_name(&self) -> Option<&'static str> {
+        self.provider.map(|p| p.name)
+    }
+
+    /// The model override, if one was set via [`with_model`](Self::with_model).
+    #[must_use]
+    pub fn model(&self) -> Option<&str> {
+        self.params.model.as_deref()
+    }
+
     /// Fetch the list of available models from the provider.
     ///
     /// Returns a [`LsOutput`] with structured model names ([`models`](LsOutput::models))
