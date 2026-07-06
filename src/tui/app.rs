@@ -958,49 +958,22 @@ impl App {
                             let event_tx = self.event_tx.clone();
                             let provider = self.llm_config.provider.clone();
                             let model = self.llm_config.model.clone();
+                            let stop_signal = self.stop_signal.clone();
                             let input = msg;
 
-                            // TEMPORARY: Build header context with tool descriptions so the LLM
-                            // knows what tools are available. Remove this once proper context
-                            // window management is implemented (the Harness::run_agent_loop
-                            // already handles this via build_chat_context()).
-                            // TODO: Replace with context window management that tracks
-                            // token usage across multiple turns.
-                            use std::fmt::Write as FmtWrite;
-                            let mut header_context = String::new();
-                            {
-                                use cosh::harness::tools::{CoshTools, Tools};
-                                let cosh = CoshTools::new(".");
-                                let _ = write!(header_context, "## System Tools\n\n");
-                                cosh.write_tool_descriptions(&mut header_context);
-                                let _ = write!(
-                                    header_context,
-                                    "\n## Harness Tools\n\n"
-                                );
-                                let _ = write!(
-                                    header_context,
-                                    "- **stop_agent_loop**: Stop running the agent loop\n"
-                                );
-                                let _ = write!(
-                                    header_context,
-                                    "  Schema: {{\"type\": \"object\", \"properties\": {{}}}}\n"
-                                );
-                            }
+                            // Create a fresh answer channel for this agent loop invocation
+                            let (answer_tx, answer_rx) = mpsc::unbounded_channel();
+                            self.answer_tx = answer_tx;
 
+                            let event_tx_panic = event_tx.clone();
                             std::thread::spawn(move || {
-                                use cosh_sdk::connector::Connector;
                                 use std::panic::AssertUnwindSafe;
                                 use tokio::runtime::Builder;
 
-                                let event_tx_panic = event_tx.clone();
-
-                                let rt = match Builder::new_current_thread()
-                                    .enable_all()
-                                    .build()
-                                {
+                                let rt = match Builder::new_current_thread().enable_all().build() {
                                     Ok(rt) => rt,
                                     Err(e) => {
-                                        let _ = event_tx_panic.send(HarnessEvent::Error(
+                                        let _ = event_tx.send(HarnessEvent::Error(
                                             format!("runtime: {e}"),
                                         ));
                                         return;
@@ -1009,6 +982,9 @@ impl App {
 
                                 let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                                     rt.block_on(async {
+                                        use cosh::harness::Harness;
+                                        use cosh_sdk::connector::Connector;
+
                                         let connector = match Connector::new(&provider) {
                                             Ok(c) => c,
                                             Err(e) => {
@@ -1025,34 +1001,9 @@ impl App {
                                             connector
                                         };
 
-                                        // Use STREAMING chat for real-time token delivery
-                                        match connector.stream_chat_with_system(&input, &header_context).await {
-                                            Ok(mut stream) => {
-                                                use tokio_stream::StreamExt;
-                                                while let Some(chunk) = stream.next().await {
-                                                    match chunk {
-                                                        Ok(chunk) => {
-                                                            let token = chunk.token().to_string();
-                                                            if !token.is_empty() {
-                                                                let _ = event_tx.send(HarnessEvent::Token { text: token });
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = event_tx.send(HarnessEvent::Error(
-                                                                format!("stream error: {e}"),
-                                                            ));
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                                let _ = event_tx.send(HarnessEvent::Done);
-                                            }
-                                            Err(e) => {
-                                                let _ = event_tx.send(HarnessEvent::Error(
-                                                    format!("chat error: {e}"),
-                                                ));
-                                            }
-                                        }
+                                        let mut harness = Harness::new(connector, ".");
+                                        harness.format_header_context();
+                                        harness.run_agent_loop(&input, event_tx, answer_rx, stop_signal).await;
                                     })
                                 }));
 
