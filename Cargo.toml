@@ -7,6 +7,10 @@ members = [
   "crates/cosh-tui",
 ]
 
+[features]
+default = []
+lancedb = ["cosh-recall/lancedb"]
+
 [package]
 description = "Coding agent for the terminal. No UI, no noise."
 edition = "2024"

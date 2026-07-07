@@ -3,7 +3,28 @@ name = "cosh-recall"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+lancedb = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:futures"]
+fastembed = ["dep:fastembed"]
+cloud = ["dep:cosh-sdk"]
+
 [dependencies]
 log = "0.4"
+thiserror = "2"
+
+# Local text embedding via fastembed (ONNX Runtime)
+fastembed = { version = "5", optional = true }
+
+# Vector database
+lancedb = { version = "0.30", optional = true }
+arrow-array = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
+futures = { version = "0.3", optional = true }
+
+# Cloud embedding via cosh-sdk connector
+cosh-sdk = { path = "../cosh-sdk", optional = true }
 
 [dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
