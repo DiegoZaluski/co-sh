@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
 use super::bsh::spawn_bash;
+#[cfg(unix)]
 #[allow(unused_imports)]
 use super::bsh::spawn_bash_pty;
 #[allow(unused_imports)]
@@ -216,6 +217,7 @@ async fn test_spawn_bash_exit_code_after_output() {
 // output bytes differ from the non-PTY path.  We use `text.contains()`
 // instead of exact byte comparison.
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_simple_echo() {
     let mut stream = spawn_bash_pty(None, ".", "echo hello", None);
@@ -229,6 +231,7 @@ async fn test_spawn_bash_pty_simple_echo() {
     assert!(text.contains("hello"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_exit_code() {
     let mut stream = spawn_bash_pty(None, ".", "exit 42", None);
@@ -242,6 +245,7 @@ async fn test_spawn_bash_pty_exit_code() {
     assert_eq!(exit_code, Some(42));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_env() {
     let mut stream = spawn_bash_pty(
@@ -259,6 +263,7 @@ async fn test_spawn_bash_pty_env() {
     assert!(text.contains("hello world"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_invalid_env_var_name() {
     let mut stream = spawn_bash_pty(
@@ -293,6 +298,7 @@ async fn test_spawn_bash_pty_signal() {
     assert!(got_signal);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_large_output() {
     let n = BUFFER_SIZE * 2 + 100;
@@ -322,6 +328,7 @@ async fn test_spawn_bash_timeout() {
     assert!(items[0].stderr.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout() {
     let mut stream = spawn_bash_pty(None, ".", "sleep 10", Some(10));
@@ -353,6 +360,7 @@ async fn test_spawn_bash_timeout_zero() {
     assert!(items[0].stderr.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout_zero() {
     let mut stream = spawn_bash_pty(None, ".", "echo should-not-appear", Some(0));
@@ -389,6 +397,7 @@ async fn test_spawn_bash_timeout_partial_output() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout_partial_output() {
     let mut stream = spawn_bash_pty(None, ".", "echo hello && sleep 10", Some(200));
@@ -425,6 +434,7 @@ async fn test_spawn_bash_no_timeout_completes_normally() {
     assert_eq!(last.exit_code, Some(0));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_no_timeout_completes_normally() {
     let mut stream = spawn_bash_pty(None, ".", "echo hi", Some(10_000));
@@ -452,6 +462,7 @@ async fn test_spawn_bash_timeout_signal_exit_code_invariant() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout_signal_exit_code_invariant() {
     let mut stream = spawn_bash_pty(None, ".", "sleep 10", Some(10));
@@ -464,6 +475,7 @@ async fn test_spawn_bash_pty_timeout_signal_exit_code_invariant() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout_large_output_before_timeout() {
     let n = BUFFER_SIZE * 2 + 50;

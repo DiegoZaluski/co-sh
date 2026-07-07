@@ -6,21 +6,28 @@
 //! disk destruction, etc.) before execution.
 
 use async_stream::stream;
+#[cfg(unix)]
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use regex::Regex;
-use std::io::Read;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::OnceLock;
+
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::io::{Error, ErrorKind};
-use tokio::sync::mpsc;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
+
+#[cfg(unix)]
+use tokio::sync::mpsc;
 
 /// Returns the list of critical bash patterns that are checked before execution.
 ///
@@ -79,6 +86,7 @@ fn env_var_pattern() -> &'static Regex {
 /// SIGKILL), not the `"SIGKILL"` constant name.  We map back to the
 /// numeric value to match `SpawnOutput::signal` in the non-PTY path
 /// (which uses `std::os::unix::process::ExitStatusExt`).
+#[cfg(unix)]
 fn signal_name_to_number(name: &str) -> Option<i32> {
     match name {
         "Hangup" => Some(1),
@@ -193,19 +201,21 @@ pub fn run<'a>(
     let use_pty = pty;
 
     Ok(Box::pin(stream! {
-        if use_pty {
-            let mut stream = spawn_bash_pty(env, cwd, command, timeout_ms);
-            while let Some(item) = stream.next().await {
-                if let Ok(output) = item {
-                    yield output;
-                }
+        let mut stream: Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> = if use_pty {
+            #[cfg(unix)]
+            {
+                spawn_bash_pty(env, cwd, command, timeout_ms)
+            }
+            #[cfg(not(unix))]
+            {
+                spawn_bash(env, cwd, command, timeout_ms)
             }
         } else {
-            let mut stream = spawn_bash(env, cwd, command, timeout_ms);
-            while let Some(item) = stream.next().await {
-                if let Ok(output) = item {
-                    yield output;
-                }
+            spawn_bash(env, cwd, command, timeout_ms)
+        };
+        while let Some(item) = stream.next().await {
+            if let Ok(output) = item {
+                yield output;
             }
         }
     }))
@@ -401,6 +411,7 @@ pub(crate) fn spawn_bash<'a>(
 /// together, one is consumed per side, and each is closed exactly once.
 ///
 /// [`poll(2)`]: https://man7.org/linux/man-pages/man2/poll.2.html
+#[cfg(unix)]
 #[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_bash_pty(
     env: Option<Vec<(String, String)>>,

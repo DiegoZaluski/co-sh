@@ -50,7 +50,7 @@ impl Log for FileLogger {
 
 /// Initialize the debug file logger.
 ///
-/// Writes to `/tmp/cosh_debug.log` in append mode (creates the file if it
+/// Writes to `{tmpdir}/cosh_debug.log` in append mode (creates the file if it
 /// does not exist).
 ///
 /// - **Debug builds**: sets the max log level to `Debug` — all `debug!()`,
@@ -63,11 +63,12 @@ impl Log for FileLogger {
 /// Panics if the log file cannot be opened (e.g. permission denied) or if
 /// a logger has already been registered.
 pub fn init() {
+    let log_path = std::env::temp_dir().join("cosh_debug.log");
     let file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/cosh_debug.log")
-        .unwrap_or_else(|e| panic!("cannot open /tmp/cosh_debug.log: {e}"));
+        .open(&log_path)
+        .unwrap_or_else(|e| panic!("cannot open {}: {e}", log_path.display()));
 
     let logger = FileLogger {
         file: Mutex::new(file),

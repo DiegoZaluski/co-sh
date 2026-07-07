@@ -2196,10 +2196,16 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
         crossterm::event::EnableFocusChange,
         crossterm::event::EnableBracketedPaste,
         crossterm::event::EnableMouseCapture,
-        crossterm::event::PushKeyboardEnhancementFlags(
-            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
-        ),
     )?;
+    #[cfg(not(windows))]
+    {
+        crossterm::execute!(
+            stdout,
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+            ),
+        )?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -2212,9 +2218,15 @@ fn restore_terminal() -> io::Result<()> {
         crossterm::event::DisableMouseCapture,
         crossterm::event::DisableFocusChange,
         crossterm::event::DisableBracketedPaste,
-        crossterm::event::PopKeyboardEnhancementFlags,
         crossterm::terminal::LeaveAlternateScreen,
     )?;
+    #[cfg(not(windows))]
+    {
+        crossterm::execute!(
+            stdout,
+            crossterm::event::PopKeyboardEnhancementFlags,
+        )?;
+    }
     stdout.flush()?;
     crossterm::terminal::disable_raw_mode()?;
     Ok(())
