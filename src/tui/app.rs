@@ -1635,13 +1635,36 @@ impl App {
             }
             Event::Resize(_w, _h) => {}
             Event::Paste(text) => {
-                self.prompt_view.note_activity();
-                // Strip newlines/carriage returns so paste doesn't trigger submission
-                let cleaned: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
-                let pos = self.prompt_view.cursor_pos;
-                self.prompt_view.input.insert_str(pos, &cleaned);
-                self.prompt_view.cursor_pos = pos + cleaned.len();
-                self.slash_menu.update(&self.prompt_view.input);
+                // If ApiKeyInput dialog is visible, paste into the dialog input
+                if self.is_apikey_input_visible() {
+                    if let Some(d) = self.dialog.current_mut()
+                        && let DialogType::ApiKeyInput {
+                            input,
+                            cursor_pos,
+                            ..
+                        } = &mut d.dialog_type
+                    {
+                        let cleaned: String = text
+                            .chars()
+                            .filter(|&c| c != '\n' && c != '\r')
+                            .collect();
+                        input.insert_str(*cursor_pos, &cleaned);
+                        *cursor_pos += cleaned.len();
+                        d.last_filter_at = std::time::SystemTime::now();
+                        d.blink_start = std::time::SystemTime::now();
+                    }
+                } else {
+                    self.prompt_view.note_activity();
+                    // Strip newlines/carriage returns so paste doesn't trigger submission
+                    let cleaned: String = text
+                        .chars()
+                        .filter(|&c| c != '\n' && c != '\r')
+                        .collect();
+                    let pos = self.prompt_view.cursor_pos;
+                    self.prompt_view.input.insert_str(pos, &cleaned);
+                    self.prompt_view.cursor_pos = pos + cleaned.len();
+                    self.slash_menu.update(&self.prompt_view.input);
+                }
             }
             Event::Mouse(crossterm_mouse) => {
                 self.handle_mouse_event(crossterm_mouse)?;
