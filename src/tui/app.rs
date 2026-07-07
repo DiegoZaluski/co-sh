@@ -1744,6 +1744,23 @@ impl App {
             _ => {}
         }
 
+        // ── Mouse wheel scrolling ───────────────────────────────────────────
+        match event_type {
+            MouseEventType::ScrollUp => {
+                if matches!(self.mode(), AppMode::Session) {
+                    self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
+                }
+                return Ok(true);
+            }
+            MouseEventType::ScrollDown => {
+                if matches!(self.mode(), AppMode::Session) {
+                    self.session_view.scroll_y = (self.session_view.scroll_y + 3).max(0);
+                }
+                return Ok(true);
+            }
+            _ => {}
+        }
+
         // Only handle left-click UP events (standard "click" action)
         if event_type != MouseEventType::Up || button != MouseButton::Left {
             return Ok(true);
