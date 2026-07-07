@@ -920,7 +920,9 @@ impl App {
                             | crate::keymap::Action::NextSession
                             | crate::keymap::Action::PrevSession
                             | crate::keymap::Action::FocusInput
-                            | crate::keymap::Action::Quit,
+                            | crate::keymap::Action::Quit
+                            | crate::keymap::Action::NextAgent
+                            | crate::keymap::Action::PrevAgent,
                         ) => {
                             // TBD: help overlay
                         }
@@ -982,6 +984,7 @@ impl App {
                             let stop_signal = self.stop_signal.clone();
                             let input = msg;
                             let cwd = self.state.working_directory.clone();
+                            let mode = self.state.mode;
 
                             // Create a fresh answer channel for this agent loop invocation
                             let (answer_tx, answer_rx) = mpsc::unbounded_channel();
@@ -1055,7 +1058,9 @@ impl App {
                                         };
 
                                         let mut harness =
-                                            Harness::new(connector, &cwd).with_history(&history);
+                                            Harness::new(connector, &cwd)
+                                                .with_mode(mode)
+                                                .with_history(&history);
                                         harness.format_header_context();
                                         harness
                                             .run_agent_loop(
@@ -1138,13 +1143,12 @@ impl App {
                         Some(crate::keymap::Action::ToggleTimestamps) => {
                             self.config.show_timestamps = !self.config.show_timestamps;
                         }
-                        Some(crate::keymap::Action::NextAgent) => {
-                            let agents = self.state.unique_agents();
-                            self.prompt_view.next_agent(agents.len().max(1));
-                        }
-                        Some(crate::keymap::Action::PrevAgent) => {
-                            let agents = self.state.unique_agents();
-                            self.prompt_view.prev_agent(agents.len().max(1));
+                        Some(crate::keymap::Action::ToggleMode) => {
+                            use cosh::harness::Mode;
+                            self.state.mode = match self.state.mode {
+                                Mode::Build => Mode::Ask,
+                                Mode::Ask => Mode::Build,
+                            };
                         }
                         Some(crate::keymap::Action::HistoryUp) => {
                             self.prompt_view.note_activity();

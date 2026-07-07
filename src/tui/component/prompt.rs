@@ -60,7 +60,6 @@ pub struct PromptView {
     pub input_text_width: Cell<usize>,
     pub history: Vec<String>,
     pub history_index: i32,
-    pub selected_agent_index: usize,
     pub is_focused: bool,
     pub terminal_focused: bool,
     pub last_input_at: SystemTime,
@@ -77,7 +76,6 @@ impl PromptView {
             input_text_width: Cell::new(0),
             history: Vec::new(),
             history_index: -1,
-            selected_agent_index: 0,
             is_focused: true,
             terminal_focused: true,
             last_input_at: SystemTime::now(),
@@ -133,13 +131,6 @@ impl PromptView {
         self.cursor_pos = self.input.len();
     }
 
-    pub fn next_agent(&mut self, num_agents: usize) {
-        if num_agents == 0 {
-            return;
-        }
-        self.selected_agent_index = (self.selected_agent_index + 1) % num_agents;
-    }
-
     pub fn note_activity(&mut self) {
         self.last_input_at = SystemTime::now();
         self.blink_start = SystemTime::now();
@@ -164,17 +155,6 @@ impl PromptView {
     pub fn clear_selection(&mut self) {
         self.sel_start = None;
         self.sel_end = None;
-    }
-
-    pub fn prev_agent(&mut self, num_agents: usize) {
-        if num_agents == 0 {
-            return;
-        }
-        self.selected_agent_index = if self.selected_agent_index == 0 {
-            num_agents - 1
-        } else {
-            self.selected_agent_index - 1
-        };
     }
 
     pub fn cursor_up(&mut self, text_w: usize) {
@@ -364,7 +344,7 @@ impl PromptView {
         &self,
         buf: &mut Buffer,
         area: Rect,
-        _state: &AppState,
+        state: &AppState,
         theme: &Theme,
         agent_colors: &AgentColors,
         unique_agents: &[String],
@@ -393,16 +373,15 @@ impl PromptView {
         let cap_area = Rect::new(area.x, cap_y, area.width, CAP_H);
         let footer_y = cap_y + CAP_H;
 
-        let agent_name = if unique_agents.is_empty() {
-            "build".to_string()
-        } else {
-            let idx = self
-                .selected_agent_index
-                .min(unique_agents.len().saturating_sub(1));
-            unique_agents[idx].clone()
+        let agent_name = match state.mode {
+            cosh::harness::Mode::Build => "build",
+            cosh::harness::Mode::Ask => "ask",
         };
 
-        let agent_color = agent_colors.get(&agent_name, unique_agents);
+        let agent_color = match state.mode {
+            cosh::harness::Mode::Build => agent_colors.get("build", unique_agents),
+            cosh::harness::Mode::Ask => theme.info,
+        };
 
         let mut border_box = BoxRenderable::new();
         border_box.set_border_color(Some(agent_color.into()));
@@ -442,7 +421,7 @@ impl PromptView {
             draw_text_line(buf, line, x_off, ly, max_line_w, style);
         }
 
-        let agent_label = capitalize(&agent_name);
+        let agent_label = capitalize(agent_name);
         let label_style = Style::default().fg(rgba_color(agent_color));
         let label_y = input_area.y + BASE_H + n;
         draw_text_line(buf, &agent_label, x_off, label_y, max_line_w, label_style);

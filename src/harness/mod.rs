@@ -10,6 +10,6 @@ pub mod tools;
 #[cfg(test)]
 mod test;
 
-pub use core::Harness;
+pub use core::{Harness, Mode};
 pub use events::HarnessEvent;
 pub use tools::{CoshTools, Tools};

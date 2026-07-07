@@ -28,6 +28,7 @@ pub enum Action {
     ToggleCommandPalette,
     NextSession,
     PrevSession,
+    ToggleMode,
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +144,7 @@ impl KeyMap {
                     },
                 ),
                 (
-                    Action::NextAgent,
+                    Action::ToggleMode,
                     KeyBinding {
                         key: Tab,
                         modifiers: KeyModifiers::NONE,

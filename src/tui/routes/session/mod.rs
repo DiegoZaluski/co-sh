@@ -431,7 +431,7 @@ impl SessionView {
         }
     }
 
-    #[allow(clippy::too_many_arguments, clippy::cast_sign_loss)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cast_sign_loss)]
     fn render_assistant_message(
         buf: &mut Buffer,
         area: Rect,

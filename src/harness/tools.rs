@@ -62,6 +62,58 @@ impl CoshTools {
             skills: Skills::new(),
         }
     }
+
+    /// Tool descriptions restricted to read-only and search tools (Ask mode).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `plan` mutex is poisoned.
+    pub fn write_tool_descriptions_filtered(&self, out: &mut String) {
+        write_single_tool(out, &self.fs.description_read);
+        write_single_tool(out, &self.find.description_glob);
+        write_single_tool(out, &self.find.description_grep);
+        write_single_tool(out, &self.web.description_fetch);
+        write_single_tool(out, &self.web.description_search);
+        {
+            let plan = self.plan.lock().unwrap();
+            write_single_tool(out, &plan.description_todo_read);
+            write_single_tool(out, &plan.description_load_from_md);
+        }
+        write_single_tool(out, &self.question.description_ask);
+        write_single_tool(out, &self.skills.description_list);
+        write_single_tool(out, &self.skills.description_read);
+        write_single_tool(out, &self.skills.description_read_asset);
+        write_single_tool(out, &self.skills.description_match_skills);
+    }
+
+    /// Schemas restricted to read-only and search tools (Ask mode).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `plan` mutex is poisoned.
+    pub fn schemas_filtered(&self) -> Vec<ToolSchema> {
+        let mut v = vec![
+            extract_schema(&self.fs.description_read),
+            extract_schema(&self.find.description_glob),
+            extract_schema(&self.find.description_grep),
+            extract_schema(&self.web.description_fetch),
+            extract_schema(&self.web.description_search),
+        ];
+        // Each plan.lock() is its own statement to avoid deadlock
+        // on std::sync::Mutex (non-reentrant).
+        v.push(extract_schema(
+            &self.plan.lock().unwrap().description_todo_read,
+        ));
+        v.push(extract_schema(
+            &self.plan.lock().unwrap().description_load_from_md,
+        ));
+        v.push(extract_schema(&self.question.description_ask));
+        v.push(extract_schema(&self.skills.description_list));
+        v.push(extract_schema(&self.skills.description_read));
+        v.push(extract_schema(&self.skills.description_read_asset));
+        v.push(extract_schema(&self.skills.description_match_skills));
+        v
+    }
 }
 
 fn extract_schema(desc: &serde_json::Value) -> ToolSchema {

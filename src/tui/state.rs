@@ -2,6 +2,7 @@ use crate::types::{
     FilePart, Message, MessageRole, Part, ReasoningPart, Session, SessionStatus, TextPart,
     ToolPart, ToolStatus,
 };
+use cosh::harness::Mode;
 
 const MAX_SESSIONS: usize = 20;
 
@@ -12,6 +13,7 @@ pub struct AppState {
     pub scroll_y: i32,
     pub content_height: i32,
     pub working_directory: String,
+    pub mode: Mode,
     pub connected: bool,
     pub lsp_count: usize,
     pub mcp_count: usize,
@@ -28,6 +30,7 @@ impl AppState {
             scroll_y: 0,
             content_height: 0,
             working_directory: String::new(),
+            mode: Mode::Build,
             connected: false,
             lsp_count: 0,
             mcp_count: 0,

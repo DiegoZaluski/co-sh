@@ -92,8 +92,7 @@ fn tokens_for_word(word: &str) -> usize {
                 }
             }
             CharCat::Digit => n.div_ceil(3).max(1),
-            CharCat::Punct => n.div_ceil(2).max(1),
-            CharCat::Other => n.div_ceil(2).max(1),
+            CharCat::Punct | CharCat::Other => n.div_ceil(2).max(1),
         };
     }
 

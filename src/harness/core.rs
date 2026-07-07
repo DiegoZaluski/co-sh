@@ -11,13 +11,19 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    Build,
+    Ask,
+}
+
 pub struct ServerSession {
     pub name_server: String,
     pub tools: Vec<Tool>,
     pub client: RunningService<RoleClient, ()>,
 }
 
-pub const INSTRUCTIONS: &str = concat!(
+pub const INSTRUCTIONS_BUILD: &str = concat!(
     "You are an expert software engineering agent with access to tools.\n\n",
     "## Behaviour\n",
     "- **Answer naturally.** If someone says \"hello\", just greet them back. ",
@@ -25,6 +31,22 @@ pub const INSTRUCTIONS: &str = concat!(
     "- **Use tools only when necessary.** If you already know the answer, answer directly.\n",
     "- **Be concise.** Skip narration of obvious actions.\n",
     "- When done, call `stop_agent_loop`.\n\n",
+    "## Tool format\n",
+    "To call a tool, respond with a JSON object:\n",
+    "{\"name\": \"tool_name\", \"arguments\": { ... }}\n\n",
+    "The available tools and their schemas are listed below.\n"
+);
+
+pub const INSTRUCTIONS_ASK: &str = concat!(
+    "You are a technical discussion and planning agent with access to read-only tools.\n\n",
+    "## Behaviour\n",
+    "- **Your role is to discuss, explore, and plan.** You help the user understand their ",
+    "codebase, clarify requirements, and outline implementation strategies.\n",
+    "- **Do not make changes.** You cannot edit, write, or run code.\n",
+    "- **Be conversational.** Ask clarifying questions to understand the user's intent.\n",
+    "- **Use tools to explore.** Read files, search code, fetch documentation, and research ",
+    "before answering.\n",
+    "- When the user is satisfied with the plan, call `stop_agent_loop` to end the session.\n\n",
     "## Tool format\n",
     "To call a tool, respond with a JSON object:\n",
     "{\"name\": \"tool_name\", \"arguments\": { ... }}\n\n",
@@ -65,6 +87,7 @@ pub struct Harness {
     system_prompts: Vec<PromptSystem>,
     harness_tools: Vec<HarnessTool>,
     cosh_tools: Option<CoshTools>,
+    mode: Mode,
     /// To stop the agent loop.
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
@@ -91,6 +114,7 @@ impl Harness {
             system_prompts: Vec::new(),
             harness_tools: default_harness_tools(),
             cosh_tools: Some(CoshTools::new(cwd)),
+            mode: Mode::Build,
             stop: false,
             tool_issuer: VecDeque::new(),
             server_response: Vec::new(),
@@ -174,6 +198,12 @@ impl Harness {
         self
     }
 
+    #[must_use]
+    pub fn with_mode(mut self, mode: Mode) -> Self {
+        self.mode = mode;
+        self
+    }
+
     /// Signal the agent loop to stop at the next safe opportunity.
     pub fn request_stop(&mut self) {
         self.stop = true;
@@ -204,12 +234,16 @@ impl Harness {
 
     /// Builds the system header for the LLM.
     ///
-    /// Concatenates system prompts, harness tools, system tools, and MCP server tools
-    /// — all rendered inline with full name, description, and input schema.
+    /// Concatenates mode-specific instructions, system prompts, harness tools, system tools,
+    /// and MCP server tools — all rendered inline with full name, description, and input schema.
     pub fn format_header_context(&mut self) -> &str {
         let mut out = String::new();
 
-        let _ = write!(out, "{INSTRUCTIONS}");
+        let instructions = match self.mode {
+            Mode::Build => INSTRUCTIONS_BUILD,
+            Mode::Ask => INSTRUCTIONS_ASK,
+        };
+        let _ = write!(out, "{instructions}");
 
         for prompt in &self.system_prompts {
             let _ = write!(out, "## System: {}\n{}\n\n", prompt.title, prompt.text);
@@ -227,7 +261,10 @@ impl Harness {
 
         if let Some(ref cosh) = self.cosh_tools {
             let _ = write!(out, "## System Tools\n\n");
-            cosh.write_tool_descriptions(&mut out);
+            match self.mode {
+                Mode::Build => cosh.write_tool_descriptions(&mut out),
+                Mode::Ask => cosh.write_tool_descriptions_filtered(&mut out),
+            }
         }
 
         for session in &self.sessions {
@@ -260,7 +297,10 @@ impl Harness {
             }
         }
         if let Some(ref cosh) = self.cosh_tools {
-            let schemas = cosh.schemas();
+            let schemas = match self.mode {
+                Mode::Build => cosh.schemas(),
+                Mode::Ask => cosh.schemas_filtered(),
+            };
             log::debug!(
                 "build_extractor: cosh.schemas() returned {} tools",
                 schemas.len()
@@ -748,6 +788,7 @@ impl Harness {
             mock_chat_response: None,
             mock_stream_response: None,
             test_tools: Vec::new(),
+            mode: Mode::Build,
         }
     }
 
