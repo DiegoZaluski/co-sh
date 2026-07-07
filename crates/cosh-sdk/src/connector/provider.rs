@@ -319,6 +319,23 @@ pub fn known_providers() -> impl Iterator<Item = &'static str> {
     PROVIDERS.iter().map(|(name, _)| *name)
 }
 
+/// Return the environment variable name for a given provider's API key.
+///
+/// Returns `None` if the provider is unknown.
+pub fn get_provider_env_var(provider: &str) -> Option<&'static str> {
+    API_KEY_ENVS
+        .iter()
+        .find(|(key, _)| *key == provider)
+        .map(|(_, var)| *var)
+}
+
+/// Return all known providers with their API key environment variable names.
+///
+/// Useful for UI rendering that needs both the provider name and its key env var.
+pub fn known_providers_with_env() -> impl Iterator<Item = (&'static str, &'static str)> {
+    API_KEY_ENVS.iter().map(|(name, env)| (*name, *env))
+}
+
 /// Return the first provider whose API-key environment variable is set.
 ///
 /// The iteration order follows the registration order in the provider table.

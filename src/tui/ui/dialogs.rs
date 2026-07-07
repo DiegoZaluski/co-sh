@@ -20,6 +20,25 @@ enum VisualItem {
     Model(ModelEntry),
 }
 
+/// List of (key_combo, description) for the Shortcuts dialog
+/// Only non-obvious compound shortcuts — basic nav/enter/esc are excluded
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Tab", "Toggle mode (Build/Ask)"),
+    ("PageUp/Down", "Scroll page up/down"),
+    ("Home/End", "Go to start/end of input"),
+    ("Ctrl+B", "Toggle sidebar"),
+    ("Ctrl+C", "Copy selection / Quit"),
+    ("Ctrl+T", "Toggle thinking"),
+    ("Ctrl+D", "Toggle tool details"),
+    ("Ctrl+G", "Toggle generic output"),
+    ("Ctrl+Y", "Toggle timestamps"),
+    ("Ctrl+P", "Command palette"),
+    ("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
+    ("Ctrl+J", "Insert newline"),
+    ("j/k", "Vim-style scroll (prompt empty)"),
+    ("Ctrl+K", "Show keyboard shortcuts"),
+];
+
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
@@ -56,6 +75,15 @@ pub enum DialogType {
         models: Vec<ModelEntry>,
         current: String,
         filter: String,
+    },
+    ApiKeyInput {
+        provider: String,
+        env_var: String,
+        input: String,
+        cursor_pos: usize,
+    },
+    Shortcuts {
+        scroll: usize,
     },
 }
 
@@ -135,7 +163,7 @@ impl DialogState {
         let x = mouse.x;
         let y_click = mouse.y;
 
-        match &instance.dialog_type {
+        match &mut instance.dialog_type {
             DialogType::Alert { message: _ } => {
                 // Click anywhere on alert → dismiss
                 DialogAction::Dismissed
@@ -249,6 +277,64 @@ impl DialogState {
                         if item_idx < filtered.len() {
                             instance.selected = item_idx;
                             return DialogAction::Confirmed;
+                        }
+                    }
+                }
+
+                DialogAction::Consumed
+            }
+            DialogType::ApiKeyInput { .. } => {
+                // Click outside the dialog box → dismiss
+                let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
+                let dialog_h = 7;
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+
+                if x < dialog_x
+                    || x >= dialog_x + dialog_w
+                    || y_click < dialog_y
+                    || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+                DialogAction::Consumed
+            }            DialogType::Shortcuts { scroll } => {
+                let max_w = 46u16.min(area.width.saturating_sub(6)).max(30);
+                let entries = SHORTCUTS.len();
+                let max_visible = (area.height.saturating_sub(4)) as usize;
+                let max_visible = max_visible.min(entries).max(1).clamp(1, 20);
+                let list_h = max_visible as u16;
+                let dialog_h = 1 + list_h;
+                let dialog_w = max_w;
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+
+                // Click outside → dismiss
+                if x < dialog_x
+                    || x >= dialog_x + dialog_w
+                    || y_click < dialog_y
+                    || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+
+                // Check esc label click (title row)
+                let esc_x = dialog_x + dialog_w.saturating_sub(4).saturating_sub("esc".len() as u16);
+                if y_click == dialog_y && x >= esc_x && x < esc_x + "esc".len() as u16 {
+                    return DialogAction::Dismissed;
+                }
+
+                // Scroll on click inside list area
+                let list_top = dialog_y + 1;
+                if y_click >= list_top {
+                    let row = (y_click - list_top) as usize;
+                    if row < max_visible {
+                        // Toggle: click on upper half = scroll up, lower half = scroll down
+                        if row <= max_visible / 2 {
+                            *scroll = scroll.saturating_sub(1);
+                        } else {
+                            let max_scroll = entries.saturating_sub(max_visible);
+                            *scroll = (*scroll + 1).min(max_scroll);
                         }
                     }
                 }
@@ -377,7 +463,7 @@ impl DialogState {
     }
 
     #[allow(clippy::too_many_lines, clippy::similar_names)]
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime) {
+    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime, terminal_focused: bool) {
         let Some(instance) = self.stack.last() else {
             return;
         };
@@ -806,6 +892,273 @@ impl DialogState {
                 }
                 // Lines after list: paddingBottom=1 (already filled with background)
                 // NO footer, NO separator - matching original DialogSelect
+            }
+            DialogType::Shortcuts { scroll } => {
+                // Shortcuts overlay - scrollable list of keyboard shortcuts (no border)
+                let max_w = 46u16.min(area.width.saturating_sub(6)).max(30);
+                let entries = SHORTCUTS.len();
+                let max_visible = (area.height.saturating_sub(4)) as usize;
+                let max_visible = max_visible.min(entries).max(1).clamp(1, 20);
+                let list_h = max_visible as u16;
+                // Title row + list rows (no border)
+                let dialog_h = 1 + list_h;
+                let dialog_w = max_w;
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+
+                // Fill background with a subtly lighter shade than theme background
+                let (r, g, b, _) = theme.background_element.to_ints();
+                let lighten = |c: u8| c.saturating_add(5).min(255);
+                let bg_color = Color::Rgb(lighten(r), lighten(g), lighten(b));
+                for y in dialog_y..dialog_y + dialog_h {
+                    for x in dialog_x..dialog_x + dialog_w {
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(bg_color));
+                        }
+                    }
+                }
+
+                // Title line with inline "esc" label
+                let title_text = "Keyboard Shortcuts";
+                draw_text_line(
+                    buf,
+                    title_text,
+                    dialog_x + 2,
+                    dialog_y,
+                    dialog_w.saturating_sub(4),
+                    Style::default()
+                        .fg(rgba_color(theme.text))
+                        .add_modifier(Modifier::BOLD),
+                );
+
+                // "esc" label right-aligned on same line as title
+                let esc_label = "esc";
+                let esc_x = dialog_x + dialog_w.saturating_sub(4).saturating_sub(esc_label.len() as u16);
+                draw_text_line(
+                    buf,
+                    esc_label,
+                    esc_x,
+                    dialog_y,
+                    dialog_w.saturating_sub(2),
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                // Ensure scroll is within bounds
+                let max_scroll = entries.saturating_sub(max_visible);
+                let scroll = (*scroll).min(max_scroll);
+
+                let text_color = rgba_color(theme.text);
+                let accent = rgba_color(theme.primary);
+
+                // Draw each visible shortcut
+                for (i, entry) in SHORTCUTS.iter().enumerate().skip(scroll).take(max_visible) {
+                    let ry = dialog_y + 1 + (i - scroll) as u16;
+                    let (key_str, desc) = (entry.0, entry.1);
+
+                    // Key column (left-aligned, accent color, fixed width)
+                    let key_x = dialog_x + 2;
+                    let key_w = 14u16;
+                    draw_text_line(
+                        buf,
+                        key_str,
+                        key_x,
+                        ry,
+                        key_w,
+                        Style::default().fg(accent),
+                    );
+
+                    // Description column
+                    let desc_x = key_x + key_w;
+                    let desc_w = dialog_w.saturating_sub(2).saturating_sub(desc_x - dialog_x);
+                    draw_text_line(
+                        buf,
+                        desc,
+                        desc_x,
+                        ry,
+                        desc_w,
+                        Style::default().fg(text_color),
+                    );
+                }
+            }
+            DialogType::ApiKeyInput {
+                provider,
+                env_var,
+                input,
+                cursor_pos,
+            } => {
+                // API Key input dialog - small centered box
+                let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
+                let dialog_h = 7;
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+                let _dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+                // Fill background with theme background_element color
+                let bg_color = rgba_color(theme.background_element);
+                for y in dialog_y..dialog_y + dialog_h {
+                    for x in dialog_x..dialog_x + dialog_w {
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(bg_color));
+                        }
+                    }
+                }
+
+                // Draw border (rounded corners via unicode)
+                let border_color = rgba_color(theme.border_active);
+                let max_x = dialog_x + dialog_w - 1;
+                let max_y = dialog_y + dialog_h - 1;
+
+                // Top & bottom horizontal lines
+                for x in (dialog_x + 1)..max_x {
+                    if let Some(cell) = buf.cell_mut((x, dialog_y)) {
+                        cell.set_char('\u{2500}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                    if let Some(cell) = buf.cell_mut((x, max_y)) {
+                        cell.set_char('\u{2500}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                }
+
+                // Left & right vertical lines
+                for y in (dialog_y + 1)..max_y {
+                    if let Some(cell) = buf.cell_mut((dialog_x, y)) {
+                        cell.set_char('\u{2502}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                    if let Some(cell) = buf.cell_mut((max_x, y)) {
+                        cell.set_char('\u{2502}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                }
+
+                // Corners (rounded)
+                if let Some(cell) = buf.cell_mut((dialog_x, dialog_y)) {
+                    cell.set_char('\u{256D}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((max_x, dialog_y)) {
+                    cell.set_char('\u{256E}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((dialog_x, max_y)) {
+                    cell.set_char('\u{2570}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((max_x, max_y)) {
+                    cell.set_char('\u{256F}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+
+                // Content area
+                let content_x = dialog_x + 2;
+                let content_w = dialog_w.saturating_sub(4);
+
+                // Title: "API Key for {provider}"
+                let title = format!("API Key for {provider}");
+                draw_text_line(
+                    buf,
+                    &title,
+                    content_x,
+                    dialog_y + 1,
+                    content_w,
+                    Style::default()
+                        .fg(rgba_color(theme.text))
+                        .add_modifier(Modifier::BOLD),
+                );
+
+                // Env var name
+                let env_label = format!("({env_var})");
+                draw_text_line(
+                    buf,
+                    &env_label,
+                    content_x,
+                    dialog_y + 2,
+                    content_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                // Input field with masked characters (blinking cursor at cursor_pos)
+                let input_x = content_x;
+                let input_y = dialog_y + 4;
+                let bg_element = rgba_color(theme.background_element);
+
+                // Clear input field background
+                for cx in input_x..input_x + content_w {
+                    if let Some(cell) = buf.cell_mut((cx, input_y)) {
+                        cell.set_char(' ');
+                        cell.set_style(Style::default().bg(bg_element));
+                    }
+                }
+
+                // Draw masked input (*** characters), char by char so cursor can be positioned
+                let masked: Vec<char> = input.chars().map(|_| '*').collect();
+
+                // Blink cursor logic: steady for 500ms after typing, then blink 500ms on/off
+                let idle_ms = now
+                    .duration_since(instance.last_filter_at)
+                    .map_or(0, |d| d.as_millis());
+                let cursor_visible = if idle_ms < 500 {
+                    true // steady after typing
+                } else {
+                    let elapsed_ms = now
+                        .duration_since(instance.blink_start)
+                        .map_or(0, |d| d.as_millis() % 1000);
+                    elapsed_ms < 500
+                };
+
+                // Draw each masked character
+                for (i, _ch) in masked.iter().enumerate() {
+                    let cx = input_x + i as u16;
+                    if cx >= input_x + content_w {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((cx, input_y)) {
+                        cell.set_char('*');
+                        cell.set_style(
+                            Style::default()
+                                .fg(rgba_color(theme.text))
+                                .bg(bg_element),
+                        );
+                    }
+                }
+
+                // Draw cursor at cursor_pos
+                let cursor_x = input_x + *cursor_pos as u16;
+                if cursor_x < input_x + content_w
+                    && let Some(cell) = buf.cell_mut((cursor_x, input_y))
+                {
+                    if terminal_focused {
+                        // Steady while typing, blink after 500ms idle
+                        if cursor_visible {
+                            // ON: block cursor with primary color
+                            cell.set_char('\u{2588}');
+                            cell.set_style(
+                                Style::default()
+                                    .fg(rgba_color(theme.primary))
+                                    .bg(bg_element),
+                            );
+                        } else {
+                            // OFF: dimmed block cursor (still visible, not invisible)
+                            cell.set_char('\u{2588}');
+                            cell.set_style(
+                                Style::default()
+                                    .fg(Color::Rgb(60, 60, 60))
+                                    .bg(bg_element),
+                            );
+                        }
+                    } else {
+                        // Terminal unfocused: transparent black cursor (static, no blink)
+                        cell.set_char('\u{2588}');
+                        cell.set_style(
+                            Style::default()
+                                .fg(Color::Rgb(60, 60, 60))
+                                .bg(bg_element),
+                        );
+                    }
+                }
             }
             DialogType::ModelList {
                 models,

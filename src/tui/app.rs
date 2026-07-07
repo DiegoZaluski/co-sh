@@ -29,6 +29,7 @@ use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::sidebar::SidebarView;
+use crate::routes::add_provider::AddProviderView;
 use crate::routes::tools::InternalToolsView;
 use crate::state::AppState;
 use crate::theme::{Theme, ThemeRegistry};
@@ -50,6 +51,7 @@ enum AppMode {
     Home,
     Session,
     InternalTools,
+    AddProvider,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -66,6 +68,8 @@ pub struct App {
     pub home_view: HomeView,
     pub internal_tools_view: InternalToolsView,
     pub show_internal_tools: bool,
+    pub add_provider_view: AddProviderView,
+    pub show_add_provider: bool,
     pub keymap: KeyMap,
     pub config: TuiConfig,
     pub toast_state: ToastState,
@@ -116,6 +120,8 @@ impl App {
             home_view: HomeView::new(),
             internal_tools_view: InternalToolsView::new(),
             show_internal_tools: false,
+            add_provider_view: AddProviderView::new(),
+            show_add_provider: false,
             prompt_view: PromptView::new(),
             sidebar: SidebarView::new(),
             dialog: DialogState::new(),
@@ -390,6 +396,160 @@ impl App {
             )
     }
 
+    fn is_shortcuts_dialog_visible(&self) -> bool {
+        self.dialog.visible()
+            && matches!(
+                self.dialog.current().map(|d| &d.dialog_type),
+                Some(DialogType::Shortcuts { .. })
+            )
+    }
+
+    fn is_apikey_input_visible(&self) -> bool {
+        self.dialog.visible()
+            && matches!(
+                self.dialog.current().map(|d| &d.dialog_type),
+                Some(DialogType::ApiKeyInput { .. })
+            )
+    }
+
+    fn handle_apikey_dialog_key(&mut self, key: KeyCode) -> bool {
+        if !self.is_apikey_input_visible() {
+            return false;
+        }
+
+        // Update blink timestamps on any interaction
+        if let Some(d) = self.dialog.current_mut() {
+            d.last_filter_at = std::time::SystemTime::now();
+            d.blink_start = std::time::SystemTime::now();
+        }
+
+        match key {
+            KeyCode::Enter => {
+                let should_save = self.dialog.current().is_some_and(|d| {
+                    if let DialogType::ApiKeyInput { input, .. } = &d.dialog_type {
+                        !input.is_empty()
+                    } else {
+                        false
+                    }
+                });
+                if should_save
+                    && let Some(d) = self.dialog.current()
+                    && let DialogType::ApiKeyInput {
+                        provider,
+                        env_var,
+                        input,
+                        ..
+                    } = &d.dialog_type
+                {
+                    save_provider_api_key(provider, env_var, input);
+                    // SAFETY: Setting env vars is safe in a single-threaded CLI context
+                    unsafe { std::env::set_var(env_var, input); }
+                }
+                self.dialog.pop();
+                true
+            }
+            KeyCode::Esc => {
+                self.dialog.pop();
+                true
+            }
+            KeyCode::Left => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        cursor_pos, ..
+                    } = &mut d.dialog_type
+                {
+                    if *cursor_pos > 0 {
+                        *cursor_pos -= 1;
+                    }
+                }
+                true
+            }
+            KeyCode::Right => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        input,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    if *cursor_pos < input.len() {
+                        *cursor_pos += 1;
+                    }
+                }
+                true
+            }
+            KeyCode::Home => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        cursor_pos, ..
+                    } = &mut d.dialog_type
+                {
+                    *cursor_pos = 0;
+                }
+                true
+            }
+            KeyCode::End => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        input,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    *cursor_pos = input.len();
+                }
+                true
+            }
+            KeyCode::Delete => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        input,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    if *cursor_pos < input.len() {
+                        let next = input
+                            .floor_char_boundary(*cursor_pos + 1)
+                            .min(input.len());
+                        input.drain(*cursor_pos..next);
+                    }
+                }
+                true
+            }
+            KeyCode::Backspace => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        input,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    if *cursor_pos > 0 {
+                        let char_start = input.floor_char_boundary(*cursor_pos - 1);
+                        input.remove(char_start);
+                        *cursor_pos = char_start;
+                    }
+                }
+                true
+            }
+            KeyCode::Char(ch) => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        input,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    input.insert(*cursor_pos, ch);
+                    *cursor_pos += ch.len_utf8();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn handle_confirm_dialog_key(&mut self, key: KeyCode) -> bool {
         if !self.is_confirm_dialog_visible() {
             return false;
@@ -551,6 +711,8 @@ impl App {
     fn mode(&self) -> AppMode {
         if self.show_internal_tools {
             AppMode::InternalTools
+        } else if self.show_add_provider {
+            AppMode::AddProvider
         } else if self.state.current_session().is_some() {
             AppMode::Session
         } else {
@@ -694,6 +856,17 @@ impl App {
                     self.internal_tools_view
                         .render(buf, tools_area, &self.theme);
                 }
+                AppMode::AddProvider => {
+                    self.prompt_view.blur();
+                    let tools_area = Rect::new(
+                        session_area.x,
+                        session_area.y,
+                        session_area.width,
+                        session_area.height.saturating_sub(1),
+                    );
+                    self.add_provider_view
+                        .render(buf, tools_area, &self.theme);
+                }
                 AppMode::Session => {
                     self.prompt_view.focus();
                     self.prompt_view.terminal_focused = self.terminal_focused;
@@ -740,7 +913,7 @@ impl App {
                 }
             }
 
-            let show_home = !matches!(self.mode(), AppMode::InternalTools);
+            let show_home = !matches!(self.mode(), AppMode::InternalTools | AppMode::AddProvider);
             FooterView::render_with_mode(
                 buf,
                 Rect::new(main_area.x, footer_y, main_area.width, 1),
@@ -750,7 +923,7 @@ impl App {
             );
             let now = std::time::SystemTime::now();
             self.toast_state.render(buf, area, &self.theme);
-            self.dialog.render(buf, area, &self.theme, now);
+            self.dialog.render(buf, area, &self.theme, now, self.terminal_focused);
             self.permission_dialog.render(buf, area, &self.theme);
             self.command_palette.render(buf, area, &self.theme);
             self.slash_menu.render(buf, prompt_area, &self.theme);
@@ -826,6 +999,37 @@ impl App {
                         return Ok(false);
                     }
 
+                    // Check ApiKeyInput dialog
+                    if self.is_apikey_input_visible() {
+                        let handled = self.handle_apikey_dialog_key(key.code);
+                        if handled {
+                            return Ok(false);
+                        }
+                    }
+
+                    // Check Shortcuts dialog for scrolling
+                    if self.is_shortcuts_dialog_visible() {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if let Some(d) = self.dialog.current_mut()
+                                    && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
+                                {
+                                    *scroll = scroll.saturating_sub(1);
+                                }
+                                return Ok(false);
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if let Some(d) = self.dialog.current_mut()
+                                    && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
+                                {
+                                    *scroll = scroll.saturating_add(1);
+                                }
+                                return Ok(false);
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // Shift/Ctrl/Alt+Enter inserts a newline instead of sending.
                     if key.code == KeyCode::Enter && key.modifiers != KeyModifiers::NONE {
                         self.prompt_view.note_activity();
@@ -846,6 +1050,12 @@ impl App {
                             KeyCode::Down => {
                                 self.home_view.select_next();
                             }
+                            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                self.dialog.show(DialogType::Shortcuts {
+                                    scroll: 0,
+                                });
+                                return Ok(false);
+                            }
                             KeyCode::Enter => {
                                 match self.home_view.selected_action() {
                                     HomeAction::NewSession => {
@@ -862,6 +1072,14 @@ impl App {
                                     }
                                     HomeAction::OpenInternalTools => {
                                         self.show_internal_tools = true;
+                                    }
+                                    HomeAction::OpenShortcuts => {
+                                        self.dialog.show(DialogType::Shortcuts {
+                                            scroll: 0,
+                                        });
+                                    }
+                                    HomeAction::OpenAddProvider => {
+                                        self.show_add_provider = true;
                                     }
                                 }
                                 return Ok(false);
@@ -886,6 +1104,37 @@ impl App {
                             }
                             KeyCode::Esc => {
                                 self.show_internal_tools = false;
+                            }
+                            _ => {}
+                        }
+                        return Ok(false);
+                    }
+
+                    // AddProvider mode: navigation and select
+                    if matches!(self.mode(), AppMode::AddProvider) && !self.dialog.visible() {
+                        match key.code {
+                            KeyCode::Up => {
+                                let list_area = 20;
+                                self.add_provider_view.select_prev(list_area);
+                            }
+                            KeyCode::Down => {
+                                let list_area = 20;
+                                self.add_provider_view.select_next(list_area);
+                            }
+                            KeyCode::Enter => {
+                                if let Some((provider, env_var)) =
+                                    self.add_provider_view.selected_provider()
+                                {
+                                    self.dialog.show(DialogType::ApiKeyInput {
+                                        provider: provider.to_string(),
+                                        env_var: env_var.to_string(),
+                                        input: String::new(),
+                                        cursor_pos: 0,
+                                    });
+                                }
+                            }
+                            KeyCode::Esc => {
+                                self.show_add_provider = false;
                             }
                             _ => {}
                         }
@@ -1165,6 +1414,8 @@ impl App {
                                 self.dialog.pop();
                             } else if matches!(self.mode(), AppMode::Session) {
                                 self.state.current_session_id = None;
+                            } else if matches!(self.mode(), AppMode::AddProvider) {
+                                self.show_add_provider = false;
                             } else if matches!(self.mode(), AppMode::Home) {
                                 self.dialog.show(DialogType::Confirm {
                                     message: "Quit cosh?".into(),
@@ -1426,13 +1677,36 @@ impl App {
             }
             Event::Resize(_w, _h) => {}
             Event::Paste(text) => {
-                self.prompt_view.note_activity();
-                // Strip newlines/carriage returns so paste doesn't trigger submission
-                let cleaned: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
-                let pos = self.prompt_view.cursor_pos;
-                self.prompt_view.input.insert_str(pos, &cleaned);
-                self.prompt_view.cursor_pos = pos + cleaned.len();
-                self.slash_menu.update(&self.prompt_view.input);
+                // If ApiKeyInput dialog is visible, paste into the dialog input
+                if self.is_apikey_input_visible() {
+                    if let Some(d) = self.dialog.current_mut()
+                        && let DialogType::ApiKeyInput {
+                            input,
+                            cursor_pos,
+                            ..
+                        } = &mut d.dialog_type
+                    {
+                        let cleaned: String = text
+                            .chars()
+                            .filter(|&c| c != '\n' && c != '\r')
+                            .collect();
+                        input.insert_str(*cursor_pos, &cleaned);
+                        *cursor_pos += cleaned.len();
+                        d.last_filter_at = std::time::SystemTime::now();
+                        d.blink_start = std::time::SystemTime::now();
+                    }
+                } else {
+                    self.prompt_view.note_activity();
+                    // Strip newlines/carriage returns so paste doesn't trigger submission
+                    let cleaned: String = text
+                        .chars()
+                        .filter(|&c| c != '\n' && c != '\r')
+                        .collect();
+                    let pos = self.prompt_view.cursor_pos;
+                    self.prompt_view.input.insert_str(pos, &cleaned);
+                    self.prompt_view.cursor_pos = pos + cleaned.len();
+                    self.slash_menu.update(&self.prompt_view.input);
+                }
             }
             Event::Mouse(crossterm_mouse) => {
                 self.handle_mouse_event(crossterm_mouse)?;
@@ -1859,6 +2133,18 @@ impl App {
                                 }
                                 self.model_dialog_original = None;
                             }
+                            DialogType::ApiKeyInput {
+                                provider,
+                                env_var,
+                                input,
+                                ..
+                            } => {
+                                if !input.is_empty() {
+                                    save_provider_api_key(provider, env_var, input);
+                                    // SAFETY: Setting env vars is safe in a single-threaded CLI context
+                                    unsafe { std::env::set_var(env_var, input); }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -2086,6 +2372,14 @@ impl App {
                     crate::routes::home::HomeAction::OpenInternalTools => {
                         self.show_internal_tools = true;
                     }
+                    crate::routes::home::HomeAction::OpenShortcuts => {
+                        self.dialog.show(DialogType::Shortcuts {
+                            scroll: 0,
+                        });
+                    }
+                    crate::routes::home::HomeAction::OpenAddProvider => {
+                        self.show_add_provider = true;
+                    }
                 }
                 return Ok(true);
             }
@@ -2110,6 +2404,38 @@ impl App {
             if let Some(clicked_idx) = self.internal_tools_view.handle_mouse(&mouse, tools_area) {
                 self.internal_tools_view.selected_index = clicked_idx;
                 self.internal_tools_view.toggle_current();
+                return Ok(true);
+            }
+        }
+
+        // 8c. AddProvider view — mouse click on a provider row opens API key input
+        if matches!(self.mode(), AppMode::AddProvider) && !self.dialog.visible() {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            let tools_area = Rect::new(
+                main_area.x,
+                area.y + 1,
+                main_area.width,
+                main_area.height.saturating_sub(2),
+            );
+            if let Some(clicked_idx) = self.add_provider_view.handle_mouse(&mouse, tools_area) {
+                self.add_provider_view.selected_index = clicked_idx;
+                if let Some((provider, env_var)) =
+                    self.add_provider_view.selected_provider()
+                {
+                    self.dialog.show(DialogType::ApiKeyInput {
+                        provider: provider.to_string(),
+                        env_var: env_var.to_string(),
+                        input: String::new(),
+                        cursor_pos: 0,
+                    });
+                }
                 return Ok(true);
             }
         }
@@ -2230,4 +2556,42 @@ fn restore_terminal() -> io::Result<()> {
     stdout.flush()?;
     crossterm::terminal::disable_raw_mode()?;
     Ok(())
+}
+
+/// Save a provider API key to the user's shell profile for persistence.
+/// Delegates security to the OS by writing to the shell config file.
+fn save_provider_api_key(provider: &str, env_var: &str, api_key: &str) {
+    // Determine shell config file from $SHELL environment variable
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let config_file: Option<std::path::PathBuf> = if shell.ends_with("zsh") {
+        std::env::var("ZDOTDIR").ok().map_or_else(
+            || Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".zshrc")),
+            |zd| Some(std::path::PathBuf::from(zd).join(".zshrc")),
+        )
+    } else if shell.ends_with("bash") {
+        Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".bashrc"))
+    } else if shell.ends_with("fish") {
+        Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/fish/config.fish"))
+    } else {
+        // Fallback to .profile
+        Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".profile"))
+    };
+
+    if let Some(path) = config_file {
+        let export_line = format!("export {env_var}=\"{api_key}\"\n");
+        let comment_line = format!("# cosh: {provider} API key\n");
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                let _ = write!(file, "\n{comment_line}{export_line}");
+            }
+            Err(_) => {
+                // Silently fail - env var is still set for the current process
+            }
+        }
+    }
 }
