@@ -1,4 +1,5 @@
 use super::tools::{CoshTools, Tools};
+use cosh_recall::window::ContextWindow;
 use cosh_sdk::connector::Connector;
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use rmcp::ServiceExt;
@@ -17,29 +18,21 @@ pub struct ServerSession {
 }
 
 pub const INSTRUCTIONS: &str = concat!(
-    "You are an expert software engineering agent. ",
-    "You solve problems step by step using the tools below.\n\n",
-    "## Workflow\n",
-    "1. **Understand** — read files, search code, explore the project.\n",
-    "2. **Plan** — think before you act.\n",
-    "3. **Execute** — call the right tools.\n",
-    "4. **Verify** — check compilation and tests pass.\n\n",
-    "## Tool calls\n",
-    "Respond with a JSON object:\n",
+    "You are an expert software engineering agent with access to tools.\n\n",
+    "## Behaviour\n",
+    "- **Answer naturally.** If someone says \"hello\", just greet them back. ",
+    "Do not list tools or describe your capabilities.\n",
+    "- **Use tools only when necessary.** If you already know the answer, answer directly.\n",
+    "- **Be concise.** Skip narration of obvious actions.\n",
+    "- When done, call `stop_agent_loop`.\n\n",
+    "## Tool format\n",
+    "To call a tool, respond with a JSON object:\n",
     "{\"name\": \"tool_name\", \"arguments\": { ... }}\n\n",
-    "Tool schemas are listed below with name, description, and input schema. ",
-    "The description tells you what the tool does and when to use it.\n\n",
-    "## Rules\n",
-    "- **`fs_edit` over `fs_write`**: targeted edits are safer than full rewrites.\n",
-    "- **External calls last**: only use `web_*` tools when the answer is not in the codebase.\n",
-    "- **Batch questions**: one `ask_questions` call, never split.\n",
-    "- **No unnecessary calls**: don't call a tool if you already have the answer.\n",
-    "- **Stop when done**: call `stop_agent_loop` when the task is complete.\n\n",
-    "## Output\n",
-    "- Explain what you're doing before each step, and what happened after.\n",
-    "- Be concise. Skip narration of obvious actions.\n",
-    "- When finished, summarize what was done.\n"
+    "The available tools and their schemas are listed below.\n"
 );
+
+/// Default token budget for the context window.
+const MAX_TOKENS: usize = 10_000;
 
 pub struct PromptSystem {
     pub title: String,
@@ -76,6 +69,8 @@ pub struct Harness {
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
     server_response: Vec<String>,
+    /// Context window for iterative agent sessions.
+    context_window: ContextWindow,
 
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
@@ -99,6 +94,7 @@ impl Harness {
             stop: false,
             tool_issuer: VecDeque::new(),
             server_response: Vec::new(),
+            context_window: ContextWindow::new(MAX_TOKENS),
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
@@ -106,6 +102,22 @@ impl Harness {
             #[cfg(test)]
             test_tools: Vec::new(),
         }
+    }
+
+    /// Load previous conversation turns into the context window so the
+    /// assistant sees history when it starts.
+    #[must_use]
+    pub fn with_history(mut self, turns: &[(String, String)]) -> Self {
+        for (role, text) in turns {
+            let line = if role == "user" {
+                format!("## User\n{text}")
+            } else {
+                format!("## Assistant\n{text}")
+            };
+            let count = crate::util::token_counter::estimate_tokens(&line);
+            self.context_window.push(line, count);
+        }
+        self
     }
 
     /// # Errors
@@ -297,7 +309,8 @@ impl Harness {
         output
     }
 
-    /// Build the final context by appending pending server responses to the header.
+    /// Build the final context by appending pending server responses and
+    /// the context window to the header.
     fn build_chat_context(&mut self) -> String {
         let mut out = self.header_context.clone();
         if !self.server_response.is_empty() {
@@ -307,6 +320,7 @@ impl Harness {
             }
             self.server_response.clear();
         }
+        out.push_str(&self.context_window.format_context());
         out
     }
 
@@ -625,6 +639,10 @@ impl Harness {
             }
 
             log::debug!("run_agent_loop RESTARTING with tool results");
+            // Summarize this iteration into the context window
+            let summary = self.server_response.join("; ");
+            let token_count = crate::util::token_counter::estimate_tokens(&summary);
+            self.context_window.push(summary, token_count);
             // Tool results were accumulated in server_response
             // Next iteration sends an empty prompt with results in context
             current_input.clear();
@@ -726,6 +744,7 @@ impl Harness {
             stop: false,
             server_response: Vec::new(),
             tool_issuer: VecDeque::new(),
+            context_window: ContextWindow::new(MAX_TOKENS),
             mock_chat_response: None,
             mock_stream_response: None,
             test_tools: Vec::new(),

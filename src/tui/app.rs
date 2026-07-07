@@ -986,6 +986,40 @@ impl App {
                             self.answer_tx = answer_tx;
 
                             let event_tx_panic = event_tx.clone();
+                            // Build conversation history from existing session messages
+                            let history: Vec<(String, String)> = self
+                                .state
+                                .current_session()
+                                .map(|s| {
+                                    s.messages
+                                        .iter()
+                                        .filter_map(|m| {
+                                            let role = match m.role {
+                                                crate::types::MessageRole::User => "user",
+                                                crate::types::MessageRole::Assistant => {
+                                                    "assistant"
+                                                }
+                                            };
+                                            let text: String = m
+                                                .parts
+                                                .iter()
+                                                .filter_map(|p| match p {
+                                                    crate::types::Part::Text(t) => {
+                                                        Some(t.text.as_str())
+                                                    }
+                                                    _ => None,
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join("\n");
+                                            if text.is_empty() {
+                                                None
+                                            } else {
+                                                Some((role.to_owned(), text))
+                                            }
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
                             std::thread::spawn(move || {
                                 use std::panic::AssertUnwindSafe;
                                 use tokio::runtime::Builder;
@@ -1020,7 +1054,8 @@ impl App {
                                             connector
                                         };
 
-                                        let mut harness = Harness::new(connector, ".");
+                                        let mut harness = Harness::new(connector, ".")
+                                            .with_history(&history);
                                         harness.format_header_context();
                                         harness
                                             .run_agent_loop(

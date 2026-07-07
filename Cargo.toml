@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "cosh-server",
+  "crates/cosh-recall",
   "crates/cosh-sdk",
   "crates/cosh-tools",
   "crates/cosh-tui",
@@ -15,6 +16,9 @@ repository = "https://github.com/DiegoZaluski/cosh"
 version = "0.0.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies.cosh-recall]
+path = "crates/cosh-recall"
 
 [dependencies.cosh-sdk]
 path = "crates/cosh-sdk"
@@ -32,13 +36,14 @@ path = "src/tui/main.rs"
 # ---
 [dependencies]
 serde_json = "1.0"
-toml = "1.1"
+# toml = "1.1"
 chrono = "0.4"
 log = { version = "0.4", features = ["std"] }
 dotenvy = "0.15.7"
 anyhow = "1"
 schemars = "1"
 crossterm = { version = "0.28", features = ["bracketed-paste"] }
+# directories = "6.0.0"
 
 # ---
 [dependencies.ratatui]
