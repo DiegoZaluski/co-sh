@@ -1101,6 +1101,10 @@ impl App {
                             }
                         }
                         Some(crate::keymap::Action::Cancel) => {
+                            if self.state.status == crate::types::SessionStatus::Working {
+                                self.stop_signal.store(true, Ordering::Relaxed);
+                                return Ok(false);
+                            }
                             if self.question_dialog.visible {
                                 self.question_dialog.visible = false;
                                 let _ = self

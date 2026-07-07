@@ -88,6 +88,8 @@ pub struct Harness {
     harness_tools: Vec<HarnessTool>,
     cosh_tools: Option<CoshTools>,
     mode: Mode,
+    /// Shared stop signal from the TUI, checked during streaming.
+    stop_signal: Option<Arc<AtomicBool>>,
     /// To stop the agent loop.
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
@@ -115,6 +117,7 @@ impl Harness {
             harness_tools: default_harness_tools(),
             cosh_tools: Some(CoshTools::new(cwd)),
             mode: Mode::Build,
+            stop_signal: None,
             stop: false,
             tool_issuer: VecDeque::new(),
             server_response: Vec::new(),
@@ -460,13 +463,34 @@ impl Harness {
 
         let mut extractor = self.build_extractor();
         let mut token_count = 0u64;
+        use tokio::time::Duration;
 
-        while let Some(content) = stream.next().await {
-            let chunk = match content {
-                Ok(c) => c,
-                Err(e) => {
-                    log::debug!("stream_chat STREAM_ERR={e}");
-                    return Err(e.to_string());
+        loop {
+            {
+                let stop = self
+                    .stop_signal
+                    .as_ref()
+                    .map_or(false, |s| s.load(Ordering::Relaxed));
+                if stop {
+                    log::debug!("stream_chat STOPPED by signal");
+                    break;
+                }
+            }
+
+            let chunk = {
+                let poll = tokio::select! {
+                    chunk = stream.next() => chunk.map(|c| c.map_err(|e| {
+                        log::debug!("stream_chat STREAM_ERR={e}");
+                        e.to_string()
+                    })),
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                        continue;
+                    }
+                };
+                match poll {
+                    Some(Ok(c)) => c,
+                    Some(Err(e)) => return Err(e),
+                    None => break,
                 }
             };
             let token = chunk.token();
@@ -522,6 +546,9 @@ impl Harness {
 
         let mut current_input = input.to_string();
         let mut iteration = 0u64;
+
+        // Store the stop signal so stream_chat can check it mid-stream.
+        self.stop_signal = Some(stop_signal.clone());
 
         log::debug!(
             "run_agent_loop ENTER input={:?}",
@@ -781,6 +808,8 @@ impl Harness {
             system_prompts: Vec::new(),
             harness_tools: default_harness_tools(),
             cosh_tools: None,
+            mode: Mode::Build,
+            stop_signal: None,
             stop: false,
             server_response: Vec::new(),
             tool_issuer: VecDeque::new(),
@@ -788,7 +817,6 @@ impl Harness {
             mock_chat_response: None,
             mock_stream_response: None,
             test_tools: Vec::new(),
-            mode: Mode::Build,
         }
     }
 
