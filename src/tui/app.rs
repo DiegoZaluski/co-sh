@@ -396,6 +396,14 @@ impl App {
             )
     }
 
+    fn is_shortcuts_dialog_visible(&self) -> bool {
+        self.dialog.visible()
+            && matches!(
+                self.dialog.current().map(|d| &d.dialog_type),
+                Some(DialogType::Shortcuts { .. })
+            )
+    }
+
     fn is_apikey_input_visible(&self) -> bool {
         self.dialog.visible()
             && matches!(
@@ -999,6 +1007,29 @@ impl App {
                         }
                     }
 
+                    // Check Shortcuts dialog for scrolling
+                    if self.is_shortcuts_dialog_visible() {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if let Some(d) = self.dialog.current_mut()
+                                    && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
+                                {
+                                    *scroll = scroll.saturating_sub(1);
+                                }
+                                return Ok(false);
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if let Some(d) = self.dialog.current_mut()
+                                    && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
+                                {
+                                    *scroll = scroll.saturating_add(1);
+                                }
+                                return Ok(false);
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // Shift/Ctrl/Alt+Enter inserts a newline instead of sending.
                     if key.code == KeyCode::Enter && key.modifiers != KeyModifiers::NONE {
                         self.prompt_view.note_activity();
@@ -1019,6 +1050,12 @@ impl App {
                             KeyCode::Down => {
                                 self.home_view.select_next();
                             }
+                            KeyCode::Char('?') => {
+                                self.dialog.show(DialogType::Shortcuts {
+                                    scroll: 0,
+                                });
+                                return Ok(false);
+                            }
                             KeyCode::Enter => {
                                 match self.home_view.selected_action() {
                                     HomeAction::NewSession => {
@@ -1035,6 +1072,11 @@ impl App {
                                     }
                                     HomeAction::OpenInternalTools => {
                                         self.show_internal_tools = true;
+                                    }
+                                    HomeAction::OpenShortcuts => {
+                                        self.dialog.show(DialogType::Shortcuts {
+                                            scroll: 0,
+                                        });
                                     }
                                     HomeAction::OpenAddProvider => {
                                         self.show_add_provider = true;
@@ -2329,6 +2371,11 @@ impl App {
                     }
                     crate::routes::home::HomeAction::OpenInternalTools => {
                         self.show_internal_tools = true;
+                    }
+                    crate::routes::home::HomeAction::OpenShortcuts => {
+                        self.dialog.show(DialogType::Shortcuts {
+                            scroll: 0,
+                        });
                     }
                     crate::routes::home::HomeAction::OpenAddProvider => {
                         self.show_add_provider = true;
