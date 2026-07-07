@@ -24,6 +24,7 @@ use crate::component::prompt::PromptView;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
 use crate::routes::home::{HomeAction, HomeView};
+use crate::routes::tools::InternalToolsView;
 use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
@@ -48,6 +49,7 @@ const FOOTER_HEIGHT: u16 = 1;
 enum AppMode {
     Home,
     Session,
+    InternalTools,
 }
 
 pub struct App {
@@ -61,6 +63,8 @@ pub struct App {
     pub permission_dialog: PermissionDialog,
     pub question_dialog: QuestionDialog,
     pub home_view: HomeView,
+    pub internal_tools_view: InternalToolsView,
+    pub show_internal_tools: bool,
     pub keymap: KeyMap,
     pub config: TuiConfig,
     pub toast_state: ToastState,
@@ -109,6 +113,8 @@ impl App {
             theme,
             session_view: SessionView::new(),
             home_view: HomeView::new(),
+            internal_tools_view: InternalToolsView::new(),
+            show_internal_tools: false,
             prompt_view: PromptView::new(),
             sidebar: SidebarView::new(),
             dialog: DialogState::new(),
@@ -542,7 +548,9 @@ impl App {
     }
 
     fn mode(&self) -> AppMode {
-        if self.state.current_session().is_some() {
+        if self.show_internal_tools {
+            AppMode::InternalTools
+        } else if self.state.current_session().is_some() {
             AppMode::Session
         } else {
             AppMode::Home
@@ -674,6 +682,16 @@ impl App {
                     self.prompt_view.blur();
                     self.home_view.render(buf, session_area, &self.theme);
                 }
+                AppMode::InternalTools => {
+                    self.prompt_view.blur();
+                    let tools_area = Rect::new(
+                        session_area.x,
+                        session_area.y,
+                        session_area.width,
+                        session_area.height.saturating_sub(1),
+                    );
+                    self.internal_tools_view.render(buf, tools_area, &self.theme);
+                }
                 AppMode::Session => {
                     self.prompt_view.focus();
                     self.prompt_view.terminal_focused = self.terminal_focused;
@@ -720,11 +738,13 @@ impl App {
                 }
             }
 
-            FooterView::render(
+            let show_home = !matches!(self.mode(), AppMode::InternalTools);
+            FooterView::render_with_mode(
                 buf,
                 Rect::new(main_area.x, footer_y, main_area.width, 1),
                 &self.state,
                 &self.theme,
+                show_home,
             );
             let now = std::time::SystemTime::now();
             self.toast_state.render(buf, area, &self.theme);
@@ -838,11 +858,36 @@ impl App {
                                     HomeAction::ToggleSidebar => {
                                         self.sidebar.open = !self.sidebar.open;
                                     }
+                                    HomeAction::OpenInternalTools => {
+                                        self.show_internal_tools = true;
+                                    }
                                 }
                                 return Ok(false);
                             }
                             _ => {}
                         }
+                    }
+
+                    // InternalTools mode: navigation and toggle keys
+                    if matches!(self.mode(), AppMode::InternalTools) && !self.dialog.visible() {
+                        match key.code {
+                            KeyCode::Up => {
+                                let list_area = 20; // max visible items estimate based on terminal
+                                self.internal_tools_view.select_prev(list_area);
+                            }
+                            KeyCode::Down => {
+                                let list_area = 20;
+                                self.internal_tools_view.select_next(list_area);
+                            }
+                            KeyCode::Enter | KeyCode::Char(' ') => {
+                                self.internal_tools_view.toggle_current();
+                            }
+                            KeyCode::Esc => {
+                                self.show_internal_tools = false;
+                            }
+                            _ => {}
+                        }
+                        return Ok(false);
                     }
 
                     // If slash menu is visible, arrow keys should move selection there
@@ -990,6 +1035,8 @@ impl App {
                             let (answer_tx, answer_rx) = mpsc::unbounded_channel();
                             self.answer_tx = answer_tx;
 
+                            let disabled_tools = self.internal_tools_view.disabled.clone();
+
                             let event_tx_panic = event_tx.clone();
                             // Build conversation history from existing session messages
                             let history: Vec<(String, String)> = self
@@ -1058,7 +1105,7 @@ impl App {
                                         };
 
                                         let mut harness =
-                                            Harness::new(connector, &cwd)
+                                            Harness::new(connector, &cwd, disabled_tools)
                                                 .with_mode(mode)
                                                 .with_history(&history);
                                         harness.format_header_context();
@@ -2034,7 +2081,33 @@ impl App {
                     crate::routes::home::HomeAction::ToggleSidebar => {
                         self.sidebar.open = !self.sidebar.open;
                     }
+                    crate::routes::home::HomeAction::OpenInternalTools => {
+                        self.show_internal_tools = true;
+                    }
                 }
+                return Ok(true);
+            }
+        }
+
+        // 8b. Internal Tools view — mouse click on a tool row toggles it
+        if matches!(self.mode(), AppMode::InternalTools) && !self.dialog.visible() {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            let tools_area = Rect::new(
+                main_area.x,
+                area.y + 1,
+                main_area.width,
+                main_area.height.saturating_sub(2),
+            );
+            if let Some(clicked_idx) = self.internal_tools_view.handle_mouse(&mouse, tools_area) {
+                self.internal_tools_view.selected_index = clicked_idx;
+                self.internal_tools_view.toggle_current();
                 return Ok(true);
             }
         }

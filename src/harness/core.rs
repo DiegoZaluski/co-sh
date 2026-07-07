@@ -6,7 +6,7 @@ use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, Tool};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,6 +97,10 @@ pub struct Harness {
     /// Context window for iterative agent sessions.
     context_window: ContextWindow,
 
+    /// Tools explicitly disabled by the user via the Internal Tools screen.
+    /// These are excluded from both the prompt header and the extractor.
+    disabled_tools: HashSet<String>,
+
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
     #[cfg(test)]
@@ -107,7 +111,7 @@ pub struct Harness {
 
 impl Harness {
     #[must_use]
-    pub fn new(connector: Connector, cwd: &str) -> Self {
+    pub fn new(connector: Connector, cwd: &str, disabled_tools: HashSet<String>) -> Self {
         Self {
             connector,
             sessions: Vec::new(),
@@ -122,6 +126,7 @@ impl Harness {
             tool_issuer: VecDeque::new(),
             server_response: Vec::new(),
             context_window: ContextWindow::new(MAX_TOKENS),
+            disabled_tools,
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
@@ -254,6 +259,9 @@ impl Harness {
 
         let _ = write!(out, "## Harness Tools\n\n");
         for tool in &self.harness_tools {
+            if self.disabled_tools.contains(&tool.name) {
+                continue;
+            }
             let schema = serde_json::to_string_pretty(&tool.input_schema).unwrap_or_default();
             let _ = write!(
                 out,
@@ -265,8 +273,8 @@ impl Harness {
         if let Some(ref cosh) = self.cosh_tools {
             let _ = write!(out, "## System Tools\n\n");
             match self.mode {
-                Mode::Build => cosh.write_tool_descriptions(&mut out),
-                Mode::Ask => cosh.write_tool_descriptions_filtered(&mut out),
+                Mode::Build => cosh.write_tool_descriptions_enabled(&mut out, &self.disabled_tools),
+                Mode::Ask => cosh.write_tool_descriptions_filtered(&mut out, &self.disabled_tools),
             }
         }
 
@@ -301,8 +309,8 @@ impl Harness {
         }
         if let Some(ref cosh) = self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build => cosh.schemas(),
-                Mode::Ask => cosh.schemas_filtered(),
+                Mode::Build => cosh.schemas_enabled(&self.disabled_tools),
+                Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             log::debug!(
                 "build_extractor: cosh.schemas() returned {} tools",
@@ -313,6 +321,9 @@ impl Harness {
             }
         }
         for tool in &self.harness_tools {
+            if self.disabled_tools.contains(&tool.name) {
+                continue;
+            }
             extractor.add_tool(ToolSchema {
                 name: tool.name.clone(),
                 input_schema: tool.input_schema.clone(),
@@ -814,6 +825,7 @@ impl Harness {
             server_response: Vec::new(),
             tool_issuer: VecDeque::new(),
             context_window: ContextWindow::new(MAX_TOKENS),
+            disabled_tools: HashSet::new(),
             mock_chat_response: None,
             mock_stream_response: None,
             test_tools: Vec::new(),

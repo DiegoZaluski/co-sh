@@ -137,12 +137,13 @@ const LOGO: &[&str] = &[
 
 const TAGLINE: &str = "Terminal AI Agent";
 
-pub const MENU_ITEMS: &[&str] = &["Start a New Session", "Browse Session History"];
+pub const MENU_ITEMS: &[&str] = &["Start a New Session", "Browse Session History", "Internal Tools"];
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum HomeAction {
     NewSession,
     ToggleSidebar,
+    OpenInternalTools,
 }
 
 pub struct HomeView {
@@ -198,7 +199,9 @@ impl HomeView {
     pub fn selected_action(&self) -> HomeAction {
         match self.selected_index {
             0 => HomeAction::NewSession,
-            _ => HomeAction::ToggleSidebar,
+            1 => HomeAction::ToggleSidebar,
+            2 => HomeAction::OpenInternalTools,
+            _ => HomeAction::NewSession,
         }
     }
 

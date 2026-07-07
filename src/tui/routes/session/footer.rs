@@ -30,6 +30,16 @@ pub struct FooterView;
 
 impl FooterView {
     pub fn render(buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
+        Self::render_with_mode(buf, area, state, theme, true)
+    }
+
+    pub fn render_with_mode(
+        buf: &mut Buffer,
+        area: Rect,
+        state: &AppState,
+        theme: &Theme,
+        show_home_label: bool,
+    ) {
         let bg_color = rgba_color(theme.background);
         for x in area.x..area.right() {
             if let Some(cell) = buf.cell_mut((x, area.y)) {
@@ -104,7 +114,7 @@ impl FooterView {
                 rx = rx.saturating_sub(s.len() as u16);
                 draw_text_line(buf, &s, rx, area.y, s.len() as u16, muted);
             }
-        } else {
+        } else if show_home_label {
             let text = " \u{2302} Home";
             draw_text_line(
                 buf,

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::sync::Mutex;
 
@@ -63,56 +64,90 @@ impl CoshTools {
         }
     }
 
+    /// All tool descriptions, skipping disabled ones.
+    pub fn write_tool_descriptions_enabled(
+        &self,
+        out: &mut String,
+        disabled_tools: &HashSet<String>,
+    ) {
+        let all = self.tool_descriptions();
+        for desc in all {
+            let name = desc["name"].as_str().unwrap_or_default();
+            if disabled_tools.contains(name) {
+                continue;
+            }
+            let description = desc["description"].as_str().unwrap_or_default();
+            let schema = serde_json::to_string_pretty(&desc["inputSchema"]).unwrap_or_default();
+            let _ = write!(out, "- **{name}**: {description}\n  Schema: {schema}\n");
+        }
+    }
+
     /// Tool descriptions restricted to read-only and search tools (Ask mode).
     ///
     /// # Panics
     ///
     /// Panics if the internal `plan` mutex is poisoned.
-    pub fn write_tool_descriptions_filtered(&self, out: &mut String) {
-        write_single_tool(out, &self.fs.description_read);
-        write_single_tool(out, &self.find.description_glob);
-        write_single_tool(out, &self.find.description_grep);
-        write_single_tool(out, &self.web.description_fetch);
-        write_single_tool(out, &self.web.description_search);
+    pub fn write_tool_descriptions_filtered(
+        &self,
+        out: &mut String,
+        disabled_tools: &HashSet<String>,
+    ) {
+        write_tool_if_enabled(out, disabled_tools, &self.fs.description_read);
+        write_tool_if_enabled(out, disabled_tools, &self.find.description_glob);
+        write_tool_if_enabled(out, disabled_tools, &self.find.description_grep);
+        write_tool_if_enabled(out, disabled_tools, &self.web.description_fetch);
+        write_tool_if_enabled(out, disabled_tools, &self.web.description_search);
         {
             let plan = self.plan.lock().unwrap();
-            write_single_tool(out, &plan.description_todo_read);
-            write_single_tool(out, &plan.description_load_from_md);
+            write_tool_if_enabled(out, disabled_tools, &plan.description_todo_read);
+            write_tool_if_enabled(out, disabled_tools, &plan.description_load_from_md);
         }
-        write_single_tool(out, &self.question.description_ask);
-        write_single_tool(out, &self.skills.description_list);
-        write_single_tool(out, &self.skills.description_read);
-        write_single_tool(out, &self.skills.description_read_asset);
-        write_single_tool(out, &self.skills.description_match_skills);
+        write_tool_if_enabled(out, disabled_tools, &self.question.description_ask);
+        write_tool_if_enabled(out, disabled_tools, &self.skills.description_list);
+        write_tool_if_enabled(out, disabled_tools, &self.skills.description_read);
+        write_tool_if_enabled(out, disabled_tools, &self.skills.description_read_asset);
+        write_tool_if_enabled(out, disabled_tools, &self.skills.description_match_skills);
     }
 
-    /// Schemas restricted to read-only and search tools (Ask mode).
+    /// All schemas, skipping disabled ones.
     ///
     /// # Panics
     ///
     /// Panics if the internal `plan` mutex is poisoned.
-    pub fn schemas_filtered(&self) -> Vec<ToolSchema> {
-        let mut v = vec![
+    pub fn schemas_enabled(&self, disabled_tools: &HashSet<String>) -> Vec<ToolSchema> {
+        let all = self.tool_descriptions();
+        all.iter()
+            .filter(|desc| {
+                let name = desc["name"].as_str().unwrap_or_default();
+                !disabled_tools.contains(name)
+            })
+            .map(extract_schema)
+            .collect()
+    }
+
+    /// Schemas restricted to read-only and search tools (Ask mode), skipping disabled ones.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `plan` mutex is poisoned.
+    pub fn schemas_filtered(&self, disabled_tools: &HashSet<String>) -> Vec<ToolSchema> {
+        let all = vec![
             extract_schema(&self.fs.description_read),
             extract_schema(&self.find.description_glob),
             extract_schema(&self.find.description_grep),
             extract_schema(&self.web.description_fetch),
             extract_schema(&self.web.description_search),
+            extract_schema(&self.plan.lock().unwrap().description_todo_read),
+            extract_schema(&self.plan.lock().unwrap().description_load_from_md),
+            extract_schema(&self.question.description_ask),
+            extract_schema(&self.skills.description_list),
+            extract_schema(&self.skills.description_read),
+            extract_schema(&self.skills.description_read_asset),
+            extract_schema(&self.skills.description_match_skills),
         ];
-        // Each plan.lock() is its own statement to avoid deadlock
-        // on std::sync::Mutex (non-reentrant).
-        v.push(extract_schema(
-            &self.plan.lock().unwrap().description_todo_read,
-        ));
-        v.push(extract_schema(
-            &self.plan.lock().unwrap().description_load_from_md,
-        ));
-        v.push(extract_schema(&self.question.description_ask));
-        v.push(extract_schema(&self.skills.description_list));
-        v.push(extract_schema(&self.skills.description_read));
-        v.push(extract_schema(&self.skills.description_read_asset));
-        v.push(extract_schema(&self.skills.description_match_skills));
-        v
+        all.into_iter()
+            .filter(|schema| !disabled_tools.contains(&schema.name))
+            .collect()
     }
 }
 
@@ -129,6 +164,14 @@ fn write_single_tool(out: &mut String, desc: &serde_json::Value) {
     let description = desc["description"].as_str().unwrap_or_default();
     let schema = serde_json::to_string_pretty(&desc["inputSchema"]).unwrap_or_default();
     let _ = write!(out, "- **{name}**: {description}\n  Schema: {schema}\n");
+}
+
+/// Write a single tool description only if its name is not in the disabled set.
+fn write_tool_if_enabled(out: &mut String, disabled: &HashSet<String>, desc: &serde_json::Value) {
+    let name = desc["name"].as_str().unwrap_or_default();
+    if !disabled.contains(name) {
+        write_single_tool(out, desc);
+    }
 }
 
 impl Tools for CoshTools {
