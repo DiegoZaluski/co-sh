@@ -996,9 +996,7 @@ impl App {
                                         .filter_map(|m| {
                                             let role = match m.role {
                                                 crate::types::MessageRole::User => "user",
-                                                crate::types::MessageRole::Assistant => {
-                                                    "assistant"
-                                                }
+                                                crate::types::MessageRole::Assistant => "assistant",
                                             };
                                             let text: String = m
                                                 .parts
@@ -1054,8 +1052,8 @@ impl App {
                                             connector
                                         };
 
-                                        let mut harness = Harness::new(connector, ".")
-                                            .with_history(&history);
+                                        let mut harness =
+                                            Harness::new(connector, ".").with_history(&history);
                                         harness.format_header_context();
                                         harness
                                             .run_agent_loop(

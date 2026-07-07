@@ -5,7 +5,11 @@
 pub(crate) fn extract_tokens(raw: &str) -> Option<u32> {
     serde_json::from_str::<serde_json::Value>(raw)
         .ok()
-        .and_then(|v| v["usage"]["output_tokens"].as_u64().and_then(|n| n.try_into().ok()))
+        .and_then(|v| {
+            v["usage"]["output_tokens"]
+                .as_u64()
+                .and_then(|n| n.try_into().ok())
+        })
 }
 
 #[cfg(test)]

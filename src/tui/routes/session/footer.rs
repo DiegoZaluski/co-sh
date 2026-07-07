@@ -47,7 +47,7 @@ impl FooterView {
             let dir_display = if dir.is_empty() { "~" } else { dir };
 
             let left = format!(
-                " {}  {} msgs  q:quit  \u{2191}\u{2195}:scroll",
+                " {}  {} msgs \u{2191}\u{2193}:scroll",
                 session.title,
                 session.messages.len()
             );

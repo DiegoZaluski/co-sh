@@ -46,7 +46,17 @@ fn push_exactly_at_budget_triggers_eviction_inline() {
 
     // The surviving entries are the 6 newest
     let remaining: Vec<_> = w.iter().map(|e| e.content.as_str()).collect();
-    assert_eq!(remaining, vec!["entry-5", "entry-6", "entry-7", "entry-8", "entry-9", "new-entry"]);
+    assert_eq!(
+        remaining,
+        vec![
+            "entry-5",
+            "entry-6",
+            "entry-7",
+            "entry-8",
+            "entry-9",
+            "new-entry"
+        ]
+    );
 }
 
 #[test]
@@ -95,7 +105,10 @@ fn push_many_entries_gradually_shrinks() {
     // After 50 entries of 10 tokens each with a 100-token budget,
     // the window should have stabilised
     assert!(w.total_tokens() <= w.max_tokens());
-    assert!(!w.is_empty(), "window should never become empty after many pushes");
+    assert!(
+        !w.is_empty(),
+        "window should never become empty after many pushes"
+    );
 }
 
 #[test]
@@ -164,7 +177,11 @@ fn eviction_never_empties_with_small_entries() {
     assert!(!w.is_empty(), "window should never become empty");
     assert!(w.total_tokens() <= w.max_tokens());
     // With max=100 and entries of 10 tokens, the stable size is ~5-10.
-    assert!(w.len() > 0 && w.len() <= 10, "expected 1-10 entries, got {}", w.len());
+    assert!(
+        w.len() > 0 && w.len() <= 10,
+        "expected 1-10 entries, got {}",
+        w.len()
+    );
 
     // Verify newest entries survive
     let entries: Vec<_> = w.iter().map(|e| e.content.as_str()).collect();
