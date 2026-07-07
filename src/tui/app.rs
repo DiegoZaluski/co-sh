@@ -1050,12 +1050,6 @@ impl App {
                             KeyCode::Down => {
                                 self.home_view.select_next();
                             }
-                            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                self.dialog.show(DialogType::Shortcuts {
-                                    scroll: 0,
-                                });
-                                return Ok(false);
-                            }
                             KeyCode::Enter => {
                                 match self.home_view.selected_action() {
                                     HomeAction::NewSession => {
@@ -1089,37 +1083,46 @@ impl App {
                     }
 
                     // InternalTools mode: navigation and toggle keys
+                    // Each matched arm returns early so unmatched keys fall through
+                    // to the keymap action dispatch (e.g. Ctrl+B, Ctrl+K).
                     if matches!(self.mode(), AppMode::InternalTools) && !self.dialog.visible() {
                         match key.code {
                             KeyCode::Up => {
                                 let list_area = 20; // max visible items estimate based on terminal
                                 self.internal_tools_view.select_prev(list_area);
+                                return Ok(false);
                             }
                             KeyCode::Down => {
                                 let list_area = 20;
                                 self.internal_tools_view.select_next(list_area);
+                                return Ok(false);
                             }
                             KeyCode::Enter | KeyCode::Char(' ') => {
                                 self.internal_tools_view.toggle_current();
+                                return Ok(false);
                             }
                             KeyCode::Esc => {
                                 self.show_internal_tools = false;
+                                return Ok(false);
                             }
                             _ => {}
                         }
-                        return Ok(false);
                     }
 
                     // AddProvider mode: navigation and select
+                    // Each matched arm returns early so unmatched keys fall through
+                    // to the keymap action dispatch (e.g. Ctrl+B, Ctrl+K).
                     if matches!(self.mode(), AppMode::AddProvider) && !self.dialog.visible() {
                         match key.code {
                             KeyCode::Up => {
                                 let list_area = 20;
                                 self.add_provider_view.select_prev(list_area);
+                                return Ok(false);
                             }
                             KeyCode::Down => {
                                 let list_area = 20;
                                 self.add_provider_view.select_next(list_area);
+                                return Ok(false);
                             }
                             KeyCode::Enter => {
                                 if let Some((provider, env_var)) =
@@ -1132,13 +1135,14 @@ impl App {
                                         cursor_pos: 0,
                                     });
                                 }
+                                return Ok(false);
                             }
                             KeyCode::Esc => {
                                 self.show_add_provider = false;
+                                return Ok(false);
                             }
                             _ => {}
                         }
-                        return Ok(false);
                     }
 
                     // If slash menu is visible, arrow keys should move selection there
@@ -1211,16 +1215,20 @@ impl App {
                         Some(crate::keymap::Action::ToggleSidebar) => {
                             self.sidebar.open = !self.sidebar.open;
                         }
+                        Some(crate::keymap::Action::ToggleHelp) => {
+                            self.dialog.show(DialogType::Shortcuts {
+                                scroll: 0,
+                            });
+                        }
                         Some(
-                            crate::keymap::Action::ToggleHelp
-                            | crate::keymap::Action::NextSession
+                            crate::keymap::Action::NextSession
                             | crate::keymap::Action::PrevSession
                             | crate::keymap::Action::FocusInput
                             | crate::keymap::Action::Quit
                             | crate::keymap::Action::NextAgent
                             | crate::keymap::Action::PrevAgent,
                         ) => {
-                            // TBD: help overlay
+                            // TBD
                         }
                         Some(
                             crate::keymap::Action::SendMessage | crate::keymap::Action::Confirm,

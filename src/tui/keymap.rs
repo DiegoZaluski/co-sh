@@ -77,9 +77,13 @@ impl KeyMap {
                         modifiers: KeyModifiers::CONTROL,
                     },
                 ),
-                // '?' for ToggleHelp is intentionally omitted — it would block
-                // typing the '?' character in the prompt (most terminals send
-                // '?' with NONE modifier since shift is encoded in the char).
+                (
+                    Action::ToggleHelp,
+                    KeyBinding {
+                        key: Char('k'),
+                        modifiers: KeyModifiers::CONTROL,
+                    },
+                ),
                 (
                     Action::ToggleConceal,
                     KeyBinding {
