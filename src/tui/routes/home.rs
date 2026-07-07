@@ -141,6 +141,7 @@ pub const MENU_ITEMS: &[&str] = &[
     "Start a New Session",
     "Browse Session History",
     "Internal Tools",
+    "ADD Provider",
 ];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -148,6 +149,7 @@ pub enum HomeAction {
     NewSession,
     ToggleSidebar,
     OpenInternalTools,
+    OpenAddProvider,
 }
 
 pub struct HomeView {
@@ -204,7 +206,8 @@ impl HomeView {
         match self.selected_index {
             0 => HomeAction::NewSession,
             1 => HomeAction::ToggleSidebar,
-            _ => HomeAction::OpenInternalTools,
+            2 => HomeAction::OpenInternalTools,
+            _ => HomeAction::OpenAddProvider,
         }
     }
 
@@ -231,7 +234,8 @@ impl HomeView {
                 return Some(match i {
                     0 => HomeAction::NewSession,
                     1 => HomeAction::ToggleSidebar,
-                    _ => HomeAction::OpenInternalTools,
+                    2 => HomeAction::OpenInternalTools,
+                    _ => HomeAction::OpenAddProvider,
                 });
             }
         }

@@ -57,6 +57,11 @@ pub enum DialogType {
         current: String,
         filter: String,
     },
+    ApiKeyInput {
+        provider: String,
+        env_var: String,
+        input: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +258,22 @@ impl DialogState {
                     }
                 }
 
+                DialogAction::Consumed
+            }
+            DialogType::ApiKeyInput { .. } => {
+                // Click outside the dialog box → dismiss
+                let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
+                let dialog_h = 7;
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+
+                if x < dialog_x
+                    || x >= dialog_x + dialog_w
+                    || y_click < dialog_y
+                    || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
                 DialogAction::Consumed
             }
             DialogType::ModelList {
@@ -806,6 +827,136 @@ impl DialogState {
                 }
                 // Lines after list: paddingBottom=1 (already filled with background)
                 // NO footer, NO separator - matching original DialogSelect
+            }
+            DialogType::ApiKeyInput {
+                provider,
+                env_var,
+                input,
+            } => {
+                // API Key input dialog - small centered box
+                let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
+                let dialog_h = 7;
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+                let _dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+                // Fill background with theme background_element color
+                let bg_color = rgba_color(theme.background_element);
+                for y in dialog_y..dialog_y + dialog_h {
+                    for x in dialog_x..dialog_x + dialog_w {
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(bg_color));
+                        }
+                    }
+                }
+
+                // Draw border (rounded corners via unicode)
+                let border_color = rgba_color(theme.border_active);
+                let max_x = dialog_x + dialog_w - 1;
+                let max_y = dialog_y + dialog_h - 1;
+
+                // Top & bottom horizontal lines
+                for x in (dialog_x + 1)..max_x {
+                    if let Some(cell) = buf.cell_mut((x, dialog_y)) {
+                        cell.set_char('\u{2500}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                    if let Some(cell) = buf.cell_mut((x, max_y)) {
+                        cell.set_char('\u{2500}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                }
+
+                // Left & right vertical lines
+                for y in (dialog_y + 1)..max_y {
+                    if let Some(cell) = buf.cell_mut((dialog_x, y)) {
+                        cell.set_char('\u{2502}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                    if let Some(cell) = buf.cell_mut((max_x, y)) {
+                        cell.set_char('\u{2502}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                }
+
+                // Corners (rounded)
+                if let Some(cell) = buf.cell_mut((dialog_x, dialog_y)) {
+                    cell.set_char('\u{256D}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((max_x, dialog_y)) {
+                    cell.set_char('\u{256E}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((dialog_x, max_y)) {
+                    cell.set_char('\u{2570}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((max_x, max_y)) {
+                    cell.set_char('\u{256F}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+
+                // Content area
+                let content_x = dialog_x + 2;
+                let content_w = dialog_w.saturating_sub(4);
+
+                // Title: "API Key for {provider}"
+                let title = format!("API Key for {provider}");
+                draw_text_line(
+                    buf,
+                    &title,
+                    content_x,
+                    dialog_y + 1,
+                    content_w,
+                    Style::default()
+                        .fg(rgba_color(theme.text))
+                        .add_modifier(Modifier::BOLD),
+                );
+
+                // Env var name
+                let env_label = format!("({env_var})");
+                draw_text_line(
+                    buf,
+                    &env_label,
+                    content_x,
+                    dialog_y + 2,
+                    content_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                // Input field with masked characters
+                let input_x = content_x;
+                let input_y = dialog_y + 4;
+                let input_style = Style::default()
+                    .fg(rgba_color(theme.text))
+                    .bg(rgba_color(theme.background_element));
+
+                // Clear input field background
+                for cx in input_x..input_x + content_w {
+                    if let Some(cell) = buf.cell_mut((cx, input_y)) {
+                        cell.set_char(' ');
+                        cell.set_style(Style::default().bg(rgba_color(theme.background_element)));
+                    }
+                }
+
+                // Draw masked input (*** characters)
+                let masked: String = input.chars().map(|_| '*').collect();
+                draw_text_line(buf, &masked, input_x, input_y, content_w, input_style);
+
+                // Cursor at end of input
+                let cursor_x = input_x + input.len() as u16;
+                if cursor_x < input_x + content_w
+                    && let Some(cell) = buf.cell_mut((cursor_x, input_y))
+                {
+                    cell.set_char('\u{2588}');
+                    cell.set_style(
+                        Style::default()
+                            .fg(rgba_color(theme.primary))
+                            .bg(rgba_color(theme.background_element)),
+                    );
+                }
             }
             DialogType::ModelList {
                 models,
