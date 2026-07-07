@@ -23,13 +23,13 @@ use crate::component::agent_spinner::AgentSpinner;
 use crate::component::prompt::PromptView;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
+use crate::routes::add_provider::AddProviderView;
 use crate::routes::home::{HomeAction, HomeView};
 use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::sidebar::SidebarView;
-use crate::routes::add_provider::AddProviderView;
 use crate::routes::tools::InternalToolsView;
 use crate::state::AppState;
 use crate::theme::{Theme, ThemeRegistry};
@@ -444,7 +444,9 @@ impl App {
                 {
                     save_provider_api_key(provider, env_var, input);
                     // SAFETY: Setting env vars is safe in a single-threaded CLI context
-                    unsafe { std::env::set_var(env_var, input); }
+                    unsafe {
+                        std::env::set_var(env_var, input);
+                    }
                 }
                 self.dialog.pop();
                 true
@@ -455,31 +457,27 @@ impl App {
             }
             KeyCode::Left => {
                 if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::ApiKeyInput {
-                        cursor_pos, ..
-                    } = &mut d.dialog_type
-                    && *cursor_pos > 0 {
-                        *cursor_pos -= 1;
-                    }
+                    && let DialogType::ApiKeyInput { cursor_pos, .. } = &mut d.dialog_type
+                    && *cursor_pos > 0
+                {
+                    *cursor_pos -= 1;
+                }
                 true
             }
             KeyCode::Right => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput {
-                        input,
-                        cursor_pos,
-                        ..
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
-                    && *cursor_pos < input.len() {
-                        *cursor_pos += 1;
-                    }
+                    && *cursor_pos < input.len()
+                {
+                    *cursor_pos += 1;
+                }
                 true
             }
             KeyCode::Home => {
                 if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::ApiKeyInput {
-                        cursor_pos, ..
-                    } = &mut d.dialog_type
+                    && let DialogType::ApiKeyInput { cursor_pos, .. } = &mut d.dialog_type
                 {
                     *cursor_pos = 0;
                 }
@@ -488,9 +486,7 @@ impl App {
             KeyCode::End => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput {
-                        input,
-                        cursor_pos,
-                        ..
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
                 {
                     *cursor_pos = input.len();
@@ -500,38 +496,32 @@ impl App {
             KeyCode::Delete => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput {
-                        input,
-                        cursor_pos,
-                        ..
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
-                    && *cursor_pos < input.len() {
-                        let next = input
-                            .floor_char_boundary(*cursor_pos + 1)
-                            .min(input.len());
-                        input.drain(*cursor_pos..next);
-                    }
+                    && *cursor_pos < input.len()
+                {
+                    let next = input.floor_char_boundary(*cursor_pos + 1).min(input.len());
+                    input.drain(*cursor_pos..next);
+                }
                 true
             }
             KeyCode::Backspace => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput {
-                        input,
-                        cursor_pos,
-                        ..
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
-                    && *cursor_pos > 0 {
-                        let char_start = input.floor_char_boundary(*cursor_pos - 1);
-                        input.remove(char_start);
-                        *cursor_pos = char_start;
-                    }
+                    && *cursor_pos > 0
+                {
+                    let char_start = input.floor_char_boundary(*cursor_pos - 1);
+                    input.remove(char_start);
+                    *cursor_pos = char_start;
+                }
                 true
             }
             KeyCode::Char(ch) => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput {
-                        input,
-                        cursor_pos,
-                        ..
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
                 {
                     input.insert(*cursor_pos, ch);
@@ -857,8 +847,7 @@ impl App {
                         session_area.width,
                         session_area.height.saturating_sub(1),
                     );
-                    self.add_provider_view
-                        .render(buf, tools_area, &self.theme);
+                    self.add_provider_view.render(buf, tools_area, &self.theme);
                 }
                 AppMode::Session => {
                     self.prompt_view.focus();
@@ -916,7 +905,8 @@ impl App {
             );
             let now = std::time::SystemTime::now();
             self.toast_state.render(buf, area, &self.theme);
-            self.dialog.render(buf, area, &self.theme, now, self.terminal_focused);
+            self.dialog
+                .render(buf, area, &self.theme, now, self.terminal_focused);
             self.permission_dialog.render(buf, area, &self.theme);
             self.command_palette.render(buf, area, &self.theme);
             self.slash_menu.render(buf, prompt_area, &self.theme);
@@ -1061,9 +1051,7 @@ impl App {
                                         self.show_internal_tools = true;
                                     }
                                     HomeAction::OpenShortcuts => {
-                                        self.dialog.show(DialogType::Shortcuts {
-                                            scroll: 0,
-                                        });
+                                        self.dialog.show(DialogType::Shortcuts { scroll: 0 });
                                     }
                                     HomeAction::OpenAddProvider => {
                                         self.show_add_provider = true;
@@ -1209,9 +1197,7 @@ impl App {
                             self.sidebar.open = !self.sidebar.open;
                         }
                         Some(crate::keymap::Action::ToggleHelp) => {
-                            self.dialog.show(DialogType::Shortcuts {
-                                scroll: 0,
-                            });
+                            self.dialog.show(DialogType::Shortcuts { scroll: 0 });
                         }
                         Some(
                             crate::keymap::Action::NextSession
@@ -1572,10 +1558,10 @@ impl App {
                                     KeyCode::Left => {
                                         self.prompt_view.note_activity();
                                         if self.prompt_view.cursor_pos > 0 {
-                                            self.prompt_view.cursor_pos = self
-                                                .prompt_view
-                                                .input
-                                                .floor_char_boundary(self.prompt_view.cursor_pos - 1);
+                                            self.prompt_view.cursor_pos =
+                                                self.prompt_view.input.floor_char_boundary(
+                                                    self.prompt_view.cursor_pos - 1,
+                                                );
                                         }
                                     }
                                     KeyCode::Right => {
@@ -1585,7 +1571,9 @@ impl App {
                                             self.prompt_view.cursor_pos = self
                                                 .prompt_view
                                                 .input
-                                                .floor_char_boundary(self.prompt_view.cursor_pos + 1)
+                                                .floor_char_boundary(
+                                                    self.prompt_view.cursor_pos + 1,
+                                                )
                                                 .min(len);
                                         }
                                     }
@@ -1635,7 +1623,9 @@ impl App {
                                         self.prompt_view.note_activity();
 
                                         // Ctrl+J is the universal newline (^J = \n) — works in every terminal
-                                        if ch == 'j' && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                        if ch == 'j'
+                                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                                        {
                                             let pos = self.prompt_view.cursor_pos;
                                             self.prompt_view.input.insert(pos, '\n');
                                             self.prompt_view.cursor_pos = pos + 1;
@@ -1684,15 +1674,11 @@ impl App {
                 if self.is_apikey_input_visible() {
                     if let Some(d) = self.dialog.current_mut()
                         && let DialogType::ApiKeyInput {
-                            input,
-                            cursor_pos,
-                            ..
+                            input, cursor_pos, ..
                         } = &mut d.dialog_type
                     {
-                        let cleaned: String = text
-                            .chars()
-                            .filter(|&c| c != '\n' && c != '\r')
-                            .collect();
+                        let cleaned: String =
+                            text.chars().filter(|&c| c != '\n' && c != '\r').collect();
                         input.insert_str(*cursor_pos, &cleaned);
                         *cursor_pos += cleaned.len();
                         d.last_filter_at = std::time::SystemTime::now();
@@ -1701,10 +1687,8 @@ impl App {
                 } else {
                     self.prompt_view.note_activity();
                     // Strip newlines/carriage returns so paste doesn't trigger submission
-                    let cleaned: String = text
-                        .chars()
-                        .filter(|&c| c != '\n' && c != '\r')
-                        .collect();
+                    let cleaned: String =
+                        text.chars().filter(|&c| c != '\n' && c != '\r').collect();
                     let pos = self.prompt_view.cursor_pos;
                     self.prompt_view.input.insert_str(pos, &cleaned);
                     self.prompt_view.cursor_pos = pos + cleaned.len();
@@ -2141,12 +2125,13 @@ impl App {
                                 env_var,
                                 input,
                                 ..
-                            }
-                                if !input.is_empty() => {
-                                    save_provider_api_key(provider, env_var, input);
-                                    // SAFETY: Setting env vars is safe in a single-threaded CLI context
-                                    unsafe { std::env::set_var(env_var, input); }
+                            } if !input.is_empty() => {
+                                save_provider_api_key(provider, env_var, input);
+                                // SAFETY: Setting env vars is safe in a single-threaded CLI context
+                                unsafe {
+                                    std::env::set_var(env_var, input);
                                 }
+                            }
                             _ => {}
                         }
                     }
@@ -2375,9 +2360,7 @@ impl App {
                         self.show_internal_tools = true;
                     }
                     crate::routes::home::HomeAction::OpenShortcuts => {
-                        self.dialog.show(DialogType::Shortcuts {
-                            scroll: 0,
-                        });
+                        self.dialog.show(DialogType::Shortcuts { scroll: 0 });
                     }
                     crate::routes::home::HomeAction::OpenAddProvider => {
                         self.show_add_provider = true;
@@ -2428,9 +2411,7 @@ impl App {
             );
             if let Some(clicked_idx) = self.add_provider_view.handle_mouse(&mouse, tools_area) {
                 self.add_provider_view.selected_index = clicked_idx;
-                if let Some((provider, env_var)) =
-                    self.add_provider_view.selected_provider()
-                {
+                if let Some((provider, env_var)) = self.add_provider_view.selected_provider() {
                     self.dialog.show(DialogType::ApiKeyInput {
                         provider: provider.to_string(),
                         env_var: env_var.to_string(),
@@ -2550,10 +2531,7 @@ fn restore_terminal() -> io::Result<()> {
     )?;
     #[cfg(not(windows))]
     {
-        crossterm::execute!(
-            stdout,
-            crossterm::event::PopKeyboardEnhancementFlags,
-        )?;
+        crossterm::execute!(stdout, crossterm::event::PopKeyboardEnhancementFlags,)?;
     }
     stdout.flush()?;
     crossterm::terminal::disable_raw_mode()?;
@@ -2567,13 +2545,21 @@ fn save_provider_api_key(provider: &str, env_var: &str, api_key: &str) {
     let shell = std::env::var("SHELL").unwrap_or_default();
     let config_file: Option<std::path::PathBuf> = if shell.ends_with("zsh") {
         std::env::var("ZDOTDIR").ok().map_or_else(
-            || Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".zshrc")),
+            || {
+                Some(
+                    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                        .join(".zshrc"),
+                )
+            },
             |zd| Some(std::path::PathBuf::from(zd).join(".zshrc")),
         )
     } else if shell.ends_with("bash") {
         Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".bashrc"))
     } else if shell.ends_with("fish") {
-        Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/fish/config.fish"))
+        Some(
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".config/fish/config.fish"),
+        )
     } else {
         // Fallback to .profile
         Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".profile"))
@@ -2585,7 +2571,8 @@ fn save_provider_api_key(provider: &str, env_var: &str, api_key: &str) {
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path) {
+            .open(&path)
+        {
             use std::io::Write;
             let _ = write!(file, "\n{comment_line}{export_line}");
         } else {

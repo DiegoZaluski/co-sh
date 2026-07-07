@@ -298,7 +298,8 @@ impl DialogState {
                     return DialogAction::Dismissed;
                 }
                 DialogAction::Consumed
-            }            DialogType::Shortcuts { scroll } => {
+            }
+            DialogType::Shortcuts { scroll } => {
                 let max_w = 46u16.min(area.width.saturating_sub(6)).max(30);
                 let entries = SHORTCUTS.len();
                 let max_visible = (area.height.saturating_sub(4)) as usize;
@@ -319,7 +320,10 @@ impl DialogState {
                 }
 
                 // Check esc label click (title row)
-                let esc_x = dialog_x + dialog_w.saturating_sub(4).saturating_sub("esc".len() as u16);
+                let esc_x = dialog_x
+                    + dialog_w
+                        .saturating_sub(4)
+                        .saturating_sub("esc".len() as u16);
                 if y_click == dialog_y && x >= esc_x && x < esc_x + "esc".len() as u16 {
                     return DialogAction::Dismissed;
                 }
@@ -463,7 +467,14 @@ impl DialogState {
     }
 
     #[allow(clippy::too_many_lines, clippy::similar_names)]
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime, terminal_focused: bool) {
+    pub fn render(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        theme: &Theme,
+        now: SystemTime,
+        terminal_focused: bool,
+    ) {
         let Some(instance) = self.stack.last() else {
             return;
         };
@@ -934,7 +945,10 @@ impl DialogState {
 
                 // "esc" label right-aligned on same line as title
                 let esc_label = "esc";
-                let esc_x = dialog_x + dialog_w.saturating_sub(4).saturating_sub(esc_label.len() as u16);
+                let esc_x = dialog_x
+                    + dialog_w
+                        .saturating_sub(4)
+                        .saturating_sub(esc_label.len() as u16);
                 draw_text_line(
                     buf,
                     esc_label,
@@ -959,14 +973,7 @@ impl DialogState {
                     // Key column (left-aligned, accent color, fixed width)
                     let key_x = dialog_x + 2;
                     let key_w = 14u16;
-                    draw_text_line(
-                        buf,
-                        key_str,
-                        key_x,
-                        ry,
-                        key_w,
-                        Style::default().fg(accent),
-                    );
+                    draw_text_line(buf, key_str, key_x, ry, key_w, Style::default().fg(accent));
 
                     // Description column
                     let desc_x = key_x + key_w;
@@ -1117,11 +1124,7 @@ impl DialogState {
                     }
                     if let Some(cell) = buf.cell_mut((cx, input_y)) {
                         cell.set_char('*');
-                        cell.set_style(
-                            Style::default()
-                                .fg(rgba_color(theme.text))
-                                .bg(bg_element),
-                        );
+                        cell.set_style(Style::default().fg(rgba_color(theme.text)).bg(bg_element));
                     }
                 }
 
@@ -1144,19 +1147,13 @@ impl DialogState {
                             // OFF: dimmed block cursor (still visible, not invisible)
                             cell.set_char('\u{2588}');
                             cell.set_style(
-                                Style::default()
-                                    .fg(Color::Rgb(60, 60, 60))
-                                    .bg(bg_element),
+                                Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_element),
                             );
                         }
                     } else {
                         // Terminal unfocused: transparent black cursor (static, no blink)
                         cell.set_char('\u{2588}');
-                        cell.set_style(
-                            Style::default()
-                                .fg(Color::Rgb(60, 60, 60))
-                                .bg(bg_element),
-                        );
+                        cell.set_style(Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_element));
                     }
                 }
             }

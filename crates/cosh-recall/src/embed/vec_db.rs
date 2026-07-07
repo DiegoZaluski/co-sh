@@ -1,10 +1,8 @@
-use std::sync::Arc;
-use arrow_array::{
-    Array, RecordBatch, Float32Array, FixedSizeListArray, StringArray,
-};
+use arrow_array::{Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray};
 use arrow_schema::{ArrowError, DataType, Field, Schema};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -105,14 +103,15 @@ impl VecDb {
     ) -> Result<Self, VecDbError> {
         let connection = lancedb::connect(uri).execute().await?;
 
-        let table = match connection.open_table(table_name).execute().await {
-            Ok(table) => table,
-            Err(_) => {
-                connection
-                    .create_empty_table(table_name, schema(vector_dim as i32))
-                    .execute()
-                    .await?
-            }
+        let table = if let Ok(table) = connection.open_table(table_name).execute().await {
+            table
+        } else {
+            let dim = i32::try_from(vector_dim)
+                .map_err(|_| VecDbError::Database("vector dimension exceeds i32 range".into()))?;
+            connection
+                .create_empty_table(table_name, schema(dim))
+                .execute()
+                .await?
         };
 
         Ok(Self { table, vector_dim })
@@ -136,17 +135,15 @@ impl VecDb {
             return Ok(existing_id);
         }
 
-        let batch = build_batch(id, content, &vector, self.vector_dim as i32)?;
+        let dim = i32::try_from(self.vector_dim)
+            .map_err(|_| VecDbError::Database("vector dimension exceeds i32 range".into()))?;
+        let batch = build_batch(id, content, &vector, dim)?;
         self.table.add(vec![batch]).execute().await?;
 
         Ok(id.to_string())
     }
 
-    pub async fn get(
-        &self,
-        query_vector: &[f32],
-        limit: usize,
-    ) -> Result<Vec<Entry>, VecDbError> {
+    pub async fn get(&self, query_vector: &[f32], limit: usize) -> Result<Vec<Entry>, VecDbError> {
         if query_vector.len() != self.vector_dim {
             return Ok(Vec::new());
         }
@@ -185,10 +182,12 @@ impl VecDb {
         Ok(entries)
     }
 
+    #[allow(dead_code)]
     pub async fn exists_by_content(&self, content: &str) -> Result<bool, VecDbError> {
         Ok(self.find_id_by_content(content).await?.is_some())
     }
 
+    #[allow(dead_code)]
     pub async fn patch(
         &self,
         id: &str,
@@ -210,11 +209,8 @@ impl VecDb {
     pub async fn delete(&self, id: &str) -> Result<(), VecDbError> {
         validate_id(id)?;
 
-        let predicate = format!("id = '{}'", id);
-        let count = self
-            .table
-            .count_rows(Some(predicate.clone()))
-            .await?;
+        let predicate = format!("id = '{id}'");
+        let count = self.table.count_rows(Some(predicate.clone())).await?;
 
         if count == 0 {
             return Err(VecDbError::NotFound(id.to_string()));
@@ -233,7 +229,7 @@ impl VecDb {
         let results = self
             .table
             .query()
-            .only_if(format!("content = '{}'", escaped))
+            .only_if(format!("content = '{escaped}'"))
             .limit(1)
             .execute()
             .await?;

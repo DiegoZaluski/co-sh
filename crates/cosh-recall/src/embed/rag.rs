@@ -7,7 +7,7 @@ use super::vec_db::{Entry, VecDb, VecDbError};
 
 /// Unified error type for RAG operations.
 ///
-/// Covers errors from embedding models, the LanceDB vector store,
+/// Covers errors from embedding models, the `LanceDB` vector store,
 /// and lock poisoning (internal mutex).
 #[derive(Debug, Error)]
 pub enum RagError {
@@ -15,7 +15,7 @@ pub enum RagError {
     #[error("embedding error: {0}")]
     Embedding(String),
 
-    /// The LanceDB vector store operation failed.
+    /// The `LanceDB` vector store operation failed.
     #[error("database error: {0}")]
     Database(#[from] VecDbError),
 
@@ -71,7 +71,7 @@ impl From<cosh_sdk::connector::ConnectorError> for RagError {
 pub enum Embedder {
     /// Local ONNX embedding via [fastembed-rs](https://github.com/Anush008/fastembed-rs).
     ///
-    /// Runs on CPU using ONNX Runtime. Models are downloaded from HuggingFace
+    /// Runs on CPU using ONNX Runtime. Models are downloaded from `HuggingFace`
     /// on first use and cached locally.
     ///
     /// Requires the `fastembed` feature.
@@ -101,7 +101,7 @@ pub enum Embedder {
 impl Embedder {
     /// Create a local ONNX embedder from a built-in model.
     ///
-    /// Downloads the model files from HuggingFace on first use and caches
+    /// Downloads the model files from `HuggingFace` on first use and caches
     /// them under the platform cache directory.
     ///
     /// Requires the `fastembed` feature.
@@ -115,9 +115,7 @@ impl Embedder {
         let dim = fastembed::TextEmbedding::get_model_info(&model)
             .map_err(|e| RagError::Embedding(e.to_string()))?
             .dim;
-        let text_embedding = fastembed::TextEmbedding::try_new(
-            fastembed::InitOptions::new(model),
-        )?;
+        let text_embedding = fastembed::TextEmbedding::try_new(fastembed::InitOptions::new(model))?;
         Ok(Self::Local {
             model: Mutex::new(text_embedding),
             dim,
@@ -142,6 +140,7 @@ impl Embedder {
     }
 
     /// Embed a batch of texts, returning one vector per input.
+    #[allow(clippy::unused_async)]
     pub(crate) async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, RagError> {
         match self {
             #[cfg(feature = "fastembed")]
@@ -186,7 +185,7 @@ impl Embedder {
 ///
 /// # Feature flags
 ///
-/// The underlying LanceDB storage is activated with the `lancedb` feature.
+/// The underlying `LanceDB` storage is activated with the `lancedb` feature.
 /// At least one embedding provider feature (`fastembed` or `cloud`) is also
 /// required.
 ///
@@ -226,7 +225,7 @@ pub struct Rag {
 }
 
 impl Rag {
-    /// Open (or create) a LanceDB table with the given embedder.
+    /// Open (or create) a `LanceDB` table with the given embedder.
     ///
     /// If the table already exists its schema is validated; otherwise a new
     /// table is created with columns `id`, `content`, and `vector` (dimension
@@ -234,13 +233,13 @@ impl Rag {
     ///
     /// # Arguments
     ///
-    /// * `uri` — Local directory or cloud URI for the LanceDB database.
+    /// * `uri` — Local directory or cloud URI for the `LanceDB` database.
     /// * `table_name` — Name of the table inside the database.
     /// * `embedder` — An [`Embedder`] instance (local or cloud).
     ///
     /// # Errors
     ///
-    /// Returns [`RagError::Database`] if LanceDB cannot be reached or the
+    /// Returns [`RagError::Database`] if `LanceDB` cannot be reached or the
     /// table cannot be created.
     ///
     /// # Examples
@@ -248,7 +247,11 @@ impl Rag {
     /// ```rust,ignore
     /// let rag = Rag::connect("data/lancedb", "my_table", embedder).await?;
     /// ```
-    pub async fn connect(uri: &str, table_name: &str, embedder: Embedder) -> Result<Self, RagError> {
+    pub async fn connect(
+        uri: &str,
+        table_name: &str,
+        embedder: Embedder,
+    ) -> Result<Self, RagError> {
         let dim = embedder.dim();
         let db = VecDb::connect(uri, table_name, dim).await?;
         Ok(Self { embedder, db })
@@ -273,7 +276,7 @@ impl Rag {
     /// # Errors
     ///
     /// Returns [`RagError::Embedding`] if the model fails to process the text,
-    /// or [`RagError::Database`] if LanceDB rejects the insert.
+    /// or [`RagError::Database`] if `LanceDB` rejects the insert.
     ///
     /// # Examples
     ///
@@ -317,7 +320,10 @@ impl Rag {
     /// ];
     /// let ids = rag.ingest_batch(&docs).await?;
     /// ```
-    pub async fn ingest_batch(&self, entries: &[(String, String)]) -> Result<Vec<String>, RagError> {
+    pub async fn ingest_batch(
+        &self,
+        entries: &[(String, String)],
+    ) -> Result<Vec<String>, RagError> {
         let contents: Vec<&str> = entries.iter().map(|(_, c)| c.as_str()).collect();
         let embeddings = self.embedder.embed(&contents).await?;
 
@@ -373,6 +379,10 @@ impl Rag {
     }
 
     /// Return the total number of entries in the index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RagError::Database`] if the count query fails.
     ///
     /// # Examples
     ///

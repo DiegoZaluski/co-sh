@@ -127,12 +127,13 @@ fn cloud_embedder_returns_error_without_api_key() {
 #[cfg(feature = "lancedb")]
 fn test_vec_db() -> (super::vec_db::VecDb, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();
-    let db = rt().block_on(super::vec_db::VecDb::connect(
-        dir.path().to_str().unwrap(),
-        "test_table",
-        4,
-    ))
-    .unwrap();
+    let db = rt()
+        .block_on(super::vec_db::VecDb::connect(
+            dir.path().to_str().unwrap(),
+            "test_table",
+            4,
+        ))
+        .unwrap();
     (db, dir)
 }
 
@@ -153,9 +154,7 @@ fn vec_db_post_and_get_roundtrip() {
         .unwrap();
     assert_eq!(id, "a");
 
-    let results = rt()
-        .block_on(db.get(&[1.0, 0.0, 0.0, 0.0], 10))
-        .unwrap();
+    let results = rt().block_on(db.get(&[1.0, 0.0, 0.0, 0.0], 10)).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, "a");
     assert_eq!(results[0].content, "hello");
@@ -178,9 +177,7 @@ fn vec_db_post_dedup_by_content() {
 #[test]
 fn vec_db_get_empty_when_no_match() {
     let (db, _dir) = test_vec_db();
-    let results = rt()
-        .block_on(db.get(&[1.0, 0.0, 0.0, 0.0], 10))
-        .unwrap();
+    let results = rt().block_on(db.get(&[1.0, 0.0, 0.0, 0.0], 10)).unwrap();
     assert!(results.is_empty());
 }
 
@@ -209,8 +206,7 @@ fn vec_db_get_returns_empty_on_dim_mismatch() {
 #[test]
 fn vec_db_delete_existing_entry() {
     let (db, _dir) = test_vec_db();
-    rt().block_on(db.post("a", "hello", vec![1.0; 4]))
-        .unwrap();
+    rt().block_on(db.post("a", "hello", vec![1.0; 4])).unwrap();
     rt().block_on(db.delete("a")).unwrap();
     let count = rt().block_on(db.entry_count()).unwrap();
     assert_eq!(count, 0);
@@ -229,11 +225,9 @@ fn vec_db_delete_nonexistent_returns_error() {
 fn vec_db_entry_count_after_inserts() {
     let (db, _dir) = test_vec_db();
     assert_eq!(rt().block_on(db.entry_count()).unwrap(), 0);
-    rt().block_on(db.post("a", "x", vec![1.0; 4]))
-        .unwrap();
+    rt().block_on(db.post("a", "x", vec![1.0; 4])).unwrap();
     assert_eq!(rt().block_on(db.entry_count()).unwrap(), 1);
-    rt().block_on(db.post("b", "y", vec![1.0; 4]))
-        .unwrap();
+    rt().block_on(db.post("b", "y", vec![1.0; 4])).unwrap();
     assert_eq!(rt().block_on(db.entry_count()).unwrap(), 2);
 }
 
@@ -292,9 +286,7 @@ fn vec_db_exists_by_content_true() {
     let (db, _dir) = test_vec_db();
     rt().block_on(db.post("a", "unique text", vec![1.0; 4]))
         .unwrap();
-    let exists = rt()
-        .block_on(db.exists_by_content("unique text"))
-        .unwrap();
+    let exists = rt().block_on(db.exists_by_content("unique text")).unwrap();
     assert!(exists);
 }
 
@@ -314,12 +306,13 @@ fn vec_db_exists_by_content_false() {
 fn test_rag() -> (super::Rag, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();
     let embedder = super::Embedder::try_new_local(Default::default()).unwrap();
-    let rag = rt().block_on(super::Rag::connect(
-        dir.path().to_str().unwrap(),
-        "rag_test",
-        embedder,
-    ))
-    .unwrap();
+    let rag = rt()
+        .block_on(super::Rag::connect(
+            dir.path().to_str().unwrap(),
+            "rag_test",
+            embedder,
+        ))
+        .unwrap();
     (rag, dir)
 }
 

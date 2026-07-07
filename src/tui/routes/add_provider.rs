@@ -9,8 +9,7 @@ use crate::theme::Theme;
 
 /// All known providers with their API key env var names
 fn all_providers() -> Vec<(&'static str, &'static str)> {
-    let mut providers: Vec<(&'static str, &'static str)> =
-        known_providers_with_env().collect();
+    let mut providers: Vec<(&'static str, &'static str)> = known_providers_with_env().collect();
     // Sort alphabetically for consistent display
     providers.sort_by_key(|(name, _)| *name);
     providers
@@ -166,7 +165,11 @@ impl AddProviderView {
             // Check if env var is already set
             let is_configured = std::env::var(env_var).is_ok();
             let symbol = if is_configured { "✔" } else { " " };
-            let sym_color = if is_configured { Color::Green } else { row_color };
+            let sym_color = if is_configured {
+                Color::Green
+            } else {
+                row_color
+            };
 
             // Symbol (✔ if configured, space otherwise)
             let sym_ch = symbol.chars().next().unwrap();
