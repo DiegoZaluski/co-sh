@@ -61,6 +61,7 @@ pub enum DialogType {
         provider: String,
         env_var: String,
         input: String,
+        cursor_pos: usize,
     },
 }
 
@@ -398,7 +399,7 @@ impl DialogState {
     }
 
     #[allow(clippy::too_many_lines, clippy::similar_names)]
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime) {
+    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime, terminal_focused: bool) {
         let Some(instance) = self.stack.last() else {
             return;
         };
@@ -832,6 +833,7 @@ impl DialogState {
                 provider,
                 env_var,
                 input,
+                cursor_pos,
             } => {
                 // API Key input dialog - small centered box
                 let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
@@ -926,36 +928,84 @@ impl DialogState {
                     Style::default().fg(rgba_color(theme.text_muted)),
                 );
 
-                // Input field with masked characters
+                // Input field with masked characters (blinking cursor at cursor_pos)
                 let input_x = content_x;
                 let input_y = dialog_y + 4;
-                let input_style = Style::default()
-                    .fg(rgba_color(theme.text))
-                    .bg(rgba_color(theme.background_element));
+                let bg_element = rgba_color(theme.background_element);
 
                 // Clear input field background
                 for cx in input_x..input_x + content_w {
                     if let Some(cell) = buf.cell_mut((cx, input_y)) {
                         cell.set_char(' ');
-                        cell.set_style(Style::default().bg(rgba_color(theme.background_element)));
+                        cell.set_style(Style::default().bg(bg_element));
                     }
                 }
 
-                // Draw masked input (*** characters)
-                let masked: String = input.chars().map(|_| '*').collect();
-                draw_text_line(buf, &masked, input_x, input_y, content_w, input_style);
+                // Draw masked input (*** characters), char by char so cursor can be positioned
+                let masked: Vec<char> = input.chars().map(|_| '*').collect();
 
-                // Cursor at end of input
-                let cursor_x = input_x + input.len() as u16;
+                // Blink cursor logic: steady for 500ms after typing, then blink 500ms on/off
+                let idle_ms = now
+                    .duration_since(instance.last_filter_at)
+                    .map_or(0, |d| d.as_millis());
+                let cursor_visible = if idle_ms < 500 {
+                    true // steady after typing
+                } else {
+                    let elapsed_ms = now
+                        .duration_since(instance.blink_start)
+                        .map_or(0, |d| d.as_millis() % 1000);
+                    elapsed_ms < 500
+                };
+
+                // Draw each masked character
+                for (i, _ch) in masked.iter().enumerate() {
+                    let cx = input_x + i as u16;
+                    if cx >= input_x + content_w {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((cx, input_y)) {
+                        cell.set_char('*');
+                        cell.set_style(
+                            Style::default()
+                                .fg(rgba_color(theme.text))
+                                .bg(bg_element),
+                        );
+                    }
+                }
+
+                // Draw cursor at cursor_pos
+                let cursor_x = input_x + *cursor_pos as u16;
                 if cursor_x < input_x + content_w
                     && let Some(cell) = buf.cell_mut((cursor_x, input_y))
                 {
-                    cell.set_char('\u{2588}');
-                    cell.set_style(
-                        Style::default()
-                            .fg(rgba_color(theme.primary))
-                            .bg(rgba_color(theme.background_element)),
-                    );
+                    if terminal_focused {
+                        // Steady while typing, blink after 500ms idle
+                        if cursor_visible {
+                            // ON: block cursor with primary color
+                            cell.set_char('\u{2588}');
+                            cell.set_style(
+                                Style::default()
+                                    .fg(rgba_color(theme.primary))
+                                    .bg(bg_element),
+                            );
+                        } else {
+                            // OFF: dimmed block cursor (still visible, not invisible)
+                            cell.set_char('\u{2588}');
+                            cell.set_style(
+                                Style::default()
+                                    .fg(Color::Rgb(60, 60, 60))
+                                    .bg(bg_element),
+                            );
+                        }
+                    } else {
+                        // Terminal unfocused: transparent black cursor (static, no blink)
+                        cell.set_char('\u{2588}');
+                        cell.set_style(
+                            Style::default()
+                                .fg(Color::Rgb(60, 60, 60))
+                                .bg(bg_element),
+                        );
+                    }
                 }
             }
             DialogType::ModelList {

@@ -409,20 +409,33 @@ impl App {
             return false;
         }
 
+        // Update blink timestamps on any interaction
+        if let Some(d) = self.dialog.current_mut() {
+            d.last_filter_at = std::time::SystemTime::now();
+            d.blink_start = std::time::SystemTime::now();
+        }
+
         match key {
             KeyCode::Enter => {
-                if let Some(d) = self.dialog.current()
+                let should_save = self.dialog.current().is_some_and(|d| {
+                    if let DialogType::ApiKeyInput { input, .. } = &d.dialog_type {
+                        !input.is_empty()
+                    } else {
+                        false
+                    }
+                });
+                if should_save
+                    && let Some(d) = self.dialog.current()
                     && let DialogType::ApiKeyInput {
                         provider,
                         env_var,
                         input,
+                        ..
                     } = &d.dialog_type
                 {
-                    if !input.is_empty() {
-                        save_provider_api_key(provider, env_var, input);
-                        // SAFETY: Setting env vars is safe in a single-threaded CLI context
-                        unsafe { std::env::set_var(env_var, input); }
-                    }
+                    save_provider_api_key(provider, env_var, input);
+                    // SAFETY: Setting env vars is safe in a single-threaded CLI context
+                    unsafe { std::env::set_var(env_var, input); }
                 }
                 self.dialog.pop();
                 true
@@ -431,19 +444,97 @@ impl App {
                 self.dialog.pop();
                 true
             }
+            KeyCode::Left => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        cursor_pos, ..
+                    } = &mut d.dialog_type
+                {
+                    if *cursor_pos > 0 {
+                        *cursor_pos -= 1;
+                    }
+                }
+                true
+            }
+            KeyCode::Right => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        input,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    if *cursor_pos < input.len() {
+                        *cursor_pos += 1;
+                    }
+                }
+                true
+            }
+            KeyCode::Home => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        cursor_pos, ..
+                    } = &mut d.dialog_type
+                {
+                    *cursor_pos = 0;
+                }
+                true
+            }
+            KeyCode::End => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        input,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    *cursor_pos = input.len();
+                }
+                true
+            }
+            KeyCode::Delete => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ApiKeyInput {
+                        input,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    if *cursor_pos < input.len() {
+                        let next = input
+                            .floor_char_boundary(*cursor_pos + 1)
+                            .min(input.len());
+                        input.drain(*cursor_pos..next);
+                    }
+                }
+                true
+            }
             KeyCode::Backspace => {
                 if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::ApiKeyInput { input, .. } = &mut d.dialog_type
+                    && let DialogType::ApiKeyInput {
+                        input,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
                 {
-                    input.pop();
+                    if *cursor_pos > 0 {
+                        let char_start = input.floor_char_boundary(*cursor_pos - 1);
+                        input.remove(char_start);
+                        *cursor_pos = char_start;
+                    }
                 }
                 true
             }
             KeyCode::Char(ch) => {
                 if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::ApiKeyInput { input, .. } = &mut d.dialog_type
+                    && let DialogType::ApiKeyInput {
+                        input,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
                 {
-                    input.push(ch);
+                    input.insert(*cursor_pos, ch);
+                    *cursor_pos += ch.len_utf8();
                 }
                 true
             }
@@ -824,7 +915,7 @@ impl App {
             );
             let now = std::time::SystemTime::now();
             self.toast_state.render(buf, area, &self.theme);
-            self.dialog.render(buf, area, &self.theme, now);
+            self.dialog.render(buf, area, &self.theme, now, self.terminal_focused);
             self.permission_dialog.render(buf, area, &self.theme);
             self.command_palette.render(buf, area, &self.theme);
             self.slash_menu.render(buf, prompt_area, &self.theme);
@@ -996,6 +1087,7 @@ impl App {
                                         provider: provider.to_string(),
                                         env_var: env_var.to_string(),
                                         input: String::new(),
+                                        cursor_pos: 0,
                                     });
                                 }
                             }
@@ -1980,6 +2072,7 @@ impl App {
                                 provider,
                                 env_var,
                                 input,
+                                ..
                             } => {
                                 if !input.is_empty() {
                                     save_provider_api_key(provider, env_var, input);
@@ -2270,6 +2363,7 @@ impl App {
                         provider: provider.to_string(),
                         env_var: env_var.to_string(),
                         input: String::new(),
+                        cursor_pos: 0,
                     });
                 }
                 return Ok(true);
