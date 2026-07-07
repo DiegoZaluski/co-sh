@@ -1544,126 +1544,128 @@ impl App {
                                 return Ok(false);
                             }
 
-                            match key.code {
-                                KeyCode::Up => {
-                                    if self.prompt_view.input.is_empty() {
-                                        self.session_view.scroll_y =
-                                            (self.session_view.scroll_y - 3).max(0);
-                                    } else {
+                            if matches!(self.mode(), AppMode::Session) {
+                                match key.code {
+                                    KeyCode::Up => {
+                                        if self.prompt_view.input.is_empty() {
+                                            self.session_view.scroll_y =
+                                                (self.session_view.scroll_y - 3).max(0);
+                                        } else {
+                                            self.prompt_view.note_activity();
+                                            self.prompt_view.cursor_up(
+                                                self.prompt_view.input_text_width.get().max(1),
+                                            );
+                                        }
+                                    }
+                                    KeyCode::Down => {
+                                        if self.prompt_view.input.is_empty() {
+                                            self.session_view.scroll_y =
+                                                (self.session_view.scroll_y + 3).max(0);
+                                        } else {
+                                            self.prompt_view.note_activity();
+                                            self.prompt_view.cursor_down(
+                                                self.prompt_view.input_text_width.get().max(1),
+                                            );
+                                        }
+                                    }
+                                    KeyCode::Left => {
                                         self.prompt_view.note_activity();
-                                        self.prompt_view.cursor_up(
-                                            self.prompt_view.input_text_width.get().max(1),
-                                        );
+                                        if self.prompt_view.cursor_pos > 0 {
+                                            self.prompt_view.cursor_pos = self
+                                                .prompt_view
+                                                .input
+                                                .floor_char_boundary(self.prompt_view.cursor_pos - 1);
+                                        }
                                     }
-                                }
-                                KeyCode::Down => {
-                                    if self.prompt_view.input.is_empty() {
-                                        self.session_view.scroll_y =
-                                            (self.session_view.scroll_y + 3).max(0);
-                                    } else {
+                                    KeyCode::Right => {
                                         self.prompt_view.note_activity();
-                                        self.prompt_view.cursor_down(
-                                            self.prompt_view.input_text_width.get().max(1),
-                                        );
+                                        let len = self.prompt_view.input.len();
+                                        if self.prompt_view.cursor_pos < len {
+                                            self.prompt_view.cursor_pos = self
+                                                .prompt_view
+                                                .input
+                                                .floor_char_boundary(self.prompt_view.cursor_pos + 1)
+                                                .min(len);
+                                        }
                                     }
-                                }
-                                KeyCode::Left => {
-                                    self.prompt_view.note_activity();
-                                    if self.prompt_view.cursor_pos > 0 {
-                                        self.prompt_view.cursor_pos = self
-                                            .prompt_view
-                                            .input
-                                            .floor_char_boundary(self.prompt_view.cursor_pos - 1);
+                                    KeyCode::Home => {
+                                        self.prompt_view.note_activity();
+                                        self.prompt_view.cursor_pos = 0;
                                     }
-                                }
-                                KeyCode::Right => {
-                                    self.prompt_view.note_activity();
-                                    let len = self.prompt_view.input.len();
-                                    if self.prompt_view.cursor_pos < len {
-                                        self.prompt_view.cursor_pos = self
-                                            .prompt_view
-                                            .input
-                                            .floor_char_boundary(self.prompt_view.cursor_pos + 1)
-                                            .min(len);
+                                    KeyCode::End => {
+                                        self.prompt_view.note_activity();
+                                        self.prompt_view.cursor_pos = self.prompt_view.input.len();
                                     }
-                                }
-                                KeyCode::Home => {
-                                    self.prompt_view.note_activity();
-                                    self.prompt_view.cursor_pos = 0;
-                                }
-                                KeyCode::End => {
-                                    self.prompt_view.note_activity();
-                                    self.prompt_view.cursor_pos = self.prompt_view.input.len();
-                                }
-                                KeyCode::Delete => {
-                                    self.prompt_view.note_activity();
-                                    let pos = self.prompt_view.cursor_pos;
-                                    let len = self.prompt_view.input.len();
-                                    if pos < len {
-                                        let next = self
-                                            .prompt_view
-                                            .input
-                                            .floor_char_boundary(pos + 1)
-                                            .min(len);
-                                        self.prompt_view.input.drain(pos..next);
-                                    }
-                                }
-                                KeyCode::PageUp => {
-                                    self.session_view.scroll_y =
-                                        (self.session_view.scroll_y - 10).max(0);
-                                }
-                                KeyCode::PageDown => {
-                                    self.session_view.scroll_y =
-                                        (self.session_view.scroll_y + 10).max(0);
-                                }
-                                KeyCode::Backspace => {
-                                    self.prompt_view.note_activity();
-                                    let pos = self.prompt_view.cursor_pos;
-                                    if pos > 0 {
-                                        // Use floor_char_boundary to safely handle multi-byte chars
-                                        // (e.g. á, é, emoji). remove() panics if called at a
-                                        // non-char-boundary position.
-                                        let char_start =
-                                            self.prompt_view.input.floor_char_boundary(pos - 1);
-                                        self.prompt_view.input.remove(char_start);
-                                        self.prompt_view.cursor_pos = char_start;
-                                    }
-                                }
-                                KeyCode::Char(ch) => {
-                                    self.prompt_view.note_activity();
-
-                                    // Ctrl+J is the universal newline (^J = \n) — works in every terminal
-                                    if ch == 'j' && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    KeyCode::Delete => {
+                                        self.prompt_view.note_activity();
                                         let pos = self.prompt_view.cursor_pos;
-                                        self.prompt_view.input.insert(pos, '\n');
-                                        self.prompt_view.cursor_pos = pos + 1;
-                                        return Ok(false);
+                                        let len = self.prompt_view.input.len();
+                                        if pos < len {
+                                            let next = self
+                                                .prompt_view
+                                                .input
+                                                .floor_char_boundary(pos + 1)
+                                                .min(len);
+                                            self.prompt_view.input.drain(pos..next);
+                                        }
                                     }
-
-                                    // Vim-style scroll only when prompt is empty
-                                    // (otherwise these chars are typed normally)
-                                    if ch == 'j' && self.prompt_view.input.is_empty() {
+                                    KeyCode::PageUp => {
                                         self.session_view.scroll_y =
-                                            (self.session_view.scroll_y + 3).max(0);
-                                        return Ok(false);
+                                            (self.session_view.scroll_y - 10).max(0);
                                     }
-                                    if ch == 'k' && self.prompt_view.input.is_empty() {
+                                    KeyCode::PageDown => {
                                         self.session_view.scroll_y =
-                                            (self.session_view.scroll_y - 3).max(0);
-                                        return Ok(false);
+                                            (self.session_view.scroll_y + 10).max(0);
                                     }
+                                    KeyCode::Backspace => {
+                                        self.prompt_view.note_activity();
+                                        let pos = self.prompt_view.cursor_pos;
+                                        if pos > 0 {
+                                            // Use floor_char_boundary to safely handle multi-byte chars
+                                            // (e.g. á, é, emoji). remove() panics if called at a
+                                            // non-char-boundary position.
+                                            let char_start =
+                                                self.prompt_view.input.floor_char_boundary(pos - 1);
+                                            self.prompt_view.input.remove(char_start);
+                                            self.prompt_view.cursor_pos = char_start;
+                                        }
+                                    }
+                                    KeyCode::Char(ch) => {
+                                        self.prompt_view.note_activity();
 
-                                    // Insert character normally
-                                    let pos = self.prompt_view.cursor_pos;
-                                    self.prompt_view.input.insert(pos, ch);
-                                    // Use len_utf8() so cursor stays on a valid UTF-8 boundary
-                                    // for multi-byte chars (e.g. á, é, emoji).
-                                    self.prompt_view.cursor_pos = pos + ch.len_utf8();
+                                        // Ctrl+J is the universal newline (^J = \n) — works in every terminal
+                                        if ch == 'j' && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                            let pos = self.prompt_view.cursor_pos;
+                                            self.prompt_view.input.insert(pos, '\n');
+                                            self.prompt_view.cursor_pos = pos + 1;
+                                            return Ok(false);
+                                        }
 
-                                    // Check if "/" menu should open
-                                    self.slash_menu.update(&self.prompt_view.input);
+                                        // Vim-style scroll only when prompt is empty
+                                        // (otherwise these chars are typed normally)
+                                        if ch == 'j' && self.prompt_view.input.is_empty() {
+                                            self.session_view.scroll_y =
+                                                (self.session_view.scroll_y + 3).max(0);
+                                            return Ok(false);
+                                        }
+                                        if ch == 'k' && self.prompt_view.input.is_empty() {
+                                            self.session_view.scroll_y =
+                                                (self.session_view.scroll_y - 3).max(0);
+                                            return Ok(false);
+                                        }
+
+                                        // Insert character normally
+                                        let pos = self.prompt_view.cursor_pos;
+                                        self.prompt_view.input.insert(pos, ch);
+                                        // Use len_utf8() so cursor stays on a valid UTF-8 boundary
+                                        // for multi-byte chars (e.g. á, é, emoji).
+                                        self.prompt_view.cursor_pos = pos + ch.len_utf8();
+
+                                        // Check if "/" menu should open
+                                        self.slash_menu.update(&self.prompt_view.input);
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                     }
