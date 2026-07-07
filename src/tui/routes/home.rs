@@ -227,7 +227,9 @@ impl HomeView {
             if my == item_y && mx >= menu_left && mx < menu_left + max_entry_len as u16 {
                 return Some(match i {
                     0 => HomeAction::NewSession,
-                    _ => HomeAction::ToggleSidebar,
+                    1 => HomeAction::ToggleSidebar,
+                    2 => HomeAction::OpenInternalTools,
+                    _ => HomeAction::NewSession,
                 });
             }
         }
