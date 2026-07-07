@@ -93,8 +93,9 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
-        let state = AppState::new();
+    pub fn new(cwd: String) -> Self {
+        let mut state = AppState::new();
+        state.working_directory = cwd;
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
@@ -980,6 +981,7 @@ impl App {
                             let model = self.llm_config.model.clone();
                             let stop_signal = self.stop_signal.clone();
                             let input = msg;
+                            let cwd = self.state.working_directory.clone();
 
                             // Create a fresh answer channel for this agent loop invocation
                             let (answer_tx, answer_rx) = mpsc::unbounded_channel();
@@ -1053,7 +1055,7 @@ impl App {
                                         };
 
                                         let mut harness =
-                                            Harness::new(connector, ".").with_history(&history);
+                                            Harness::new(connector, &cwd).with_history(&history);
                                         harness.format_header_context();
                                         harness
                                             .run_agent_loop(

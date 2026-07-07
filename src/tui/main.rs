@@ -24,7 +24,11 @@ async fn main() {
     cosh::util::logger::init();
 
     crate::util::selection::init_clipboard();
-    let mut app = App::new();
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| "?".to_string());
+    let mut app = App::new(cwd);
     app.show_welcome_toast();
     if let Err(e) = app.run() {
         eprintln!("Error: {e}");
