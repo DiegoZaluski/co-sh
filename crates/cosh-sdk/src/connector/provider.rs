@@ -322,6 +322,7 @@ pub fn known_providers() -> impl Iterator<Item = &'static str> {
 /// Return the environment variable name for a given provider's API key.
 ///
 /// Returns `None` if the provider is unknown.
+#[must_use]
 pub fn get_provider_env_var(provider: &str) -> Option<&'static str> {
     API_KEY_ENVS
         .iter()

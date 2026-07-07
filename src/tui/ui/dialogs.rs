@@ -20,7 +20,7 @@ enum VisualItem {
     Model(ModelEntry),
 }
 
-/// List of (key_combo, description) for the Shortcuts dialog
+/// List of (`key_combo`, description) for the Shortcuts dialog
 /// Only non-obvious compound shortcuts — basic nav/enter/esc are excluded
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Tab", "Toggle mode (Build/Ask)"),
@@ -908,7 +908,7 @@ impl DialogState {
 
                 // Fill background with a subtly lighter shade than theme background
                 let (r, g, b, _) = theme.background_element.to_ints();
-                let lighten = |c: u8| c.saturating_add(5).min(255);
+                let lighten = |c: u8| c.saturating_add(5);
                 let bg_color = Color::Rgb(lighten(r), lighten(g), lighten(b));
                 for y in dialog_y..dialog_y + dialog_h {
                     for x in dialog_x..dialog_x + dialog_w {

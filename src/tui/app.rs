@@ -412,6 +412,7 @@ impl App {
             )
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_apikey_dialog_key(&mut self, key: KeyCode) -> bool {
         if !self.is_apikey_input_visible() {
             return false;
@@ -457,11 +458,9 @@ impl App {
                     && let DialogType::ApiKeyInput {
                         cursor_pos, ..
                     } = &mut d.dialog_type
-                {
-                    if *cursor_pos > 0 {
+                    && *cursor_pos > 0 {
                         *cursor_pos -= 1;
                     }
-                }
                 true
             }
             KeyCode::Right => {
@@ -471,11 +470,9 @@ impl App {
                         cursor_pos,
                         ..
                     } = &mut d.dialog_type
-                {
-                    if *cursor_pos < input.len() {
+                    && *cursor_pos < input.len() {
                         *cursor_pos += 1;
                     }
-                }
                 true
             }
             KeyCode::Home => {
@@ -507,14 +504,12 @@ impl App {
                         cursor_pos,
                         ..
                     } = &mut d.dialog_type
-                {
-                    if *cursor_pos < input.len() {
+                    && *cursor_pos < input.len() {
                         let next = input
                             .floor_char_boundary(*cursor_pos + 1)
                             .min(input.len());
                         input.drain(*cursor_pos..next);
                     }
-                }
                 true
             }
             KeyCode::Backspace => {
@@ -524,13 +519,11 @@ impl App {
                         cursor_pos,
                         ..
                     } = &mut d.dialog_type
-                {
-                    if *cursor_pos > 0 {
+                    && *cursor_pos > 0 {
                         let char_start = input.floor_char_boundary(*cursor_pos - 1);
                         input.remove(char_start);
                         *cursor_pos = char_start;
                     }
-                }
                 true
             }
             KeyCode::Char(ch) => {
@@ -2148,13 +2141,12 @@ impl App {
                                 env_var,
                                 input,
                                 ..
-                            } => {
-                                if !input.is_empty() {
+                            }
+                                if !input.is_empty() => {
                                     save_provider_api_key(provider, env_var, input);
                                     // SAFETY: Setting env vars is safe in a single-threaded CLI context
                                     unsafe { std::env::set_var(env_var, input); }
                                 }
-                            }
                             _ => {}
                         }
                     }
@@ -2590,18 +2582,14 @@ fn save_provider_api_key(provider: &str, env_var: &str, api_key: &str) {
     if let Some(path) = config_file {
         let export_line = format!("export {env_var}=\"{api_key}\"\n");
         let comment_line = format!("# cosh: {provider} API key\n");
-        match std::fs::OpenOptions::new()
+        if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                let _ = write!(file, "\n{comment_line}{export_line}");
-            }
-            Err(_) => {
-                // Silently fail - env var is still set for the current process
-            }
+            .open(&path) {
+            use std::io::Write;
+            let _ = write!(file, "\n{comment_line}{export_line}");
+        } else {
+            // Silently fail - env var is still set for the current process
         }
     }
 }
