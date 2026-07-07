@@ -2,7 +2,7 @@
 .opencode/*
 .devin
 .crush
-/linetime
+# /linetime
 TODO.md
 .env
 /idea
