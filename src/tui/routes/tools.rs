@@ -54,7 +54,9 @@ impl InternalToolsView {
         let total = INTERNAL_TOOLS.len();
         self.selected_index = (self.selected_index + 1) % total;
         if self.selected_index >= self.scroll_offset + visible_count {
-            self.scroll_offset = self.selected_index.saturating_sub(visible_count.saturating_sub(1));
+            self.scroll_offset = self
+                .selected_index
+                .saturating_sub(visible_count.saturating_sub(1));
         }
     }
 

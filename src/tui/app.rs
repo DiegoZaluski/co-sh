@@ -24,12 +24,12 @@ use crate::component::prompt::PromptView;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
 use crate::routes::home::{HomeAction, HomeView};
-use crate::routes::tools::InternalToolsView;
 use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::sidebar::SidebarView;
+use crate::routes::tools::InternalToolsView;
 use crate::state::AppState;
 use crate::theme::{Theme, ThemeRegistry};
 use crate::types::SessionStatus;
@@ -52,6 +52,7 @@ enum AppMode {
     InternalTools,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     pub state: AppState,
     pub theme: Theme,
@@ -690,7 +691,8 @@ impl App {
                         session_area.width,
                         session_area.height.saturating_sub(1),
                     );
-                    self.internal_tools_view.render(buf, tools_area, &self.theme);
+                    self.internal_tools_view
+                        .render(buf, tools_area, &self.theme);
                 }
                 AppMode::Session => {
                     self.prompt_view.focus();

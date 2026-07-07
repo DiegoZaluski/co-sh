@@ -137,7 +137,11 @@ const LOGO: &[&str] = &[
 
 const TAGLINE: &str = "Terminal AI Agent";
 
-pub const MENU_ITEMS: &[&str] = &["Start a New Session", "Browse Session History", "Internal Tools"];
+pub const MENU_ITEMS: &[&str] = &[
+    "Start a New Session",
+    "Browse Session History",
+    "Internal Tools",
+];
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum HomeAction {
@@ -200,8 +204,7 @@ impl HomeView {
         match self.selected_index {
             0 => HomeAction::NewSession,
             1 => HomeAction::ToggleSidebar,
-            2 => HomeAction::OpenInternalTools,
-            _ => HomeAction::NewSession,
+            _ => HomeAction::OpenInternalTools,
         }
     }
 
@@ -228,8 +231,7 @@ impl HomeView {
                 return Some(match i {
                     0 => HomeAction::NewSession,
                     1 => HomeAction::ToggleSidebar,
-                    2 => HomeAction::OpenInternalTools,
-                    _ => HomeAction::NewSession,
+                    _ => HomeAction::OpenInternalTools,
                 });
             }
         }

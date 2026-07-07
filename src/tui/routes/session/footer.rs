@@ -30,7 +30,7 @@ pub struct FooterView;
 
 impl FooterView {
     pub fn render(buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
-        Self::render_with_mode(buf, area, state, theme, true)
+        Self::render_with_mode(buf, area, state, theme, true);
     }
 
     pub fn render_with_mode(

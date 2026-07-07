@@ -131,21 +131,27 @@ impl CoshTools {
     ///
     /// Panics if the internal `plan` mutex is poisoned.
     pub fn schemas_filtered(&self, disabled_tools: &HashSet<String>) -> Vec<ToolSchema> {
-        let all = vec![
+        let mut v = vec![
             extract_schema(&self.fs.description_read),
             extract_schema(&self.find.description_glob),
             extract_schema(&self.find.description_grep),
             extract_schema(&self.web.description_fetch),
             extract_schema(&self.web.description_search),
-            extract_schema(&self.plan.lock().unwrap().description_todo_read),
-            extract_schema(&self.plan.lock().unwrap().description_load_from_md),
-            extract_schema(&self.question.description_ask),
-            extract_schema(&self.skills.description_list),
-            extract_schema(&self.skills.description_read),
-            extract_schema(&self.skills.description_read_asset),
-            extract_schema(&self.skills.description_match_skills),
         ];
-        all.into_iter()
+        // Each plan.lock() is its own statement to avoid deadlock
+        // on std::sync::Mutex (non-reentrant).
+        v.push(extract_schema(
+            &self.plan.lock().unwrap().description_todo_read,
+        ));
+        v.push(extract_schema(
+            &self.plan.lock().unwrap().description_load_from_md,
+        ));
+        v.push(extract_schema(&self.question.description_ask));
+        v.push(extract_schema(&self.skills.description_list));
+        v.push(extract_schema(&self.skills.description_read));
+        v.push(extract_schema(&self.skills.description_read_asset));
+        v.push(extract_schema(&self.skills.description_match_skills));
+        v.into_iter()
             .filter(|schema| !disabled_tools.contains(&schema.name))
             .collect()
     }
@@ -202,7 +208,7 @@ impl Tools for CoshTools {
     }
 
     fn tool_descriptions(&self) -> Vec<serde_json::Value> {
-        vec![
+        let mut v = vec![
             self.bash.description_run.clone(),
             self.fs.description_read.clone(),
             self.fs.description_write.clone(),
@@ -213,17 +219,20 @@ impl Tools for CoshTools {
             self.web.description_fetch.clone(),
             self.web.description_search.clone(),
             self.vision.description_terminal.clone(),
-            self.plan.lock().unwrap().description_todo_write.clone(),
-            self.plan.lock().unwrap().description_todo_edit.clone(),
-            self.plan.lock().unwrap().description_todo_cross_off.clone(),
-            self.plan.lock().unwrap().description_todo_read.clone(),
-            self.plan.lock().unwrap().description_load_from_md.clone(),
-            self.question.description_ask.clone(),
-            self.skills.description_list.clone(),
-            self.skills.description_read.clone(),
-            self.skills.description_read_asset.clone(),
-            self.skills.description_match_skills.clone(),
-        ]
+        ];
+        // Each plan.lock() is its own statement to avoid deadlock
+        // on std::sync::Mutex (non-reentrant).
+        v.push(self.plan.lock().unwrap().description_todo_write.clone());
+        v.push(self.plan.lock().unwrap().description_todo_edit.clone());
+        v.push(self.plan.lock().unwrap().description_todo_cross_off.clone());
+        v.push(self.plan.lock().unwrap().description_todo_read.clone());
+        v.push(self.plan.lock().unwrap().description_load_from_md.clone());
+        v.push(self.question.description_ask.clone());
+        v.push(self.skills.description_list.clone());
+        v.push(self.skills.description_read.clone());
+        v.push(self.skills.description_read_asset.clone());
+        v.push(self.skills.description_match_skills.clone());
+        v
     }
 
     fn schemas(&self) -> Vec<ToolSchema> {

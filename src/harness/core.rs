@@ -10,6 +10,7 @@ use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -474,14 +475,13 @@ impl Harness {
 
         let mut extractor = self.build_extractor();
         let mut token_count = 0u64;
-        use tokio::time::Duration;
 
         loop {
             {
                 let stop = self
                     .stop_signal
                     .as_ref()
-                    .map_or(false, |s| s.load(Ordering::Relaxed));
+                    .is_some_and(|s| s.load(Ordering::Relaxed));
                 if stop {
                     log::debug!("stream_chat STOPPED by signal");
                     break;
@@ -494,7 +494,7 @@ impl Harness {
                         log::debug!("stream_chat STREAM_ERR={e}");
                         e.to_string()
                     })),
-                    _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    () = tokio::time::sleep(Duration::from_millis(50)) => {
                         continue;
                     }
                 };
