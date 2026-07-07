@@ -1050,7 +1050,7 @@ impl App {
                             KeyCode::Down => {
                                 self.home_view.select_next();
                             }
-                            KeyCode::Char('?') => {
+                            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 self.dialog.show(DialogType::Shortcuts {
                                     scroll: 0,
                                 });

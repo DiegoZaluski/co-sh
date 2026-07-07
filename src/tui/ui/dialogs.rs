@@ -36,7 +36,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
     ("Ctrl+J", "Insert newline"),
     ("j/k", "Vim-style scroll (prompt empty)"),
-    ("?", "Show this shortcuts list"),
+    ("Ctrl+K", "Show keyboard shortcuts"),
 ];
 
 fn rgba_color(rgba: RGBA) -> Color {
