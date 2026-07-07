@@ -81,11 +81,11 @@ impl InternalToolsView {
     fn find_row_for_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
         let my = mouse.y;
         let mx = mouse.x;
-        let list_start_y = area.y + 2;
         let max_row_w = max_row_width();
         if max_row_w == 0 {
             return None;
         }
+        let list_start_y = content_start_y(area) + 2;
         let row_x = area.x + (area.width.saturating_sub(max_row_w as u16)) / 2;
         let visible_count = visible_items(area);
         let hit = mx >= row_x && mx < row_x + max_row_w as u16;
@@ -116,26 +116,29 @@ impl InternalToolsView {
 
         // title
         let title = "Internal Tools";
-        let title_x = area.x + (area.width.saturating_sub(title.len() as u16)) / 2;
+        let count = visible_items(area).min(INTERNAL_TOOLS.len());
+        let start_y = content_start_y(area);
+
+        let max_w = max_row_width();
+        let row_x = area.x + (area.width.saturating_sub(max_w as u16)) / 2;
+
+        let title_x = row_x;
         for (i, ch) in title.chars().enumerate() {
             let cx = title_x + i as u16;
             if cx >= area.right() {
                 break;
             }
-            if let Some(cell) = buf.cell_mut((cx, area.y)) {
+            if let Some(cell) = buf.cell_mut((cx, start_y)) {
                 cell.set_char(ch);
                 cell.set_style(Style::default().fg(muted));
             }
         }
 
         // tools list aligned
-        let list_start_y = area.y + 2;
-        let count = visible_items(area).min(INTERNAL_TOOLS.len());
-        let max_w = max_row_width();
+        let list_start_y = start_y + 2;
         if max_w == 0 {
             return;
         }
-        let row_x = area.x + (area.width.saturating_sub(max_w as u16)) / 2;
 
         // "  " column for the symbol (ZERO WIDTH prefix so column 0 = symbol)
         let sym_x = row_x;
@@ -184,6 +187,13 @@ impl InternalToolsView {
 fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
+}
+
+/// Compute the Y position where title and list start (vertically centered).
+fn content_start_y(area: Rect) -> u16 {
+    let count = visible_items(area).min(INTERNAL_TOOLS.len());
+    let content_height = count + 2; // title + blank line + items
+    area.y + (area.height.saturating_sub(content_height as u16)) / 2
 }
 
 fn max_row_width() -> usize {
