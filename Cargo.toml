@@ -47,7 +47,7 @@ dotenvy = "0.15.7"
 anyhow = "1"
 schemars = "1"
 crossterm = { version = "0.28", features = ["bracketed-paste"] }
-# directories = "6.0.0"
+directories = "6.0.0"
 
 # ---
 [dependencies.ratatui]

@@ -2,7 +2,7 @@ use cosh_tools::question::types::QuestionItem;
 use serde_json::Value;
 
 /// Represents a model entry with its provider
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelEntry {
     pub provider: String,
     pub model: String,

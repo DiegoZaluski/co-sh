@@ -89,6 +89,8 @@ pub struct App {
     theme_dialog_original: Option<String>,
     /// Stores the model that was active when the model dialog opened (for cancel/restore)
     model_dialog_original: Option<String>,
+    /// Stale-while-revalidate cache for model listings, keyed by provider.
+    model_cache: crate::util::cache::StaleCache<String, Vec<cosh::ModelEntry>>,
 
     // ── Mouse drag / selection tracking ───────────────────────────────────────────
     /// Position where the mouse was pressed down (for detecting drag selections).
@@ -134,6 +136,7 @@ impl App {
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
             theme_dialog_original: None,
             model_dialog_original: None,
+            model_cache: crate::util::cache::StaleCache::new("model.json"),
             should_quit: false,
             tokio_handle: Handle::current(),
             event_tx,
@@ -188,47 +191,115 @@ impl App {
     fn open_model_dialog(&mut self) {
         use cosh::ModelEntry;
         use cosh_sdk::connector::Connector;
-        use cosh_sdk::connector::known_providers;
+        use cosh_sdk::connector::known_providers_with_env;
 
         let current = self.llm_config.model.clone().unwrap_or_default();
 
         // Store the current model so we can restore on cancel
         self.model_dialog_original = Some(current.clone());
 
-        let dialog_tx = self.event_tx.clone();
-
-        // Show a loading state first
-        self.dialog.replace(DialogType::ModelList {
-            models: vec![],
-            current: current.clone(),
-            filter: String::new(),
-        });
-
-        // Fetch models from all known providers asynchronously
-        let providers_to_check: Vec<&str> = known_providers().collect();
-        let dialog_tx_clone = dialog_tx.clone();
-
-        self.tokio_handle.spawn(async move {
-            let mut all_models: Vec<ModelEntry> = Vec::new();
-
-            for provider in providers_to_check {
-                if let Ok(connector) = Connector::new(provider)
-                    && let Ok(output) = connector.list_models().await
-                {
-                    for model_info in output.models() {
-                        all_models.push(ModelEntry {
-                            provider: provider.to_string(),
-                            model: model_info.id().to_string(),
-                        });
-                    }
+        // Collect providers and check if their API key is still configured.
+        // If a provider's env var is missing, invalidate its cache entry so
+        // stale models don't appear as available options.
+        let providers_to_check: Vec<&str> = {
+            let mut active = Vec::new();
+            for (provider, env_var) in known_providers_with_env() {
+                if std::env::var(env_var).is_ok() {
+                    active.push(provider);
+                } else {
+                    // Provider no longer configured — purge cached models
+                    self.model_cache.invalidate(&provider.to_string());
                 }
             }
+            active
+        };
 
-            let _ = dialog_tx_clone.send(HarnessEvent::ModelsLoaded {
-                models: all_models,
-                current,
+        // Try to populate the dialog from cache first (instant, no network)
+        let mut cached_models: Vec<ModelEntry> = Vec::new();
+        for &provider in &providers_to_check {
+            if let Some(models) = self.model_cache.get(&provider.to_string()) {
+                cached_models.extend(models.iter().cloned());
+            }
+        }
+
+        if !cached_models.is_empty() {
+            self.dialog.replace(DialogType::ModelList {
+                models: cached_models,
+                current: current.clone(),
+                filter: String::new(),
             });
-        });
+        } else {
+            // Show a loading state first
+            self.dialog.replace(DialogType::ModelList {
+                models: vec![],
+                current: current.clone(),
+                filter: String::new(),
+            });
+        }
+
+        // Check if any provider is already being revalidated — if so,
+        // a background fetch is already in progress, skip spawning another.
+        let any_revalidating = providers_to_check
+            .iter()
+            .any(|p| self.model_cache.is_revalidating(&p.to_string()));
+
+        if !any_revalidating {
+            // Mark all providers as revalidating to prevent redundant fetches
+            for &provider in &providers_to_check {
+                self.model_cache.start_revalidation(provider.to_string());
+            }
+
+            // Always revalidate in background (stale-while-revalidate)
+            let dialog_tx = self.event_tx.clone();
+            let dialog_tx_clone = dialog_tx.clone();
+
+            self.tokio_handle.spawn(async move {
+                let mut all_models: Vec<ModelEntry> = Vec::new();
+
+                for provider in providers_to_check {
+                    if let Ok(connector) = Connector::new(provider)
+                        && let Ok(output) = connector.list_models().await
+                    {
+                        for model_info in output.models() {
+                            all_models.push(ModelEntry {
+                                provider: provider.to_string(),
+                                model: model_info.id().to_string(),
+                            });
+                        }
+                    }
+                }
+
+                let _ = dialog_tx_clone.send(HarnessEvent::ModelsLoaded {
+                    models: all_models,
+                    current,
+                });
+            });
+        }
+    }
+
+    /// Group models by provider and update the cache for each provider.
+    fn update_model_cache(&mut self, models: &[cosh::ModelEntry]) {
+        use std::collections::HashMap;
+        use cosh::ModelEntry;
+
+        // Group by provider
+        let mut grouped: HashMap<&str, Vec<ModelEntry>> = HashMap::new();
+        for entry in models {
+            grouped
+                .entry(entry.provider.as_str())
+                .or_default()
+                .push(entry.clone());
+        }
+
+        // Update cache for each provider with results
+        for (provider, provider_models) in grouped {
+            self.model_cache
+                .finish_revalidation(provider.to_string(), provider_models);
+        }
+
+        // Clear any remaining revalidation flags (providers that failed or
+        // returned no results) — preserves old cached data for those providers.
+        self.model_cache.clear_all_revalidation();
     }
 
     fn is_theme_dialog_visible(&self) -> bool {
@@ -440,6 +511,9 @@ impl App {
                     } = &d.dialog_type
                 {
                     save_provider_api_key(provider, env_var, input);
+                    // Invalidate model cache for this provider so the next
+                    // dialog open fetches fresh models with the new key.
+                    self.model_cache.invalidate(&provider.to_string());
                     // SAFETY: Setting env vars is safe in a single-threaded CLI context
                     unsafe {
                         std::env::set_var(env_var, input);
@@ -1880,6 +1954,9 @@ impl App {
                 }
 
                 HarnessEvent::ModelsLoaded { models, current } => {
+                    // Update cache with the freshly fetched models
+                    self.update_model_cache(&models);
+
                     // Update the dialog with the loaded models
                     if let Some(d) = self.dialog.current_mut()
                         && let DialogType::ModelList {
@@ -2166,6 +2243,9 @@ impl App {
                                 ..
                             } if !input.is_empty() => {
                                 save_provider_api_key(provider, env_var, input);
+                                // Invalidate model cache for this provider so the next
+                                // dialog open fetches fresh models with the new key.
+                                self.model_cache.invalidate(&provider.to_string());
                                 // SAFETY: Setting env vars is safe in a single-threaded CLI context
                                 unsafe {
                                     std::env::set_var(env_var, input);
