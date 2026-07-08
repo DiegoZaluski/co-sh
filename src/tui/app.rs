@@ -1257,11 +1257,16 @@ impl App {
                                 self.slash_menu.visible = false;
                             }
                             KeyCode::Backspace => {
-                                self.prompt_view.note_activity();
-                                if !self.prompt_view.input.is_empty() {
-                                    self.prompt_view.input.pop();
-                                    self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    self.prompt_view.delete_word_before_cursor();
                                     self.slash_menu.update(&self.prompt_view.input);
+                                } else {
+                                    self.prompt_view.note_activity();
+                                    if !self.prompt_view.input.is_empty() {
+                                        self.prompt_view.input.pop();
+                                        self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                        self.slash_menu.update(&self.prompt_view.input);
+                                    }
                                 }
                             }
                             KeyCode::Char(ch) => {
@@ -1606,12 +1611,17 @@ impl App {
                                         self.slash_menu.visible = false;
                                     }
                                     KeyCode::Backspace => {
-                                        self.prompt_view.note_activity();
-                                        if !self.prompt_view.input.is_empty() {
-                                            self.prompt_view.input.pop();
-                                            self.prompt_view.cursor_pos =
-                                                self.prompt_view.input.len();
+                                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                            self.prompt_view.delete_word_before_cursor();
                                             self.slash_menu.update(&self.prompt_view.input);
+                                        } else {
+                                            self.prompt_view.note_activity();
+                                            if !self.prompt_view.input.is_empty() {
+                                                self.prompt_view.input.pop();
+                                                self.prompt_view.cursor_pos =
+                                                    self.prompt_view.input.len();
+                                                self.slash_menu.update(&self.prompt_view.input);
+                                            }
                                         }
                                     }
                                     KeyCode::Char(ch) => {
@@ -1711,16 +1721,21 @@ impl App {
                                             (self.session_view.scroll_y + 10).max(0);
                                     }
                                     KeyCode::Backspace => {
-                                        self.prompt_view.note_activity();
-                                        let pos = self.prompt_view.cursor_pos;
-                                        if pos > 0 {
-                                            // Use floor_char_boundary to safely handle multi-byte chars
-                                            // (e.g. á, é, emoji). remove() panics if called at a
-                                            // non-char-boundary position.
-                                            let char_start =
-                                                self.prompt_view.input.floor_char_boundary(pos - 1);
-                                            self.prompt_view.input.remove(char_start);
-                                            self.prompt_view.cursor_pos = char_start;
+                                        // Ctrl+Backspace = delete word before cursor
+                                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                            self.prompt_view.delete_word_before_cursor();
+                                        } else {
+                                            self.prompt_view.note_activity();
+                                            let pos = self.prompt_view.cursor_pos;
+                                            if pos > 0 {
+                                                // Use floor_char_boundary to safely handle multi-byte chars
+                                                // (e.g. á, é, emoji). remove() panics if called at a
+                                                // non-char-boundary position.
+                                                let char_start =
+                                                    self.prompt_view.input.floor_char_boundary(pos - 1);
+                                                self.prompt_view.input.remove(char_start);
+                                                self.prompt_view.cursor_pos = char_start;
+                                            }
                                         }
                                     }
                                     KeyCode::Char(ch) => {
@@ -1733,6 +1748,14 @@ impl App {
                                             let pos = self.prompt_view.cursor_pos;
                                             self.prompt_view.input.insert(pos, '\n');
                                             self.prompt_view.cursor_pos = pos + 1;
+                                            return Ok(false);
+                                        }
+
+                                        // Ctrl+W = delete word before cursor (universal terminal shortcut)
+                                        if ch == 'w'
+                                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                                        {
+                                            self.prompt_view.delete_word_before_cursor();
                                             return Ok(false);
                                         }
 
@@ -2652,15 +2675,14 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
         crossterm::event::EnableBracketedPaste,
         crossterm::event::EnableMouseCapture,
     )?;
-    #[cfg(not(windows))]
-    {
-        crossterm::execute!(
-            stdout,
-            crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
-            ),
-        )?;
-    }
+    // Enable keyboard enhancement on all platforms (Windows Terminal + Kitty protocol)
+    // This allows detecting modifier+key combinations like Ctrl+Backspace.
+    let _ = crossterm::execute!(
+        stdout,
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ),
+    );
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -2675,10 +2697,7 @@ fn restore_terminal() -> io::Result<()> {
         crossterm::event::DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen,
     )?;
-    #[cfg(not(windows))]
-    {
-        crossterm::execute!(stdout, crossterm::event::PopKeyboardEnhancementFlags,)?;
-    }
+    let _ = crossterm::execute!(stdout, crossterm::event::PopKeyboardEnhancementFlags,);
     stdout.flush()?;
     crossterm::terminal::disable_raw_mode()?;
     Ok(())

@@ -153,6 +153,51 @@ impl PromptView {
         self.sel_end = None;
     }
 
+    /// Delete the word (or run of whitespace then word) immediately before the cursor.
+    /// Behaves like Ctrl+Backspace in most terminals/editors.
+    pub fn delete_word_before_cursor(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+
+        let pos = self.cursor_pos.min(self.input.len());
+        let mut i = pos;
+
+        // 1. Skip any whitespace immediately before the cursor.
+        while i > 0 {
+            let prev = self.input.floor_char_boundary(i - 1);
+            if prev >= i {
+                break;
+            }
+            let ch = self.input[prev..i].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                i = prev;
+            } else {
+                break;
+            }
+        }
+
+        // 2. Skip the word (non-whitespace) characters.
+        while i > 0 {
+            let prev = self.input.floor_char_boundary(i - 1);
+            if prev >= i {
+                break;
+            }
+            let ch = self.input[prev..i].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                i = prev;
+            } else {
+                break;
+            }
+        }
+
+        if i < self.cursor_pos {
+            self.note_activity();
+            self.input.drain(i..self.cursor_pos);
+            self.cursor_pos = i;
+        }
+    }
+
     pub fn cursor_up(&mut self, text_w: usize) {
         if self.input.is_empty() || text_w == 0 {
             return;
