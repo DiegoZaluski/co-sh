@@ -91,6 +91,8 @@ pub struct App {
     model_dialog_original: Option<String>,
     /// Stale-while-revalidate cache for model listings, keyed by provider.
     model_cache: crate::util::cache::StaleCache<String, Vec<cosh::ModelEntry>>,
+    /// Generic preferences cache (theme, etc.) persisted as key-value pairs.
+    prefs_cache: crate::util::cache::StaleCache<String, String>,
 
     // ── Mouse drag / selection tracking ───────────────────────────────────────────
     /// Position where the mouse was pressed down (for detecting drag selections).
@@ -112,7 +114,17 @@ impl App {
         let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
 
         let theme_registry = ThemeRegistry::new();
-        let theme = theme_registry.default_theme().clone();
+        let prefs_cache = crate::util::cache::StaleCache::new("preferences.json");
+
+        // Load saved theme from preferences cache, if available
+        let saved_theme: Option<String> = prefs_cache
+            .get(&"theme".to_string())
+            .cloned();
+        let theme = saved_theme
+            .as_deref()
+            .and_then(|name| theme_registry.get(name))
+            .cloned()
+            .unwrap_or_else(|| theme_registry.default_theme().clone());
 
         App {
             state,
@@ -137,6 +149,7 @@ impl App {
             theme_dialog_original: None,
             model_dialog_original: None,
             model_cache: crate::util::cache::StaleCache::new("model.json"),
+            prefs_cache,
             should_quit: false,
             tokio_handle: Handle::current(),
             event_tx,
@@ -362,6 +375,9 @@ impl App {
                     if let Some(t) = self.theme_registry.get(&name) {
                         self.theme = t.clone();
                     }
+                    // Persist theme choice so it survives restarts
+                    self.prefs_cache
+                        .finish_revalidation("theme".to_string(), name);
                 }
                 self.theme_dialog_original = None;
                 self.dialog.pop();
@@ -2221,6 +2237,17 @@ impl App {
                             DialogType::ThemeList { .. } => {
                                 self.apply_filtered_theme_preview();
                                 self.theme_dialog_original = None;
+                                // Persist theme choice from the dialog selection
+                                let filtered = self.theme_dialog_filtered();
+                                if let Some(d) = self.dialog.current() {
+                                    let sel = d.selected.min(filtered.len().saturating_sub(1));
+                                    if sel < filtered.len() {
+                                        self.prefs_cache.finish_revalidation(
+                                            "theme".to_string(),
+                                            filtered[sel].clone(),
+                                        );
+                                    }
+                                }
                             }
                             DialogType::ModelList { .. } => {
                                 let models =
