@@ -1122,6 +1122,16 @@ impl App {
                                 self.show_add_provider = false;
                                 return Ok(false);
                             }
+                            KeyCode::Char(ch) => {
+                                let list_area = 20;
+                                self.add_provider_view.push_filter_char(ch, list_area);
+                                return Ok(false);
+                            }
+                            KeyCode::Backspace => {
+                                let list_area = 20;
+                                self.add_provider_view.pop_filter_char(list_area);
+                                return Ok(false);
+                            }
                             _ => {}
                         }
                     }
