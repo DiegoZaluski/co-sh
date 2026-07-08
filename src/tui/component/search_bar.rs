@@ -66,13 +66,13 @@ impl SearchBar {
     }
 
     pub fn render(&self, buf: &mut Buffer, x: u16, y: u16, width: u16, theme: &Theme) {
-        let bg_element = rgba_color(theme.background_element);
+        let bg_color = rgba_color(theme.background);
         let now = SystemTime::now();
 
         for cx in x..x + width {
             if let Some(cell) = buf.cell_mut((cx, y)) {
                 cell.set_char(' ');
-                cell.set_style(Style::default().bg(bg_element));
+                cell.set_style(Style::default().bg(bg_color));
             }
         }
 
@@ -88,27 +88,29 @@ impl SearchBar {
                 width,
                 Style::default()
                     .fg(rgba_color(theme.text_muted))
-                    .bg(bg_element),
+                    .bg(bg_color),
             );
 
-            let cursor_x = x + search_label.len() as u16;
-            if cursor_x < x + width
-                && let Some(cell) = buf.cell_mut((cursor_x, y))
-            {
-                if cursor_vis {
-                    cell.set_char('\u{2588}');
-                    cell.set_style(
-                        Style::default()
-                            .fg(rgba_color(theme.primary))
-                            .bg(bg_element),
-                    );
-                } else {
-                    cell.set_char('\u{2588}');
-                    cell.set_style(
-                        Style::default()
-                            .fg(rgba_color(theme.text_muted))
-                            .bg(bg_element),
-                    );
+            // Cursor positioned over the first character of the placeholder
+            let cursor_state = self.cursor.current_state(now);
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                match cursor_state {
+                    CursorState::On => {
+                        cell.set_char('\u{2588}');
+                        cell.set_style(
+                            Style::default()
+                                .fg(rgba_color(theme.primary))
+                                .bg(bg_color),
+                        );
+                    }
+                    CursorState::Off | CursorState::Blur => {
+                        cell.set_char('\u{2592}');
+                        cell.set_style(
+                            Style::default()
+                                .fg(rgba_color(theme.text_muted))
+                                .bg(bg_color),
+                        );
+                    }
                 }
             }
         } else {
@@ -118,7 +120,7 @@ impl SearchBar {
                 x,
                 y,
                 width,
-                Style::default().fg(rgba_color(theme.text)).bg(bg_element),
+                Style::default().fg(rgba_color(theme.text)).bg(bg_color),
             );
 
             let cursor_x = x + self.filter.len() as u16;
@@ -130,14 +132,14 @@ impl SearchBar {
                     cell.set_style(
                         Style::default()
                             .fg(rgba_color(theme.primary))
-                            .bg(bg_element),
+                            .bg(bg_color),
                     );
                 } else {
-                    cell.set_char('\u{2588}');
+                    cell.set_char('\u{2592}');
                     cell.set_style(
                         Style::default()
                             .fg(rgba_color(theme.text_muted))
-                            .bg(bg_element),
+                            .bg(bg_color),
                     );
                 }
             }

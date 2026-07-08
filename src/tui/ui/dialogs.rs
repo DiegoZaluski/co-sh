@@ -726,7 +726,8 @@ impl DialogState {
                                 );
                             }
                             CursorState::Off | CursorState::Blur => {
-                                cell.set_char('\u{2588}');
+                                // Semi-transparent cursor with medium shade character
+                                cell.set_char('\u{2592}');
                                 cell.set_style(
                                     Style::default()
                                         .fg(rgba_color(theme.text_muted))
@@ -748,11 +749,8 @@ impl DialogState {
                             .fg(rgba_color(theme.text_muted))
                             .bg(bg_element),
                     );
-                    // Cursor AFTER "Search"
-                    let cursor_x = header_x + search_label.len() as u16;
-                    if cursor_x < header_x + header_w
-                        && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
-                    {
+                    // Cursor positioned over the first character of the placeholder
+                    if let Some(cell) = buf.cell_mut((header_x, dialog_y + 1)) {
                         match cursor_state {
                             CursorState::On => {
                                 cell.set_char('\u{2588}');
@@ -763,7 +761,8 @@ impl DialogState {
                                 );
                             }
                             CursorState::Off | CursorState::Blur => {
-                                cell.set_char('\u{2588}');
+                                // Semi-transparent cursor with medium shade character
+                                cell.set_char('\u{2592}');
                                 cell.set_style(
                                     Style::default()
                                         .fg(rgba_color(theme.text_muted))
@@ -1136,8 +1135,8 @@ impl DialogState {
                             );
                         }
                         CursorState::Off | CursorState::Blur => {
-                            // OFF/Blur: dimmed block cursor
-                            cell.set_char('\u{2588}');
+                            // OFF/Blur: semi-transparent cursor
+                            cell.set_char('\u{2592}');
                             cell.set_style(
                                 Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_element),
                             );
@@ -1260,7 +1259,8 @@ impl DialogState {
                                 );
                             }
                             CursorState::Off | CursorState::Blur => {
-                                cell.set_char('\u{2588}');
+                                // Semi-transparent cursor with medium shade character
+                                cell.set_char('\u{2592}');
                                 cell.set_style(
                                     Style::default()
                                         .fg(rgba_color(theme.text_muted))
@@ -1282,11 +1282,8 @@ impl DialogState {
                             .fg(rgba_color(theme.text_muted))
                             .bg(bg_element),
                     );
-                    // Cursor AFTER "Search"
-                    let cursor_x = header_x + search_label.len() as u16;
-                    if cursor_x < header_x + header_w
-                        && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
-                    {
+                    // Cursor positioned over the first character of the placeholder
+                    if let Some(cell) = buf.cell_mut((header_x, dialog_y + 1)) {
                         match cursor_state {
                             CursorState::On => {
                                 cell.set_char('\u{2588}');
@@ -1297,7 +1294,8 @@ impl DialogState {
                                 );
                             }
                             CursorState::Off | CursorState::Blur => {
-                                cell.set_char('\u{2588}');
+                                // Semi-transparent cursor with medium shade character
+                                cell.set_char('\u{2592}');
                                 cell.set_style(
                                     Style::default()
                                         .fg(rgba_color(theme.text_muted))
