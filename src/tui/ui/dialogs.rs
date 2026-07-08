@@ -726,8 +726,12 @@ impl DialogState {
                                 );
                             }
                             CursorState::Off | CursorState::Blur => {
-                                cell.set_char(' ');
-                                cell.set_style(Style::default().bg(bg_element));
+                                cell.set_char('\u{2588}');
+                                cell.set_style(
+                                    Style::default()
+                                        .fg(rgba_color(theme.text_muted))
+                                        .bg(bg_element),
+                                );
                             }
                         }
                     }
@@ -759,8 +763,12 @@ impl DialogState {
                                 );
                             }
                             CursorState::Off | CursorState::Blur => {
-                                cell.set_char(' ');
-                                cell.set_style(Style::default().bg(bg_element));
+                                cell.set_char('\u{2588}');
+                                cell.set_style(
+                                    Style::default()
+                                        .fg(rgba_color(theme.text_muted))
+                                        .bg(bg_element),
+                                );
                             }
                         }
                     }
@@ -1252,8 +1260,12 @@ impl DialogState {
                                 );
                             }
                             CursorState::Off | CursorState::Blur => {
-                                cell.set_char(' ');
-                                cell.set_style(Style::default().bg(bg_element));
+                                cell.set_char('\u{2588}');
+                                cell.set_style(
+                                    Style::default()
+                                        .fg(rgba_color(theme.text_muted))
+                                        .bg(bg_element),
+                                );
                             }
                         }
                     }
@@ -1285,8 +1297,12 @@ impl DialogState {
                                 );
                             }
                             CursorState::Off | CursorState::Blur => {
-                                cell.set_char(' ');
-                                cell.set_style(Style::default().bg(bg_element));
+                                cell.set_char('\u{2588}');
+                                cell.set_style(
+                                    Style::default()
+                                        .fg(rgba_color(theme.text_muted))
+                                        .bg(bg_element),
+                                );
                             }
                         }
                     }

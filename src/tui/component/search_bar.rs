@@ -103,8 +103,12 @@ impl SearchBar {
                             .bg(bg_element),
                     );
                 } else {
-                    cell.set_char(' ');
-                    cell.set_style(Style::default().bg(bg_element));
+                    cell.set_char('\u{2588}');
+                    cell.set_style(
+                        Style::default()
+                            .fg(rgba_color(theme.text_muted))
+                            .bg(bg_element),
+                    );
                 }
             }
         } else {
@@ -129,8 +133,12 @@ impl SearchBar {
                             .bg(bg_element),
                     );
                 } else {
-                    cell.set_char(' ');
-                    cell.set_style(Style::default().bg(bg_element));
+                    cell.set_char('\u{2588}');
+                    cell.set_style(
+                        Style::default()
+                            .fg(rgba_color(theme.text_muted))
+                            .bg(bg_element),
+                    );
                 }
             }
         }
