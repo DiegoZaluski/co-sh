@@ -277,6 +277,18 @@ impl SessionView {
         let mut y = y_;
         let mut cx = x;
         for ch in text.chars() {
+            if ch == '\n' {
+                y += 1;
+                cx = x;
+                if y >= bottom {
+                    break;
+                }
+                continue;
+            }
+            // ratatui panics on control chars, so filter those out
+            if ch.is_control() && ch != '\t' {
+                continue;
+            }
             if cx >= right {
                 y += 1;
                 cx = x;
