@@ -2075,14 +2075,40 @@ impl App {
         // ── Mouse wheel scrolling ───────────────────────────────────────────
         match event_type {
             MouseEventType::ScrollUp => {
-                if matches!(self.mode(), AppMode::Session) {
+                if let Some(d) = self.dialog.current_mut() {
+                    match &d.dialog_type {
+                        DialogType::ModelList { .. } => {
+                            self.handle_model_dialog_key(KeyCode::Up);
+                        }
+                        DialogType::ThemeList { .. } => {
+                            self.handle_theme_dialog_key(KeyCode::Up);
+                        }
+                        _ => {}
+                    }
+                } else if matches!(self.mode(), AppMode::Session) {
                     self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
+                } else if matches!(self.mode(), AppMode::AddProvider) {
+                    let list_area = 20;
+                    self.add_provider_view.select_prev(list_area);
                 }
                 return Ok(true);
             }
             MouseEventType::ScrollDown => {
-                if matches!(self.mode(), AppMode::Session) {
+                if let Some(d) = self.dialog.current_mut() {
+                    match &d.dialog_type {
+                        DialogType::ModelList { .. } => {
+                            self.handle_model_dialog_key(KeyCode::Down);
+                        }
+                        DialogType::ThemeList { .. } => {
+                            self.handle_theme_dialog_key(KeyCode::Down);
+                        }
+                        _ => {}
+                    }
+                } else if matches!(self.mode(), AppMode::Session) {
                     self.session_view.scroll_y = (self.session_view.scroll_y + 3).max(0);
+                } else if matches!(self.mode(), AppMode::AddProvider) {
+                    let list_area = 20;
+                    self.add_provider_view.select_next(list_area);
                 }
                 return Ok(true);
             }
