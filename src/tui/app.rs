@@ -2384,7 +2384,7 @@ impl App {
                 main_area.x,
                 area.y + 1,
                 main_area.width,
-                main_area.height.saturating_sub(2),
+                main_area.height.saturating_sub(3),
             );
             if let Some(clicked_idx) = self.internal_tools_view.handle_mouse(&mouse, tools_area) {
                 self.internal_tools_view.selected_index = clicked_idx;
@@ -2407,7 +2407,7 @@ impl App {
                 main_area.x,
                 area.y + 1,
                 main_area.width,
-                main_area.height.saturating_sub(2),
+                main_area.height.saturating_sub(3),
             );
             if let Some(clicked_idx) = self.add_provider_view.handle_mouse(&mouse, tools_area) {
                 self.add_provider_view.selected_index = clicked_idx;
