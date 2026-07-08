@@ -1670,25 +1670,33 @@ impl App {
                                         }
                                     }
                                     KeyCode::Left => {
-                                        self.prompt_view.note_activity();
-                                        if self.prompt_view.cursor_pos > 0 {
-                                            self.prompt_view.cursor_pos =
-                                                self.prompt_view.input.floor_char_boundary(
-                                                    self.prompt_view.cursor_pos - 1,
-                                                );
+                                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                            self.prompt_view.cursor_word_left();
+                                        } else {
+                                            self.prompt_view.note_activity();
+                                            if self.prompt_view.cursor_pos > 0 {
+                                                self.prompt_view.cursor_pos =
+                                                    self.prompt_view.input.floor_char_boundary(
+                                                        self.prompt_view.cursor_pos - 1,
+                                                    );
+                                            }
                                         }
                                     }
                                     KeyCode::Right => {
-                                        self.prompt_view.note_activity();
-                                        let len = self.prompt_view.input.len();
-                                        if self.prompt_view.cursor_pos < len {
-                                            self.prompt_view.cursor_pos = self
-                                                .prompt_view
-                                                .input
-                                                .floor_char_boundary(
-                                                    self.prompt_view.cursor_pos + 1,
-                                                )
-                                                .min(len);
+                                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                            self.prompt_view.cursor_word_right();
+                                        } else {
+                                            self.prompt_view.note_activity();
+                                            let len = self.prompt_view.input.len();
+                                            if self.prompt_view.cursor_pos < len {
+                                                self.prompt_view.cursor_pos = self
+                                                    .prompt_view
+                                                    .input
+                                                    .floor_char_boundary(
+                                                        self.prompt_view.cursor_pos + 1,
+                                                    )
+                                                    .min(len);
+                                            }
                                         }
                                     }
                                     KeyCode::Home => {
