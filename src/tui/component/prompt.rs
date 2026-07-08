@@ -9,6 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
+use crate::component::cursor::{Cursor, CursorState};
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::types::AgentColors;
@@ -61,9 +62,7 @@ pub struct PromptView {
     pub history: Vec<String>,
     pub history_index: i32,
     pub is_focused: bool,
-    pub terminal_focused: bool,
-    pub last_input_at: SystemTime,
-    pub blink_start: SystemTime,
+    pub cursor: Cursor,
     pub sel_start: Option<usize>,
     pub sel_end: Option<usize>,
 }
@@ -77,9 +76,7 @@ impl PromptView {
             history: Vec::new(),
             history_index: -1,
             is_focused: true,
-            terminal_focused: true,
-            last_input_at: SystemTime::now(),
-            blink_start: SystemTime::now(),
+            cursor: Cursor::new(),
             sel_start: None,
             sel_end: None,
         }
@@ -132,8 +129,7 @@ impl PromptView {
     }
 
     pub fn note_activity(&mut self) {
-        self.last_input_at = SystemTime::now();
-        self.blink_start = SystemTime::now();
+        self.cursor.note_activity();
     }
 
     pub fn has_selection(&self) -> bool {
@@ -514,41 +510,24 @@ impl PromptView {
                 if cursor_x < input_area.right()
                     && let Some(cell) = buf.cell_mut((cursor_x, cursor_y))
                 {
-                    if self.terminal_focused {
-                        // Steady cursor while typing; blink after 500ms idle
-                        let idle_ms = now
-                            .duration_since(self.last_input_at)
-                            .map_or(0, |d| d.as_millis());
-                        let show = if idle_ms < 500 {
-                            true
-                        } else {
-                            let elapsed_ms = now
-                                .duration_since(self.blink_start)
-                                .map_or(0, |d| d.as_millis() % 1000);
-                            elapsed_ms < 500
-                        };
-                        if show {
+                    // Use the reusable cursor component
+                    match self.cursor.current_state(now) {
+                        CursorState::On => {
                             // ON: transparent cursor (invert colors)
                             cell.set_style(
                                 Style::default()
                                     .fg(rgba_color(theme.background))
                                     .bg(rgba_color(theme.text)),
                             );
-                        } else {
-                            // OFF: dimmed visible state (not invisible)
+                        }
+                        CursorState::Off | CursorState::Blur => {
+                            // OFF/Blur: dimmed visible state (not invisible)
                             cell.set_style(
                                 Style::default()
                                     .fg(rgba_color(theme.text_muted))
                                     .bg(rgba_color(theme.background)),
                             );
                         }
-                    } else {
-                        // Terminal unfocused: transparent dark
-                        cell.set_style(
-                            Style::default()
-                                .fg(rgba_color(theme.text_muted))
-                                .bg(rgba_color(theme.background)),
-                        );
                     }
                 }
             }

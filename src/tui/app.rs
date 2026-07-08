@@ -317,8 +317,7 @@ impl App {
                     };
                     filter.pop();
                     d.selected = 0;
-                    d.last_filter_at = std::time::SystemTime::now();
-                    d.blink_start = std::time::SystemTime::now();
+                    d.cursor.note_activity();
                     filter.is_empty()
                 };
                 if is_empty {
@@ -382,8 +381,7 @@ impl App {
                 filter.push(ch);
             }
             d.selected = 0;
-            d.last_filter_at = std::time::SystemTime::now();
-            d.blink_start = std::time::SystemTime::now();
+            d.cursor.note_activity();
         }
         self.apply_filtered_theme_preview();
     }
@@ -420,8 +418,7 @@ impl App {
 
         // Update blink timestamps on any interaction
         if let Some(d) = self.dialog.current_mut() {
-            d.last_filter_at = std::time::SystemTime::now();
-            d.blink_start = std::time::SystemTime::now();
+            d.cursor.note_activity();
         }
 
         match key {
@@ -665,8 +662,7 @@ impl App {
                     };
                     filter.pop();
                     d.selected = 0;
-                    d.last_filter_at = std::time::SystemTime::now();
-                    d.blink_start = std::time::SystemTime::now();
+                    d.cursor.note_activity();
                     filter.is_empty()
                 };
                 true
@@ -686,8 +682,7 @@ impl App {
                 filter.push(ch);
             }
             d.selected = 0;
-            d.last_filter_at = std::time::SystemTime::now();
-            d.blink_start = std::time::SystemTime::now();
+            d.cursor.note_activity();
         }
     }
 
@@ -841,6 +836,10 @@ impl App {
                 }
                 AppMode::AddProvider => {
                     self.prompt_view.blur();
+                    self.add_provider_view
+                        .search_bar
+                        .cursor
+                        .terminal_focused = self.terminal_focused;
                     let tools_area = Rect::new(
                         session_area.x,
                         session_area.y,
@@ -851,7 +850,7 @@ impl App {
                 }
                 AppMode::Session => {
                     self.prompt_view.focus();
-                    self.prompt_view.terminal_focused = self.terminal_focused;
+                    self.prompt_view.cursor.terminal_focused = self.terminal_focused;
                     self.session_view.drag_selection = self.drag_selection;
                     self.session_view.tool_state.advance_spinner();
 
@@ -905,8 +904,13 @@ impl App {
             );
             let now = std::time::SystemTime::now();
             self.toast_state.render(buf, area, &self.theme);
+            // Sync terminal_focused to the dialog cursor so ThemeList/ModelList/ApiKeyInput
+            // all respect the terminal focus state (blur when user clicks outside).
+            if let Some(d) = self.dialog.current_mut() {
+                d.cursor.terminal_focused = self.terminal_focused;
+            }
             self.dialog
-                .render(buf, area, &self.theme, now, self.terminal_focused);
+                .render(buf, area, &self.theme, now);
             self.permission_dialog.render(buf, area, &self.theme);
             self.command_palette.render(buf, area, &self.theme);
             self.slash_menu.render(buf, prompt_area, &self.theme);
@@ -1691,8 +1695,7 @@ impl App {
                             text.chars().filter(|&c| c != '\n' && c != '\r').collect();
                         input.insert_str(*cursor_pos, &cleaned);
                         *cursor_pos += cleaned.len();
-                        d.last_filter_at = std::time::SystemTime::now();
-                        d.blink_start = std::time::SystemTime::now();
+                        d.cursor.note_activity();
                     }
                 } else {
                     self.prompt_view.note_activity();

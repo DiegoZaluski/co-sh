@@ -3,6 +3,7 @@ use std::time::SystemTime;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Style};
 
+use crate::component::cursor::{Cursor, CursorState};
 use crate::theme::Theme;
 
 fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
@@ -26,35 +27,30 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
 
 pub struct SearchBar {
     pub filter: String,
-    pub last_filter_at: SystemTime,
-    pub blink_start: SystemTime,
+    pub cursor: Cursor,
 }
 
 impl SearchBar {
     pub fn new() -> Self {
         Self {
             filter: String::new(),
-            last_filter_at: SystemTime::now(),
-            blink_start: SystemTime::now(),
+            cursor: Cursor::new(),
         }
     }
 
     pub fn push_char(&mut self, ch: char) {
         self.filter.push(ch);
-        self.last_filter_at = SystemTime::now();
-        self.blink_start = SystemTime::now();
+        self.cursor.note_activity();
     }
 
     pub fn pop_char(&mut self) {
         self.filter.pop();
-        self.last_filter_at = SystemTime::now();
-        self.blink_start = SystemTime::now();
+        self.cursor.note_activity();
     }
 
     pub fn clear(&mut self) {
         self.filter.clear();
-        self.last_filter_at = SystemTime::now();
-        self.blink_start = SystemTime::now();
+        self.cursor.note_activity();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -66,17 +62,7 @@ impl SearchBar {
     }
 
     fn cursor_visible(&self, now: SystemTime) -> bool {
-        let idle_ms = now
-            .duration_since(self.last_filter_at)
-            .map_or(0, |d| d.as_millis());
-        if idle_ms < 500 {
-            true
-        } else {
-            let elapsed_ms = now
-                .duration_since(self.blink_start)
-                .map_or(0, |d| d.as_millis() % 1000);
-            elapsed_ms < 500
-        }
+        matches!(self.cursor.current_state(now), CursorState::On)
     }
 
     pub fn render(&self, buf: &mut Buffer, x: u16, y: u16, width: u16, theme: &Theme) {
@@ -92,17 +78,20 @@ impl SearchBar {
 
         let cursor_vis = self.cursor_visible(now);
 
-        if !self.filter.is_empty() {
+        if self.filter.is_empty() {
+            let search_label = "Search";
             draw_text_line(
                 buf,
-                &self.filter,
+                search_label,
                 x,
                 y,
                 width,
-                Style::default().fg(rgba_color(theme.text)).bg(bg_element),
+                Style::default()
+                    .fg(rgba_color(theme.text_muted))
+                    .bg(bg_element),
             );
 
-            let cursor_x = x + self.filter.len() as u16;
+            let cursor_x = x + search_label.len() as u16;
             if cursor_x < x + width
                 && let Some(cell) = buf.cell_mut((cursor_x, y))
             {
@@ -119,19 +108,16 @@ impl SearchBar {
                 }
             }
         } else {
-            let search_label = "Search";
             draw_text_line(
                 buf,
-                search_label,
+                &self.filter,
                 x,
                 y,
                 width,
-                Style::default()
-                    .fg(rgba_color(theme.text_muted))
-                    .bg(bg_element),
+                Style::default().fg(rgba_color(theme.text)).bg(bg_element),
             );
 
-            let cursor_x = x + search_label.len() as u16;
+            let cursor_x = x + self.filter.len() as u16;
             if cursor_x < x + width
                 && let Some(cell) = buf.cell_mut((cursor_x, y))
             {

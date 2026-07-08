@@ -11,6 +11,7 @@ use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::types::MouseEvent;
 
+use crate::component::cursor::{Cursor, CursorState};
 use crate::theme::Theme;
 
 /// Visual item in the model list - either a provider header or a model
@@ -91,8 +92,7 @@ pub enum DialogType {
 pub struct DialogInstance {
     pub dialog_type: DialogType,
     pub selected: usize,
-    pub last_filter_at: SystemTime,
-    pub blink_start: SystemTime,
+    pub cursor: Cursor,
 }
 
 pub struct DialogState {
@@ -121,8 +121,7 @@ impl DialogState {
         self.stack.push(DialogInstance {
             dialog_type,
             selected: 0,
-            last_filter_at: SystemTime::now(),
-            blink_start: SystemTime::now(),
+            cursor: Cursor::new(),
         });
     }
 
@@ -473,7 +472,6 @@ impl DialogState {
         area: Rect,
         theme: &Theme,
         now: SystemTime,
-        terminal_focused: bool,
     ) {
         let Some(instance) = self.stack.last() else {
             return;
@@ -699,18 +697,8 @@ impl DialogState {
                     }
                 }
 
-                // Blink cursor logic: steady for 500ms after typing, then blink 500ms on/off
-                let idle_ms = now
-                    .duration_since(instance.last_filter_at)
-                    .map_or(0, |d| d.as_millis());
-                let cursor_visible = if idle_ms < 500 {
-                    true // steady after typing
-                } else {
-                    let elapsed_ms = now
-                        .duration_since(instance.blink_start)
-                        .map_or(0, |d| d.as_millis() % 1000);
-                    elapsed_ms < 500
-                };
+                // Use the reusable cursor component (no blur behavior; always focused)
+                let cursor_state = instance.cursor.current_state(now);
 
                 // Show "Search" when empty, otherwise show filter text + cursor
                 let has_filter = !filter.is_empty();
@@ -728,16 +716,19 @@ impl DialogState {
                     if cursor_x < header_x + header_w
                         && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
                     {
-                        if cursor_visible {
-                            cell.set_char('\u{2588}');
-                            cell.set_style(
-                                Style::default()
-                                    .fg(rgba_color(theme.primary))
-                                    .bg(bg_element),
-                            );
-                        } else {
-                            cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_element));
+                        match cursor_state {
+                            CursorState::On => {
+                                cell.set_char('\u{2588}');
+                                cell.set_style(
+                                    Style::default()
+                                        .fg(rgba_color(theme.primary))
+                                        .bg(bg_element),
+                                );
+                            }
+                            CursorState::Off | CursorState::Blur => {
+                                cell.set_char(' ');
+                                cell.set_style(Style::default().bg(bg_element));
+                            }
                         }
                     }
                 } else {
@@ -753,21 +744,24 @@ impl DialogState {
                             .fg(rgba_color(theme.text_muted))
                             .bg(bg_element),
                     );
-                    // Cursor AFTER "Search" (at position 6)
+                    // Cursor AFTER "Search"
                     let cursor_x = header_x + search_label.len() as u16;
                     if cursor_x < header_x + header_w
                         && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
                     {
-                        if cursor_visible {
-                            cell.set_char('\u{2588}');
-                            cell.set_style(
-                                Style::default()
-                                    .fg(rgba_color(theme.primary))
-                                    .bg(bg_element),
-                            );
-                        } else {
-                            cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_element));
+                        match cursor_state {
+                            CursorState::On => {
+                                cell.set_char('\u{2588}');
+                                cell.set_style(
+                                    Style::default()
+                                        .fg(rgba_color(theme.primary))
+                                        .bg(bg_element),
+                                );
+                            }
+                            CursorState::Off | CursorState::Blur => {
+                                cell.set_char(' ');
+                                cell.set_style(Style::default().bg(bg_element));
+                            }
                         }
                     }
                 }
@@ -1103,18 +1097,8 @@ impl DialogState {
                 // Draw masked input (*** characters), char by char so cursor can be positioned
                 let masked: Vec<char> = input.chars().map(|_| '*').collect();
 
-                // Blink cursor logic: steady for 500ms after typing, then blink 500ms on/off
-                let idle_ms = now
-                    .duration_since(instance.last_filter_at)
-                    .map_or(0, |d| d.as_millis());
-                let cursor_visible = if idle_ms < 500 {
-                    true // steady after typing
-                } else {
-                    let elapsed_ms = now
-                        .duration_since(instance.blink_start)
-                        .map_or(0, |d| d.as_millis() % 1000);
-                    elapsed_ms < 500
-                };
+                // Cursor's terminal_focused is synced from app.rs before render
+                let cursor_state = instance.cursor.current_state(now);
 
                 // Draw each masked character
                 for (i, _ch) in masked.iter().enumerate() {
@@ -1133,9 +1117,8 @@ impl DialogState {
                 if cursor_x < input_x + content_w
                     && let Some(cell) = buf.cell_mut((cursor_x, input_y))
                 {
-                    if terminal_focused {
-                        // Steady while typing, blink after 500ms idle
-                        if cursor_visible {
+                    match cursor_state {
+                        CursorState::On => {
                             // ON: block cursor with primary color
                             cell.set_char('\u{2588}');
                             cell.set_style(
@@ -1143,17 +1126,14 @@ impl DialogState {
                                     .fg(rgba_color(theme.primary))
                                     .bg(bg_element),
                             );
-                        } else {
-                            // OFF: dimmed block cursor (still visible, not invisible)
+                        }
+                        CursorState::Off | CursorState::Blur => {
+                            // OFF/Blur: dimmed block cursor
                             cell.set_char('\u{2588}');
                             cell.set_style(
                                 Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_element),
                             );
                         }
-                    } else {
-                        // Terminal unfocused: transparent black cursor (static, no blink)
-                        cell.set_char('\u{2588}');
-                        cell.set_style(Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_element));
                     }
                 }
             }
@@ -1243,18 +1223,8 @@ impl DialogState {
                     }
                 }
 
-                // Blink cursor logic: steady for 500ms after typing, then blink 500ms on/off
-                let idle_ms = now
-                    .duration_since(instance.last_filter_at)
-                    .map_or(0, |d| d.as_millis());
-                let cursor_visible = if idle_ms < 500 {
-                    true // steady after typing
-                } else {
-                    let elapsed_ms = now
-                        .duration_since(instance.blink_start)
-                        .map_or(0, |d| d.as_millis() % 1000);
-                    elapsed_ms < 500
-                };
+                // Use the reusable cursor component (no blur behavior; always focused)
+                let cursor_state = instance.cursor.current_state(now);
 
                 // Show "Search" when empty, otherwise show filter text + cursor
                 let has_filter = !filter.is_empty();
@@ -1272,16 +1242,19 @@ impl DialogState {
                     if cursor_x < header_x + header_w
                         && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
                     {
-                        if cursor_visible {
-                            cell.set_char('\u{2588}');
-                            cell.set_style(
-                                Style::default()
-                                    .fg(rgba_color(theme.primary))
-                                    .bg(bg_element),
-                            );
-                        } else {
-                            cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_element));
+                        match cursor_state {
+                            CursorState::On => {
+                                cell.set_char('\u{2588}');
+                                cell.set_style(
+                                    Style::default()
+                                        .fg(rgba_color(theme.primary))
+                                        .bg(bg_element),
+                                );
+                            }
+                            CursorState::Off | CursorState::Blur => {
+                                cell.set_char(' ');
+                                cell.set_style(Style::default().bg(bg_element));
+                            }
                         }
                     }
                 } else {
@@ -1297,21 +1270,24 @@ impl DialogState {
                             .fg(rgba_color(theme.text_muted))
                             .bg(bg_element),
                     );
-                    // Cursor AFTER "Search" (at position 6)
+                    // Cursor AFTER "Search"
                     let cursor_x = header_x + search_label.len() as u16;
                     if cursor_x < header_x + header_w
                         && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
                     {
-                        if cursor_visible {
-                            cell.set_char('\u{2588}');
-                            cell.set_style(
-                                Style::default()
-                                    .fg(rgba_color(theme.primary))
-                                    .bg(bg_element),
-                            );
-                        } else {
-                            cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_element));
+                        match cursor_state {
+                            CursorState::On => {
+                                cell.set_char('\u{2588}');
+                                cell.set_style(
+                                    Style::default()
+                                        .fg(rgba_color(theme.primary))
+                                        .bg(bg_element),
+                                );
+                            }
+                            CursorState::Off | CursorState::Blur => {
+                                cell.set_char(' ');
+                                cell.set_style(Style::default().bg(bg_element));
+                            }
                         }
                     }
                 }
