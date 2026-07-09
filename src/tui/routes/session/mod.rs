@@ -68,6 +68,10 @@ fn concealed_char(ch: char) -> char {
     if ch == ' ' { ' ' } else { '\u{2588}' }
 }
 
+fn sanitize_text(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_control()).collect()
+}
+
 fn conceal_text(text: &str) -> String {
     text.chars().map(concealed_char).collect()
 }
@@ -191,7 +195,7 @@ impl SessionView {
                     let content = if config.conceal {
                         conceal_text(&t.text)
                     } else {
-                        t.text.clone()
+                        sanitize_text(&t.text)
                     };
                     let h = Self::estimate_part_height(part, max_w, config).min(bottom - y);
                     let area = Rect::new(x, y, max_w, h);
@@ -207,7 +211,7 @@ impl SessionView {
                     let content = if config.conceal {
                         conceal_text(&t.text)
                     } else {
-                        t.text.clone()
+                        sanitize_text(&t.text)
                     };
                     let h = Self::estimate_part_height(part, max_w, config)
                         .min(bottom - y)
@@ -290,7 +294,7 @@ impl SessionView {
                 }
                 continue;
             }
-            if ch.is_control() && ch != '\t' {
+            if ch.is_control() {
                 continue;
             }
             if cx >= right {
@@ -497,16 +501,19 @@ impl SessionView {
                     }
                 })
                 .collect::<Vec<_>>()
-                .join(" ");
+                .join(" ")
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .collect();
             let mut line_x = x_off;
-            let mut line_y = area.y + 2;
+            let mut line_y = area.y + 1;
             for ch in error_text.chars() {
                 if ch == '\n' {
                     line_x = x_off;
                     line_y += 1;
                     continue;
                 }
-                if ch.is_control() && ch != '\n' && ch != '\t' {
+                if ch.is_control() {
                     continue;
                 }
                 if line_x >= x_off + max_w {
@@ -661,15 +668,55 @@ impl SessionView {
             MessageRole::User => 1,
             MessageRole::Assistant => 0,
         };
+        let is_error = msg.id.starts_with("msg-err-");
+        let parts_h: i32 = if is_error {
+            let error_text: String = msg
+                .parts
+                .iter()
+                .filter_map(|p| {
+                    if let crate::types::Part::Text(t) = p {
+                        Some(t.text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .collect();
+            let mut lines = 0u16;
+            let mut col = 0u16;
+            for ch in error_text.chars() {
+                if ch == '\n' {
+                    lines += 1;
+                    col = 0;
+                    continue;
+                }
+                if ch.is_control() {
+                    continue;
+                }
+                if col >= max_w {
+                    lines += 1;
+                    col = 0;
+                }
+                col += 1;
+            }
+            if col > 0 || error_text.is_empty() {
+                lines += 1;
+            }
+            i32::from(lines)
+        } else {
+            msg.parts
+                .iter()
+                .map(|p| i32::from(Self::estimate_part_height(p, max_w, config)))
+                .sum()
+        };
         let padding_bottom: i32 = match msg.role {
             MessageRole::User => 1,
+            MessageRole::Assistant if is_error => 2,
             MessageRole::Assistant => 0,
         };
-        let parts_h: i32 = msg
-            .parts
-            .iter()
-            .map(|p| i32::from(Self::estimate_part_height(p, max_w, config)))
-            .sum();
         border_h + parts_h + padding_bottom
     }
 
