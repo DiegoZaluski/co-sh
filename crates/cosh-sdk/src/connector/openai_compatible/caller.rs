@@ -98,6 +98,19 @@ struct ResponseMessage {
     tool_calls: Option<Vec<ToolCall>>,
 }
 
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+struct ApiErrorResponse {
+    error: ApiErrorDetail,
+}
+
+#[derive(serde::Deserialize)]
+struct ApiErrorDetail {
+    message: String,
+    #[serde(default)]
+    r#type: Option<String>,
+}
+
 //  SSE streaming types
 
 #[derive(serde::Deserialize)]
@@ -206,7 +219,20 @@ pub(crate) async fn chat(
     let auth = format!("Bearer {api_key}");
     let response_text =
         send_request(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
-    let chat_response: ChatResponse = serde_json::from_str(&response_text)?;
+    let chat_response: ChatResponse = match serde_json::from_str(&response_text) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&response_text) {
+                return Err(ConnectorError::HttpError {
+                    status: 200,
+                    body: api_err.error.message,
+                });
+            }
+            return Err(ConnectorError::Deserialization(format!(
+                "{e}. Raw response: {response_text}"
+            )));
+        }
+    };
     let first_choice = chat_response
         .choices
         .first()
@@ -301,7 +327,16 @@ pub(crate) async fn chat_stream(
                             }
                         }
                         Err(e) => {
-                            yield Err(ConnectorError::Deserialization(e.to_string()));
+                            if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&data) {
+                                yield Err(ConnectorError::HttpError {
+                                    status: 200,
+                                    body: api_err.error.message,
+                                });
+                                return;
+                            }
+                            yield Err(ConnectorError::Deserialization(format!(
+                                "{e}. Raw chunk: {data}"
+                            )));
                             return;
                         }
                     }

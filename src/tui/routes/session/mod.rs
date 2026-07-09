@@ -72,48 +72,27 @@ fn conceal_text(text: &str) -> String {
     text.chars().map(concealed_char).collect()
 }
 
-/// A rectangular region of text on screen with its content.
 struct TextRegion {
-    /// Top y-coordinate (inclusive).
     y1: u16,
-    /// Bottom y-coordinate (exclusive).
     y2: u16,
-    /// Left x-coordinate (inclusive).
     x1: u16,
-    /// Right x-coordinate (exclusive).
     x2: u16,
-    /// The plain text content displayed in this region.
     text: String,
 }
 
 pub struct SessionView {
     pub scroll_y: i32,
     pub tool_state: ToolRenderState,
-    /// Text regions from the last render pass, used for mouse-based selection.
     text_regions: Vec<TextRegion>,
-    /// Active drag selection: (`anchor_x`, `anchor_y`, `focus_x`, `focus_y`) in screen coordinates.
-    /// Stored WITHOUT normalisation so the renderer can apply flow-based highlighting:
-    /// top line from `start_x` to end, bottom line from start to `end_x`, middle lines fully highlighted.
-    /// Set before `render()` to enable visual selection highlight.
     pub drag_selection: Option<(u16, u16, u16, u16)>,
 
-    // ── Auto-scroll on selection drag ─────────────────────────────────────────────
-    /// Whether auto-scroll is currently active (user dragged to edge and held).
     pub is_auto_scrolling: bool,
-    /// Cached auto-scroll speed in lines/second, based on distance to edge.
     auto_scroll_speed: f64,
-    /// Accumulator for fractional vertical scroll (lines).
     auto_scroll_accumulator: f64,
-    /// The session area (screen coordinates) used to detect edge proximity.
-    /// Set before `render()` so `handle_mouse` can use it.
     pub session_area: Option<(u16, u16, u16, u16)>,
-    /// Number of cells from the top/bottom edge that triggers auto-scroll.
     auto_scroll_threshold: u16,
-    /// Slow speed (lines/sec) when cursor is far from the edge (distance > 2).
     auto_scroll_speed_slow: f64,
-    /// Medium speed (lines/sec) when cursor is 2 cells from edge.
     auto_scroll_speed_medium: f64,
-    /// Fast speed (lines/sec) when cursor is at the very edge (distance <= 1).
     auto_scroll_speed_fast: f64,
 }
 
@@ -292,7 +271,6 @@ impl SessionView {
     ) -> u16 {
         let right = x + max_w;
         let bottom = y_ + max_h;
-        // Pre-fill area with bg so there's no gap between characters
         for row in y_..bottom {
             for col in x..right {
                 if let Some(cell) = buf.cell_mut((col, row)) {
@@ -312,7 +290,6 @@ impl SessionView {
                 }
                 continue;
             }
-            // ratatui panics on control chars, so filter those out
             if ch.is_control() && ch != '\t' {
                 continue;
             }
@@ -332,13 +309,12 @@ impl SessionView {
             }
             cx += 1;
         }
-        (y - y_).max(1)
+        (y - y_ + 1).max(1)
     }
 
     fn estimate_part_height(part: &Part, max_w: u16, config: &TuiConfig) -> u16 {
         match part {
             Part::Text(t) if !t.synthetic => {
-                // Estimate wrapped height: each line can hold up to max_w chars
                 let chars_per_line = max_w as usize;
                 if chars_per_line > 0 {
                     let mut total_lines: usize = 0;
@@ -368,7 +344,10 @@ impl SessionView {
                     && matches!(t.status, ToolStatus::Completed)
                     && !t.output.as_deref().unwrap_or("").trim().is_empty();
                 if is_block {
-                    let lines = t.output.as_deref().unwrap_or("").lines().count().max(1) as u16;
+                    let output = t.output.as_deref().unwrap_or("").trim();
+                    let collapsed = crate::util::scroll::collapse_tool_output(output, 10, 800);
+                    let display = &collapsed.output;
+                    let lines = display.lines().count().max(1) as u16;
                     lines + 2
                 } else {
                     1
@@ -413,6 +392,29 @@ impl SessionView {
         draw_text_line(buf, &format!(" [{ts_str}]"), x, y, 12, ts_style);
     }
 
+    fn estimate_message_height(
+        msg: &Message,
+        max_w: u16,
+        config: &TuiConfig,
+        is_last: bool,
+    ) -> i32 {
+        let border_h: i32 = match msg.role {
+            MessageRole::User => 1,
+            MessageRole::Assistant => 0,
+        };
+        let parts_h: i32 = msg
+            .parts
+            .iter()
+            .map(|p| i32::from(Self::estimate_part_height(p, max_w, config)))
+            .sum();
+        let extra_h = if is_last && msg.role == MessageRole::Assistant {
+            2
+        } else {
+            0
+        };
+        border_h + parts_h + extra_h
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_user_message(
         buf: &mut Buffer,
@@ -439,13 +441,14 @@ impl SessionView {
 
         let x_off = area.x + 3;
         let max_w = area.width.saturating_sub(6);
-        let inner_h = area.height.saturating_sub(1);
+        let border_line = 1u16;
+        let inner_h = area.height.saturating_sub(border_line);
 
         if is_compacted {
             Self::render_compaction_banner(buf, x_off, area.y + 1, max_w, theme);
         }
 
-        let inner_y = area.y + 1 + u16::from(is_compacted);
+        let inner_y = area.y + border_line + u16::from(is_compacted);
         let remaining = inner_h.saturating_sub(u16::from(is_compacted));
 
         Self::render_parts(
@@ -492,15 +495,7 @@ impl SessionView {
         let x_off = area.x + 3;
         let max_w = area.width.saturating_sub(6);
 
-        let banner_h = u16::from(is_compacted);
-        let inner_y = if is_error {
-            area.y + 2 // vertical padding + border line
-        } else {
-            area.y + banner_h
-        };
-
         if is_error {
-            // Error messages get a red left border
             let mut border_box = BoxRenderable::new();
             border_box.set_background_color(Some(theme.background_panel.into()));
             border_box.set_border_color(Some(theme.error.into()));
@@ -513,7 +508,6 @@ impl SessionView {
             border_box.set_custom_border_chars(left_border_chars());
             border_box.render_self(buf, area);
 
-            // Render error text character by character with wrap (safe for multi-byte UTF-8)
             let error_style = Style::default()
                 .fg(rgba_color(theme.text_muted))
                 .bg(rgba_color(theme.background));
@@ -537,7 +531,6 @@ impl SessionView {
                     line_y += 1;
                     continue;
                 }
-                // ratatui panics on control chars, so filter those out
                 if ch.is_control() && ch != '\n' && ch != '\t' {
                     continue;
                 }
@@ -557,12 +550,16 @@ impl SessionView {
             return;
         }
 
+        let banner_h = u16::from(is_compacted);
+        let inner_y = area.y + banner_h;
+        let net_h = area.height.saturating_sub(banner_h);
+
         Self::render_parts(
             buf,
             x_off,
             inner_y,
             max_w,
-            area.height.saturating_sub(banner_h),
+            net_h,
             &msg.parts,
             &MessageRole::Assistant,
             theme,
@@ -583,8 +580,8 @@ impl SessionView {
         }
 
         if is_last && !is_error {
-            let last_part_end = inner_y + area.height.saturating_sub(banner_h);
-            let meta_y = last_part_end;
+            let parts_end = inner_y + net_h;
+            let meta_y = parts_end;
             if meta_y < area.bottom() {
                 let model_name = msg.model.as_deref().unwrap_or("assistant");
                 let agent = msg.agent.as_deref().unwrap_or("default");
@@ -611,8 +608,6 @@ impl SessionView {
     }
 
     #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
-    /// Handle a mouse click on the session view.
-    /// Returns true if the click was consumed (e.g., toggled a tool expand/collapse).
     pub fn handle_mouse(
         &mut self,
         mouse: &MouseEvent,
@@ -644,29 +639,23 @@ impl SessionView {
                 y += 1;
             }
 
-            let mut msg_h = 2i32;
-            for part in &msg.parts {
-                msg_h += i32::from(Self::estimate_part_height(part, max_w, config));
-            }
             let is_last = idx == session.messages.len() - 1;
-            if is_last && msg.role == crate::types::MessageRole::Assistant {
-                msg_h += 2;
-            }
+            let msg_h = Self::render_message_height(msg, max_w, config, is_last);
 
             let msg_y = y.max(i32::from(inner_area.y) - 1) as u16;
 
             if click_y >= msg_y && msg_y < visible_bottom {
-                // Check if click is on this message
-                // Iterate through parts to find the click target
-                let mut part_y = msg_y + 2; // offset for message border
+                let border_offset: i32 = match msg.role {
+                    MessageRole::User => 1,
+                    MessageRole::Assistant => 0,
+                };
+                let mut part_y = i32::from(msg_y) + border_offset;
 
                 for part in &msg.parts {
-                    let part_h = Self::estimate_part_height(part, max_w, config).max(1);
+                    let part_h = i32::from(Self::estimate_part_height(part, max_w, config).max(1));
 
-                    if click_y >= part_y && click_y < part_y + part_h {
-                        // Click is within this part
+                    if click_y >= part_y as u16 && click_y < (part_y + part_h) as u16 {
                         if let crate::types::Part::Tool(tool) = part {
-                            // Check for shell tool expand/collapse
                             if tool_render::tool_display(&tool.tool) == "bash" {
                                 let output =
                                     tool.output.as_deref().unwrap_or("").trim().to_string();
@@ -678,9 +667,9 @@ impl SessionView {
                                         let expanded = self.tool_state.is_expanded(id);
                                         let display =
                                             if expanded { &output } else { &collapsed.output };
-                                        let hint_y = part_y + 1 + display.lines().count() as u16;
+                                        let hint_y = part_y + 1 + display.lines().count() as i32;
 
-                                        if click_y == hint_y
+                                        if click_y as i32 == hint_y
                                             && click_x >= x_off
                                             && click_x < x_off + max_w
                                         {
@@ -692,12 +681,10 @@ impl SessionView {
                             }
                         }
 
-                        // Check reasoning part click
                         if let crate::types::Part::Reasoning(r) = part {
                             let part_id = &r.text[..r.text.len().min(32)];
-                            if click_y == part_y {
-                                // Click on the reasoning header to toggle
-                                let header_x_end = x_off + 8; // "+ Thought" or "- Thought"
+                            if click_y == part_y as u16 {
+                                let header_x_end = x_off + 8;
                                 if click_x >= x_off && click_x < header_x_end {
                                     self.tool_state.toggle_expanded(part_id);
                                     return true;
@@ -705,7 +692,7 @@ impl SessionView {
                             }
                         }
 
-                        return true; // Click consumed even if not on a clickable region
+                        return true;
                     }
 
                     part_y += part_h;
@@ -718,7 +705,29 @@ impl SessionView {
         false
     }
 
-    /// Build the list of text regions for mouse-based selection.
+    pub fn render_message_height(
+        msg: &Message,
+        max_w: u16,
+        config: &TuiConfig,
+        is_last: bool,
+    ) -> i32 {
+        let border_h: i32 = match msg.role {
+            MessageRole::User => 1,
+            MessageRole::Assistant => 0,
+        };
+        let parts_h: i32 = msg
+            .parts
+            .iter()
+            .map(|p| i32::from(Self::estimate_part_height(p, max_w, config)))
+            .sum();
+        let extra_h = if is_last && msg.role == MessageRole::Assistant {
+            2
+        } else {
+            0
+        };
+        border_h + parts_h + extra_h
+    }
+
     #[allow(clippy::too_many_lines, clippy::cast_sign_loss)]
     pub fn build_text_regions(
         &mut self,
@@ -739,24 +748,16 @@ impl SessionView {
                 y += 1;
             }
 
-            // In build_text_regions we don't add +2 for the last assistant message's
-            // metadata footer because we don't capture that footer text as regions.
-            let mut msg_h = 2i32;
-            for part in &msg.parts {
-                msg_h += i32::from(Self::estimate_part_height(part, max_w, config));
-            }
+            let is_last = idx == session.messages.len() - 1;
+            let msg_h = Self::render_message_height(msg, max_w, config, is_last);
 
             let msg_y = y.max(i32::from(inner_area.y) - 1) as u16;
             let visible_bottom = inner_area.bottom();
 
             if msg_y < visible_bottom {
-                // Account for border offsets based on message type.
-                let border_offset = if msg.role == MessageRole::User {
-                    1
-                } else if msg.id.starts_with("msg-err-") {
-                    2
-                } else {
-                    0
+                let border_offset = match msg.role {
+                    MessageRole::User => 1,
+                    MessageRole::Assistant => 0,
                 };
                 let mut part_y = i32::from(msg_y) + border_offset;
 
@@ -782,11 +783,6 @@ impl SessionView {
                                 part_y += part_h;
                                 continue;
                             }
-                            // Split content into visual wrapped lines, exactly like
-                            // draw_text_wrap displays them: each screen line is at
-                            // most `max_w` chars. Store each visual line as its
-                            // own TextRegion with 1-line height so get_text_in_region
-                            // can precisely slice characters by x-coordinate.
                             let max_w_usize = max_w as usize;
                             let mut line_y = vp_y1;
                             for logical_line in content.lines() {
@@ -841,7 +837,6 @@ impl SessionView {
                                         crate::util::scroll::collapse_tool_output(trimmed, 10, 800)
                                             .output
                                     };
-                                    // Store each line of tool output separately.
                                     let mut line_y = vp_y1;
                                     for display_line in display.lines() {
                                         if line_y < vp_y2 {
@@ -860,7 +855,9 @@ impl SessionView {
                         }
                         crate::types::Part::Reasoning(r) => {
                             let expanded = config.thinking_mode
-                                || self.tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
+                                || self
+                                    .tool_state
+                                    .is_expanded(&r.text[..r.text.len().min(32)]);
                             let header = if expanded { "- Thought" } else { "+ Thought" };
                             if vp_y1 < vp_y2 {
                                 self.text_regions.push(TextRegion {
@@ -900,14 +897,6 @@ impl SessionView {
         }
     }
 
-    /// Return the text selected by a flow-based selection from `anchor` to `focus`.
-    /// Unlike a rectangular selection, flow selection follows the text direction:
-    ///   - If selecting top-to-bottom: top line selects from `anchor_x` to end,
-    ///     bottom line selects from 0 to `focus_x`, middle lines are fully selected.
-    ///   - If selecting bottom-to-top: top line selects from 0 to `focus_x`,
-    ///     bottom line selects from `anchor_x` to end, middle lines are fully selected.
-    ///     Each `TextRegion` stores exactly 1 visual line, so x-coordinates are
-    ///     used to slice individual characters from each line.
     pub fn get_text_in_region(
         &self,
         anchor_x: u16,
@@ -918,48 +907,36 @@ impl SessionView {
         let start_y = anchor_y.min(focus_y);
         let end_y = anchor_y.max(focus_y);
 
-        // start_x is the x-coordinate on the topmost line;
-        // end_x is the x-coordinate on the bottommost line.
         let (start_x, end_x) = if anchor_y == start_y {
-            // Anchor is at top (or on same line), focus is at bottom
             (anchor_x, focus_x)
         } else {
-            // Focus is at top, anchor is at bottom
             (focus_x, anchor_x)
         };
 
         let mut result = String::new();
         for region in &self.text_regions {
-            // Y-range check: does this visual line fall within the selection?
             if region.y1 > end_y || region.y2 <= start_y {
                 continue;
             }
 
-            let line_y = region.y1; // Each region is exactly 1 line high
+            let line_y = region.y1;
 
-            // Determine the x-range for this specific line based on flow selection.
             let (lx1, lx2) = if start_y == end_y {
-                // Single line: just the range between start and end.
                 (start_x.min(end_x), start_x.max(end_x))
             } else if line_y == start_y {
-                // Topmost selected line: from start_x to end of this line.
                 (start_x, region.x2)
             } else if line_y == end_y {
-                // Bottommost selected line: from start of this line to end_x.
                 (region.x1, end_x)
             } else {
-                // Middle line: select the entire line.
                 (region.x1, region.x2)
             };
 
-            // Clamp to the actual region's x bounds.
             let ox1 = region.x1.max(lx1);
             let ox2 = region.x2.min(lx2);
             if ox1 >= ox2 {
                 continue;
             }
 
-            // Map screen x-coordinates to character indices.
             let col_start = (ox1 - region.x1) as usize;
             let col_end = (ox2 - region.x1) as usize;
 
@@ -996,7 +973,6 @@ impl SessionView {
             return 0;
         };
 
-        // Store session area for auto-scroll edge detection.
         self.session_area = Some((area.x, area.y + 1, area.right(), area.bottom()));
 
         let margin = 2;
@@ -1014,13 +990,8 @@ impl SessionView {
         let mut total_height: i32 = 0;
         for (idx, msg) in session.messages.iter().enumerate() {
             let gap = i32::from(idx > 0);
-            let mut msg_h = 2i32;
-            for part in &msg.parts {
-                msg_h += i32::from(Self::estimate_part_height(part, max_w, config));
-            }
-            if idx == session.messages.len() - 1 && msg.role == MessageRole::Assistant {
-                msg_h += 2;
-            }
+            let is_last = idx == session.messages.len() - 1;
+            let msg_h = Self::render_message_height(msg, max_w, config, is_last);
             total_height += gap + msg_h;
         }
 
@@ -1028,7 +999,6 @@ impl SessionView {
         let max_scroll = (total_height - visible_height).max(0);
         self.scroll_y = self.scroll_y.clamp(0, max_scroll);
 
-        // Build text regions for mouse-based selection.
         self.build_text_regions(session, inner_area, max_w, config);
 
         if config.show_scrollbar {
@@ -1054,14 +1024,8 @@ impl SessionView {
                 y += 1;
             }
 
-            let mut msg_h = 2i32;
-            for part in &msg.parts {
-                msg_h += i32::from(Self::estimate_part_height(part, max_w, config));
-            }
             let is_last = idx == session.messages.len() - 1;
-            if is_last && msg.role == MessageRole::Assistant {
-                msg_h += 2;
-            }
+            let msg_h = Self::render_message_height(msg, max_w, config, is_last);
 
             let msg_y = y.max(i32::from(inner_area.y) - 1) as u16;
             let visible_bottom = inner_area.bottom();
@@ -1111,11 +1075,6 @@ impl SessionView {
             y += msg_h;
         }
 
-        // ── Visual selection highlight (flow-based) ────────────────────────
-        // After rendering all messages, apply inverted colors to non-space cells
-        // within the flow-based selection region. Uses the same anchor/focus
-        // logic as get_text_in_region() so the visual highlight exactly matches
-        // what will be copied.
         if let Some((anchor_x, anchor_y, focus_x, focus_y)) = self.drag_selection {
             let start_y = anchor_y.min(focus_y);
             let end_y = anchor_y.max(focus_y);
@@ -1126,25 +1085,19 @@ impl SessionView {
                 (focus_x, anchor_x)
             };
 
-            // Bounds for "full width" highlight: the session area's right edge.
             let max_x = area.right().saturating_sub(1);
             let min_x = area.x;
 
-            // Apply highlight per-line, matching flow selection boundaries.
             for cy in start_y..=end_y {
                 let (lx1, lx2) = if start_y == end_y {
-                    // Single line.
                     let a = start_x.min(end_x);
                     let b = start_x.max(end_x);
                     (a.min(max_x), b.min(max_x))
                 } else if cy == start_y {
-                    // Topmost selected line: from start_x to end.
                     (start_x.min(max_x), max_x)
                 } else if cy == end_y {
-                    // Bottommost selected line: from start to end_x.
                     (min_x, end_x.min(max_x))
                 } else {
-                    // Middle line: highlight entire row within session area.
                     (min_x, max_x)
                 };
 
@@ -1161,27 +1114,11 @@ impl SessionView {
             }
         }
 
-        // ── Handle auto-scroll during selection drag ─────────────────────────
         self.handle_auto_scroll(delta_time, total_height, visible_height);
 
         total_height
     }
 
-    // ── Auto-scroll on selection drag ────────────────────────────────────────────
-    //
-    // Inspired by ScrollBox.ts from @opentui/core.
-    //
-    // When the user drags a selection toward the top or bottom edge of the session
-    // area, the content scrolls. If the user holds at the edge beyond a threshold
-    // (~500ms), it enters continuous auto-scroll mode that persists until the user
-    // clicks anywhere.
-    //
-    // Speed varies by proximity to the edge:
-    //   - distance <= 1 cell: fast  (72 lines/sec)
-    //   - distance <= 2 cells: medium (36 lines/sec)
-    //   - distance > 2 cells:  slow  (6 lines/sec)
-
-    /// Direction of auto-scroll: -1 = up, 0 = none, 1 = down.
     fn get_auto_scroll_direction(&self, mouse_y: u16) -> i32 {
         let Some((_sx, sy, _sx2, sy2)) = self.session_area else {
             return 0;
@@ -1190,14 +1127,11 @@ impl SessionView {
         let height = sy2.saturating_sub(sy);
         let threshold = self.auto_scroll_threshold;
 
-        // Top edge
         if relative_y <= threshold && self.scroll_y > 0 {
             return -1;
         }
-        // Bottom edge
         if height > threshold && relative_y >= height.saturating_sub(threshold) {
-            let max_scroll = i32::MAX; // caller will clamp anyway
-            if self.scroll_y < max_scroll {
+            if self.scroll_y < i32::MAX {
                 return 1;
             }
         }
@@ -1205,7 +1139,6 @@ impl SessionView {
         0
     }
 
-    /// Compute auto-scroll speed based on distance from the nearest vertical edge.
     fn get_auto_scroll_speed(&self, mouse_y: u16) -> f64 {
         let Some((_sx, sy, _sx2, sy2)) = self.session_area else {
             return 0.0;
@@ -1226,9 +1159,7 @@ impl SessionView {
         }
     }
 
-    /// Called during mouse drag to update or start auto-scroll based on mouse position.
     pub fn update_auto_scroll(&mut self, mouse_x: u16, mouse_y: u16) {
-        // Only auto-scroll if we're within the session area horizontally.
         let Some((sx, _sy, sx2, _sy2)) = self.session_area else {
             self.stop_auto_scroll();
             return;
@@ -1248,7 +1179,6 @@ impl SessionView {
         }
     }
 
-    /// Called every frame to apply accumulated auto-scroll.
     fn handle_auto_scroll(&mut self, delta_time: f64, total_height: i32, visible_height: i32) {
         if !self.is_auto_scrolling {
             return;
@@ -1259,8 +1189,6 @@ impl SessionView {
 
         while self.auto_scroll_accumulator >= 1.0 {
             self.auto_scroll_accumulator -= 1.0;
-            // Re-check direction each step in case the mouse has moved.
-            // We use the last stored drag_selection focus point.
             let dir = if let Some((_ax, _ay, _fx, fy)) = self.drag_selection {
                 self.get_auto_scroll_direction(fy)
             } else {
@@ -1281,7 +1209,6 @@ impl SessionView {
         }
     }
 
-    /// Stop auto-scroll and reset state.
     pub fn stop_auto_scroll(&mut self) {
         if self.is_auto_scrolling {
             self.is_auto_scrolling = false;
