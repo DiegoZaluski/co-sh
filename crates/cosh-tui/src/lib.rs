@@ -1,4 +1,5 @@
 #![allow(
+    clippy::multiple_crate_versions, // transitive deps: bitflags, thiserror, etc.
     clippy::cast_possible_truncation,
     clippy::explicit_counter_loop,
     clippy::many_single_char_names,

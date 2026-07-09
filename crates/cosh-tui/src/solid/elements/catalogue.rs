@@ -31,7 +31,7 @@ impl SpanRenderable {
     #[must_use]
     pub fn new() -> Self {
         let num = NEXT_CATALOGUE_NUM.fetch_add(1, Ordering::Relaxed);
-        SpanRenderable {
+        Self {
             id: format!("span-{num}"),
             num,
             visible: true,
@@ -49,7 +49,7 @@ impl SpanRenderable {
         self.text = text;
     }
 
-    pub fn set_attributes(&mut self, attrs: u32) {
+    pub const fn set_attributes(&mut self, attrs: u32) {
         self.attributes = attrs;
     }
 
@@ -167,7 +167,7 @@ impl LineBreakRenderable {
     #[must_use]
     pub fn new() -> Self {
         let num = NEXT_CATALOGUE_NUM.fetch_add(1, Ordering::Relaxed);
-        LineBreakRenderable {
+        Self {
             id: format!("br-{num}"),
             num,
             visible: true,
@@ -247,7 +247,7 @@ impl LinkRenderable {
     pub fn new(url: String) -> Self {
         let mut inner = SpanRenderable::new();
         inner.set_link(Some(url));
-        LinkRenderable { inner }
+        Self { inner }
     }
 
     pub fn set_text(&mut self, text: String) {
@@ -330,9 +330,7 @@ pub fn register_component(name: &'static str, ctor: ComponentConstructor) {
 }
 
 pub fn create_component(name: &str) -> Option<Box<dyn Renderable>> {
-    if let Ok(registry) = COMPONENT_REGISTRY.lock() {
-        registry.get(name).map(|ctor| ctor())
-    } else {
-        None
-    }
+    COMPONENT_REGISTRY
+        .lock()
+        .map_or_else(|_| None, |registry| registry.get(name).map(|ctor| ctor()))
 }

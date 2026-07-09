@@ -34,7 +34,7 @@ impl DynamicRenderable {
     pub fn try_new(component_name: &str) -> Option<Self> {
         let inner = create_component(component_name)?;
         let num = NEXT_DYNAMIC_NUM.fetch_add(1, Ordering::Relaxed);
-        Some(DynamicRenderable {
+        Some(Self {
             id: format!("dynamic-{num}"),
             num,
             visible: true,
@@ -52,6 +52,7 @@ impl DynamicRenderable {
     ///
     /// Panics when `component_name` has not been registered in the component
     /// catalogue.
+    #[allow(clippy::panic)]
     #[must_use]
     pub fn new(component_name: &str) -> Self {
         Self::try_new(component_name)

@@ -22,10 +22,11 @@ struct IndexedEdit {
     idx: usize,
 }
 
+#[allow(clippy::unwrap_used)]
 static STRUCTURAL_CLOSER_RE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"^\s*[)\]}]+[;,]?\s*$").unwrap());
 
-fn is_replacement_insert(edit: &Edit) -> bool {
+const fn is_replacement_insert(edit: &Edit) -> bool {
     matches!(
         edit,
         Edit::Insert {
@@ -229,12 +230,12 @@ fn compute_delimiter_balance(lines: &[String]) -> DelimiterBalance {
                 continue;
             }
             match ch {
-                '(' => balance.paren += 1,
-                ')' => balance.paren -= 1,
-                '[' => balance.bracket += 1,
-                ']' => balance.bracket -= 1,
-                '{' => balance.brace += 1,
-                '}' => balance.brace -= 1,
+                '(' => balance.paren += 1_i32,
+                ')' => balance.paren -= 1_i32,
+                '[' => balance.bracket += 1_i32,
+                ']' => balance.bracket -= 1_i32,
+                '{' => balance.brace += 1_i32,
+                '}' => balance.brace -= 1_i32,
                 _ => {}
             }
             i += 1;
@@ -246,7 +247,7 @@ fn compute_delimiter_balance(lines: &[String]) -> DelimiterBalance {
     balance
 }
 
-fn balance_delta(a: DelimiterBalance, b: DelimiterBalance) -> DelimiterBalance {
+const fn balance_delta(a: DelimiterBalance, b: DelimiterBalance) -> DelimiterBalance {
     DelimiterBalance {
         paren: a.paren - b.paren,
         bracket: a.bracket - b.bracket,
@@ -254,7 +255,7 @@ fn balance_delta(a: DelimiterBalance, b: DelimiterBalance) -> DelimiterBalance {
     }
 }
 
-fn balance_negate(a: DelimiterBalance) -> DelimiterBalance {
+const fn balance_negate(a: DelimiterBalance) -> DelimiterBalance {
     DelimiterBalance {
         paren: -a.paren,
         bracket: -a.bracket,
@@ -262,11 +263,11 @@ fn balance_negate(a: DelimiterBalance) -> DelimiterBalance {
     }
 }
 
-fn balance_equal(a: DelimiterBalance, b: DelimiterBalance) -> bool {
+const fn balance_equal(a: DelimiterBalance, b: DelimiterBalance) -> bool {
     a.paren == b.paren && a.bracket == b.bracket && a.brace == b.brace
 }
 
-fn balance_is_zero(a: DelimiterBalance) -> bool {
+const fn balance_is_zero(a: DelimiterBalance) -> bool {
     a.paren == 0 && a.bracket == 0 && a.brace == 0
 }
 
@@ -522,7 +523,7 @@ fn repair_boundary_balance(edits: &[Edit], file_lines: &[String]) -> (Vec<Edit>,
 /// # Panics
 ///
 /// Panics if any edit is an unresolved `Edit::Block` variant or an anchor is out of bounds.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::unwrap_used, clippy::panic)]
 #[must_use]
 pub fn apply_edits(text: &str, edits: &[Edit]) -> ApplyResult {
     if edits.is_empty() {

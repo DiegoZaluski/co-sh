@@ -44,6 +44,7 @@ pub use self::terminalstate::*;
 pub type PhysRowIndex = usize;
 
 /// Represents an index into the visible portion of the screen.
+///
 /// Value 0 is the first visible row.  `VisibleRowIndex` needs to be
 /// resolved into a `PhysRowIndex` to obtain an actual row.  It is not
 /// valid to have a negative `VisibleRowIndex` value so this type logically
@@ -56,6 +57,7 @@ pub type PhysRowIndex = usize;
 pub type VisibleRowIndex = i64;
 
 /// Like `VisibleRowIndex` above, but can index backwards into scrollback.
+///
 /// This is deliberately a differently sized signed type to catch
 /// accidentally blending together the wrong types of indices.
 /// This is explicitly 32-bit rather than 64-bit as it seems unreasonable
@@ -63,6 +65,7 @@ pub type VisibleRowIndex = i64;
 pub type ScrollbackOrVisibleRowIndex = i32;
 
 /// Allows referencing a logical line in the scrollback, allowing for scrolling.
+///
 /// The `StableRowIndex` counts from the top of the scrollback, growing larger
 /// as you move down through the display rows.
 /// Initially the very first line as StableRowIndex==0.  If the scrollback

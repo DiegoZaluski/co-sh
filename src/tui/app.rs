@@ -143,7 +143,7 @@ impl App {
             .cloned()
             .unwrap_or_else(|| theme_registry.default_theme().clone());
 
-        App {
+        Self {
             state,
             theme_registry,
             theme,
@@ -284,7 +284,7 @@ impl App {
 
             // Always revalidate in background (stale-while-revalidate)
             let dialog_tx = self.event_tx.clone();
-            let dialog_tx_clone = dialog_tx.clone();
+            let dialog_tx_clone = dialog_tx;
 
             self.tokio_handle.spawn(async move {
                 let mut all_models: Vec<ModelEntry> = Vec::new();
@@ -823,10 +823,8 @@ impl App {
 
             if self.live_requested {
                 // When auto-scroll is active, don't block on event::poll.
-                if event::poll(Duration::from_millis(8))? {
-                    if self.handle_events()? {
-                        break;
-                    }
+                if event::poll(Duration::from_millis(8))? && self.handle_events()? {
+                    break;
                 }
             } else if self.handle_events()? {
                 break;
@@ -842,11 +840,7 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn render(&mut self, frame: &mut Frame<'_>, delta_time: f64) {
         // Sync live_requested from session_view auto-scroll state.
-        if self.session_view.is_auto_scrolling {
-            self.live_requested = true;
-        } else {
-            self.live_requested = false;
-        }
+        self.live_requested = self.session_view.is_auto_scrolling;
         let area = frame.area();
 
         {

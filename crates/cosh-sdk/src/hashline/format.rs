@@ -106,6 +106,7 @@ fn normalize_file_hash_text(text: &str) -> String {
 }
 
 /// Compute the content-derived hash tag carried by a hashline section header.
+///
 /// The tag is a 4-hex fingerprint of the whole file's normalized text: any read
 /// of byte-identical content mints the same tag, and a follow-up edit anchored
 /// at any line validates whenever the live file still hashes to it.
@@ -162,8 +163,9 @@ pub fn format_insert_header(cursor: &Cursor) -> String {
 /// prefix, quoted for inclusion in error messages: `"160", "42", "7"`.
 #[must_use]
 pub fn describe_anchor_examples(line_prefix: Option<&str>) -> String {
-    let examples: Vec<String> = match line_prefix {
-        Option::Some(prefix) => {
+    let examples: Vec<String> = line_prefix.map_or_else(
+        || vec!["160".to_string(), "42".to_string(), "7".to_string()],
+        |prefix| {
             let second = if prefix.len() > 1 {
                 let trimmed = &prefix[..prefix.len() - 1];
                 if trimmed.is_empty() {
@@ -175,9 +177,8 @@ pub fn describe_anchor_examples(line_prefix: Option<&str>) -> String {
                 "42".to_string()
             };
             vec![prefix.to_string(), second, "7".to_string()]
-        }
-        Option::None => vec!["160".to_string(), "42".to_string(), "7".to_string()],
-    };
+        },
+    );
     examples
         .iter()
         .map(|e| format!("\"{e}\""))

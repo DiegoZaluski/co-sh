@@ -21,7 +21,7 @@ pub const ATTRIBUTE_BASE_MASK: u32 = 0xff;
 /// Extract the base 8 bits of attributes from a u32 attribute value.
 /// Currently we only use the first 8 bits for standard text attributes.
 #[must_use]
-pub fn get_base_attributes(attr: u32) -> u32 {
+pub const fn get_base_attributes(attr: u32) -> u32 {
     attr & ATTRIBUTE_BASE_MASK
 }
 
@@ -137,7 +137,7 @@ pub struct Selection {
 impl Selection {
     /// Create a new selection starting at the given position.
     #[must_use]
-    pub fn new(x: i32, y: i32) -> Self {
+    pub const fn new(x: i32, y: i32) -> Self {
         Self {
             anchor_x: x,
             anchor_y: y,
@@ -149,20 +149,20 @@ impl Selection {
     }
 
     /// Update the focus point (called during drag).
-    pub fn update(&mut self, x: i32, y: i32) {
+    pub const fn update(&mut self, x: i32, y: i32) {
         self.focus_x = x;
         self.focus_y = y;
         self.is_active = true;
     }
 
     /// Finish the selection (called on mouse up).
-    pub fn finish(&mut self) {
+    pub const fn finish(&mut self) {
         self.is_dragging = false;
         self.is_active = true;
     }
 
     /// Clear the selection.
-    pub fn clear(&mut self) {
+    pub const fn clear(&mut self) {
         self.is_active = false;
         self.is_dragging = false;
     }
@@ -180,7 +180,7 @@ impl Selection {
 
     /// Returns `true` if the selection spans a non-zero area.
     #[must_use]
-    pub fn has_non_zero_area(&self) -> bool {
+    pub const fn has_non_zero_area(&self) -> bool {
         self.is_active && (self.anchor_x != self.focus_x || self.anchor_y != self.focus_y)
     }
 }
@@ -216,8 +216,8 @@ pub struct MouseModifiers {
 
 impl MouseModifiers {
     #[must_use]
-    pub fn none() -> Self {
-        MouseModifiers {
+    pub const fn none() -> Self {
+        Self {
             shift: false,
             alt: false,
             ctrl: false,
@@ -239,14 +239,14 @@ pub struct MouseEvent {
 
 impl MouseEvent {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         event_type: MouseEventType,
         button: MouseButton,
         x: u16,
         y: u16,
         modifiers: MouseModifiers,
     ) -> Self {
-        MouseEvent {
+        Self {
             event_type,
             button,
             x,
@@ -257,11 +257,11 @@ impl MouseEvent {
         }
     }
 
-    pub fn stop_propagation(&mut self) {
+    pub const fn stop_propagation(&mut self) {
         self.propagation_stopped = true;
     }
 
-    pub fn prevent_default(&mut self) {
+    pub const fn prevent_default(&mut self) {
         self.default_prevented = true;
     }
 

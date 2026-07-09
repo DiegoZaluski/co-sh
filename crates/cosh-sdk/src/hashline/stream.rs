@@ -33,7 +33,7 @@ struct ChunkEmitter {
 }
 
 impl ChunkEmitter {
-    fn new(options: &ResolvedStreamOptions) -> Self {
+    const fn new(options: &ResolvedStreamOptions) -> Self {
         Self {
             line_number: options.start_line,
             out_lines: Vec::new(),

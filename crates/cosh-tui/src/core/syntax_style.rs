@@ -99,7 +99,7 @@ pub struct SyntaxStyle {
 impl SyntaxStyle {
     #[must_use]
     pub fn create() -> Self {
-        SyntaxStyle {
+        Self {
             next_id: 1,
             name_cache: HashMap::new(),
             style_defs: HashMap::new(),
@@ -110,7 +110,7 @@ impl SyntaxStyle {
 
     #[must_use]
     pub fn from_theme(theme: &[ThemeTokenStyle]) -> Self {
-        let mut style = SyntaxStyle::create();
+        let mut style = Self::create();
         let flat_styles = convert_theme_to_styles(theme);
         for (name, style_def) in flat_styles {
             let input = StyleDefinitionInput {
@@ -128,7 +128,7 @@ impl SyntaxStyle {
 
     #[must_use]
     pub fn from_styles(styles: &HashMap<String, StyleDefinitionInput>) -> Self {
-        let mut style = SyntaxStyle::create();
+        let mut style = Self::create();
         for (name, style_def) in styles {
             let _ = style.register_style(name, style_def);
         }

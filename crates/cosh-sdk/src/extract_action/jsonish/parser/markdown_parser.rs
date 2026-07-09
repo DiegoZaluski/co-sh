@@ -10,6 +10,7 @@ pub enum MarkdownResult {
 }
 
 // Cache compiled regexes for markdown parsing - these are compiled once and reused
+#[allow(clippy::expect_used)]
 static MD_TAG_START: LazyLock<regex::Regex> = LazyLock::new(|| {
     // Anchor fences to the start of a line (optionally indented) to avoid
     // confusing content like ```json that appears inside strings/code.
@@ -17,6 +18,7 @@ static MD_TAG_START: LazyLock<regex::Regex> = LazyLock::new(|| {
         .expect("Failed to compile md-tag-start regex")
 });
 
+#[allow(clippy::expect_used)]
 static MD_TAG_END: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?m)^[ \t]*```(?:\n|$)").expect("Failed to compile md-tag-end regex")
 });
@@ -84,14 +86,16 @@ pub fn parse(str: &str, options: &ParseOptions) -> Result<Vec<MarkdownResult>, J
 
         log::trace!("Content:\n-----\n{md_content}\n-----\n");
 
-        let res = match parsed_value {
-            Some(v) => Ok(v),
-            None => super::entry::parse_func(
-                md_content,
-                options.next_from_mode(ParsingMode::JsonMarkdown),
-                false,
-            ),
-        };
+        let res = parsed_value.map_or_else(
+            || {
+                super::entry::parse_func(
+                    md_content,
+                    options.next_from_mode(ParsingMode::JsonMarkdown),
+                    false,
+                )
+            },
+            Ok,
+        );
 
         match res {
             Ok(v) => {

@@ -18,13 +18,10 @@ static DISCOVERY_CACHE: LazyLock<Mutex<HashMap<String, Vec<RawSkill>>>> =
 
 fn cache_key_for_source(source: &SkillSource) -> String {
     match source {
-        SkillSource::Directory { path } => {
-            if let Ok(canon) = Path::new(path).canonicalize() {
-                format!("dir:{}", canon.display())
-            } else {
-                format!("dir:{path}")
-            }
-        }
+        SkillSource::Directory { path } => Path::new(path).canonicalize().map_or_else(
+            |_| format!("dir:{path}"),
+            |canon| format!("dir:{}", canon.display()),
+        ),
         SkillSource::Embedded { skill } => format!("embedded:{}", skill.name),
     }
 }
@@ -37,6 +34,7 @@ fn cache_key_for_source(source: &SkillSource) -> String {
 /// # Errors
 /// Returns `SkillError::InvalidSource` when a directory source does not exist
 /// or cannot be read.
+#[allow(clippy::significant_drop_tightening)]
 pub fn discover_skills(schema: &SkillSchema) -> Result<Vec<RawSkill>, SkillError> {
     let mut all: Vec<RawSkill> = Vec::new();
     let mut seen_names: HashMap<String, usize> = HashMap::new();

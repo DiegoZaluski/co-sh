@@ -22,7 +22,7 @@ impl SrgbaTuple {
     #[must_use]
     pub fn from_named(name: &str) -> Option<Self> {
         csscolorparser::parse(name).ok().map(|c| {
-            SrgbaTuple(
+            Self(
                 f64::from(c.r),
                 f64::from(c.g),
                 f64::from(c.b),
@@ -73,7 +73,7 @@ impl SrgbaTuple {
 
 impl From<(u8, u8, u8)> for SrgbaTuple {
     fn from(v: (u8, u8, u8)) -> Self {
-        SrgbaTuple(
+        Self(
             f64::from(v.0) / 255.0,
             f64::from(v.1) / 255.0,
             f64::from(v.2) / 255.0,
@@ -84,7 +84,7 @@ impl From<(u8, u8, u8)> for SrgbaTuple {
 
 impl From<(u8, u8, u8, u8)> for SrgbaTuple {
     fn from(v: (u8, u8, u8, u8)) -> Self {
-        SrgbaTuple(
+        Self(
             f64::from(v.0) / 255.0,
             f64::from(v.1) / 255.0,
             f64::from(v.2) / 255.0,
@@ -106,7 +106,7 @@ impl core::str::FromStr for SrgbaTuple {
     type Err = csscolorparser::ParseColorError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         csscolorparser::parse(s).map(|c| {
-            SrgbaTuple(
+            Self(
                 f64::from(c.r),
                 f64::from(c.g),
                 f64::from(c.b),

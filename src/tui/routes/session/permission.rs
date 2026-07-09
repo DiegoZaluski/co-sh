@@ -34,8 +34,8 @@ pub struct PermissionDialog {
 }
 
 impl PermissionDialog {
-    pub fn new() -> Self {
-        PermissionDialog {
+    pub const fn new() -> Self {
+        Self {
             visible: false,
             request: None,
             selected: 0,

@@ -1,4 +1,5 @@
 //! Minimal text-shape normalization: line-ending detection / round-trip and
+//!
 //! BOM stripping. The patcher uses these to canonicalize text to LF before
 //! applying edits and to restore the original shape on write-back.
 
@@ -36,7 +37,7 @@ pub fn restore_line_endings(text: &str, ending: LineEnding) -> String {
 }
 
 /// Result of stripping a UTF-8 BOM from content.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BomResult {
     /// Either the empty string or the BOM sequence (currently UTF-8 BOM).
     pub bom: String,
@@ -47,15 +48,14 @@ pub struct BomResult {
 /// Strip a UTF-8 BOM if present and return both the BOM and the trailing text.
 #[must_use]
 pub fn strip_bom(content: &str) -> BomResult {
-    if let Some(rest) = content.strip_prefix('\u{FEFF}') {
-        BomResult {
-            bom: "\u{FEFF}".to_string(),
-            text: rest.to_string(),
-        }
-    } else {
-        BomResult {
+    content.strip_prefix('\u{FEFF}').map_or_else(
+        || BomResult {
             bom: String::new(),
             text: content.to_string(),
-        }
-    }
+        },
+        |rest| BomResult {
+            bom: "\u{FEFF}".to_string(),
+            text: rest.to_string(),
+        },
+    )
 }

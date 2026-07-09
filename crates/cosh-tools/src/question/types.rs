@@ -21,12 +21,12 @@ pub struct QuestionItem {
     pub required: bool,
 }
 
-fn default_required() -> bool {
+const fn default_required() -> bool {
     true
 }
 
 /// The kind of answer expected for a question.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum QuestionType {
     /// Free-text input. The user types their answer.
     Text,

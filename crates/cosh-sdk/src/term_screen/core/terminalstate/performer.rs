@@ -38,7 +38,7 @@ use url::Url;
 
 /// A helper struct for implementing `vtparse::VTActor` while compartmentalizing
 /// the terminal state and the embedding/host terminal interface
-pub(crate) struct Performer<'a> {
+pub struct Performer<'a> {
     pub state: &'a mut TerminalState,
     print: String,
 }
@@ -64,7 +64,7 @@ impl Drop for Performer<'_> {
 }
 
 impl<'a> Performer<'a> {
-    pub fn new(state: &'a mut TerminalState) -> Self {
+    pub const fn new(state: &'a mut TerminalState) -> Self {
         Self {
             state,
             print: String::new(),
@@ -387,18 +387,19 @@ impl<'a> Performer<'a> {
             }
 
             ControlCode::Backspace => {
+                let at_left_margin = self.cursor.x == self.left_and_right_margins.start;
+                let at_top_margin = self.cursor.y == self.top_and_bottom_margins.start;
+                let at_or_left_of_margin = self.cursor.x <= self.left_and_right_margins.start;
                 if self.reverse_wraparound_mode
                     && self.dec_auto_wrap
-                    && self.cursor.x == self.left_and_right_margins.start
-                    && self.cursor.y == self.top_and_bottom_margins.start
+                    && at_left_margin
+                    && at_top_margin
                 {
                     // Backspace off the top-left wraps around to the bottom right
                     let x_pos = Position::Absolute(self.left_and_right_margins.end as i64 - 1);
                     let y_pos = Position::Absolute(self.top_and_bottom_margins.end - 1);
                     self.set_cursor_pos(&x_pos, &y_pos);
-                } else if self.reverse_wraparound_mode
-                    && self.dec_auto_wrap
-                    && self.cursor.x <= self.left_and_right_margins.start
+                } else if self.reverse_wraparound_mode && self.dec_auto_wrap && at_or_left_of_margin
                 {
                     // Backspace off the left wraps around to the prior line on the right
                     let x_pos = Position::Absolute(self.left_and_right_margins.end as i64 - 1);
@@ -867,7 +868,7 @@ impl<'a> Performer<'a> {
                 }
             }
             OperatingSystemCommand::RxvtExtension(params) => {
-                if let Some("notify") = params.first().map(String::as_str) {
+                if params.first().map(String::as_str) == Some("notify") {
                     let title = params.get(1);
                     let body = params.get(2);
                     let (title, body) = match (title.cloned(), body.cloned()) {
@@ -1047,7 +1048,7 @@ impl<'a> Performer<'a> {
     }
 }
 
-fn selection_to_selection(sel: Selection) -> ClipboardSelection {
+const fn selection_to_selection(sel: Selection) -> ClipboardSelection {
     match sel {
         Selection::CLIPBOARD => ClipboardSelection::Clipboard,
         Selection::PRIMARY => ClipboardSelection::PrimarySelection,

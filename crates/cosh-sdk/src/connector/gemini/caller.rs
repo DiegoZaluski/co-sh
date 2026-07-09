@@ -274,7 +274,7 @@ fn build_tool_config(tool_choice: &serde_json::Value) -> Option<ToolConfig> {
             let mode = obj
                 .get("type")
                 .and_then(|v| v.as_str())
-                .map_or("ANY".to_string(), str::to_uppercase);
+                .map_or_else(|| "ANY".to_string(), str::to_uppercase);
             let names = obj
                 .get("function")
                 .and_then(|v| v.get("name"))
@@ -343,7 +343,7 @@ fn prepare_request(
 
 // Public API
 
-pub(crate) async fn chat(
+pub async fn chat(
     config: &ProviderConfig,
     params: &Parameters,
     prompt: &str,
@@ -372,7 +372,7 @@ pub(crate) async fn chat(
     })
 }
 
-pub(crate) async fn chat_stream(
+pub async fn chat_stream(
     config: &ProviderConfig,
     params: &Parameters,
     prompt: &str,
@@ -445,7 +445,7 @@ pub(crate) async fn chat_stream(
     Ok(ChatStream::new(inner))
 }
 
-pub(crate) async fn embed(
+pub async fn embed(
     config: &ProviderConfig,
     params: &Parameters,
     input: &str,
@@ -498,7 +498,7 @@ struct GeminiListModelsResponse {
 ///
 /// Sends a GET to `{base_url}/models`, strips the `models/` prefix from
 /// each entry's `name` field, and returns a [`LsOutput`].
-pub(crate) async fn list_models(
+pub async fn list_models(
     config: &ProviderConfig,
     params: &Parameters,
 ) -> Result<LsOutput, ConnectorError> {

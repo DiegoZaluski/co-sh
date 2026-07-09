@@ -34,8 +34,8 @@ pub struct SidebarView {
 }
 
 impl SidebarView {
-    pub fn new() -> Self {
-        SidebarView {
+    pub const fn new() -> Self {
+        Self {
             open: false,
             width: 24,
         }

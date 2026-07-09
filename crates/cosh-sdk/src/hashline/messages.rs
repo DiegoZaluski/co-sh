@@ -1,4 +1,5 @@
 //! Centralized error and warning text emitted by the hashline parser, applier,
+//!
 //! and patcher. Consolidating these as named constants makes them easy to
 //! audit and keeps wording stable across the rendering paths that surface
 //! them.
@@ -14,6 +15,7 @@ pub const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";
 pub const END_PATCH_MARKER: &str = "*** End Patch";
 
 /// Recovery sentinel emitted by an agent loop when a contaminated tool-call
+///
 /// stream is truncated mid-call. Behaves like [`END_PATCH_MARKER`] for
 /// parsing — terminates the line loop — and does not surface a warning.
 pub const ABORT_MARKER: &str = "*** Abort";
@@ -47,6 +49,7 @@ pub const EMPTY_BLOCK: &str = "`replace block N:` needs at least one `+TEXT` bod
      use `delete N..M` with the block's line range.";
 
 /// Error text emitted when a `replace block N:` anchor cannot be resolved to a
+///
 /// syntactic block (unrecognized language, blank/out-of-range line, no node
 /// begins on line N such as a lone closing delimiter, or the resolved block has
 /// a syntax error). Names the offending line and steers back to an explicit
@@ -67,8 +70,9 @@ pub fn block_unresolved_message(line: u32) -> String {
 pub const BLOCK_RESOLVER_UNAVAILABLE: &str = "`replace block N:` is not available here (no tree-sitter block resolver \
      is configured). Use `replace N..M:` with an explicit range.";
 
-/// Internal invariant error: `apply_edits` received an unresolved `replace
-/// block N:` edit. Block edits must be expanded by `resolve_block_edits` before
+/// Internal invariant error: `apply_edits` received an unresolved `replace block N:` edit.
+///
+/// Block edits must be expanded by `resolve_block_edits` before
 /// reaching the applier; hitting this is a wiring bug, not authored-input error.
 pub const UNRESOLVED_BLOCK_INTERNAL: &str = "internal error: unresolved `replace block` edit reached the applier \
      (resolve_block_edits was not run).";
@@ -95,6 +99,7 @@ pub const RECOVERY_SESSION_CHAIN_WARNING: &str = "Recovered from a stale file ha
      (the file hash advanced after a prior edit in this session).";
 
 /// Warning text emitted by [`Recovery`] when the session-chain replay
+///
 /// fast-path was taken. Distinct from [`RECOVERY_SESSION_CHAIN_WARNING`]
 /// because replay is the less-certain mode: the structured-patch 3-way
 /// merge refused, the anchor-content gate passed, but a coincidental
@@ -106,6 +111,7 @@ pub const RECOVERY_SESSION_REPLAY_WARNING: &str = "Recovered by replaying your e
      hash. Verify the diff matches your intent before continuing.";
 
 /// Warning emitted when an `insert head:` / `insert tail:` edit is applied to an
+///
 /// existing file whose snapshot tag is stale (the file drifted since the read).
 /// Head/tail insert position is content-independent — "start"/"end" cannot move
 /// with drift — so this is non-fatal: the edit applies onto the live content and
@@ -116,6 +122,7 @@ pub const HEADTAIL_DRIFT_WARNING: &str = "Applied an `insert head:`/`insert tail
      was not rejected — but re-read if the drift was unexpected.";
 
 /// Error text emitted when a hashline section omits the mandatory snapshot tag.
+///
 /// The tag is REQUIRED on every section, enforced identically by the apply path
 /// and the preview/diff path, so both surfaces reuse this single builder to
 /// stay in lockstep.

@@ -42,7 +42,7 @@ pub struct CommandPalette {
 
 impl CommandPalette {
     pub fn new() -> Self {
-        CommandPalette {
+        Self {
             visible: false,
             filter: String::new(),
             selected: 0,

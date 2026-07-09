@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use std::vec::Vec;
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub(crate) struct VecStorage {
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct VecStorage {
     cells: Vec<Cell>,
 }
 
 impl VecStorage {
-    pub(crate) fn new(cells: Vec<Cell>) -> Self {
+    pub(crate) const fn new(cells: Vec<Cell>) -> Self {
         Self { cells }
     }
 
@@ -35,7 +35,7 @@ impl core::ops::DerefMut for VecStorage {
 }
 
 /// Iterates over a slice of Cell, yielding only visible cells
-pub(crate) struct VecStorageIter<'a> {
+pub struct VecStorageIter<'a> {
     pub cells: core::slice::Iter<'a, Cell>,
     pub idx: usize,
     pub skip_width: usize,

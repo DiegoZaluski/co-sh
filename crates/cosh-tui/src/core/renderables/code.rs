@@ -29,7 +29,7 @@ pub struct CodeRenderable {
     wrap_mode: WrapMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrapMode {
     None,
     Char,
@@ -40,7 +40,7 @@ impl CodeRenderable {
     #[must_use]
     pub fn new(content: Option<String>, filetype: Option<String>) -> Self {
         let num = NEXT_CODE_RENDERABLE_NUM.fetch_add(1, Ordering::Relaxed);
-        CodeRenderable {
+        Self {
             id: format!("code-{num}"),
             num,
             visible: true,
@@ -78,11 +78,11 @@ impl CodeRenderable {
         self.bg = value.map(parse_color);
     }
 
-    pub fn set_conceal(&mut self, value: bool) {
+    pub const fn set_conceal(&mut self, value: bool) {
         self.conceal = value;
     }
 
-    pub fn set_wrap_mode(&mut self, value: WrapMode) {
+    pub const fn set_wrap_mode(&mut self, value: WrapMode) {
         self.wrap_mode = value;
     }
 }

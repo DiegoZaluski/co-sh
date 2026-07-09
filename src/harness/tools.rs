@@ -444,7 +444,7 @@ impl Tools for CoshTools {
             "ask_questions" => {
                 let input: QuestionInput =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let output = self.question.ask(&input).map_err(|e| e.clone())?;
+                let output = self.question.ask(&input)?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 

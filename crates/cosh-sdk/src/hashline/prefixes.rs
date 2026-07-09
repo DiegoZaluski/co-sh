@@ -1,4 +1,5 @@
 //! When a hashline payload is authored against `read`/`search` output, each
+//!
 //! line is prefixed with either a hashline-mode line number (`123:`) or, for
 //! diff-style echoes, a leading `+`. These helpers detect that and recover
 //! the raw text. Two strip modes are exposed:
@@ -14,17 +15,21 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
+#[allow(clippy::unwrap_used)]
 static HL_PREFIX_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*(?:>>>|>>)?\s*(?:[+*-]\s*)?\d+:").unwrap());
 
+#[allow(clippy::unwrap_used)]
 static HL_PREFIX_PLUS_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*(?:>>>|>>)?\s*\+\s*\d+:").unwrap());
 
+#[allow(clippy::unwrap_used)]
 static HL_HEADER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*¶\S+#[0-9a-fA-F]{3}\s*$").unwrap());
 
 // No regex for diff-plus — uses `is_diff_plus_line` directly (rust/regex does
 // not support lookahead, and `^\+` alone would match `+++` lines from merges).
+#[allow(clippy::unwrap_used)]
 static READ_TRUNCATION_NOTICE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"^\[(?:Showing lines \d+-\d+ of \d+|\d+ more lines? in (?:file|\S+))\b.*\bUse :L?\d+",
@@ -114,7 +119,7 @@ pub fn strip_new_line_prefixes(lines: &[String]) -> Vec<String> {
     let strip_plus = !strip_hash
         && stats.diff_plus_hash_prefix_count == 0
         && stats.diff_plus_count > 0
-        && stats.diff_plus_count as f64 >= stats.non_empty as f64 * 0.5;
+        && stats.diff_plus_count as f64 >= stats.non_empty as f64 * 0.5_f64;
 
     if !strip_hash && !strip_plus && stats.diff_plus_hash_prefix_count == 0 {
         return lines.to_vec();

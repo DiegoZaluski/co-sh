@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::result::Result;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Palette256(pub [SrgbaTuple; 256]);
 
 impl Serialize for Palette256 {
@@ -23,7 +23,7 @@ impl Serialize for Palette256 {
 }
 
 impl<'de> Deserialize<'de> for Palette256 {
-    fn deserialize<D>(deserializer: D) -> Result<Palette256, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -46,7 +46,7 @@ impl std::iter::FromIterator<SrgbaTuple> for Palette256 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColorPalette {
     pub colors: Palette256,
     pub foreground: SrgbaTuple,
@@ -72,7 +72,7 @@ impl fmt::Debug for Palette256 {
 
 impl ColorPalette {
     #[must_use]
-    pub fn resolve_fg(&self, color: ColorAttribute) -> SrgbaTuple {
+    pub const fn resolve_fg(&self, color: ColorAttribute) -> SrgbaTuple {
         match color {
             ColorAttribute::Default => self.foreground,
             ColorAttribute::PaletteIndex(idx) => self.colors.0[idx as usize],
@@ -81,7 +81,7 @@ impl ColorPalette {
         }
     }
     #[must_use]
-    pub fn resolve_bg(&self, color: ColorAttribute) -> SrgbaTuple {
+    pub const fn resolve_bg(&self, color: ColorAttribute) -> SrgbaTuple {
         match color {
             ColorAttribute::Default => self.background,
             ColorAttribute::PaletteIndex(idx) => self.colors.0[idx as usize],
@@ -97,7 +97,7 @@ lazy_static::lazy_static! {
 
 impl Default for ColorPalette {
     /// Construct a default color palette
-    fn default() -> ColorPalette {
+    fn default() -> Self {
         DEFAULT_PALETTE.clone()
     }
 }
@@ -186,7 +186,7 @@ impl ColorPalette {
         let scrollbar_thumb = RgbColor::new_8bpc(0x22, 0x22, 0x22).into();
         let split = RgbColor::new_8bpc(0x44, 0x44, 0x44).into();
 
-        ColorPalette {
+        Self {
             colors: Palette256(colors),
             foreground,
             background,

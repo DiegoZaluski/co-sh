@@ -10,7 +10,7 @@ use crate::core::rgba::{ColorInput, RGBA, parse_color};
 
 static NEXT_SCROLL_BAR_NUM: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollBarOrientation {
     Vertical,
     Horizontal,
@@ -41,7 +41,7 @@ impl ScrollBarRenderable {
     #[must_use]
     pub fn new(orientation: ScrollBarOrientation) -> Self {
         let num = NEXT_SCROLL_BAR_NUM.fetch_add(1, Ordering::Relaxed);
-        ScrollBarRenderable {
+        Self {
             id: format!("scrollbar-{num}"),
             num,
             visible: true,
@@ -62,7 +62,7 @@ impl ScrollBarRenderable {
     }
 
     #[must_use]
-    pub fn scroll_position(&self) -> f64 {
+    pub const fn scroll_position(&self) -> f64 {
         self.scroll_position
     }
 
@@ -72,7 +72,7 @@ impl ScrollBarRenderable {
     }
 
     #[must_use]
-    pub fn scroll_size(&self) -> f64 {
+    pub const fn scroll_size(&self) -> f64 {
         self.scroll_size
     }
 
@@ -82,7 +82,7 @@ impl ScrollBarRenderable {
     }
 
     #[must_use]
-    pub fn viewport_size(&self) -> f64 {
+    pub const fn viewport_size(&self) -> f64 {
         self.viewport_size
     }
 
@@ -91,7 +91,7 @@ impl ScrollBarRenderable {
         self.set_scroll_position(self.scroll_position);
     }
 
-    pub fn set_show_arrows(&mut self, show: bool) {
+    pub const fn set_show_arrows(&mut self, show: bool) {
         self.show_arrows = show;
     }
 
@@ -105,16 +105,18 @@ impl ScrollBarRenderable {
     }
 
     pub fn set_track_color(&mut self, color: Option<ColorInput>) {
-        self.track_color = parse_color(color.unwrap_or(ColorInput::String("#252527".into())));
+        self.track_color =
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#252527".into())));
     }
 
     pub fn set_thumb_color(&mut self, color: Option<ColorInput>) {
-        self.thumb_color = parse_color(color.unwrap_or(ColorInput::String("#9a9ea3".into())));
+        self.thumb_color =
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#9a9ea3".into())));
     }
 
     fn ratio(&self) -> f64 {
         let range = self.scroll_size - self.viewport_size;
-        if range <= 0.0 {
+        if range <= 0.0_f64 {
             return 0.0;
         }
         (self.scroll_position / range).clamp(0.0, 1.0)
@@ -135,7 +137,7 @@ impl ScrollBarRenderable {
         let rs = f64::from(render_size);
         let ts = f64::from(self.thumb_size(render_size));
         let available = rs - ts;
-        if available <= 0.0 {
+        if available <= 0.0_f64 {
             return 0;
         }
         (self.ratio() * available).round() as u16

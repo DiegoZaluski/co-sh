@@ -229,6 +229,7 @@ struct SortedMatchVisitor<'a> {
     visited: usize,
 }
 
+#[allow(clippy::expect_used)]
 impl Drop for SortedMatchVisitor<'_> {
     fn drop(&mut self) {
         if self.top_matches.is_empty() {
@@ -242,6 +243,7 @@ impl Drop for SortedMatchVisitor<'_> {
     }
 }
 
+#[allow(clippy::expect_used)]
 impl ParallelVisitor for SortedMatchVisitor<'_> {
     fn visit(&mut self, entry: std::result::Result<ignore::DirEntry, ignore::Error>) -> WalkState {
         if self.visited == 0 || self.visited >= 128 {
@@ -309,6 +311,7 @@ impl<'a> ParallelVisitorBuilder<'a> for SortedMatchVisitorBuilder<'a> {
 /// worker. The union of per-thread heaps always contains the global top-N;
 /// `run_glob` re-sorts and truncates afterwards, so the final ranking is
 /// deterministic (mtime desc, path tiebreak) regardless of walk order.
+#[allow(clippy::expect_used)]
 fn collect_sorted_matches_uncached(
     glob_set: &GlobSet,
     config: &GlobConfig,

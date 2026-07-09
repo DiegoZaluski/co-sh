@@ -26,12 +26,12 @@ pub enum ToastVariant {
 }
 
 impl ToastVariant {
-    fn theme_color(&self, theme: &Theme) -> RGBA {
+    const fn theme_color(&self, theme: &Theme) -> RGBA {
         match self {
-            ToastVariant::Info => theme.info,
-            ToastVariant::Success => theme.success,
-            ToastVariant::Warning => theme.warning,
-            ToastVariant::Error => theme.error,
+            Self::Info => theme.info,
+            Self::Success => theme.success,
+            Self::Warning => theme.warning,
+            Self::Error => theme.error,
         }
     }
 }
@@ -46,7 +46,7 @@ pub struct ToastOptions {
 
 impl Default for ToastOptions {
     fn default() -> Self {
-        ToastOptions {
+        Self {
             title: None,
             message: String::new(),
             variant: ToastVariant::Info,
@@ -61,8 +61,8 @@ pub struct ToastState {
 }
 
 impl ToastState {
-    pub fn new() -> Self {
-        ToastState {
+    pub const fn new() -> Self {
+        Self {
             current: None,
             elapsed: 0,
         }

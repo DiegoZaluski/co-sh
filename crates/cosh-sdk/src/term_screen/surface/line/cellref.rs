@@ -18,7 +18,7 @@ pub enum CellRef<'a> {
 
 impl CellRef<'_> {
     #[must_use]
-    pub fn cell_index(&self) -> usize {
+    pub const fn cell_index(&self) -> usize {
         match self {
             Self::ClusterRef { cell_index, .. } | Self::CellRef { cell_index, .. } => *cell_index,
         }
@@ -33,7 +33,7 @@ impl CellRef<'_> {
     }
 
     #[must_use]
-    pub fn width(&self) -> usize {
+    pub const fn width(&self) -> usize {
         match self {
             Self::CellRef { cell, .. } => cell.width(),
             Self::ClusterRef { width, .. } => *width,
@@ -41,7 +41,7 @@ impl CellRef<'_> {
     }
 
     #[must_use]
-    pub fn attrs(&self) -> &CellAttributes {
+    pub const fn attrs(&self) -> &CellAttributes {
         match self {
             Self::CellRef { cell, .. } => cell.attrs(),
             Self::ClusterRef { attrs, .. } => attrs,

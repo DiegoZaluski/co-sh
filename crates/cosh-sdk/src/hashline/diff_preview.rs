@@ -1,4 +1,5 @@
 //! Re-number a unified diff that uses the `+<lineNum>|content` /
+//!
 //! `-<lineNum>|content` / ` <lineNum>|content` line format into a compact
 //! preview that anchors every line to its post-edit position. Added lines,
 //! removed lines, and context lines all end up with a hashline-style anchor
@@ -38,6 +39,7 @@ pub fn build_compact_diff_preview(
                 Some('+' | '-' | ' ') => {}
                 _ => return line.to_string(),
             }
+            #[allow(clippy::unwrap_used)]
             let kind = kind.unwrap();
 
             let body = &line[1..];

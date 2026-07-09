@@ -29,13 +29,13 @@ pub enum Value {
     // During parsing, if we hare an incomplete key, does the parser
     // complete it and set its value to null? Or drop it?
     // If the parser drops it, we don't need to carry CompletionState.
-    Object(Vec<(String, Value)>, CompletionState),
-    Array(Vec<Value>, CompletionState),
+    Object(Vec<(String, Self)>, CompletionState),
+    Array(Vec<Self>, CompletionState),
 
     // Fixed types
-    Markdown(String, Box<Value>, CompletionState),
-    FixedJson(Box<Value>, Vec<Fixes>),
-    AnyOf(Vec<Value>, String),
+    Markdown(String, Box<Self>, CompletionState),
+    FixedJson(Box<Self>, Vec<Fixes>),
+    AnyOf(Vec<Self>, String),
 }
 
 impl Hash for Value {
@@ -44,27 +44,27 @@ impl Hash for Value {
         std::mem::discriminant(self).hash(state);
 
         match self {
-            Value::String(s, _) => s.hash(state),
-            Value::Number(n, _) => n.to_string().hash(state),
-            Value::Boolean(b) => b.hash(state),
-            Value::Null => "null".hash(state),
-            Value::Object(o, _) => {
+            Self::String(s, _) => s.hash(state),
+            Self::Number(n, _) => n.to_string().hash(state),
+            Self::Boolean(b) => b.hash(state),
+            Self::Null => "null".hash(state),
+            Self::Object(o, _) => {
                 for (k, v) in o {
                     k.hash(state);
                     v.hash(state);
                 }
             }
-            Value::Array(a, _) => {
+            Self::Array(a, _) => {
                 for v in a {
                     v.hash(state);
                 }
             }
-            Value::Markdown(s, v, _) => {
+            Self::Markdown(s, v, _) => {
                 s.hash(state);
                 v.hash(state);
             }
-            Value::FixedJson(v, _) => v.hash(state),
-            Value::AnyOf(items, _) => {
+            Self::FixedJson(v, _) => v.hash(state),
+            Self::AnyOf(items, _) => {
                 for item in items {
                     item.hash(state);
                 }
@@ -76,9 +76,9 @@ impl Hash for Value {
 impl Value {
     pub(super) fn simplify(self, is_done: bool) -> Self {
         match self {
-            Value::AnyOf(items, s) => {
+            Self::AnyOf(items, s) => {
                 let as_simple_str = |s: String| {
-                    Value::String(
+                    Self::String(
                         s,
                         if is_done {
                             CompletionState::Complete
@@ -93,13 +93,17 @@ impl Value {
                     .collect::<Vec<_>>();
                 match items.len() {
                     0 => as_simple_str(s),
-                    1 => match items.pop().expect("Expected 1 item") {
-                        Value::String(content, _completion_state) if content == s => {
-                            as_simple_str(s)
+                    1 => {
+                        #[allow(clippy::expect_used)]
+                        let item = items.pop().expect("Expected 1 item");
+                        match item {
+                            Self::String(content, _completion_state) if content == s => {
+                                as_simple_str(s)
+                            }
+                            other => Self::AnyOf(vec![other], s),
                         }
-                        other => Value::AnyOf(vec![other], s),
-                    },
-                    _ => Value::AnyOf(items, s),
+                    }
+                    _ => Self::AnyOf(items, s),
                 }
             }
             _ => self,
@@ -109,23 +113,24 @@ impl Value {
     #[must_use]
     pub fn r#type(&self) -> String {
         match self {
-            Value::String(_, _) => "String".to_string(),
-            Value::Number(_, _) => "Number".to_string(),
-            Value::Boolean(_) => "Boolean".to_string(),
-            Value::Null => "Null".to_string(),
-            Value::Object(k, _) => {
+            Self::String(_, _) => "String".to_string(),
+            Self::Number(_, _) => "Number".to_string(),
+            Self::Boolean(_) => "Boolean".to_string(),
+            Self::Null => "Null".to_string(),
+            Self::Object(k, _) => {
                 let mut s = "Object{".to_string();
                 for (key, value) in k {
+                    #[allow(clippy::unwrap_used)]
                     write!(s, "{}: {}, ", key, value.r#type()).unwrap();
                 }
                 s.push('}');
                 s
             }
-            Value::Array(i, _) => {
+            Self::Array(i, _) => {
                 let mut s = "Array[".to_string();
                 let items = i
                     .iter()
-                    .map(Value::r#type)
+                    .map(Self::r#type)
                     .collect::<HashSet<String>>()
                     .into_iter()
                     .collect::<Vec<String>>()
@@ -134,13 +139,13 @@ impl Value {
                 s.push(']');
                 s
             }
-            Value::Markdown(tag, item, _) => {
+            Self::Markdown(tag, item, _) => {
                 format!("Markdown:{} - {}", tag, item.r#type())
             }
-            Value::FixedJson(inner, fixes) => {
+            Self::FixedJson(inner, fixes) => {
                 format!("{} ({} fixes)", inner.r#type(), fixes.len())
             }
-            Value::AnyOf(items, _) => {
+            Self::AnyOf(items, _) => {
                 let mut s = "AnyOf[".to_string();
                 for item in items {
                     s.push_str(&item.r#type());
@@ -155,13 +160,13 @@ impl Value {
     #[must_use]
     pub fn completion_state(&self) -> &CompletionState {
         match self {
-            Value::String(_, s)
-            | Value::Number(_, s)
-            | Value::Object(_, s)
-            | Value::Array(_, s)
-            | Value::Markdown(_, _, s) => s,
-            Value::Boolean(_) | Value::Null | Value::FixedJson(_, _) => &CompletionState::Complete,
-            Value::AnyOf(choices, _) => {
+            Self::String(_, s)
+            | Self::Number(_, s)
+            | Self::Object(_, s)
+            | Self::Array(_, s)
+            | Self::Markdown(_, _, s) => s,
+            Self::Boolean(_) | Self::Null | Self::FixedJson(_, _) => &CompletionState::Complete,
+            Self::AnyOf(choices, _) => {
                 if choices
                     .iter()
                     .any(|c| c.completion_state() == &CompletionState::Incomplete)
@@ -176,26 +181,26 @@ impl Value {
 
     pub fn complete_deeply(&mut self) {
         match self {
-            Value::String(_, s) | Value::Number(_, s) | Value::Markdown(_, _, s) => {
+            Self::String(_, s) | Self::Number(_, s) | Self::Markdown(_, _, s) => {
                 *s = CompletionState::Complete;
             }
-            Value::Boolean(_) | Value::Null => {}
-            Value::Object(kv_pairs, s) => {
+            Self::Boolean(_) | Self::Null => {}
+            Self::Object(kv_pairs, s) => {
                 *s = CompletionState::Complete;
                 for (_, v) in kv_pairs.iter_mut() {
                     v.complete_deeply();
                 }
             }
-            Value::Array(elems, s) => {
+            Self::Array(elems, s) => {
                 *s = CompletionState::Complete;
                 for v in elems.iter_mut() {
                     v.complete_deeply();
                 }
             }
-            Value::FixedJson(val, _fixes) => {
+            Self::FixedJson(val, _fixes) => {
                 val.complete_deeply();
             }
-            Value::AnyOf(choices, _) => {
+            Self::AnyOf(choices, _) => {
                 for v in choices.iter_mut() {
                     v.complete_deeply();
                 }
@@ -207,11 +212,11 @@ impl Value {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::String(s, _) => write!(f, "{s}"),
-            Value::Number(n, _) => write!(f, "{n}"),
-            Value::Boolean(b) => write!(f, "{b}"),
-            Value::Null => write!(f, "null"),
-            Value::Object(o, _) => {
+            Self::String(s, _) => write!(f, "{s}"),
+            Self::Number(n, _) => write!(f, "{n}"),
+            Self::Boolean(b) => write!(f, "{b}"),
+            Self::Null => write!(f, "null"),
+            Self::Object(o, _) => {
                 write!(f, "{{")?;
                 for (i, (k, v)) in o.iter().enumerate() {
                     if i > 0 {
@@ -221,7 +226,7 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
-            Value::Array(a, _) => {
+            Self::Array(a, _) => {
                 write!(f, "[")?;
                 for (i, v) in a.iter().enumerate() {
                     if i > 0 {
@@ -231,9 +236,9 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "]")
             }
-            Value::Markdown(s, v, _) => write!(f, "{s}\n{v}"),
-            Value::FixedJson(v, _) => write!(f, "{v}"),
-            Value::AnyOf(items, s) => {
+            Self::Markdown(s, v, _) => write!(f, "{s}\n{v}"),
+            Self::FixedJson(v, _) => write!(f, "{v}"),
+            Self::AnyOf(items, s) => {
                 write!(f, "AnyOf[{s},")?;
                 for item in items {
                     write!(f, "{item},")?;
@@ -285,12 +290,14 @@ impl<'de> serde::de::Visitor<'de> for ValueVisitor {
     where
         E: serde::de::Error,
     {
-        match serde_json::Number::from_f64(v) {
-            Some(n) => Ok(Value::Number(n, CompletionState::Complete)),
-            None => Err(serde::de::Error::custom(format!(
-                "f64 value cannot be represented as JSON number: {v}"
-            ))),
-        }
+        serde_json::Number::from_f64(v).map_or_else(
+            || {
+                Err(serde::de::Error::custom(format!(
+                    "f64 value cannot be represented as JSON number: {v}"
+                )))
+            },
+            |n| Ok(Value::Number(n, CompletionState::Complete)),
+        )
     }
 
     fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {

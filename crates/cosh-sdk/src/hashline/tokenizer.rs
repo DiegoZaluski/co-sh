@@ -14,15 +14,15 @@ use super::format::{
 use crate::hashline::messages::{ABORT_MARKER, BEGIN_PATCH_MARKER, END_PATCH_MARKER};
 use crate::hashline::types::{Anchor, ParsedRange};
 
-fn is_digit_code(c: u8) -> bool {
+const fn is_digit_code(c: u8) -> bool {
     c.is_ascii_digit()
 }
 
-fn is_non_zero_digit_code(c: u8) -> bool {
+const fn is_non_zero_digit_code(c: u8) -> bool {
     c > b'0' && c <= b'9'
 }
 
-fn is_hex_digit_code(c: u8) -> bool {
+const fn is_hex_digit_code(c: u8) -> bool {
     c.is_ascii_hexdigit()
 }
 
@@ -219,7 +219,7 @@ fn scan_header_range(
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockTarget {
     Replace { range: ParsedRange },
     Block { anchor: Anchor },
@@ -370,7 +370,7 @@ pub fn try_parse_hunk_header(line: &str) -> Option<BlockTarget> {
     Some(scan.target)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderInfo {
     pub path: String,
     pub file_hash: Option<String>,
@@ -420,7 +420,7 @@ pub fn try_parse_header(line: &str) -> Option<HeaderInfo> {
     Some(HeaderInfo { path, file_hash })
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     Blank {
         line_num: u32,
@@ -506,7 +506,7 @@ pub struct Tokenizer {
 impl Tokenizer {
     /// Create a new tokenizer starting at line number 1.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             buffer: String::new(),
             next_line_num: 1,

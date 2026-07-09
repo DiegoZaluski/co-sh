@@ -108,7 +108,7 @@ impl RenderableNode {
     #[must_use]
     pub fn new(id: Option<String>) -> Self {
         let num = NEXT_RENDERABLE_NUM.fetch_add(1, Ordering::Relaxed);
-        RenderableNode {
+        Self {
             id: id.unwrap_or_else(|| format!("renderable-{num}")),
             num,
             visible: true,
@@ -146,11 +146,11 @@ impl RenderableNode {
     }
 
     #[must_use]
-    pub fn layout_node(&self) -> Option<taffy::NodeId> {
+    pub const fn layout_node(&self) -> Option<taffy::NodeId> {
         self.layout_node
     }
 
-    pub fn set_layout_node(&mut self, node: Option<taffy::NodeId>) {
+    pub const fn set_layout_node(&mut self, node: Option<taffy::NodeId>) {
         self.layout_node = node;
     }
 }
@@ -162,7 +162,7 @@ pub struct RootRenderable {
 impl RootRenderable {
     #[must_use]
     pub fn new() -> Self {
-        RootRenderable {
+        Self {
             node: RenderableNode::new(Some("__root__".to_string())),
         }
     }
@@ -187,11 +187,11 @@ impl RootRenderable {
         self.node.id = id;
     }
 
-    pub fn set_visible(&mut self, visible: bool) {
+    pub const fn set_visible(&mut self, visible: bool) {
         self.node.visible = visible;
     }
 
-    pub fn set_focusable(&mut self, focusable: bool) {
+    pub const fn set_focusable(&mut self, focusable: bool) {
         self.node.focusable = focusable;
     }
 }

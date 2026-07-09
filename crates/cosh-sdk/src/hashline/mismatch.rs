@@ -13,16 +13,14 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::LazyLock;
 
+#[allow(clippy::unwrap_used)]
 static LINE_REF_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*[>+\-*]*\s*(\d+)(?::.*)?\s*$").unwrap());
 
 /// Format the required-shape diagnostic shown when a line reference is malformed.
 #[must_use]
 pub fn format_full_anchor_requirement(raw: Option<&str>) -> String {
-    let received = match raw {
-        Some(s) => format!(" Received {s:?}."),
-        None => String::new(),
-    };
+    let received = raw.map_or_else(String::new, |s| format!(" Received {s:?}."));
     format!(
         "a bare line number from read/search output plus the section header content-hash tag \
          (for example {}{}{}{} and line \"160\"){}",
@@ -101,6 +99,7 @@ fn get_mismatch_display_lines(anchor_lines: &[u32], file_lines: &[String]) -> Ve
 }
 
 /// Raised when a hashline section's snapshot tag doesn't match the live file's
+///
 /// content (and recovery, if configured, declined the merge). Carries the
 /// file lines plus anchored lines so renderers can produce a richer
 /// diagnostic via [`MismatchError::display_message`].
@@ -148,10 +147,10 @@ impl MismatchError {
 
     #[must_use]
     pub fn rejection_header(details: &MismatchDetails) -> Vec<String> {
-        let path_text = match &details.path {
-            Some(p) => format!(" for {p}"),
-            None => String::new(),
-        };
+        let path_text = details
+            .path
+            .as_ref()
+            .map_or_else(String::new, |p| format!(" for {p}"));
         if details.hash_recognized {
             vec![
                 format!(

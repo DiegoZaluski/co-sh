@@ -49,8 +49,8 @@ pub enum AnsiColor {
 }
 
 impl From<AnsiColor> for u8 {
-    fn from(col: AnsiColor) -> u8 {
-        col as u8
+    fn from(col: AnsiColor) -> Self {
+        col as Self
     }
 }
 
@@ -92,7 +92,7 @@ impl RgbColor {
     /// Will convert from 10bpc if that is the internal storage.
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
-    pub fn to_tuple_rgb8(self) -> (u8, u8, u8) {
+    pub const fn to_tuple_rgb8(self) -> (u8, u8, u8) {
         (
             (self.bits >> 16) as u8,
             (self.bits >> 8) as u8,
@@ -126,7 +126,7 @@ impl RgbColor {
     /// The list of names can be found here:
     /// <https://en.wikipedia.org/wiki/X11_color_names>
     #[must_use]
-    pub fn from_named(name: &str) -> Option<RgbColor> {
+    pub fn from_named(name: &str) -> Option<Self> {
         Some(SrgbaTuple::from_named(name)?.into())
     }
 
@@ -152,7 +152,7 @@ impl RgbColor {
     /// in the range 0-100.
     #[must_use]
     #[allow(clippy::many_single_char_names, clippy::cast_possible_truncation)]
-    pub fn from_rgb_str(s: &str) -> Option<RgbColor> {
+    pub fn from_rgb_str(s: &str) -> Option<Self> {
         // Handle hsl: prefix with space separators (original wezterm format)
         if let Some(hsl) = s.strip_prefix("hsl:") {
             let parts: Vec<f64> = hsl
@@ -167,7 +167,7 @@ impl RgbColor {
                     1.0,
                 );
                 let [r, g, b, _] = c.to_rgba8();
-                return Some(RgbColor::new_8bpc(r, g, b));
+                return Some(Self::new_8bpc(r, g, b));
             }
             return None;
         }
@@ -183,7 +183,7 @@ impl RgbColor {
                 let r = to_u8(parts[0])?;
                 let g = to_u8(parts[1])?;
                 let b = to_u8(parts[2])?;
-                return Some(RgbColor::new_8bpc(r, g, b));
+                return Some(Self::new_8bpc(r, g, b));
             }
             return None;
         }
@@ -208,7 +208,7 @@ impl RgbColor {
                     let r = to_u8(0)?;
                     let g = to_u8(1)?;
                     let b = to_u8(2)?;
-                    return Some(RgbColor::new_8bpc(r, g, b));
+                    return Some(Self::new_8bpc(r, g, b));
                 }
             }
         }
@@ -229,13 +229,13 @@ impl RgbColor {
     /// <https://ogeon.github.io/docs/palette/master/palette/named/index.html>
     #[must_use]
     pub fn from_named_or_rgb_string(s: &str) -> Option<Self> {
-        RgbColor::from_rgb_str(s).or_else(|| RgbColor::from_named(s))
+        Self::from_rgb_str(s).or_else(|| Self::from_named(s))
     }
 }
 
 impl From<SrgbaTuple> for RgbColor {
     #[allow(clippy::cast_possible_truncation)]
-    fn from(srgb: SrgbaTuple) -> RgbColor {
+    fn from(srgb: SrgbaTuple) -> Self {
         let SrgbaTuple(r, g, b, _) = srgb;
         Self::new_f32(r as f32, g as f32, b as f32)
     }
@@ -259,12 +259,12 @@ impl Serialize for RgbColor {
 }
 
 impl<'de> Deserialize<'de> for RgbColor {
-    fn deserialize<D>(deserializer: D) -> Result<RgbColor, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        RgbColor::from_named_or_rgb_string(&s)
+        Self::from_named_or_rgb_string(&s)
             .ok_or_else(|| format!("unknown color name: {s}"))
             .map_err(serde::de::Error::custom)
     }
@@ -274,6 +274,7 @@ impl<'de> Deserialize<'de> for RgbColor {
 pub type PaletteIndex = u8;
 
 /// Specifies the color to be used when rendering a cell.
+///
 /// This differs from `ColorAttribute` in that this type can only
 /// specify one of the possible color types at once, whereas the
 /// `ColorAttribute` type can specify a `TrueColor` value and a fallback.
@@ -288,19 +289,19 @@ pub enum ColorSpec {
 
 impl From<AnsiColor> for ColorSpec {
     fn from(col: AnsiColor) -> Self {
-        ColorSpec::PaletteIndex(col as u8)
+        Self::PaletteIndex(col as u8)
     }
 }
 
 impl From<RgbColor> for ColorSpec {
     fn from(col: RgbColor) -> Self {
-        ColorSpec::TrueColor(col.into())
+        Self::TrueColor(col.into())
     }
 }
 
 impl From<SrgbaTuple> for ColorSpec {
     fn from(col: SrgbaTuple) -> Self {
-        ColorSpec::TrueColor(col)
+        Self::TrueColor(col)
     }
 }
 

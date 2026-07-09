@@ -5,7 +5,7 @@ use super::todo_cross_off::TodoCrossOff;
 use super::todo_edit::TodoEdit;
 use super::todo_write::TodoWriteAction;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum TodoStatus {
     Pending,
     InProgress,

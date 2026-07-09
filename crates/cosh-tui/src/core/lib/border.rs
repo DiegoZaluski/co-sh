@@ -1,6 +1,6 @@
 use crate::core::rgba::ColorInput;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BorderCharacters {
     pub top_left: char,
     pub top_right: char,
@@ -15,7 +15,7 @@ pub struct BorderCharacters {
     pub cross: char,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderStyle {
     Single,
     Double,
@@ -107,7 +107,7 @@ pub const HEAVY: BorderCharacters = BorderCharacters {
 };
 
 #[must_use]
-pub fn border_chars(style: BorderStyle) -> &'static BorderCharacters {
+pub const fn border_chars(style: BorderStyle) -> &'static BorderCharacters {
     match style {
         BorderStyle::Single => &SINGLE,
         BorderStyle::Double => &DOUBLE,
@@ -116,7 +116,7 @@ pub fn border_chars(style: BorderStyle) -> &'static BorderCharacters {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BorderConfig {
     pub border_style: BorderStyle,
     pub border: BorderSidesConfig,
@@ -124,7 +124,7 @@ pub struct BorderConfig {
     pub custom_border_chars: Option<BorderCharacters>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoxDrawOptions {
     pub x: i32,
     pub y: i32,
@@ -142,7 +142,7 @@ pub struct BoxDrawOptions {
     pub bottom_title_alignment: Option<TitleAlignment>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TitleAlignment {
     Left,
     Center,
@@ -150,7 +150,7 @@ pub enum TitleAlignment {
 }
 
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BorderSidesConfig {
     pub top: bool,
     pub right: bool,
@@ -159,14 +159,14 @@ pub struct BorderSidesConfig {
 }
 
 impl BorderSidesConfig {
-    pub const ALL: BorderSidesConfig = BorderSidesConfig {
+    pub const ALL: Self = Self {
         top: true,
         right: true,
         bottom: true,
         left: true,
     };
 
-    pub const NONE: BorderSidesConfig = BorderSidesConfig {
+    pub const NONE: Self = Self {
         top: false,
         right: false,
         bottom: false,
@@ -174,7 +174,7 @@ impl BorderSidesConfig {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderSide {
     Top,
     Right,
@@ -201,6 +201,6 @@ pub fn get_border_from_sides(sides: BorderSidesConfig) -> Vec<BorderSide> {
 }
 
 #[must_use]
-pub fn get_border_sides(border: &BorderSidesConfig) -> BorderSidesConfig {
+pub const fn get_border_sides(border: &BorderSidesConfig) -> BorderSidesConfig {
     *border
 }

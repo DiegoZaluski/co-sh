@@ -22,7 +22,7 @@ bitflags! {
 
 impl Default for Modifiers {
     fn default() -> Self {
-        Modifiers::NONE
+        Self::NONE
     }
 }
 
@@ -41,12 +41,12 @@ bitflags! {
 
 impl Default for KittyKeyboardFlags {
     fn default() -> Self {
-        KittyKeyboardFlags::NONE
+        Self::NONE
     }
 }
 
 /// Keyboard encoding modes (replacement for `termwiz::input::KeyboardEncoding`)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyboardEncoding {
     Xterm,
     CsiU,

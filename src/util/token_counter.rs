@@ -51,7 +51,7 @@ enum CharCat {
     Other,
 }
 
-fn char_category(c: char) -> CharCat {
+const fn char_category(c: char) -> CharCat {
     if c.is_ascii_alphabetic() {
         CharCat::Letter
     } else if c.is_ascii_digit() {

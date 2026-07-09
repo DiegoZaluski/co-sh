@@ -331,10 +331,10 @@ fn truncate_line(line: String, max_columns: Option<usize>) -> (String, bool) {
 
 #[allow(dead_code)]
 fn bytes_to_trimmed_string(bytes: &[u8]) -> String {
-    match std::str::from_utf8(bytes) {
-        Ok(text) => text.trim_end().to_string(),
-        Err(_) => String::from_utf8_lossy(bytes).trim_end().to_string(),
-    }
+    std::str::from_utf8(bytes).map_or_else(
+        |_| String::from_utf8_lossy(bytes).trim_end().to_string(),
+        |text| text.trim_end().to_string(),
+    )
 }
 
 // Sink implementation for grep-searcher
@@ -688,6 +688,7 @@ fn to_grep_match(path: String, matched: CollectedMatch) -> GrepMatch {
 }
 
 #[allow(dead_code)]
+#[allow(clippy::expect_used)]
 fn push_content_matches(
     matches: &mut Vec<GrepMatch>,
     path: String,
@@ -829,6 +830,7 @@ fn find_braced_escape_end(bytes: &[u8], start: usize) -> Option<usize> {
 /// and avoids confusing error messages for callers who pass literal text
 /// fragments (e.g. JS template strings).
 #[allow(dead_code)]
+#[allow(clippy::expect_used)]
 fn sanitize_braces(pattern: &str) -> Cow<'_, str> {
     let bytes = pattern.as_bytes();
     if !bytes.contains(&b'{') && !bytes.contains(&b'}') {
@@ -907,6 +909,7 @@ fn sanitize_braces(pattern: &str) -> Cow<'_, str> {
 /// remaining literal parentheses preserves useful search behavior without
 /// changing valid regexes.
 #[allow(dead_code)]
+#[allow(clippy::expect_used)]
 fn escape_unescaped_parentheses(pattern: &str) -> Cow<'_, str> {
     let bytes = pattern.as_bytes();
     if !bytes.contains(&b'(') && !bytes.contains(&b')') {
@@ -1358,6 +1361,7 @@ struct StreamingGrepVisitor<'a> {
     visited: usize,
 }
 
+#[allow(clippy::expect_used)]
 impl Drop for StreamingGrepVisitor<'_> {
     fn drop(&mut self) {
         if self.results.is_empty() {
@@ -1371,12 +1375,13 @@ impl Drop for StreamingGrepVisitor<'_> {
     }
 }
 
+#[allow(clippy::expect_used)]
 impl ParallelVisitor for StreamingGrepVisitor<'_> {
     fn visit(&mut self, entry: std::result::Result<ignore::DirEntry, ignore::Error>) -> WalkState {
         if self.visited == 0 || self.visited >= 128 {
             self.visited = 0;
             if let Err(err) = self.ct.heartbeat() {
-                *self.error.lock().expect("error lock poisoned") = Some(err.clone());
+                *self.error.lock().expect("error lock poisoned") = Some(err);
                 return WalkState::Quit;
             }
         }
@@ -1484,6 +1489,7 @@ impl<'a> ParallelVisitorBuilder<'a> for StreamingGrepVisitorBuilder<'a> {
     clippy::too_many_arguments,
     reason = "matches GrepOptions field count"
 )]
+#[allow(clippy::expect_used)]
 fn run_streaming_grep(
     search_path: &Path,
     matcher: &grep_regex::RegexMatcher,
@@ -1693,7 +1699,7 @@ fn search_sync(content: &[u8], options: &SearchOptions) -> SearchResult {
     let mode = parse_output_mode(options.mode);
     let matcher = match build_matcher(&options.pattern, ignore_case, multiline) {
         Ok(matcher) => matcher,
-        Err(err) => return empty_search_result(Some(err.clone())),
+        Err(err) => return empty_search_result(Some(err)),
     };
 
     let (context_before, context_after) = resolve_context(

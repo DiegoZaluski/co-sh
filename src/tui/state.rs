@@ -22,8 +22,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        AppState {
+    pub const fn new() -> Self {
+        Self {
             sessions: vec![],
             current_session_id: None,
             status: SessionStatus::Idle,

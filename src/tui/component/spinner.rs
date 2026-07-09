@@ -6,14 +6,14 @@ pub struct SpinnerState {
 }
 
 impl SpinnerState {
-    pub fn new() -> Self {
-        SpinnerState {
+    pub const fn new() -> Self {
+        Self {
             frame: 0,
             tick_counter: 0,
         }
     }
 
-    pub fn advance(&mut self) {
+    pub const fn advance(&mut self) {
         self.tick_counter += 1;
         if self.tick_counter >= 2 {
             self.tick_counter = 0;

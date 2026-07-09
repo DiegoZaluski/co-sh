@@ -1,6 +1,6 @@
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HighlightCategory {
     Keyword,
     String,

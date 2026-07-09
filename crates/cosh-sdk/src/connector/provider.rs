@@ -2,14 +2,14 @@
 //! and API key environment variable names.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Family {
+pub enum Family {
     OpenAICompatible,
     Gemini,
     Claude,
 }
 
 #[derive(Debug)]
-pub(crate) struct ProviderConfig {
+pub struct ProviderConfig {
     pub name: &'static str,
     pub family: Family,
     pub base_url: &'static str,
@@ -296,14 +296,14 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     ("claude", "ANTHROPIC_API_KEY"),
 ];
 
-pub(crate) fn get_provider(name: &str) -> Option<&'static ProviderConfig> {
+pub fn get_provider(name: &str) -> Option<&'static ProviderConfig> {
     PROVIDERS
         .iter()
         .find(|(key, _)| *key == name)
         .map(|(_, config)| config)
 }
 
-pub(crate) fn get_api_key(provider: &str) -> Option<String> {
+pub fn get_api_key(provider: &str) -> Option<String> {
     let env_var = API_KEY_ENVS
         .iter()
         .find(|(key, _)| *key == provider)

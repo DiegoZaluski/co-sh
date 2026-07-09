@@ -66,19 +66,19 @@ impl Connector {
     }
 
     /// Maximum number of tokens to generate.
-    pub fn with_max_tokens(mut self, v: u32) -> Self {
+    pub const fn with_max_tokens(mut self, v: u32) -> Self {
         self.params.max_tokens = Some(v);
         self
     }
 
     /// Sampling temperature (0.0 – 2.0). Higher values make output more random.
-    pub fn with_temperature(mut self, v: f32) -> Self {
+    pub const fn with_temperature(mut self, v: f32) -> Self {
         self.params.temperature = Some(v);
         self
     }
 
     /// Nucleus sampling threshold (0.0 – 1.0).
-    pub fn with_top_p(mut self, v: f32) -> Self {
+    pub const fn with_top_p(mut self, v: f32) -> Self {
         self.params.top_p = Some(v);
         self
     }
@@ -90,19 +90,19 @@ impl Connector {
     }
 
     /// Frequency penalty (-2.0 – 2.0). Positive values penalize frequent tokens.
-    pub fn with_frequency_penalty(mut self, v: f32) -> Self {
+    pub const fn with_frequency_penalty(mut self, v: f32) -> Self {
         self.params.frequency_penalty = Some(v);
         self
     }
 
     /// Presence penalty (-2.0 – 2.0). Positive values penalize tokens that have appeared.
-    pub fn with_presence_penalty(mut self, v: f32) -> Self {
+    pub const fn with_presence_penalty(mut self, v: f32) -> Self {
         self.params.presence_penalty = Some(v);
         self
     }
 
     /// Seed for deterministic sampling.
-    pub fn with_seed(mut self, v: i64) -> Self {
+    pub const fn with_seed(mut self, v: i64) -> Self {
         self.params.seed = Some(v);
         self
     }
@@ -114,13 +114,13 @@ impl Connector {
     }
 
     /// Whether to return log probabilities of the output tokens.
-    pub fn with_logprobs(mut self, v: bool) -> Self {
+    pub const fn with_logprobs(mut self, v: bool) -> Self {
         self.params.logprobs = Some(v);
         self
     }
 
     /// Number of most probable tokens to return log probabilities for.
-    pub fn with_top_logprobs(mut self, v: u32) -> Self {
+    pub const fn with_top_logprobs(mut self, v: u32) -> Self {
         self.params.top_logprobs = Some(v);
         self
     }

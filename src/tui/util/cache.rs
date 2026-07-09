@@ -75,7 +75,7 @@ where
         let data = Self::load_from_disk(&file_path).unwrap_or_default();
         let revalidating = HashSet::new();
 
-        StaleCache {
+        Self {
             data,
             revalidating,
             file_path,
@@ -164,10 +164,7 @@ mod tests {
         assert!(cache.get(&"key1".to_string()).is_none());
 
         cache.finish_revalidation("key1".to_string(), "value1".to_string());
-        assert_eq!(
-            cache.get(&"key1".to_string()),
-            Some(&"value1".to_string())
-        );
+        assert_eq!(cache.get(&"key1".to_string()), Some(&"value1".to_string()));
     }
 
     #[test]
@@ -214,14 +211,8 @@ mod tests {
         // Second cache: load from same file
         {
             let cache = StaleCache::<String, String>::new_for_test(file_path);
-            assert_eq!(
-                cache.get(&"key1".to_string()),
-                Some(&"value1".to_string())
-            );
-            assert_eq!(
-                cache.get(&"key2".to_string()),
-                Some(&"value2".to_string())
-            );
+            assert_eq!(cache.get(&"key1".to_string()), Some(&"value1".to_string()));
+            assert_eq!(cache.get(&"key2".to_string()), Some(&"value2".to_string()));
         }
     }
 
@@ -232,7 +223,7 @@ mod tests {
         std::fs::write(&file_path, "this is not valid json").unwrap();
 
         // Should not panic — treats corrupted file as empty cache
-        let cache = StaleCache::<String, String>::new_for_test(file_path.clone());
+        let cache = StaleCache::<String, String>::new_for_test(file_path);
         assert!(cache.get(&"any".to_string()).is_none());
     }
 
@@ -258,7 +249,7 @@ mod tests {
                 std::fs::create_dir_all(parent).ok();
             }
             let data = Self::load_from_disk(&file_path).unwrap_or_default();
-            StaleCache {
+            Self {
                 data,
                 revalidating: HashSet::new(),
                 file_path,

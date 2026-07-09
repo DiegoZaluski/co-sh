@@ -23,7 +23,7 @@ use num_traits::FromPrimitive;
 use ordered_float::NotNan;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColorOrQuery {
     Color(SrgbaTuple),
     Query,
@@ -32,13 +32,14 @@ pub enum ColorOrQuery {
 impl Display for ColorOrQuery {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
-            ColorOrQuery::Query => write!(f, "?"),
-            ColorOrQuery::Color(c) => write!(f, "{}", c.to_x11_16bit_rgb_string()),
+            Self::Query => write!(f, "?"),
+            Self::Color(c) => write!(f, "{}", c.to_x11_16bit_rgb_string()),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::derive_partial_eq_without_eq)]
 pub enum OperatingSystemCommand {
     SetIconNameAndWindowTitle(String),
     SetWindowTitle(String),
@@ -78,7 +79,7 @@ pub enum DynamicColorNumber {
     HighlightForegroundColor = 19,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeColorPair {
     pub palette_index: u8,
     pub color: ColorOrQuery,
@@ -105,26 +106,26 @@ pub struct Selection :u16{
 }
 
 impl Selection {
-    fn try_parse(buf: &[u8]) -> Result<Selection> {
+    fn try_parse(buf: &[u8]) -> Result<Self> {
         if buf == b"" {
-            Ok(Selection::SELECT | Selection::CUT0)
+            Ok(Self::SELECT | Self::CUT0)
         } else {
-            let mut s = Selection::NONE;
+            let mut s = Self::NONE;
             for c in buf {
                 s |= match c {
-                    b'c' => Selection::CLIPBOARD,
-                    b'p' => Selection::PRIMARY,
-                    b's' => Selection::SELECT,
-                    b'0' => Selection::CUT0,
-                    b'1' => Selection::CUT1,
-                    b'2' => Selection::CUT2,
-                    b'3' => Selection::CUT3,
-                    b'4' => Selection::CUT4,
-                    b'5' => Selection::CUT5,
-                    b'6' => Selection::CUT6,
-                    b'7' => Selection::CUT7,
-                    b'8' => Selection::CUT8,
-                    b'9' => Selection::CUT9,
+                    b'c' => Self::CLIPBOARD,
+                    b'p' => Self::PRIMARY,
+                    b's' => Self::SELECT,
+                    b'0' => Self::CUT0,
+                    b'1' => Self::CUT1,
+                    b'2' => Self::CUT2,
+                    b'3' => Self::CUT3,
+                    b'4' => Self::CUT4,
+                    b'5' => Self::CUT5,
+                    b'6' => Self::CUT6,
+                    b'7' => Self::CUT7,
+                    b'8' => Self::CUT8,
+                    b'9' => Self::CUT9,
                     _ => bail!("invalid selection {:?}", buf),
                 }
             }
@@ -169,7 +170,7 @@ impl OperatingSystemCommand {
                 vec.push(slice.to_vec());
             }
             log::trace!("OSC internal parse err: {err}, track as Unspecified {vec:?}");
-            OperatingSystemCommand::Unspecified(vec)
+            Self::Unspecified(vec)
         })
     }
 
@@ -182,7 +183,7 @@ impl OperatingSystemCommand {
             let sel = Selection::try_parse(osc[1])?;
             let bytes = base64_decode(osc[2])?;
             let s = String::from_utf8(bytes)?;
-            Ok(OperatingSystemCommand::SetSelection(sel, s))
+            Ok(Self::SetSelection(sel, s))
         } else {
             bail!("unhandled OSC 52: {:?}", osc);
         }
@@ -201,7 +202,7 @@ impl OperatingSystemCommand {
             colors.push(index);
         }
 
-        Ok(OperatingSystemCommand::ResetColors(colors))
+        Ok(Self::ResetColors(colors))
     }
 
     fn parse_change_color_number(osc: &[&[u8]]) -> Result<Self> {
@@ -227,14 +228,14 @@ impl OperatingSystemCommand {
             });
         }
 
-        Ok(OperatingSystemCommand::ChangeColorNumber(pairs))
+        Ok(Self::ChangeColorNumber(pairs))
     }
 
     fn parse_reset_dynamic_color_number(idx: u8) -> Result<Self> {
         let which_color: DynamicColorNumber = FromPrimitive::from_u8(idx)
             .ok_or_else(|| "osc code is not a valid DynamicColorNumber!?".to_string())?;
 
-        Ok(OperatingSystemCommand::ResetDynamicColor(which_color))
+        Ok(Self::ResetDynamicColor(which_color))
     }
 
     fn parse_change_dynamic_color_number(idx: u8, osc: &[&[u8]]) -> Result<Self> {
@@ -253,10 +254,7 @@ impl OperatingSystemCommand {
             }
         }
 
-        Ok(OperatingSystemCommand::ChangeDynamicColors(
-            which_color,
-            colors,
-        ))
+        Ok(Self::ChangeDynamicColors(which_color, colors))
     }
 
     fn internal_parse(osc: &[&[u8]]) -> Result<Self> {
@@ -323,15 +321,11 @@ impl OperatingSystemCommand {
         match osc_code {
             SetIconNameAndWindowTitle => single_title_string!(SetIconNameAndWindowTitle),
             SetWindowTitle => single_title_string!(SetWindowTitle),
-            SetWindowTitleSun => Ok(OperatingSystemCommand::SetWindowTitleSun(
-                p1str[1..].to_owned(),
-            )),
+            SetWindowTitleSun => Ok(Self::SetWindowTitleSun(p1str[1..].to_owned())),
 
             SetIconName => single_title_string!(SetIconName),
-            SetIconNameSun => Ok(OperatingSystemCommand::SetIconNameSun(
-                p1str[1..].to_owned(),
-            )),
-            SetHyperlink => Ok(OperatingSystemCommand::SetHyperlink(Hyperlink::parse(osc)?)),
+            SetIconNameSun => Ok(Self::SetIconNameSun(p1str[1..].to_owned())),
+            SetHyperlink => Ok(Self::SetHyperlink(Hyperlink::parse(osc)?)),
             ManipulateSelectionData => Self::parse_selection(osc),
             SystemNotification => {
                 if osc.len() >= 3 && osc[1] == b"4" {
@@ -340,26 +334,20 @@ impl OperatingSystemCommand {
                         number.parse::<u8>().unwrap_or(0).min(100)
                     }
                     match osc[2] {
-                        b"0" => return Ok(OperatingSystemCommand::ConEmuProgress(Progress::None)),
+                        b"0" => return Ok(Self::ConEmuProgress(Progress::None)),
                         b"1" => {
                             let pct = osc.get(3).map_or(0, get_pct);
-                            return Ok(OperatingSystemCommand::ConEmuProgress(
-                                Progress::SetPercentage(pct),
-                            ));
+                            return Ok(Self::ConEmuProgress(Progress::SetPercentage(pct)));
                         }
                         b"2" => {
                             let pct = osc.get(3).map_or(0, get_pct);
-                            return Ok(OperatingSystemCommand::ConEmuProgress(Progress::SetError(
-                                pct,
-                            )));
+                            return Ok(Self::ConEmuProgress(Progress::SetError(pct)));
                         }
                         b"3" => {
-                            return Ok(OperatingSystemCommand::ConEmuProgress(
-                                Progress::SetIndeterminate,
-                            ));
+                            return Ok(Self::ConEmuProgress(Progress::SetIndeterminate));
                         }
                         b"4" => {
-                            return Ok(OperatingSystemCommand::ConEmuProgress(Progress::Paused));
+                            return Ok(Self::ConEmuProgress(Progress::Paused));
                         }
                         _ => {}
                     }
@@ -375,7 +363,7 @@ impl OperatingSystemCommand {
                 for slice in osc.iter().skip(1) {
                     vec.push(String::from_utf8_lossy(slice).to_string());
                 }
-                Ok(OperatingSystemCommand::RxvtExtension(vec))
+                Ok(Self::RxvtExtension(vec))
             }
             FinalTermSemanticPrompt => self::FinalTermSemanticPrompt::parse(osc)
                 .map(OperatingSystemCommand::FinalTermSemanticPrompt),
@@ -439,7 +427,7 @@ impl OperatingSystemCommandCode {
         }
     }
 
-    fn linear_search_variant(v: &Self) -> &'static str {
+    const fn linear_search_variant(v: &Self) -> &'static str {
         use OperatingSystemCommandCode::*;
         match *v {
         $(
@@ -505,7 +493,7 @@ impl OperatingSystemCommandCode {
         Self::linear_search_code(code)
     }
 
-    fn as_code(self) -> &'static str {
+    const fn as_code(self) -> &'static str {
         Self::linear_search_variant(&self)
     }
 }
@@ -1096,23 +1084,23 @@ impl Display for ITermDimension {
 impl core::str::FromStr for ITermDimension {
     type Err = crate::term_screen::escape_parser::Error;
     fn from_str(s: &str) -> Result<Self> {
-        ITermDimension::parse(s)
+        Self::parse(s)
     }
 }
 
 impl ITermDimension {
     fn parse(s: &str) -> Result<Self> {
         if s == "auto" {
-            Ok(ITermDimension::Automatic)
+            Ok(Self::Automatic)
         } else if let Some(s) = s.strip_suffix("px") {
             let num = s.parse()?;
-            Ok(ITermDimension::Pixels(num))
+            Ok(Self::Pixels(num))
         } else if let Some(s) = s.strip_suffix('%') {
             let num = s.parse()?;
-            Ok(ITermDimension::Percent(num))
+            Ok(Self::Percent(num))
         } else {
             let num = s.parse()?;
-            Ok(ITermDimension::Cells(num))
+            Ok(Self::Cells(num))
         }
     }
 
@@ -1122,10 +1110,10 @@ impl ITermDimension {
     #[must_use]
     pub fn to_pixels(&self, cell_size: usize, num_cells: usize) -> Option<usize> {
         match self {
-            ITermDimension::Automatic => None,
-            ITermDimension::Cells(n) => Some((*n).max(0) as usize * cell_size),
-            ITermDimension::Pixels(n) => Some((*n).max(0) as usize),
-            ITermDimension::Percent(n) => Some(
+            Self::Automatic => None,
+            Self::Cells(n) => Some((*n).max(0) as usize * cell_size),
+            Self::Pixels(n) => Some((*n).max(0) as usize),
+            Self::Percent(n) => Some(
                 (((*n).clamp(0, 100) as f32 / 100.0) * num_cells as f32 * cell_size as f32)
                     as usize,
             ),
@@ -1189,14 +1177,12 @@ impl ITermProprietary {
         let p1_empty = matches!(p1, Some("") | None);
 
         if osc.len() == 3 && keyword == "Copy" && p1_empty {
-            return Ok(ITermProprietary::Copy(String::from_utf8(base64_decode(
-                osc[2],
-            )?)?));
+            return Ok(Self::Copy(String::from_utf8(base64_decode(osc[2])?)?));
         }
         if osc.len() == 3 && keyword == "SetBadgeFormat" && p1_empty {
-            return Ok(ITermProprietary::SetBadgeFormat(String::from_utf8(
-                base64_decode(osc[2])?,
-            )?));
+            return Ok(Self::SetBadgeFormat(String::from_utf8(base64_decode(
+                osc[2],
+            )?)?));
         }
 
         if osc.len() == 3
@@ -1204,7 +1190,7 @@ impl ITermProprietary {
             && p1.is_some()
             && let Some(p1) = p1
         {
-            return Ok(ITermProprietary::ReportCellSize {
+            return Ok(Self::ReportCellSize {
                 height_pixels: NotNan::new(p1.parse()?).map_err(not_nan_err)?,
                 width_pixels: NotNan::new(String::from_utf8_lossy(osc[2]).parse()?)
                     .map_err(not_nan_err)?,
@@ -1216,7 +1202,7 @@ impl ITermProprietary {
             && p1.is_some()
             && let Some(p1) = p1
         {
-            return Ok(ITermProprietary::ReportCellSize {
+            return Ok(Self::ReportCellSize {
                 height_pixels: NotNan::new(p1.parse()?).map_err(not_nan_err)?,
                 width_pixels: NotNan::new(String::from_utf8_lossy(osc[2]).parse()?)
                     .map_err(not_nan_err)?,
@@ -1235,7 +1221,7 @@ impl ITermProprietary {
             let p2 = iter.next();
 
             if let (Some(k), Some(v)) = (p1, p2) {
-                return Ok(ITermProprietary::SetUserVar {
+                return Ok(Self::SetUserVar {
                     name: k.to_string(),
                     value: String::from_utf8(base64_decode(v)?)?,
                 });
@@ -1250,26 +1236,24 @@ impl ITermProprietary {
             let keyword = iter.next();
             let label = iter.next();
 
-            if let Some("push") = keyword {
-                return Ok(ITermProprietary::UnicodeVersion(
-                    ITermUnicodeVersionOp::Push(label.map(std::string::ToString::to_string)),
-                ));
+            if keyword == Some("push") {
+                return Ok(Self::UnicodeVersion(ITermUnicodeVersionOp::Push(
+                    label.map(std::string::ToString::to_string),
+                )));
             }
-            if let Some("pop") = keyword {
-                return Ok(ITermProprietary::UnicodeVersion(
-                    ITermUnicodeVersionOp::Pop(label.map(std::string::ToString::to_string)),
-                ));
+            if keyword == Some("pop") {
+                return Ok(Self::UnicodeVersion(ITermUnicodeVersionOp::Pop(
+                    label.map(std::string::ToString::to_string),
+                )));
             }
 
             if let Ok(n) = p1.parse::<u8>() {
-                return Ok(ITermProprietary::UnicodeVersion(
-                    ITermUnicodeVersionOp::Set(n),
-                ));
+                return Ok(Self::UnicodeVersion(ITermUnicodeVersionOp::Set(n)));
             }
         }
 
         if keyword == "File" {
-            return Ok(ITermProprietary::File(Box::new(ITermFileData::parse(osc)?)));
+            return Ok(Self::File(Box::new(ITermFileData::parse(osc)?)));
         }
 
         bail!("ITermProprietary {:?}", osc);

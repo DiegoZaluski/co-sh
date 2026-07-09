@@ -40,7 +40,7 @@ impl TextTableRenderable {
     pub fn new(content: Option<TextTableContent>) -> Self {
         let num = NEXT_TABLE_NUM.fetch_add(1, Ordering::Relaxed);
         let c = content.unwrap_or_default();
-        TextTableRenderable {
+        Self {
             id: format!("table-{num}"),
             num,
             visible: true,
@@ -64,11 +64,11 @@ impl TextTableRenderable {
         self.content = value;
     }
 
-    pub fn set_border(&mut self, value: bool) {
+    pub const fn set_border(&mut self, value: bool) {
         self.border = value;
     }
 
-    pub fn set_border_style(&mut self, value: BorderStyle) {
+    pub const fn set_border_style(&mut self, value: BorderStyle) {
         self.border_style = value;
     }
 
@@ -76,7 +76,7 @@ impl TextTableRenderable {
         self.border_color = parse_color(value);
     }
 
-    pub fn set_padding_x(&mut self, value: u16) {
+    pub const fn set_padding_x(&mut self, value: u16) {
         self.padding_x = value;
     }
 
@@ -88,7 +88,7 @@ impl TextTableRenderable {
         self.default_bg = parse_color(value);
     }
 
-    fn chars_for_style(&self) -> &'static BorderCharacters {
+    const fn chars_for_style(&self) -> &'static BorderCharacters {
         border_chars(self.border_style)
     }
 
@@ -110,7 +110,7 @@ impl TextTableRenderable {
         widths
     }
 
-    fn row_count(&self) -> usize {
+    const fn row_count(&self) -> usize {
         self.content.len()
     }
 

@@ -21,7 +21,7 @@ use crate::theme::Theme;
 use crate::types::{AgentColors, FilePart, Message, MessageRole, Part, ReasoningPart, ToolStatus};
 use crate::util::tool_render::{self, ToolRenderState};
 
-fn left_border_chars() -> BorderCharacters {
+const fn left_border_chars() -> BorderCharacters {
     BorderCharacters {
         top_left: ' ',
         top_right: ' ',
@@ -64,12 +64,14 @@ fn format_timestamp(ms: u64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-fn concealed_char(ch: char) -> char {
+const fn concealed_char(ch: char) -> char {
     if ch == ' ' { ' ' } else { '\u{2588}' }
 }
 
 fn sanitize_text(text: &str) -> String {
-    text.chars().filter(|ch| !ch.is_control() || *ch == '\n').collect()
+    text.chars()
+        .filter(|ch| !ch.is_control() || *ch == '\n')
+        .collect()
 }
 
 fn conceal_text(text: &str) -> String {
@@ -102,7 +104,7 @@ pub struct SessionView {
 
 impl SessionView {
     pub fn new() -> Self {
-        SessionView {
+        Self {
             scroll_y: 0,
             tool_state: ToolRenderState::new(),
             text_regions: Vec::new(),
@@ -264,6 +266,7 @@ impl SessionView {
         y - y_start
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_text_wrap(
         buf: &mut Buffer,
         text: &str,
@@ -424,7 +427,10 @@ impl SessionView {
         let max_w = area.width.saturating_sub(6);
         let border_line = 1u16;
         let padding_bottom = 1u16;
-        let inner_h = area.height.saturating_sub(border_line).saturating_sub(padding_bottom);
+        let inner_h = area
+            .height
+            .saturating_sub(border_line)
+            .saturating_sub(padding_bottom);
 
         if is_compacted {
             Self::render_compaction_banner(buf, x_off, area.y + 1, max_w, theme);
@@ -609,27 +615,26 @@ impl SessionView {
                     let part_h = i32::from(Self::estimate_part_height(part, max_w, config).max(1));
 
                     if click_y >= part_y as u16 && click_y < (part_y + part_h) as u16 {
-                        if let crate::types::Part::Tool(tool) = part {
-                            if tool_render::tool_display(&tool.tool) == "bash" {
-                                let output =
-                                    tool.output.as_deref().unwrap_or("").trim().to_string();
-                                if !output.is_empty() {
-                                    let id = tool.tool_call_id.as_deref().unwrap_or("shell");
-                                    let collapsed =
-                                        crate::util::scroll::collapse_tool_output(&output, 10, 800);
-                                    if collapsed.overflow {
-                                        let expanded = self.tool_state.is_expanded(id);
-                                        let display =
-                                            if expanded { &output } else { &collapsed.output };
-                                        let hint_y = part_y + 1 + display.lines().count() as i32;
+                        if let crate::types::Part::Tool(tool) = part
+                            && tool_render::tool_display(&tool.tool) == "bash"
+                        {
+                            let output = tool.output.as_deref().unwrap_or("").trim().to_string();
+                            if !output.is_empty() {
+                                let id = tool.tool_call_id.as_deref().unwrap_or("shell");
+                                let collapsed =
+                                    crate::util::scroll::collapse_tool_output(&output, 10, 800);
+                                if collapsed.overflow {
+                                    let expanded = self.tool_state.is_expanded(id);
+                                    let display =
+                                        if expanded { &output } else { &collapsed.output };
+                                    let hint_y = part_y + 1 + display.lines().count() as i32;
 
-                                        if click_y as i32 == hint_y
-                                            && click_x >= x_off
-                                            && click_x < x_off + max_w
-                                        {
-                                            self.tool_state.toggle_expanded(id);
-                                            return true;
-                                        }
+                                    if click_y as i32 == hint_y
+                                        && click_x >= x_off
+                                        && click_x < x_off + max_w
+                                    {
+                                        self.tool_state.toggle_expanded(id);
+                                        return true;
                                     }
                                 }
                             }
@@ -659,11 +664,7 @@ impl SessionView {
         false
     }
 
-    pub fn render_message_height(
-        msg: &Message,
-        max_w: u16,
-        config: &TuiConfig,
-    ) -> i32 {
+    pub fn render_message_height(msg: &Message, max_w: u16, config: &TuiConfig) -> i32 {
         let border_h: i32 = match msg.role {
             MessageRole::User => 1,
             MessageRole::Assistant => 0,
@@ -846,9 +847,7 @@ impl SessionView {
                         }
                         crate::types::Part::Reasoning(r) => {
                             let expanded = config.thinking_mode
-                                || self
-                                    .tool_state
-                                    .is_expanded(&r.text[..r.text.len().min(32)]);
+                                || self.tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
                             let header = if expanded { "- Thought" } else { "+ Thought" };
                             if vp_y1 < vp_y2 {
                                 self.text_regions.push(TextRegion {
@@ -950,7 +949,11 @@ impl SessionView {
         result
     }
 
-    #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::too_many_lines,
+        clippy::too_many_arguments
+    )]
     pub fn render(
         &mut self,
         buf: &mut Buffer,
@@ -1104,7 +1107,7 @@ impl SessionView {
         total_height
     }
 
-    fn get_auto_scroll_direction(&self, mouse_y: u16) -> i32 {
+    const fn get_auto_scroll_direction(&self, mouse_y: u16) -> i32 {
         let Some((_sx, sy, _sx2, sy2)) = self.session_area else {
             return 0;
         };
@@ -1115,10 +1118,11 @@ impl SessionView {
         if relative_y <= threshold && self.scroll_y > 0 {
             return -1;
         }
-        if height > threshold && relative_y >= height.saturating_sub(threshold) {
-            if self.scroll_y < i32::MAX {
-                return 1;
-            }
+        if height > threshold
+            && relative_y >= height.saturating_sub(threshold)
+            && self.scroll_y < i32::MAX
+        {
+            return 1;
         }
 
         0
@@ -1194,7 +1198,7 @@ impl SessionView {
         }
     }
 
-    pub fn stop_auto_scroll(&mut self) {
+    pub const fn stop_auto_scroll(&mut self) {
         if self.is_auto_scrolling {
             self.is_auto_scrolling = false;
             self.auto_scroll_accumulator = 0.0;

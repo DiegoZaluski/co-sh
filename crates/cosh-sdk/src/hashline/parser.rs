@@ -54,6 +54,7 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
         ));
     }
 
+    #[allow(clippy::unwrap_used)]
     let udiff_re = Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").unwrap();
     if udiff_re.is_match(trimmed) {
         return Some(
@@ -75,6 +76,7 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
         ));
     }
 
+    #[allow(clippy::unwrap_used)]
     let delete_colon_re =
         Regex::new(r"^delete\s+[1-9]\d*(?:\s*(?:\.\.|-|…|\s)\s*[1-9]\d*)?\s*:").unwrap();
     if delete_colon_re.is_match(trimmed) {
@@ -83,6 +85,7 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
         );
     }
 
+    #[allow(clippy::unwrap_used)]
     let bare_line_re = Regex::new(r"^[1-9]\d*\s*$").unwrap();
     if bare_line_re.is_match(trimmed) {
         let num = trimmed.trim();
@@ -91,6 +94,7 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
         ));
     }
 
+    #[allow(clippy::unwrap_used)]
     let bare_range_re = Regex::new(r"^([1-9]\d*)\s*[-. …]+\s*([1-9]\d*)\s*:?$").unwrap();
     if let Some(caps) = bare_range_re.captures(trimmed) {
         let s = &caps[1];
@@ -130,7 +134,7 @@ pub struct Executor {
 
 impl Executor {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             edits: Vec::new(),
             warnings: Vec::new(),
@@ -268,7 +272,7 @@ impl Executor {
         self.terminated = false;
     }
 
-    fn validate_no_overlapping_deletes(&mut self) -> Result<(), String> {
+    fn validate_no_overlapping_deletes(&self) -> Result<(), String> {
         let mut source_lines_by_anchor: std::collections::HashMap<u32, Vec<u32>> =
             std::collections::HashMap::new();
         for edit in &self.edits {
@@ -462,23 +466,13 @@ impl Executor {
                 if payloads.is_empty() {
                     return Err(format!("line {line_num}: {EMPTY_INSERT}"));
                 }
-                self.emit_payload_rows(
-                    &Cursor::BeforeAnchor(Anchor { line: anchor.line }),
-                    &payloads,
-                    line_num,
-                    None,
-                );
+                self.emit_payload_rows(&Cursor::BeforeAnchor(anchor), &payloads, line_num, None);
             }
             BlockTarget::InsertAfter { anchor } => {
                 if payloads.is_empty() {
                     return Err(format!("line {line_num}: {EMPTY_INSERT}"));
                 }
-                self.emit_payload_rows(
-                    &Cursor::AfterAnchor(Anchor { line: anchor.line }),
-                    &payloads,
-                    line_num,
-                    None,
-                );
+                self.emit_payload_rows(&Cursor::AfterAnchor(anchor), &payloads, line_num, None);
             }
             BlockTarget::Bof => {
                 if payloads.is_empty() {

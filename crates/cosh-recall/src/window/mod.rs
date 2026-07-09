@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 /// A single entry in the context window.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowEntry {
     /// The content of the entry (e.g., a summary, a tool result).
     pub content: String,
@@ -75,25 +75,25 @@ impl ContextWindow {
 
     /// Current total token count across all entries.
     #[must_use]
-    pub fn total_tokens(&self) -> usize {
+    pub const fn total_tokens(&self) -> usize {
         self.total_tokens
     }
 
     /// The configured token budget.
     #[must_use]
-    pub fn max_tokens(&self) -> usize {
+    pub const fn max_tokens(&self) -> usize {
         self.max_tokens
     }
 
     /// True when `total_tokens` >= `max_tokens`.
     #[must_use]
-    pub fn is_over_budget(&self) -> bool {
+    pub const fn is_over_budget(&self) -> bool {
         self.total_tokens >= self.max_tokens
     }
 
     /// Borrow the current entries (oldest first).
     #[must_use]
-    pub fn entries(&self) -> &VecDeque<WindowEntry> {
+    pub const fn entries(&self) -> &VecDeque<WindowEntry> {
         &self.entries
     }
 

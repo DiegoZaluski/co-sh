@@ -35,7 +35,7 @@ pub struct TextNodeRenderable {
 impl TextNodeRenderable {
     pub fn new(options: TextNodeOptions) -> Self {
         let num = NEXT_TEXT_NODE_NUM.fetch_add(1, Ordering::Relaxed);
-        TextNodeRenderable {
+        Self {
             id: options.id.unwrap_or_else(|| format!("textnode-{num}")),
             num,
             fg: options.fg.map(parse_color),
@@ -53,20 +53,20 @@ impl TextNodeRenderable {
     }
 
     #[must_use]
-    pub fn num(&self) -> u64 {
+    pub const fn num(&self) -> u64 {
         self.num
     }
 
     #[must_use]
-    pub fn is_dirty(&self) -> bool {
+    pub const fn is_dirty(&self) -> bool {
         self.dirty
     }
 
-    pub fn mark_clean(&mut self) {
+    pub const fn mark_clean(&mut self) {
         self.dirty = false;
     }
 
-    pub fn mark_dirty(&mut self) {
+    pub const fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
@@ -75,12 +75,12 @@ impl TextNodeRenderable {
         &self.children
     }
 
-    pub fn children_mut(&mut self) -> &mut Vec<TextNodeChild> {
+    pub const fn children_mut(&mut self) -> &mut Vec<TextNodeChild> {
         &mut self.children
     }
 
     #[must_use]
-    pub fn fg(&self) -> Option<RGBA> {
+    pub const fn fg(&self) -> Option<RGBA> {
         self.fg
     }
 
@@ -90,7 +90,7 @@ impl TextNodeRenderable {
     }
 
     #[must_use]
-    pub fn bg(&self) -> Option<RGBA> {
+    pub const fn bg(&self) -> Option<RGBA> {
         self.bg
     }
 
@@ -100,17 +100,17 @@ impl TextNodeRenderable {
     }
 
     #[must_use]
-    pub fn attributes(&self) -> u32 {
+    pub const fn attributes(&self) -> u32 {
         self.attributes
     }
 
-    pub fn set_attributes(&mut self, attributes: u32) {
+    pub const fn set_attributes(&mut self, attributes: u32) {
         self.attributes = attributes;
         self.mark_dirty();
     }
 
     #[must_use]
-    pub fn link(&self) -> Option<&UrlLink> {
+    pub const fn link(&self) -> Option<&UrlLink> {
         self.link.as_ref()
     }
 
@@ -201,7 +201,7 @@ impl TextNodeRenderable {
     }
 
     #[must_use]
-    pub fn get_children(&self) -> Vec<&TextNodeRenderable> {
+    pub fn get_children(&self) -> Vec<&Self> {
         self.children
             .iter()
             .filter_map(|c| {
@@ -215,12 +215,12 @@ impl TextNodeRenderable {
     }
 
     #[must_use]
-    pub fn get_children_count(&self) -> usize {
+    pub const fn get_children_count(&self) -> usize {
         self.children.len()
     }
 
     #[must_use]
-    pub fn get_renderable(&self, id: &str) -> Option<&TextNodeRenderable> {
+    pub fn get_renderable(&self, id: &str) -> Option<&Self> {
         self.children.iter().find_map(|c| {
             if let TextNodeChild::Node(n) = c {
                 if n.id() == id { Some(n.as_ref()) } else { None }
@@ -239,14 +239,14 @@ impl TextNodeRenderable {
 
     #[must_use]
     pub fn from_string(text: &str, options: TextNodeOptions) -> Self {
-        let mut node = TextNodeRenderable::new(options);
+        let mut node = Self::new(options);
         node.add(TextNodeAddItem::Text(text.to_string()));
         node
     }
 
     #[must_use]
-    pub fn from_nodes(nodes: Vec<TextNodeRenderable>, options: TextNodeOptions) -> Self {
-        let mut root = TextNodeRenderable::new(options);
+    pub fn from_nodes(nodes: Vec<Self>, options: TextNodeOptions) -> Self {
+        let mut root = Self::new(options);
         for node in nodes {
             root.add(TextNodeAddItem::Node(node));
         }
@@ -275,8 +275,8 @@ pub struct InheritedStyle {
 
 impl InheritedStyle {
     #[must_use]
-    pub fn new() -> Self {
-        InheritedStyle {
+    pub const fn new() -> Self {
+        Self {
             fg: None,
             bg: None,
             attributes: 0,

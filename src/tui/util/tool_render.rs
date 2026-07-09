@@ -192,7 +192,7 @@ pub struct ToolRenderState {
 
 impl ToolRenderState {
     pub fn new() -> Self {
-        ToolRenderState {
+        Self {
             expanded: HashMap::new(),
             error_expanded: HashMap::new(),
             spinner: SpinnerState::new(),
@@ -213,7 +213,7 @@ impl ToolRenderState {
         *entry = !*entry;
     }
 
-    pub fn advance_spinner(&mut self) {
+    pub const fn advance_spinner(&mut self) {
         self.spinner.advance();
     }
 }

@@ -32,38 +32,38 @@ pub enum JsonCollection {
 }
 
 impl JsonCollection {
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
-            JsonCollection::Object(_, _, _) => "Object",
-            JsonCollection::Array(_, _) => "Array",
-            JsonCollection::QuotedString(_, _)
-            | JsonCollection::SingleQuotedString(_, _)
-            | JsonCollection::BacktickString(_, _) => "String",
-            JsonCollection::TripleBacktickString { .. } => "TripleBacktickString",
-            JsonCollection::TripleQuotedString(_, _) => "TripleQuotedString",
-            JsonCollection::UnquotedString(_, _) => "UnquotedString",
-            JsonCollection::TrailingComment(_, _) | JsonCollection::BlockComment(_, _) => "Comment",
+            Self::Object(_, _, _) => "Object",
+            Self::Array(_, _) => "Array",
+            Self::QuotedString(_, _)
+            | Self::SingleQuotedString(_, _)
+            | Self::BacktickString(_, _) => "String",
+            Self::TripleBacktickString { .. } => "TripleBacktickString",
+            Self::TripleQuotedString(_, _) => "TripleQuotedString",
+            Self::UnquotedString(_, _) => "UnquotedString",
+            Self::TrailingComment(_, _) | Self::BlockComment(_, _) => "Comment",
         }
     }
 
-    pub fn completion_state(&self) -> &CompletionState {
+    pub const fn completion_state(&self) -> &CompletionState {
         match self {
-            JsonCollection::Object(_, _, s)
-            | JsonCollection::Array(_, s)
-            | JsonCollection::QuotedString(_, s)
-            | JsonCollection::SingleQuotedString(_, s)
-            | JsonCollection::BacktickString(_, s)
-            | JsonCollection::TripleQuotedString(_, s)
-            | JsonCollection::UnquotedString(_, s)
-            | JsonCollection::TrailingComment(_, s)
-            | JsonCollection::BlockComment(_, s) => s,
-            JsonCollection::TripleBacktickString { content, .. } => &content.1, // TODO: correct?
+            Self::Object(_, _, s)
+            | Self::Array(_, s)
+            | Self::QuotedString(_, s)
+            | Self::SingleQuotedString(_, s)
+            | Self::BacktickString(_, s)
+            | Self::TripleQuotedString(_, s)
+            | Self::UnquotedString(_, s)
+            | Self::TrailingComment(_, s)
+            | Self::BlockComment(_, s) => s,
+            Self::TripleBacktickString { content, .. } => &content.1, // TODO: correct?
         }
     }
 }
 
 impl From<JsonCollection> for Option<Value> {
-    fn from(collection: JsonCollection) -> Option<Value> {
+    fn from(collection: JsonCollection) -> Self {
         Some(match collection {
             JsonCollection::TrailingComment(_, _) | JsonCollection::BlockComment(_, _) => {
                 return None;
@@ -108,10 +108,10 @@ impl From<JsonCollection> for Option<Value> {
                 } else if let Ok(n) = s.parse::<u64>() {
                     Value::Number(n.into(), completion_state)
                 } else if let Ok(n) = s.parse::<f64>() {
-                    match serde_json::Number::from_f64(n) {
-                        Some(n) => Value::Number(n, completion_state),
-                        None => Value::String(s.into(), completion_state),
-                    }
+                    serde_json::Number::from_f64(n).map_or_else(
+                        || Value::String(s.into(), completion_state),
+                        |n| Value::Number(n, completion_state),
+                    )
                 } else {
                     Value::String(s.into(), completion_state)
                 }

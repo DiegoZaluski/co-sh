@@ -35,10 +35,7 @@ pub fn parse_frontmatter(content: &str) -> (Frontmatter, String) {
         }
     }
 
-    let frontmatter_str = match closing_pos {
-        Some(pos) => &after_first[..pos],
-        None => after_first,
-    };
+    let frontmatter_str = closing_pos.map_or(after_first, |pos| &after_first[..pos]);
 
     let body = match closing_pos {
         Some(_) => after_first[body_start..].trim().to_owned(),
@@ -147,7 +144,7 @@ fn parse_frontmatter_lines(input: &str) -> Frontmatter {
 }
 
 fn finalize_block_scalar(fm: &mut Frontmatter, key: Option<&str>, lines: &[String]) {
-    if let Some("description") = key {
+    if key == Some("description") {
         let value = if lines.is_empty() {
             String::new()
         } else {
@@ -174,7 +171,7 @@ fn finalize_block_scalar(fm: &mut Frontmatter, key: Option<&str>, lines: &[Strin
 }
 
 fn finalize_list(fm: &mut Frontmatter, key: Option<&str>, items: &[String]) {
-    if let Some("globs") = key {
+    if key == Some("globs") {
         fm.globs = items.to_vec();
     }
 }

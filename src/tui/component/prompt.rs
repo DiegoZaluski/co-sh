@@ -25,7 +25,7 @@ fn rgba_color(rgba: RGBA) -> Color {
     Color::Rgb(r, g, b)
 }
 
-fn prompt_border_chars() -> BorderCharacters {
+const fn prompt_border_chars() -> BorderCharacters {
     BorderCharacters {
         top_left: ' ',
         top_right: ' ',
@@ -69,7 +69,7 @@ pub struct PromptView {
 
 impl PromptView {
     pub fn new() -> Self {
-        PromptView {
+        Self {
             input: String::new(),
             cursor_pos: 0,
             input_text_width: Cell::new(0),
@@ -82,11 +82,11 @@ impl PromptView {
         }
     }
 
-    pub fn focus(&mut self) {
+    pub const fn focus(&mut self) {
         self.is_focused = true;
     }
 
-    pub fn blur(&mut self) {
+    pub const fn blur(&mut self) {
         self.is_focused = false;
     }
 
@@ -148,7 +148,7 @@ impl PromptView {
         }
     }
 
-    pub fn clear_selection(&mut self) {
+    pub const fn clear_selection(&mut self) {
         self.sel_start = None;
         self.sel_end = None;
     }

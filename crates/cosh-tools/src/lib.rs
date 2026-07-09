@@ -1,3 +1,8 @@
+// Known transitive dependency version duplicates intentionally kept:
+// bitflags 1.x/2.x, thiserror 1.x/2.x, phf 0.11/0.13, rand 0.8/0.9, etc.
+// These cannot be unified without breaking upstream crates.
+#![allow(clippy::multiple_crate_versions)]
+
 pub mod bash;
 pub mod find;
 pub mod fs;

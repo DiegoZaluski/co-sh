@@ -44,8 +44,8 @@ impl Default for Timeline {
 
 impl Timeline {
     #[must_use]
-    pub fn new() -> Self {
-        Timeline
+    pub const fn new() -> Self {
+        Self
     }
 }
 

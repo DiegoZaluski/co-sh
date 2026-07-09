@@ -36,6 +36,7 @@ impl TreeSitter {
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(LruCache::new(
+                #[allow(clippy::expect_used)]
                 std::num::NonZeroUsize::new(capacity).expect("capacity > 0"),
             )),
         }
@@ -48,12 +49,14 @@ impl TreeSitter {
     ///
     /// # Panics
     /// Panics if the inner mutex is poisoned.
+    #[allow(clippy::significant_drop_tightening)]
     fn with_entry<R>(
         &self,
         path: &str,
         text: &str,
         f: impl FnOnce(&CachedEntry, &str) -> R,
     ) -> Option<R> {
+        #[allow(clippy::unwrap_used)]
         let mut guard = self.inner.lock().unwrap();
 
         // `Tree` is not `Clone`, so we must pop to gain ownership even on a cache hit.

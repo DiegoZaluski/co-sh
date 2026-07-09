@@ -1,4 +1,5 @@
 //! Storage seam for the hashline patcher. [`Filesystem`] is intentionally
+//!
 //! minimal — `read_text`, `write_text`, `exists` — so any backing store can be
 //! adapted: disk, memory, S3, an LSP text-document protocol, a Git tree, a
 //! VFS, etc.
@@ -16,13 +17,14 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 /// Result returned by [`Filesystem::write_text`]. The patcher echoes back
 /// `text` so adapters that transform on serialization (e.g. notebooks) can
 /// report what actually landed on disk.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteResult {
     /// Final text that was persisted. May differ from the input if the FS transformed it.
     pub text: String,
 }
 
 /// ENOENT-like error returned by [`Filesystem::read_text`] when a path is
+///
 /// missing. Carrying a `code` property keeps the contract compatible with
 /// `std::io::ErrorKind::NotFound` callers that already check
 /// `error.kind() == NotFound`.
@@ -138,6 +140,7 @@ pub struct InMemoryFilesystem {
     files: Mutex<HashMap<String, String>>,
 }
 
+#[allow(clippy::unwrap_used)]
 impl Clone for InMemoryFilesystem {
     fn clone(&self) -> Self {
         Self {
@@ -158,6 +161,7 @@ impl InMemoryFilesystem {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
+    #[allow(clippy::unwrap_used)]
     pub fn set(&self, path: impl Into<String>, content: impl Into<String>) {
         self.files
             .lock()
@@ -170,6 +174,7 @@ impl InMemoryFilesystem {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
+    #[allow(clippy::unwrap_used)]
     pub fn get(&self, path: &str) -> Option<String> {
         self.files.lock().unwrap().get(path).cloned()
     }
@@ -179,6 +184,7 @@ impl InMemoryFilesystem {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
+    #[allow(clippy::unwrap_used)]
     pub fn delete(&self, path: &str) -> bool {
         self.files.lock().unwrap().remove(path).is_some()
     }
@@ -188,6 +194,7 @@ impl InMemoryFilesystem {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
+    #[allow(clippy::unwrap_used)]
     pub fn clear(&self) {
         self.files.lock().unwrap().clear();
     }
@@ -197,6 +204,7 @@ impl InMemoryFilesystem {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
+    #[allow(clippy::unwrap_used)]
     pub fn entries(&self) -> Vec<(String, String)> {
         self.files
             .lock()
@@ -208,6 +216,7 @@ impl InMemoryFilesystem {
 }
 
 impl Filesystem for InMemoryFilesystem {
+    #[allow(clippy::unwrap_used)]
     async fn read_text(&self, path: &str) -> Result<String> {
         self.files
             .lock()
@@ -217,6 +226,7 @@ impl Filesystem for InMemoryFilesystem {
             .ok_or_else(|| NotFoundError::new(path).into())
     }
 
+    #[allow(clippy::unwrap_used)]
     async fn write_text(&self, path: &str, content: &str) -> Result<WriteResult> {
         self.files
             .lock()
@@ -227,12 +237,14 @@ impl Filesystem for InMemoryFilesystem {
         })
     }
 
+    #[allow(clippy::unwrap_used)]
     async fn exists(&self, path: &str) -> Result<bool> {
         Ok(self.files.lock().unwrap().contains_key(path))
     }
 }
 
 /// Disk-backed [`Filesystem`] using `std::fs`. The default for CLI
+///
 /// use. Paths are accepted as-is; callers responsible for any cwd or
 /// jail/sandbox resolution should wrap this with their own implementation.
 #[derive(Debug, Clone, Default)]
@@ -240,7 +252,7 @@ pub struct DiskFilesystem;
 
 impl DiskFilesystem {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }

@@ -35,7 +35,7 @@ pub(super) enum ParsingMode {
 }
 
 impl ParseOptions {
-    pub(super) fn next_from_mode(&self, curr_mode: ParsingMode) -> Self {
+    pub(super) const fn next_from_mode(&self, curr_mode: ParsingMode) -> Self {
         let mut new = *self;
         match curr_mode {
             ParsingMode::JsonMarkdownString => {

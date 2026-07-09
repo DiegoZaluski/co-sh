@@ -94,7 +94,7 @@ impl Bash {
     /// yields a final item with `signal: Some(-1)` and `exit_code: None`.
     /// Pass `None` via [`env`](Self::env) or leave unset for no timeout.
     #[must_use]
-    pub fn timeout(mut self, ms: u64) -> Self {
+    pub const fn timeout(mut self, ms: u64) -> Self {
         self.timeout = Some(ms);
         self
     }
@@ -114,7 +114,7 @@ impl Bash {
     /// (colored output, prompts, etc.). When `false` (default), they
     /// are captured as separate piped streams.
     #[must_use]
-    pub fn pty(mut self, v: bool) -> Self {
+    pub const fn pty(mut self, v: bool) -> Self {
         self.pty = v;
         self
     }

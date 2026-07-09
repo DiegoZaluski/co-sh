@@ -4,12 +4,12 @@ use super::vecstorage::{VecStorage, VecStorageIter};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub(crate) enum CellStorage {
+pub enum CellStorage {
     V(VecStorage),
     C(ClusteredLine),
 }
 
-pub(crate) enum VisibleCellIter<'a> {
+pub enum VisibleCellIter<'a> {
     V(VecStorageIter<'a>),
     C(ClusterLineCellIter<'a>),
 }

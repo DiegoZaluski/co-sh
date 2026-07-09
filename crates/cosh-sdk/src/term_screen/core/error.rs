@@ -25,7 +25,7 @@ pub type Result<T> = std::result::Result<T, TermScreenError>;
 
 impl From<String> for TermScreenError {
     fn from(s: String) -> Self {
-        TermScreenError::Msg(s)
+        Self::Msg(s)
     }
 }
 

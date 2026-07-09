@@ -49,7 +49,7 @@ pub fn glob(glob: &Glob, pattern: &str, path: &str) -> Result<GlobOutput, String
 }
 
 #[must_use]
-fn file_type_str(ft: FileType) -> &'static str {
+const fn file_type_str(ft: FileType) -> &'static str {
     match ft {
         FileType::File => "file",
         FileType::Dir => "dir",

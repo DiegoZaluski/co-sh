@@ -1,4 +1,5 @@
 //! Top-level patch parser. Splits an authored hashline input into a list of
+//!
 //! [`PatchSection`]s, each rooted at a `¶PATH#HASH` header, then exposes a
 //! [`Patch`] struct that gives lazy access to the parsed edits per section.
 //!
@@ -46,6 +47,7 @@ fn unquote_hashline_path(path_text: &str) -> &str {
 /// We strip a leading `***` (the model duplicating the header sigil) and a
 /// leading `(Update|Add|Delete|Move)[<separator>]*(File|to)?[<separator>]*:`
 /// keyword block, case-insensitive. The remaining text is the real path.
+#[allow(clippy::expect_used)]
 static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\*{0,3}\s*(?:(?:update|add|delete|move)[^A-Za-z0-9]*(?:file|to)?[^A-Za-z0-9]*:)?\s*\*{0,3}\s*")
         .expect("APPLY_PATCH_PATH_NOISE_RE regex should be valid")
@@ -95,6 +97,7 @@ fn normalize_hashline_path(raw_path: &str, cwd: Option<&str>) -> String {
     if !path.is_absolute() {
         return unquoted;
     }
+    #[allow(clippy::option_if_let_else)]
     if let Ok(relative) = path.strip_prefix(cwd_path) {
         let s = relative.to_string_lossy().to_string();
         if s.is_empty() { ".".to_string() } else { s }
@@ -165,6 +168,7 @@ fn strip_leading_blank_lines(input: &str) -> String {
 }
 
 /// Returns true when the input contains at least one line that the tokenizer
+///
 /// recognizes as a hashline op. Used by streaming previews to decide whether
 /// the partial input is worth treating as a hashline patch yet.
 #[must_use]
@@ -280,6 +284,7 @@ fn split_raw_sections(input: &str, options: &SplitOptions) -> Result<Vec<RawSect
 }
 
 /// Snapshot of one section in a parsed [`Patch`]: a target file plus the
+///
 /// lazily-parsed list of edits that should land on it. Constructed by
 /// [`Patch::parse`]; consumers usually iterate `patch.sections` rather
 /// than build these directly.
@@ -449,7 +454,7 @@ pub struct Patch {
 }
 
 impl Patch {
-    fn new(sections: Vec<PatchSection>) -> Self {
+    const fn new(sections: Vec<PatchSection>) -> Self {
         Self { sections }
     }
 
@@ -467,10 +472,10 @@ impl Patch {
     /// # Errors
     ///
     /// Returns an error if the input is malformed or parsing fails.
-    pub fn parse(input: &str, options: &SplitOptions) -> Result<Patch, String> {
+    pub fn parse(input: &str, options: &SplitOptions) -> Result<Self, String> {
         let raw = merge_same_path_sections(split_raw_sections(input, options)?);
         let sections: Vec<PatchSection> = raw.into_iter().map(PatchSection::new).collect();
-        Ok(Patch::new(sections))
+        Ok(Self::new(sections))
     }
 
     /// Parse `input` and return only the first section. Returns an error if the
@@ -481,7 +486,7 @@ impl Patch {
     ///
     /// Returns an error if the input is malformed or parsing fails.
     pub fn parse_single(input: &str, options: &SplitOptions) -> Result<PatchSection, String> {
-        let patch = Patch::parse(input, options)?;
+        let patch = Self::parse(input, options)?;
         let first = patch
             .sections
             .into_iter()
@@ -525,6 +530,7 @@ fn merge_same_path_sections(sections: Vec<RawSection>) -> Vec<RawSection> {
     order
         .into_iter()
         .map(|path| {
+            #[allow(clippy::unwrap_used)]
             let (file_hash, diffs) = by_path.remove(&path).unwrap();
             RawSection {
                 path,

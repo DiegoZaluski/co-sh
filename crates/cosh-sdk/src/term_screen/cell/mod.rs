@@ -25,13 +25,14 @@ enum SmallColor {
 impl From<SmallColor> for ColorAttribute {
     fn from(val: SmallColor) -> Self {
         match val {
-            SmallColor::Default => ColorAttribute::Default,
-            SmallColor::PaletteIndex(idx) => ColorAttribute::PaletteIndex(idx),
+            SmallColor::Default => Self::Default,
+            SmallColor::PaletteIndex(idx) => Self::PaletteIndex(idx),
         }
     }
 }
 
 /// Holds the attributes for a cell.
+///
 /// Most style attributes are stored internally as part of a bitfield
 /// to reduce per-cell overhead.
 /// The setter methods return a mutable self reference so that they can
@@ -103,12 +104,12 @@ impl FatAttributes {
 macro_rules! bitfield {
     ($getter:ident, $setter:ident, $bitnum:expr) => {
         #[inline]
-        pub fn $getter(&self) -> bool {
+        pub const fn $getter(&self) -> bool {
             (self.attributes & (1 << $bitnum)) == (1 << $bitnum)
         }
 
         #[inline]
-        pub fn $setter(&mut self, value: bool) -> &mut Self {
+        pub const fn $setter(&mut self, value: bool) -> &mut Self {
             let attr_value = if value { 1 << $bitnum } else { 0 };
             self.attributes = (self.attributes & !(1 << $bitnum)) | attr_value;
             self
@@ -137,7 +138,7 @@ macro_rules! bitfield {
         }
 
         #[inline]
-        pub fn $setter(&mut self, value: $enum) -> &mut Self {
+        pub const fn $setter(&mut self, value: $enum) -> &mut Self {
             let value = value as u32;
             let clear = !($bitmask << $bitshift);
             let attr_value = (value & $bitmask) << $bitshift;
@@ -148,6 +149,7 @@ macro_rules! bitfield {
 }
 
 /// Describes the semantic "type" of the cell.
+///
 /// This categorizes cells into Output (from the actions the user is
 /// taking; this is the default if left unspecified),
 /// Input (that the user typed) and Prompt (effectively, "chrome" provided
@@ -197,7 +199,7 @@ impl CellAttributes {
     /// This can be used to cheaply test whether the styles of the two
     /// cells are the same, and is used by some `Renderer` implementations.
     #[must_use]
-    pub fn attribute_bits_equal(&self, other: &Self) -> bool {
+    pub const fn attribute_bits_equal(&self, other: &Self) -> bool {
         self.attributes == other.attributes
     }
 
@@ -320,14 +322,12 @@ impl CellAttributes {
     /// # Panics
     /// If the fat attributes need to be allocated first and the allocation fails.
     pub fn set_hyperlink(&mut self, link: Option<Arc<Hyperlink>>) -> &mut Self {
-        if link.is_none() && self.fat.is_none() {
-            self
-        } else {
+        if link.is_some() || self.fat.is_some() {
             self.allocate_fat_attributes();
             self.fat.as_mut().unwrap().hyperlink = link;
             self.deallocate_fat_attributes_if_none();
-            self
         }
+        self
     }
 }
 
@@ -339,14 +339,12 @@ impl CellAttributes {
         underline_color: C,
     ) -> &mut Self {
         let underline_color = underline_color.into();
-        if underline_color == ColorAttribute::Default && self.fat.is_none() {
-            self
-        } else {
+        if underline_color != ColorAttribute::Default || self.fat.is_some() {
             self.allocate_fat_attributes();
             self.fat.as_mut().unwrap().underline_color = underline_color;
             self.deallocate_fat_attributes_if_none();
-            self
         }
+        self
     }
 
     /// Clone the attributes, but exclude fancy extras such
@@ -570,7 +568,7 @@ impl TeenyString {
         Self::from_str(c.encode_utf8(&mut bytes), None, None)
     }
 
-    pub fn width(&self) -> usize {
+    pub const fn width(&self) -> usize {
         if Self::is_marker_bit_set(self.0) {
             if Self::is_double_width(self.0) { 2 } else { 1 }
         } else {
@@ -746,18 +744,18 @@ impl Cell {
 
     /// Returns the number of cells visually occupied by this grapheme
     #[must_use]
-    pub fn width(&self) -> usize {
+    pub const fn width(&self) -> usize {
         self.text.width()
     }
 
     /// Returns the attributes of the cell
     #[must_use]
-    pub fn attrs(&self) -> &CellAttributes {
+    pub const fn attrs(&self) -> &CellAttributes {
         &self.attrs
     }
 
     #[must_use]
-    pub fn attrs_mut(&mut self) -> &mut CellAttributes {
+    pub const fn attrs_mut(&mut self) -> &mut CellAttributes {
         &mut self.attrs
     }
 }

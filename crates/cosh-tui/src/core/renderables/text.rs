@@ -12,7 +12,7 @@ use crate::core::types::TextAttributes;
 
 static NEXT_TEXT_RENDERABLE_NUM: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrapMode {
     None,
     Char,
@@ -55,7 +55,7 @@ impl TextRenderable {
         let num = NEXT_TEXT_RENDERABLE_NUM.fetch_add(1, Ordering::Relaxed);
         let text = content.unwrap_or_else(|| string_to_styled_text(""));
 
-        TextRenderable {
+        Self {
             id: format!("text-{num}"),
             num,
             visible: true,
@@ -82,7 +82,7 @@ impl TextRenderable {
     }
 
     #[must_use]
-    pub fn content(&self) -> &StyledText {
+    pub const fn content(&self) -> &StyledText {
         &self.text
     }
 
@@ -97,7 +97,7 @@ impl TextRenderable {
     }
 
     #[must_use]
-    pub fn fg(&self) -> RGBA {
+    pub const fn fg(&self) -> RGBA {
         self.default_fg
     }
 
@@ -108,7 +108,7 @@ impl TextRenderable {
     }
 
     #[must_use]
-    pub fn bg(&self) -> RGBA {
+    pub const fn bg(&self) -> RGBA {
         self.default_bg
     }
 
@@ -119,51 +119,51 @@ impl TextRenderable {
     }
 
     #[must_use]
-    pub fn attributes(&self) -> u32 {
+    pub const fn attributes(&self) -> u32 {
         self.default_attributes
     }
 
-    pub fn set_attributes(&mut self, value: u32) {
+    pub const fn set_attributes(&mut self, value: u32) {
         self.default_attributes = value;
     }
 
     #[must_use]
-    pub fn wrap_mode(&self) -> WrapMode {
+    pub const fn wrap_mode(&self) -> WrapMode {
         self.wrap_mode
     }
 
-    pub fn set_wrap_mode(&mut self, value: WrapMode) {
+    pub const fn set_wrap_mode(&mut self, value: WrapMode) {
         self.wrap_mode = value;
     }
 
     #[must_use]
-    pub fn scroll_y(&self) -> i32 {
+    pub const fn scroll_y(&self) -> i32 {
         self.scroll_y
     }
 
     pub fn set_scroll_y(&mut self, value: i32) {
-        self.scroll_y = value.max(0);
+        self.scroll_y = value.max(0_i32);
     }
 
     #[must_use]
-    pub fn scroll_x(&self) -> i32 {
+    pub const fn scroll_x(&self) -> i32 {
         self.scroll_x
     }
 
     pub fn set_scroll_x(&mut self, value: i32) {
-        self.scroll_x = value.max(0);
+        self.scroll_x = value.max(0_i32);
     }
 
     #[must_use]
-    pub fn truncate(&self) -> bool {
+    pub const fn truncate(&self) -> bool {
         self.truncate
     }
 
-    pub fn set_truncate(&mut self, value: bool) {
+    pub const fn set_truncate(&mut self, value: bool) {
         self.truncate = value;
     }
 
-    pub fn set_selectable(&mut self, value: bool) {
+    pub const fn set_selectable(&mut self, value: bool) {
         self.selectable = value;
     }
 

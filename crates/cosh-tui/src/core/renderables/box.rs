@@ -38,7 +38,7 @@ pub struct BoxRenderable {
     layout_node: Option<taffy::NodeId>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TitleAlignment {
     Left,
     Center,
@@ -49,7 +49,7 @@ impl BoxRenderable {
     #[must_use]
     pub fn new() -> Self {
         let num = NEXT_BOX_NUM.fetch_add(1, Ordering::Relaxed);
-        BoxRenderable {
+        Self {
             id: format!("box-{num}"),
             num,
             visible: true,
@@ -79,15 +79,15 @@ impl BoxRenderable {
 
     pub fn set_background_color(&mut self, color: Option<ColorInput>) {
         self.background_color =
-            parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("transparent".into())));
     }
 
     #[must_use]
-    pub fn background_color(&self) -> RGBA {
+    pub const fn background_color(&self) -> RGBA {
         self.background_color
     }
 
-    pub fn set_border(&mut self, enable: bool) {
+    pub const fn set_border(&mut self, enable: bool) {
         if enable {
             self.border = BorderSidesConfig::ALL;
         } else {
@@ -96,19 +96,19 @@ impl BoxRenderable {
     }
 
     #[must_use]
-    pub fn border_sides(&self) -> &BorderSidesConfig {
+    pub const fn border_sides(&self) -> &BorderSidesConfig {
         &self.border
     }
 
-    pub fn set_border_sides(&mut self, sides: BorderSidesConfig) {
+    pub const fn set_border_sides(&mut self, sides: BorderSidesConfig) {
         self.border = sides;
     }
 
-    pub fn set_custom_border_chars(&mut self, chars: BorderCharacters) {
+    pub const fn set_custom_border_chars(&mut self, chars: BorderCharacters) {
         self.custom_border_chars = Some(chars);
     }
 
-    pub fn set_border_style(&mut self, style: BorderStyle) {
+    pub const fn set_border_style(&mut self, style: BorderStyle) {
         self.border_style = style;
         self.custom_border_chars = None;
         if !self.border.top {
@@ -117,38 +117,39 @@ impl BoxRenderable {
     }
 
     #[must_use]
-    pub fn border_style(&self) -> BorderStyle {
+    pub const fn border_style(&self) -> BorderStyle {
         self.border_style
     }
 
     pub fn set_border_color(&mut self, color: Option<ColorInput>) {
-        self.border_color = parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
+        self.border_color =
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#FFFFFF".into())));
         if !self.border.top {
             self.border = BorderSidesConfig::ALL;
         }
     }
 
     #[must_use]
-    pub fn border_color(&self) -> RGBA {
+    pub const fn border_color(&self) -> RGBA {
         self.border_color
     }
 
     pub fn set_focused_border_color(&mut self, color: Option<ColorInput>) {
         self.focused_border_color =
-            parse_color(color.unwrap_or(ColorInput::String("#00AAFF".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#00AAFF".into())));
     }
 
     #[must_use]
-    pub fn focused_border_color(&self) -> RGBA {
+    pub const fn focused_border_color(&self) -> RGBA {
         self.focused_border_color
     }
 
-    pub fn set_should_fill(&mut self, fill: bool) {
+    pub const fn set_should_fill(&mut self, fill: bool) {
         self.should_fill = fill;
     }
 
     #[must_use]
-    pub fn should_fill(&self) -> bool {
+    pub const fn should_fill(&self) -> bool {
         self.should_fill
     }
 
@@ -166,16 +167,16 @@ impl BoxRenderable {
     }
 
     #[must_use]
-    pub fn title_color(&self) -> Option<RGBA> {
+    pub const fn title_color(&self) -> Option<RGBA> {
         self.title_color
     }
 
-    pub fn set_title_alignment(&mut self, align: TitleAlignment) {
+    pub const fn set_title_alignment(&mut self, align: TitleAlignment) {
         self.title_alignment = align;
     }
 
     #[must_use]
-    pub fn title_alignment(&self) -> TitleAlignment {
+    pub const fn title_alignment(&self) -> TitleAlignment {
         self.title_alignment
     }
 
@@ -188,39 +189,39 @@ impl BoxRenderable {
         self.bottom_title.as_deref()
     }
 
-    pub fn set_bottom_title_alignment(&mut self, align: TitleAlignment) {
+    pub const fn set_bottom_title_alignment(&mut self, align: TitleAlignment) {
         self.bottom_title_alignment = align;
     }
 
     #[must_use]
-    pub fn bottom_title_alignment(&self) -> TitleAlignment {
+    pub const fn bottom_title_alignment(&self) -> TitleAlignment {
         self.bottom_title_alignment
     }
 
-    pub fn set_gap(&mut self, value: Option<f32>) {
+    pub const fn set_gap(&mut self, value: Option<f32>) {
         self.gap = value;
     }
 
     #[must_use]
-    pub fn gap(&self) -> Option<f32> {
+    pub const fn gap(&self) -> Option<f32> {
         self.gap
     }
 
-    pub fn set_row_gap(&mut self, value: Option<f32>) {
+    pub const fn set_row_gap(&mut self, value: Option<f32>) {
         self.row_gap = value;
     }
 
     #[must_use]
-    pub fn row_gap(&self) -> Option<f32> {
+    pub const fn row_gap(&self) -> Option<f32> {
         self.row_gap
     }
 
-    pub fn set_column_gap(&mut self, value: Option<f32>) {
+    pub const fn set_column_gap(&mut self, value: Option<f32>) {
         self.column_gap = value;
     }
 
     #[must_use]
-    pub fn column_gap(&self) -> Option<f32> {
+    pub const fn column_gap(&self) -> Option<f32> {
         self.column_gap
     }
 
@@ -232,7 +233,7 @@ impl BoxRenderable {
         self.children.retain(|c| c.id() != id);
     }
 
-    fn has_border(&self) -> bool {
+    const fn has_border(&self) -> bool {
         self.border.top || self.border.right || self.border.bottom || self.border.left
     }
 

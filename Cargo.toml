@@ -16,8 +16,11 @@ description = "Coding agent for the terminal. No UI, no noise."
 edition = "2024"
 license = "Apache-2.0"
 name = "cosh"
+readme = "README.md"
 repository = "https://github.com/DiegoZaluski/cosh"
 version = "0.0.0"
+keywords = ["terminal", "cli"]
+categories = ["command-line-utilities"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -46,7 +49,7 @@ log = { version = "0.4", features = ["std"] }
 dotenvy = "0.15.7"
 anyhow = "1"
 schemars = "1"
-crossterm = { version = "0.28", features = ["bracketed-paste"] }
+crossterm = { version = "0.29", features = ["bracketed-paste"] }
 directories = "6.0.0"
 
 # ---
@@ -111,7 +114,7 @@ cast_precision_loss      = "allow"
 
 default_numeric_fallback = "warn"
 exit                  = "warn"
-string_to_string      = "warn"
+implicit_clone      = "warn"
 
 unwrap_used   = "warn"
 expect_used   = "warn"

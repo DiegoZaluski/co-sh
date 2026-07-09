@@ -63,7 +63,7 @@ impl SessionStore {
         let cwd_hash = compute_cwd_hash();
         let sessions_dir = proj_dirs.data_dir().join("sessions").join(&cwd_hash);
         std::fs::create_dir_all(&sessions_dir).ok();
-        SessionStore {
+        Self {
             sessions_dir,
             cwd_hash,
         }
@@ -277,7 +277,7 @@ impl SessionStore {
 
         // Count remaining non-empty lines (messages)
         let mut message_count: usize = 0;
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if !line.trim().is_empty() {
                 message_count += 1;
             }
@@ -307,12 +307,11 @@ impl SessionStore {
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if let Some(ts_str) = stem.strip_prefix("session-") {
-                        if let Ok(ts) = ts_str.parse::<u64>() {
-                            files.push((path, ts));
-                        }
-                    }
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && let Some(ts_str) = stem.strip_prefix("session-")
+                    && let Ok(ts) = ts_str.parse::<u64>()
+                {
+                    files.push((path, ts));
                 }
             }
         }
@@ -369,7 +368,7 @@ struct StoredMessage {
 
 impl From<&Message> for StoredMessage {
     fn from(msg: &Message) -> Self {
-        StoredMessage {
+        Self {
             id: msg.id.clone(),
             role: match msg.role {
                 MessageRole::User => "user".to_string(),
@@ -737,14 +736,14 @@ mod tests {
             sessions_dir: base.join("proja"),
             cwd_hash: "proja".to_string(),
         };
-        std::fs::create_dir_all(&base.join("proja")).ok();
+        std::fs::create_dir_all(base.join("proja")).ok();
 
         // Store for "projb" CWD
         let store_b = SessionStore {
             sessions_dir: base.join("projb"),
             cwd_hash: "projb".to_string(),
         };
-        std::fs::create_dir_all(&base.join("projb")).ok();
+        std::fs::create_dir_all(base.join("projb")).ok();
 
         let session_a = make_test_session(
             "1000",

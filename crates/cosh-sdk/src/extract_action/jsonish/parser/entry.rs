@@ -60,11 +60,7 @@ pub(super) fn parse_func(
                     match res {
                         Some(MarkdownResult::CodeBlock(s, v)) => {
                             return Ok(Value::AnyOf(
-                                vec![Value::Markdown(
-                                    s.clone(),
-                                    Box::new(v),
-                                    CompletionState::Incomplete,
-                                )],
+                                vec![Value::Markdown(s, Box::new(v), CompletionState::Incomplete)],
                                 str.to_string(),
                             ));
                         }
@@ -111,7 +107,7 @@ pub(super) fn parse_func(
                             MarkdownResult::String(_) => None,
                         })
                         .map(|(s, v)| {
-                            Value::Markdown(s.clone(), Box::new(v.clone()), *v.completion_state())
+                            Value::Markdown(s, Box::new(v.clone()), *v.completion_state())
                         })
                         .collect::<Vec<_>>();
                     let array = Value::Array(items.clone(), CompletionState::Incomplete);
@@ -134,6 +130,7 @@ pub(super) fn parse_func(
             Ok(mut items) => match items.len() {
                 0 => {}
                 1 => {
+                    #[allow(clippy::expect_used)]
                     let first = items.pop().expect("Expected 1 item");
                     match &first {
                         // if the string is the same, then we can drop this condition.

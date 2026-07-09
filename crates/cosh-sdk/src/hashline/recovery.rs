@@ -24,7 +24,7 @@ pub struct RecoveryArgs {
 }
 
 /// Post-recovery state returned by [`Recovery::try_recover`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryResult {
     /// Post-recovery text.
     pub text: String,
@@ -196,7 +196,7 @@ pub struct Recovery<S> {
 }
 
 impl<S: SnapshotStore> Recovery<S> {
-    pub fn new(store: S) -> Self {
+    pub const fn new(store: S) -> Self {
         Self { store }
     }
 

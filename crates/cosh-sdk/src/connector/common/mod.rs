@@ -2,12 +2,12 @@ use super::error::ConnectorError;
 use super::provider::ProviderConfig;
 use std::time::Duration;
 
-pub(crate) struct SseBuffer {
+pub struct SseBuffer {
     buf: Vec<u8>,
 }
 
 impl SseBuffer {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { buf: Vec::new() }
     }
 
@@ -25,7 +25,7 @@ impl SseBuffer {
     }
 }
 
-pub(crate) async fn send_request(
+pub async fn send_request(
     config: &ProviderConfig,
     url: &str,
     body: &(impl serde::Serialize + Sync),
@@ -35,7 +35,7 @@ pub(crate) async fn send_request(
     Ok(response.text().await?)
 }
 
-pub(crate) async fn send_get_request(
+pub async fn send_get_request(
     config: &ProviderConfig,
     url: &str,
     headers: &[(&str, &str)],
@@ -75,7 +75,7 @@ pub(crate) async fn send_get_request(
     Ok(response.text().await?)
 }
 
-pub(crate) async fn send_request_stream(
+pub async fn send_request_stream(
     config: &ProviderConfig,
     url: &str,
     body: &(impl serde::Serialize + Sync),

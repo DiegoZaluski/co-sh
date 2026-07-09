@@ -27,11 +27,8 @@ pub fn parse(str: &str, options: &ParseOptions) -> Result<Vec<Value>, JsonishErr
 
                 if stack.is_empty() {
                     let end_index = index + 1;
-                    let json_str = if let Some(start) = json_str_start {
-                        &str[start..end_index]
-                    } else {
-                        &str[..end_index]
-                    };
+                    let json_str =
+                        json_str_start.map_or(&str[..end_index], |start| &str[start..end_index]);
                     match entry::parse_func(
                         json_str,
                         options.next_from_mode(super::ParsingMode::AllJsonObjects),

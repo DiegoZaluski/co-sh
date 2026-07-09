@@ -188,11 +188,11 @@ impl ExtractAction {
         let mut output = String::new();
 
         for (i, ch) in input.char_indices() {
-            if self.state.depth > 0 {
+            if self.state.depth > 0_i32 {
                 self.state.buffer.push(ch);
                 self.handle_json_char(ch);
 
-                if self.state.depth == 0 {
+                if self.state.depth == 0_i32 {
                     let buffer = std::mem::take(&mut self.state.buffer);
                     self.state = StreamState::default();
 
@@ -215,7 +215,7 @@ impl ExtractAction {
             } else if ch == '{' {
                 if !output.is_empty() {
                     let text = std::mem::take(&mut output);
-                    self.state.depth = 1;
+                    self.state.depth = 1_i32;
                     self.state.depth1_state = Some(Depth1State::ExpectKey);
                     self.state.buffer.push('{');
                     let next = i + ch.len_utf8();
@@ -224,7 +224,7 @@ impl ExtractAction {
                     }
                     return StreamAction::Text(text);
                 }
-                self.state.depth = 1;
+                self.state.depth = 1_i32;
                 self.state.depth1_state = Some(Depth1State::ExpectKey);
                 self.state.buffer.push('{');
             } else {
@@ -232,7 +232,7 @@ impl ExtractAction {
             }
         }
 
-        if self.state.depth == 0 && !output.is_empty() {
+        if self.state.depth == 0_i32 && !output.is_empty() {
             return StreamAction::Text(output);
         }
 
@@ -247,11 +247,12 @@ impl ExtractAction {
                 self.state.escape = true;
             } else if ch == '"' {
                 self.state.in_string = false;
-                if self.state.depth == 1 && self.state.depth1_state == Some(Depth1State::ExpectKey)
+                if self.state.depth == 1_i32
+                    && self.state.depth1_state == Some(Depth1State::ExpectKey)
                 {
                     self.state.pending_key = Some(std::mem::take(&mut self.state.current_key));
                 }
-            } else if self.state.depth == 1
+            } else if self.state.depth == 1_i32
                 && self.state.depth1_state == Some(Depth1State::ExpectKey)
             {
                 self.state.current_key.push(ch);
@@ -259,31 +260,31 @@ impl ExtractAction {
         } else {
             match ch {
                 '{' | '[' => {
-                    self.state.depth += 1;
-                    if self.state.depth == 1 {
+                    self.state.depth += 1_i32;
+                    if self.state.depth == 1_i32 {
                         self.state.depth1_state = Some(Depth1State::ExpectKey);
-                    } else if self.state.depth == 2 {
+                    } else if self.state.depth == 2_i32 {
                         self.state.depth1_state = Some(Depth1State::InValue);
                         self.state.pending_key = None;
                     }
                 }
                 '}' | ']' => {
-                    self.state.depth -= 1;
-                    if self.state.depth == 1 {
+                    self.state.depth -= 1_i32;
+                    if self.state.depth == 1_i32 {
                         self.state.depth1_state = Some(Depth1State::InValue);
                     }
                 }
                 '"' => {
                     self.state.in_string = true;
                     self.state.escape = false;
-                    if self.state.depth == 1
+                    if self.state.depth == 1_i32
                         && self.state.depth1_state == Some(Depth1State::ExpectKey)
                     {
                         self.state.current_key.clear();
                     }
                 }
                 ':' => {
-                    if self.state.depth == 1 {
+                    if self.state.depth == 1_i32 {
                         if let Some(ref key) = self.state.pending_key.take()
                             && !is_known_key(key, &self.tool_keys)
                         {
@@ -292,7 +293,7 @@ impl ExtractAction {
                         self.state.depth1_state = Some(Depth1State::InValue);
                     }
                 }
-                ',' if self.state.depth == 1 => {
+                ',' if self.state.depth == 1_i32 => {
                     self.state.depth1_state = Some(Depth1State::ExpectKey);
                 }
                 _ => {}
@@ -300,7 +301,7 @@ impl ExtractAction {
         }
     }
 
-    fn check_early_exit(&mut self) -> bool {
+    const fn check_early_exit(&mut self) -> bool {
         std::mem::replace(&mut self.state.early_exit, false)
     }
 
@@ -346,7 +347,7 @@ pub fn find_json_objects(text: &str) -> Vec<(usize, usize)> {
             let mut escaped = false;
             i += 1;
 
-            while i < bytes.len() && depth > 0 {
+            while i < bytes.len() && depth > 0_i32 {
                 let c = bytes[i];
                 if in_string {
                     if escaped {
@@ -359,15 +360,15 @@ pub fn find_json_objects(text: &str) -> Vec<(usize, usize)> {
                 } else {
                     match c {
                         b'"' => in_string = true,
-                        b'{' => depth += 1,
-                        b'}' => depth -= 1,
+                        b'{' => depth += 1_i32,
+                        b'}' => depth -= 1_i32,
                         _ => {}
                     }
                 }
                 i += 1;
             }
 
-            if depth == 0 {
+            if depth == 0_i32 {
                 results.push((start, i - 1));
             }
         } else {

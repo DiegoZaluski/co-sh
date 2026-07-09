@@ -38,7 +38,7 @@ pub struct ZoneRange {
     pub range: Range<u16>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DoubleClickRange {
     Range(Range<usize>),
     RangeWithWrap(Range<usize>),
@@ -76,7 +76,7 @@ impl Line {
     #[must_use]
     pub fn with_width_and_cell(width: usize, cell: Cell, seqno: SequenceNo) -> Self {
         let mut cells = Vec::with_capacity(width);
-        cells.resize(width, cell.clone());
+        cells.resize(width, cell);
         let bits = LineBits::NONE;
         Self {
             bits,
@@ -152,7 +152,7 @@ impl Line {
         attrs: &CellAttributes,
         seqno: SequenceNo,
         unicode_version: Option<&UnicodeVersion>,
-    ) -> Line {
+    ) -> Self {
         let mut cells = Vec::new();
 
         for sub in Graphemes::new(s) {
@@ -164,7 +164,7 @@ impl Line {
             }
         }
 
-        Line {
+        Self {
             cells: CellStorage::V(VecStorage::new(cells)),
             bits: LineBits::NONE,
             seqno,
@@ -178,7 +178,7 @@ impl Line {
         s: &str,
         attrs: &CellAttributes,
         seqno: SequenceNo,
-    ) -> Line {
+    ) -> Self {
         let mut line = Self::from_text(s, attrs, seqno, None);
         line.cells_mut()
             .last_mut()
@@ -228,7 +228,7 @@ impl Line {
                     if let Some(line) = lines.last_mut() {
                         line.set_last_cell_was_wrapped(true, seqno);
                     }
-                    lines.push(Line::new(seqno));
+                    lines.push(Self::new(seqno));
                     delta = cell.cell_index();
                 }
                 let line = lines.last_mut().unwrap();
@@ -278,11 +278,11 @@ impl Line {
 
     /// Returns true if the line's last changed seqno is more recent
     /// than the provided seqno parameter
-    pub fn changed_since(&self, seqno: SequenceNo) -> bool {
+    pub const fn changed_since(&self, seqno: SequenceNo) -> bool {
         self.seqno == SEQ_ZERO || self.seqno > seqno
     }
 
-    pub fn current_seqno(&self) -> SequenceNo {
+    pub const fn current_seqno(&self) -> SequenceNo {
         self.seqno
     }
 
@@ -402,7 +402,7 @@ impl Line {
     /// Returns a tuple of (`BIDI_ENABLED`, Direction), indicating whether
     /// the line should have the bidi algorithm applied and its base
     /// direction, respectively.
-    pub fn bidi_info(&self) -> (bool, ParagraphDirectionHint) {
+    pub const fn bidi_info(&self) -> (bool, ParagraphDirectionHint) {
         (
             self.bits.contains(LineBits::BIDI_ENABLED),
             match (
@@ -960,7 +960,7 @@ impl Line {
     /// to this line.
     /// This function is used by rewrapping logic when joining wrapped
     /// lines back together.
-    pub fn append_line(&mut self, other: Line, seqno: SequenceNo) {
+    pub fn append_line(&mut self, other: Self, seqno: SequenceNo) {
         match &mut self.cells {
             CellStorage::V(cells) => {
                 for cell in other.visible_cells() {
@@ -996,9 +996,7 @@ impl Line {
         let mut text_run = String::new();
 
         for cell in self.visible_cells() {
-            if *cell.attrs() == attr {
-                text_run.push_str(cell.str());
-            } else {
+            if *cell.attrs() != attr {
                 // flush out the current text run
                 if !text_run.is_empty() {
                     result.push(Change::Text(text_run.clone()));
@@ -1007,8 +1005,8 @@ impl Line {
 
                 attr = cell.attrs().clone();
                 result.push(Change::AllAttributes(attr.clone()));
-                text_run.push_str(cell.str());
             }
+            text_run.push_str(cell.str());
         }
 
         // flush out any remaining text run
@@ -1059,7 +1057,7 @@ impl Line {
 }
 
 impl From<&str> for Line {
-    fn from(s: &str) -> Line {
-        Line::from_text(s, &CellAttributes::default(), SEQ_ZERO, None)
+    fn from(s: &str) -> Self {
+        Self::from_text(s, &CellAttributes::default(), SEQ_ZERO, None)
     }
 }

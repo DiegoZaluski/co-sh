@@ -8,6 +8,7 @@ pub struct LayoutTree {
     pub root: NodeId,
 }
 
+#[allow(clippy::expect_used)]
 impl LayoutTree {
     /// Create a layout tree with a root node.
     ///
@@ -21,7 +22,7 @@ impl LayoutTree {
         let root = taffy
             .new_leaf(root_style)
             .expect("failed to create root layout node");
-        LayoutTree { taffy, root }
+        Self { taffy, root }
     }
 
     /// Create a new leaf node from a `Style`.
@@ -140,7 +141,12 @@ impl Default for LayoutTree {
 /// Each active border side contributes 1.0 cell of border width.
 #[allow(clippy::fn_params_excessive_bools)]
 #[must_use]
-pub fn border_rect(top: bool, right: bool, bottom: bool, left: bool) -> Rect<LengthPercentage> {
+pub const fn border_rect(
+    top: bool,
+    right: bool,
+    bottom: bool,
+    left: bool,
+) -> Rect<LengthPercentage> {
     Rect {
         left: if left {
             LengthPercentage::length(1.0)

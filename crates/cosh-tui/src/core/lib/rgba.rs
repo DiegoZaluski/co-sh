@@ -2,7 +2,7 @@ use std::fmt;
 
 pub type RgbTriplet = (u8, u8, u8);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorIntent {
     Rgb,
     Indexed,
@@ -33,12 +33,12 @@ const ANSI16_RGB: [RgbTriplet; 16] = [
 
 const ANSI_256_CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NormalizedColorValue {
     pub rgba: RGBA,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RGBA {
     r: u8,
     g: u8,
@@ -54,7 +54,7 @@ fn to_u8(value: f32) -> u8 {
 }
 
 #[must_use]
-pub fn ansi256_index_to_rgb(index: u8) -> RgbTriplet {
+pub const fn ansi256_index_to_rgb(index: u8) -> RgbTriplet {
     let normalized = normalize_indexed_color_index(index);
 
     if (normalized as usize) < ANSI16_RGB.len() {
@@ -77,20 +77,20 @@ pub fn ansi256_index_to_rgb(index: u8) -> RgbTriplet {
     }
 }
 
-fn rgba_for_ansi256_index(index: u8) -> RGBA {
+const fn rgba_for_ansi256_index(index: u8) -> RGBA {
     let (r, g, b) = ansi256_index_to_rgb(index);
     RGBA::from_ints(r, g, b, 255)
 }
 
 #[must_use]
-pub fn normalize_indexed_color_index(index: u8) -> u8 {
+pub const fn normalize_indexed_color_index(index: u8) -> u8 {
     index
 }
 
 impl RGBA {
     #[must_use]
     pub fn from_values(r: f32, g: f32, b: f32, a: f32) -> Self {
-        RGBA {
+        Self {
             r: to_u8(r),
             g: to_u8(g),
             b: to_u8(b),
@@ -101,8 +101,8 @@ impl RGBA {
     }
 
     #[must_use]
-    pub fn from_ints(r: u8, g: u8, b: u8, a: u8) -> Self {
-        RGBA {
+    pub const fn from_ints(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self {
             r,
             g,
             b,
@@ -120,11 +120,8 @@ impl RGBA {
     #[must_use]
     pub fn from_index(index: u8, snapshot: Option<ColorInput>) -> Self {
         let normalized = normalize_indexed_color_index(index);
-        let rgba = match snapshot {
-            Some(input) => parse_color(input),
-            None => rgba_for_ansi256_index(normalized),
-        };
-        RGBA {
+        let rgba = snapshot.map_or_else(|| rgba_for_ansi256_index(normalized), parse_color);
+        Self {
             r: rgba.r,
             g: rgba.g,
             b: rgba.b,
@@ -136,16 +133,18 @@ impl RGBA {
 
     #[must_use]
     pub fn default_foreground(snapshot: Option<ColorInput>) -> Self {
-        let rgba = match snapshot {
-            Some(input) => parse_color(input),
-            None => RGBA::from_ints(
-                DEFAULT_FOREGROUND_RGB.0,
-                DEFAULT_FOREGROUND_RGB.1,
-                DEFAULT_FOREGROUND_RGB.2,
-                255,
-            ),
-        };
-        RGBA {
+        let rgba = snapshot.map_or_else(
+            || {
+                Self::from_ints(
+                    DEFAULT_FOREGROUND_RGB.0,
+                    DEFAULT_FOREGROUND_RGB.1,
+                    DEFAULT_FOREGROUND_RGB.2,
+                    255,
+                )
+            },
+            parse_color,
+        );
+        Self {
             r: rgba.r,
             g: rgba.g,
             b: rgba.b,
@@ -157,16 +156,18 @@ impl RGBA {
 
     #[must_use]
     pub fn default_background(snapshot: Option<ColorInput>) -> Self {
-        let rgba = match snapshot {
-            Some(input) => parse_color(input),
-            None => RGBA::from_ints(
-                DEFAULT_BACKGROUND_RGB.0,
-                DEFAULT_BACKGROUND_RGB.1,
-                DEFAULT_BACKGROUND_RGB.2,
-                255,
-            ),
-        };
-        RGBA {
+        let rgba = snapshot.map_or_else(
+            || {
+                Self::from_ints(
+                    DEFAULT_BACKGROUND_RGB.0,
+                    DEFAULT_BACKGROUND_RGB.1,
+                    DEFAULT_BACKGROUND_RGB.2,
+                    255,
+                )
+            },
+            parse_color,
+        );
+        Self {
             r: rgba.r,
             g: rgba.g,
             b: rgba.b,
@@ -177,7 +178,7 @@ impl RGBA {
     }
 
     #[must_use]
-    pub fn to_ints(&self) -> (u8, u8, u8, u8) {
+    pub const fn to_ints(&self) -> (u8, u8, u8, u8) {
         (self.r, self.g, self.b, self.a)
     }
 
@@ -222,11 +223,8 @@ impl RGBA {
     }
 
     #[must_use]
-    pub fn equals(&self, other: Option<&RGBA>) -> bool {
-        match other {
-            Some(other) => self == other,
-            None => false,
-        }
+    pub fn equals(&self, other: Option<&Self>) -> bool {
+        other == Some(self)
     }
 }
 
@@ -243,6 +241,7 @@ impl fmt::Display for RGBA {
     }
 }
 
+#[allow(clippy::single_option_map)]
 #[must_use]
 pub fn normalize_color_value(value: Option<ColorInput>) -> Option<NormalizedColorValue> {
     value.map(|v| NormalizedColorValue {
@@ -307,14 +306,18 @@ pub fn rgb_to_hex(rgb: &RGBA) -> String {
     }
 }
 
-#[allow(clippy::many_single_char_names, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::many_single_char_names,
+    clippy::cast_possible_truncation,
+    clippy::default_numeric_fallback
+)]
 #[must_use]
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> RGBA {
-    let i = (h / 60.0).floor() as i32 % 6;
+    let i = (h / 60.0).floor() as i32 % 6_i32;
     let f = h / 60.0 - (h / 60.0).floor();
     let p = v * (1.0 - s);
     let q = v * (1.0 - f * s);
-    let t = v * (1.0 - (1.0 - f) * s);
+    let t = v * (1.0 - f).mul_add(-s, 1.0);
 
     let (r, g, b) = match i {
         0 => (v, t, p),
@@ -378,7 +381,7 @@ pub fn parse_color(color: ColorInput) -> RGBA {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColorInput {
     String(String),
     RGBA(RGBA),
@@ -386,12 +389,12 @@ pub enum ColorInput {
 
 impl From<&str> for ColorInput {
     fn from(s: &str) -> Self {
-        ColorInput::String(s.to_string())
+        Self::String(s.to_string())
     }
 }
 
 impl From<RGBA> for ColorInput {
     fn from(rgba: RGBA) -> Self {
-        ColorInput::RGBA(rgba)
+        Self::RGBA(rgba)
     }
 }

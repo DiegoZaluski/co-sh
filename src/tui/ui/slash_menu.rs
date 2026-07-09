@@ -90,7 +90,7 @@ impl SlashMenu {
             },
         ];
 
-        SlashMenu {
+        Self {
             visible: false,
             query: String::new(),
             selected: 0,

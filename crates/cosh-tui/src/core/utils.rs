@@ -15,7 +15,7 @@ pub struct TextAttributeOptions {
 }
 
 #[must_use]
-pub fn create_text_attributes(options: TextAttributeOptions) -> u32 {
+pub const fn create_text_attributes(options: TextAttributeOptions) -> u32 {
     let mut attributes = TextAttributes::NONE.bits();
     if options.bold {
         attributes |= TextAttributes::BOLD.bits();
@@ -50,13 +50,13 @@ const LINK_ID_SHIFT: u32 = 8;
 const LINK_ID_PAYLOAD_MASK: u32 = 0xff_ff_ff;
 
 #[must_use]
-pub fn attributes_with_link(base_attributes: u32, link_id: u32) -> u32 {
+pub const fn attributes_with_link(base_attributes: u32, link_id: u32) -> u32 {
     let base = base_attributes & ATTRIBUTE_BASE_MASK;
     let link_bits = (link_id & LINK_ID_PAYLOAD_MASK) << LINK_ID_SHIFT;
     base | link_bits
 }
 
 #[must_use]
-pub fn get_link_id(attributes: u32) -> u32 {
+pub const fn get_link_id(attributes: u32) -> u32 {
     (attributes >> LINK_ID_SHIFT) & LINK_ID_PAYLOAD_MASK
 }

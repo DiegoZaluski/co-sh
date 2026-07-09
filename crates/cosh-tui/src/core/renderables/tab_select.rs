@@ -48,7 +48,7 @@ impl TabSelectRenderable {
     #[must_use]
     pub fn new() -> Self {
         let num = NEXT_TAB_SELECT_NUM.fetch_add(1, Ordering::Relaxed);
-        TabSelectRenderable {
+        Self {
             id: format!("tabselect-{num}"),
             num,
             visible: true,
@@ -89,7 +89,7 @@ impl TabSelectRenderable {
     }
 
     #[must_use]
-    pub fn selected_index(&self) -> usize {
+    pub const fn selected_index(&self) -> usize {
         self.selected_index
     }
 
@@ -129,53 +129,54 @@ impl TabSelectRenderable {
         self.update_scroll_offset();
     }
 
-    pub fn set_tab_width(&mut self, width: u16) {
+    pub const fn set_tab_width(&mut self, width: u16) {
         self.tab_width = width;
     }
 
     #[must_use]
-    pub fn tab_width(&self) -> u16 {
+    pub const fn tab_width(&self) -> u16 {
         self.tab_width
     }
 
     pub fn set_background_color(&mut self, color: Option<ColorInput>) {
         self.background_color =
-            parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("transparent".into())));
     }
 
     pub fn set_text_color(&mut self, color: Option<ColorInput>) {
-        self.text_color = parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
+        self.text_color =
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#FFFFFF".into())));
     }
 
     pub fn set_focused_background_color(&mut self, color: Option<ColorInput>) {
         self.focused_background_color =
-            parse_color(color.unwrap_or(ColorInput::String("#1a1a1a".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#1a1a1a".into())));
     }
 
     pub fn set_focused_text_color(&mut self, color: Option<ColorInput>) {
         self.focused_text_color =
-            parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#FFFFFF".into())));
     }
 
     pub fn set_selected_background_color(&mut self, color: Option<ColorInput>) {
         self.selected_background_color =
-            parse_color(color.unwrap_or(ColorInput::String("#334455".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#334455".into())));
     }
 
     pub fn set_selected_text_color(&mut self, color: Option<ColorInput>) {
         self.selected_text_color =
-            parse_color(color.unwrap_or(ColorInput::String("#FFFF00".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#FFFF00".into())));
     }
 
-    pub fn set_show_description(&mut self, show: bool) {
+    pub const fn set_show_description(&mut self, show: bool) {
         self.show_description = show;
     }
 
-    pub fn set_show_underline(&mut self, show: bool) {
+    pub const fn set_show_underline(&mut self, show: bool) {
         self.show_underline = show;
     }
 
-    pub fn set_show_scroll_arrows(&mut self, show: bool) {
+    pub const fn set_show_scroll_arrows(&mut self, show: bool) {
         self.show_scroll_arrows = show;
     }
 
@@ -193,7 +194,7 @@ impl TabSelectRenderable {
         target.min(max_scroll)
     }
 
-    fn calculated_height(&self) -> u16 {
+    const fn calculated_height(&self) -> u16 {
         let mut h: u16 = 1;
         if self.show_underline {
             h += 1;

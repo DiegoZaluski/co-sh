@@ -1,4 +1,5 @@
 //! High-level patch orchestrator. Reads each section's target file via the
+//!
 //! configured [`Filesystem`], strips BOM and normalizes line endings,
 //! validates the section snapshot tag (with [`Recovery`]), applies the
 //! result back through the same [`Filesystem`].
@@ -82,6 +83,7 @@ pub struct PatcherApplyResult {
 }
 
 /// Opaque token returned by [`Patcher::prepare`]. Carries the section, the
+///
 /// raw file content read off disk, and the in-memory apply result.
 /// [`Patcher::commit`] just writes the [`PreparedSection::apply_result`].
 #[derive(Debug, Clone)]
@@ -136,6 +138,7 @@ fn assert_section_hash_present(
     Err(missing_snapshot_tag_message(section_path).into())
 }
 
+#[allow(clippy::unwrap_used)]
 fn recovery_to_apply_result(result: RecoveryResult) -> ApplyResult {
     ApplyResult {
         text: result.text,
@@ -202,6 +205,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     /// # Errors
     ///
     /// Returns an error if any section fails to parse, validate, or apply.
+    #[allow(clippy::future_not_send)]
     pub async fn apply(
         &mut self,
         patch: &Patch,
@@ -243,6 +247,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     /// # Errors
     ///
     /// Returns an error if any section fails to parse, validate, or apply.
+    #[allow(clippy::future_not_send)]
     pub async fn preflight(
         &mut self,
         patch: &Patch,
@@ -274,6 +279,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
     /// # Errors
     ///
     /// Returns an error if the section fails to parse, the file is missing, or the tag does not match.
+    #[allow(clippy::future_not_send)]
     pub async fn prepare(
         &mut self,
         section: &PatchSection,
@@ -387,6 +393,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         })
     }
 
+    #[allow(clippy::future_not_send)]
     async fn try_read(
         &self,
         path: &str,
@@ -403,7 +410,8 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         }
     }
 
-    fn record_full_snapshot(&mut self, canonical_path: &str, normalized: &str) -> String {
+    #[allow(clippy::unwrap_used)]
+    fn record_full_snapshot(&self, canonical_path: &str, normalized: &str) -> String {
         self.snapshots
             .lock()
             .unwrap()
@@ -454,6 +462,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
                 Some(exp) => {
                     // Pre-fetch snapshot outside the block so the Mutex lock is
                     // released before we call any &mut self methods (e.g. mismatch_error).
+                    #[allow(clippy::unwrap_used)]
                     let snapshot = self.snapshots.lock().unwrap().by_hash(canonical_path, exp);
                     if let Some(s) = snapshot {
                         s.text
@@ -508,29 +517,37 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         let recovered = self.recovery.try_recover(&RecoveryArgs {
             path: canonical_path.to_string(),
             current_text: normalized.to_string(),
+            #[allow(clippy::unwrap_used)]
             file_hash: expected.unwrap().to_string(),
             edits: resolved,
         });
         if let Some(result) = recovered {
             return Ok(recovery_to_apply_result(result));
         }
+        #[allow(clippy::unwrap_used)]
         let hash_recognized = self
             .snapshots
             .lock()
             .unwrap()
-            .by_hash(canonical_path, expected.unwrap())
+            .by_hash(canonical_path, {
+                #[allow(clippy::unwrap_used)]
+                expected.unwrap()
+            })
             .is_some();
         Err(Box::new(self.mismatch_error(
             section,
             canonical_path,
             normalized,
-            expected.unwrap(),
+            {
+                #[allow(clippy::unwrap_used)]
+                expected.unwrap()
+            },
             hash_recognized,
         )))
     }
 
     fn mismatch_error(
-        &mut self,
+        &self,
         section: &PatchSection,
         canonical_path: &str,
         normalized: &str,

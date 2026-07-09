@@ -53,17 +53,17 @@ impl Action {
     /// `PrintString` then the elements are combined into `PrintString`
     /// to reduce heap utilization.
     pub fn append_to(self, dest: &mut Vec<Self>) {
-        if let Action::Print(c) = &self {
+        if let Self::Print(c) = &self {
             match dest.last_mut() {
-                Some(Action::PrintString(s)) => {
+                Some(Self::PrintString(s)) => {
                     s.push(*c);
                     return;
                 }
-                Some(Action::Print(prior)) => {
+                Some(Self::Print(prior)) => {
                     let mut s = prior.to_string();
                     dest.pop();
                     s.push(*c);
-                    dest.push(Action::PrintString(s));
+                    dest.push(Self::PrintString(s));
                     return;
                 }
                 _ => {}
@@ -88,14 +88,14 @@ fn action_size() {
 impl Display for Action {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
-            Action::Print(c) => write!(f, "{c}"),
-            Action::PrintString(s) => write!(f, "{s}"),
-            Action::Control(c) => f.write_char(*c as u8 as char),
-            Action::DeviceControl(c) => c.fmt(f),
-            Action::OperatingSystemCommand(osc) => osc.fmt(f),
-            Action::CSI(csi) => csi.fmt(f),
-            Action::Esc(esc) => esc.fmt(f),
-            Action::XtGetTcap(names) => {
+            Self::Print(c) => write!(f, "{c}"),
+            Self::PrintString(s) => write!(f, "{s}"),
+            Self::Control(c) => f.write_char(*c as u8 as char),
+            Self::DeviceControl(c) => c.fmt(f),
+            Self::OperatingSystemCommand(osc) => osc.fmt(f),
+            Self::CSI(csi) => csi.fmt(f),
+            Self::Esc(esc) => esc.fmt(f),
+            Self::XtGetTcap(names) => {
                 write!(f, "\x1bP+q")?;
                 for (i, name) in names.iter().enumerate() {
                     if i > 0 {
@@ -113,6 +113,7 @@ impl Display for Action {
 }
 
 /// A fully parsed DCS sequence.
+///
 /// The parser emits these for byte/intermediate sequences that are
 /// known to be relatively short and self contained (eg: DECRQSS)
 /// as opposed to larger ones that require streaming mode handling.
@@ -340,7 +341,7 @@ impl OneBased {
     }
 
     #[must_use]
-    pub fn from_zero_based(value: u32) -> Self {
+    pub const fn from_zero_based(value: u32) -> Self {
         Self { value: value + 1 }
     }
 
@@ -380,12 +381,12 @@ impl OneBased {
 
     /// Return the underlying value as a 0-based value
     #[must_use]
-    pub fn as_zero_based(self) -> u32 {
+    pub const fn as_zero_based(self) -> u32 {
         self.value.saturating_sub(1)
     }
 
     #[must_use]
-    pub fn as_one_based(self) -> u32 {
+    pub const fn as_one_based(self) -> u32 {
         self.value
     }
 }

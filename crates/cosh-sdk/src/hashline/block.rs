@@ -14,6 +14,7 @@ use super::types::{
 };
 
 /// How to handle a block edit that cannot be resolved (missing resolver or a
+///
 /// `null` span). `"throw"` (default) raises a `blockUnresolvedMessage` error —
 /// used by the authoritative apply + final preview paths. `"drop"` silently
 /// skips the edit — used by the streaming preview, where a half-written file
@@ -38,6 +39,7 @@ pub fn has_block_edit(edits: &[Edit]) -> bool {
 }
 
 /// Resolve every `replace block N:` edit in `edits` against `text` (parsed as
+///
 /// the language inferred from `path`). Non-block edits pass through untouched.
 /// Returns a fresh edit list with no `block` variants. The fast path returns the
 /// input unchanged when there is nothing to resolve.
@@ -49,7 +51,7 @@ pub fn has_block_edit(edits: &[Edit]) -> bool {
 /// # Panics
 ///
 /// Panics if an unresolvable block edit is encountered and `on_unresolved` is set to `Throw`.
-#[allow(clippy::similar_names)]
+#[allow(clippy::similar_names, clippy::panic)]
 #[must_use]
 pub fn resolve_block_edits(
     edits: &[Edit],

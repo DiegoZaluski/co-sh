@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::Duration;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Build,
     Ask,
@@ -208,24 +208,24 @@ impl Harness {
     }
 
     #[must_use]
-    pub fn with_mode(mut self, mode: Mode) -> Self {
+    pub const fn with_mode(mut self, mode: Mode) -> Self {
         self.mode = mode;
         self
     }
 
     /// Signal the agent loop to stop at the next safe opportunity.
-    pub fn request_stop(&mut self) {
+    pub const fn request_stop(&mut self) {
         self.stop = true;
     }
 
     /// Check whether a stop has been requested.
     #[must_use]
-    pub fn is_stopped(&self) -> bool {
+    pub const fn is_stopped(&self) -> bool {
         self.stop
     }
 
     /// Reset the stop flag so the harness can be reused for a new cycle.
-    pub fn reset_stop(&mut self) {
+    pub const fn reset_stop(&mut self) {
         self.stop = false;
     }
 

@@ -65,7 +65,7 @@ impl Screen {
         allow_scrollback: bool,
         seqno: SequenceNo,
         bidi_mode: BidiMode,
-    ) -> Screen {
+    ) -> Self {
         let physical_rows = size.rows.max(1);
         let physical_cols = size.cols.max(1);
 
@@ -77,7 +77,7 @@ impl Screen {
             lines.push_back(line);
         }
 
-        Screen {
+        Self {
             lines,
             config: Arc::clone(config),
             allow_scrollback,
@@ -541,7 +541,7 @@ impl Screen {
     #[inline]
     #[must_use]
     #[allow(clippy::cast_possible_wrap)]
-    pub fn phys_to_stable_row_index(&self, phys: PhysRowIndex) -> StableRowIndex {
+    pub const fn phys_to_stable_row_index(&self, phys: PhysRowIndex) -> StableRowIndex {
         (phys + self.stable_row_index_offset) as StableRowIndex
     }
 

@@ -53,7 +53,7 @@ impl SearchBar {
         self.cursor.note_activity();
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.filter.is_empty()
     }
 
@@ -97,11 +97,7 @@ impl SearchBar {
                 match cursor_state {
                     CursorState::On => {
                         cell.set_char('\u{2588}');
-                        cell.set_style(
-                            Style::default()
-                                .fg(rgba_color(theme.primary))
-                                .bg(bg_color),
-                        );
+                        cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_color));
                     }
                     CursorState::Off | CursorState::Blur => {
                         cell.set_char('\u{2592}');
@@ -129,11 +125,7 @@ impl SearchBar {
             {
                 if cursor_vis {
                     cell.set_char('\u{2588}');
-                    cell.set_style(
-                        Style::default()
-                            .fg(rgba_color(theme.primary))
-                            .bg(bg_color),
-                    );
+                    cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_color));
                 } else {
                     cell.set_char('\u{2592}');
                     cell.set_style(

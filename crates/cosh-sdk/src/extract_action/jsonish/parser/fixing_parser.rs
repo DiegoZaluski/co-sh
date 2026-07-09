@@ -28,7 +28,7 @@ pub fn parse(str: &str, _options: &ParseOptions) -> Result<Vec<(Value, Vec<Fixes
 
     let mut state = JsonParseState::new();
 
-    let mut chars = str.char_indices().peekable();
+    let mut chars = str.char_indices();
     while let Some((count, c)) = chars.next() {
         let peekable = str[count + c.len_utf8()..].char_indices().peekable();
         match state.process_token(c, peekable) {
@@ -52,8 +52,8 @@ pub fn parse(str: &str, _options: &ParseOptions) -> Result<Vec<(Value, Vec<Fixes
 
     match state.completed_values.len() {
         0 => Err(JsonishError("No JSON objects found".into())),
-        1 => state.completed_values.pop().map_or(
-            Err(JsonishError("Failed to pop completed value".into())),
+        1 => state.completed_values.pop().map_or_else(
+            || Err(JsonishError("Failed to pop completed value".into())),
             |(_name, value, fixes)| Ok(vec![(value, fixes)]),
         ),
         _ => {

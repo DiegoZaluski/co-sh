@@ -10,7 +10,7 @@ pub struct Anchor {
 }
 
 /// Where an `insert` edit should land relative to existing content.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cursor {
     Bof,
     Eof,
@@ -24,7 +24,7 @@ pub enum Cursor {
 /// one `delete` per consumed line. Replacement payloads are tagged so the
 /// applier can distinguish literal insertion from new content for a deleted
 /// line.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Edit {
     Insert {
         cursor: Cursor,
@@ -75,7 +75,7 @@ pub enum ResolveAction {
 }
 
 /// Result of applying a parsed set of edits to a text body.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyResult {
     /// Post-edit text body.
     pub text: String,
@@ -115,7 +115,7 @@ pub struct StreamOptions {
 }
 
 /// Result of [`crate::hashline::diff_preview::build_compact_diff_preview`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactDiffPreview {
     pub preview: String,
     pub added_lines: u32,
@@ -150,6 +150,7 @@ pub struct BlockResolverRequest {
 }
 
 /// Resolves a `replace block N:` anchor to the line span of the syntactic block
+///
 /// that begins on line N. Returns `None` when no block can be resolved
 /// (unrecognized language, blank/out-of-range line, no node begins there, or the
 /// resolved subtree has a syntax error). Pure seam: the hashline core declares

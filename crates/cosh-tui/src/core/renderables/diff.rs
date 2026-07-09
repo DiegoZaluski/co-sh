@@ -38,7 +38,7 @@ impl DiffRenderable {
     #[must_use]
     pub fn new(diff: Option<String>) -> Self {
         let num = NEXT_DIFF_NUM.fetch_add(1, Ordering::Relaxed);
-        DiffRenderable {
+        Self {
             id: format!("diff-{num}"),
             num,
             visible: true,

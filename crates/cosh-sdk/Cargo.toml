@@ -1,6 +1,12 @@
 [package]
+categories = ["command-line-utilities"]
+description = "SDK crate for cosh - coding agent for the terminal"
 edition = "2024"
+keywords = ["terminal", "cli"]
+license = "Apache-2.0"
 name = "cosh-sdk"
+readme = "README.md"
+repository = "https://github.com/DiegoZaluski/cosh"
 version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -13,7 +19,7 @@ grep-searcher = "0.1.16"
 ignore = "0.4.25"
 libc = "0.2"
 log = "0.4"
-lru = "0.12"
+lru = "0.18"
 memmap2 = "0.9.9"
 miniz_oxide = "0.8"
 rayon = "1"

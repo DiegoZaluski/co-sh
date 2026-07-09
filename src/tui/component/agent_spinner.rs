@@ -179,7 +179,7 @@ impl AgentSpinner {
     }
 
     /// Advance the animation by one frame (call each render cycle).
-    pub fn advance(&mut self) {
+    pub const fn advance(&mut self) {
         self.step = (self.step + 1) % PRERENDERED_FRAMES as u32;
         self.frames_elapsed = self.frames_elapsed.saturating_add(1);
 
@@ -196,7 +196,7 @@ impl AgentSpinner {
     }
 
     /// Reset the spinner to its initial state, restarting the birth animation.
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.step = 0;
         self.frames_elapsed = 0;
         self.ellipsis_step = 0;
@@ -222,7 +222,7 @@ impl AgentSpinner {
     }
 
     /// Whether the birth animation is still playing.
-    pub fn is_initialized(&self) -> bool {
+    pub const fn is_initialized(&self) -> bool {
         self.initialized
     }
 

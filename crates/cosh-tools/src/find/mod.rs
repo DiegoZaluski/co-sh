@@ -149,21 +149,21 @@ impl Find {
 
     /// Search subdirectories recursively (default: `true`).
     #[must_use]
-    pub fn recursive(mut self, v: bool) -> Self {
+    pub const fn recursive(mut self, v: bool) -> Self {
         self.recursive = Some(v);
         self
     }
 
     /// Maximum number of glob entries to return.
     #[must_use]
-    pub fn max_results(mut self, n: u32) -> Self {
+    pub const fn max_results(mut self, n: u32) -> Self {
         self.max_results = Some(n);
         self
     }
 
     /// Sort glob results by modification time, most recent first.
     #[must_use]
-    pub fn sort_by_mtime(mut self, v: bool) -> Self {
+    pub const fn sort_by_mtime(mut self, v: bool) -> Self {
         self.sort_by_mtime = Some(v);
         self
     }
@@ -186,28 +186,28 @@ impl Find {
 
     /// Case-insensitive matching.
     #[must_use]
-    pub fn ignore_case(mut self, v: bool) -> Self {
+    pub const fn ignore_case(mut self, v: bool) -> Self {
         self.ignore_case = Some(v);
         self
     }
 
     /// Maximum total number of grep matches across all files.
     #[must_use]
-    pub fn max_count(mut self, n: u32) -> Self {
+    pub const fn max_count(mut self, n: u32) -> Self {
         self.max_count = Some(n);
         self
     }
 
     /// Lines of context to include before each match.
     #[must_use]
-    pub fn context_before(mut self, n: u32) -> Self {
+    pub const fn context_before(mut self, n: u32) -> Self {
         self.context_before = Some(n);
         self
     }
 
     /// Lines of context to include after each match.
     #[must_use]
-    pub fn context_after(mut self, n: u32) -> Self {
+    pub const fn context_after(mut self, n: u32) -> Self {
         self.context_after = Some(n);
         self
     }
@@ -216,21 +216,21 @@ impl Find {
 
     /// Include hidden files / directories (names starting with `.`).
     #[must_use]
-    pub fn hidden(mut self, v: bool) -> Self {
+    pub const fn hidden(mut self, v: bool) -> Self {
         self.hidden = Some(v);
         self
     }
 
     /// Respect `.gitignore` rules.
     #[must_use]
-    pub fn gitignore(mut self, v: bool) -> Self {
+    pub const fn gitignore(mut self, v: bool) -> Self {
         self.gitignore = Some(v);
         self
     }
 
     /// Abort the search after this many milliseconds.
     #[must_use]
-    pub fn timeout_ms(mut self, ms: u32) -> Self {
+    pub const fn timeout_ms(mut self, ms: u32) -> Self {
         self.timeout_ms = Some(ms);
         self
     }

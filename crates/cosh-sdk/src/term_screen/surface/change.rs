@@ -103,14 +103,15 @@ pub enum Change {
 
 impl Change {
     #[must_use]
-    pub fn is_text(&self) -> bool {
-        matches!(self, Change::Text(_))
+    pub const fn is_text(&self) -> bool {
+        matches!(self, Self::Text(_))
     }
 
     #[must_use]
+    #[allow(clippy::panic)]
     pub fn text(&self) -> &str {
         match self {
-            Change::Text(text) => text,
+            Self::Text(text) => text,
             _ => panic!("you must use Change::is_text() to guard calls to Change::text()"),
         }
     }
@@ -118,25 +119,25 @@ impl Change {
 
 impl From<String> for Change {
     fn from(s: String) -> Self {
-        Change::Text(s)
+        Self::Text(s)
     }
 }
 
 impl From<&str> for Change {
     fn from(s: &str) -> Self {
-        Change::Text(s.into())
+        Self::Text(s.into())
     }
 }
 
 impl From<AttributeChange> for Change {
     fn from(c: AttributeChange) -> Self {
-        Change::Attribute(c)
+        Self::Attribute(c)
     }
 }
 
 impl From<LineAttribute> for Change {
     fn from(attr: LineAttribute) -> Self {
-        Change::LineAttribute(attr)
+        Self::LineAttribute(attr)
     }
 }
 
@@ -158,7 +159,7 @@ pub struct ChangeSequence {
 
 impl ChangeSequence {
     #[must_use]
-    pub fn new(rows: usize, cols: usize) -> Self {
+    pub const fn new(rows: usize, cols: usize) -> Self {
         Self {
             changes: vec![],
             screen_rows: rows,
@@ -177,7 +178,7 @@ impl ChangeSequence {
 
     /// Returns the cursor position, (x, y).
     #[must_use]
-    pub fn current_cursor_position(&self) -> (usize, isize) {
+    pub const fn current_cursor_position(&self) -> (usize, isize) {
         (self.cursor_x, self.cursor_y)
     }
 

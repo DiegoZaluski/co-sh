@@ -21,7 +21,7 @@ struct SlotBaseRenderable {
 impl SlotBaseRenderable {
     fn new(prefix: &str) -> Self {
         let num = NEXT_SLOT_NUM.fetch_add(1, Ordering::Relaxed);
-        SlotBaseRenderable {
+        Self {
             id: format!("{prefix}-{num}"),
             num,
             visible: false,
@@ -89,19 +89,19 @@ pub struct TextSlotRenderable {
 impl TextSlotRenderable {
     #[must_use]
     pub fn new() -> Self {
-        TextSlotRenderable {
+        Self {
             base: SlotBaseRenderable::new("slot-text"),
             slot_parent_num: None,
         }
     }
 
     /// Detach from the owning `SlotRenderable` without destroying the node.
-    pub fn detach_from_slot(&mut self) {
+    pub const fn detach_from_slot(&mut self) {
         self.slot_parent_num = None;
     }
 
     /// Dispose without cascading destruction to the slot parent.
-    pub fn dispose_without_slot_cascade(&mut self) {
+    pub const fn dispose_without_slot_cascade(&mut self) {
         if self.base.destroyed {
             return;
         }
@@ -109,17 +109,17 @@ impl TextSlotRenderable {
         self.detach_from_slot();
     }
 
-    pub fn set_slot_parent(&mut self, parent_num: u64) {
+    pub const fn set_slot_parent(&mut self, parent_num: u64) {
         self.slot_parent_num = Some(parent_num);
     }
 
     #[must_use]
-    pub fn slot_parent_num(&self) -> Option<u64> {
+    pub const fn slot_parent_num(&self) -> Option<u64> {
         self.slot_parent_num
     }
 
     /// Mark the node as destroyed, and if attached to a slot, destroy the slot.
-    pub fn destroy_with_slot(&mut self) {
+    pub const fn destroy_with_slot(&mut self) {
         if self.base.destroyed {
             return;
         }
@@ -194,7 +194,7 @@ pub struct SlotRenderable {
 impl SlotRenderable {
     #[must_use]
     pub fn new() -> Self {
-        SlotRenderable {
+        Self {
             base: SlotBaseRenderable::new("slot"),
             children_by_parent: HashMap::new(),
         }

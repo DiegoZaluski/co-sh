@@ -10,7 +10,7 @@ use crate::core::rgba::{ColorInput, RGBA, parse_color};
 
 static NEXT_TEXTAREA_NUM: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextareaAction {
     MoveLeft,
     MoveRight,
@@ -77,7 +77,7 @@ pub struct TextareaOptions {
 
 impl Default for TextareaOptions {
     fn default() -> Self {
-        TextareaOptions {
+        Self {
             initial_value: None,
             background_color: Some(ColorInput::String("transparent".into())),
             text_color: Some(ColorInput::String("#FFFFFF".into())),
@@ -138,35 +138,34 @@ impl TextareaRenderable {
         let unfocused_bg = parse_color(
             opts.background_color
                 .clone()
-                .unwrap_or(ColorInput::String("transparent".into())),
+                .unwrap_or_else(|| ColorInput::String("transparent".into())),
         );
         let unfocused_fg = parse_color(
             opts.text_color
                 .clone()
-                .unwrap_or(ColorInput::String("#FFFFFF".into())),
+                .unwrap_or_else(|| ColorInput::String("#FFFFFF".into())),
         );
         let focused_bg = parse_color(
             opts.focused_background_color
                 .or_else(|| opts.background_color.clone())
-                .unwrap_or(ColorInput::String("transparent".into())),
+                .unwrap_or_else(|| ColorInput::String("transparent".into())),
         );
         let focused_fg = parse_color(
             opts.focused_text_color
                 .or_else(|| opts.text_color.clone())
-                .unwrap_or(ColorInput::String("#FFFFFF".into())),
+                .unwrap_or_else(|| ColorInput::String("#FFFFFF".into())),
         );
         let placeholder_color = parse_color(
             opts.placeholder_color
-                .unwrap_or(ColorInput::String("#666666".into())),
+                .unwrap_or_else(|| ColorInput::String("#666666".into())),
         );
 
-        let lines = if let Some(ref val) = opts.initial_value {
-            val.split('\n').map(String::from).collect()
-        } else {
-            vec![String::new()]
-        };
+        let lines = opts.initial_value.as_ref().map_or_else(
+            || vec![String::new()],
+            |val| val.split('\n').map(String::from).collect(),
+        );
 
-        TextareaRenderable {
+        Self {
             id: format!("textarea-{num}"),
             num,
             visible: true,
@@ -203,7 +202,7 @@ impl TextareaRenderable {
         self.submit_listener = handler;
     }
 
-    fn update_colors(&mut self) {
+    const fn update_colors(&mut self) {
         self.current_bg = if self.is_focused {
             self.focused_bg
         } else {
@@ -216,18 +215,18 @@ impl TextareaRenderable {
         };
     }
 
-    pub fn focus(&mut self) {
+    pub const fn focus(&mut self) {
         self.is_focused = true;
         self.update_colors();
     }
 
-    pub fn blur(&mut self) {
+    pub const fn blur(&mut self) {
         self.is_focused = false;
         self.update_colors();
     }
 
     #[must_use]
-    pub fn is_focused(&self) -> bool {
+    pub const fn is_focused(&self) -> bool {
         self.is_focused
     }
 
@@ -375,7 +374,7 @@ impl TextareaRenderable {
         true
     }
 
-    pub fn goto_buffer_home(&mut self) -> bool {
+    pub const fn goto_buffer_home(&mut self) -> bool {
         self.cursor_row = 0;
         self.cursor_col = 0;
         true
@@ -474,12 +473,14 @@ impl TextareaRenderable {
     }
 
     pub fn set_focused_background_color(&mut self, color: Option<ColorInput>) {
-        self.focused_bg = parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
+        self.focused_bg =
+            parse_color(color.unwrap_or_else(|| ColorInput::String("transparent".into())));
         self.update_colors();
     }
 
     pub fn set_focused_text_color(&mut self, color: Option<ColorInput>) {
-        self.focused_fg = parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
+        self.focused_fg =
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#FFFFFF".into())));
         self.update_colors();
     }
 

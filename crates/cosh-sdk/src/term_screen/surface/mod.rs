@@ -59,7 +59,7 @@ pub enum CursorShape {
 }
 
 impl CursorShape {
-    pub fn is_blinking(self) -> bool {
+    pub const fn is_blinking(self) -> bool {
         matches!(
             self,
             Self::BlinkingBlock | Self::BlinkingUnderline | Self::BlinkingBar
@@ -73,6 +73,7 @@ pub type SequenceNo = usize;
 pub const SEQ_ZERO: SequenceNo = 0;
 
 /// The `Surface` type represents the contents of a terminal screen.
+///
 /// It is not directly connected to a terminal device.
 /// It consists of a buffer and a log of changes.  You can accumulate
 /// updates to the screen by adding instances of the `Change` enum
@@ -189,7 +190,7 @@ impl DiffState {
 impl Surface {
     /// Create a new Surface with the specified width and height.
     pub fn new(width: usize, height: usize) -> Self {
-        let mut scr = Surface {
+        let mut scr = Self {
             width,
             height,
             ..Default::default()
@@ -199,19 +200,19 @@ impl Surface {
     }
 
     /// Returns the (width, height) of the surface
-    pub fn dimensions(&self) -> (usize, usize) {
+    pub const fn dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
     }
 
-    pub fn cursor_position(&self) -> (usize, usize) {
+    pub const fn cursor_position(&self) -> (usize, usize) {
         (self.xpos, self.ypos)
     }
 
-    pub fn cursor_shape(&self) -> Option<CursorShape> {
+    pub const fn cursor_shape(&self) -> Option<CursorShape> {
         self.cursor_shape
     }
 
-    pub fn cursor_visibility(&self) -> CursorVisibility {
+    pub const fn cursor_visibility(&self) -> CursorVisibility {
         self.cursor_visibility
     }
 
@@ -491,11 +492,11 @@ impl Surface {
         }
     }
 
-    pub fn has_changes(&self, seq: SequenceNo) -> bool {
+    pub const fn has_changes(&self, seq: SequenceNo) -> bool {
         self.seqno != seq
     }
 
-    pub fn current_seqno(&self) -> SequenceNo {
+    pub const fn current_seqno(&self) -> SequenceNo {
         self.seqno
     }
 
@@ -676,7 +677,7 @@ impl Surface {
         y: usize,
         width: usize,
         height: usize,
-        other: &Surface,
+        other: &Self,
         other_x: usize,
         other_y: usize,
     ) -> Vec<Change> {
@@ -722,7 +723,7 @@ impl Surface {
 
     /// Computes the change stream required to make `self` have the same
     /// screen contents as `other`.
-    pub fn diff_screens(&self, other: &Surface) -> Vec<Change> {
+    pub fn diff_screens(&self, other: &Self) -> Vec<Change> {
         self.diff_region(0, 0, self.width, self.height, other, 0, 0)
     }
 
@@ -732,7 +733,7 @@ impl Surface {
     /// Saves the cursor position and attributes that were in effect prior to
     /// calling `draw_from_screen` and restores them after applying the changes
     /// from the other surface.
-    pub fn draw_from_screen(&mut self, other: &Surface, x: usize, y: usize) -> SequenceNo {
+    pub fn draw_from_screen(&mut self, other: &Self, x: usize, y: usize) -> SequenceNo {
         let attrs = self.attributes.clone();
         let cursor = (self.xpos, self.ypos);
         let changes = self.diff_region(x, y, other.width, other.height, other, 0, 0);

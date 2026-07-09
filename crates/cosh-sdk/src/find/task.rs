@@ -34,9 +34,9 @@ pub enum AbortReason {
 impl std::fmt::Display for AbortReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AbortReason::Timeout => write!(f, "Timeout"),
-            AbortReason::Signal => write!(f, "Signal"),
-            AbortReason::User => write!(f, "User"),
+            Self::Timeout => write!(f, "Timeout"),
+            Self::Signal => write!(f, "Signal"),
+            Self::User => write!(f, "User"),
         }
     }
 }
@@ -112,6 +112,7 @@ impl CancelToken {
     ///
     /// # Panics
     /// Panics if the internal state mutex is poisoned.
+    #[allow(clippy::expect_used, clippy::significant_drop_tightening)]
     pub fn heartbeat(&self) -> Result<(), String> {
         let state = self.state.lock().expect("cancel state lock poisoned");
         if state.aborted {
@@ -130,6 +131,7 @@ impl CancelToken {
     ///
     /// # Panics
     /// Panics if the internal state mutex is poisoned.
+    #[allow(clippy::expect_used)]
     pub async fn wait(&self) -> AbortReason {
         // Fast path: already aborted
         {
@@ -179,6 +181,7 @@ impl CancelToken {
     /// # Panics
     /// Panics if the internal state mutex is poisoned.
     #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn aborted(&self) -> bool {
         self.state
             .lock()
@@ -199,6 +202,7 @@ impl AbortToken {
     ///
     /// # Panics
     /// Panics if the internal state mutex is poisoned.
+    #[allow(clippy::expect_used, clippy::significant_drop_tightening)]
     pub fn abort(&self, reason: AbortReason) {
         let mut state = self.state.lock().expect("cancel state lock poisoned");
         state.aborted = true;

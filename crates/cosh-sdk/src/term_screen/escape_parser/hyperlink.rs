@@ -31,7 +31,7 @@ impl Hyperlink {
     }
 
     #[must_use]
-    pub fn params(&self) -> &HashMap<String, String> {
+    pub const fn params(&self) -> &HashMap<String, String> {
         &self.params
     }
 
@@ -45,7 +45,7 @@ impl Hyperlink {
 
     #[inline]
     #[must_use]
-    pub fn is_implicit(&self) -> bool {
+    pub const fn is_implicit(&self) -> bool {
         self.implicit
     }
 
@@ -75,7 +75,7 @@ impl Hyperlink {
         }
     }
 
-    pub fn parse(osc: &[&[u8]]) -> Result<Option<Hyperlink>> {
+    pub fn parse(osc: &[&[u8]]) -> Result<Option<Self>> {
         ensure!(osc.len() == 3, "wrong param count");
         if osc[1].is_empty() && osc[2].is_empty() {
             // Clearing current hyperlink
@@ -94,7 +94,7 @@ impl Hyperlink {
                 }
             }
 
-            Ok(Some(Hyperlink::new_with_params(uri, params)))
+            Ok(Some(Self::new_with_params(uri, params)))
         }
     }
 }

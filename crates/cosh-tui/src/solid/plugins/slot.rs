@@ -47,7 +47,7 @@ pub struct SlotRegistry {
 impl SlotRegistry {
     #[must_use]
     pub fn new() -> Self {
-        SlotRegistry {
+        Self {
             entries: HashMap::new(),
             error_handlers: Vec::new(),
         }

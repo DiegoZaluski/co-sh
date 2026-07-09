@@ -25,13 +25,13 @@ pub enum VecDbError {
 
 impl From<lancedb::error::Error> for VecDbError {
     fn from(e: lancedb::error::Error) -> Self {
-        VecDbError::Database(e.to_string())
+        Self::Database(e.to_string())
     }
 }
 
 impl From<ArrowError> for VecDbError {
     fn from(e: ArrowError) -> Self {
-        VecDbError::Database(e.to_string())
+        Self::Database(e.to_string())
     }
 }
 

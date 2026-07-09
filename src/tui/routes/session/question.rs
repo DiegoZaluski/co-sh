@@ -31,7 +31,7 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
-fn left_border_chars() -> BorderCharacters {
+const fn left_border_chars() -> BorderCharacters {
     BorderCharacters {
         top_left: ' ',
         top_right: ' ',
@@ -61,8 +61,8 @@ struct QuestionState {
 }
 
 impl QuestionState {
-    fn new() -> Self {
-        QuestionState {
+    const fn new() -> Self {
+        Self {
             single_selection: None,
             multi_selection: Vec::new(),
             text_input: String::new(),
@@ -94,8 +94,8 @@ pub struct QuestionDialog {
 }
 
 impl QuestionDialog {
-    pub fn new() -> Self {
-        QuestionDialog {
+    pub const fn new() -> Self {
+        Self {
             visible: false,
             submitted: false,
             questions: Vec::new(),
@@ -167,7 +167,7 @@ impl QuestionDialog {
     }
 
     /// The total number of tabs: one per question + the confirm screen.
-    fn tab_count(&self) -> usize {
+    const fn tab_count(&self) -> usize {
         if self.questions.is_empty() {
             1
         } else {
@@ -176,7 +176,7 @@ impl QuestionDialog {
     }
 
     /// Whether the current tab is the confirm screen.
-    fn is_confirm(&self) -> bool {
+    const fn is_confirm(&self) -> bool {
         self.current_tab >= self.questions.len()
     }
 

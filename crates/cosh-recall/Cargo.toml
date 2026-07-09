@@ -1,5 +1,11 @@
 [package]
+categories = ["development-tools"]
+description = "Memory/recall crate for cosh - coding agent for the terminal"
+keywords = ["ai", "coding", "terminal", "agent"]
+license = "Apache-2.0"
+readme = "README.md"
 name = "cosh-recall"
+repository = "https://github.com/DiegoZaluski/cosh"
 version = "0.1.0"
 edition = "2024"
 

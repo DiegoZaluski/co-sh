@@ -113,7 +113,7 @@ pub enum EscCode {
 impl Esc {
     #[must_use]
     pub fn parse(intermediate: Option<u8>, control: u8) -> Self {
-        Self::internal_parse(intermediate, control).unwrap_or(Esc::Unspecified {
+        Self::internal_parse(intermediate, control).unwrap_or(Self::Unspecified {
             intermediate,
             control,
         })
@@ -127,7 +127,7 @@ impl Esc {
 
         let code = FromPrimitive::from_u16(packed).ok_or(())?;
 
-        Ok(Esc::Code(code))
+        Ok(Self::Code(code))
     }
 }
 

@@ -94,7 +94,7 @@ impl Web {
 
     /// Set the number of search results (capped at 10 by the underlying API).
     #[must_use]
-    pub fn num_results(mut self, n: u32) -> Self {
+    pub const fn num_results(mut self, n: u32) -> Self {
         self.num_results = n;
         self
     }

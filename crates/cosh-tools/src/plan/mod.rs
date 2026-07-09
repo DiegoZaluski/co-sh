@@ -89,7 +89,7 @@ impl Plan {
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn new() -> Self {
-        Plan {
+        Self {
             list: TodoList::default(),
             with_test: false,
             description_todo_write: serde_json::json!({
@@ -278,7 +278,7 @@ impl Plan {
 
     /// Returns a reference to the internal todo list.
     #[must_use]
-    pub fn list(&self) -> &TodoList {
+    pub const fn list(&self) -> &TodoList {
         &self.list
     }
 
@@ -339,7 +339,7 @@ impl Plan {
 
     /// Set whether test generation is expected after each completed group.
     /// Default is `false` (no test expectation).
-    pub fn with_test(&mut self, value: bool) -> &mut Self {
+    pub const fn with_test(&mut self, value: bool) -> &mut Self {
         self.with_test = value;
         self
     }

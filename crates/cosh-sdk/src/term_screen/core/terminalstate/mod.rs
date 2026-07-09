@@ -224,11 +224,11 @@ impl ScreenOrAlt {
         }
     }
 
-    pub fn is_alt_screen_active(&self) -> bool {
+    pub const fn is_alt_screen_active(&self) -> bool {
         self.alt_screen_is_active
     }
 
-    pub fn saved_cursor(&mut self) -> &mut Option<SavedCursor> {
+    pub const fn saved_cursor(&mut self) -> &mut Option<SavedCursor> {
         if self.alt_screen_is_active {
             &mut self.alt_screen.saved_cursor
         } else {
@@ -394,14 +394,14 @@ impl TerminalState {
         term_program: &str,
         term_version: &str,
         writer: Box<dyn std::io::Write + Send>,
-    ) -> TerminalState {
+    ) -> Self {
         let writer = BufWriter::new(writer);
         let seqno = 1;
         let screen = ScreenOrAlt::new(size, &config, seqno, config.bidi_mode());
 
         let unicode_version = config.unicode_version();
 
-        TerminalState {
+        Self {
             config,
             screen,
             pen: CellAttributes::default(),
@@ -465,17 +465,17 @@ impl TerminalState {
         }
     }
 
-    pub fn enable_conpty_quirks(&mut self) {
+    pub const fn enable_conpty_quirks(&mut self) {
         self.enable_conpty_quirks = true;
         self.suppress_initial_title_change = true;
     }
 
     #[must_use]
-    pub fn current_seqno(&self) -> SequenceNo {
+    pub const fn current_seqno(&self) -> SequenceNo {
         self.seqno
     }
 
-    pub fn increment_seqno(&mut self) {
+    pub const fn increment_seqno(&mut self) {
         self.seqno += 1;
     }
 
@@ -531,7 +531,7 @@ impl TerminalState {
     /// terminal session.  The working directory can be changed by
     /// the applicaiton using the OSC 7 escape sequence.
     #[must_use]
-    pub fn get_current_dir(&self) -> Option<&Url> {
+    pub const fn get_current_dir(&self) -> Option<&Url> {
         self.current_dir.as_ref()
     }
 
@@ -631,12 +631,12 @@ impl TerminalState {
     /// This is useful for the hosting GUI application to decide how best
     /// to dispatch mouse events to the terminal.
     #[must_use]
-    pub fn is_mouse_grabbed(&self) -> bool {
+    pub const fn is_mouse_grabbed(&self) -> bool {
         self.mouse_tracking || self.button_event_mouse || self.any_event_mouse
     }
 
     #[must_use]
-    pub fn is_alt_screen_active(&self) -> bool {
+    pub const fn is_alt_screen_active(&self) -> bool {
         self.screen.is_alt_screen_active()
     }
 
@@ -644,7 +644,7 @@ impl TerminalState {
     /// bracketed paste mode, which can be helpful to the hosting
     /// GUI application to decide about fragmenting a large paste.
     #[must_use]
-    pub fn bracketed_paste_enabled(&self) -> bool {
+    pub const fn bracketed_paste_enabled(&self) -> bool {
         self.bracketed_paste
     }
 
@@ -682,7 +682,7 @@ impl TerminalState {
     /// Returns true if there is new output since the terminal
     /// lost focus
     #[must_use]
-    pub fn has_unseen_output(&self) -> bool {
+    pub const fn has_unseen_output(&self) -> bool {
         !self.focused && self.seqno > self.lost_focus_seqno
     }
 
@@ -830,7 +830,7 @@ impl TerminalState {
     /// Returns the 0-based cursor position relative to the top left of
     /// the visible screen
     #[must_use]
-    pub fn cursor_pos(&self) -> CursorPosition {
+    pub const fn cursor_pos(&self) -> CursorPosition {
         CursorPosition {
             x: self.cursor.x,
             y: self.cursor.y,
@@ -851,7 +851,7 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub fn user_vars(&self) -> &HashMap<String, String> {
+    pub const fn user_vars(&self) -> &HashMap<String, String> {
         &self.user_vars
     }
 
@@ -2611,7 +2611,7 @@ impl TerminalState {
 
     #[inline]
     #[must_use]
-    pub fn get_reverse_video(&self) -> bool {
+    pub const fn get_reverse_video(&self) -> bool {
         self.reverse_video_mode
     }
 

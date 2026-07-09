@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 /// Result of a path validation check.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum GuardResult {
     /// Path is allowed. Contains the normalized (safe) path.
     Allowed(PathBuf),

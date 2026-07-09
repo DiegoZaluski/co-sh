@@ -34,7 +34,7 @@ impl MarkdownRenderable {
     #[must_use]
     pub fn new(content: Option<String>) -> Self {
         let num = NEXT_MARKDOWN_NUM.fetch_add(1, Ordering::Relaxed);
-        MarkdownRenderable {
+        Self {
             id: format!("md-{num}"),
             num,
             visible: true,
@@ -66,7 +66,7 @@ impl MarkdownRenderable {
         self.bg = value.map(parse_color);
     }
 
-    pub fn set_conceal(&mut self, value: bool) {
+    pub const fn set_conceal(&mut self, value: bool) {
         self.conceal = value;
     }
 
@@ -84,7 +84,7 @@ impl MarkdownRenderable {
         self.bg.unwrap_or(RGBA::from_ints(0, 0, 0, 0))
     }
 
-    fn rgba_to_ratatui(rgba: RGBA) -> Color {
+    const fn rgba_to_ratatui(rgba: RGBA) -> Color {
         let (r, g, b, _a) = rgba.to_ints();
         Color::Rgb(r, g, b)
     }
@@ -270,13 +270,14 @@ impl Renderable for MarkdownRenderable {
                             y += 1;
                             x = area.x;
                         }
-                        let bullet = if let Some(counter) = numbered_list_counters.last_mut() {
-                            let marker = format!("{}. ", *counter);
-                            *counter += 1;
-                            marker
-                        } else {
-                            "• ".to_string()
-                        };
+                        let bullet = numbered_list_counters.last_mut().map_or_else(
+                            || "• ".to_string(),
+                            |counter| {
+                                let marker = format!("{}. ", *counter);
+                                *counter += 1;
+                                marker
+                            },
+                        );
                         Self::render_text(
                             &bullet,
                             buf,

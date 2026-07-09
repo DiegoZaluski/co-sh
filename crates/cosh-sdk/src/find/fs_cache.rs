@@ -141,6 +141,7 @@ pub struct ScanResult {
     pub cache_age_ms: u64,
 }
 
+#[allow(clippy::expect_used)]
 fn evict_oldest() {
     let mut cache = FS_CACHE.lock().expect("FS_CACHE lock poisoned");
     if cache.len() > max_cache_entries()
@@ -320,6 +321,7 @@ struct EntryVisitor<'a> {
     visited: usize,
 }
 
+#[allow(clippy::expect_used)]
 impl Drop for EntryVisitor<'_> {
     fn drop(&mut self) {
         if self.entries.is_empty() {
@@ -333,12 +335,13 @@ impl Drop for EntryVisitor<'_> {
     }
 }
 
+#[allow(clippy::expect_used)]
 impl ParallelVisitor for EntryVisitor<'_> {
     fn visit(&mut self, entry: std::result::Result<ignore::DirEntry, ignore::Error>) -> WalkState {
         if self.visited == 0 || self.visited >= 128 {
             self.visited = 0;
             if let Err(err) = self.ct.heartbeat() {
-                *self.error.lock().expect("error lock poisoned") = Some(err.clone());
+                *self.error.lock().expect("error lock poisoned") = Some(err);
                 return WalkState::Quit;
             }
         }
@@ -378,6 +381,7 @@ impl<'a> ParallelVisitorBuilder<'a> for EntryVisitorBuilder<'a> {
 
 /// Scans filesystem entries and records normalized relative paths with file
 /// metadata.
+#[allow(clippy::expect_used)]
 fn collect_entries(
     root: &Path,
     options: ScanOptions,
@@ -479,6 +483,7 @@ pub(crate) fn collect_entry(
 ///
 /// # Panics
 /// Panics if the internal `FS_CACHE` mutex is poisoned.
+#[allow(clippy::expect_used)]
 pub fn get_or_scan(
     root: &Path,
     options: ScanOptions,
@@ -546,6 +551,7 @@ pub fn get_or_scan(
 ///
 /// # Panics
 /// Panics if the internal `FS_CACHE` mutex is poisoned.
+#[allow(clippy::expect_used)]
 pub fn force_rescan(
     root: &Path,
     options: ScanOptions,
@@ -588,6 +594,7 @@ pub fn force_rescan(
 ///
 /// # Panics
 /// Panics if the internal `FS_CACHE` mutex is poisoned.
+#[allow(clippy::expect_used)]
 pub fn invalidate_path(target: &Path) {
     let mut cache = FS_CACHE.lock().expect("FS_CACHE lock poisoned");
     let keys_to_remove: Vec<CacheKey> = cache
@@ -604,6 +611,7 @@ pub fn invalidate_path(target: &Path) {
 ///
 /// # Panics
 /// Panics if the internal `FS_CACHE` mutex is poisoned.
+#[allow(clippy::expect_used)]
 pub fn invalidate_all() {
     FS_CACHE.lock().expect("FS_CACHE lock poisoned").clear();
 }

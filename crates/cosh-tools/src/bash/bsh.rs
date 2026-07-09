@@ -35,6 +35,7 @@ use tokio::sync::mpsc;
 ///
 /// Panics if any of the internal regular expressions fail to compile (they are
 /// static and guaranteed valid on first access).
+#[allow(clippy::unwrap_used)]
 pub fn critical_bash_patterns() -> &'static [Regex] {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -75,6 +76,7 @@ const BUFFER_SIZE: usize = 4096;
 
 static ENV_VAR_PATTERN: OnceLock<Regex> = OnceLock::new();
 
+#[allow(clippy::unwrap_used)]
 fn env_var_pattern() -> &'static Regex {
     ENV_VAR_PATTERN.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap())
 }
@@ -270,8 +272,10 @@ pub(crate) fn spawn_bash<'a>(
             }
         };
 
-        let mut stream_stdout = child.stdout.take().unwrap();
-        let mut stream_stderr = child.stderr.take().unwrap();
+        #[allow(clippy::expect_used)]
+        let mut stream_stdout = child.stdout.take().expect("stdout pipe should be configured");
+        #[allow(clippy::expect_used)]
+        let mut stream_stderr = child.stderr.take().expect("stderr pipe should be configured");
         let mut stdout_done = false;
         let mut stderr_done = false;
         let deadline = timeout_ms.map(|ms| tokio::time::Instant::now() + Duration::from_millis(ms));
@@ -291,7 +295,7 @@ pub(crate) fn spawn_bash<'a>(
                         stdout: vec![],
                         stderr: vec![],
                         exit_code: None,
-                        signal: Some(-1),
+                        signal: Some(-1_i32),
                         truncated: false,
                     });
                     return;
@@ -434,11 +438,11 @@ pub(crate) fn spawn_bash_pty(
         let pipe_result = unsafe {
             libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC)
         };
-        if pipe_result != 0 {
+        if pipe_result != 0_i32 {
             yield Err(Error::other("failed to create self-pipe for timeout"));
             return;
         }
-        let (pipe_rx, pipe_tx) = (pipe_fds[0], pipe_fds[1]);
+        let [pipe_rx, pipe_tx] = pipe_fds;
 
         tokio::task::spawn_blocking(move || {
             // Validate environment variables (same rules as spawn_bash).
@@ -523,7 +527,7 @@ pub(crate) fn spawn_bash_pty(
                 let n_ready = loop {
 
                     let res = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, -1) };
-                    if res < 0 {
+                    if res < 0_i32 {
                         let err = std::io::Error::last_os_error();
                         if err.raw_os_error() == Some(libc::EINTR) {
                             continue;
@@ -534,7 +538,7 @@ pub(crate) fn spawn_bash_pty(
                     break res;
                 };
 
-                if n_ready == 0 {
+                if n_ready == 0_i32 {
                     // Spurious wakeup (shouldn't happen with -1 timeout).
                     continue;
                 }
@@ -663,7 +667,7 @@ pub(crate) fn spawn_bash_pty(
                         stdout: vec![],
                         stderr: vec![],
                         exit_code: None,
-                        signal: Some(-1),
+                        signal: Some(-1_i32),
                         truncated: false,
                     });
                     return;

@@ -49,7 +49,7 @@ impl SelectRenderable {
     #[must_use]
     pub fn new() -> Self {
         let num = NEXT_SELECT_NUM.fetch_add(1, Ordering::Relaxed);
-        SelectRenderable {
+        Self {
             id: format!("select-{num}"),
             num,
             visible: true,
@@ -91,7 +91,7 @@ impl SelectRenderable {
     }
 
     #[must_use]
-    pub fn selected_index(&self) -> usize {
+    pub const fn selected_index(&self) -> usize {
         self.selected_index
     }
 
@@ -140,48 +140,49 @@ impl SelectRenderable {
         self.update_scroll_offset();
     }
 
-    pub fn set_show_scroll_indicator(&mut self, show: bool) {
+    pub const fn set_show_scroll_indicator(&mut self, show: bool) {
         self.show_scroll_indicator = show;
     }
 
-    pub fn set_show_description(&mut self, show: bool) {
+    pub const fn set_show_description(&mut self, show: bool) {
         self.show_description = show;
     }
 
-    pub fn set_show_selection_indicator(&mut self, show: bool) {
+    pub const fn set_show_selection_indicator(&mut self, show: bool) {
         self.show_selection_indicator = show;
     }
 
     pub fn set_background_color(&mut self, color: Option<ColorInput>) {
         self.background_color =
-            parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("transparent".into())));
     }
 
     pub fn set_text_color(&mut self, color: Option<ColorInput>) {
-        self.text_color = parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
+        self.text_color =
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#FFFFFF".into())));
     }
 
     pub fn set_focused_background_color(&mut self, color: Option<ColorInput>) {
         self.focused_background_color =
-            parse_color(color.unwrap_or(ColorInput::String("#1a1a1a".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#1a1a1a".into())));
     }
 
     pub fn set_focused_text_color(&mut self, color: Option<ColorInput>) {
         self.focused_text_color =
-            parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#FFFFFF".into())));
     }
 
     pub fn set_selected_background_color(&mut self, color: Option<ColorInput>) {
         self.selected_background_color =
-            parse_color(color.unwrap_or(ColorInput::String("#334455".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#334455".into())));
     }
 
     pub fn set_selected_text_color(&mut self, color: Option<ColorInput>) {
         self.selected_text_color =
-            parse_color(color.unwrap_or(ColorInput::String("#FFFF00".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#FFFF00".into())));
     }
 
-    fn lines_per_item(&self) -> u16 {
+    const fn lines_per_item(&self) -> u16 {
         if self.show_description { 2 } else { 1 }
     }
 

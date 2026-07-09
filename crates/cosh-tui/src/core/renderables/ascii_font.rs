@@ -37,7 +37,7 @@ impl ASCIIFontRenderable {
             None => vec![RGBA::from_ints(255, 255, 255, 255)],
         };
 
-        ASCIIFontRenderable {
+        Self {
             id: format!("asciifont-{num}"),
             num,
             visible: true,

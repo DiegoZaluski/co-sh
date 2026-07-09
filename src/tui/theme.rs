@@ -135,7 +135,7 @@ impl ThemeRegistry {
                 theme: material(),
             },
         ];
-        ThemeRegistry {
+        Self {
             default_index: 0,
             themes,
         }

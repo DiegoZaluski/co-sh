@@ -160,7 +160,7 @@ impl Skills {
 
     /// Whether to scan directories recursively for skills.
     #[must_use]
-    pub fn recursive(mut self, v: bool) -> Self {
+    pub const fn recursive(mut self, v: bool) -> Self {
         self.recursive = v;
         self
     }

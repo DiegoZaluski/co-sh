@@ -53,7 +53,7 @@ enum Pos {
 impl JsonParseState {
     /// Creates a new empty parser state with no collections on the stack.
     pub fn new() -> Self {
-        JsonParseState {
+        Self {
             collection_stack: vec![],
             completed_values: vec![],
             string_quote_tracking: StringQuoteTracking::default(),
@@ -67,7 +67,7 @@ impl JsonParseState {
 
     /// Update quote tracking when consuming a character into a quoted string.
     /// Must be called BEFORE the character is added to the string.
-    fn update_quote_tracking(&mut self, token: char) {
+    const fn update_quote_tracking(&mut self, token: char) {
         if token == '\\' {
             self.string_quote_tracking.trailing_backslashes += 1;
         } else {
@@ -91,6 +91,7 @@ impl JsonParseState {
     /// The `completion_state` parameter is applied to the value being
     /// completed. If it is `CompletionState::Complete`, we also apply
     /// that state to the children of the value being completed.
+    #[allow(clippy::panic)]
     pub fn complete_collection(&mut self, completion_state: CompletionState) {
         let Some((collection, fixes)) = self.collection_stack.pop() else {
             return;
@@ -133,6 +134,7 @@ impl JsonParseState {
 
     /// Appends a character to the current string-like collection on top of the stack.
     /// Returns `Ok(0)` on success (no additional characters to skip).
+    #[allow(clippy::panic)]
     fn consume(&mut self, token: char) -> Result<usize, JsonishError> {
         // First check if we're in a QuotedString and need to update tracking
         // (done before getting mutable borrow to avoid borrow checker conflict)
@@ -219,6 +221,7 @@ impl JsonParseState {
         }
     }
 
+    #[allow(clippy::unwrap_used)]
     fn unescaped_string_position(&self) -> Pos {
         if self.collection_stack.len() >= 2 {
             self.collection_stack
@@ -397,8 +400,9 @@ impl JsonParseState {
     /// Determines whether a quoted string (double-quoted, single-quoted, or
     /// backtick) should be closed at the current position by peeking at
     /// upcoming characters and checking for structural delimiters.
+    #[allow(clippy::unwrap_used)]
     fn should_close_string(
-        &mut self,
+        &self,
         mut next: Peekable<impl Iterator<Item = (usize, char)>>,
         closing_char: char,
     ) -> bool {
@@ -424,6 +428,7 @@ impl JsonParseState {
             };
         // Use pre-computed quote count from incremental tracking (O(1) instead of O(n²))
         let closing_char_count = if closing_char == '"' {
+            #[allow(clippy::unwrap_used)]
             let (last, _) = self.collection_stack.last().unwrap();
             match last {
                 JsonCollection::QuotedString(..) => {

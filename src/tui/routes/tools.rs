@@ -50,7 +50,7 @@ impl InternalToolsView {
         }
     }
 
-    pub fn select_next(&mut self, visible_count: usize) {
+    pub const fn select_next(&mut self, visible_count: usize) {
         let total = INTERNAL_TOOLS.len();
         self.selected_index = (self.selected_index + 1) % total;
         if self.selected_index >= self.scroll_offset + visible_count {
@@ -60,7 +60,7 @@ impl InternalToolsView {
         }
     }
 
-    pub fn select_prev(&mut self, _visible_count: usize) {
+    pub const fn select_prev(&mut self, _visible_count: usize) {
         let total = INTERNAL_TOOLS.len();
         self.selected_index = if self.selected_index == 0 {
             total - 1
@@ -206,6 +206,6 @@ fn max_row_width() -> usize {
         .unwrap_or(0)
 }
 
-fn visible_items(area: Rect) -> usize {
+const fn visible_items(area: Rect) -> usize {
     (area.height.saturating_sub(3)) as usize
 }

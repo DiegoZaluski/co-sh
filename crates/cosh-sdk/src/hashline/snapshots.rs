@@ -24,7 +24,7 @@ use std::num::NonZeroUsize;
 
 /// One full-file version observed at a point in time. The tag the model sees is
 /// [`Snapshot::hash`]; recovery replays edits against [`Snapshot::text`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     /// Canonical path this version belongs to.
     pub path: String,
@@ -37,6 +37,7 @@ pub struct Snapshot {
 }
 
 /// Storage seam for full-file version snapshots. The patcher calls [`head`](SnapshotStore::head)
+///
 /// for the latest version of a path and [`by_hash`](SnapshotStore::by_hash) when it needs the
 /// specific historical version a section's stale tag names.
 pub trait SnapshotStore {
@@ -73,6 +74,7 @@ pub struct InMemorySnapshotStoreOptions {
 }
 
 /// In-memory [`SnapshotStore`] backed by `lru`. Per-path history is a
+///
 /// short ring of full-file versions (oldest dropped first); per-session path
 /// tracking is LRU-bounded so cold paths age out automatically.
 ///
@@ -92,9 +94,10 @@ impl InMemorySnapshotStore {
     /// Panics if `max_paths` is zero.
     #[must_use]
     pub fn new(options: &InMemorySnapshotStoreOptions) -> Self {
-        let max_paths = options
-            .max_paths
-            .unwrap_or(NonZeroUsize::new(DEFAULT_MAX_PATHS).unwrap());
+        let max_paths = options.max_paths.unwrap_or({
+            #[allow(clippy::unwrap_used)]
+            NonZeroUsize::new(DEFAULT_MAX_PATHS).unwrap()
+        });
         Self {
             versions: LruCache::new(max_paths),
             max_versions_per_path: options
@@ -161,21 +164,27 @@ impl SnapshotStore for InMemorySnapshotStore {
 use std::sync::{Arc, Mutex};
 
 impl<S: SnapshotStore> SnapshotStore for Arc<Mutex<S>> {
+    #[allow(clippy::unwrap_used)]
     fn head(&mut self, path: &str) -> Option<Snapshot> {
         self.lock().unwrap().head(path)
     }
+    #[allow(clippy::unwrap_used)]
     fn history(&mut self, path: &str) -> Vec<Snapshot> {
         self.lock().unwrap().history(path)
     }
+    #[allow(clippy::unwrap_used)]
     fn by_hash(&mut self, path: &str, hash: &str) -> Option<Snapshot> {
         self.lock().unwrap().by_hash(path, hash)
     }
+    #[allow(clippy::unwrap_used)]
     fn record(&mut self, path: &str, full_text: &str) -> String {
         self.lock().unwrap().record(path, full_text)
     }
+    #[allow(clippy::unwrap_used)]
     fn invalidate(&mut self, path: &str) {
         self.lock().unwrap().invalidate(path);
     }
+    #[allow(clippy::unwrap_used)]
     fn clear(&mut self) {
         self.lock().unwrap().clear();
     }

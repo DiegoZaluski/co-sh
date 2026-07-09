@@ -11,7 +11,7 @@ pub struct TuiConfig {
 
 impl Default for TuiConfig {
     fn default() -> Self {
-        TuiConfig {
+        Self {
             scroll_acceleration: 1.0,
             show_scrollbar: false,
             show_timestamps: false,
@@ -36,7 +36,7 @@ impl LlmConfig {
             .or_else(|| cosh_sdk::connector::detect_provider().map(String::from))
             .unwrap_or_else(|| "openai".to_string());
 
-        LlmConfig {
+        Self {
             provider,
             model: std::env::var("COSH_MODEL").ok(),
         }

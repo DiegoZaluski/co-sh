@@ -40,7 +40,10 @@ pub fn plan_from_md(path: &str) -> Result<TodoList, PlanError> {
             continue;
         }
 
-        let last_group = groups.last_mut().unwrap();
+        #[allow(clippy::expect_used)]
+        let last_group = groups
+            .last_mut()
+            .expect("groups should not be empty at this point");
 
         // Checklist item
         if let Some(desc) = trimmed

@@ -8,6 +8,7 @@ static ID_COUNTER: LazyLock<Mutex<HashMap<String, u64>>> =
 ///
 /// # Panics
 /// Panics if the global mutex is poisoned (another thread panicked while holding the lock).
+#[allow(clippy::unwrap_used, clippy::significant_drop_tightening)]
 pub fn get_next_id(element_type: &str) -> String {
     let mut map = ID_COUNTER.lock().unwrap();
     let entry = map.entry(element_type.to_string()).or_insert(0);

@@ -127,7 +127,7 @@ impl Stream for ChatStream {
         if let Poll::Ready(Some(Ok(ref chunk))) = poll {
             self.last_raw = Some(chunk.raw.clone());
         }
-        if let Poll::Ready(None) = poll {
+        if matches!(poll, Poll::Ready(None)) {
             self.finished = true;
         }
         poll
@@ -158,7 +158,7 @@ pub struct LsOutput {
 }
 
 impl LsOutput {
-    pub(crate) fn new(raw: String, models: Vec<ModelInfo>) -> Self {
+    pub(crate) const fn new(raw: String, models: Vec<ModelInfo>) -> Self {
         Self { raw, models }
     }
 

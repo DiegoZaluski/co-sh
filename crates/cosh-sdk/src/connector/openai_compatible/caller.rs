@@ -105,6 +105,7 @@ struct ApiErrorResponse {
 }
 
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct ApiErrorDetail {
     message: String,
     #[serde(default)]
@@ -195,7 +196,7 @@ fn build_chat_request(
 ///
 /// Resolves the API key and model, builds the request body, and parses the
 /// OpenAI-compatible JSON response.
-pub(crate) async fn chat(
+pub async fn chat(
     config: &ProviderConfig,
     params: &Parameters,
     prompt: &str,
@@ -253,7 +254,7 @@ pub(crate) async fn chat(
 /// Returns an async [`Stream`] of content chunks parsed from SSE frames.
 /// The stream terminates with `StreamTerminated` if the connection closes
 /// without a `[DONE]` signal.
-pub(crate) async fn chat_stream(
+pub async fn chat_stream(
     config: &ProviderConfig,
     params: &Parameters,
     prompt: &str,
@@ -354,7 +355,7 @@ pub(crate) async fn chat_stream(
 ///
 /// Resolves the API key, builds the request body, and extracts the first
 /// embedding from the OpenAI-compatible response.
-pub(crate) async fn embed(
+pub async fn embed(
     config: &ProviderConfig,
     params: &Parameters,
     input: &str,
@@ -401,7 +402,7 @@ struct ListModelsResponse {
 ///
 /// Resolves the API key, sends a GET to `{base_url}/models`, and parses
 /// the OpenAI-compatible JSON response into a [`LsOutput`].
-pub(crate) async fn list_models(
+pub async fn list_models(
     config: &ProviderConfig,
     params: &Parameters,
 ) -> Result<LsOutput, ConnectorError> {

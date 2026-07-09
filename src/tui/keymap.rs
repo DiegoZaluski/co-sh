@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Quit,
     ScrollUp,
@@ -47,7 +47,7 @@ impl KeyMap {
     pub fn default_vim() -> Self {
         use KeyCode::{BackTab, Char, Down, Enter, Esc, PageDown, PageUp, Tab, Up};
 
-        KeyMap {
+        Self {
             bindings: vec![
                 (
                     Action::ScrollUpPage,

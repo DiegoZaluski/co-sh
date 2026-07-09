@@ -10,7 +10,7 @@ use crate::core::rgba::{ColorInput, RGBA, parse_color};
 
 static NEXT_SLIDER_NUM: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SliderOrientation {
     Horizontal,
     Vertical,
@@ -38,7 +38,7 @@ impl SliderRenderable {
     #[must_use]
     pub fn new(orientation: SliderOrientation) -> Self {
         let num = NEXT_SLIDER_NUM.fetch_add(1, Ordering::Relaxed);
-        SliderRenderable {
+        Self {
             id: format!("slider-{num}"),
             num,
             visible: true,
@@ -57,7 +57,7 @@ impl SliderRenderable {
     }
 
     #[must_use]
-    pub fn value(&self) -> f64 {
+    pub const fn value(&self) -> f64 {
         self.value
     }
 
@@ -69,7 +69,7 @@ impl SliderRenderable {
     }
 
     #[must_use]
-    pub fn min(&self) -> f64 {
+    pub const fn min(&self) -> f64 {
         self.min
     }
 
@@ -81,7 +81,7 @@ impl SliderRenderable {
     }
 
     #[must_use]
-    pub fn max(&self) -> f64 {
+    pub const fn max(&self) -> f64 {
         self.max
     }
 
@@ -93,16 +93,16 @@ impl SliderRenderable {
     }
 
     #[must_use]
-    pub fn orientation(&self) -> SliderOrientation {
+    pub const fn orientation(&self) -> SliderOrientation {
         self.orientation
     }
 
-    pub fn set_orientation(&mut self, orientation: SliderOrientation) {
+    pub const fn set_orientation(&mut self, orientation: SliderOrientation) {
         self.orientation = orientation;
     }
 
     #[must_use]
-    pub fn view_port_size(&self) -> f64 {
+    pub const fn view_port_size(&self) -> f64 {
         self.view_port_size
     }
 
@@ -112,31 +112,33 @@ impl SliderRenderable {
     }
 
     pub fn set_track_color(&mut self, color: Option<ColorInput>) {
-        self.track_color = parse_color(color.unwrap_or(ColorInput::String("#252527".into())));
+        self.track_color =
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#252527".into())));
     }
 
     pub fn set_thumb_color(&mut self, color: Option<ColorInput>) {
-        self.thumb_color = parse_color(color.unwrap_or(ColorInput::String("#9a9ea3".into())));
+        self.thumb_color =
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#9a9ea3".into())));
     }
 
     #[must_use]
-    pub fn track_color(&self) -> RGBA {
+    pub const fn track_color(&self) -> RGBA {
         self.track_color
     }
 
     #[must_use]
-    pub fn thumb_color(&self) -> RGBA {
+    pub const fn thumb_color(&self) -> RGBA {
         self.thumb_color
     }
 
     fn virtual_track_size(render_size: u16) -> f64 {
-        f64::from(render_size) * 2.0
+        f64::from(render_size) * 2.0_f64
     }
 
     fn virtual_thumb_size(&self, render_size: u16) -> f64 {
         let virtual_track = Self::virtual_track_size(render_size);
         let range = self.max - self.min;
-        if range <= 0.0 {
+        if range <= 0.0_f64 {
             return virtual_track;
         }
         let vp = self.view_port_size.max(1.0);
@@ -151,8 +153,8 @@ impl SliderRenderable {
     fn virtual_thumb_start(&self, render_size: u16) -> f64 {
         let virtual_track = Self::virtual_track_size(render_size);
         let range = self.max - self.min;
-        if range <= 0.0 {
-            return 0.0;
+        if range <= 0.0_f64 {
+            return 0.0_f64;
         }
         let ratio = (self.value - self.min) / range;
         let thumb_size = self.virtual_thumb_size(render_size);
@@ -235,6 +237,8 @@ impl Renderable for SliderRenderable {
 }
 
 impl SliderRenderable {
+    #[allow(clippy::default_numeric_fallback)]
+    #[allow(clippy::default_numeric_fallback, clippy::expect_used)]
     fn render_horizontal(&self, buf: &mut Buffer, area: Rect, track_style: Style) {
         let (fr, fg, fb, fa) = self.thumb_color.to_ints();
         let thumb_style = if fa == 0 {
@@ -294,6 +298,7 @@ impl SliderRenderable {
         }
     }
 
+    #[allow(clippy::default_numeric_fallback, clippy::expect_used)]
     fn render_vertical(&self, buf: &mut Buffer, area: Rect, track_style: Style) {
         let (fr, fg, fb, fa) = self.thumb_color.to_ints();
         let thumb_style = if fa == 0 {

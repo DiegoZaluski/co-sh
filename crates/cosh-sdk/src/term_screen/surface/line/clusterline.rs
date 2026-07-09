@@ -30,7 +30,7 @@ struct Cluster {
 /// clusters of attribute data describing attributed ranges
 /// within the line
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
-pub(crate) struct ClusteredLine {
+pub struct ClusteredLine {
     pub text: String,
     #[serde(
         deserialize_with = "deserialize_bitset",
@@ -175,7 +175,7 @@ impl ClusteredLine {
         }
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.len as usize
     }
 
@@ -334,7 +334,7 @@ impl ClusteredLine {
     }
 }
 
-pub(crate) struct ClusterLineCellIter<'a> {
+pub struct ClusterLineCellIter<'a> {
     graphemes: Graphemes<'a>,
     clusters: core::slice::Iter<'a, Cluster>,
     cluster: Option<&'a Cluster>,

@@ -70,7 +70,10 @@ pub fn session_store() -> &'static Arc<Mutex<InMemorySnapshotStore>> {
     SESSION.get_or_init(|| {
         Arc::new(Mutex::new(InMemorySnapshotStore::new(
             &InMemorySnapshotStoreOptions {
-                max_paths: Some(NonZeroUsize::new(MAX_PATHS).expect("MAX_PATHS is nonzero")),
+                max_paths: Some(
+                    #[allow(clippy::expect_used)]
+                    NonZeroUsize::new(MAX_PATHS).expect("MAX_PATHS is nonzero"),
+                ),
                 max_versions_per_path: Some(MAX_VERSIONS_PER_PATH),
             },
         )))
@@ -267,6 +270,7 @@ fn external_mod_warning(path: &str, disk_hash: &str, head_hash: Option<&str>) ->
 /// Panics if the history is empty when `hash` is `None` and the file does not
 /// exist on disk, as restoring to the head of history is impossible without a
 /// recorded version.
+#[allow(clippy::significant_drop_tightening)]
 pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
     let path = &input.path;
 
@@ -279,6 +283,7 @@ pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
 
     // Phase 2: resolve target snapshot (lock acquired and released before any await).
     let (target_text, target_hash, warning) = {
+        #[allow(clippy::unwrap_used)]
         let mut store = session_store()
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -317,6 +322,7 @@ pub async fn restore(input: RestoreInput) -> Result<RestoreOutput, String> {
 
             (None, None) => {
                 // File deleted and no hash given: restore to head (last session state).
+                #[allow(clippy::expect_used)]
                 let head = history.first().cloned().expect("history is non-empty");
                 let warning = Some(format!(
                     "`{path}` no longer exists on disk; restoring to last session state (`{}`)",

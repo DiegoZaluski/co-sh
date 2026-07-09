@@ -38,8 +38,7 @@ impl AddProviderView {
         providers
             .into_iter()
             .filter(|(name, env)| {
-                name.to_lowercase().contains(&lower)
-                    || env.to_lowercase().contains(&lower)
+                name.to_lowercase().contains(&lower) || env.to_lowercase().contains(&lower)
             })
             .collect()
     }
@@ -58,9 +57,7 @@ impl AddProviderView {
         if self.selected_index < self.scroll_offset {
             self.scroll_offset = self.selected_index;
         } else if vc > 0 && self.selected_index >= self.scroll_offset + vc {
-            self.scroll_offset = self
-                .selected_index
-                .saturating_sub(vc.saturating_sub(1));
+            self.scroll_offset = self.selected_index.saturating_sub(vc.saturating_sub(1));
         }
     }
 
@@ -107,9 +104,7 @@ impl AddProviderView {
             return;
         }
         if self.selected_index >= self.scroll_offset + vc {
-            self.scroll_offset = self
-                .selected_index
-                .saturating_sub(vc.saturating_sub(1));
+            self.scroll_offset = self.selected_index.saturating_sub(vc.saturating_sub(1));
         }
         if self.selected_index < self.scroll_offset {
             self.scroll_offset = self.selected_index;
@@ -190,7 +185,8 @@ impl AddProviderView {
         let block_y = area.y + 1 + (remaining_h.saturating_sub(block_h as u16)) / 2;
 
         let search_w = max_w.min(area.width.saturating_sub(row_x) as usize);
-        self.search_bar.render(buf, row_x, block_y, search_w as u16, theme);
+        self.search_bar
+            .render(buf, row_x, block_y, search_w as u16, theme);
 
         let list_start_y = block_y + 2;
         if max_w == 0 {
@@ -277,6 +273,6 @@ fn max_row_width() -> usize {
         .max("ADD Provider".len())
 }
 
-fn max_visible_items(remaining_h: u16) -> usize {
+const fn max_visible_items(remaining_h: u16) -> usize {
     (remaining_h.saturating_sub(3)) as usize
 }

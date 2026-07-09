@@ -61,7 +61,7 @@ pub struct GetPaletteOptions {
 
 impl Default for GetPaletteOptions {
     fn default() -> Self {
-        GetPaletteOptions {
+        Self {
             timeout_ms: 5000,
             size: 16,
         }
@@ -323,7 +323,7 @@ impl TerminalPalette {
     #[must_use]
     pub fn new(options: TerminalPaletteOptions) -> Self {
         let in_legacy_tmux = options.is_legacy_tmux;
-        TerminalPalette {
+        Self {
             write_fn: options.write_fn,
             in_legacy_tmux,
             in_tmux: options.is_tmux || in_legacy_tmux,
@@ -414,7 +414,7 @@ impl TerminalPalette {
     }
 
     fn query_palette(
-        &mut self,
+        &self,
         indices: &[u8],
         timeout_ms: u64,
         idle_timeout_ms: u64,
@@ -487,7 +487,7 @@ impl TerminalPalette {
     }
 
     fn query_special_colors(
-        &mut self,
+        &self,
         timeout_ms: u64,
         idle_timeout_ms: u64,
     ) -> Result<HashMap<u8, HexColor>, String> {
@@ -619,7 +619,7 @@ impl TerminalPalette {
         })
     }
 
-    pub fn cleanup(&mut self) {}
+    pub const fn cleanup(&mut self) {}
 }
 
 impl TerminalPaletteDetector for TerminalPalette {

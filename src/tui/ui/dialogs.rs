@@ -113,8 +113,8 @@ pub enum DialogAction {
 }
 
 impl DialogState {
-    pub fn new() -> Self {
-        DialogState { stack: Vec::new() }
+    pub const fn new() -> Self {
+        Self { stack: Vec::new() }
     }
 
     pub fn show(&mut self, dialog_type: DialogType) {
@@ -138,7 +138,7 @@ impl DialogState {
         self.stack.clear();
     }
 
-    pub fn visible(&self) -> bool {
+    pub const fn visible(&self) -> bool {
         !self.stack.is_empty()
     }
 
@@ -466,13 +466,7 @@ impl DialogState {
     }
 
     #[allow(clippy::too_many_lines, clippy::similar_names)]
-    pub fn render(
-        &self,
-        buf: &mut Buffer,
-        area: Rect,
-        theme: &Theme,
-        now: SystemTime,
-    ) {
+    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime) {
         let Some(instance) = self.stack.last() else {
             return;
         };

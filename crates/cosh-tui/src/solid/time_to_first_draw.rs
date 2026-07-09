@@ -2,8 +2,8 @@ pub struct TimeToFirstDrawRenderable;
 
 impl TimeToFirstDrawRenderable {
     #[must_use]
-    pub fn new() -> Self {
-        TimeToFirstDrawRenderable
+    pub const fn new() -> Self {
+        Self
     }
 }
 

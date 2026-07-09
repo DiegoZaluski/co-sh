@@ -87,7 +87,7 @@ fn add(
     }
 
     let item = TodoItem {
-        id: id.clone(),
+        id,
         description: description.to_owned(),
         status: TodoStatus::Pending,
         depends_on: depends_on.cloned().unwrap_or_default(),

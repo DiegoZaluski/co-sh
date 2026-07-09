@@ -32,7 +32,7 @@ impl InputRenderable {
     #[must_use]
     pub fn new(value: Option<String>) -> Self {
         let num = NEXT_INPUT_NUM.fetch_add(1, Ordering::Relaxed);
-        InputRenderable {
+        Self {
             id: format!("input-{num}"),
             num,
             visible: true,
@@ -72,7 +72,7 @@ impl InputRenderable {
     }
 
     #[must_use]
-    pub fn max_length(&self) -> usize {
+    pub const fn max_length(&self) -> usize {
         self.max_length
     }
 
@@ -85,7 +85,7 @@ impl InputRenderable {
     }
 
     #[must_use]
-    pub fn min_length(&self) -> usize {
+    pub const fn min_length(&self) -> usize {
         self.min_length
     }
 
@@ -100,7 +100,7 @@ impl InputRenderable {
     }
 
     #[must_use]
-    pub fn cursor_offset(&self) -> usize {
+    pub const fn cursor_offset(&self) -> usize {
         self.cursor_offset
     }
 
@@ -145,12 +145,13 @@ impl InputRenderable {
     }
 
     pub fn set_text_color(&mut self, color: Option<ColorInput>) {
-        self.text_color = parse_color(color.unwrap_or(ColorInput::String("#FFFFFF".into())));
+        self.text_color =
+            parse_color(color.unwrap_or_else(|| ColorInput::String("#FFFFFF".into())));
     }
 
     pub fn set_background_color(&mut self, color: Option<ColorInput>) {
         self.background_color =
-            parse_color(color.unwrap_or(ColorInput::String("transparent".into())));
+            parse_color(color.unwrap_or_else(|| ColorInput::String("transparent".into())));
     }
 }
 

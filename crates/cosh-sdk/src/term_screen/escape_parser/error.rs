@@ -62,7 +62,7 @@ pub enum InternalError {
 
 impl From<String> for InternalError {
     fn from(s: String) -> Self {
-        InternalError::StringErr(StringWrap(s))
+        Self::StringErr(StringWrap(s))
     }
 }
 

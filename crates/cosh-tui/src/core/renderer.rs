@@ -53,7 +53,7 @@ pub struct RendererConfig {
 
 impl Default for RendererConfig {
     fn default() -> Self {
-        RendererConfig {
+        Self {
             alternate_screen: true,
             width: 80,
             height: 24,
@@ -100,7 +100,7 @@ pub struct Renderer<B: Backend> {
 
 impl<B: Backend> Renderer<B> {
     pub fn new(terminal: Terminal<B>, config: RendererConfig) -> Self {
-        Renderer {
+        Self {
             terminal,
             config,
             root: RootRenderable::new(),
@@ -110,19 +110,19 @@ impl<B: Backend> Renderer<B> {
         }
     }
 
-    pub fn root(&self) -> &RootRenderable {
+    pub const fn root(&self) -> &RootRenderable {
         &self.root
     }
 
-    pub fn root_mut(&mut self) -> &mut RootRenderable {
+    pub const fn root_mut(&mut self) -> &mut RootRenderable {
         &mut self.root
     }
 
-    pub fn config(&self) -> &RendererConfig {
+    pub const fn config(&self) -> &RendererConfig {
         &self.config
     }
 
-    pub fn frame_count(&self) -> u64 {
+    pub const fn frame_count(&self) -> u64 {
         self.frame_count
     }
 
@@ -173,14 +173,14 @@ impl<B: Backend> Renderer<B> {
         Ok(())
     }
 
-    pub fn destroy(&mut self) {
+    pub const fn destroy(&mut self) {
         if self.destroyed {
             return;
         }
         self.destroyed = true;
     }
 
-    pub fn is_destroyed(&self) -> bool {
+    pub const fn is_destroyed(&self) -> bool {
         self.destroyed
     }
 

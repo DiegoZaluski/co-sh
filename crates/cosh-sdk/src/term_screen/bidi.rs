@@ -1,4 +1,5 @@
 //! Bidirectional text support.
+//!
 //! Stripped-down replacement for wezterm-bidi.
 //! This is a minimal stub that always assumes Left-to-Right text direction.
 //! Full bidi support (UAX #9) is not needed for terminal output parsing;
@@ -23,14 +24,10 @@ pub enum ParagraphDirectionHint {
 
 impl ParagraphDirectionHint {
     #[must_use]
-    pub fn direction(self) -> Direction {
+    pub const fn direction(self) -> Direction {
         match self {
-            ParagraphDirectionHint::AutoLeftToRight | ParagraphDirectionHint::LeftToRight => {
-                Direction::LeftToRight
-            }
-            ParagraphDirectionHint::AutoRightToLeft | ParagraphDirectionHint::RightToLeft => {
-                Direction::RightToLeft
-            }
+            Self::AutoLeftToRight | Self::LeftToRight => Direction::LeftToRight,
+            Self::AutoRightToLeft | Self::RightToLeft => Direction::RightToLeft,
         }
     }
 }
@@ -69,13 +66,13 @@ impl Default for BidiContext {
 
 impl BidiContext {
     #[must_use]
-    pub fn new() -> Self {
-        BidiContext
+    pub const fn new() -> Self {
+        Self
     }
 
     /// Resolve paragraph direction and bidi levels.
     /// Stub: does nothing, assumes LTR.
-    pub fn resolve_paragraph(&mut self, _paragraph: &[char], _hint: ParagraphDirectionHint) {
+    pub const fn resolve_paragraph(&mut self, _paragraph: &[char], _hint: ParagraphDirectionHint) {
         // No-op: always LTR
     }
 

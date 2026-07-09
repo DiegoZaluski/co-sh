@@ -26,16 +26,16 @@ pub enum ColorAttribute {
 
 impl From<AnsiColor> for ColorAttribute {
     fn from(col: AnsiColor) -> Self {
-        ColorAttribute::PaletteIndex(col as u8)
+        Self::PaletteIndex(col as u8)
     }
 }
 
 impl From<ColorSpec> for ColorAttribute {
     fn from(spec: ColorSpec) -> Self {
         match spec {
-            ColorSpec::Default => ColorAttribute::Default,
-            ColorSpec::PaletteIndex(idx) => ColorAttribute::PaletteIndex(idx),
-            ColorSpec::TrueColor(color) => ColorAttribute::TrueColorWithDefaultFallback(color),
+            ColorSpec::Default => Self::Default,
+            ColorSpec::PaletteIndex(idx) => Self::PaletteIndex(idx),
+            ColorSpec::TrueColor(color) => Self::TrueColorWithDefaultFallback(color),
         }
     }
 }

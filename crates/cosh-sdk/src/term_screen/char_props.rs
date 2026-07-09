@@ -14,7 +14,7 @@ impl Presentation {
     /// Returns (`default_presentation`, `optional_variation_override`).
     /// A VariationSelector-16 (U+FE0F) forces Emoji, VS-15 (U+FE0E) forces Text.
     #[must_use]
-    pub fn for_grapheme(s: &str) -> (Presentation, Option<Presentation>) {
+    pub fn for_grapheme(s: &str) -> (Self, Option<Self>) {
         let mut chars = s.chars();
         let base = chars.next();
         let rest: Vec<char> = chars.collect();
@@ -23,9 +23,9 @@ impl Presentation {
             // Explicit emoji variation selector
             let base_emoji = is_emoji_presentation(base.unwrap_or(' '));
             if base_emoji {
-                (Presentation::Emoji, Some(Presentation::Emoji))
+                (Self::Emoji, Some(Self::Emoji))
             } else {
-                (Presentation::Text, Some(Presentation::Emoji))
+                (Self::Text, Some(Self::Emoji))
             }
         } else if rest.contains(&'\u{FE0E}') {
             // Text variation selector: only meaningful for characters
@@ -34,18 +34,18 @@ impl Presentation {
             // not valid and is ignored.
             let base_emoji = is_emoji_presentation(base.unwrap_or(' '));
             if base_emoji {
-                (Presentation::Emoji, None)
+                (Self::Emoji, None)
             } else {
-                (Presentation::Text, Some(Presentation::Text))
+                (Self::Text, Some(Self::Text))
             }
         } else if let Some(c) = base {
             if is_emoji_presentation(c) {
-                (Presentation::Emoji, None)
+                (Self::Emoji, None)
             } else {
-                (Presentation::Text, None)
+                (Self::Text, None)
             }
         } else {
-            (Presentation::Text, None)
+            (Self::Text, None)
         }
     }
 }
@@ -62,20 +62,20 @@ pub enum WcWidth {
 
 impl WcWidth {
     #[must_use]
-    pub fn width_unicode_9_or_later(self) -> u32 {
+    pub const fn width_unicode_9_or_later(self) -> u32 {
         match self {
-            WcWidth::Two | WcWidth::Ambiguous => 2,
-            WcWidth::One | WcWidth::Unassigned => 1,
-            WcWidth::Zero => 0,
+            Self::Two | Self::Ambiguous => 2,
+            Self::One | Self::Unassigned => 1,
+            Self::Zero => 0,
         }
     }
 
     #[must_use]
-    pub fn width_unicode_8_or_earlier(self) -> u32 {
+    pub const fn width_unicode_8_or_earlier(self) -> u32 {
         match self {
-            WcWidth::Two => 2,
-            WcWidth::Ambiguous | WcWidth::One | WcWidth::Unassigned => 1,
-            WcWidth::Zero => 0,
+            Self::Two => 2,
+            Self::Ambiguous | Self::One | Self::Unassigned => 1,
+            Self::Zero => 0,
         }
     }
 }

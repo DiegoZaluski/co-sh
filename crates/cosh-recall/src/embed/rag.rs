@@ -1,9 +1,8 @@
 #[cfg(feature = "fastembed")]
 use std::sync::Mutex;
 
-use thiserror::Error;
-
 use super::vec_db::{Entry, VecDb, VecDbError};
+use thiserror::Error;
 
 /// Unified error type for RAG operations.
 ///
@@ -29,14 +28,14 @@ pub enum RagError {
 #[cfg(feature = "fastembed")]
 impl From<fastembed::Error> for RagError {
     fn from(e: fastembed::Error) -> Self {
-        RagError::Embedding(e.to_string())
+        Self::Embedding(e.to_string())
     }
 }
 
 #[cfg(feature = "cloud")]
 impl From<cosh_sdk::connector::ConnectorError> for RagError {
     fn from(e: cosh_sdk::connector::ConnectorError) -> Self {
-        RagError::Embedding(e.to_string())
+        Self::Embedding(e.to_string())
     }
 }
 
@@ -78,14 +77,14 @@ pub enum Embedder {
     #[cfg(feature = "fastembed")]
     Local {
         /// ONNX session wrapped in a mutex (the session is not `Sync`).
-        model: Mutex<fastembed::TextEmbedding>,
+        model: Box<Mutex<fastembed::TextEmbedding>>,
         /// Output dimension of the loaded model.
         dim: usize,
     },
 
     /// Remote embedding via a [`cosh_sdk::connector::Connector`].
     ///
-    /// Sends text to a provider API (e.g. OpenAI, Gemini) and returns the
+    /// Sends text to a provider API (e.g. `OpenAI`, Gemini) and returns the
     /// embedding vector.
     ///
     /// Requires the `cloud` feature.
@@ -117,7 +116,7 @@ impl Embedder {
             .dim;
         let text_embedding = fastembed::TextEmbedding::try_new(fastembed::InitOptions::new(model))?;
         Ok(Self::Local {
-            model: Mutex::new(text_embedding),
+            model: Box::new(Mutex::new(text_embedding)),
             dim,
         })
     }
@@ -135,7 +134,8 @@ impl Embedder {
     ///
     /// [`cosh-sdk`]: https://docs.rs/cosh-sdk
     #[cfg(feature = "cloud")]
-    pub fn new_cloud(connector: cosh_sdk::connector::Connector, dim: usize) -> Self {
+    #[must_use]
+    pub const fn new_cloud(connector: cosh_sdk::connector::Connector, dim: usize) -> Self {
         Self::Cloud { connector, dim }
     }
 
@@ -147,6 +147,7 @@ impl Embedder {
             Self::Local { model, dim: _ } => {
                 let mut guard = model.lock().map_err(|_| RagError::LockPoisoned)?;
                 let embeddings = guard.embed(texts, None)?;
+                drop(guard);
                 Ok(embeddings)
             }
             #[cfg(feature = "cloud")]
@@ -164,14 +165,14 @@ impl Embedder {
     }
 
     /// Return the output dimension of the embedding model.
-    pub(crate) fn dim(&self) -> usize {
+    pub(crate) const fn dim(&self) -> usize {
         match self {
             #[cfg(feature = "fastembed")]
             Self::Local { dim, .. } => *dim,
             #[cfg(feature = "cloud")]
             Self::Cloud { dim, .. } => *dim,
             #[allow(unreachable_patterns)]
-            _ => unreachable!("no embedder feature enabled (fastembed or cloud)"),
+            _ => unreachable!(),
         }
     }
 }

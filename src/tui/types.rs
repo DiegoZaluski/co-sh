@@ -23,7 +23,7 @@ pub struct Message {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
     User,
     Assistant,
@@ -55,7 +55,7 @@ pub struct ToolPart {
     pub is_streaming: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolStatus {
     Running,
     Completed,
@@ -74,7 +74,7 @@ pub struct FilePart {
     pub mime: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionStatus {
     Idle,
     Working,

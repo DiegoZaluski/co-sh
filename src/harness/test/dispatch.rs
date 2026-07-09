@@ -111,7 +111,7 @@ impl ServerHandler for CrashOnCall {
 /// Create a session from any `ServerHandler`.
 async fn session_from_handler(
     server_name: &str,
-    handler: impl ServerHandler + Clone + Send + Sync + 'static,
+    handler: impl ServerHandler + Clone + 'static,
 ) -> (ServerSession, tokio::task::JoinHandle<()>) {
     let (server_io, client_io) = tokio::io::duplex(4096);
 

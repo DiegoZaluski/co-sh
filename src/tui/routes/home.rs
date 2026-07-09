@@ -38,7 +38,14 @@ fn dim_color(color: Color, brightness: f64) -> Color {
     )
 }
 
-fn render_logo(buf: &mut Buffer, area: Rect, cx: u16, logo_start_y: u16, frame: u64, primary: Color) {
+fn render_logo(
+    buf: &mut Buffer,
+    area: Rect,
+    cx: u16,
+    logo_start_y: u16,
+    frame: u64,
+    primary: Color,
+) {
     let t = frame as f64 * 0.025;
     let center_x: f64 = 14.0;
     let center_y: f64 = 2.5;
@@ -91,7 +98,7 @@ pub const MENU_ITEMS: &[&str] = &[
     "ADD Provider",
 ];
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HomeAction {
     NewSession,
     ToggleSidebar,
@@ -108,8 +115,8 @@ pub struct HomeView {
 }
 
 impl HomeView {
-    pub fn new() -> Self {
-        HomeView {
+    pub const fn new() -> Self {
+        Self {
             selected_index: 0,
             frame: 0,
             anim_active: true,
@@ -117,7 +124,7 @@ impl HomeView {
         }
     }
 
-    pub fn advance(&mut self) {
+    pub const fn advance(&mut self) {
         if !self.anim_active {
             return;
         }
@@ -127,11 +134,11 @@ impl HomeView {
         }
     }
 
-    pub fn select_next(&mut self) {
+    pub const fn select_next(&mut self) {
         self.selected_index = (self.selected_index + 1) % MENU_ITEMS.len();
     }
 
-    pub fn select_prev(&mut self) {
+    pub const fn select_prev(&mut self) {
         self.selected_index = if self.selected_index == 0 {
             MENU_ITEMS.len() - 1
         } else {
@@ -139,7 +146,7 @@ impl HomeView {
         };
     }
 
-    pub fn selected_action(&self) -> HomeAction {
+    pub const fn selected_action(&self) -> HomeAction {
         match self.selected_index {
             0 => HomeAction::NewSession,
             1 => HomeAction::ToggleSidebar,

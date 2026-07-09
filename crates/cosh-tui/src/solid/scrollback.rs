@@ -11,7 +11,7 @@ pub struct SolidScrollbackWriterOptions {
 
 impl Default for SolidScrollbackWriterOptions {
     fn default() -> Self {
-        SolidScrollbackWriterOptions {
+        Self {
             width: None,
             height: None,
             row_columns: None,

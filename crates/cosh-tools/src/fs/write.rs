@@ -36,6 +36,7 @@ pub struct WriteResult {
 
 /// Strip hashline display prefixes (`[path#hash]` headers and `N:` line prefixes)
 /// from content the model may have copied from read/search output.
+#[allow(clippy::unwrap_used)]
 fn strip_write_content(content: &str) -> (String, bool) {
     static BRACKET_HEADER_RE: OnceLock<Regex> = OnceLock::new();
     let bracket_re =
@@ -61,7 +62,7 @@ fn strip_write_content(content: &str) -> (String, bool) {
         return (content.to_string(), false);
     }
 
-    let mut without_header = lines.clone();
+    let mut without_header = lines;
     without_header.remove(idx);
     let stripped2 = cosh_sdk::hashline::prefixes::strip_new_line_prefixes(&without_header);
     if stripped2 != without_header {

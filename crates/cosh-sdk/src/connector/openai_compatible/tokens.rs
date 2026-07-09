@@ -3,7 +3,7 @@
 /// Looks for `usage.completion_tokens` in the JSON response body — the
 /// standard `OpenAI` shape that most compatible providers follow.
 #[must_use]
-pub(crate) fn extract_tokens(raw: &str) -> Option<u32> {
+pub fn extract_tokens(raw: &str) -> Option<u32> {
     serde_json::from_str::<serde_json::Value>(raw)
         .ok()
         .and_then(|v| {

@@ -27,7 +27,7 @@ impl ScrollBoxRenderable {
     #[must_use]
     pub fn new() -> Self {
         let num = NEXT_SCROLL_BOX_NUM.fetch_add(1, Ordering::Relaxed);
-        ScrollBoxRenderable {
+        Self {
             id: format!("scrollbox-{num}"),
             num,
             visible: true,
@@ -43,21 +43,21 @@ impl ScrollBoxRenderable {
     }
 
     #[must_use]
-    pub fn scroll_x(&self) -> i32 {
+    pub const fn scroll_x(&self) -> i32 {
         self.scroll_x
     }
 
     pub fn set_scroll_x(&mut self, value: i32) {
-        self.scroll_x = value.max(0);
+        self.scroll_x = value.max(0_i32);
     }
 
     #[must_use]
-    pub fn scroll_y(&self) -> i32 {
+    pub const fn scroll_y(&self) -> i32 {
         self.scroll_y
     }
 
     pub fn set_scroll_y(&mut self, value: i32) {
-        self.scroll_y = value.max(0);
+        self.scroll_y = value.max(0_i32);
     }
 
     pub fn scroll_by(&mut self, dx: i32, dy: i32) {
@@ -65,7 +65,7 @@ impl ScrollBoxRenderable {
         self.set_scroll_y(self.scroll_y + dy);
     }
 
-    pub fn set_content_size(&mut self, width: i32, height: i32) {
+    pub const fn set_content_size(&mut self, width: i32, height: i32) {
         self.content_width = width;
         self.content_height = height;
     }

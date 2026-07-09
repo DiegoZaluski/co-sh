@@ -13,7 +13,7 @@ pub enum NewlineCanon {
 }
 
 impl NewlineCanon {
-    fn target(self) -> Option<&'static str> {
+    const fn target(self) -> Option<&'static str> {
         match self {
             Self::None => None,
             Self::LineFeed => Some("\n"),
@@ -35,7 +35,7 @@ impl NewlineCanon {
                         buf.push_str(canon);
                     } else if c == '\r' {
                         buf.push_str(canon);
-                        if let Some('\n') = iter.peek() {
+                        if matches!(iter.peek(), Some('\n')) {
                             // Paired with the \r, so consume this one
                             iter.next();
                         }
