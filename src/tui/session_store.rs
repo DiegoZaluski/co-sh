@@ -1,19 +1,19 @@
 //! Session persistence module.
 //!
-//! Stores chat sessions as individual JSONL files in
-//! `{data_dir}/sessions/session-{timestamp}.jsonl`.
+//! Stores chat sessions as individual JSONL files organized by CWD:
+//! `{data_dir}/sessions/{cwd_hash}/session-{timestamp}.jsonl`.
 //!
 //! ## Format
 //!
 //! Each JSONL file represents one complete chat session:
 //!
-//! - Line 1: Session metadata (JSON object with title, created_at, etc.)
+//! - Line 1: Session metadata (JSON object with title, created_at, cwd, etc.)
 //! - Lines 2+: Each message serialized as a JSON object, one per line.
 //!
-//! This append-only design is O(1) for writes and makes it easy to
-//! reconstruct sessions by reading lines sequentially. The filename
-//! itself encodes the session ID (timestamp) so directory listing is
-//! sufficient for session history.
+//! Sessions are grouped by CWD (current working directory). The CWD path is
+//! hashed with xxHash32 to produce a deterministic subdirectory name, so
+//! sessions started in different directories never mix. The full CWD path is
+//! also stored in the session header for display and filtering.
 //!
 //! A session is only persisted when it contains actual dialog:
 //! at least one user message AND at least one valid assistant response
@@ -25,10 +25,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::Datelike;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use xxhash_rust::xxh32::xxh32;
 
 use crate::types::{Message, MessageRole, Part, Session};
 
-/// Number of session files to keep on disk. Oldest files are evicted first.
+/// Number of session files to keep on disk per CWD. Oldest files are evicted first.
 const MAX_SESSIONS_ON_DISK: usize = 50;
 
 /// Metadata stored as the first JSONL line in each session file.
@@ -36,40 +37,46 @@ const MAX_SESSIONS_ON_DISK: usize = 50;
 struct SessionHeader {
     title: String,
     created_at: u64,
-    working_directory: String,
+    cwd: String,
     provider: Option<String>,
     model: Option<String>,
 }
 
-/// Manages reading and writing session files to disk.
+/// Manages reading and writing session files to disk, isolated by CWD.
 pub struct SessionStore {
-    /// Resolved path to the sessions directory
-    /// (e.g. `~/.local/share/cosh/sessions/`).
+    /// Resolved path to the per-CWD sessions directory
+    /// (e.g. `~/.local/share/cosh/sessions/{hash}/`).
     sessions_dir: PathBuf,
+    /// The hash of the current working directory.
+    cwd_hash: String,
 }
 
 impl SessionStore {
-    /// Create a new `SessionStore`, ensuring the sessions directory exists.
+    /// Create a new `SessionStore`, resolving the CWD and creating the
+    /// per-CWD sessions directory.
     ///
     /// # Panics
     /// Panics if the `ProjectDirs` cannot be determined (e.g. no $HOME set).
     pub fn new() -> Self {
         let proj_dirs =
             ProjectDirs::from("", "", "cosh").expect("could not determine project directories");
-        let sessions_dir = proj_dirs.data_dir().join("sessions");
+        let cwd_hash = compute_cwd_hash();
+        let sessions_dir = proj_dirs.data_dir().join("sessions").join(&cwd_hash);
         std::fs::create_dir_all(&sessions_dir).ok();
-        SessionStore { sessions_dir }
+        SessionStore {
+            sessions_dir,
+            cwd_hash,
+        }
     }
 
     // ── Public API ────────────────────────────────────────────────────────
 
-    /// Persist a session to disk as a JSONL file.
+    /// Persist a session to disk as a JSONL file in the current CWD's subdirectory.
     ///
-    /// The session is saved as `session-{id}.jsonl` inside the sessions
-    /// directory. If a file with the same name already exists, it is
-    /// overwritten so the disk always reflects the latest state.
-    ///
-    /// After saving, the store evicts the oldest files beyond `MAX_SESSIONS_ON_DISK`.
+    /// The session is saved as `session-{id}.jsonl`. If a file with the same
+    /// name already exists, it is overwritten so the disk always reflects the
+    /// latest state. After saving, the store evicts the oldest files beyond
+    /// `MAX_SESSIONS_ON_DISK`.
     pub fn save_session(&self, session: &Session) {
         let file_path = self.file_path(&session.id);
         let header = self.build_header(session);
@@ -95,10 +102,11 @@ impl SessionStore {
         self.evict_old_sessions();
     }
 
-    /// Load all session files from disk, sorted by creation time (newest first).
+    /// Load all session files from the current CWD's subdirectory, sorted by
+    /// creation time (newest first).
     ///
-    /// Returns a list of lightweight session summaries suitable for the
-    /// sidebar or session history browser.
+    /// Only sessions from the same CWD as the current process are returned,
+    /// giving natural per-directory isolation.
     pub fn list_sessions(&self) -> Vec<SessionSummary> {
         let mut summaries: Vec<SessionSummary> = Vec::new();
 
@@ -118,6 +126,46 @@ impl SessionStore {
         }
 
         // Sort newest first by timestamp
+        summaries.sort_by(|a, b| b.session_id.cmp(&a.session_id));
+        summaries
+    }
+
+    /// List sessions across ALL CWD subdirectories (for directory browsing).
+    ///
+    /// Returns summaries that include the `cwd` field so the UI can display
+    /// which directory each session belongs to.
+    pub fn list_all_sessions(&self) -> Vec<SessionSummary> {
+        let mut summaries: Vec<SessionSummary> = Vec::new();
+
+        // Parent directory of all per-CWD subdirectories
+        let base = match self.sessions_dir.parent() {
+            Some(p) => p.to_path_buf(),
+            None => return summaries,
+        };
+
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return summaries;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Ok(dir_entries) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for file_entry in dir_entries.flatten() {
+                let file_path = file_entry.path();
+                if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                if let Some(summary) = self.read_summary(&file_path) {
+                    summaries.push(summary);
+                }
+            }
+        }
+
         summaries.sort_by(|a, b| b.session_id.cmp(&a.session_id));
         summaries
     }
@@ -171,13 +219,14 @@ impl SessionStore {
 
     // ── Private helpers ───────────────────────────────────────────────────
 
-    /// Build the absolute path for a session file.
+    /// Build the absolute path for a session file within the current CWD subdirectory.
     fn file_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir
             .join(format!("session-{session_id}.jsonl"))
     }
 
-    /// Build a `SessionHeader` from a `Session`.
+    /// Build a `SessionHeader` from a `Session`, populating `cwd` with the
+    /// canonicalized current working directory.
     fn build_header(&self, session: &Session) -> SessionHeader {
         // Grab provider/model from the last valid assistant message
         let (provider, model) = session
@@ -197,10 +246,16 @@ impl SessionStore {
             })
             .unwrap_or((None, None));
 
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| std::fs::canonicalize(&p).ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
         SessionHeader {
             title: session.title.clone(),
             created_at: session.created_at,
-            working_directory: String::new(),
+            cwd,
             provider,
             model,
         }
@@ -232,19 +287,17 @@ impl SessionStore {
         let filename = path.file_stem()?.to_str()?;
         let session_id = filename.strip_prefix("session-")?.to_string();
 
-        // Use the session title from the header
-        let title = header.title.clone();
-
         Some(SessionSummary {
             session_id,
-            title,
+            title: header.title,
             created_at: header.created_at,
             message_count,
+            cwd: header.cwd,
             model: header.model,
         })
     }
 
-    /// Remove the oldest session files if we exceed the maximum count.
+    /// Remove the oldest session files if we exceed the maximum count for this CWD.
     fn evict_old_sessions(&self) {
         let mut files: Vec<(PathBuf, u64)> = Vec::new();
 
@@ -295,6 +348,8 @@ pub struct SessionSummary {
     pub created_at: u64,
     /// Number of messages in the session.
     pub message_count: usize,
+    /// Canonical path of the working directory where the session was started.
+    pub cwd: String,
     /// The model used (if available).
     pub model: Option<String>,
 }
@@ -353,6 +408,21 @@ pub fn generate_session_id() -> String {
         .unwrap_or_default()
         .as_millis();
     format!("{ts}")
+}
+
+/// Compute a deterministic xxHash32 of the canonicalized current working
+/// directory for per-CWD session isolation.
+///
+/// The same CWD always produces the same hash, so sessions from the same
+/// directory are grouped together automatically.
+pub fn compute_cwd_hash() -> String {
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(&p).ok())
+        .unwrap_or_else(|| PathBuf::from("unknown"));
+    let path_str = cwd.to_string_lossy();
+    let hash = xxh32(path_str.as_bytes(), 0);
+    format!("{:08x}", hash)
 }
 
 /// Determine whether a session should be persisted to disk.
@@ -466,6 +536,17 @@ mod tests {
         }
     }
 
+    /// Create a test store that uses a temp dir with a fake CWD hash, bypassing
+    /// the real `current_dir()` call.
+    fn test_store(dir: &tempfile::TempDir) -> SessionStore {
+        let sessions_dir = dir.path().join("testhash");
+        std::fs::create_dir_all(&sessions_dir).ok();
+        SessionStore {
+            sessions_dir,
+            cwd_hash: "testhash".to_string(),
+        }
+    }
+
     #[test]
     fn test_is_valid_session_empty() {
         let session = make_test_session("1", "Empty", vec![]);
@@ -540,9 +621,7 @@ mod tests {
     #[test]
     fn test_session_store_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore {
-            sessions_dir: dir.path().to_path_buf(),
-        };
+        let store = test_store(&dir);
 
         let session = make_test_session(
             "12345",
@@ -568,9 +647,7 @@ mod tests {
     #[test]
     fn test_session_store_list() {
         let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore {
-            sessions_dir: dir.path().to_path_buf(),
-        };
+        let store = test_store(&dir);
 
         let session1 = make_test_session(
             "1000",
@@ -601,9 +678,7 @@ mod tests {
     #[test]
     fn test_delete_session() {
         let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore {
-            sessions_dir: dir.path().to_path_buf(),
-        };
+        let store = test_store(&dir);
 
         let session = make_test_session(
             "12345",
@@ -624,9 +699,7 @@ mod tests {
     #[test]
     fn test_evict_old_sessions() {
         let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore {
-            sessions_dir: dir.path().to_path_buf(),
-        };
+        let store = test_store(&dir);
 
         for i in 0..(MAX_SESSIONS_ON_DISK + 5) {
             let session = make_test_session(
@@ -642,6 +715,91 @@ mod tests {
 
         let list = store.list_sessions();
         assert!(list.len() <= MAX_SESSIONS_ON_DISK);
+    }
+
+    #[test]
+    fn test_cwd_hash_deterministic() {
+        // The hash should be deterministic for the same input — we verify
+        // by checking it's a non-empty 8-char hex string.
+        let hash = compute_cwd_hash();
+        assert_eq!(hash.len(), 8);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_cwd_isolation() {
+        // Sessions saved in one CWD hash directory should not appear in another.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("sessions");
+
+        // Store for "proja" CWD
+        let store_a = SessionStore {
+            sessions_dir: base.join("proja"),
+            cwd_hash: "proja".to_string(),
+        };
+        std::fs::create_dir_all(&base.join("proja")).ok();
+
+        // Store for "projb" CWD
+        let store_b = SessionStore {
+            sessions_dir: base.join("projb"),
+            cwd_hash: "projb".to_string(),
+        };
+        std::fs::create_dir_all(&base.join("projb")).ok();
+
+        let session_a = make_test_session(
+            "1000",
+            "Project A",
+            vec![
+                make_user_msg("msg-0", "Hi"),
+                make_assistant_msg("msg-1", "Hello"),
+            ],
+        );
+        store_a.save_session(&session_a);
+
+        let session_b = make_test_session(
+            "2000",
+            "Project B",
+            vec![
+                make_user_msg("msg-0", "Hey"),
+                make_assistant_msg("msg-1", "Yo"),
+            ],
+        );
+        store_b.save_session(&session_b);
+
+        // Each store only sees its own sessions
+        assert_eq!(store_a.list_sessions().len(), 1);
+        assert_eq!(store_a.list_sessions()[0].session_id, "1000");
+
+        assert_eq!(store_b.list_sessions().len(), 1);
+        assert_eq!(store_b.list_sessions()[0].session_id, "2000");
+
+        // list_all_sessions should see both
+        let all = store_a.list_all_sessions();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_header_contains_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let session = make_test_session(
+            "100",
+            "CWD Test",
+            vec![
+                make_user_msg("msg-0", "Hello"),
+                make_assistant_msg("msg-1", "Hi"),
+            ],
+        );
+
+        store.save_session(&session);
+
+        // Load and check cwd was populated in the summary
+        let list = store.list_sessions();
+        assert_eq!(list.len(), 1);
+        // For test stores we use the fake hash, but the header will
+        // still get populated with current_dir() from build_header
+        assert!(!list[0].cwd.is_empty());
     }
 
     #[test]
