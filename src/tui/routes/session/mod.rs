@@ -69,7 +69,7 @@ fn concealed_char(ch: char) -> char {
 }
 
 fn sanitize_text(text: &str) -> String {
-    text.chars().filter(|ch| !ch.is_control()).collect()
+    text.chars().filter(|ch| !ch.is_control() || *ch == '\n').collect()
 }
 
 fn conceal_text(text: &str) -> String {
@@ -768,7 +768,7 @@ impl SessionView {
                             let content = if config.conceal {
                                 conceal_text(&t.text)
                             } else {
-                                t.text.clone()
+                                sanitize_text(&t.text)
                             };
                             if content.chars().all(char::is_whitespace) {
                                 part_y += part_h;
