@@ -34,3 +34,6 @@ features = ["derive"]
 
 [dependencies.cosh-sdk]
 path = "../cosh-sdk"
+
+[lints]
+workspace = true
