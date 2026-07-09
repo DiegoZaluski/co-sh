@@ -96,6 +96,25 @@ pub struct SessionView {
     /// top line from `start_x` to end, bottom line from start to `end_x`, middle lines fully highlighted.
     /// Set before `render()` to enable visual selection highlight.
     pub drag_selection: Option<(u16, u16, u16, u16)>,
+
+    // ── Auto-scroll on selection drag ─────────────────────────────────────────────
+    /// Whether auto-scroll is currently active (user dragged to edge and held).
+    pub is_auto_scrolling: bool,
+    /// Cached auto-scroll speed in lines/second, based on distance to edge.
+    auto_scroll_speed: f64,
+    /// Accumulator for fractional vertical scroll (lines).
+    auto_scroll_accumulator: f64,
+    /// The session area (screen coordinates) used to detect edge proximity.
+    /// Set before `render()` so `handle_mouse` can use it.
+    pub session_area: Option<(u16, u16, u16, u16)>,
+    /// Number of cells from the top/bottom edge that triggers auto-scroll.
+    auto_scroll_threshold: u16,
+    /// Slow speed (lines/sec) when cursor is far from the edge (distance > 2).
+    auto_scroll_speed_slow: f64,
+    /// Medium speed (lines/sec) when cursor is 2 cells from edge.
+    auto_scroll_speed_medium: f64,
+    /// Fast speed (lines/sec) when cursor is at the very edge (distance <= 1).
+    auto_scroll_speed_fast: f64,
 }
 
 impl SessionView {
@@ -105,6 +124,14 @@ impl SessionView {
             tool_state: ToolRenderState::new(),
             text_regions: Vec::new(),
             drag_selection: None,
+            is_auto_scrolling: false,
+            auto_scroll_speed: 0.0,
+            auto_scroll_accumulator: 0.0,
+            session_area: None,
+            auto_scroll_threshold: 3,
+            auto_scroll_speed_slow: 6.0,
+            auto_scroll_speed_medium: 36.0,
+            auto_scroll_speed_fast: 72.0,
         }
     }
 
@@ -963,10 +990,14 @@ impl SessionView {
         state: &AppState,
         theme: &Theme,
         config: &TuiConfig,
+        delta_time: f64,
     ) -> i32 {
         let Some(session) = state.current_session() else {
             return 0;
         };
+
+        // Store session area for auto-scroll edge detection.
+        self.session_area = Some((area.x, area.y + 1, area.right(), area.bottom()));
 
         let margin = 2;
         let inner_area = Rect::new(
@@ -1130,6 +1161,132 @@ impl SessionView {
             }
         }
 
+        // ── Handle auto-scroll during selection drag ─────────────────────────
+        self.handle_auto_scroll(delta_time, total_height, visible_height);
+
         total_height
+    }
+
+    // ── Auto-scroll on selection drag ────────────────────────────────────────────
+    //
+    // Inspired by ScrollBox.ts from @opentui/core.
+    //
+    // When the user drags a selection toward the top or bottom edge of the session
+    // area, the content scrolls. If the user holds at the edge beyond a threshold
+    // (~500ms), it enters continuous auto-scroll mode that persists until the user
+    // clicks anywhere.
+    //
+    // Speed varies by proximity to the edge:
+    //   - distance <= 1 cell: fast  (72 lines/sec)
+    //   - distance <= 2 cells: medium (36 lines/sec)
+    //   - distance > 2 cells:  slow  (6 lines/sec)
+
+    /// Direction of auto-scroll: -1 = up, 0 = none, 1 = down.
+    fn get_auto_scroll_direction(&self, mouse_y: u16) -> i32 {
+        let Some((_sx, sy, _sx2, sy2)) = self.session_area else {
+            return 0;
+        };
+        let relative_y = mouse_y.saturating_sub(sy);
+        let height = sy2.saturating_sub(sy);
+        let threshold = self.auto_scroll_threshold;
+
+        // Top edge
+        if relative_y <= threshold && self.scroll_y > 0 {
+            return -1;
+        }
+        // Bottom edge
+        if height > threshold && relative_y >= height.saturating_sub(threshold) {
+            let max_scroll = i32::MAX; // caller will clamp anyway
+            if self.scroll_y < max_scroll {
+                return 1;
+            }
+        }
+
+        0
+    }
+
+    /// Compute auto-scroll speed based on distance from the nearest vertical edge.
+    fn get_auto_scroll_speed(&self, mouse_y: u16) -> f64 {
+        let Some((_sx, sy, _sx2, sy2)) = self.session_area else {
+            return 0.0;
+        };
+        let relative_y = mouse_y.saturating_sub(sy);
+        let height = sy2.saturating_sub(sy);
+
+        let dist_to_top = relative_y;
+        let dist_to_bottom = height.saturating_sub(relative_y);
+        let min_distance = dist_to_top.min(dist_to_bottom);
+
+        if min_distance <= 1 {
+            self.auto_scroll_speed_fast
+        } else if min_distance <= 2 {
+            self.auto_scroll_speed_medium
+        } else {
+            self.auto_scroll_speed_slow
+        }
+    }
+
+    /// Called during mouse drag to update or start auto-scroll based on mouse position.
+    pub fn update_auto_scroll(&mut self, mouse_x: u16, mouse_y: u16) {
+        // Only auto-scroll if we're within the session area horizontally.
+        let Some((sx, _sy, sx2, _sy2)) = self.session_area else {
+            self.stop_auto_scroll();
+            return;
+        };
+        if mouse_x < sx || mouse_x >= sx2 {
+            self.stop_auto_scroll();
+            return;
+        }
+
+        self.auto_scroll_speed = self.get_auto_scroll_speed(mouse_y);
+        let dir = self.get_auto_scroll_direction(mouse_y);
+        if dir == 0 {
+            self.stop_auto_scroll();
+        } else if !self.is_auto_scrolling {
+            self.is_auto_scrolling = true;
+            self.auto_scroll_accumulator = 0.0;
+        }
+    }
+
+    /// Called every frame to apply accumulated auto-scroll.
+    fn handle_auto_scroll(&mut self, delta_time: f64, total_height: i32, visible_height: i32) {
+        if !self.is_auto_scrolling {
+            return;
+        }
+
+        let scroll_amount = self.auto_scroll_speed * delta_time;
+        self.auto_scroll_accumulator += scroll_amount;
+
+        while self.auto_scroll_accumulator >= 1.0 {
+            self.auto_scroll_accumulator -= 1.0;
+            // Re-check direction each step in case the mouse has moved.
+            // We use the last stored drag_selection focus point.
+            let dir = if let Some((_ax, _ay, _fx, fy)) = self.drag_selection {
+                self.get_auto_scroll_direction(fy)
+            } else {
+                0
+            };
+            if dir == 0 {
+                self.stop_auto_scroll();
+                return;
+            }
+
+            let new_scroll = self.scroll_y + dir;
+            let max_scroll = (total_height - visible_height).max(0);
+            if new_scroll < 0 || new_scroll > max_scroll {
+                self.stop_auto_scroll();
+                return;
+            }
+            self.scroll_y = new_scroll;
+        }
+    }
+
+    /// Stop auto-scroll and reset state.
+    pub fn stop_auto_scroll(&mut self) {
+        if self.is_auto_scrolling {
+            self.is_auto_scrolling = false;
+            self.auto_scroll_accumulator = 0.0;
+            self.auto_scroll_speed = 0.0;
+        }
     }
 }

@@ -103,6 +103,12 @@ pub struct App {
     /// so the renderer can apply flow-based selection highlighting (top line from `start_x`
     /// to end, bottom line from start to `end_x`, middle lines fully highlighted).
     drag_selection: Option<(u16, u16, u16, u16)>,
+
+    // ── Auto-scroll on selection drag ─────────────────────────────────────────────
+    /// When true, the render loop keeps running even without input events.
+    live_requested: bool,
+    /// Timestamp of the previous frame (for delta_time calculation).
+    last_frame_time: std::time::Instant,
 }
 
 impl App {
@@ -162,6 +168,8 @@ impl App {
             mouse_down_pos: None,
             mouse_drag_active: false,
             drag_selection: None,
+            live_requested: false,
+            last_frame_time: std::time::Instant::now(),
         }
     }
 
@@ -792,11 +800,23 @@ impl App {
         let mut terminal = init_terminal()?;
 
         while !self.should_quit {
+            let now = std::time::Instant::now();
+            let delta = now.duration_since(self.last_frame_time);
+            self.last_frame_time = now;
+            let delta_secs = delta.as_secs_f64();
+
             terminal.draw(|frame| {
-                self.render(frame);
+                self.render(frame, delta_secs);
             })?;
 
-            if self.handle_events()? {
+            if self.live_requested {
+                // When auto-scroll is active, don't block on event::poll.
+                if event::poll(Duration::from_millis(8))? {
+                    if self.handle_events()? {
+                        break;
+                    }
+                }
+            } else if self.handle_events()? {
                 break;
             }
 
@@ -808,7 +828,13 @@ impl App {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn render(&mut self, frame: &mut Frame<'_>) {
+    fn render(&mut self, frame: &mut Frame<'_>, delta_time: f64) {
+        // Sync live_requested from session_view auto-scroll state.
+        if self.session_view.is_auto_scrolling {
+            self.live_requested = true;
+        } else {
+            self.live_requested = false;
+        }
         let area = frame.area();
 
         {
@@ -959,6 +985,7 @@ impl App {
                         &self.state,
                         &self.theme,
                         &self.config,
+                        delta_time,
                     );
                     // Question dialog rendered inline between messages and prompt (like OpenCode)
                     if self.question_dialog.visible {
@@ -2113,10 +2140,17 @@ impl App {
                         self.prompt_view.cursor_pos = pos;
                         self.prompt_view.sel_end = Some(pos);
                     }
+
+                    // Update auto-scroll on selection drag in the session view.
+                    if matches!(self.mode(), AppMode::Session) {
+                        self.session_view.update_auto_scroll(x, y);
+                    }
                 }
                 return Ok(true);
             }
             (MouseEventType::Up, MouseButton::Left) => {
+                // Stop auto-scroll on any mouse up.
+                self.session_view.stop_auto_scroll();
                 let _rect = self.drag_selection.take();
                 let drag_start = self.mouse_down_pos.take();
                 let is_drag =
@@ -2197,6 +2231,11 @@ impl App {
                 }
             }
             _ => {}
+        }
+
+        // Auto-scroll stops on any mouse action (up, scroll, etc.) outside of drag.
+        if event_type != MouseEventType::Drag {
+            self.session_view.stop_auto_scroll();
         }
 
         // ── Mouse wheel scrolling ───────────────────────────────────────────
