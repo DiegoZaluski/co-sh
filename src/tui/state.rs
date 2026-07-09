@@ -88,6 +88,7 @@ impl AppState {
         let session = Session {
             id: "demo-1".to_string(),
             title: "Demo Session".to_string(),
+            created_at: 1000,
             messages: vec![
                 Message {
                     id: "msg-1".to_string(),

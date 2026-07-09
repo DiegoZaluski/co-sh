@@ -31,6 +31,9 @@ use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::sidebar::SidebarView;
 use crate::routes::tools::InternalToolsView;
+use crate::session_store::{
+    SessionStore, format_session_timestamp, generate_session_id, is_valid_session,
+};
 use crate::state::AppState;
 use crate::theme::{Theme, ThemeRegistry};
 use crate::types::SessionStatus;
@@ -93,6 +96,8 @@ pub struct App {
     model_cache: crate::util::cache::StaleCache<String, Vec<cosh::ModelEntry>>,
     /// Generic preferences cache (theme, etc.) persisted as key-value pairs.
     prefs_cache: crate::util::cache::StaleCache<String, String>,
+    /// Session persistence store (JSONL files on disk).
+    session_store: SessionStore,
 
     // ── Mouse drag / selection tracking ───────────────────────────────────────────
     /// Position where the mouse was pressed down (for detecting drag selections).
@@ -116,6 +121,14 @@ impl App {
         let mut state = AppState::new();
         state.working_directory = cwd;
 
+        // Load persisted sessions from disk
+        let session_store = SessionStore::new();
+        for summary in session_store.list_sessions() {
+            if let Some(session) = session_store.load_session(&summary.session_id) {
+                state.add_session(session);
+            }
+        }
+
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
 
@@ -123,9 +136,7 @@ impl App {
         let prefs_cache = crate::util::cache::StaleCache::new("preferences.json");
 
         // Load saved theme from preferences cache, if available
-        let saved_theme: Option<String> = prefs_cache
-            .get(&"theme".to_string())
-            .cloned();
+        let saved_theme: Option<String> = prefs_cache.get(&"theme".to_string()).cloned();
         let theme = saved_theme
             .as_deref()
             .and_then(|name| theme_registry.get(name))
@@ -156,6 +167,7 @@ impl App {
             model_dialog_original: None,
             model_cache: crate::util::cache::StaleCache::new("model.json"),
             prefs_cache,
+            session_store,
             should_quit: false,
             tokio_handle: Handle::current(),
             event_tx,
@@ -300,8 +312,8 @@ impl App {
 
     /// Group models by provider and update the cache for each provider.
     fn update_model_cache(&mut self, models: &[cosh::ModelEntry]) {
-        use std::collections::HashMap;
         use cosh::ModelEntry;
+        use std::collections::HashMap;
 
         // Group by provider
         let mut grouped: HashMap<&str, Vec<ModelEntry>> = HashMap::new();
@@ -952,10 +964,8 @@ impl App {
                 }
                 AppMode::AddProvider => {
                     self.prompt_view.blur();
-                    self.add_provider_view
-                        .search_bar
-                        .cursor
-                        .terminal_focused = self.terminal_focused;
+                    self.add_provider_view.search_bar.cursor.terminal_focused =
+                        self.terminal_focused;
                     let tools_area = Rect::new(
                         session_area.x,
                         session_area.y,
@@ -1026,8 +1036,7 @@ impl App {
             if let Some(d) = self.dialog.current_mut() {
                 d.cursor.terminal_focused = self.terminal_focused;
             }
-            self.dialog
-                .render(buf, area, &self.theme, now);
+            self.dialog.render(buf, area, &self.theme, now);
             self.permission_dialog.render(buf, area, &self.theme);
             self.command_palette.render(buf, area, &self.theme);
             self.slash_menu.render(buf, prompt_area, &self.theme);
@@ -1157,9 +1166,17 @@ impl App {
                             KeyCode::Enter => {
                                 match self.home_view.selected_action() {
                                     HomeAction::NewSession => {
+                                        let now_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis()
+                                            as u64;
+                                        let id = format!("{now_ms}");
+                                        let title = format_session_timestamp(now_ms);
                                         self.state.add_session(crate::types::Session {
-                                            id: format!("session-{}", self.state.sessions.len()),
-                                            title: "New Session".to_string(),
+                                            id,
+                                            title,
+                                            created_at: now_ms,
                                             messages: vec![],
                                         });
                                         self.state.current_session_id =
@@ -1369,11 +1386,16 @@ impl App {
                             }
 
                             if self.state.current_session_id.is_none() {
-                                let id = format!("session-{}", self.state.sessions.len());
+                                let id = generate_session_id();
                                 let title: String = msg.chars().take(40).collect();
                                 self.state.add_session(crate::types::Session {
                                     id: id.clone(),
                                     title,
+                                    created_at: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis()
+                                        as u64,
                                     messages: vec![],
                                 });
                                 self.state.current_session_id = Some(id);
@@ -1766,8 +1788,10 @@ impl App {
                                                 // Use floor_char_boundary to safely handle multi-byte chars
                                                 // (e.g. á, é, emoji). remove() panics if called at a
                                                 // non-char-boundary position.
-                                                let char_start =
-                                                    self.prompt_view.input.floor_char_boundary(pos - 1);
+                                                let char_start = self
+                                                    .prompt_view
+                                                    .input
+                                                    .floor_char_boundary(pos - 1);
                                                 self.prompt_view.input.remove(char_start);
                                                 self.prompt_view.cursor_pos = char_start;
                                             }
@@ -1984,6 +2008,13 @@ impl App {
                 HarnessEvent::Done => {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
+
+                    // Persist session to disk if it has valid dialog
+                    if let Some(session) = self.state.current_session()
+                        && is_valid_session(session)
+                    {
+                        self.session_store.save_session(session);
+                    }
                 }
 
                 HarnessEvent::Stopped => {
@@ -1995,6 +2026,13 @@ impl App {
                         variant: ToastVariant::Warning,
                         duration_ms: 3000,
                     });
+
+                    // Persist session to disk even when stopped (partial dialog is still valuable)
+                    if let Some(session) = self.state.current_session()
+                        && is_valid_session(session)
+                    {
+                        self.session_store.save_session(session);
+                    }
                 }
 
                 HarnessEvent::Error(msg) => {
@@ -2561,9 +2599,15 @@ impl App {
             if let Some(action) = self.home_view.handle_mouse(&mouse, session_area) {
                 match action {
                     crate::routes::home::HomeAction::NewSession => {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let title = format_session_timestamp(now_ms);
                         self.state.add_session(crate::types::Session {
-                            id: format!("session-{}", self.state.sessions.len()),
-                            title: "New Session".to_string(),
+                            id: format!("{now_ms}"),
+                            title,
+                            created_at: now_ms,
                             messages: vec![],
                         });
                         self.state.current_session_id =

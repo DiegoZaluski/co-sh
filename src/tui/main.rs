@@ -6,6 +6,7 @@ mod component;
 mod config;
 mod keymap;
 mod routes;
+mod session_store;
 mod state;
 mod theme;
 mod types;

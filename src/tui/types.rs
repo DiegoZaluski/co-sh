@@ -1,15 +1,19 @@
+use serde::{Deserialize, Serialize};
+
 use cosh_tui::core::lib::rgba::RGBA;
 
 use crate::theme::Theme;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
     pub title: String,
     pub messages: Vec<Message>,
+    /// Unix timestamp in milliseconds when the session was created.
+    pub created_at: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: String,
     pub role: MessageRole,
@@ -19,13 +23,14 @@ pub struct Message {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MessageRole {
     User,
     Assistant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum Part {
     Text(TextPart),
     Tool(ToolPart),
@@ -33,13 +38,13 @@ pub enum Part {
     File(FilePart),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextPart {
     pub text: String,
     pub synthetic: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolPart {
     pub tool: String,
     pub input: serde_json::Value,
@@ -50,20 +55,20 @@ pub struct ToolPart {
     pub is_streaming: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ToolStatus {
     Running,
     Completed,
     Failed(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReasoningPart {
     pub text: String,
     pub collapsed: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilePart {
     pub filename: String,
     pub mime: String,
