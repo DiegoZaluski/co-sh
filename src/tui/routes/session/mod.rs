@@ -392,29 +392,6 @@ impl SessionView {
         draw_text_line(buf, &format!(" [{ts_str}]"), x, y, 12, ts_style);
     }
 
-    fn estimate_message_height(
-        msg: &Message,
-        max_w: u16,
-        config: &TuiConfig,
-        is_last: bool,
-    ) -> i32 {
-        let border_h: i32 = match msg.role {
-            MessageRole::User => 1,
-            MessageRole::Assistant => 0,
-        };
-        let parts_h: i32 = msg
-            .parts
-            .iter()
-            .map(|p| i32::from(Self::estimate_part_height(p, max_w, config)))
-            .sum();
-        let extra_h = if is_last && msg.role == MessageRole::Assistant {
-            2
-        } else {
-            0
-        };
-        border_h + parts_h + extra_h
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn render_user_message(
         buf: &mut Buffer,
@@ -442,7 +419,8 @@ impl SessionView {
         let x_off = area.x + 3;
         let max_w = area.width.saturating_sub(6);
         let border_line = 1u16;
-        let inner_h = area.height.saturating_sub(border_line);
+        let padding_bottom = 1u16;
+        let inner_h = area.height.saturating_sub(border_line).saturating_sub(padding_bottom);
 
         if is_compacted {
             Self::render_compaction_banner(buf, x_off, area.y + 1, max_w, theme);
@@ -483,9 +461,6 @@ impl SessionView {
         area: Rect,
         msg: &Message,
         theme: &Theme,
-        agent_colors: &AgentColors,
-        is_last: bool,
-        unique_agents: &[String],
         tool_state: &ToolRenderState,
         config: &TuiConfig,
         is_queued: bool,
@@ -578,33 +553,6 @@ impl SessionView {
         if config.show_timestamps {
             Self::render_timestamp(buf, x_off, area.y, msg.created_at, theme);
         }
-
-        if is_last && !is_error {
-            let parts_end = inner_y + net_h;
-            let meta_y = parts_end;
-            if meta_y < area.bottom() {
-                let model_name = msg.model.as_deref().unwrap_or("assistant");
-                let agent = msg.agent.as_deref().unwrap_or("default");
-                let agent_color = agent_colors.get(agent, unique_agents);
-
-                let muted_style = Style::default().fg(rgba_color(theme.text_muted));
-                let icon_style = Style::default().fg(rgba_color(agent_color));
-
-                if let Some(cell) = buf.cell_mut((x_off, meta_y)) {
-                    cell.set_char('\u{25a3}');
-                    cell.set_style(icon_style);
-                }
-                let rest = format!(" chat \u{b7} {model_name}");
-                draw_text_line(
-                    buf,
-                    &rest,
-                    x_off + 1,
-                    meta_y,
-                    max_w.saturating_sub(1),
-                    muted_style,
-                );
-            }
-        }
     }
 
     #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
@@ -639,10 +587,9 @@ impl SessionView {
                 y += 1;
             }
 
-            let is_last = idx == session.messages.len() - 1;
-            let msg_h = Self::render_message_height(msg, max_w, config, is_last);
+            let msg_h = Self::render_message_height(msg, max_w, config);
 
-            let msg_y = y.max(i32::from(inner_area.y) - 1) as u16;
+            let msg_y = y as u16;
 
             if click_y >= msg_y && msg_y < visible_bottom {
                 let border_offset: i32 = match msg.role {
@@ -709,9 +656,12 @@ impl SessionView {
         msg: &Message,
         max_w: u16,
         config: &TuiConfig,
-        is_last: bool,
     ) -> i32 {
         let border_h: i32 = match msg.role {
+            MessageRole::User => 1,
+            MessageRole::Assistant => 0,
+        };
+        let padding_bottom: i32 = match msg.role {
             MessageRole::User => 1,
             MessageRole::Assistant => 0,
         };
@@ -720,12 +670,7 @@ impl SessionView {
             .iter()
             .map(|p| i32::from(Self::estimate_part_height(p, max_w, config)))
             .sum();
-        let extra_h = if is_last && msg.role == MessageRole::Assistant {
-            2
-        } else {
-            0
-        };
-        border_h + parts_h + extra_h
+        border_h + parts_h + padding_bottom
     }
 
     #[allow(clippy::too_many_lines, clippy::cast_sign_loss)]
@@ -748,10 +693,9 @@ impl SessionView {
                 y += 1;
             }
 
-            let is_last = idx == session.messages.len() - 1;
-            let msg_h = Self::render_message_height(msg, max_w, config, is_last);
+            let msg_h = Self::render_message_height(msg, max_w, config);
 
-            let msg_y = y.max(i32::from(inner_area.y) - 1) as u16;
+            let msg_y = y as u16;
             let visible_bottom = inner_area.bottom();
 
             if msg_y < visible_bottom {
@@ -990,8 +934,7 @@ impl SessionView {
         let mut total_height: i32 = 0;
         for (idx, msg) in session.messages.iter().enumerate() {
             let gap = i32::from(idx > 0);
-            let is_last = idx == session.messages.len() - 1;
-            let msg_h = Self::render_message_height(msg, max_w, config, is_last);
+            let msg_h = Self::render_message_height(msg, max_w, config);
             total_height += gap + msg_h;
         }
 
@@ -1024,18 +967,16 @@ impl SessionView {
                 y += 1;
             }
 
-            let is_last = idx == session.messages.len() - 1;
-            let msg_h = Self::render_message_height(msg, max_w, config, is_last);
+            let msg_h = Self::render_message_height(msg, max_w, config);
 
-            let msg_y = y.max(i32::from(inner_area.y) - 1) as u16;
-            let visible_bottom = inner_area.bottom();
-
-            if msg_y < visible_bottom {
+            let msg_y = y as u16;
+            if msg_y < inner_area.bottom() {
+                let h_avail = inner_area.bottom() - msg_y;
                 let msg_area = Rect::new(
                     inner_area.x,
                     msg_y,
                     inner_area.width,
-                    msg_h.min(i32::from(visible_bottom - msg_y)) as u16,
+                    msg_h.min(i32::from(h_avail)) as u16,
                 );
 
                 match msg.role {
@@ -1060,9 +1001,6 @@ impl SessionView {
                             msg_area,
                             msg,
                             theme,
-                            &agent_colors,
-                            is_last,
-                            &unique_agents,
                             &self.tool_state,
                             config,
                             false,

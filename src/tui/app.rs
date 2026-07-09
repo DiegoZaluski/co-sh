@@ -2195,7 +2195,7 @@ impl App {
                         let prompt_area_y = footer_y.saturating_sub(prompt_h);
                         let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
                         let question_area_y = spinner_area_y.saturating_sub(question_h);
-                        let session_bottom = question_area_y;
+                        let session_bottom = question_area_y.saturating_sub(1);
                         let session_area = Rect::new(
                             main_area.x,
                             area.y + 1,
