@@ -663,37 +663,27 @@ impl App {
 
         match key {
             KeyCode::Up => {
-                // Get the models from the dialog
+                // Build flat entries in the same grouped-by-provider order as the render
                 if let Some(d) = self.dialog.current()
                     && let DialogType::ModelList { models, filter, .. } = &d.dialog_type
                 {
-                    // Build filtered indices
-                    let filtered_indices: Vec<usize> = if filter.is_empty() {
-                        (0..models.len()).collect()
-                    } else {
-                        let lower = filter.to_lowercase();
-                        models
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, m)| m.model.to_lowercase().contains(&lower))
-                            .map(|(i, _)| i)
-                            .collect()
-                    };
-
-                    if !filtered_indices.is_empty()
-                        && let Some(d_mut) = self.dialog.current_mut()
-                    {
-                        let current_pos =
-                            filtered_indices.iter().position(|&i| i == d_mut.selected);
-                        if let Some(current_idx) = current_pos {
-                            d_mut.selected = if current_idx == 0 {
-                                *filtered_indices.last().unwrap()
-                            } else {
-                                filtered_indices[current_idx - 1]
-                            };
+                    let new_selected = {
+                        let flat_entries = Self::model_dialog_flat_entries(models, filter);
+                        if flat_entries.is_empty() {
+                            None
                         } else {
-                            // If current selection is not in filtered list, select first
-                            d_mut.selected = filtered_indices[0];
+                            let old = d.selected;
+                            let next = if old == 0 || old >= flat_entries.len() {
+                                flat_entries.len() - 1
+                            } else {
+                                old - 1
+                            };
+                            Some(next)
+                        }
+                    };
+                    if let Some(ns) = new_selected {
+                        if let Some(d_mut) = self.dialog.current_mut() {
+                            d_mut.selected = ns;
                         }
                     }
                 }
@@ -703,33 +693,25 @@ impl App {
                 if let Some(d) = self.dialog.current()
                     && let DialogType::ModelList { models, filter, .. } = &d.dialog_type
                 {
-                    // Build filtered indices
-                    let filtered_indices: Vec<usize> = if filter.is_empty() {
-                        (0..models.len()).collect()
-                    } else {
-                        let lower = filter.to_lowercase();
-                        models
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, m)| m.model.to_lowercase().contains(&lower))
-                            .map(|(i, _)| i)
-                            .collect()
-                    };
-
-                    if !filtered_indices.is_empty()
-                        && let Some(d_mut) = self.dialog.current_mut()
-                    {
-                        let current_pos =
-                            filtered_indices.iter().position(|&i| i == d_mut.selected);
-                        if let Some(current_idx) = current_pos {
-                            if current_idx + 1 < filtered_indices.len() {
-                                d_mut.selected = filtered_indices[current_idx + 1];
-                            } else {
-                                d_mut.selected = filtered_indices[0];
-                            }
+                    // Compute new selection in a separate scope so the borrow drops
+                    // before calling current_mut().
+                    let new_selected = {
+                        let flat_entries = Self::model_dialog_flat_entries(models, filter);
+                        if flat_entries.is_empty() {
+                            None
                         } else {
-                            // If current selection is not in filtered list, select first
-                            d_mut.selected = filtered_indices[0];
+                            let old = d.selected;
+                            let next = if old + 1 >= flat_entries.len() {
+                                0
+                            } else {
+                                old + 1
+                            };
+                            Some(next)
+                        }
+                    };
+                    if let Some(ns) = new_selected {
+                        if let Some(d_mut) = self.dialog.current_mut() {
+                            d_mut.selected = ns;
                         }
                     }
                 }
@@ -737,13 +719,25 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(d) = self.dialog.current()
-                    && let DialogType::ModelList { models, .. } = &d.dialog_type
+                    && let DialogType::ModelList { models, filter, .. } = &d.dialog_type
                     && !models.is_empty()
                 {
-                    let selected_idx = d.selected.min(models.len().saturating_sub(1));
-                    let selected_entry = &models[selected_idx];
-                    self.llm_config.model = Some(selected_entry.model.clone());
-                    self.llm_config.provider = selected_entry.provider.clone();
+                    // Extract model info in a separate scope so the borrow on self.dialog
+                    // drops before we modify self.llm_config.
+                    let selection = {
+                        let flat_entries = Self::model_dialog_flat_entries(models, filter);
+                        if !flat_entries.is_empty() {
+                            let selected_idx = d.selected.min(flat_entries.len().saturating_sub(1));
+                            let entry = flat_entries[selected_idx];
+                            Some((entry.model.clone(), entry.provider.clone()))
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some((model, provider)) = selection {
+                        self.llm_config.model = Some(model);
+                        self.llm_config.provider = provider;
+                    }
                 }
                 self.model_dialog_original = None;
                 self.dialog.pop();
@@ -794,6 +788,28 @@ impl App {
             d.selected = 0;
             d.cursor.note_activity();
         }
+    }
+
+
+    /// Compute the flat list of models in the same grouped-by-provider order
+    /// used by the dialog render, so navigation and rendering stay in sync.
+    fn model_dialog_flat_entries<'a>(
+        models: &'a [cosh::ModelEntry],
+        filter: &str,
+    ) -> Vec<&'a cosh::ModelEntry> {
+        use std::collections::BTreeMap;
+        let mut grouped: BTreeMap<String, Vec<&'a cosh::ModelEntry>> = BTreeMap::new();
+        for entry in models {
+            if filter.is_empty()
+                || entry.model.to_lowercase().contains(&filter.to_lowercase())
+            {
+                grouped
+                    .entry(entry.provider.clone())
+                    .or_default()
+                    .push(entry);
+            }
+        }
+        grouped.values().flatten().copied().collect()
     }
 
     fn mode(&self) -> AppMode {
