@@ -2788,45 +2788,22 @@ fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
-/// Save a provider API key to the user's shell profile for persistence.
-/// Delegates security to the OS by writing to the shell config file.
+/// Save a provider API key to `.env` in the project root (CWD).
+///
+/// NOTE: This is a temporary development-only mechanism. It will be replaced
+/// by the `keyring` crate for proper system keychain integration in the future.
 fn save_provider_api_key(provider: &str, env_var: &str, api_key: &str) {
-    // Determine shell config file from $SHELL environment variable
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let config_file: Option<std::path::PathBuf> = if shell.ends_with("zsh") {
-        std::env::var("ZDOTDIR").ok().map_or_else(
-            || {
-                Some(
-                    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                        .join(".zshrc"),
-                )
-            },
-            |zd| Some(std::path::PathBuf::from(zd).join(".zshrc")),
-        )
-    } else if shell.ends_with("bash") {
-        Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".bashrc"))
-    } else if shell.ends_with("fish") {
-        Some(
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join(".config/fish/config.fish"),
-        )
+    let path = std::path::PathBuf::from(".env");
+    let export_line = format!("export {env_var}=\"{api_key}\"\n");
+    let comment_line = format!("# cosh: {provider} API key\n");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = write!(file, "\n{comment_line}{export_line}");
     } else {
-        // Fallback to .profile
-        Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".profile"))
-    };
-
-    if let Some(path) = config_file {
-        let export_line = format!("export {env_var}=\"{api_key}\"\n");
-        let comment_line = format!("# cosh: {provider} API key\n");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            use std::io::Write;
-            let _ = write!(file, "\n{comment_line}{export_line}");
-        } else {
-            // Silently fail - env var is still set for the current process
-        }
+        // Silently fail - env var is still set for the current process
     }
 }
