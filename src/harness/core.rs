@@ -57,6 +57,9 @@ pub const INSTRUCTIONS_ASK: &str = concat!(
 /// Default token budget for the context window.
 const MAX_TOKENS: usize = 10_000;
 
+/// Maximum consecutive tool-call failures before aborting the agent loop.
+const MAX_TOOL_RETRIES: usize = 3;
+
 pub struct PromptSystem {
     pub title: String,
     pub text: String,
@@ -102,6 +105,15 @@ pub struct Harness {
     /// These are excluded from both the prompt header and the extractor.
     disabled_tools: HashSet<String>,
 
+    /// How many consecutive tool calls have failed so far.
+    /// Reset to 0 on the first successful dispatch.
+    tool_failure_count: usize,
+
+    /// Correction prompt from the last tool failure, injected into the LLM
+    /// context *after* the context window so it never pollutes the sliding
+    /// window with repetitive data.
+    correction_prompt: Option<String>,
+
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
     #[cfg(test)]
@@ -128,6 +140,8 @@ impl Harness {
             server_response: Vec::new(),
             context_window: ContextWindow::new(MAX_TOKENS),
             disabled_tools,
+            tool_failure_count: 0,
+            correction_prompt: None,
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
@@ -376,6 +390,9 @@ impl Harness {
             self.server_response.clear();
         }
         out.push_str(&self.context_window.format_context());
+        if let Some(ref prompt) = self.correction_prompt {
+            let _ = write!(out, "\n{prompt}");
+        }
         out
     }
 
@@ -607,6 +624,10 @@ impl Harness {
                 result.is_ok()
             );
 
+            // Correction prompt was consumed by the LLM — clear it so it
+            // doesn't accumulate across iterations.
+            self.correction_prompt = None;
+
             if let Err(e) = result {
                 log::debug!("run_agent_loop PHASE1_ERR={e}");
                 let _ = tx.send(HarnessEvent::Error(e));
@@ -694,12 +715,31 @@ impl Harness {
                     log::debug!("run_agent_loop dispatch_next start");
                     match self.dispatch_next().await {
                         Ok(output) => {
+                            self.tool_failure_count = 0;
                             log::debug!("run_agent_loop dispatch_next OK len={}", output.len());
                             let _ = tx.send(HarnessEvent::ToolResult { output });
                         }
                         Err(e) => {
-                            log::debug!("run_agent_loop dispatch_next ERR={e}");
+                            self.tool_failure_count += 1;
+                            self.correction_prompt = Some(format!(
+                                "## Correction\n\nTool `{}` failed:\n{}\n",
+                                info.as_ref().map_or("?", |(n, _)| n),
+                                e,
+                            ));
+                            log::debug!(
+                                "run_agent_loop dispatch_next ERR={e} (failure #{}/{MAX_TOOL_RETRIES})",
+                                self.tool_failure_count,
+                            );
                             let _ = tx.send(HarnessEvent::ToolError { error: e });
+                            if self.tool_failure_count >= MAX_TOOL_RETRIES {
+                                let msg = format!(
+                                    "{MAX_TOOL_RETRIES} consecutive tool call failures. \
+                                     Agent loop interrupted."
+                                );
+                                let _ = tx.send(HarnessEvent::Error(msg));
+                                self.stop = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -826,6 +866,8 @@ impl Harness {
             tool_issuer: VecDeque::new(),
             context_window: ContextWindow::new(MAX_TOKENS),
             disabled_tools: HashSet::new(),
+            tool_failure_count: 0,
+            correction_prompt: None,
             mock_chat_response: None,
             mock_stream_response: None,
             test_tools: Vec::new(),
