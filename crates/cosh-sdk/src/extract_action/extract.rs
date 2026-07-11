@@ -511,6 +511,11 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
 }
 
 fn validate_against_schema(value: &JsonValue, schema: &JsonValue) -> bool {
+    // Handle oneOf: value must match at least one sub-schema
+    if let Some(one_of) = schema.get("oneOf").and_then(|o| o.as_array()) {
+        return one_of.iter().any(|sub| validate_against_schema(value, sub));
+    }
+
     let JsonValue::Object(obj) = value else {
         return schema.get("type").is_none_or(|t| t == "null");
     };
@@ -534,11 +539,23 @@ fn validate_against_schema(value: &JsonValue, schema: &JsonValue) -> bool {
 
     if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
         for (field_name, field_schema) in properties {
-            if let Some(field_value) = obj.get(field_name)
-                && let Some(expected_type) = field_schema.get("type").and_then(|t| t.as_str())
-                && !value_type_matches(field_value, expected_type)
-            {
-                return false;
+            if let Some(field_value) = obj.get(field_name) {
+                if field_schema.get("oneOf").is_some() {
+                    if !validate_against_schema(field_value, field_schema) {
+                        return false;
+                    }
+                } else {
+                    if let Some(const_val) = field_schema.get("const") {
+                        if field_value != const_val {
+                            return false;
+                        }
+                    }
+                    if let Some(expected_type) = field_schema.get("type").and_then(|t| t.as_str())
+                        && !value_type_matches(field_value, expected_type)
+                    {
+                        return false;
+                    }
+                }
             }
         }
     }

@@ -235,17 +235,18 @@ const TOOL_DISPLAYS: &[&str] = &[
     "edit",
     "task",
     "apply_patch",
-    "todowrite",
     "question",
     "skill",
 ];
 
 pub fn tool_display(tool: &str) -> &str {
     if TOOL_DISPLAYS.contains(&tool) {
-        tool
-    } else {
-        "generic"
+        return tool;
     }
+    if tool.starts_with("plan_") {
+        return "todo";
+    }
+    "generic"
 }
 
 pub fn web_search_provider_label(provider: Option<&str>) -> &str {
@@ -765,6 +766,142 @@ pub fn render_question_tool(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn render_todo(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    line_h: &mut u16,
+    max_w: u16,
+    part: &ToolPart,
+    _state: &ToolRenderState,
+    theme: &Theme,
+) {
+    let tool_name: &str = &part.tool;
+    let output = part.output.as_deref().unwrap_or("").trim().to_string();
+    let is_running = matches!(part.status, ToolStatus::Running);
+
+    if is_running || output.is_empty() {
+        let icon = "\u{2630}";
+        let label = format!("Writing {tool_name}...");
+        let fg = theme.text;
+        *line_h = 1;
+        render_inline_tool(
+            buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
+        );
+        return;
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(match tool_name {
+        "plan_todo_write" => "\u{270F} TODO Write",
+        "plan_todo_edit" => "\u{270F} TODO Edit",
+        "plan_todo_cross_off" => "\u{2713} TODO Cross Off",
+        "plan_todo_read" => "\u{2630} TODO Read",
+        "plan_load_from_md" => "\u{1F4C2} TODO Load",
+        _ => "\u{2630} TODO",
+    }
+    .to_string());
+
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&output) {
+        let groups = json
+            .get("list")
+            .and_then(|l| l.get("groups"))
+            .or_else(|| json.get("groups"))
+            .and_then(|g| g.as_array());
+
+        if let Some(groups) = groups {
+            for group in groups {
+                let title = group
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Untitled");
+                lines.push(format!("  {title}:"));
+                if let Some(items) = group.get("items").and_then(|i| i.as_array()) {
+                    for item in items {
+                        let id = item.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+                        let desc = item
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("");
+                        let status = item
+                            .get("status")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("?");
+                        let icon = match status {
+                            "Completed" => "\u{2713}",
+                            "InProgress" => "\u{25CF}",
+                            "Cancelled" => "\u{2717}",
+                            _ => "\u{25CB}",
+                        };
+                        lines.push(format!("    {icon} {desc}  ({id})"));
+                    }
+                }
+            }
+        }
+
+        if let Some(nags) = json.get("nags").and_then(|n| n.as_array()) {
+            for nag in nags {
+                if let Some(msg) = nag.get("message").and_then(|m| m.as_str()) {
+                    lines.push(format!("  \u{26A0} {msg}"));
+                }
+            }
+        }
+
+        if groups.is_none() && json.get("nags").and_then(|n| n.as_array()).map_or(true, |n| n.is_empty())
+        {
+            lines.push("  (empty)".to_string());
+        }
+    } else {
+        for line in output.lines() {
+            lines.push(line.to_string());
+        }
+    }
+
+    let display = lines.join("\n");
+    let line_count = display.lines().count() as u16;
+    let area = Rect::new(x, y, max_w.saturating_add(3), line_count.saturating_add(2));
+    *line_h = area.height;
+
+    let mut border_box = BoxRenderable::new();
+    border_box.set_background_color(Some(theme.background_panel.into()));
+    border_box.set_border_color(Some(theme.background.into()));
+    border_box.set_border_sides(BorderSidesConfig {
+        left: true,
+        top: false,
+        right: false,
+        bottom: false,
+    });
+    border_box.set_custom_border_chars(BorderCharacters {
+        top_left: ' ',
+        top_right: ' ',
+        bottom_left: ' ',
+        bottom_right: ' ',
+        horizontal: ' ',
+        vertical: '\u{2503}',
+        top_t: ' ',
+        bottom_t: ' ',
+        left_t: '\u{2503}',
+        right_t: ' ',
+        cross: ' ',
+    });
+    border_box.render_self(buf, area);
+
+    let title_style = Style::default().fg(rgba_color(theme.text_muted));
+    let title = &lines[0];
+    draw_text_line(buf, title, x + 3, y, max_w.saturating_sub(3), title_style);
+
+    let content_style = Style::default().fg(rgba_color(theme.text));
+    for (i, line) in display.lines().enumerate().skip(1) {
+        let ly = y + 1 + i as u16;
+        if ly >= area.bottom() {
+            break;
+        }
+        draw_text_line(buf, line, x + 3, ly, max_w.saturating_sub(3), content_style);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn render_generic(
     buf: &mut Buffer,
     x: u16,
@@ -818,6 +955,7 @@ pub fn dispatch_tool(
         "edit" => render_edit(buf, x, y, line_h, max_w, part, state, theme),
         "task" => render_task(buf, x, y, line_h, max_w, part, state, theme),
         "question" => render_question_tool(buf, x, y, line_h, max_w, part, state, theme),
+        "todo" => render_todo(buf, x, y, line_h, max_w, part, state, theme),
         _ => render_generic(buf, x, y, line_h, max_w, part, state, theme),
     }
 }
