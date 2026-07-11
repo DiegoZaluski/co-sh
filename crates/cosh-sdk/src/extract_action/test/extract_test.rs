@@ -33,7 +33,7 @@ fn make_extractor() -> ExtractAction {
 
 #[test]
 fn batch_no_tool_call() {
-    let ex = make_extractor();
+    let mut ex = make_extractor();
     let result = ex.extract_batch("Hello world");
     assert_eq!(result.items.len(), 1);
     match &result.items[0] {
@@ -44,7 +44,7 @@ fn batch_no_tool_call() {
 
 #[test]
 fn batch_simple_tool_call() {
-    let ex = make_extractor();
+    let mut ex = make_extractor();
     let text = r#"I will call {"name": "expand_namespace", "arguments": {"server": "prod", "namespace": "acme"}}"#;
     let result = ex.extract_batch(text);
     assert_eq!(result.items.len(), 2);
@@ -66,7 +66,7 @@ fn batch_simple_tool_call() {
 
 #[test]
 fn batch_multiple_tool_calls() {
-    let ex = make_extractor();
+    let mut ex = make_extractor();
     let text = r#"first {"name": "fs.read", "arguments": {"path": "/a"}} second {"name": "expand_namespace", "arguments": {"server": "s", "namespace": "n"}} third"#;
     let result = ex.extract_batch(text);
     assert_eq!(result.items.len(), 5);
@@ -94,7 +94,7 @@ fn batch_multiple_tool_calls() {
 
 #[test]
 fn batch_text_before_and_after() {
-    let ex = make_extractor();
+    let mut ex = make_extractor();
     let text = r#"prefix {"name": "fs.read", "arguments": {"path": "/x"}} suffix"#;
     let result = ex.extract_batch(text);
     assert_eq!(result.items.len(), 3);
@@ -114,7 +114,7 @@ fn batch_text_before_and_after() {
 
 #[test]
 fn batch_unknown_tool_name_is_not_captured() {
-    let ex = make_extractor();
+    let mut ex = make_extractor();
     let text = r#"{"name": "nonexistent", "arguments": {"x": 1}}"#;
     let result = ex.extract_batch(text);
     assert_eq!(result.items.len(), 1);
@@ -126,7 +126,7 @@ fn batch_unknown_tool_name_is_not_captured() {
 
 #[test]
 fn batch_missing_required_field_is_not_captured() {
-    let ex = make_extractor();
+    let mut ex = make_extractor();
     let text = r#"{"name": "fs.read", "arguments": {}}"#;
     let result = ex.extract_batch(text);
     assert_eq!(result.items.len(), 1);
@@ -138,7 +138,7 @@ fn batch_missing_required_field_is_not_captured() {
 
 #[test]
 fn batch_not_an_object_is_not_captured() {
-    let ex = make_extractor();
+    let mut ex = make_extractor();
     let text = r#"{"name": "fs.read", "arguments": null}"#;
     let result = ex.extract_batch(text);
     assert_eq!(result.items.len(), 1);
@@ -150,7 +150,7 @@ fn batch_not_an_object_is_not_captured() {
 
 #[test]
 fn batch_empty_input() {
-    let ex = make_extractor();
+    let mut ex = make_extractor();
     let result = ex.extract_batch("");
     assert_eq!(result.items.len(), 1);
     match &result.items[0] {
@@ -161,7 +161,7 @@ fn batch_empty_input() {
 
 #[test]
 fn batch_no_tools_registered() {
-    let ex = ExtractAction::new();
+    let mut ex = ExtractAction::new();
     let text = r#"{"name": "fs.read", "arguments": {"path": "/"}}"#;
     let result = ex.extract_batch(text);
     assert_eq!(result.items.len(), 1);
@@ -173,7 +173,7 @@ fn batch_no_tools_registered() {
 
 #[test]
 fn batch_tool_call_with_input_key() {
-    let ex = make_extractor();
+    let mut ex = make_extractor();
     let text = r#"{"name": "fs.read", "input": {"path": "/a"}}"#;
     let result = ex.extract_batch(text);
     assert_eq!(result.items.len(), 1, "expected just tool: {result:?}");
@@ -188,7 +188,7 @@ fn batch_tool_call_with_input_key() {
 
 #[test]
 fn batch_tool_call_with_args_key() {
-    let ex = make_extractor();
+    let mut ex = make_extractor();
     let text = r#"{"name": "fs.read", "args": {"path": "/a"}}"#;
     let result = ex.extract_batch(text);
     assert_eq!(result.items.len(), 1);
@@ -302,8 +302,8 @@ fn stream_early_exit_on_unknown_key() {
     match r {
         StreamAction::Text(t) => {
             assert!(
-                t.contains("animal"),
-                "should flush buffered text on unknown key: {t:?}"
+                t.contains("Tool call failure"),
+                "should flush warning on unknown key: {t:?}"
             );
         }
         other => panic!("expected Text, got {other:?}"),
@@ -335,8 +335,8 @@ fn stream_invalid_json_is_flushed_as_text() {
     match r {
         StreamAction::Text(t) => {
             assert!(
-                t.contains("bad"),
-                "should flush buffered text with unknown key 'bad': {t:?}"
+                t.contains("Tool call failure"),
+                "should flush warning instead of raw JSON: {t:?}"
             );
         }
         other => panic!("expected Text, got {other:?}"),
@@ -349,7 +349,12 @@ fn stream_no_tool_schema_registered() {
     let text = r#"{"name": "fs.read", "arguments": {"path": "/"}}"#;
     let result = ex.extract_stream(text);
     match result {
-        StreamAction::Text(t) => assert_eq!(t, text),
+        StreamAction::Text(t) => {
+            assert!(
+                t.contains("Tool call failure"),
+                "should warn instead of showing raw JSON: {t:?}"
+            );
+        }
         other => panic!("expected Text, got {other:?}"),
     }
 }
@@ -387,7 +392,7 @@ fn stream_key_starting_same_as_known_but_different() {
     let r = ex.extract_stream(r#"": 1}"#);
     match r {
         StreamAction::Text(t) => {
-            assert!(t.contains("nameX"), "should flush: {t:?}");
+            assert!(t.contains("Tool call failure"), "should warn: {t:?}");
         }
         other => panic!("expected Text, got {other:?}"),
     }
@@ -435,7 +440,7 @@ fn batch_ask_questions_tool_call() {
         }),
     };
 
-    let ex = ExtractAction::new().with_tool(ask_schema);
+    let mut ex = ExtractAction::new().with_tool(ask_schema);
 
     // Standard envelope
     let text = r#"Some thoughts {"name": "ask_questions", "arguments": {"questions": [{"id": "lang", "question": "What language?", "type": "SingleChoice", "required": true, "options": ["Python", "Rust"]}]}} trailing"#;
@@ -486,7 +491,7 @@ fn batch_ask_questions_bare_args() {
         }),
     };
 
-    let ex = ExtractAction::new().with_tool(ask_schema);
+    let mut ex = ExtractAction::new().with_tool(ask_schema);
 
     // Bare arguments (no envelope) — triggers the "bare-arguments fallback"
     let text = r#"{"questions": [{"id": "lang", "question": "What?", "type": "Text"}]}"#;

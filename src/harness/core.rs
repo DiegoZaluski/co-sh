@@ -1,3 +1,4 @@
+use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
 use cosh_recall::window::ContextWindow;
 use cosh_sdk::connector::Connector;
@@ -109,10 +110,14 @@ pub struct Harness {
     /// Reset to 0 on the first successful dispatch.
     tool_failure_count: usize,
 
-    /// Correction prompt from the last tool failure, injected into the LLM
-    /// context *after* the context window so it never pollutes the sliding
-    /// window with repetitive data.
-    correction_prompt: Option<String>,
+    /// How many tool calls failed extraction (invalid schema) in the current stream.
+    /// Reset at the start of each [`stream_chat`](Self::stream_chat).
+    tool_extraction_failure_count: usize,
+
+    /// Bounded, deduplicated memory of tool correction errors.
+    /// Persists across agent loop iterations so the model never repeats the
+    /// same mistake blindly.
+    correction_memory: CorrectionMemory,
 
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
@@ -141,7 +146,8 @@ impl Harness {
             context_window: ContextWindow::new(MAX_TOKENS),
             disabled_tools,
             tool_failure_count: 0,
-            correction_prompt: None,
+            tool_extraction_failure_count: 0,
+            correction_memory: CorrectionMemory::new(5),
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
@@ -363,7 +369,7 @@ impl Harness {
     }
 
     /// Process extracted items into a text response, routing tool calls.
-    fn process_extraction(&mut self, raw: &str, extractor: &ExtractAction) -> String {
+    fn process_extraction(&mut self, raw: &str, extractor: &mut ExtractAction) -> String {
         let result = extractor.extract_batch(raw);
         let mut output = String::new();
         for item in result.items {
@@ -375,6 +381,8 @@ impl Harness {
                 Item::ToolCall(_) => {}
             }
         }
+        let extraction_failures = extractor.take_tool_failures();
+        self.tool_extraction_failure_count += extraction_failures;
         output
     }
 
@@ -390,9 +398,8 @@ impl Harness {
             self.server_response.clear();
         }
         out.push_str(&self.context_window.format_context());
-        if let Some(ref prompt) = self.correction_prompt {
-            let _ = write!(out, "\n{prompt}");
-        }
+        let correction = self.correction_memory.format();
+        out.push_str(&correction);
         out
     }
 
@@ -408,7 +415,8 @@ impl Harness {
         #[cfg(test)]
         if let Some(ref response) = self.mock_chat_response.clone() {
             let raw = response.clone()?;
-            return Ok(self.process_extraction(&raw, &self.build_extractor()));
+            let mut extractor = self.build_extractor();
+            return Ok(self.process_extraction(&raw, &mut extractor));
         }
 
         let context = self.build_chat_context();
@@ -419,7 +427,8 @@ impl Harness {
             .await
             .map_err(|e| e.to_string())?;
 
-        Ok(self.process_extraction(out.message(), &self.build_extractor()))
+        let mut extractor = self.build_extractor();
+        Ok(self.process_extraction(out.message(), &mut extractor))
     }
 
     /// Process a stream chunk through the extractor, routing tool calls and
@@ -431,6 +440,7 @@ impl Harness {
         on_token: &mut dyn FnMut(&str),
     ) {
         let action = extractor.extract_stream(token);
+        self.tool_extraction_failure_count += extractor.take_tool_failures();
         match action {
             StreamAction::Text(text) => {
                 on_token(&text);
@@ -624,14 +634,22 @@ impl Harness {
                 result.is_ok()
             );
 
-            // Correction prompt was consumed by the LLM — clear it so it
-            // doesn't accumulate across iterations.
-            self.correction_prompt = None;
+            // Capture extraction failures from this stream and reset for next.
+            let extraction_failures = self.tool_extraction_failure_count;
+            self.tool_extraction_failure_count = 0;
 
             if let Err(e) = result {
                 log::debug!("run_agent_loop PHASE1_ERR={e}");
                 let _ = tx.send(HarnessEvent::Error(e));
                 break;
+            }
+
+            // Record extraction failures in the correction memory so the model
+            // sees the pattern even when no specific dispatch error is available.
+            if extraction_failures > 0 {
+                self.correction_memory.push(
+                    "Invalid JSON tool call — no registered schema matched",
+                );
             }
 
             if check_stop!() {
@@ -721,8 +739,8 @@ impl Harness {
                         }
                         Err(e) => {
                             self.tool_failure_count += 1;
-                            self.correction_prompt = Some(format!(
-                                "## Correction\n\nTool `{}` failed:\n{}\n",
+                            self.correction_memory.push(&format!(
+                                "Tool `{}` failed: {}",
                                 info.as_ref().map_or("?", |(n, _)| n),
                                 e,
                             ));
@@ -750,7 +768,14 @@ impl Harness {
             }
 
             if !had_tools {
-                // No tool calls were made — the conversation is complete
+                if extraction_failures > 0 {
+                    // Model tried but all tool calls failed validation.
+                    // Give it another chance with the correction prompt.
+                    log::debug!("run_agent_loop RETRY (extraction failures)");
+                    current_input.clear();
+                    continue;
+                }
+                // No tools and no extraction failures — conversation is complete
                 log::debug!("run_agent_loop DONE (no tools)");
                 let _ = tx.send(HarnessEvent::Done);
                 break;
@@ -867,7 +892,8 @@ impl Harness {
             context_window: ContextWindow::new(MAX_TOKENS),
             disabled_tools: HashSet::new(),
             tool_failure_count: 0,
-            correction_prompt: None,
+            tool_extraction_failure_count: 0,
+            correction_memory: CorrectionMemory::new(5),
             mock_chat_response: None,
             mock_stream_response: None,
             test_tools: Vec::new(),

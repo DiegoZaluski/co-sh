@@ -57,6 +57,8 @@ struct StreamState {
     current_key: String,
     pending_key: Option<String>,
     early_exit: bool,
+    in_code_block: bool,
+    fence_count: usize,
 }
 
 const KNOWN_KEYS: &[&str] = &[
@@ -86,6 +88,8 @@ pub struct ExtractAction {
     tools: Vec<ToolSchema>,
     tool_keys: Vec<String>,
     state: StreamState,
+    tool_failure_message: String,
+    tool_failure_count: usize,
 }
 
 fn extract_tool_property_keys(schema: &JsonValue) -> Vec<String> {
@@ -108,6 +112,8 @@ impl ExtractAction {
             tools: Vec::new(),
             tool_keys: Vec::new(),
             state: StreamState::default(),
+            tool_failure_message: "\n\n> ⚠ Tool call failure\n\n".to_string(),
+            tool_failure_count: 0,
         }
     }
 
@@ -120,6 +126,13 @@ impl ExtractAction {
         self
     }
 
+    /// Set the message emitted when a tool call is detected but fails validation.
+    #[must_use]
+    pub fn with_tool_failure_message<S: Into<String>>(mut self, msg: S) -> Self {
+        self.tool_failure_message = msg.into();
+        self
+    }
+
     /// Register a tool schema.
     pub fn add_tool(&mut self, schema: ToolSchema) {
         self.tool_keys
@@ -127,12 +140,23 @@ impl ExtractAction {
         self.tools.push(schema);
     }
 
+    /// Set the message emitted when a tool call is detected but fails validation.
+    pub fn set_tool_failure_message<S: Into<String>>(&mut self, msg: S) {
+        self.tool_failure_message = msg.into();
+    }
+
+    /// Drain the count of tool call failures since the last call to `take_tool_failures`.
+    #[must_use]
+    pub fn take_tool_failures(&mut self) -> usize {
+        std::mem::take(&mut self.tool_failure_count)
+    }
+
     /// Process a complete text and extract all embedded tool calls.
     ///
     /// Returns the text split into alternating [`Item::Text`] and [`Item::ToolCall`]
     /// segments in their original order.
     #[must_use]
-    pub fn extract_batch(&self, text: &str) -> BatchResult {
+    pub fn extract_batch(&mut self, text: &str) -> BatchResult {
         let objects = find_json_objects(text);
         if objects.is_empty() {
             return BatchResult {
@@ -149,10 +173,20 @@ impl ExtractAction {
             }
 
             let candidate = &text[start..=end];
+
+            // Inside a fenced code block → display JSON, keep as text
+            if is_in_code_block(text, start) {
+                items.push(Item::Text(candidate.to_string()));
+                last_end = end + 1;
+                continue;
+            }
+
             if let Some(tool_call) = self.parse_and_validate(candidate) {
                 items.push(Item::ToolCall(tool_call));
             } else {
-                items.push(Item::Text(candidate.to_string()));
+                // Invalid unfenced JSON — suppress, show warning instead
+                self.tool_failure_count += 1;
+                items.push(Item::Text(self.tool_failure_message.clone()));
             }
 
             last_end = end + 1;
@@ -207,28 +241,45 @@ impl ExtractAction {
                         self.state.pending_tool_call = Some(call);
                         return StreamAction::Text(std::mem::take(&mut output));
                     }
-                    output.push_str(&buffer);
+                    self.tool_failure_count += 1;
+                    output.push_str(&self.tool_failure_message);
                 } else if self.check_early_exit() {
-                    output.push_str(&self.state.buffer);
+                    self.tool_failure_count += 1;
+                    output.push_str(&self.tool_failure_message);
                     self.state = StreamState::default();
                 }
-            } else if ch == '{' {
-                if !output.is_empty() {
-                    let text = std::mem::take(&mut output);
+            } else if ch == '`' {
+                self.state.fence_count += 1;
+                output.push('`');
+            } else {
+                if self.state.fence_count >= 3 {
+                    self.state.in_code_block = !self.state.in_code_block;
+                }
+                self.state.fence_count = 0;
+
+                if self.state.in_code_block {
+                    output.push(ch);
+                    continue;
+                }
+
+                if ch == '{' {
+                    if !output.is_empty() {
+                        let text = std::mem::take(&mut output);
+                        self.state.depth = 1_i32;
+                        self.state.depth1_state = Some(Depth1State::ExpectKey);
+                        self.state.buffer.push('{');
+                        let next = i + ch.len_utf8();
+                        if next < input.len() {
+                            self.state.deferred_tail = input[next..].to_string();
+                        }
+                        return StreamAction::Text(text);
+                    }
                     self.state.depth = 1_i32;
                     self.state.depth1_state = Some(Depth1State::ExpectKey);
                     self.state.buffer.push('{');
-                    let next = i + ch.len_utf8();
-                    if next < input.len() {
-                        self.state.deferred_tail = input[next..].to_string();
-                    }
-                    return StreamAction::Text(text);
+                } else {
+                    output.push(ch);
                 }
-                self.state.depth = 1_i32;
-                self.state.depth1_state = Some(Depth1State::ExpectKey);
-                self.state.buffer.push('{');
-            } else {
-                output.push(ch);
             }
         }
 
@@ -493,6 +544,28 @@ fn validate_against_schema(value: &JsonValue, schema: &JsonValue) -> bool {
     }
 
     true
+}
+
+/// Check whether `byte_pos` falls inside a fenced code block (` ``` `).
+fn is_in_code_block(text: &str, byte_pos: usize) -> bool {
+    let prefix = &text[..byte_pos.min(text.len())];
+    let bytes = prefix.as_bytes();
+    let mut in_block = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 3 <= bytes.len()
+            && bytes[i] == b'`'
+            && bytes[i + 1] == b'`'
+            && bytes[i + 2] == b'`'
+            && (i == 0 || bytes[i - 1] == b'\n')
+        {
+            in_block = !in_block;
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    in_block
 }
 
 fn value_type_matches(value: &JsonValue, expected_type: &str) -> bool {
