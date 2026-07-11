@@ -513,6 +513,17 @@ impl DialogState {
                 let dialog_h = 7;
                 let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
 
+                // Fill interior with theme background
+                let bg_color = rgba_color(theme.background);
+                for y in dialog_y..dialog_y + dialog_h {
+                    for x in dialog_x..dialog_x + dialog_w {
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(bg_color));
+                        }
+                    }
+                }
+
                 // Draw border using theme color
                 let border_color = rgba_color(theme.border_active);
                 let max_x = dialog_x + dialog_w - 1;
