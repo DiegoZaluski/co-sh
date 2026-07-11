@@ -15,6 +15,8 @@ use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::scroll_bar::{ScrollBarOrientation, ScrollBarRenderable};
 use cosh_tui::core::types::MouseEvent;
 
+use pulldown_cmark::{Event, Tag, TagEnd};
+
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -281,7 +283,7 @@ impl SessionView {
 
     /// Recalculate bar props (called when content/viewport size changes).
     /// Mirrors OpenCode's `recalculateBarProps()` which:
-    /// 1. Sets `is_applying_sticky_scroll = true` 
+    /// 1. Sets `is_applying_sticky_scroll = true`
     /// 2. If `!hasManualScroll` → `applyStickyStart(stickyStart)`
     /// 3. If `hasManualScroll && isAtStickyReengagePoint()` → re-engage
     /// 4. Updates `last_content_height`
@@ -383,7 +385,7 @@ impl SessionView {
                     } else {
                         sanitize_text(&t.text)
                     };
-                    let h = Self::estimate_part_height(part, max_w, config).min(bottom - y);
+                    let h = Self::estimate_part_height(part, max_w, config, role).min(bottom - y);
                     let area = Rect::new(x, y, max_w, h);
                     let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
                         Some(content),
@@ -399,7 +401,7 @@ impl SessionView {
                     } else {
                         sanitize_text(&t.text)
                     };
-                    let h = Self::estimate_part_height(part, max_w, config)
+                    let h = Self::estimate_part_height(part, max_w, config, role)
                         .min(bottom - y)
                         .max(1);
                     let text_style = Style::default()
@@ -503,19 +505,227 @@ impl SessionView {
         (y - y_ + 1).max(1)
     }
 
-    fn estimate_part_height(part: &Part, max_w: u16, config: &TuiConfig) -> u16 {
+    /// Estimate the rendered height of markdown text by tracing pulldown_cmark's
+    /// event stream — same logic as MarkdownRenderable, but without writing to a
+    /// buffer. This correctly accounts for markdown syntax that pulldown strips
+    /// (e.g. `[text](url)` URLs, `**bold**` markers, `#` heading prefixes),
+    /// preventing the estimate from being larger than the actual rendered height.
+    fn estimate_markdown_height(text: &str, max_w: u16) -> u16 {
+        let area_x = 0u16;
+        let max_x = max_w;
+        let mut y: u16 = 0;
+        let mut x: u16 = 0;
+        let mut in_code_block = false;
+        let mut list_counters: Vec<usize> = Vec::new();
+
+        let parser = pulldown_cmark::Parser::new(text);
+
+        for event in parser {
+            match event {
+                Event::Start(tag) => match tag {
+                    Tag::Paragraph
+                    | Tag::BlockQuote(_)
+                    | Tag::Table(_)
+                    | Tag::Heading {
+                        level: _,
+                        id: _,
+                        classes: _,
+                        attrs: _,
+                    } => {
+                        if x != area_x {
+                            y += 1;
+                            x = area_x;
+                        }
+                    }
+                    Tag::CodeBlock(_kind) => {
+                        if x != area_x {
+                            y += 1;
+                            x = area_x;
+                        }
+                        in_code_block = true;
+                    }
+                    Tag::List(start) => {
+                        list_counters.push(start.unwrap_or(1) as usize);
+                    }
+                    Tag::Item => {
+                        if x != area_x {
+                            y += 1;
+                            x = area_x;
+                        }
+                        // Render bullet (same as MarkdownRenderable)
+                        // For both ordered and un-ordered, the code uses
+                        // numbered_list_counters which is pushed for ALL lists.
+                        // This matches MarkdownRenderable's behavior.
+                        if let Some(counter) = list_counters.last_mut() {
+                            let marker = format!("{}. ", *counter);
+                            *counter += 1;
+                            // Track bullet characters through render_text equivalent
+                            for _ch in marker.chars() {
+                                if x >= max_x {
+                                    y += 1;
+                                    x = area_x;
+                                }
+                                x += 1;
+                            }
+                        }
+                    }
+                    Tag::TableHead
+                    | Tag::TableRow
+                    | Tag::TableCell
+                    | Tag::FootnoteDefinition(_)
+                    | Tag::DefinitionList
+                    | Tag::DefinitionListTitle
+                    | Tag::DefinitionListDefinition
+                    | Tag::Strikethrough
+                    | Tag::Emphasis
+                    | Tag::Strong
+                    | Tag::Link {
+                        link_type: _,
+                        dest_url: _,
+                        title: _,
+                        id: _,
+                    }
+                    | Tag::Image {
+                        link_type: _,
+                        dest_url: _,
+                        title: _,
+                        id: _,
+                    }
+                    | Tag::MetadataBlock(_)
+                    | Tag::HtmlBlock
+                    | Tag::Superscript
+                    | Tag::Subscript => {}
+                },
+                Event::End(tag_end) => match tag_end {
+                    TagEnd::List(_) => {
+                        list_counters.pop();
+                    }
+                    TagEnd::Paragraph
+                    | TagEnd::Heading(_)
+                    | TagEnd::BlockQuote(_)
+                    | TagEnd::Item
+                    | TagEnd::Table
+                    | TagEnd::TableRow
+                    | TagEnd::CodeBlock => {
+                        y += 1;
+                        x = area_x;
+                        if matches!(tag_end, TagEnd::CodeBlock) {
+                            in_code_block = false;
+                        }
+                    }
+                    TagEnd::TableHead
+                    | TagEnd::FootnoteDefinition
+                    | TagEnd::DefinitionList
+                    | TagEnd::DefinitionListTitle
+                    | TagEnd::DefinitionListDefinition
+                    | TagEnd::Strikethrough
+                    | TagEnd::Emphasis
+                    | TagEnd::Strong
+                    | TagEnd::Link
+                    | TagEnd::Image
+                    | TagEnd::MetadataBlock(_)
+                    | TagEnd::HtmlBlock
+                    | TagEnd::Superscript
+                    | TagEnd::Subscript => {}
+                    TagEnd::TableCell => {
+                        x = x.saturating_add(2);
+                    }
+                },
+                Event::Text(text)
+                | Event::FootnoteReference(text)
+                | Event::InlineMath(text)
+                | Event::DisplayMath(text)
+                | Event::InlineHtml(text) => {
+                    if in_code_block {
+                        for (i, line) in text.lines().enumerate() {
+                            if i > 0 {
+                                y += 1;
+                                x = area_x;
+                            }
+                            let line_chars = line.chars().count() as u16;
+                            x = x.saturating_add(line_chars.min(max_x.saturating_sub(x)));
+                        }
+                    } else {
+                        for ch in text.chars() {
+                            if x >= max_x {
+                                y += 1;
+                                x = area_x;
+                                if ch == ' ' {
+                                    continue;
+                                }
+                            }
+                            x += 1;
+                        }
+                    }
+                }
+                Event::Code(text) => {
+                    for ch in text.chars() {
+                        if x >= max_x {
+                            y += 1;
+                            x = area_x;
+                            if ch == ' ' {
+                                continue;
+                            }
+                        }
+                        x += 1;
+                    }
+                }
+                Event::Html(text) => {
+                    for ch in text.chars() {
+                        if x >= max_x {
+                            y += 1;
+                            x = area_x;
+                            if ch == ' ' {
+                                continue;
+                            }
+                        }
+                        x += 1;
+                    }
+                }
+                Event::SoftBreak | Event::HardBreak => {
+                    x = area_x;
+                    y += 1;
+                }
+                Event::Rule => {
+                    y += 1;
+                    x = area_x;
+                }
+                Event::TaskListMarker(_checked) => {
+                    let marker = "[ ] ";
+                    for _ch in marker.chars() {
+                        if x >= max_x {
+                            y += 1;
+                            x = area_x;
+                        }
+                        x += 1;
+                    }
+                }
+            }
+        }
+
+        y.max(1)
+    }
+
+    fn estimate_part_height(
+        part: &Part,
+        max_w: u16,
+        config: &TuiConfig,
+        role: &MessageRole,
+    ) -> u16 {
         match part {
+            Part::Text(t) if !t.synthetic && *role == MessageRole::Assistant => {
+                Self::estimate_markdown_height(&t.text, max_w)
+            }
             Part::Text(t) if !t.synthetic => {
                 let chars_per_line = max_w as usize;
                 if chars_per_line > 0 {
                     let mut total_lines: usize = 0;
                     for line in t.text.lines() {
+                        if line.is_empty() {
+                            continue;
+                        }
                         let line_len = line.chars().count();
-                        total_lines += if line_len == 0 {
-                            1
-                        } else {
-                            line_len.div_ceil(chars_per_line)
-                        };
+                        total_lines += line_len.div_ceil(chars_per_line);
                     }
                     total_lines.max(1) as u16
                 } else {
@@ -791,7 +1001,11 @@ impl SessionView {
             let msg_bottom = y + msg_h;
 
             // Check if click is within this message and message is visible
-            if click_y >= msg_top && click_y < msg_bottom && msg_bottom > vp_top && msg_top < vp_bottom {
+            if click_y >= msg_top
+                && click_y < msg_bottom
+                && msg_bottom > vp_top
+                && msg_top < vp_bottom
+            {
                 let border_offset: i32 = match msg.role {
                     MessageRole::User => 1,
                     MessageRole::Assistant => 0,
@@ -799,7 +1013,9 @@ impl SessionView {
                 let mut part_y = msg_top + border_offset;
 
                 for part in &msg.parts {
-                    let part_h = i32::from(Self::estimate_part_height(part, max_w, config).max(1));
+                    let part_h = i32::from(
+                        Self::estimate_part_height(part, max_w, config, &msg.role).max(1),
+                    );
 
                     if click_y >= part_y && click_y < part_y + part_h {
                         if let crate::types::Part::Tool(tool) = part
@@ -897,7 +1113,7 @@ impl SessionView {
         } else {
             msg.parts
                 .iter()
-                .map(|p| i32::from(Self::estimate_part_height(p, max_w, config)))
+                .map(|p| i32::from(Self::estimate_part_height(p, max_w, config, &msg.role)))
                 .sum()
         };
         let padding_bottom: i32 = match msg.role {
@@ -944,7 +1160,9 @@ impl SessionView {
                 let mut part_y = msg_top + border_offset;
 
                 for part in &msg.parts {
-                    let part_h = i32::from(Self::estimate_part_height(part, max_w, config).max(1));
+                    let part_h = i32::from(
+                        Self::estimate_part_height(part, max_w, config, &msg.role).max(1),
+                    );
                     let p_top = part_y;
                     let p_bottom = part_y + part_h;
 
@@ -1011,12 +1229,16 @@ impl SessionView {
                                     let trimmed = output.trim();
                                     if !trimmed.is_empty() {
                                         let display = if config.show_tool_details
-                                            || !matches!(t.status, crate::types::ToolStatus::Completed)
-                                        {
+                                            || !matches!(
+                                                t.status,
+                                                crate::types::ToolStatus::Completed
+                                            ) {
                                             trimmed.to_string()
                                         } else {
-                                            crate::util::scroll::collapse_tool_output(trimmed, 10, 800)
-                                                .output
+                                            crate::util::scroll::collapse_tool_output(
+                                                trimmed, 10, 800,
+                                            )
+                                            .output
                                         };
                                         let mut line_y = vp_y1;
                                         for display_line in display.lines() {
@@ -1259,8 +1481,7 @@ impl SessionView {
                         match msg.role {
                             MessageRole::User => {
                                 let agent_name = msg.agent.as_deref().unwrap_or("default");
-                                let agent_color =
-                                    agent_colors.get(agent_name, &unique_agents);
+                                let agent_color = agent_colors.get(agent_name, &unique_agents);
                                 Self::render_user_message(
                                     &mut temp,
                                     full_area,
@@ -1293,8 +1514,7 @@ impl SessionView {
                             let dst_line_y = dst_y + dy;
                             for dx in 0..inner_area.width {
                                 if let Some(cell) = temp.cell((dx, temp_y)) {
-                                    if let Some(dst) =
-                                        buf.cell_mut((inner_area.x + dx, dst_line_y))
+                                    if let Some(dst) = buf.cell_mut((inner_area.x + dx, dst_line_y))
                                     {
                                         *dst = cell.clone();
                                     }
@@ -1312,19 +1532,13 @@ impl SessionView {
                     let visible_h = (visible_bottom - i32::from(visible_top)) as u16;
 
                     if visible_h > 0 {
-                        let msg_area = Rect::new(
-                            inner_area.x,
-                            visible_top,
-                            inner_area.width,
-                            visible_h,
-                        );
+                        let msg_area =
+                            Rect::new(inner_area.x, visible_top, inner_area.width, visible_h);
 
                         match msg.role {
                             MessageRole::User => {
-                                let agent_name =
-                                    msg.agent.as_deref().unwrap_or("default");
-                                let agent_color =
-                                    agent_colors.get(agent_name, &unique_agents);
+                                let agent_name = msg.agent.as_deref().unwrap_or("default");
+                                let agent_color = agent_colors.get(agent_name, &unique_agents);
                                 Self::render_user_message(
                                     buf,
                                     msg_area,

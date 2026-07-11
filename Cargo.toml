@@ -89,6 +89,9 @@ version = "3"
 default-features = false
 features = []
 
+[dependencies.pulldown-cmark]
+version = "0.13"
+
 # ---
 [dev-dependencies]
 tempfile = "3"

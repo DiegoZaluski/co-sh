@@ -790,7 +790,6 @@ impl App {
         }
     }
 
-
     /// Compute the flat list of models in the same grouped-by-provider order
     /// used by the dialog render, so navigation and rendering stay in sync.
     fn model_dialog_flat_entries<'a>(
@@ -800,9 +799,7 @@ impl App {
         use std::collections::BTreeMap;
         let mut grouped: BTreeMap<String, Vec<&'a cosh::ModelEntry>> = BTreeMap::new();
         for entry in models {
-            if filter.is_empty()
-                || entry.model.to_lowercase().contains(&filter.to_lowercase())
-            {
+            if filter.is_empty() || entry.model.to_lowercase().contains(&filter.to_lowercase()) {
                 grouped
                     .entry(entry.provider.clone())
                     .or_default()
@@ -858,7 +855,8 @@ impl App {
         // Sync live_requested from session_view auto-scroll and sticky scroll state.
         // During streaming, sticky scroll needs continuous rendering to re-apply scroll position.
         self.live_requested = self.session_view.is_auto_scrolling
-            || (self.state.status == crate::types::SessionStatus::Working && self.session_view.is_sticky_bottom);
+            || (self.state.status == crate::types::SessionStatus::Working
+                && self.session_view.is_sticky_bottom);
         let area = frame.area();
 
         {
