@@ -406,7 +406,7 @@ impl SessionView {
                         .max(1);
                     let text_style = Style::default()
                         .fg(rgba_color(fg_color))
-                        .bg(rgba_color(theme.background));
+                        .bg(rgba_color(theme.background_panel));
                     let rendered = Self::draw_text_wrap(buf, &content, x, y, max_w, h, text_style);
                     y += rendered;
                 }
@@ -889,7 +889,7 @@ impl SessionView {
 
             let error_style = Style::default()
                 .fg(rgba_color(theme.text_muted))
-                .bg(rgba_color(theme.background));
+                .bg(rgba_color(theme.background_panel));
             let error_text: String = msg
                 .parts
                 .iter()

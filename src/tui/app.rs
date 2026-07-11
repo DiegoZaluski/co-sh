@@ -929,7 +929,8 @@ impl App {
 
             // Question dialog inline (between messages and spinner), only during session
             let question_area_y = spinner_area_y.saturating_sub(question_h);
-            let session_bottom = question_area_y;
+            let prompt_padding: u16 = 1;
+            let session_bottom = question_area_y.saturating_sub(prompt_padding);
 
             let prompt_area = Rect::new(
                 main_area.x + 2,
