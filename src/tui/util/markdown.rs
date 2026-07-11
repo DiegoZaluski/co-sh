@@ -11,5 +11,6 @@ pub fn render_markdown(buf: &mut Buffer, area: Rect, content: &str, fg: RGBA, bg
     let mut md = MarkdownRenderable::new(Some(content.to_string()));
     md.set_fg(Some(ColorInput::RGBA(fg)));
     md.set_bg(Some(ColorInput::RGBA(bg)));
+    md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
     md.render_self(buf, area);
 }

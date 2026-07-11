@@ -15,7 +15,7 @@ use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::scroll_bar::{ScrollBarOrientation, ScrollBarRenderable};
 use cosh_tui::core::types::MouseEvent;
 
-use pulldown_cmark::{Event, Tag, TagEnd};
+use cosh_tui::core::renderables::markdown::estimate_height;
 
 use crate::config::TuiConfig;
 use crate::state::AppState;
@@ -347,6 +347,7 @@ impl SessionView {
             ));
             md.set_fg(Some(ColorInput::RGBA(theme.text_muted)));
             md.set_bg(Some(ColorInput::RGBA(theme.background)));
+            md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
             md.render_self(buf, md_area);
             *line_h = 1 + md_h;
         }
@@ -392,6 +393,7 @@ impl SessionView {
                     );
                     md.set_fg(Some(ColorInput::RGBA(fg_color)));
                     md.set_bg(Some(ColorInput::RGBA(theme.background)));
+                    md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
                     md.render_self(buf, area);
                     y += h;
                 }
@@ -505,207 +507,6 @@ impl SessionView {
         (y - y_ + 1).max(1)
     }
 
-    /// Estimate the rendered height of markdown text by tracing pulldown_cmark's
-    /// event stream — same logic as MarkdownRenderable, but without writing to a
-    /// buffer. This correctly accounts for markdown syntax that pulldown strips
-    /// (e.g. `[text](url)` URLs, `**bold**` markers, `#` heading prefixes),
-    /// preventing the estimate from being larger than the actual rendered height.
-    fn estimate_markdown_height(text: &str, max_w: u16) -> u16 {
-        let area_x = 0u16;
-        let max_x = max_w;
-        let mut y: u16 = 0;
-        let mut x: u16 = 0;
-        let mut in_code_block = false;
-        let mut list_counters: Vec<usize> = Vec::new();
-
-        let parser = pulldown_cmark::Parser::new(text);
-
-        for event in parser {
-            match event {
-                Event::Start(tag) => match tag {
-                    Tag::Paragraph
-                    | Tag::BlockQuote(_)
-                    | Tag::Table(_)
-                    | Tag::Heading {
-                        level: _,
-                        id: _,
-                        classes: _,
-                        attrs: _,
-                    } => {
-                        if x != area_x {
-                            y += 1;
-                            x = area_x;
-                        }
-                    }
-                    Tag::CodeBlock(_kind) => {
-                        if x != area_x {
-                            y += 1;
-                            x = area_x;
-                        }
-                        in_code_block = true;
-                    }
-                    Tag::List(start) => {
-                        list_counters.push(start.unwrap_or(1) as usize);
-                    }
-                    Tag::Item => {
-                        if x != area_x {
-                            y += 1;
-                            x = area_x;
-                        }
-                        // Render bullet (same as MarkdownRenderable)
-                        // For both ordered and un-ordered, the code uses
-                        // numbered_list_counters which is pushed for ALL lists.
-                        // This matches MarkdownRenderable's behavior.
-                        if let Some(counter) = list_counters.last_mut() {
-                            let marker = format!("{}. ", *counter);
-                            *counter += 1;
-                            // Track bullet characters through render_text equivalent
-                            for _ch in marker.chars() {
-                                if x >= max_x {
-                                    y += 1;
-                                    x = area_x;
-                                }
-                                x += 1;
-                            }
-                        }
-                    }
-                    Tag::TableHead
-                    | Tag::TableRow
-                    | Tag::TableCell
-                    | Tag::FootnoteDefinition(_)
-                    | Tag::DefinitionList
-                    | Tag::DefinitionListTitle
-                    | Tag::DefinitionListDefinition
-                    | Tag::Strikethrough
-                    | Tag::Emphasis
-                    | Tag::Strong
-                    | Tag::Link {
-                        link_type: _,
-                        dest_url: _,
-                        title: _,
-                        id: _,
-                    }
-                    | Tag::Image {
-                        link_type: _,
-                        dest_url: _,
-                        title: _,
-                        id: _,
-                    }
-                    | Tag::MetadataBlock(_)
-                    | Tag::HtmlBlock
-                    | Tag::Superscript
-                    | Tag::Subscript => {}
-                },
-                Event::End(tag_end) => match tag_end {
-                    TagEnd::List(_) => {
-                        list_counters.pop();
-                    }
-                    TagEnd::Paragraph
-                    | TagEnd::Heading(_)
-                    | TagEnd::BlockQuote(_)
-                    | TagEnd::Item
-                    | TagEnd::Table
-                    | TagEnd::TableRow
-                    | TagEnd::CodeBlock => {
-                        y += 1;
-                        x = area_x;
-                        if matches!(tag_end, TagEnd::CodeBlock) {
-                            in_code_block = false;
-                        }
-                    }
-                    TagEnd::TableHead
-                    | TagEnd::FootnoteDefinition
-                    | TagEnd::DefinitionList
-                    | TagEnd::DefinitionListTitle
-                    | TagEnd::DefinitionListDefinition
-                    | TagEnd::Strikethrough
-                    | TagEnd::Emphasis
-                    | TagEnd::Strong
-                    | TagEnd::Link
-                    | TagEnd::Image
-                    | TagEnd::MetadataBlock(_)
-                    | TagEnd::HtmlBlock
-                    | TagEnd::Superscript
-                    | TagEnd::Subscript => {}
-                    TagEnd::TableCell => {
-                        x = x.saturating_add(2);
-                    }
-                },
-                Event::Text(text)
-                | Event::FootnoteReference(text)
-                | Event::InlineMath(text)
-                | Event::DisplayMath(text)
-                | Event::InlineHtml(text) => {
-                    if in_code_block {
-                        for (i, line) in text.lines().enumerate() {
-                            if i > 0 {
-                                y += 1;
-                                x = area_x;
-                            }
-                            let line_chars = line.chars().count() as u16;
-                            x = x.saturating_add(line_chars.min(max_x.saturating_sub(x)));
-                        }
-                    } else {
-                        for ch in text.chars() {
-                            if x >= max_x {
-                                y += 1;
-                                x = area_x;
-                                if ch == ' ' {
-                                    continue;
-                                }
-                            }
-                            x += 1;
-                        }
-                    }
-                }
-                Event::Code(text) => {
-                    for ch in text.chars() {
-                        if x >= max_x {
-                            y += 1;
-                            x = area_x;
-                            if ch == ' ' {
-                                continue;
-                            }
-                        }
-                        x += 1;
-                    }
-                }
-                Event::Html(text) => {
-                    for ch in text.chars() {
-                        if x >= max_x {
-                            y += 1;
-                            x = area_x;
-                            if ch == ' ' {
-                                continue;
-                            }
-                        }
-                        x += 1;
-                    }
-                }
-                Event::SoftBreak | Event::HardBreak => {
-                    x = area_x;
-                    y += 1;
-                }
-                Event::Rule => {
-                    y += 1;
-                    x = area_x;
-                }
-                Event::TaskListMarker(_checked) => {
-                    let marker = "[ ] ";
-                    for _ch in marker.chars() {
-                        if x >= max_x {
-                            y += 1;
-                            x = area_x;
-                        }
-                        x += 1;
-                    }
-                }
-            }
-        }
-
-        y.max(1)
-    }
-
     fn estimate_part_height(
         part: &Part,
         max_w: u16,
@@ -714,7 +515,7 @@ impl SessionView {
     ) -> u16 {
         match part {
             Part::Text(t) if !t.synthetic && *role == MessageRole::Assistant => {
-                Self::estimate_markdown_height(&t.text, max_w)
+                estimate_height(&t.text, max_w)
             }
             Part::Text(t) if !t.synthetic => {
                 let chars_per_line = max_w as usize;
