@@ -15,7 +15,7 @@ use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::scroll_bar::{ScrollBarOrientation, ScrollBarRenderable};
 use cosh_tui::core::types::MouseEvent;
 
-use cosh_tui::core::renderables::markdown::estimate_height;
+use cosh_tui::core::renderables::markdown::{estimate_height, markdown_to_visible_text};
 
 use crate::config::TuiConfig;
 use crate::state::AppState;
@@ -80,9 +80,14 @@ fn conceal_text(text: &str) -> String {
     text.chars().map(concealed_char).collect()
 }
 
+/// A run of rendered text at a given content position.
+/// Coordinates are in **content space** (absolute row from start of session content),
+/// so they remain valid regardless of the current scroll position.
 struct TextRegion {
-    y1: u16,
-    y2: u16,
+    /// First content row (inclusive).
+    y1: i32,
+    /// Last content row (exclusive).
+    y2: i32,
     x1: u16,
     x2: u16,
     text: String,
@@ -107,6 +112,15 @@ pub struct SessionView {
     pub total_height: i32,
     /// Visible viewport height from last render.
     pub visible_height: i32,
+
+    // ── Scroll position at mouse-down (for content-space selection) ────────────
+    /// The `scroll_y` value when the current drag selection started.
+    /// Used together with `drag_selection` to convert screen-space anchor
+    /// coordinates into content-space when extracting selected text.
+    pub mouse_down_scroll_y: i32,
+    /// Anchor Y in content space (set once at mouse-down), so the visual
+    /// highlight scrolls with the content during auto-scroll drag.
+    pub selection_anchor_content_y: i32,
 
     // ── Sticky scroll (auto-scroll to bottom) ──────────────────────────────────
     /// Whether the user has manually scrolled away from the sticky position.
@@ -141,6 +155,8 @@ impl SessionView {
             auto_scroll_speed_fast: 72.0,
             total_height: 0,
             visible_height: 0,
+            mouse_down_scroll_y: 0,
+            selection_anchor_content_y: 0,
             has_manual_scroll: false,
             is_sticky_bottom: true,
             last_content_height: 0,
@@ -957,7 +973,6 @@ impl SessionView {
                     MessageRole::User => 1,
                     MessageRole::Assistant => 0,
                 };
-                // Adjust part_y so that parts before the viewport are accounted for
                 let mut part_y = msg_top + border_offset;
 
                 for part in &msg.parts {
@@ -967,65 +982,92 @@ impl SessionView {
                     let p_top = part_y;
                     let p_bottom = part_y + part_h;
 
-                    // Clip part to viewport
-                    let vp_y1 = p_top.max(vp_top) as u16;
-                    let vp_y2 = p_bottom.min(vp_bottom) as u16;
+                    // Content-space position of this part's first row
+                    let content_offset = p_top - vp_top + scroll;
 
-                    if vp_y1 < vp_y2 {
+                    // Only add regions for parts that overlap the viewport
+                    if p_bottom > vp_top && p_top < vp_bottom {
                         match part {
                             crate::types::Part::Text(t) if !t.synthetic => {
-                                let content = if config.conceal {
+                                let mut content = if config.conceal {
                                     conceal_text(&t.text)
                                 } else {
                                     sanitize_text(&t.text)
                                 };
+                                if msg.role == MessageRole::Assistant {
+                                    content = markdown_to_visible_text(&content);
+                                }
                                 if content.chars().all(char::is_whitespace) {
                                     part_y += part_h;
                                     continue;
                                 }
                                 let max_w_usize = max_w as usize;
-                                let mut line_y = vp_y1;
+                                // Screen Y of first visible line of this part
+                                let mut screen_line_y = p_top.max(vp_top) as u16;
+                                let screen_end = p_bottom.min(vp_bottom) as u16;
+
                                 for logical_line in content.lines() {
                                     if logical_line.is_empty() {
-                                        if line_y < vp_y2 {
+                                        if screen_line_y < screen_end {
+                                            let cy = (screen_line_y as i32) - vp_top + scroll;
                                             self.text_regions.push(TextRegion {
-                                                y1: line_y,
-                                                y2: line_y + 1,
+                                                y1: cy,
+                                                y2: cy + 1,
                                                 x1: x_off,
                                                 x2: x_off + max_w,
                                                 text: String::new(),
                                             });
-                                            line_y += 1;
+                                            screen_line_y += 1;
                                         }
                                         continue;
                                     }
                                     let mut remaining = logical_line;
-                                    while !remaining.is_empty() && line_y < vp_y2 {
+                                    while !remaining.is_empty() && screen_line_y < screen_end {
                                         let n = remaining.chars().take(max_w_usize).count();
                                         let split = remaining
                                             .char_indices()
                                             .nth(n)
                                             .map_or(remaining.len(), |(i, _)| i);
                                         let visual_line = &remaining[..split];
+                                        let cy = (screen_line_y as i32) - vp_top + scroll;
                                         self.text_regions.push(TextRegion {
-                                            y1: line_y,
-                                            y2: line_y + 1,
+                                            y1: cy,
+                                            y2: cy + 1,
                                             x1: x_off,
                                             x2: x_off + max_w,
                                             text: visual_line.to_string(),
                                         });
-                                        line_y += 1;
+                                        screen_line_y += 1;
                                         remaining = &remaining[split..];
                                     }
                                 }
                             }
                             crate::types::Part::Tool(t) => {
+                                if !config.show_tool_details
+                                    && matches!(t.status, crate::types::ToolStatus::Completed)
+                                {
+                                    part_y += part_h;
+                                    continue;
+                                }
                                 if !config.show_generic_tool_output
                                     && crate::util::tool_render::tool_display(&t.tool) == "generic"
                                 {
                                     part_y += part_h;
                                     continue;
                                 }
+                                // Add inline tool label (only when visible)
+                                if p_top >= vp_top {
+                                    let label =
+                                        crate::util::tool_render::tool_inline_text(t);
+                                    self.text_regions.push(TextRegion {
+                                        y1: content_offset,
+                                        y2: content_offset + 1,
+                                        x1: x_off,
+                                        x2: x_off + max_w,
+                                        text: label,
+                                    });
+                                }
+                                // Add visible output lines after the label
                                 if let Some(ref output) = t.output {
                                     let trimmed = output.trim();
                                     if !trimmed.is_empty() {
@@ -1041,17 +1083,21 @@ impl SessionView {
                                             )
                                             .output
                                         };
-                                        let mut line_y = vp_y1;
+                                        let first_output_screen =
+                                            (p_top.max(vp_top) + 1) as u16;
+                                        let screen_end = p_bottom.min(vp_bottom) as u16;
+                                        let mut out_screen_y = first_output_screen;
                                         for display_line in display.lines() {
-                                            if line_y < vp_y2 {
+                                            if out_screen_y < screen_end {
+                                                let cy = (out_screen_y as i32) - vp_top + scroll;
                                                 self.text_regions.push(TextRegion {
-                                                    y1: line_y,
-                                                    y2: line_y + 1,
+                                                    y1: cy,
+                                                    y2: cy + 1,
                                                     x1: x_off,
                                                     x2: x_off + max_w,
                                                     text: display_line.to_string(),
                                                 });
-                                                line_y += 1;
+                                                out_screen_y += 1;
                                             }
                                         }
                                     }
@@ -1061,29 +1107,32 @@ impl SessionView {
                                 let expanded = config.thinking_mode
                                     || self.tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
                                 let header = if expanded { "- Thought" } else { "+ Thought" };
-                                if vp_y1 < vp_y2 {
+                                if p_top >= vp_top {
                                     self.text_regions.push(TextRegion {
-                                        y1: vp_y1,
-                                        y2: vp_y1 + 1,
+                                        y1: content_offset,
+                                        y2: content_offset + 1,
                                         x1: x_off,
                                         x2: x_off + max_w,
                                         text: header.to_string(),
                                     });
                                 }
                                 if expanded && !r.text.is_empty() {
-                                    let mut line_y = vp_y1 + 1;
+                                    let screen_line_start = (p_top.max(vp_top) + 1) as u16;
+                                    let screen_end = p_bottom.min(vp_bottom) as u16;
                                     let truncated =
                                         r.text.lines().take(10).collect::<Vec<_>>().join("\n");
+                                    let mut screen_line_y = screen_line_start;
                                     for line in truncated.lines() {
-                                        if line_y < vp_y2 && !line.is_empty() {
+                                        if screen_line_y < screen_end && !line.is_empty() {
+                                            let cy = (screen_line_y as i32) - vp_top + scroll;
                                             self.text_regions.push(TextRegion {
-                                                y1: line_y,
-                                                y2: line_y + 1,
+                                                y1: cy,
+                                                y2: cy + 1,
                                                 x1: x_off + 2,
                                                 x2: x_off + max_w,
                                                 text: line.to_string(),
                                             });
-                                            line_y += 1;
+                                            screen_line_y += 1;
                                         }
                                     }
                                 }
@@ -1107,10 +1156,19 @@ impl SessionView {
         focus_x: u16,
         focus_y: u16,
     ) -> String {
-        let start_y = anchor_y.min(focus_y);
-        let end_y = anchor_y.max(focus_y);
+        // Convert screen-space anchor/focus to content-space coordinates.
+        // The anchor was captured at mouse_down_scroll_y; the focus at the
+        // current scroll_y.  Content-space allows the selection to survive
+        // scroll changes during drag (auto-scroll).
+        let vp_top = self.session_area.map_or(0, |(_, y, _, _)| i32::from(y));
+        let content_anchor = (anchor_y as i32) - vp_top + self.mouse_down_scroll_y;
+        let content_focus = (focus_y as i32) - vp_top + self.scroll_y;
 
-        let (start_x, end_x) = if anchor_y == start_y {
+        let start_content_y = content_anchor.min(content_focus);
+        let end_content_y = content_anchor.max(content_focus);
+
+        // Determine x-bounds from the content-space drag direction.
+        let (start_x, end_x) = if content_anchor <= content_focus {
             (anchor_x, focus_x)
         } else {
             (focus_x, anchor_x)
@@ -1118,17 +1176,17 @@ impl SessionView {
 
         let mut result = String::new();
         for region in &self.text_regions {
-            if region.y1 > end_y || region.y2 <= start_y {
+            if region.y1 > end_content_y || region.y2 <= start_content_y {
                 continue;
             }
 
             let line_y = region.y1;
 
-            let (lx1, lx2) = if start_y == end_y {
+            let (lx1, lx2) = if start_content_y == end_content_y {
                 (start_x.min(end_x), start_x.max(end_x))
-            } else if line_y == start_y {
+            } else if line_y == start_content_y {
                 (start_x, region.x2)
-            } else if line_y == end_y {
+            } else if line_y == end_content_y {
                 (region.x1, end_x)
             } else {
                 (region.x1, region.x2)
@@ -1372,36 +1430,45 @@ impl SessionView {
             y += msg_h;
         }
 
-        if let Some((anchor_x, anchor_y, focus_x, focus_y)) = self.drag_selection {
-            let start_y = anchor_y.min(focus_y);
-            let end_y = anchor_y.max(focus_y);
+        if let Some((anchor_x, _anchor_screen_y, focus_x, focus_y)) = self.drag_selection {
+            // Convert content-space anchor to current screen position
+            // screen_y = content_y - scroll_y + vp_top
+            let vp_top = i32::from(inner_area.y);
+            let anchor_screen_y =
+                (self.selection_anchor_content_y - self.scroll_y + vp_top)
+                    .clamp(vp_top, vp_top + i32::from(inner_area.height) - 1) as u16;
 
-            let (start_x, end_x) = if anchor_y == start_y {
+            let start_y = anchor_screen_y.min(focus_y);
+            let end_y = anchor_screen_y.max(focus_y);
+
+            let (start_x, end_x) = if anchor_screen_y == start_y {
                 (anchor_x, focus_x)
             } else {
                 (focus_x, anchor_x)
             };
 
-            let max_x = area.right().saturating_sub(1);
-            let min_x = area.x;
+            let content_min_x = inner_area.x + 3;
+            let content_max_x = (inner_area.x + 3 + max_w).saturating_sub(1);
 
             for cy in start_y..=end_y {
                 let (lx1, lx2) = if start_y == end_y {
-                    let a = start_x.min(end_x);
-                    let b = start_x.max(end_x);
-                    (a.min(max_x), b.min(max_x))
+                    (start_x.min(end_x), start_x.max(end_x))
                 } else if cy == start_y {
-                    (start_x.min(max_x), max_x)
+                    (start_x, content_max_x)
                 } else if cy == end_y {
-                    (min_x, end_x.min(max_x))
+                    (content_min_x, end_x)
                 } else {
-                    (min_x, max_x)
+                    (content_min_x, content_max_x)
                 };
 
+                let lx1 = lx1.max(content_min_x);
+                let lx2 = lx2.min(content_max_x);
+                if lx1 > lx2 {
+                    continue;
+                }
+
                 for cx in lx1..=lx2 {
-                    if let Some(cell) = buf.cell_mut((cx, cy))
-                        && cell.symbol() != " "
-                    {
+                    if let Some(cell) = buf.cell_mut((cx, cy)) {
                         let fg = cell.fg;
                         let bg = cell.bg;
                         cell.set_fg(bg);

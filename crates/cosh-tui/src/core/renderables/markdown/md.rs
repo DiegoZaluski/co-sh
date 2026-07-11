@@ -787,3 +787,91 @@ fn rgba_to_color(c: RGBA) -> Color {
     let (r, g, b, _) = c.to_ints();
     Color::Rgb(r, g, b)
 }
+
+/// Strip markdown formatting and return the visible text content,
+/// matching what `MarkdownRenderable` actually displays on screen.
+///
+/// Uses the same `pulldown_cmark` parser and `MarkdownContext` that
+/// the renderer uses, so the output word-wraps and line-breaks
+/// identically to the rendered output.
+pub fn markdown_to_visible_text(markdown: &str) -> String {
+    if markdown.is_empty() {
+        return String::new();
+    }
+
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    let parser = pulldown_cmark::Parser::new_ext(markdown, options);
+    let mut ctx = MarkdownContext::new();
+    let mut result = String::new();
+
+    for event in parser {
+        match event {
+            Event::Start(tag) => {
+                ctx.handle_start(&tag);
+                match &tag {
+                    Tag::Item => {
+                        let marker = ctx
+                            .list_marker()
+                            .map_or_else(|| "• ".to_string(), |(ordered, num)| {
+                                if ordered {
+                                    format!("{num}. ")
+                                } else {
+                                    "• ".to_string()
+                                }
+                            });
+                        result.push_str(&marker);
+                    }
+                    Tag::Paragraph
+                    | Tag::BlockQuote(_)
+                    | Tag::Heading { .. }
+                    | Tag::CodeBlock(_) => {
+                        if !result.is_empty() && !result.ends_with('\n') {
+                            result.push('\n');
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Event::End(tag_end) => {
+                match &tag_end {
+                    TagEnd::Paragraph
+                    | TagEnd::Heading(_)
+                    | TagEnd::BlockQuote(_)
+                    | TagEnd::Item
+                    | TagEnd::CodeBlock
+                    | TagEnd::TableRow => {
+                        if !result.ends_with('\n') {
+                            result.push('\n');
+                        }
+                    }
+                    _ => {}
+                }
+                ctx.handle_end(&tag_end);
+            }
+            Event::Text(text) | Event::Code(text) | Event::InlineHtml(text) => {
+                result.push_str(&text);
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                result.push('\n');
+            }
+            Event::TaskListMarker(checked) => {
+                if checked {
+                    result.push_str("[x] ");
+                } else {
+                    result.push_str("[ ] ");
+                }
+            }
+            Event::Rule => {
+                if !result.ends_with('\n') {
+                    result.push('\n');
+                }
+            }
+            _ => {}
+        }
+    }
+
+    result.trim_end().to_string()
+}

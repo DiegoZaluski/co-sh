@@ -249,6 +249,111 @@ pub fn tool_display(tool: &str) -> &str {
     "generic"
 }
 
+/// Generate the visible inline text for a tool part (icon + label).
+/// Returns the text that would be shown by `render_inline_tool`.
+pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
+    let icon = tool_icon(part);
+    let label = match tool_display(&part.tool) {
+        "bash" => {
+            let cmd = input_value(&part.input, "command").unwrap_or_default();
+            if cmd.is_empty() || matches!(part.status, ToolStatus::Running) {
+                "Writing command...".to_string()
+            } else {
+                cmd
+            }
+        }
+        "write" => {
+            let fp = input_value(&part.input, "filePath").unwrap_or_default();
+            format!("Write {fp}")
+        }
+        "edit" => {
+            let fp = input_value(&part.input, "filePath").unwrap_or_default();
+            format!("Edit {fp}")
+        }
+        "glob" => {
+            let pat = input_value(&part.input, "pattern").unwrap_or_default();
+            let path = input_value(&part.input, "path");
+            if let Some(p) = path {
+                format!("Glob \"{pat}\" in {p}")
+            } else {
+                format!("Glob \"{pat}\"")
+            }
+        }
+        "read" => {
+            let fp = input_value(&part.input, "filePath").unwrap_or_default();
+            format!("Read {fp}")
+        }
+        "grep" => {
+            let pat = input_value(&part.input, "pattern").unwrap_or_default();
+            let path = input_value(&part.input, "path");
+            if let Some(p) = path {
+                format!("Grep \"{pat}\" in {p}")
+            } else {
+                format!("Grep \"{pat}\"")
+            }
+        }
+        "webfetch" => {
+            let url = input_value(&part.input, "url").unwrap_or_default();
+            format!("WebFetch {url}")
+        }
+        "websearch" => {
+            let q = input_value(&part.input, "query").unwrap_or_default();
+            let provider = input_value(&part.input, "provider");
+            let label = web_search_provider_label(provider.as_deref());
+            format!("{label} \"{q}\"")
+        }
+        "task" => {
+            let desc = input_value(&part.input, "description").unwrap_or_default();
+            if desc.is_empty() { "Delegating...".to_string() } else { desc }
+        }
+        "question" => "Asking questions...".to_string(),
+        "todo" => {
+            if matches!(part.status, ToolStatus::Running) || part.output.as_deref().unwrap_or("").trim().is_empty() {
+                format!("Writing {}...", &part.tool)
+            } else {
+                match part.tool.as_str() {
+                    "plan_todo_write" => "\u{270F} TODO Write".to_string(),
+                    "plan_todo_edit" => "\u{270F} TODO Edit".to_string(),
+                    "plan_todo_cross_off" => "\u{2713} TODO Cross Off".to_string(),
+                    "plan_todo_read" => "\u{2630} TODO Read".to_string(),
+                    "plan_load_from_md" => "\u{1F4C2} TODO Load".to_string(),
+                    _ => "\u{2630} TODO".to_string(),
+                }
+            }
+        }
+        _ => {
+            if matches!(part.status, ToolStatus::Completed) {
+                part.tool.clone()
+            } else {
+                format!("Writing {}...", &part.tool)
+            }
+        }
+    };
+    format!("{icon} {label}")
+}
+
+/// Return the icon character for a tool.
+fn tool_icon(part: &ToolPart) -> &'static str {
+    match tool_display(&part.tool) {
+        "bash" => "$",
+        "write" | "edit" => "\u{2190}",
+        "glob" | "grep" => "\u{2731}",
+        "read" => "\u{2192}",
+        "webfetch" => "%",
+        "websearch" => "\u{25c8}",
+        "task" => {
+            if matches!(part.status, ToolStatus::Completed) {
+                "\u{2713}"
+            } else {
+                "\u{2502}"
+            }
+        }
+        "question" => "\u{2192}",
+        "todo" => "\u{2630}",
+        _ => "\u{2699}",
+    }
+}
+
 pub fn web_search_provider_label(provider: Option<&str>) -> &str {
     match provider {
         Some("parallel") => "Parallel Web Search",
@@ -257,7 +362,7 @@ pub fn web_search_provider_label(provider: Option<&str>) -> &str {
     }
 }
 
-fn input_value(input: &serde_json::Value, key: &str) -> Option<String> {
+pub(crate) fn input_value(input: &serde_json::Value, key: &str) -> Option<String> {
     input.get(key).and_then(|v| match v {
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Number(n) => Some(n.to_string()),

@@ -2197,6 +2197,13 @@ impl App {
                 self.mouse_down_pos = Some((x, y));
                 self.mouse_drag_active = false;
                 self.drag_selection = None;
+                self.session_view.mouse_down_scroll_y = self.session_view.scroll_y;
+                // Store anchor in content space so the visual highlight moves with content
+                if let Some(session_area) = self.session_view.session_area {
+                    let vp_top = i32::from(session_area.1);
+                    self.session_view.selection_anchor_content_y =
+                        (y as i32) - vp_top + self.session_view.mouse_down_scroll_y;
+                }
 
                 // If the click is inside the prompt area, start a text selection.
                 if matches!(self.mode(), AppMode::Session)
