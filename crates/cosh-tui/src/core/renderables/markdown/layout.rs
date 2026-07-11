@@ -28,6 +28,8 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
     let parser = pulldown_cmark::Parser::new_ext(text, options);
 
     for event in parser {

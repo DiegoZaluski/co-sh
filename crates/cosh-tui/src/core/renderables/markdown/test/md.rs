@@ -264,3 +264,356 @@ fn test_link_style() {
         "Link text should be underlined"
     );
 }
+
+#[test]
+fn test_strikethrough_renders() {
+    let md = make_md("~~struck~~");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    // Strikethrough text should have CROSSED_OUT modifier
+    let cell = buf.cell((0, 0)).unwrap();
+    assert_eq!(cell.symbol(), "s");
+    assert!(
+        cell.style().add_modifier.contains(Modifier::CROSSED_OUT),
+        "Strikethrough text should have CROSSED_OUT modifier"
+    );
+}
+
+#[test]
+fn test_task_list_unchecked() {
+    let md = make_md("- [ ] todo item");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    // Should have bullet marker
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "•");
+    // Checkbox should show unchecked
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "[");
+    assert_eq!(buf.cell((3, 0)).unwrap().symbol(), " ");
+    assert_eq!(buf.cell((4, 0)).unwrap().symbol(), "]");
+    // Text should follow
+    assert_eq!(buf.cell((6, 0)).unwrap().symbol(), "t");
+}
+
+#[test]
+fn test_task_list_checked() {
+    let md = make_md("- [x] done");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    // Checkbox should show checked
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "[");
+    assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "x");
+    assert_eq!(buf.cell((4, 0)).unwrap().symbol(), "]");
+    // Text should follow
+    assert_eq!(buf.cell((6, 0)).unwrap().symbol(), "d");
+}
+
+#[test]
+fn test_task_list_multiple_items() {
+    let md = make_md("- [x] step 1\n- [ ] step 2\n- [ ] step 3");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
+
+    // First row: checked
+    assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "x");
+    // Second row: unchecked
+    assert_eq!(buf.cell((2, 1)).unwrap().symbol(), "[");
+    assert_eq!(buf.cell((3, 1)).unwrap().symbol(), " ");
+    assert_eq!(buf.cell((4, 1)).unwrap().symbol(), "]");
+    // Third row: unchecked
+    assert_eq!(buf.cell((2, 2)).unwrap().symbol(), "[");
+    assert_eq!(buf.cell((3, 2)).unwrap().symbol(), " ");
+    assert_eq!(buf.cell((4, 2)).unwrap().symbol(), "]");
+}
+
+#[test]
+fn test_mixed_bold_and_italic() {
+    // ***text*** should apply at least bold (innermost wins)
+    let md = make_md("***bold italic***");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    let cell = buf.cell((0, 0)).unwrap();
+    assert!(
+        cell.style().add_modifier.contains(Modifier::BOLD),
+        "***text*** should have bold modifier on innermost style"
+    );
+}
+
+#[test]
+fn test_bold_with_inline_code() {
+    let md = make_md("**bold `code` end**");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    // "bold" should be bold
+    let bold_cell = buf.cell((0, 0)).unwrap();
+    assert!(
+        bold_cell.style().add_modifier.contains(Modifier::BOLD),
+        "Text before inline code in bold should be bold"
+    );
+    // Inline code should have background
+    // "code" starts after "bold `" = 6 chars
+    let code_cell = buf.cell((6, 0)).unwrap();
+    assert!(
+        code_cell.style().bg.is_some(),
+        "Inline code inside bold should have background"
+    );
+}
+
+#[test]
+fn test_code_block_no_lang_fallback() {
+    // Code block without language specifier - should fall back to javascript and render
+    let md = make_md("```\nfn hello() {}\n```");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 60, 10));
+
+    // Code block should render characters
+    let has_fn = (0..10).any(|row| {
+        (0..60).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "f"))
+    });
+    assert!(has_fn, "Code block without lang should still render");
+}
+
+#[test]
+fn test_non_zero_area_offset() {
+    let md = make_md("Hello\nWorld");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
+    // Render into a sub-area offset from origin
+    md.render_self(&mut buf, Rect::new(5, 2, 20, 6));
+
+    // Content should appear at the offset position
+    assert_eq!(
+        buf.cell((5, 2)).unwrap().symbol(),
+        "H",
+        "First line should start at area.x"
+    );
+    assert_eq!(
+        buf.cell((5, 3)).unwrap().symbol(),
+        "W",
+        "Second line should start at area.x on next row"
+    );
+    // Content should NOT appear at origin (0,0)
+    assert_eq!(
+        buf.cell((0, 0)).unwrap().symbol(),
+        " ",
+        "Origin should remain empty (filled with background)"
+    );
+}
+
+#[test]
+fn test_content_truncation() {
+    // Content that exceeds area height
+    let md = make_md("line1\nline2\nline3\nline4\nline5");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 3));
+    md.render_self(&mut buf, Rect::new(0, 0, 20, 3));
+
+    // First line should render
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "l");
+    // Second line should render
+    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "l");
+    // Content beyond area height should NOT render
+    // (third line wraps to y=2, fourth/fifth would be at y=3+ which is beyond max_y)
+    // We can't easily check for absence at specific positions since Buffer is empty
+}
+
+#[test]
+fn test_hard_break() {
+    // Two spaces at end of line + newline = hard break in CommonMark
+    // In pulldown-cmark, this generates HardBreak events
+    let md = make_md("line1  \nline2");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "l");
+    assert_eq!(buf.cell((4, 0)).unwrap().symbol(), "1");
+    // line2 should be on row 1
+    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "l");
+    assert_eq!(buf.cell((4, 1)).unwrap().symbol(), "2");
+}
+
+#[test]
+fn test_heading_with_inline_code() {
+    let md = make_md("# Install `rustup`");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    // Heading text should be bold
+    let cell = buf.cell((0, 0)).unwrap();
+    assert!(
+        cell.style().add_modifier.contains(Modifier::BOLD),
+        "Heading text should be bold"
+    );
+    // Inline code in heading should have background AND be bold (heading style)
+    let code_start = "Install ".len() as u16;
+    let code_cell = buf.cell((code_start, 0)).unwrap();
+    assert!(
+        code_cell.style().bg.is_some(),
+        "Inline code in heading should have background"
+    );
+}
+
+#[test]
+fn test_non_zero_area_with_wrapping() {
+    // Text that wraps within a sub-area
+    let long_word = "hello";
+    let text = format!("{} world {}", long_word, "a".repeat(30));
+    let md = make_md(&text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
+    // Narrow area starting at x=2
+    md.render_self(&mut buf, Rect::new(2, 1, 10, 5));
+
+    // Content should start at area.x
+    assert_eq!(buf.cell((2, 1)).unwrap().symbol(), "h");
+    // When text wraps, it should reset to area.x, not column 0
+}
+
+#[test]
+fn test_blockquote_multiple_paragraphs() {
+    let md = make_md("> First paragraph\n>\n> Second paragraph");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
+
+    let palette = MarkdownPalette::new(RGBA::from_ints(220, 220, 220, 255), RGBA::from_ints(0, 0, 0, 0));
+    let muted_color = rgba_to_color(palette.muted_color());
+
+    // First paragraph text should be muted
+    assert_eq!(
+        buf.cell((0, 0)).unwrap().style().fg,
+        Some(muted_color),
+        "Blockquote first paragraph should be muted"
+    );
+}
+
+#[test]
+fn test_consecutive_headings() {
+    let md = make_md("# H1\n## H2\n### H3");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
+
+    // H1 on row 0
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "H");
+    assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "1");
+    // H2 on row 1
+    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "H");
+    assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "2");
+    // H3 on row 2
+    assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "H");
+    assert_eq!(buf.cell((1, 2)).unwrap().symbol(), "3");
+}
+
+#[test]
+fn test_table_proportional_scaling() {
+    // Table wider than available width - should scale proportionally
+    let text = "| A | B | C | D | E |\n|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 |\n";
+    let md = make_md(text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 20, 10));
+
+    // Should still render something (proportional scaling kicks in)
+    // At least the top border should be visible
+    let top_left = buf.cell((0, 0)).unwrap();
+    assert_eq!(top_left.symbol(), "┌");
+    // Some data should be visible
+    assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "A");
+}
+
+#[test]
+fn test_code_block_with_empty_lines() {
+    let md = make_md("```\n\nmiddle\n\n```");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
+
+    // Content should render despite empty lines
+    let has_middle = (0..10).any(|row| {
+        (0..40).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "m"))
+    });
+    assert!(has_middle, "Code block with empty lines should render 'middle'");
+}
+
+#[test]
+fn test_list_with_long_item_wrapping() {
+    let long_item = "a".repeat(50);
+    let md = make_md(&format!("- {long_item}"));
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 20, 10));
+
+    // Bullet marker should be at (0, 0)
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "•");
+    // Text content should wrap to next line
+    // At 20 wide, bullet takes 2 cols, so wrap starts at x=2
+    // 50 chars should wrap multiple times
+    let row1_text = (0..20).any(|col| {
+        let c = buf.cell((col, 1));
+        c.is_some() && c.unwrap().symbol() == "a"
+    });
+    assert!(row1_text, "Long list item should wrap to second line");
+}
+
+#[test]
+fn test_table_custom_border_color_with_headers() {
+    let text = "| Col1 | Col2 | Col3 |\n|---|---|---|\n| data1 | data2 | data3 |\n";
+    let mut md = make_md(text);
+    md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(0, 200, 0, 255))));
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, 30, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 30, 10));
+
+    // All border corners should use custom green color
+    let green = Color::Rgb(0, 200, 0);
+    assert_eq!(buf.cell((0, 0)).unwrap().style().fg, Some(green), "Top-left corner should be green");
+    assert_eq!(buf.cell((0, 4)).unwrap().style().fg, Some(green), "Bottom-left corner should be green");
+}
+
+#[test]
+fn test_heading_level_color_distinction() {
+    let md = make_md("# H1\n###### H6");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
+
+    // Both headings should be bold
+    assert!(
+        buf.cell((0, 0)).unwrap().style().add_modifier.contains(Modifier::BOLD),
+        "H1 should be bold"
+    );
+    assert!(
+        buf.cell((0, 1)).unwrap().style().add_modifier.contains(Modifier::BOLD),
+        "H6 should be bold"
+    );
+    // H1 should be brighter than H6
+    if let (Some(Color::Rgb(r1, g1, b1)), Some(Color::Rgb(r2, g2, b2))) =
+        (buf.cell((0, 0)).unwrap().style().fg, buf.cell((0, 1)).unwrap().style().fg)
+    {
+        let lum1 = r1 as u32 + g1 as u32 + b1 as u32;
+        let lum2 = r2 as u32 + g2 as u32 + b2 as u32;
+        assert!(
+            lum1 > lum2,
+            "H1 ({lum1}) should be brighter than H6 ({lum2})"
+        );
+    }
+}
+
+#[test]
+fn test_empty_content_zero_area() {
+    let md = make_md("some text");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 0, 0));
+    // Should not panic when area has zero dimensions
+    md.render_self(&mut buf, Rect::new(0, 0, 0, 0));
+}
+
+#[test]
+fn test_soft_break_in_paragraph() {
+    // Single newline within paragraph produces SoftBreak
+    let md = make_md("line 1\nline 2");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    // line 1 (6 chars: l,i,n,e,' ',1) should be on row 0, '1' at index 5
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "l");
+    assert_eq!(buf.cell((5, 0)).unwrap().symbol(), "1");
+    // line 2 should be on row 1 (soft break advances to next line)
+    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "l");
+    assert_eq!(buf.cell((5, 1)).unwrap().symbol(), "2");
+}

@@ -265,6 +265,8 @@ impl Renderable for MarkdownRenderable {
 
         let mut options = Options::empty();
         options.insert(Options::ENABLE_TABLES);
+        options.insert(Options::ENABLE_TASKLISTS);
+        options.insert(Options::ENABLE_STRIKETHROUGH);
         let parser = pulldown_cmark::Parser::new_ext(&self.content, options);
 
         for event in parser {
