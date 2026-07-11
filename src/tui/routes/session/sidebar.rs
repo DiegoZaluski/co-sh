@@ -28,6 +28,17 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
+/// Action returned by the sidebar after a mouse click.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebarAction {
+    /// Switch to the given session.
+    SwitchTo(String),
+    /// Request deletion of the given session.
+    RequestDelete(String),
+    /// No action.
+    None,
+}
+
 pub struct SidebarView {
     pub open: bool,
     pub width: u16,
@@ -41,19 +52,38 @@ impl SidebarView {
         }
     }
 
-    /// Handle a mouse click on the sidebar. Returns the session ID to switch to if any.
-    pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect, state: &AppState) -> Option<String> {
+    /// Handle a mouse click on the sidebar. Returns an action to perform.
+    pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect, state: &AppState) -> SidebarAction {
         if !self.open {
-            return None;
+            return SidebarAction::None;
         }
         let my = mouse.y;
+        let mx = mouse.x;
+
         for (i, session) in state.sessions.iter().enumerate() {
             let item_y = area.y + 2 + i as u16;
-            if my == item_y {
-                return Some(session.id.clone());
+            if my != item_y {
+                continue;
             }
+
+            // Calculate where 🗑 would be: right after the session title
+            let is_active = Some(session.id.as_str()) == state.current_session_id.as_deref();
+            let prefix = if is_active { "\u{25b8} " } else { "  " };
+            let label_len = prefix.chars().count() + session.title.chars().count();
+            let max_label_w = area.width.saturating_sub(3) as usize;
+            let visible = label_len.min(max_label_w);
+            let trash_x = area.x + 2 + visible as u16;
+
+            // Click on 🗑 or the cleared cell after it
+            if mx >= trash_x && mx < area.right() {
+                return SidebarAction::RequestDelete(session.id.clone());
+            }
+
+            // Otherwise, switch to this session
+            return SidebarAction::SwitchTo(session.id.clone());
         }
-        None
+
+        SidebarAction::None
     }
 
     pub fn render(&self, buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
@@ -83,6 +113,7 @@ impl SidebarView {
 
         let item_style = Style::default().fg(rgba_color(theme.text));
         let active_style = Style::default().fg(rgba_color(theme.primary));
+        let delete_style = Style::default().fg(rgba_color(theme.text_muted));
 
         for (i, session) in state.sessions.iter().enumerate() {
             let y = area.y + 2 + i as u16;
@@ -95,14 +126,26 @@ impl SidebarView {
 
             let prefix = if is_active { "\u{25b8} " } else { "  " };
             let label = format!("{}{}", prefix, session.title);
-            draw_text_line(
-                buf,
-                &label,
-                area.x + 1,
-                y,
-                area.width.saturating_sub(2),
-                style,
-            );
+            // Leave room for 🗑 after the text
+            let max_label_w = area.width.saturating_sub(3);
+            draw_text_line(buf, &label, area.x + 1, y, max_label_w, style);
+
+            // 🗑 immediately after the visible text
+            let label_visible = label.chars().count().min(max_label_w as usize) as u16;
+            let trash_x = area.x + 2 + label_visible;
+            if trash_x + 1 < area.right()
+                && let Some(cell) = buf.cell_mut((trash_x, y))
+            {
+                cell.set_char('\u{1F5D1}');
+                cell.set_style(delete_style);
+            }
+            // Clear the cell after the wide emoji
+            if trash_x + 1 < area.right()
+                && let Some(cell) = buf.cell_mut((trash_x + 1, y))
+            {
+                cell.set_char(' ');
+                cell.set_style(Style::default());
+            }
         }
     }
 }

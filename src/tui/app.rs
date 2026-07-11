@@ -29,7 +29,7 @@ use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
-use crate::routes::session::sidebar::SidebarView;
+use crate::routes::session::sidebar::{SidebarAction, SidebarView};
 use crate::routes::tools::InternalToolsView;
 use crate::session_store::{
     SessionStore, format_session_timestamp, generate_session_id, is_valid_session,
@@ -98,6 +98,8 @@ pub struct App {
     prefs_cache: crate::util::cache::StaleCache<String, String>,
     /// Session persistence store (JSONL files on disk).
     session_store: SessionStore,
+    /// When set, the current Confirm dialog is asking about deleting a session.
+    pending_delete_session_id: Option<String>,
 
     // ── Mouse drag / selection tracking ───────────────────────────────────────────
     /// Position where the mouse was pressed down (for detecting drag selections).
@@ -168,6 +170,7 @@ impl App {
             model_cache: crate::util::cache::StaleCache::new("model.json"),
             prefs_cache,
             session_store,
+            pending_delete_session_id: None,
             should_quit: false,
             tokio_handle: Handle::current(),
             event_tx,
@@ -1083,6 +1086,7 @@ impl App {
                             self.prompt_view.clear_selection();
                             return Ok(false);
                         }
+                        self.pending_delete_session_id = None;
                         self.dialog.show(DialogType::Confirm {
                             message: "Quit cosh?".into(),
                         });
@@ -1394,8 +1398,16 @@ impl App {
                                 && matches!(dialog.dialog_type, DialogType::Confirm { .. })
                             {
                                 if dialog.selected == 0 {
-                                    self.should_quit = true;
+                                    if let Some(session_id) = self.pending_delete_session_id.take()
+                                    {
+                                        self.state.remove_session(&session_id);
+                                        self.session_store.delete_session(&session_id);
+                                        self.dialog.pop();
+                                    } else {
+                                        self.should_quit = true;
+                                    }
                                 } else {
+                                    self.pending_delete_session_id = None;
                                     self.dialog.pop();
                                 }
                                 return Ok(false);
@@ -1568,6 +1580,7 @@ impl App {
                             } else if self.permission_dialog.visible {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
+                                self.pending_delete_session_id = None;
                                 self.dialog.pop();
                             }
                         }
@@ -1584,12 +1597,14 @@ impl App {
                             } else if self.permission_dialog.visible {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
+                                self.pending_delete_session_id = None;
                                 self.dialog.pop();
                             } else if matches!(self.mode(), AppMode::Session) {
                                 self.state.current_session_id = None;
                             } else if matches!(self.mode(), AppMode::AddProvider) {
                                 self.show_add_provider = false;
                             } else if matches!(self.mode(), AppMode::Home) {
+                                self.pending_delete_session_id = None;
                                 self.dialog.show(DialogType::Confirm {
                                     message: "Quit cosh?".into(),
                                 });
@@ -2375,7 +2390,14 @@ impl App {
                 DialogAction::Confirmed if self.is_confirm_dialog_visible() => {
                     if let Some(d) = self.dialog.current() {
                         if d.selected == 0 {
-                            self.should_quit = true;
+                            if let Some(session_id) = self.pending_delete_session_id.take() {
+                                self.state.remove_session(&session_id);
+                                self.session_store.delete_session(&session_id);
+                            } else {
+                                self.should_quit = true;
+                            }
+                        } else {
+                            self.pending_delete_session_id = None;
                         }
                         self.dialog.pop();
                     }
@@ -2574,9 +2596,22 @@ impl App {
         // 6. Sidebar
         if self.sidebar.open {
             let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
-            if let Some(session_id) = self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
-                self.state.current_session_id = Some(session_id);
-                return Ok(true);
+            match self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
+                SidebarAction::SwitchTo(session_id) => {
+                    self.state.current_session_id = Some(session_id);
+                    return Ok(true);
+                }
+                SidebarAction::RequestDelete(session_id) => {
+                    self.pending_delete_session_id = Some(session_id);
+                    self.dialog.show(DialogType::Confirm {
+                        message: "Delete this session?".into(),
+                    });
+                    if let Some(d) = self.dialog.current_mut() {
+                        d.selected = 1;
+                    }
+                    return Ok(true);
+                }
+                SidebarAction::None => {}
             }
         }
 

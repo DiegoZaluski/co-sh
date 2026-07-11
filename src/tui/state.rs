@@ -39,6 +39,18 @@ impl AppState {
         }
     }
 
+    /// Remove a session by ID. Clears `current_session_id` if it matches.
+    pub fn remove_session(&mut self, session_id: &str) {
+        self.sessions.retain(|s| s.id != session_id);
+        if self
+            .current_session_id
+            .as_deref()
+            .is_some_and(|id| id == session_id)
+        {
+            self.current_session_id = None;
+        }
+    }
+
     /// Add a session, evicting the oldest non-current session if at cap.
     pub fn add_session(&mut self, session: Session) {
         if self.sessions.len() >= MAX_SESSIONS {
