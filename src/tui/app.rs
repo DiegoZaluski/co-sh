@@ -855,8 +855,10 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn render(&mut self, frame: &mut Frame<'_>, delta_time: f64) {
-        // Sync live_requested from session_view auto-scroll state.
-        self.live_requested = self.session_view.is_auto_scrolling;
+        // Sync live_requested from session_view auto-scroll and sticky scroll state.
+        // During streaming, sticky scroll needs continuous rendering to re-apply scroll position.
+        self.live_requested = self.session_view.is_auto_scrolling
+            || (self.state.status == crate::types::SessionStatus::Working && self.session_view.is_sticky_bottom);
         let area = frame.area();
 
         {
@@ -1345,16 +1347,30 @@ impl App {
 
                     match action {
                         Some(crate::keymap::Action::ScrollUp) => {
-                            self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
+                            // OpenCode: 1/5 viewport per arrow key
+                            let vh = self.session_view.visible_height.max(1);
+                            let delta = -(vh as f64 / 5.0);
+                            self.session_view.scroll_by_raw(delta);
+                            self.session_view.reset_scroll_accumulator();
                         }
                         Some(crate::keymap::Action::ScrollDown) => {
-                            self.session_view.scroll_y = (self.session_view.scroll_y + 3).max(0);
+                            let vh = self.session_view.visible_height.max(1);
+                            let delta = vh as f64 / 5.0;
+                            self.session_view.scroll_by_raw(delta);
+                            self.session_view.reset_scroll_accumulator();
                         }
                         Some(crate::keymap::Action::ScrollUpPage) => {
-                            self.session_view.scroll_y = (self.session_view.scroll_y - 10).max(0);
+                            // OpenCode: 1/2 viewport per page key
+                            let vh = self.session_view.visible_height.max(1);
+                            let delta = -(vh as f64 / 2.0);
+                            self.session_view.scroll_by_raw(delta);
+                            self.session_view.reset_scroll_accumulator();
                         }
                         Some(crate::keymap::Action::ScrollDownPage) => {
-                            self.session_view.scroll_y = (self.session_view.scroll_y + 10).max(0);
+                            let vh = self.session_view.visible_height.max(1);
+                            let delta = vh as f64 / 2.0;
+                            self.session_view.scroll_by_raw(delta);
+                            self.session_view.reset_scroll_accumulator();
                         }
                         Some(crate::keymap::Action::ToggleSidebar) => {
                             self.sidebar.open = !self.sidebar.open;
@@ -1423,6 +1439,9 @@ impl App {
                                     agent: None,
                                     model: None,
                                 });
+
+                                // Scroll to bottom when user sends a message (matches OpenCode's `toBottom()` on submit)
+                                self.session_view.scroll_to_bottom();
                             }
 
                             self.stop_signal.store(false, Ordering::Relaxed);
@@ -1581,10 +1600,10 @@ impl App {
                             }
                         }
                         Some(crate::keymap::Action::ScrollToTop) => {
-                            self.session_view.scroll_y = 0;
+                            self.session_view.scroll_to(0);
                         }
                         Some(crate::keymap::Action::ScrollToBottom) => {
-                            self.session_view.scroll_y = self.state.max_scroll();
+                            self.session_view.scroll_to_bottom();
                         }
                         Some(crate::keymap::Action::ToggleConceal) => {
                             self.config.conceal = !self.config.conceal;
@@ -1708,8 +1727,11 @@ impl App {
                                 match key.code {
                                     KeyCode::Up => {
                                         if self.prompt_view.input.is_empty() {
-                                            self.session_view.scroll_y =
-                                                (self.session_view.scroll_y - 3).max(0);
+                                            // OpenCode: 1/5 viewport per arrow
+                                            let vh = self.session_view.visible_height.max(1);
+                                            let delta = -(vh as f64 / 5.0);
+                                            self.session_view.scroll_by_raw(delta);
+                                            self.session_view.reset_scroll_accumulator();
                                         } else {
                                             self.prompt_view.note_activity();
                                             self.prompt_view.cursor_up(
@@ -1719,8 +1741,10 @@ impl App {
                                     }
                                     KeyCode::Down => {
                                         if self.prompt_view.input.is_empty() {
-                                            self.session_view.scroll_y =
-                                                (self.session_view.scroll_y + 3).max(0);
+                                            let vh = self.session_view.visible_height.max(1);
+                                            let delta = vh as f64 / 5.0;
+                                            self.session_view.scroll_by_raw(delta);
+                                            self.session_view.reset_scroll_accumulator();
                                         } else {
                                             self.prompt_view.note_activity();
                                             self.prompt_view.cursor_down(
@@ -1780,12 +1804,17 @@ impl App {
                                         }
                                     }
                                     KeyCode::PageUp => {
-                                        self.session_view.scroll_y =
-                                            (self.session_view.scroll_y - 10).max(0);
+                                        // OpenCode: 1/2 viewport per page key
+                                        let vh = self.session_view.visible_height.max(1);
+                                        let delta = -(vh as f64 / 2.0);
+                                        self.session_view.scroll_by_raw(delta);
+                                        self.session_view.reset_scroll_accumulator();
                                     }
                                     KeyCode::PageDown => {
-                                        self.session_view.scroll_y =
-                                            (self.session_view.scroll_y + 10).max(0);
+                                        let vh = self.session_view.visible_height.max(1);
+                                        let delta = vh as f64 / 2.0;
+                                        self.session_view.scroll_by_raw(delta);
+                                        self.session_view.reset_scroll_accumulator();
                                     }
                                     KeyCode::Backspace => {
                                         // Ctrl+Backspace = delete word before cursor
@@ -1831,13 +1860,17 @@ impl App {
                                         // Vim-style scroll only when prompt is empty
                                         // (otherwise these chars are typed normally)
                                         if ch == 'j' && self.prompt_view.input.is_empty() {
-                                            self.session_view.scroll_y =
-                                                (self.session_view.scroll_y + 3).max(0);
+                                            let vh = self.session_view.visible_height.max(1);
+                                            let delta = vh as f64 / 5.0;
+                                            self.session_view.scroll_by_raw(delta);
+                                            self.session_view.reset_scroll_accumulator();
                                             return Ok(false);
                                         }
                                         if ch == 'k' && self.prompt_view.input.is_empty() {
-                                            self.session_view.scroll_y =
-                                                (self.session_view.scroll_y - 3).max(0);
+                                            let vh = self.session_view.visible_height.max(1);
+                                            let delta = -(vh as f64 / 5.0);
+                                            self.session_view.scroll_by_raw(delta);
+                                            self.session_view.reset_scroll_accumulator();
                                             return Ok(false);
                                         }
 

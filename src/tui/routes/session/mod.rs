@@ -100,6 +100,26 @@ pub struct SessionView {
     auto_scroll_speed_slow: f64,
     auto_scroll_speed_medium: f64,
     auto_scroll_speed_fast: f64,
+
+    /// Total content height from last render (used by app.rs for scroll calcs).
+    pub total_height: i32,
+    /// Visible viewport height from last render.
+    pub visible_height: i32,
+
+    // ── Sticky scroll (auto-scroll to bottom) ──────────────────────────────────
+    /// Whether the user has manually scrolled away from the sticky position.
+    pub has_manual_scroll: bool,
+    /// Whether we are currently stuck to the bottom (sticky position).
+    pub is_sticky_bottom: bool,
+    /// Previous content height to detect size changes.
+    last_content_height: i32,
+    /// Guard flag that prevents scroll changes from being treated as manual.
+    is_applying_sticky_scroll: bool,
+
+    // ── Scroll accumulator (fractional smoothing, like OpenCode) ───────────────
+    scroll_accumulator_y: f64,
+    /// Scroll speed multiplier (acceleration, default 3.0 = CustomSpeedScroll(3)).
+    scroll_accel: f64,
 }
 
 impl SessionView {
@@ -117,7 +137,171 @@ impl SessionView {
             auto_scroll_speed_slow: 6.0,
             auto_scroll_speed_medium: 36.0,
             auto_scroll_speed_fast: 72.0,
+            total_height: 0,
+            visible_height: 0,
+            has_manual_scroll: false,
+            is_sticky_bottom: true,
+            last_content_height: 0,
+            is_applying_sticky_scroll: false,
+            scroll_accumulator_y: 0.0,
+            scroll_accel: 3.0,
         }
+    }
+
+    // ── Scroll control (port of OpenCode's ScrollBox) ──────────────────────────
+
+    /// Accelerated scroll (for mouse wheel). Multiplies delta by `scroll_accel`.
+    /// Uses fractional accumulator for smooth scrolling.
+    /// Mirrors OpenCode's `onMouseEvent` for scroll type.
+    pub fn scroll_by(&mut self, delta: f64) {
+        let max_scroll = (self.total_height - self.visible_height).max(0);
+
+        let scroll_amount = delta * self.scroll_accel;
+        self.scroll_accumulator_y += scroll_amount;
+        let int_scroll = self.scroll_accumulator_y.trunc() as i32;
+        if int_scroll != 0 {
+            self.scroll_accumulator_y -= int_scroll as f64;
+            self.scroll_y = (self.scroll_y + int_scroll).clamp(0, max_scroll);
+        }
+
+        self.sync_manual_scroll_state();
+    }
+
+    /// Raw scroll (for keyboard / programmatic). No acceleration, uses accumulator.
+    /// Mirrors OpenCode's `scrollBy` + `handleKeyPress` pattern.
+    pub fn scroll_by_raw(&mut self, delta: f64) {
+        let max_scroll = (self.total_height - self.visible_height).max(0);
+
+        self.scroll_accumulator_y += delta;
+        let int_scroll = self.scroll_accumulator_y.trunc() as i32;
+        if int_scroll != 0 {
+            self.scroll_accumulator_y -= int_scroll as f64;
+            self.scroll_y = (self.scroll_y + int_scroll).clamp(0, max_scroll);
+        }
+
+        self.sync_manual_scroll_state();
+    }
+
+    /// Reset the scroll accumulator (called after keyboard scroll, like OpenCode).
+    pub fn reset_scroll_accumulator(&mut self) {
+        self.scroll_accumulator_y = 0.0;
+    }
+
+    /// Set scroll acceleration multiplier (default 3.0 = CustomSpeedScroll(3)).
+    pub fn set_scroll_accel(&mut self, accel: f64) {
+        self.scroll_accel = accel;
+    }
+
+    /// Absolute scroll to position. Mirrors OpenCode's `scrollTo`.
+    pub fn scroll_to(&mut self, position: i32) {
+        let max_scroll = (self.total_height - self.visible_height).max(0);
+        self.scroll_y = position.clamp(0, max_scroll);
+        self.scroll_accumulator_y = 0.0;
+        self.sync_manual_scroll_state();
+    }
+
+    /// Scroll to bottom. Mirrors OpenCode's `toBottom()`:
+    ///   `scroll.scrollTo(scroll.scrollHeight)`
+    pub fn scroll_to_bottom(&mut self) {
+        let max_scroll = (self.total_height - self.visible_height).max(0);
+        self.scroll_y = max_scroll;
+        self.scroll_accumulator_y = 0.0;
+        self.has_manual_scroll = false;
+        self.is_sticky_bottom = true;
+    }
+
+    /// Sync manual scroll state. Mirrors OpenCode's `syncManualScrollState()`.
+    /// Sets `hasManualScroll = hasScrollableContent && !isAtStickyPosition()`.
+    /// The `is_applying_sticky_scroll` guard prevents this from being called
+    /// during `applyStickyStart`/`recalculateBarProps`.
+    fn sync_manual_scroll_state(&mut self) {
+        if self.is_applying_sticky_scroll {
+            return;
+        }
+
+        let max_scroll = (self.total_height - self.visible_height).max(0);
+        let has_scrollable_content = max_scroll > 1;
+
+        if has_scrollable_content && !self.is_at_sticky_position() {
+            self.has_manual_scroll = true;
+        } else {
+            self.has_manual_scroll = false;
+        }
+
+        self.update_sticky_state();
+    }
+
+    /// Update sticky state flags. Mirrors OpenCode's `updateStickyState()`.
+    fn update_sticky_state(&mut self) {
+        let max_scroll = (self.total_height - self.visible_height).max(0);
+
+        if self.scroll_y <= 0 {
+            self.is_sticky_bottom = false;
+        } else if self.scroll_y >= max_scroll {
+            self.is_sticky_bottom = true;
+        } else {
+            self.is_sticky_bottom = false;
+        }
+    }
+
+    /// Check if at sticky position. Mirrors OpenCode's `isAtStickyPosition()`.
+    /// For "bottom": `scrollTop >= maxScrollTop` (accepts >=, not strict equality).
+    fn is_at_sticky_position(&self) -> bool {
+        let max_scroll = (self.total_height - self.visible_height).max(0);
+
+        // stickyStart = "bottom"
+        if max_scroll <= 0 {
+            return true;
+        }
+        self.scroll_y >= max_scroll
+    }
+
+    /// Check if at sticky re-engage point. Mirrors OpenCode's `isAtStickyReengagePoint()`.
+    /// For "bottom": `maxScrollTop > 0 && scrollTop >= maxScrollTop - 1`
+    pub fn is_at_bottom(&self) -> bool {
+        let max_scroll = (self.total_height - self.visible_height).max(0);
+        if max_scroll <= 0 {
+            return true;
+        }
+        self.scroll_y >= max_scroll.saturating_sub(1)
+    }
+
+    /// Apply sticky start (scroll to bottom). Mirrors OpenCode's `applyStickyStart("bottom")`.
+    /// Sets `is_applying_sticky_scroll` guard to prevent recursive sync.
+    fn apply_sticky_start(&mut self) {
+        let was_applying = self.is_applying_sticky_scroll;
+        self.is_applying_sticky_scroll = true;
+
+        let max_scroll = (self.total_height - self.visible_height).max(0);
+        self.scroll_y = max_scroll;
+        self.is_sticky_bottom = true;
+
+        self.is_applying_sticky_scroll = was_applying;
+    }
+
+    /// Recalculate bar props (called when content/viewport size changes).
+    /// Mirrors OpenCode's `recalculateBarProps()` which:
+    /// 1. Sets `is_applying_sticky_scroll = true` 
+    /// 2. If `!hasManualScroll` → `applyStickyStart(stickyStart)`
+    /// 3. If `hasManualScroll && isAtStickyReengagePoint()` → re-engage
+    /// 4. Updates `last_content_height`
+    fn recalculate_bar_props(&mut self, total_height: i32, visible_height: i32) {
+        let was_applying = self.is_applying_sticky_scroll;
+        self.is_applying_sticky_scroll = true;
+
+        let new_max_scroll = (total_height - visible_height).max(0);
+
+        if !self.has_manual_scroll {
+            // No manual scroll → apply sticky start
+            self.apply_sticky_start();
+        } else if self.is_at_bottom() && new_max_scroll > 0 {
+            // User scrolled back to bottom during streaming → re-engage sticky
+            self.has_manual_scroll = false;
+            self.scroll_y = new_max_scroll;
+            self.is_sticky_bottom = true;
+        }
+
+        self.is_applying_sticky_scroll = was_applying;
     }
 
     fn render_file_badge(
@@ -588,12 +772,14 @@ impl SessionView {
             area.height,
         );
         let max_w = inner_area.width.saturating_sub(6);
-        let x_off = inner_area.x + 3;
+        let x_off = i32::from(inner_area.x + 3);
+        let max_w_i32 = i32::from(max_w);
 
-        let mut y = i32::from(inner_area.y) - self.scroll_y;
-        let visible_bottom = inner_area.bottom();
-        let click_x = mouse.x;
-        let click_y = mouse.y;
+        let vp_top = i32::from(inner_area.y);
+        let vp_bottom = i32::from(inner_area.bottom());
+        let mut y = vp_top - self.scroll_y;
+        let click_x = i32::from(mouse.x);
+        let click_y = i32::from(mouse.y);
 
         for (idx, msg) in session.messages.iter().enumerate() {
             if idx > 0 {
@@ -601,20 +787,21 @@ impl SessionView {
             }
 
             let msg_h = Self::render_message_height(msg, max_w, config);
+            let msg_top = y;
+            let msg_bottom = y + msg_h;
 
-            let msg_y = y as u16;
-
-            if click_y >= msg_y && msg_y < visible_bottom {
+            // Check if click is within this message and message is visible
+            if click_y >= msg_top && click_y < msg_bottom && msg_bottom > vp_top && msg_top < vp_bottom {
                 let border_offset: i32 = match msg.role {
                     MessageRole::User => 1,
                     MessageRole::Assistant => 0,
                 };
-                let mut part_y = i32::from(msg_y) + border_offset;
+                let mut part_y = msg_top + border_offset;
 
                 for part in &msg.parts {
                     let part_h = i32::from(Self::estimate_part_height(part, max_w, config).max(1));
 
-                    if click_y >= part_y as u16 && click_y < (part_y + part_h) as u16 {
+                    if click_y >= part_y && click_y < part_y + part_h {
                         if let crate::types::Part::Tool(tool) = part
                             && tool_render::tool_display(&tool.tool) == "bash"
                         {
@@ -629,9 +816,9 @@ impl SessionView {
                                         if expanded { &output } else { &collapsed.output };
                                     let hint_y = part_y + 1 + display.lines().count() as i32;
 
-                                    if click_y as i32 == hint_y
+                                    if click_y == hint_y
                                         && click_x >= x_off
-                                        && click_x < x_off + max_w
+                                        && click_x < x_off + max_w_i32
                                     {
                                         self.tool_state.toggle_expanded(id);
                                         return true;
@@ -642,7 +829,7 @@ impl SessionView {
 
                         if let crate::types::Part::Reasoning(r) = part {
                             let part_id = &r.text[..r.text.len().min(32)];
-                            if click_y == part_y as u16 {
+                            if click_y == part_y {
                                 let header_x_end = x_off + 8;
                                 if click_x >= x_off && click_x < header_x_end {
                                     self.tool_state.toggle_expanded(part_id);
@@ -733,8 +920,10 @@ impl SessionView {
 
         let scroll = self.scroll_y;
         let x_off = inner_area.x + 3;
+        let vp_top = i32::from(inner_area.y);
+        let vp_bottom = i32::from(inner_area.bottom());
 
-        let mut y = i32::from(inner_area.y) - scroll;
+        let mut y = vp_top - scroll;
 
         for (idx, msg) in session.messages.iter().enumerate() {
             if idx > 0 {
@@ -742,141 +931,142 @@ impl SessionView {
             }
 
             let msg_h = Self::render_message_height(msg, max_w, config);
+            let msg_top = y;
+            let msg_bottom = y + msg_h;
 
-            let msg_y = y as u16;
-            let visible_bottom = inner_area.bottom();
-
-            if msg_y < visible_bottom {
+            // Only process messages that overlap with the viewport
+            if msg_bottom > vp_top && msg_top < vp_bottom {
                 let border_offset = match msg.role {
                     MessageRole::User => 1,
                     MessageRole::Assistant => 0,
                 };
-                let mut part_y = i32::from(msg_y) + border_offset;
+                // Adjust part_y so that parts before the viewport are accounted for
+                let mut part_y = msg_top + border_offset;
 
                 for part in &msg.parts {
                     let part_h = i32::from(Self::estimate_part_height(part, max_w, config).max(1));
-                    let p_y1 = part_y;
-                    let p_y2 = part_y + part_h;
-                    let vp_y1 = p_y1.max(i32::from(inner_area.y)) as u16;
-                    let vp_y2 = p_y2.min(i32::from(inner_area.bottom())) as u16;
-                    if vp_y1 >= vp_y2 {
-                        part_y += part_h;
-                        continue;
-                    }
+                    let p_top = part_y;
+                    let p_bottom = part_y + part_h;
 
-                    match part {
-                        crate::types::Part::Text(t) if !t.synthetic => {
-                            let content = if config.conceal {
-                                conceal_text(&t.text)
-                            } else {
-                                sanitize_text(&t.text)
-                            };
-                            if content.chars().all(char::is_whitespace) {
-                                part_y += part_h;
-                                continue;
-                            }
-                            let max_w_usize = max_w as usize;
-                            let mut line_y = vp_y1;
-                            for logical_line in content.lines() {
-                                if logical_line.is_empty() {
-                                    if line_y < vp_y2 {
-                                        self.text_regions.push(TextRegion {
-                                            y1: line_y,
-                                            y2: line_y + 1,
-                                            x1: x_off,
-                                            x2: x_off + max_w,
-                                            text: String::new(),
-                                        });
-                                        line_y += 1;
-                                    }
+                    // Clip part to viewport
+                    let vp_y1 = p_top.max(vp_top) as u16;
+                    let vp_y2 = p_bottom.min(vp_bottom) as u16;
+
+                    if vp_y1 < vp_y2 {
+                        match part {
+                            crate::types::Part::Text(t) if !t.synthetic => {
+                                let content = if config.conceal {
+                                    conceal_text(&t.text)
+                                } else {
+                                    sanitize_text(&t.text)
+                                };
+                                if content.chars().all(char::is_whitespace) {
+                                    part_y += part_h;
                                     continue;
                                 }
-                                let mut remaining = logical_line;
-                                while !remaining.is_empty() && line_y < vp_y2 {
-                                    let n = remaining.chars().take(max_w_usize).count();
-                                    let split = remaining
-                                        .char_indices()
-                                        .nth(n)
-                                        .map_or(remaining.len(), |(i, _)| i);
-                                    let visual_line = &remaining[..split];
-                                    self.text_regions.push(TextRegion {
-                                        y1: line_y,
-                                        y2: line_y + 1,
-                                        x1: x_off,
-                                        x2: x_off + max_w,
-                                        text: visual_line.to_string(),
-                                    });
-                                    line_y += 1;
-                                    remaining = &remaining[split..];
-                                }
-                            }
-                        }
-                        crate::types::Part::Tool(t) => {
-                            if !config.show_generic_tool_output
-                                && crate::util::tool_render::tool_display(&t.tool) == "generic"
-                            {
-                                part_y += part_h;
-                                continue;
-                            }
-                            if let Some(ref output) = t.output {
-                                let trimmed = output.trim();
-                                if !trimmed.is_empty() {
-                                    let display = if config.show_tool_details
-                                        || !matches!(t.status, crate::types::ToolStatus::Completed)
-                                    {
-                                        trimmed.to_string()
-                                    } else {
-                                        crate::util::scroll::collapse_tool_output(trimmed, 10, 800)
-                                            .output
-                                    };
-                                    let mut line_y = vp_y1;
-                                    for display_line in display.lines() {
+                                let max_w_usize = max_w as usize;
+                                let mut line_y = vp_y1;
+                                for logical_line in content.lines() {
+                                    if logical_line.is_empty() {
                                         if line_y < vp_y2 {
                                             self.text_regions.push(TextRegion {
                                                 y1: line_y,
                                                 y2: line_y + 1,
                                                 x1: x_off,
                                                 x2: x_off + max_w,
-                                                text: display_line.to_string(),
+                                                text: String::new(),
+                                            });
+                                            line_y += 1;
+                                        }
+                                        continue;
+                                    }
+                                    let mut remaining = logical_line;
+                                    while !remaining.is_empty() && line_y < vp_y2 {
+                                        let n = remaining.chars().take(max_w_usize).count();
+                                        let split = remaining
+                                            .char_indices()
+                                            .nth(n)
+                                            .map_or(remaining.len(), |(i, _)| i);
+                                        let visual_line = &remaining[..split];
+                                        self.text_regions.push(TextRegion {
+                                            y1: line_y,
+                                            y2: line_y + 1,
+                                            x1: x_off,
+                                            x2: x_off + max_w,
+                                            text: visual_line.to_string(),
+                                        });
+                                        line_y += 1;
+                                        remaining = &remaining[split..];
+                                    }
+                                }
+                            }
+                            crate::types::Part::Tool(t) => {
+                                if !config.show_generic_tool_output
+                                    && crate::util::tool_render::tool_display(&t.tool) == "generic"
+                                {
+                                    part_y += part_h;
+                                    continue;
+                                }
+                                if let Some(ref output) = t.output {
+                                    let trimmed = output.trim();
+                                    if !trimmed.is_empty() {
+                                        let display = if config.show_tool_details
+                                            || !matches!(t.status, crate::types::ToolStatus::Completed)
+                                        {
+                                            trimmed.to_string()
+                                        } else {
+                                            crate::util::scroll::collapse_tool_output(trimmed, 10, 800)
+                                                .output
+                                        };
+                                        let mut line_y = vp_y1;
+                                        for display_line in display.lines() {
+                                            if line_y < vp_y2 {
+                                                self.text_regions.push(TextRegion {
+                                                    y1: line_y,
+                                                    y2: line_y + 1,
+                                                    x1: x_off,
+                                                    x2: x_off + max_w,
+                                                    text: display_line.to_string(),
+                                                });
+                                                line_y += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            crate::types::Part::Reasoning(r) => {
+                                let expanded = config.thinking_mode
+                                    || self.tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
+                                let header = if expanded { "- Thought" } else { "+ Thought" };
+                                if vp_y1 < vp_y2 {
+                                    self.text_regions.push(TextRegion {
+                                        y1: vp_y1,
+                                        y2: vp_y1 + 1,
+                                        x1: x_off,
+                                        x2: x_off + max_w,
+                                        text: header.to_string(),
+                                    });
+                                }
+                                if expanded && !r.text.is_empty() {
+                                    let mut line_y = vp_y1 + 1;
+                                    let truncated =
+                                        r.text.lines().take(10).collect::<Vec<_>>().join("\n");
+                                    for line in truncated.lines() {
+                                        if line_y < vp_y2 && !line.is_empty() {
+                                            self.text_regions.push(TextRegion {
+                                                y1: line_y,
+                                                y2: line_y + 1,
+                                                x1: x_off + 2,
+                                                x2: x_off + max_w,
+                                                text: line.to_string(),
                                             });
                                             line_y += 1;
                                         }
                                     }
                                 }
                             }
+                            _ => {}
                         }
-                        crate::types::Part::Reasoning(r) => {
-                            let expanded = config.thinking_mode
-                                || self.tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
-                            let header = if expanded { "- Thought" } else { "+ Thought" };
-                            if vp_y1 < vp_y2 {
-                                self.text_regions.push(TextRegion {
-                                    y1: vp_y1,
-                                    y2: vp_y1 + 1,
-                                    x1: x_off,
-                                    x2: x_off + max_w,
-                                    text: header.to_string(),
-                                });
-                            }
-                            if expanded && !r.text.is_empty() {
-                                let mut line_y = vp_y1 + 1;
-                                let truncated =
-                                    r.text.lines().take(10).collect::<Vec<_>>().join("\n");
-                                for line in truncated.lines() {
-                                    if line_y < vp_y2 && !line.is_empty() {
-                                        self.text_regions.push(TextRegion {
-                                            y1: line_y,
-                                            y2: line_y + 1,
-                                            x1: x_off + 2,
-                                            x2: x_off + max_w,
-                                            text: line.to_string(),
-                                        });
-                                        line_y += 1;
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
                     }
 
                     part_y += part_h;
@@ -992,6 +1182,18 @@ impl SessionView {
         let max_scroll = (total_height - visible_height).max(0);
         self.scroll_y = self.scroll_y.clamp(0, max_scroll);
 
+        // Cache dimensions for app.rs
+        self.total_height = total_height;
+        self.visible_height = visible_height;
+
+        // ── Sticky scroll: recalculateBarProps on content size change ─────────
+        // Mirrors OpenCode's `recalculateBarProps()` which calls `applyStickyStart`
+        // when content size changes and user hasn't manually scrolled.
+        if total_height != self.last_content_height {
+            self.recalculate_bar_props(total_height, visible_height);
+            self.last_content_height = total_height;
+        }
+
         self.build_text_regions(session, inner_area, max_w, config);
 
         if config.show_scrollbar {
@@ -1011,6 +1213,8 @@ impl SessionView {
         }
 
         let mut y = i32::from(inner_area.y) - self.scroll_y;
+        let vp_top = i32::from(inner_area.y);
+        let vp_bottom = i32::from(inner_area.bottom());
 
         for (idx, msg) in session.messages.iter().enumerate() {
             if idx > 0 {
@@ -1018,44 +1222,134 @@ impl SessionView {
             }
 
             let msg_h = Self::render_message_height(msg, max_w, config);
+            let msg_top = y;
+            let msg_bottom = y + msg_h;
 
-            let msg_y = y as u16;
-            if msg_y < inner_area.bottom() {
-                let h_avail = inner_area.bottom() - msg_y;
-                let msg_area = Rect::new(
-                    inner_area.x,
-                    msg_y,
-                    inner_area.width,
-                    msg_h.min(i32::from(h_avail)) as u16,
-                );
+            // Check if message overlaps with viewport (using i32, no u16 wrap)
+            if msg_bottom > vp_top && msg_top < vp_bottom {
+                let is_top_clipped = msg_top < vp_top;
 
-                match msg.role {
-                    MessageRole::User => {
-                        let agent_name = msg.agent.as_deref().unwrap_or("default");
-                        let agent_color = agent_colors.get(agent_name, &unique_agents);
-                        Self::render_user_message(
-                            buf,
-                            msg_area,
-                            msg,
-                            theme,
-                            agent_color,
-                            &self.tool_state,
-                            config,
-                            false,
-                            false,
-                        );
+                if is_top_clipped {
+                    // ── Top-clipped: render full message into temp buffer, then copy ──
+                    // This avoids clipping the area.height (which causes inner_h/padding
+                    // miscalculation) and mirrors OpenCode's approach where each child
+                    // renders at its natural height and the viewport clips naturally.
+                    let src_y = (vp_top - msg_top) as u16; // first visible line in temp
+                    let dst_y = vp_top as u16;
+                    let vis_h = (msg_bottom.min(vp_bottom) - vp_top) as u16;
+
+                    if vis_h > 0 && msg_h > 0 {
+                        let full_area = Rect::new(0, 0, inner_area.width, msg_h as u16);
+                        let mut temp = Buffer::empty(full_area);
+
+                        // Fill entire temp buffer with session background to prevent
+                        // "holes" when copying. Cells not touched by render functions
+                        // (e.g., left margin of assistant messages) maintain this
+                        // background instead of default (transparent) style.
+                        let session_bg = Style::default().bg(rgba_color(theme.background));
+                        for by in 0..full_area.height {
+                            for bx in 0..full_area.width {
+                                if let Some(cell) = temp.cell_mut((bx, by)) {
+                                    cell.set_style(session_bg);
+                                    cell.set_char(' ');
+                                }
+                            }
+                        }
+
+                        match msg.role {
+                            MessageRole::User => {
+                                let agent_name = msg.agent.as_deref().unwrap_or("default");
+                                let agent_color =
+                                    agent_colors.get(agent_name, &unique_agents);
+                                Self::render_user_message(
+                                    &mut temp,
+                                    full_area,
+                                    msg,
+                                    theme,
+                                    agent_color,
+                                    &self.tool_state,
+                                    config,
+                                    false,
+                                    false,
+                                );
+                            }
+                            MessageRole::Assistant => {
+                                Self::render_assistant_message(
+                                    &mut temp,
+                                    full_area,
+                                    msg,
+                                    theme,
+                                    &self.tool_state,
+                                    config,
+                                    false,
+                                    false,
+                                );
+                            }
+                        }
+
+                        // Copy visible portion from temp buffer to main buffer
+                        for dy in 0..vis_h {
+                            let temp_y = src_y + dy;
+                            let dst_line_y = dst_y + dy;
+                            for dx in 0..inner_area.width {
+                                if let Some(cell) = temp.cell((dx, temp_y)) {
+                                    if let Some(dst) =
+                                        buf.cell_mut((inner_area.x + dx, dst_line_y))
+                                    {
+                                        *dst = cell.clone();
+                                    }
+                                }
+                            }
+                        }
                     }
-                    MessageRole::Assistant => {
-                        Self::render_assistant_message(
-                            buf,
-                            msg_area,
-                            msg,
-                            theme,
-                            &self.tool_state,
-                            config,
-                            false,
-                            false,
+                } else {
+                    // ── Not top-clipped: render directly to main buffer ──
+                    // The message's top is at or below vp_top, so we use its
+                    // natural Y position. Bottom clipping is handled naturally
+                    // by render_parts (breaks when y >= bottom).
+                    let visible_top = msg_top as u16;
+                    let visible_bottom = msg_bottom.min(vp_bottom);
+                    let visible_h = (visible_bottom - i32::from(visible_top)) as u16;
+
+                    if visible_h > 0 {
+                        let msg_area = Rect::new(
+                            inner_area.x,
+                            visible_top,
+                            inner_area.width,
+                            visible_h,
                         );
+
+                        match msg.role {
+                            MessageRole::User => {
+                                let agent_name =
+                                    msg.agent.as_deref().unwrap_or("default");
+                                let agent_color =
+                                    agent_colors.get(agent_name, &unique_agents);
+                                Self::render_user_message(
+                                    buf,
+                                    msg_area,
+                                    msg,
+                                    theme,
+                                    agent_color,
+                                    &self.tool_state,
+                                    config,
+                                    false,
+                                    false,
+                                );
+                            }
+                            MessageRole::Assistant => {
+                                Self::render_assistant_message(
+                                    buf,
+                                    msg_area,
+                                    msg,
+                                    theme,
+                                    &self.tool_state,
+                                    config,
+                                    false,
+                                    false,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1173,24 +1467,28 @@ impl SessionView {
             return;
         }
 
+        // Use accumulator pattern (like OpenCode's `handleAutoScroll`)
+        let dir = if let Some((_ax, _ay, _fx, fy)) = self.drag_selection {
+            self.get_auto_scroll_direction(fy)
+        } else {
+            0
+        };
+
+        if dir == 0 {
+            self.stop_auto_scroll();
+            return;
+        }
+
         let scroll_amount = self.auto_scroll_speed * delta_time;
-        self.auto_scroll_accumulator += scroll_amount;
+        self.auto_scroll_accumulator += scroll_amount * f64::from(dir);
 
-        while self.auto_scroll_accumulator >= 1.0 {
-            self.auto_scroll_accumulator -= 1.0;
-            let dir = if let Some((_ax, _ay, _fx, fy)) = self.drag_selection {
-                self.get_auto_scroll_direction(fy)
-            } else {
-                0
-            };
-            if dir == 0 {
-                self.stop_auto_scroll();
-                return;
-            }
-
-            let new_scroll = self.scroll_y + dir;
+        let int_scroll = self.auto_scroll_accumulator.trunc() as i32;
+        if int_scroll != 0 {
+            self.auto_scroll_accumulator -= int_scroll as f64;
             let max_scroll = (total_height - visible_height).max(0);
-            if new_scroll < 0 || new_scroll > max_scroll {
+            let new_scroll = (self.scroll_y + int_scroll).clamp(0, max_scroll);
+            if new_scroll == self.scroll_y {
+                // Already at boundary, stop
                 self.stop_auto_scroll();
                 return;
             }
@@ -1198,7 +1496,7 @@ impl SessionView {
         }
     }
 
-    pub const fn stop_auto_scroll(&mut self) {
+    pub fn stop_auto_scroll(&mut self) {
         if self.is_auto_scrolling {
             self.is_auto_scrolling = false;
             self.auto_scroll_accumulator = 0.0;
