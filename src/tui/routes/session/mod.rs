@@ -369,6 +369,24 @@ impl SessionView {
         }
     }
 
+    /// Scan a buffer rectangle [x, x+w) × [y, y+h) and return the
+    /// number of rows from y that contain at least one non-space glyph.
+    /// Returns 0 if the rectangle is empty or all-space.
+    fn scan_content_height(buf: &Buffer, x: u16, y: u16, w: u16, h: u16) -> u16 {
+        let mut last_row: Option<u16> = None;
+        for check_y in y..y + h {
+            for cx in x..x + w {
+                if let Some(cell) = buf.cell((cx, check_y)) {
+                    if cell.symbol().chars().next().unwrap_or(' ') != ' ' {
+                        last_row = Some(check_y);
+                        break;
+                    }
+                }
+            }
+        }
+        last_row.map(|r| r - y + 1).unwrap_or(0)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_parts(
         buf: &mut Buffer,
@@ -402,8 +420,9 @@ impl SessionView {
                     } else {
                         sanitize_text(&t.text)
                     };
-                    let h = Self::estimate_part_height(part, max_w, config, role).min(bottom - y);
-                    let area = Rect::new(x, y, max_w, h);
+                    let est_h = Self::estimate_part_height(part, max_w, config, role);
+                    let render_h = (est_h * 3).max(100).min(bottom.saturating_sub(y));
+                    let area = Rect::new(x, y, max_w, render_h);
                     let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
                         Some(content),
                     );
@@ -411,7 +430,8 @@ impl SessionView {
                     md.set_bg(Some(ColorInput::RGBA(theme.background)));
                     md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
                     md.render_self(buf, area);
-                    y += h;
+                    let actual_h = Self::scan_content_height(buf, x, y, max_w, render_h);
+                    y += actual_h.max(1);
                 }
                 Part::Text(t) if !t.synthetic => {
                     let content = if config.conceal {
@@ -686,7 +706,7 @@ impl SessionView {
         config: &TuiConfig,
         is_queued: bool,
         is_compacted: bool,
-    ) {
+    ) -> u16 {
         let is_error = msg.id.starts_with("msg-err-");
         let x_off = area.x + 3;
         let max_w = area.width.saturating_sub(6);
@@ -746,14 +766,14 @@ impl SessionView {
                 }
                 line_x += 1;
             }
-            return;
+            return 0;
         }
 
         let banner_h = u16::from(is_compacted);
         let inner_y = area.y + banner_h;
         let net_h = area.height.saturating_sub(banner_h);
 
-        Self::render_parts(
+        let parts_h = Self::render_parts(
             buf,
             x_off,
             inner_y,
@@ -777,6 +797,8 @@ impl SessionView {
         if config.show_timestamps {
             Self::render_timestamp(buf, x_off, area.y, msg.created_at, theme);
         }
+
+        banner_h + parts_h
     }
 
     #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
@@ -1305,17 +1327,54 @@ impl SessionView {
             let msg_h = Self::render_message_height(msg, max_w, config);
             let msg_top = y;
             let msg_bottom = y + msg_h;
+            let is_assistant_non_error = matches!(msg.role, MessageRole::Assistant)
+                && !msg.id.starts_with("msg-err-");
+            let mut render_actual_h = msg_h;
 
             // Check if message overlaps with viewport (using i32, no u16 wrap)
             if msg_bottom > vp_top && msg_top < vp_bottom {
                 let is_top_clipped = msg_top < vp_top;
 
-                if is_top_clipped {
-                    // ── Top-clipped: render full message into temp buffer, then copy ──
-                    // This avoids clipping the area.height (which causes inner_h/padding
-                    // miscalculation) and mirrors OpenCode's approach where each child
-                    // renders at its natural height and the viewport clips naturally.
-                    let src_y = (vp_top - msg_top) as u16; // first visible line in temp
+                if is_top_clipped && is_assistant_non_error {
+                    // ── Top-clipped assistant (non-error): generous temp buffer ──
+                    let src_y = (vp_top - msg_top) as u16;
+                    let dst_y = vp_top as u16;
+                    let generous_h = (msg_h as u16 * 3).max(100).min(5000);
+                    let full_area = Rect::new(0, 0, inner_area.width, generous_h);
+                    let mut temp = Buffer::empty(full_area);
+
+                    let session_bg = Style::default().bg(rgba_color(theme.background));
+                    for by in 0..full_area.height {
+                        for bx in 0..full_area.width {
+                            if let Some(cell) = temp.cell_mut((bx, by)) {
+                                cell.set_style(session_bg);
+                                cell.set_char(' ');
+                            }
+                        }
+                    }
+
+                    let actual_h = Self::render_assistant_message(
+                        &mut temp, full_area, msg, theme,
+                        &self.tool_state, config, false, false,
+                    ) as i32;
+
+                    let vis_h = (actual_h.min(vp_bottom - msg_top) - src_y as i32).max(0) as u16;
+                    for dy in 0..vis_h {
+                        let temp_y = src_y + dy;
+                        let dst_line_y = dst_y + dy;
+                        for dx in 0..inner_area.width {
+                            if let Some(cell) = temp.cell((dx, temp_y)) {
+                                if let Some(dst) = buf.cell_mut((inner_area.x + dx, dst_line_y)) {
+                                    *dst = cell.clone();
+                                }
+                            }
+                        }
+                    }
+
+                    render_actual_h = actual_h.max(1);
+                } else if is_top_clipped {
+                    // ── Top-clipped user/error: fixed-size temp buffer ──
+                    let src_y = (vp_top - msg_top) as u16;
                     let dst_y = vp_top as u16;
                     let vis_h = (msg_bottom.min(vp_bottom) - vp_top) as u16;
 
@@ -1323,10 +1382,6 @@ impl SessionView {
                         let full_area = Rect::new(0, 0, inner_area.width, msg_h as u16);
                         let mut temp = Buffer::empty(full_area);
 
-                        // Fill entire temp buffer with session background to prevent
-                        // "holes" when copying. Cells not touched by render functions
-                        // (e.g., left margin of assistant messages) maintain this
-                        // background instead of default (transparent) style.
                         let session_bg = Style::default().bg(rgba_color(theme.background));
                         for by in 0..full_area.height {
                             for bx in 0..full_area.width {
@@ -1342,32 +1397,19 @@ impl SessionView {
                                 let agent_name = msg.agent.as_deref().unwrap_or("default");
                                 let agent_color = agent_colors.get(agent_name, &unique_agents);
                                 Self::render_user_message(
-                                    &mut temp,
-                                    full_area,
-                                    msg,
-                                    theme,
-                                    agent_color,
-                                    &self.tool_state,
-                                    config,
-                                    false,
-                                    false,
+                                    &mut temp, full_area, msg, theme,
+                                    agent_color, &self.tool_state, config,
+                                    false, false,
                                 );
                             }
                             MessageRole::Assistant => {
                                 Self::render_assistant_message(
-                                    &mut temp,
-                                    full_area,
-                                    msg,
-                                    theme,
-                                    &self.tool_state,
-                                    config,
-                                    false,
-                                    false,
+                                    &mut temp, full_area, msg, theme,
+                                    &self.tool_state, config, false, false,
                                 );
                             }
                         }
 
-                        // Copy visible portion from temp buffer to main buffer
                         for dy in 0..vis_h {
                             let temp_y = src_y + dy;
                             let dst_line_y = dst_y + dy;
@@ -1381,11 +1423,25 @@ impl SessionView {
                             }
                         }
                     }
+                } else if is_assistant_non_error && msg_bottom <= vp_bottom {
+                    // ── Fully visible assistant: render directly, use actual height ──
+                    let visible_top = msg_top as u16;
+                    let visible_bottom = msg_bottom.min(vp_bottom);
+                    let visible_h = (visible_bottom - i32::from(visible_top)) as u16;
+
+                    if visible_h > 0 {
+                        let msg_area =
+                            Rect::new(inner_area.x, visible_top, inner_area.width, visible_h);
+
+                        let actual_h = Self::render_assistant_message(
+                            buf, msg_area, msg, theme,
+                            &self.tool_state, config, false, false,
+                        ) as i32;
+
+                        render_actual_h = actual_h.max(1);
+                    }
                 } else {
-                    // ── Not top-clipped: render directly to main buffer ──
-                    // The message's top is at or below vp_top, so we use its
-                    // natural Y position. Bottom clipping is handled naturally
-                    // by render_parts (breaks when y >= bottom).
+                    // ── Not top-clipped user/error or bottom-clipped: render directly ──
                     let visible_top = msg_top as u16;
                     let visible_bottom = msg_bottom.min(vp_bottom);
                     let visible_h = (visible_bottom - i32::from(visible_top)) as u16;
@@ -1399,27 +1455,15 @@ impl SessionView {
                                 let agent_name = msg.agent.as_deref().unwrap_or("default");
                                 let agent_color = agent_colors.get(agent_name, &unique_agents);
                                 Self::render_user_message(
-                                    buf,
-                                    msg_area,
-                                    msg,
-                                    theme,
-                                    agent_color,
-                                    &self.tool_state,
-                                    config,
-                                    false,
-                                    false,
+                                    buf, msg_area, msg, theme,
+                                    agent_color, &self.tool_state, config,
+                                    false, false,
                                 );
                             }
                             MessageRole::Assistant => {
                                 Self::render_assistant_message(
-                                    buf,
-                                    msg_area,
-                                    msg,
-                                    theme,
-                                    &self.tool_state,
-                                    config,
-                                    false,
-                                    false,
+                                    buf, msg_area, msg, theme,
+                                    &self.tool_state, config, false, false,
                                 );
                             }
                         }
@@ -1427,7 +1471,7 @@ impl SessionView {
                 }
             }
 
-            y += msg_h;
+            y += render_actual_h;
         }
 
         if let Some((anchor_x, _anchor_screen_y, focus_x, focus_y)) = self.drag_selection {
