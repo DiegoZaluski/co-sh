@@ -15,7 +15,7 @@ use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::scroll_bar::{ScrollBarOrientation, ScrollBarRenderable};
 use cosh_tui::core::types::MouseEvent;
 
-use cosh_tui::core::renderables::markdown::{estimate_height, markdown_to_visible_text};
+use cosh_tui::core::renderables::markdown::estimate_height;
 
 use crate::config::TuiConfig;
 use crate::state::AppState;
@@ -121,6 +121,9 @@ pub struct SessionView {
     /// Anchor Y in content space (set once at mouse-down), so the visual
     /// highlight scrolls with the content during auto-scroll drag.
     pub selection_anchor_content_y: i32,
+    /// Focus Y in content space (updated on each drag), so the visual
+    /// highlight follows the content during auto-scroll drag.
+    pub selection_focus_content_y: i32,
 
     // ── Sticky scroll (auto-scroll to bottom) ──────────────────────────────────
     /// Whether the user has manually scrolled away from the sticky position.
@@ -157,6 +160,7 @@ impl SessionView {
             visible_height: 0,
             mouse_down_scroll_y: 0,
             selection_anchor_content_y: 0,
+            selection_focus_content_y: 0,
             has_manual_scroll: false,
             is_sticky_bottom: true,
             last_content_height: 0,
@@ -1011,14 +1015,11 @@ impl SessionView {
                     if p_bottom > vp_top && p_top < vp_bottom {
                         match part {
                             crate::types::Part::Text(t) if !t.synthetic => {
-                                let mut content = if config.conceal {
+                                let content = if config.conceal {
                                     conceal_text(&t.text)
                                 } else {
                                     sanitize_text(&t.text)
                                 };
-                                if msg.role == MessageRole::Assistant {
-                                    content = markdown_to_visible_text(&content);
-                                }
                                 if content.chars().all(char::is_whitespace) {
                                     part_y += part_h;
                                     continue;
@@ -1474,16 +1475,20 @@ impl SessionView {
             y += render_actual_h;
         }
 
-        if let Some((anchor_x, _anchor_screen_y, focus_x, focus_y)) = self.drag_selection {
-            // Convert content-space anchor to current screen position
-            // screen_y = content_y - scroll_y + vp_top
+        if let Some((anchor_x, _anchor_screen_y, focus_x, _focus_screen_y)) = self.drag_selection {
+            // Convert content-space anchor and focus to current screen position.
+            // Both are stored in content space so the visual highlight follows
+            // content during auto-scroll.
             let vp_top = i32::from(inner_area.y);
             let anchor_screen_y =
                 (self.selection_anchor_content_y - self.scroll_y + vp_top)
                     .clamp(vp_top, vp_top + i32::from(inner_area.height) - 1) as u16;
+            let focus_screen_y =
+                (self.selection_focus_content_y - self.scroll_y + vp_top)
+                    .clamp(vp_top, vp_top + i32::from(inner_area.height) - 1) as u16;
 
-            let start_y = anchor_screen_y.min(focus_y);
-            let end_y = anchor_screen_y.max(focus_y);
+            let start_y = anchor_screen_y.min(focus_screen_y);
+            let end_y = anchor_screen_y.max(focus_screen_y);
 
             let (start_x, end_x) = if anchor_screen_y == start_y {
                 (anchor_x, focus_x)

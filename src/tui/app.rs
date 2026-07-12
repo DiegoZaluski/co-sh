@@ -2198,11 +2198,13 @@ impl App {
                 self.mouse_drag_active = false;
                 self.drag_selection = None;
                 self.session_view.mouse_down_scroll_y = self.session_view.scroll_y;
-                // Store anchor in content space so the visual highlight moves with content
+                // Store anchor and focus in content space so the visual highlight
+                // moves with content during auto-scroll drag.
                 if let Some(session_area) = self.session_view.session_area {
                     let vp_top = i32::from(session_area.1);
-                    self.session_view.selection_anchor_content_y =
-                        (y as i32) - vp_top + self.session_view.mouse_down_scroll_y;
+                    let content_y = (y as i32) - vp_top + self.session_view.mouse_down_scroll_y;
+                    self.session_view.selection_anchor_content_y = content_y;
+                    self.session_view.selection_focus_content_y = content_y;
                 }
 
                 // If the click is inside the prompt area, start a text selection.
@@ -2230,6 +2232,13 @@ impl App {
                         // Store anchor (sx,sy) and focus (x,y) WITHOUT normalising,
                         // so the renderer can apply flow-based selection highlighting.
                         self.drag_selection = Some((sx, sy, x, y));
+                        // Store focus in content space so the visual highlight follows
+                        // content during auto-scroll drag.
+                        if let Some(session_area) = self.session_view.session_area {
+                            let vp_top = i32::from(session_area.1);
+                            self.session_view.selection_focus_content_y =
+                                (y as i32) - vp_top + self.session_view.scroll_y;
+                        }
                     }
                     // If drag is within the prompt area, extend the text selection.
                     if matches!(self.mode(), AppMode::Session)
