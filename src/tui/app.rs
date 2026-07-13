@@ -905,7 +905,10 @@ impl App {
             let footer_y = main_area.bottom().saturating_sub(1);
             let is_session = matches!(self.mode(), AppMode::Session);
 
-            let prompt_h = if is_session {
+            // When question dialog is visible, hide prompt and spinner (like OpenCode)
+            let hide_prompt_and_spinner = is_session && self.question_dialog.visible;
+
+            let prompt_h = if is_session && !hide_prompt_and_spinner {
                 self.prompt_view
                     .required_height(main_area.width.saturating_sub(4))
             } else {
@@ -922,9 +925,10 @@ impl App {
 
             let prompt_area_y = footer_y.saturating_sub(prompt_h);
 
-            // Spinner line (1 row when the agent loop is active)
+            // Spinner line (1 row when the agent loop is active, hidden when questions are visible)
             let spinner_h = u16::from(
                 is_session
+                    && !hide_prompt_and_spinner
                     && self.state.status == crate::types::SessionStatus::Working
                     && self.agent_spinner.is_some(),
             );
@@ -989,7 +993,12 @@ impl App {
                     self.add_provider_view.render(buf, tools_area, &self.theme);
                 }
                 AppMode::Session => {
-                    self.prompt_view.focus();
+                    // Blur prompt when question dialog is visible, focus otherwise (like OpenCode)
+                    if self.question_dialog.visible {
+                        self.prompt_view.blur();
+                    } else {
+                        self.prompt_view.focus();
+                    }
                     self.prompt_view.cursor.terminal_focused = self.terminal_focused;
                     self.session_view.drag_selection = self.drag_selection;
                     self.session_view.tool_state.advance_spinner();
@@ -1015,23 +1024,26 @@ impl App {
                     if self.question_dialog.visible {
                         self.question_dialog.render(buf, question_area, &self.theme);
                     }
-                    // Agent spinner rendered above the prompt when the loop is active
-                    if let Some(spinner) = &self.agent_spinner
-                        && self.state.status == crate::types::SessionStatus::Working
-                    {
-                        spinner.render(buf, spinner_area.x + 1, spinner_area.y);
+                    // Hide spinner and prompt when question dialog is visible (like OpenCode)
+                    if !self.question_dialog.visible {
+                        // Agent spinner rendered above the prompt when the loop is active
+                        if let Some(spinner) = &self.agent_spinner
+                            && self.state.status == crate::types::SessionStatus::Working
+                        {
+                            spinner.render(buf, spinner_area.x + 1, spinner_area.y);
+                        }
+                        let model_name = self.llm_config.model.as_deref().unwrap_or("");
+                        self.prompt_view.render(
+                            buf,
+                            prompt_area,
+                            &self.state,
+                            &self.theme,
+                            &agent_colors,
+                            &unique_agents,
+                            std::time::SystemTime::now(),
+                            model_name,
+                        );
                     }
-                    let model_name = self.llm_config.model.as_deref().unwrap_or("");
-                    self.prompt_view.render(
-                        buf,
-                        prompt_area,
-                        &self.state,
-                        &self.theme,
-                        &agent_colors,
-                        &unique_agents,
-                        std::time::SystemTime::now(),
-                        model_name,
-                    );
                 }
             }
 
@@ -1042,6 +1054,7 @@ impl App {
                 &self.state,
                 &self.theme,
                 show_home,
+                self.question_dialog.visible,
             );
             let now = std::time::SystemTime::now();
             self.toast_state.render(buf, area, &self.theme);
@@ -1116,6 +1129,15 @@ impl App {
                                 let _ = self.answer_tx.send(Ok(answers));
                                 self.question_dialog.visible = false;
                                 self.question_dialog.submitted = false;
+                                // Re-focus prompt when question is answered (like OpenCode)
+                                self.prompt_view.focus();
+                            } else if !self.question_dialog.visible {
+                                // Dialog was dismissed via Esc (like OpenCode) — stop agent loop + send rejection
+                                self.stop_signal.store(true, Ordering::Relaxed);
+                                let _ = self
+                                    .answer_tx
+                                    .send(Err("User dismissed the question dialog".into()));
+                                self.prompt_view.focus();
                             }
                             return Ok(false);
                         }
@@ -1577,6 +1599,7 @@ impl App {
                                 let _ = self
                                     .answer_tx
                                     .send(Err("User dismissed the question dialog".into()));
+                                self.prompt_view.focus();
                             } else if self.permission_dialog.visible {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
@@ -1594,6 +1617,7 @@ impl App {
                                 let _ = self
                                     .answer_tx
                                     .send(Err("User dismissed the question dialog".into()));
+                                self.prompt_view.focus();
                             } else if self.permission_dialog.visible {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
@@ -2142,6 +2166,8 @@ impl App {
                 HarnessEvent::QuestionRequest { questions } => {
                     // Show the question dialog with real questions from the harness
                     self.question_dialog.show_questions(questions);
+                    // Blur the prompt when questions appear (like OpenCode hides the prompt)
+                    self.prompt_view.blur();
                 }
             }
         }
@@ -2571,9 +2597,13 @@ impl App {
                 area.width.saturating_sub(sidebar_w),
                 area.height,
             );
-            let prompt_h = self
-                .prompt_view
-                .required_height(main_area.width.saturating_sub(4));
+            // When question dialog is visible, prompt is hidden (like OpenCode)
+            let prompt_h = if self.question_dialog.visible {
+                0
+            } else {
+                self.prompt_view
+                    .required_height(main_area.width.saturating_sub(4))
+            };
             let question_h = self
                 .question_dialog
                 .required_height(main_area.width.saturating_sub(4));
@@ -2586,7 +2616,9 @@ impl App {
                 main_area.width.saturating_sub(4),
                 question_h,
             );
-            let consumed = self.question_dialog.handle_mouse(&mouse, question_area);
+            // Don't dispatch to question dialog if text selection is in progress
+            if !self.mouse_drag_active && self.drag_selection.is_none() {
+                            let consumed = self.question_dialog.handle_mouse(&mouse, question_area);
             if consumed {
                 if self.question_dialog.submitted {
                     let answers = self.question_dialog.build_answers();
@@ -2594,6 +2626,7 @@ impl App {
                     self.question_dialog.visible = false;
                     self.question_dialog.submitted = false;
                 }
+            }
                 return Ok(true);
             }
         }
@@ -2814,6 +2847,10 @@ impl App {
     /// Compute the prompt area rectangle (same calculation as in `render()`).
     fn compute_prompt_area(&self) -> Option<Rect> {
         if !matches!(self.mode(), AppMode::Session) {
+            return None;
+        }
+        // When question dialog is visible, prompt is hidden — return None so clicks go to question dialog
+        if self.question_dialog.visible {
             return None;
         }
         let area = self.terminal_size();

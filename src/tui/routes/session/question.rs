@@ -271,11 +271,24 @@ impl QuestionDialog {
         // Options navigation (non-confirm tabs)
         if is_confirm {
             // Confirm tab
-            if key == KeyCode::Enter {
-                self.submitted = true;
-                return true;
+            match key {
+                KeyCode::Enter => {
+                    self.submitted = true;
+                    return true;
+                }
+                KeyCode::Esc => {
+                    self.visible = false;
+                    return true;
+                }
+                _ => {}
             }
         } else {
+            // Esc dismisses the dialog (like OpenCode)
+            if key == KeyCode::Esc {
+                self.visible = false;
+                return true;
+            }
+
             let count = self.row_count(self.current_tab);
 
             match key {
@@ -294,6 +307,46 @@ impl QuestionDialog {
                         self.selected_row = (self.selected_row + 1) % count;
                     }
                     return true;
+                }
+                // Number keys (1-9) to select and activate options directly (like OpenCode)
+                // For Text questions, '1' enters text input mode
+                ch @ (KeyCode::Char('1')
+                | KeyCode::Char('2')
+                | KeyCode::Char('3')
+                | KeyCode::Char('4')
+                | KeyCode::Char('5')
+                | KeyCode::Char('6')
+                | KeyCode::Char('7')
+                | KeyCode::Char('8')
+                | KeyCode::Char('9')) => {
+                    if let KeyCode::Char(c) = ch {
+                        let num = (c as usize) - ('1' as usize);
+                        if num < count {
+                            self.selected_row = num;
+                            // For Text questions, '1' enters text mode (like OpenCode)
+                            if let Some(q) = self.questions.get(self.current_tab)
+                                && matches!(q.question_type, QuestionType::Text)
+                            {
+                                self.text_mode = true;
+                                return true;
+                            }
+                            // Auto-select the option (like OpenCode's moveTo + selectOption)
+                            return self.handle_key(KeyCode::Enter);
+                        }
+                        // num >= count: auto-enter text mode and type for Text questions
+                        // (catch-all won't run since this pattern matched first)
+                        if let Some(q) = self.questions.get(self.current_tab)
+                            && q.question_type == QuestionType::Text
+                        {
+                            self.text_mode = true;
+                            if let Some(s) = self.state.get_mut(self.current_tab) {
+                                s.text_input.push(c);
+                            }
+                            return true;
+                        }
+                        // Always consume number keys to prevent leaks to the prompt
+                        return true;
+                    }
                 }
                 KeyCode::Enter => {
                     if let Some(q) = self.questions.get(self.current_tab) {
@@ -333,7 +386,20 @@ impl QuestionDialog {
                     }
                     return true;
                 }
-                _ => {}
+                _ => {
+                    // For Text questions, any printable character auto-enters text mode
+                    // (like OpenCode where you can type directly without pressing Enter first)
+                    if let KeyCode::Char(ch) = key
+                        && let Some(q) = self.questions.get(self.current_tab)
+                        && q.question_type == QuestionType::Text
+                    {
+                        self.text_mode = true;
+                        if let Some(s) = self.state.get_mut(self.current_tab) {
+                            s.text_input.push(ch);
+                        }
+                        return true;
+                    }
+                }
             }
         }
 
@@ -508,7 +574,7 @@ impl QuestionDialog {
             return 0;
         }
 
-        let padding_vertical = 2u16;
+        let padding_vertical = 5u16;
         let footer = 1u16;
 
         if self.is_confirm() {
@@ -712,15 +778,7 @@ impl QuestionDialog {
 
             match q.question_type {
                 QuestionType::Text => {
-                    // Text input field
-                    let bg_color = rgba_color(theme.background_element);
-                    for cx in inner_x..inner_x + inner_w {
-                        if let Some(cell) = buf.cell_mut((cx, y_pos)) {
-                            cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_color));
-                        }
-                    }
-
+                    // Text input field — no explicit background (inherits from box's background_panel)
                     let state = self.state.get(self.current_tab);
                     let input_text = state.map_or(String::new(), |s| {
                         if s.text_input.is_empty() {
@@ -729,23 +787,20 @@ impl QuestionDialog {
                             s.text_input.clone()
                         }
                     });
-                    let input_style = if self.text_mode {
-                        Style::default()
-                            .fg(rgba_color(theme.text))
-                            .bg(rgba_color(theme.background_element))
+                    let input_fg = if self.text_mode {
+                        rgba_color(theme.text)
                     } else {
-                        Style::default()
-                            .fg(rgba_color(theme.text_muted))
-                            .bg(rgba_color(theme.background_element))
+                        rgba_color(theme.text_muted)
                     };
-                    draw_text_line(buf, "  ", inner_x, y_pos, inner_w, input_style);
                     draw_text_line(
                         buf,
-                        &input_text,
-                        inner_x + 2,
+                        &format!("  {input_text}"),
+                        inner_x,
                         y_pos,
-                        inner_w.saturating_sub(2),
-                        input_style,
+                        inner_w,
+                        Style::default()
+                            .fg(input_fg)
+                            .bg(rgba_color(theme.background_panel)),
                     );
                 }
 
@@ -923,118 +978,50 @@ impl QuestionDialog {
             }
         }
 
-        // --- Footer ---
-        let footer_y = inner_area.bottom().saturating_sub(1);
+        // --- Footer (keyboard hints, inherits background_panel from the box) ---
+        let footer_y = inner_area.bottom().saturating_sub(2);
+        let bg = rgba_color(theme.background_panel);
+        let key_fg = rgba_color(theme.text);
+        let desc_fg = rgba_color(theme.text_muted);
+
         let mut fx = inner_x;
+
+        macro_rules! hint {
+            ($key:expr, $desc:expr, $gap:expr) => {{
+                let kw = $key.len() as u16;
+                let dw = $desc.len() as u16;
+                draw_text_line(
+                    buf,
+                    $key,
+                    fx,
+                    footer_y,
+                    inner_w.saturating_sub(fx - inner_x),
+                    Style::default().fg(key_fg).bg(bg),
+                );
+                fx += kw + 1;
+                draw_text_line(
+                    buf,
+                    $desc,
+                    fx,
+                    footer_y,
+                    inner_w.saturating_sub(fx - inner_x),
+                    Style::default().fg(desc_fg).bg(bg),
+                );
+                fx += dw + $gap;
+            }};
+        }
+
         if tab_count > 1 {
-            let hint = "⇆";
-            draw_text_line(
-                buf,
-                hint,
-                fx,
-                footer_y,
-                inner_w.saturating_sub(fx - inner_x),
-                Style::default().fg(rgba_color(theme.text)),
-            );
-            fx += hint.len() as u16 + 1;
-            draw_text_line(
-                buf,
-                "tab",
-                fx,
-                footer_y,
-                inner_w.saturating_sub(fx - inner_x),
-                Style::default().fg(rgba_color(theme.text_muted)),
-            );
-            fx += 4;
+            hint!("⇆", "tab", 2);
         }
         if !is_confirm {
-            let hint = "↑↓";
-            draw_text_line(
-                buf,
-                hint,
-                fx,
-                footer_y,
-                inner_w.saturating_sub(fx - inner_x),
-                Style::default().fg(rgba_color(theme.text)),
-            );
-            fx += hint.len() as u16 + 1;
-            draw_text_line(
-                buf,
-                "select",
-                fx,
-                footer_y,
-                inner_w.saturating_sub(fx - inner_x),
-                Style::default().fg(rgba_color(theme.text_muted)),
-            );
-            fx += 7;
+            hint!("↑↓", "select", 2);
         }
-        let enter_action = if is_confirm { "submit" } else { "select" };
-        draw_text_line(
-            buf,
-            "enter",
-            fx,
-            footer_y,
-            inner_w.saturating_sub(fx - inner_x),
-            Style::default().fg(rgba_color(theme.text)),
-        );
-        fx += 6;
-        draw_text_line(
-            buf,
-            enter_action,
-            fx,
-            footer_y,
-            inner_w.saturating_sub(fx - inner_x),
-            Style::default().fg(rgba_color(theme.text_muted)),
-        );
-        fx += enter_action.len() as u16 + 2;
-        draw_text_line(
-            buf,
-            "esc",
-            fx,
-            footer_y,
-            inner_w.saturating_sub(fx - inner_x),
-            Style::default().fg(rgba_color(theme.text)),
-        );
-        fx += 4;
-        draw_text_line(
-            buf,
-            "dismiss",
-            fx,
-            footer_y,
-            inner_w.saturating_sub(fx - inner_x),
-            Style::default().fg(rgba_color(theme.text_muted)),
-        );
-
-        // Submit hint on confirm tab
-        if is_confirm {
-            fx += 8;
-            draw_text_line(
-                buf,
-                "→ submit answers",
-                fx,
-                footer_y,
-                inner_w.saturating_sub(fx - inner_x),
-                Style::default().fg(rgba_color(theme.text_muted)),
-            );
-        }
-        // Backspace hint on text tab
-        if !is_confirm
-            && self
-                .questions
-                .get(self.current_tab)
-                .is_some_and(|q| q.question_type == QuestionType::Text)
-            && self.text_mode
-        {
-            fx += 8;
-            draw_text_line(
-                buf,
-                "⌫ type",
-                fx,
-                footer_y,
-                inner_w.saturating_sub(fx - inner_x),
-                Style::default().fg(rgba_color(theme.text_muted)),
-            );
-        }
+        let enter_label = if is_confirm { "submit" } else { "select" };
+        hint!("enter", enter_label, 2);
+        hint!("esc", "dismiss", 0);
+        // Suppress "value assigned to `fx` is never read" warning
+        let _ = fx;
     }
 
     /// Build a one-line summary of the answer for a question (used in the review screen).

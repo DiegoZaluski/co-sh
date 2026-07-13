@@ -30,7 +30,7 @@ pub struct FooterView;
 
 impl FooterView {
     pub fn render(buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
-        Self::render_with_mode(buf, area, state, theme, true);
+        Self::render_with_mode(buf, area, state, theme, true, false);
     }
 
     pub fn render_with_mode(
@@ -39,6 +39,7 @@ impl FooterView {
         state: &AppState,
         theme: &Theme,
         show_home_label: bool,
+        hide_text: bool,
     ) {
         let bg_color = rgba_color(theme.background);
         for x in area.x..area.right() {
@@ -46,6 +47,11 @@ impl FooterView {
                 cell.set_style(Style::default().bg(bg_color));
                 cell.set_char(' ');
             }
+        }
+
+        // When hide_text is true (e.g. question dialog is visible), just render the background
+        if hide_text {
+            return;
         }
 
         let muted = Style::default().fg(rgba_color(theme.text_muted));
