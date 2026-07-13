@@ -974,6 +974,7 @@ impl SessionView {
         inner_area: Rect,
         max_w: u16,
         config: &TuiConfig,
+        theme: &Theme,
     ) {
         self.text_regions.clear();
 
@@ -1024,44 +1025,104 @@ impl SessionView {
                                     part_y += part_h;
                                     continue;
                                 }
-                                let max_w_usize = max_w as usize;
-                                // Screen Y of first visible line of this part
-                                let mut screen_line_y = p_top.max(vp_top) as u16;
-                                let screen_end = p_bottom.min(vp_bottom) as u16;
 
-                                for logical_line in content.lines() {
-                                    if logical_line.is_empty() {
-                                        if screen_line_y < screen_end {
-                                            let cy = (screen_line_y as i32) - vp_top + scroll;
-                                            self.text_regions.push(TextRegion {
-                                                y1: cy,
-                                                y2: cy + 1,
-                                                x1: x_off,
-                                                x2: x_off + max_w,
-                                                text: String::new(),
-                                            });
-                                            screen_line_y += 1;
+                                // ── Assistant text: render markdown into temp buffer and scan ──
+                                // The markdown renderer wraps text differently than simple char
+                                // wrapping, so we render to a temp buffer and scan the actual
+                                // output. This ensures text_regions match exactly what the user
+                                // sees on screen, fixing cut-off at the end of the last assistant
+                                // message and selection that lags behind cursor.
+                                if msg.role == MessageRole::Assistant {
+                                    let generous_h = (part_h as u16 * 3).max(200).min(5000);
+                                    let scan_area = Rect::new(0, 0, max_w, generous_h);
+                                    let mut temp = ratatui::buffer::Buffer::empty(scan_area);
+
+                                    let empty_style = Style::default()
+                                        .bg(rgba_color(theme.background))
+                                        .fg(rgba_color(theme.text));
+                                    for ty in 0..generous_h {
+                                        for tx in 0..max_w {
+                                            if let Some(cell) = temp.cell_mut((tx, ty)) {
+                                                cell.set_char(' ');
+                                                cell.set_style(empty_style);
+                                            }
                                         }
-                                        continue;
                                     }
-                                    let mut remaining = logical_line;
-                                    while !remaining.is_empty() && screen_line_y < screen_end {
-                                        let n = remaining.chars().take(max_w_usize).count();
-                                        let split = remaining
-                                            .char_indices()
-                                            .nth(n)
-                                            .map_or(remaining.len(), |(i, _)| i);
-                                        let visual_line = &remaining[..split];
+
+                                    let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
+                                        Some(content.clone()),
+                                    );
+                                    md.set_fg(Some(ColorInput::RGBA(theme.text)));
+                                    md.set_bg(Some(ColorInput::RGBA(theme.background)));
+                                    md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
+                                    md.render_self(&mut temp, scan_area);
+
+                                    let mut screen_line_y = p_top.max(vp_top) as u16;
+                                    let screen_end = p_bottom.min(vp_bottom) as u16;
+
+                                    for ty in 0..generous_h {
+                                        if screen_line_y >= screen_end {
+                                            break;
+                                        }
+
+                                        let mut line_text = String::new();
+                                        for tx in 0..max_w {
+                                            if let Some(cell) = temp.cell((tx, ty)) {
+                                                line_text.push(cell.symbol().chars().next().unwrap_or(' '));
+                                            }
+                                        }
+
+                                        let trimmed = line_text.trim_end().to_string();
                                         let cy = (screen_line_y as i32) - vp_top + scroll;
                                         self.text_regions.push(TextRegion {
                                             y1: cy,
                                             y2: cy + 1,
                                             x1: x_off,
                                             x2: x_off + max_w,
-                                            text: visual_line.to_string(),
+                                            text: trimmed,
                                         });
                                         screen_line_y += 1;
-                                        remaining = &remaining[split..];
+                                    }
+                                } else {
+                                    // ── User text: simple char wrapping (correct for plain text) ──
+                                    let max_w_usize = max_w as usize;
+                                    let mut screen_line_y = p_top.max(vp_top) as u16;
+                                    let screen_end = p_bottom.min(vp_bottom) as u16;
+
+                                    for logical_line in content.lines() {
+                                        if logical_line.is_empty() {
+                                            if screen_line_y < screen_end {
+                                                let cy = (screen_line_y as i32) - vp_top + scroll;
+                                                self.text_regions.push(TextRegion {
+                                                    y1: cy,
+                                                    y2: cy + 1,
+                                                    x1: x_off,
+                                                    x2: x_off + max_w,
+                                                    text: String::new(),
+                                                });
+                                                screen_line_y += 1;
+                                            }
+                                            continue;
+                                        }
+                                        let mut remaining = logical_line;
+                                        while !remaining.is_empty() && screen_line_y < screen_end {
+                                            let n = remaining.chars().take(max_w_usize).count();
+                                            let split = remaining
+                                                .char_indices()
+                                                .nth(n)
+                                                .map_or(remaining.len(), |(i, _)| i);
+                                            let visual_line = &remaining[..split];
+                                            let cy = (screen_line_y as i32) - vp_top + scroll;
+                                            self.text_regions.push(TextRegion {
+                                                y1: cy,
+                                                y2: cy + 1,
+                                                x1: x_off,
+                                                x2: x_off + max_w,
+                                                text: visual_line.to_string(),
+                                            });
+                                            screen_line_y += 1;
+                                            remaining = &remaining[split..];
+                                        }
                                     }
                                 }
                             }
@@ -1298,7 +1359,7 @@ impl SessionView {
             self.last_content_height = total_height;
         }
 
-        self.build_text_regions(session, inner_area, max_w, config);
+        self.build_text_regions(session, inner_area, max_w, config, theme);
 
         if config.show_scrollbar {
             let scrollbar_area = Rect::new(

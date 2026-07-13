@@ -2329,6 +2329,7 @@ impl App {
                                 inner_area,
                                 max_w,
                                 &self.config,
+                                &self.theme,
                             );
                         }
 
@@ -2906,3 +2907,4 @@ fn save_provider_api_key(provider: &str, env_var: &str, api_key: &str) {
         // Silently fail - env var is still set for the current process
     }
 }
+
