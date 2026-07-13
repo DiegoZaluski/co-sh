@@ -201,15 +201,19 @@ impl Renderable for DiffRenderable {
 
             // content
             let content = if line.is_empty() { line } else { &line[1..] };
-            for ch in content.chars() {
-                if x >= max_x {
+            for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(content) {
+                if x + w > max_x {
                     break;
                 }
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ch);
+                    if grapheme.len() == 1 {
+                        cell.set_char(grapheme.chars().next().unwrap());
+                    } else {
+                        cell.set_symbol(grapheme);
+                    }
                     cell.set_style(content_style);
                 }
-                x += 1;
+                x += w;
             }
 
             y += 1;

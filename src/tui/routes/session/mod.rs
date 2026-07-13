@@ -17,6 +17,8 @@ use cosh_tui::core::types::MouseEvent;
 
 use cosh_tui::core::renderables::markdown::estimate_height;
 
+use std::hash::Hasher;
+
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -81,35 +83,56 @@ fn conceal_text(text: &str) -> String {
     text.chars().map(concealed_char).collect()
 }
 
-/// Hash message part metadata: lengths, statuses, counts.
-/// Extracted to avoid duplicating the match arms across `msg_change_token`
-/// and `msg_content_token`.
+/// Hash message part content for cache invalidation.
+///
+/// Hashes the actual content bytes of each part (text body, tool name,
+/// reasoning text, filename) using `DefaultHasher::write()`, not just
+/// their lengths. This ensures that switching sessions with different
+/// content produces different tokens, preventing stale cache hits.
+///
+/// Without content-aware hashing, two messages with same-length parts
+/// would produce identical tokens, causing the per-message render
+/// cache to serve stale cells from a different session.
 fn hash_parts(msg: &Message) -> u64 {
-    let mut h: u64 = msg.parts.len() as u64;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // Hash part count
+    hasher.write_usize(msg.parts.len());
     for part in &msg.parts {
         match part {
             Part::Text(t) => {
-                h = h.wrapping_mul(31).wrapping_add(t.text.len() as u64);
+                // Hash actual content bytes, not just length
+                hasher.write(t.text.as_bytes());
+                hasher.write(&[t.synthetic as u8]);
             }
             Part::Tool(t) => {
-                h = h.wrapping_mul(31).wrapping_add(match &t.status {
-                    ToolStatus::Running => 1,
-                    ToolStatus::Completed => 2,
-                    ToolStatus::Failed(_) => 3,
-                } as u64);
+                hasher.write(t.tool.as_bytes());
+                hasher.write(&[status_to_u8(&t.status)]);
                 if let Some(ref out) = t.output {
-                    h = h.wrapping_mul(31).wrapping_add(out.len() as u64);
+                    hasher.write(out.as_bytes());
+                }
+                if let Some(ref id) = t.tool_call_id {
+                    hasher.write(id.as_bytes());
                 }
             }
             Part::Reasoning(r) => {
-                h = h.wrapping_mul(31).wrapping_add(r.text.len() as u64);
+                hasher.write(r.text.as_bytes());
             }
             Part::File(f) => {
-                h = h.wrapping_mul(31).wrapping_add(f.filename.len() as u64);
+                hasher.write(f.filename.as_bytes());
+                hasher.write(f.mime.as_bytes());
             }
         }
     }
-    h
+    hasher.finish()
+}
+
+/// Convert a `ToolStatus` to a single byte for hashing.
+fn status_to_u8(status: &ToolStatus) -> u8 {
+    match status {
+        ToolStatus::Running => 0,
+        ToolStatus::Completed => 1,
+        ToolStatus::Failed(_) => 2,
+    }
 }
 
 /// Combined hash of part metadata (lengths, statuses, counts).
@@ -622,8 +645,8 @@ impl SessionView {
         }
         let mut y = y_;
         let mut cx = x;
-        for ch in text.chars() {
-            if ch == '\n' {
+        for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(text) {
+            if grapheme == "\n" {
                 y += 1;
                 cx = x;
                 if y >= bottom {
@@ -631,24 +654,29 @@ impl SessionView {
                 }
                 continue;
             }
-            if ch.is_control() {
+            // Skip other control characters
+            if grapheme.len() == 1 && grapheme.chars().next().unwrap().is_control() {
                 continue;
             }
-            if cx >= right {
+            if cx + w > right {
                 y += 1;
                 cx = x;
                 if y >= bottom {
                     break;
                 }
-                if ch == ' ' {
+                if grapheme == " " {
                     continue;
                 }
             }
             if let Some(cell) = buf.cell_mut((cx, y)) {
-                cell.set_char(ch);
+                if grapheme.len() == 1 {
+                    cell.set_char(grapheme.chars().next().unwrap());
+                } else {
+                    cell.set_symbol(grapheme);
+                }
                 cell.set_style(style);
             }
-            cx += 1;
+            cx += w;
         }
         (y - y_ + 1).max(1)
     }
@@ -671,7 +699,9 @@ impl SessionView {
                         if line.is_empty() {
                             continue;
                         }
-                        let line_len = line.chars().count();
+                        // Use display width instead of char count to correctly
+                        // handle CJK, emoji, and flag Regional Indicators
+                        let line_len = cosh_tui::core::lib::unicode_util::str_display_width(line);
                         total_lines += line_len.div_ceil(chars_per_line);
                     }
                     total_lines.max(1) as u16
@@ -860,16 +890,16 @@ impl SessionView {
                 .collect();
             let mut line_x = x_off;
             let mut line_y = area.y + 1;
-            for ch in error_text.chars() {
-                if ch == '\n' {
+            for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(&error_text) {
+                if grapheme == "\n" {
                     line_x = x_off;
                     line_y += 1;
                     continue;
                 }
-                if ch.is_control() {
+                if grapheme.len() == 1 && grapheme.chars().next().unwrap().is_control() {
                     continue;
                 }
-                if line_x >= x_off + max_w {
+                if line_x + w > x_off + max_w {
                     line_x = x_off;
                     line_y += 1;
                 }
@@ -877,10 +907,14 @@ impl SessionView {
                     break;
                 }
                 if let Some(cell) = buf.cell_mut((line_x, line_y)) {
-                    cell.set_char(ch);
+                    if grapheme.len() == 1 {
+                        cell.set_char(grapheme.chars().next().unwrap());
+                    } else {
+                        cell.set_symbol(grapheme);
+                    }
                     cell.set_style(error_style);
                 }
-                line_x += 1;
+                line_x += w;
             }
             return 0;
         }
@@ -1057,20 +1091,20 @@ impl SessionView {
                 .collect();
             let mut lines = 0u16;
             let mut col = 0u16;
-            for ch in error_text.chars() {
-                if ch == '\n' {
+            for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(&error_text) {
+                if grapheme == "\n" {
                     lines += 1;
                     col = 0;
                     continue;
                 }
-                if ch.is_control() {
+                if grapheme.len() == 1 && grapheme.chars().next().unwrap().is_control() {
                     continue;
                 }
-                if col >= max_w {
+                if col + w > max_w {
                     lines += 1;
                     col = 0;
                 }
-                col += 1;
+                col += w;
             }
             if col > 0 || error_text.is_empty() {
                 lines += 1;
@@ -1276,7 +1310,7 @@ impl SessionView {
                                         screen_line_y += 1;
                                     }
                                 } else {
-                                    // ── User text: simple char wrapping (correct for plain text) ──
+                                    // ── User text: width-aware wrapping (CJK, emoji, flags = 2 cols) ──
                                     let max_w_usize = max_w as usize;
                                     let mut screen_line_y = p_top.max(vp_top) as u16;
                                     let screen_end = p_bottom.min(vp_bottom) as u16;
@@ -1298,12 +1332,27 @@ impl SessionView {
                                         }
                                         let mut remaining = logical_line;
                                         while !remaining.is_empty() && screen_line_y < screen_end {
-                                            let n = remaining.chars().take(max_w_usize).count();
-                                            let split = remaining
-                                                .char_indices()
-                                                .nth(n)
-                                                .map_or(remaining.len(), |(i, _)| i);
-                                            let visual_line = &remaining[..split];
+                                            // Use grapheme-based wrapping for correct width with CJK, emoji, flags
+                                            let mut width_so_far = 0usize;
+                                            let mut split_pos = 0usize;
+                                            for (g, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(remaining) {
+                                                let gw = w as usize;
+                                                if width_so_far + gw > max_w_usize {
+                                                    break;
+                                                }
+                                                width_so_far += gw;
+                                                split_pos += g.len();
+                                            }
+                                            // If nothing fit, force at least one grapheme to prevent infinite loop
+                                            if split_pos == 0 && !remaining.is_empty() {
+                                                // Take at least the first grapheme even if it's wider than max_w
+                                                let first_g = cosh_tui::core::lib::unicode_util::graphemes_with_width(remaining)
+                                                    .next()
+                                                    .map(|(g, _)| g.len())
+                                                    .unwrap_or(remaining.len());
+                                                split_pos = first_g;
+                                            }
+                                            let visual_line = &remaining[..split_pos];
                                             let cy = (screen_line_y as i32) - vp_top + scroll;
                                             self.text_regions.push(TextRegion {
                                                 y1: cy,
@@ -1313,7 +1362,7 @@ impl SessionView {
                                                 text: visual_line.to_string(),
                                             });
                                             screen_line_y += 1;
-                                            remaining = &remaining[split..];
+                                            remaining = &remaining[split_pos..];
                                         }
                                     }
                                 }

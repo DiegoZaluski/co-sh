@@ -128,9 +128,13 @@ impl MarkdownRenderable {
 
     // ── Rendering helpers ──────────────────────────────────────
 
-    /// Write `text` into the buffer one character at a time, wrapping at
-    /// `max_x`.  Leading spaces after a wrap are skipped to avoid visual
-    /// indentation on continuation lines.
+    /// Write `text` into the buffer one grapheme at a time, wrapping at
+    /// `max_x`.  Accounts for each grapheme's display width (e.g. CJK,
+    /// emoji, flag pairs, ZWJ sequences are 2 columns wide) to prevent
+    /// visual corruption and line-wrapping errors.
+    ///
+    /// Leading spaces after a wrap are skipped to avoid visual indentation
+    /// on continuation lines.
     #[allow(clippy::too_many_arguments)]
     fn render_text(
         text: &str,
@@ -142,22 +146,28 @@ impl MarkdownRenderable {
         max_y: u16,
         style: Style,
     ) {
-        for ch in text.chars() {
-            if *x >= max_x {
+        for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
+            // Check if the grapheme fits in the remaining space
+            if *x + w > max_x {
+                // Wrap to next line
                 *y += 1;
                 *x = area_x;
                 if *y >= max_y {
                     break;
                 }
-                if ch == ' ' {
+                if grapheme == " " {
                     continue;
                 }
             }
             if let Some(cell) = buf.cell_mut((*x, *y)) {
-                cell.set_char(ch);
+                if grapheme.len() == 1 {
+                    cell.set_char(grapheme.chars().next().unwrap());
+                } else {
+                    cell.set_symbol(grapheme);
+                }
                 cell.set_style(style);
             }
-            *x += 1;
+            *x += w;
         }
     }
 
@@ -635,19 +645,27 @@ impl MarkdownRenderable {
             // Fill the entire line with code-block background
             Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
 
-            // Render each character with its highlight style
-            for (ci, ch) in line.char_indices() {
-                if *x >= max_x {
+            // Render each character with its highlight style, accounting
+            // for display width (CJK, emoji, flag pairs, ZWJ sequences)
+            // Use byte offset to map to highlight categories
+            let mut remaining_offset = 0;
+            for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(line) {
+                if *x + w > max_x {
                     break;
                 }
-                let byte_pos = byte_offset + ci;
-                let cat = cat_map.get(byte_pos).copied().flatten();
+                // Use the byte offset of the first char in the grapheme for highlighting
+                let cat = cat_map.get(byte_offset + remaining_offset).copied().flatten();
                 let style = Self::highlight_style(cat, default_fg, code_bg);
                 if let Some(cell) = buf.cell_mut((*x, *y)) {
-                    cell.set_char(ch);
+                    if grapheme.len() == 1 {
+                        cell.set_char(grapheme.chars().next().unwrap());
+                    } else {
+                        cell.set_symbol(grapheme);
+                    }
                     cell.set_style(style);
                 }
-                *x += 1;
+                *x += w;
+                remaining_offset += grapheme.len();
             }
             byte_offset += line.len() + 1;
         }

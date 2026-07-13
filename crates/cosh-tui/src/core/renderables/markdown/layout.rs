@@ -103,12 +103,12 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                                     "• ".to_string()
                                 }
                             });
-                        for _ch in marker.chars() {
+                        for (_grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(&marker) {
                             if x >= max_w {
                                 y += 1;
                                 x = area_x;
                             }
-                            x += 1;
+                            x += w;
                         }
                     }
                     Tag::TableHead
@@ -170,6 +170,7 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
             | Event::InlineMath(text)
             | Event::DisplayMath(text)
             | Event::InlineHtml(text) => {
+                let text: &str = text.as_ref();
                 if ctx.in_code_block() {
                     for (i, line) in text.lines().enumerate() {
                         if i > 0 {
@@ -180,40 +181,42 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                         x = x.saturating_add(line_chars.min(max_w.saturating_sub(x)));
                     }
                 } else {
-                    for ch in text.chars() {
-                        if x >= max_w {
+                    for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
+                        if x + w > max_w {
                             y += 1;
                             x = area_x;
-                            if ch == ' ' {
+                            if grapheme == " " {
                                 continue;
                             }
                         }
-                        x += 1;
+                        x += w;
                     }
                 }
             }
             Event::Code(text) => {
-                for ch in text.chars() {
-                    if x >= max_w {
+                let text: &str = text.as_ref();
+                for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
+                    if x + w > max_w {
                         y += 1;
                         x = area_x;
-                        if ch == ' ' {
+                        if grapheme == " " {
                             continue;
                         }
                     }
-                    x += 1;
+                    x += w;
                 }
             }
             Event::Html(text) => {
-                for ch in text.chars() {
-                    if x >= max_w {
+                let text: &str = text.as_ref();
+                for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
+                    if x + w > max_w {
                         y += 1;
                         x = area_x;
-                        if ch == ' ' {
+                        if grapheme == " " {
                             continue;
                         }
                     }
-                    x += 1;
+                    x += w;
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -226,12 +229,12 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
             }
             Event::TaskListMarker(_checked) => {
                 let marker = "[ ] ";
-                for _ch in marker.chars() {
+                for (_grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(marker) {
                     if x >= max_w {
                         y += 1;
                         x = area_x;
                     }
-                    x += 1;
+                    x += w;
                 }
             }
         }

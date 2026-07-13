@@ -182,15 +182,19 @@ impl Renderable for CodeRenderable {
                 break;
             }
             let mut x = area.x;
-            for ch in line.chars() {
-                if x >= max_x {
+            for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(line) {
+                if x + w > max_x {
                     break;
                 }
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ch);
+                    if grapheme.len() == 1 {
+                        cell.set_char(grapheme.chars().next().unwrap());
+                    } else {
+                        cell.set_symbol(grapheme);
+                    }
                     cell.set_style(style);
                 }
-                x += 1;
+                x += w;
             }
             y += 1;
         }

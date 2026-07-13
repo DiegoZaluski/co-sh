@@ -1289,11 +1289,13 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.13.0",
  "cosh-sdk",
+ "finl_unicode",
  "log",
  "lru",
  "pulldown-cmark",
  "ratatui",
  "taffy",
+ "unicode-width",
 ]
 
 [[package]]

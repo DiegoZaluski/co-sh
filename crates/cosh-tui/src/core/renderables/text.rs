@@ -298,8 +298,8 @@ impl Renderable for TextRenderable {
                 .bg(ratatui_bg)
                 .add_modifier(modifier);
 
-            for ch in chunk.text.chars() {
-                if current_col >= max_x {
+            for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(&chunk.text) {
+                if current_col + w > max_x {
                     current_col = x;
                     current_line += 1;
                 }
@@ -308,11 +308,15 @@ impl Renderable for TextRenderable {
                 }
 
                 if let Some(cell) = buf.cell_mut((current_col, current_line)) {
-                    cell.set_char(ch);
+                    if grapheme.len() == 1 {
+                        cell.set_char(grapheme.chars().next().unwrap());
+                    } else {
+                        cell.set_symbol(grapheme);
+                    }
                     cell.set_style(style);
                 }
 
-                current_col += 1;
+                current_col += w;
             }
         }
     }
