@@ -1,12 +1,15 @@
 use std::any::Any;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use pulldown_cmark::{Event, Options, Tag, TagEnd};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
+use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight, HighlightSpan};
 
 use crate::core::renderable::Renderable;
 use crate::core::rgba::{ColorInput, parse_color};
@@ -16,6 +19,16 @@ use super::context::{MarkdownContext, MarkdownElement};
 use super::styles::MarkdownPalette;
 
 static NEXT_MARKDOWN_NUM: AtomicU64 = AtomicU64::new(1);
+
+static HIGHLIGHT_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, Vec<HighlightSpan>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn highlight_cache_key(text: &str, lang: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    lang.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Renders markdown content into a fixed-area `Buffer`.
 ///
@@ -232,6 +245,8 @@ impl Renderable for MarkdownRenderable {
         if self.content.is_empty() || area.width == 0 || area.height == 0 {
             return;
         }
+
+        let _start = std::time::Instant::now();
 
         let max_x = area.x.saturating_add(area.width);
         let max_y = area.y.saturating_add(area.height);
@@ -533,6 +548,11 @@ impl Renderable for MarkdownRenderable {
                 }
             }
         }
+
+        let _elapsed = _start.elapsed().as_micros();
+        if _elapsed > 500 {
+            log::debug!("[PERF] markdown_render_self: content_len={} area={}x{} elapsed={_elapsed}us", self.content.len(), area.width, area.height);
+        }
     }
 }
 
@@ -553,17 +573,30 @@ impl MarkdownRenderable {
         max_y: u16,
         lang: &str,
     ) {
+        let _cb_start = std::time::Instant::now();
         let palette = self.palette();
         let code_bg = palette.code_bg_color();
         let default_fg = rgba_to_color(palette.text_color());
 
         // When no language is specified (e.g. LLM output without ```lang),
         // default to JavaScript — the most popular language, with syntax
-        // similar to many others (C, Java, TypeScript, etc.).
+        // matching many others (C, Java, TypeScript, etc.).
         let effective_lang = if lang.is_empty() { "javascript" } else { lang };
 
-        // Build byte-to-category map for syntax highlighting
-        let spans = highlight(text, effective_lang);
+        // Build byte-to-category map for syntax highlighting (cached)
+        let key = highlight_cache_key(text, effective_lang);
+        let spans: Option<Vec<HighlightSpan>> = {
+            let mut cache = HIGHLIGHT_CACHE.lock().unwrap();
+            if let Some(cached) = cache.get(&key) {
+                Some(cached.clone())
+            } else {
+                let computed = highlight(text, effective_lang);
+                if let Some(ref spans) = computed {
+                    cache.insert(key, spans.clone());
+                }
+                computed
+            }
+        };
         let mut cat_map: Vec<Option<HighlightCategory>> = vec![None; text.len()];
         if let Some(ref spans) = spans {
             for span in spans {
@@ -602,6 +635,11 @@ impl MarkdownRenderable {
                 *x += 1;
             }
             byte_offset += line.len() + 1;
+        }
+
+        let _cb_us = _cb_start.elapsed().as_micros();
+        if _cb_us > 500 {
+            log::debug!("[PERF] code_block_render: text_len={} lang={} elapsed={_cb_us}us", text.len(), if lang.is_empty() { "none" } else { lang });
         }
     }
 }

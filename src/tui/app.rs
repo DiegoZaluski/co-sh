@@ -2,7 +2,7 @@ use std::io;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
 use crossterm::event::{
@@ -866,6 +866,7 @@ impl App {
             let buf = frame.buffer_mut();
 
             let bg_color = rgba_color(self.theme.background);
+            let _bg_start = Instant::now();
             for y in area.y..area.bottom() {
                 for x in area.x..area.right() {
                     if let Some(cell) = buf.cell_mut((x, y)) {
@@ -873,6 +874,10 @@ impl App {
                         cell.set_char(' ');
                     }
                 }
+            }
+            let _bg_us = _bg_start.elapsed().as_micros();
+            if _bg_us > 200 {
+                log::debug!("[PERF] bg_fill: {_bg_us}us area={}x{}", area.width, area.height);
             }
 
             let header_style = Style::default().fg(rgba_color(self.theme.text_muted));

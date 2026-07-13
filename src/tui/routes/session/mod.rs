@@ -21,6 +21,7 @@ use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::types::{AgentColors, FilePart, Message, MessageRole, Part, ReasoningPart, ToolStatus};
+use std::time::Instant;
 use crate::util::tool_render::{self, ToolRenderState};
 
 const fn left_border_chars() -> BorderCharacters {
@@ -93,6 +94,10 @@ struct TextRegion {
     text: String,
 }
 
+/// Cached heights per message (avoids duplicate pulldown_cmark parses).
+/// Messages are immutable after receipt, so results are valid until
+/// config/max_w changes or new messages arrive.
+
 pub struct SessionView {
     pub scroll_y: i32,
     pub tool_state: ToolRenderState,
@@ -139,6 +144,44 @@ pub struct SessionView {
     scroll_accumulator_y: f64,
     /// Scroll speed multiplier (acceleration, default 3.0 = CustomSpeedScroll(3)).
     scroll_accel: f64,
+
+    // ── Height cache (avoids duplicate pulldown_cmark parses) ──────────────────
+    msg_height_cache: Vec<i32>,
+    cache_max_w: u16,
+    cache_config_token: u64,
+
+    // ── text_regions dirty flag (skip rebuild when nothing changed) ────────────
+    text_regions_gen: u64,
+}
+
+fn text_regions_generation(session: &crate::types::Session, config: &TuiConfig, max_w: u16) -> u64 {
+    let mut g: u64 = session.messages.len() as u64;
+    g = g.wrapping_mul(31).wrapping_add(max_w as u64);
+    g = g.wrapping_mul(31).wrapping_add(config_token(config));
+    if let Some(last) = session.messages.last() {
+        let content_len: usize = last
+            .parts
+            .iter()
+            .map(|p| match p {
+                crate::types::Part::Text(t) => t.text.len(),
+                crate::types::Part::Tool(t) => {
+                    t.tool_call_id.as_deref().unwrap_or("").len()
+                }
+                _ => 0,
+            })
+            .sum();
+        g = g.wrapping_mul(31).wrapping_add(content_len as u64);
+    }
+    g
+}
+
+fn config_token(config: &TuiConfig) -> u64 {
+    let mut token: u64 = 0;
+    if config.conceal { token |= 1; }
+    if config.show_tool_details { token |= 2; }
+    if config.show_generic_tool_output { token |= 4; }
+    if config.thinking_mode { token |= 8; }
+    token
 }
 
 impl SessionView {
@@ -167,6 +210,10 @@ impl SessionView {
             is_applying_sticky_scroll: false,
             scroll_accumulator_y: 0.0,
             scroll_accel: 3.0,
+            msg_height_cache: Vec::new(),
+            cache_max_w: 0,
+            cache_config_token: 0,
+            text_regions_gen: 0,
         }
     }
 
@@ -990,7 +1037,7 @@ impl SessionView {
                 y += 1;
             }
 
-            let msg_h = Self::render_message_height(msg, max_w, config);
+            let msg_h = self.msg_height_cache[idx];
             let msg_top = y;
             let msg_bottom = y + msg_h;
 
@@ -1336,11 +1383,32 @@ impl SessionView {
         let agent_colors = AgentColors::from_theme(theme);
         let max_w = inner_area.width.saturating_sub(6);
 
+        let _frame_start = Instant::now();
+
+        // ── Height cache: populate on first render or when config/msgs/resize change ──
+        let config_tok = config_token(config);
+        let cache_stale = self.msg_height_cache.len() != session.messages.len()
+            || self.cache_max_w != max_w
+            || self.cache_config_token != config_tok;
+
+        if cache_stale {
+            let _cache_start = Instant::now();
+            self.msg_height_cache.clear();
+            for msg in session.messages.iter() {
+                let msg_h = Self::render_message_height(msg, max_w, config);
+                self.msg_height_cache.push(msg_h);
+            }
+            self.cache_max_w = max_w;
+            self.cache_config_token = config_tok;
+            log::debug!("[PERF] msg_height_cache: cold_build={}us msgs={}", _cache_start.elapsed().as_micros(), session.messages.len());
+        } else {
+            log::debug!("[PERF] msg_height_cache: hit (cached)");
+        }
+
         let mut total_height: i32 = 0;
-        for (idx, msg) in session.messages.iter().enumerate() {
+        for (idx, _msg) in session.messages.iter().enumerate() {
             let gap = i32::from(idx > 0);
-            let msg_h = Self::render_message_height(msg, max_w, config);
-            total_height += gap + msg_h;
+            total_height += gap + self.msg_height_cache[idx];
         }
 
         let visible_height = i32::from(inner_area.height);
@@ -1359,7 +1427,15 @@ impl SessionView {
             self.last_content_height = total_height;
         }
 
-        self.build_text_regions(session, inner_area, max_w, config, theme);
+        let regions_gen = text_regions_generation(session, config, max_w);
+        if regions_gen != self.text_regions_gen {
+            let _regions_start = Instant::now();
+            self.build_text_regions(session, inner_area, max_w, config, theme);
+            self.text_regions_gen = regions_gen;
+            log::debug!("[PERF] text_regions: {}us (built)", _regions_start.elapsed().as_micros());
+        } else {
+            log::debug!("[PERF] text_regions: skipped (no change)");
+        }
 
         if config.show_scrollbar {
             let scrollbar_area = Rect::new(
@@ -1386,7 +1462,7 @@ impl SessionView {
                 y += 1;
             }
 
-            let msg_h = Self::render_message_height(msg, max_w, config);
+            let msg_h = self.msg_height_cache[idx];
             let msg_top = y;
             let msg_bottom = y + msg_h;
             let is_assistant_non_error = matches!(msg.role, MessageRole::Assistant)
@@ -1398,22 +1474,13 @@ impl SessionView {
                 let is_top_clipped = msg_top < vp_top;
 
                 if is_top_clipped && is_assistant_non_error {
-                    // ── Top-clipped assistant (non-error): generous temp buffer ──
+                    // ── Top-clipped assistant (non-error): temp buffer ──
                     let src_y = (vp_top - msg_top) as u16;
                     let dst_y = vp_top as u16;
-                    let generous_h = (msg_h as u16 * 3).max(100).min(5000);
+                    let generous_h = (msg_h as u16 + inner_area.height).max(100).min(5000);
                     let full_area = Rect::new(0, 0, inner_area.width, generous_h);
                     let mut temp = Buffer::empty(full_area);
-
-                    let session_bg = Style::default().bg(rgba_color(theme.background));
-                    for by in 0..full_area.height {
-                        for bx in 0..full_area.width {
-                            if let Some(cell) = temp.cell_mut((bx, by)) {
-                                cell.set_style(session_bg);
-                                cell.set_char(' ');
-                            }
-                        }
-                    }
+                    temp.set_style(full_area, Style::default().bg(rgba_color(theme.background)));
 
                     let actual_h = Self::render_assistant_message(
                         &mut temp, full_area, msg, theme,
@@ -1421,14 +1488,16 @@ impl SessionView {
                     ) as i32;
 
                     let vis_h = (actual_h.min(vp_bottom - msg_top) - src_y as i32).max(0) as u16;
+                    let temp_cells = temp.content();
+                    let line_stride = inner_area.width as usize;
+                    let dst_x = inner_area.x;
                     for dy in 0..vis_h {
                         let temp_y = src_y + dy;
                         let dst_line_y = dst_y + dy;
-                        for dx in 0..inner_area.width {
-                            if let Some(cell) = temp.cell((dx, temp_y)) {
-                                if let Some(dst) = buf.cell_mut((inner_area.x + dx, dst_line_y)) {
-                                    *dst = cell.clone();
-                                }
+                        let base = temp_y as usize * line_stride;
+                        for dx in 0..line_stride {
+                            if let Some(dst) = buf.cell_mut((dst_x + dx as u16, dst_line_y)) {
+                                *dst = temp_cells[base + dx].clone();
                             }
                         }
                     }
@@ -1443,16 +1512,7 @@ impl SessionView {
                     if vis_h > 0 && msg_h > 0 {
                         let full_area = Rect::new(0, 0, inner_area.width, msg_h as u16);
                         let mut temp = Buffer::empty(full_area);
-
-                        let session_bg = Style::default().bg(rgba_color(theme.background));
-                        for by in 0..full_area.height {
-                            for bx in 0..full_area.width {
-                                if let Some(cell) = temp.cell_mut((bx, by)) {
-                                    cell.set_style(session_bg);
-                                    cell.set_char(' ');
-                                }
-                            }
-                        }
+                        temp.set_style(full_area, Style::default().bg(rgba_color(theme.background)));
 
                         match msg.role {
                             MessageRole::User => {
@@ -1472,15 +1532,16 @@ impl SessionView {
                             }
                         }
 
+                        let temp_cells = temp.content();
+                        let line_stride = full_area.width as usize;
+                        let dst_x = inner_area.x;
                         for dy in 0..vis_h {
                             let temp_y = src_y + dy;
                             let dst_line_y = dst_y + dy;
-                            for dx in 0..inner_area.width {
-                                if let Some(cell) = temp.cell((dx, temp_y)) {
-                                    if let Some(dst) = buf.cell_mut((inner_area.x + dx, dst_line_y))
-                                    {
-                                        *dst = cell.clone();
-                                    }
+                            let base = temp_y as usize * line_stride;
+                            for dx in 0..line_stride {
+                                if let Some(dst) = buf.cell_mut((dst_x + dx as u16, dst_line_y)) {
+                                    *dst = temp_cells[base + dx].clone();
                                 }
                             }
                         }
@@ -1589,6 +1650,11 @@ impl SessionView {
         }
 
         self.handle_auto_scroll(delta_time, total_height, visible_height);
+
+        let _frame_us = _frame_start.elapsed().as_micros();
+        if _frame_us > 5000 {
+            log::debug!("[PERF] session_render_total: {_frame_us}us msgs={} scroll_y={}", session.messages.len(), self.scroll_y);
+        }
 
         total_height
     }
