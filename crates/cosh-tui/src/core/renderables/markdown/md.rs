@@ -1,8 +1,10 @@
 use std::any::Any;
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+use lru::LruCache;
 
 use pulldown_cmark::{Event, Options, Tag, TagEnd};
 use ratatui::buffer::Buffer;
@@ -20,8 +22,8 @@ use super::styles::MarkdownPalette;
 
 static NEXT_MARKDOWN_NUM: AtomicU64 = AtomicU64::new(1);
 
-static HIGHLIGHT_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, Vec<HighlightSpan>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static HIGHLIGHT_CACHE: std::sync::LazyLock<Mutex<LruCache<u64, Vec<HighlightSpan>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(1000).unwrap())));
 
 fn highlight_cache_key(text: &str, lang: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -54,6 +56,10 @@ pub struct MarkdownRenderable {
     bg: Option<RGBA>,
     /// Optional table border colour. Falls back to the palette's muted colour.
     table_border_color: Option<RGBA>,
+    /// When true, skip tree-sitter syntax highlighting and render code blocks
+    /// as plain text. Set during LLM streaming to avoid ~10ms highlight() calls
+    /// on every frame while code block text is still growing.
+    streaming: bool,
 }
 
 impl MarkdownRenderable {
@@ -71,6 +77,7 @@ impl MarkdownRenderable {
             fg: None,
             bg: None,
             table_border_color: None,
+            streaming: false,
         }
     }
 
@@ -92,6 +99,12 @@ impl MarkdownRenderable {
     /// When `None` (the default), the palette's muted colour is used.
     pub fn set_table_border_color(&mut self, value: Option<ColorInput>) {
         self.table_border_color = value.map(parse_color);
+    }
+
+    /// When streaming, skip tree-sitter syntax highlighting to avoid
+    /// re-highlighting every frame as code block text grows.
+    pub fn set_streaming(&mut self, streaming: bool) {
+        self.streaming = streaming;
     }
 
     // ── Accessors ──────────────────────────────────────────────
@@ -584,15 +597,17 @@ impl MarkdownRenderable {
         let effective_lang = if lang.is_empty() { "javascript" } else { lang };
 
         // Build byte-to-category map for syntax highlighting (cached)
-        let key = highlight_cache_key(text, effective_lang);
-        let spans: Option<Vec<HighlightSpan>> = {
+        let spans: Option<Vec<HighlightSpan>> = if self.streaming {
+            None
+        } else {
+            let key = highlight_cache_key(text, effective_lang);
             let mut cache = HIGHLIGHT_CACHE.lock().unwrap();
             if let Some(cached) = cache.get(&key) {
                 Some(cached.clone())
             } else {
                 let computed = highlight(text, effective_lang);
                 if let Some(ref spans) = computed {
-                    cache.insert(key, spans.clone());
+                    cache.push(key, spans.clone());
                 }
                 computed
             }

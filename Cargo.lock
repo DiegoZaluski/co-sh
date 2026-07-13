@@ -1290,6 +1290,7 @@ dependencies = [
  "bitflags 2.13.0",
  "cosh-sdk",
  "log",
+ "lru",
  "pulldown-cmark",
  "ratatui",
  "taffy",

@@ -20,7 +20,7 @@ use cosh_tui::core::renderables::markdown::estimate_height;
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::Theme;
-use crate::types::{AgentColors, FilePart, Message, MessageRole, Part, ReasoningPart, ToolStatus};
+use crate::types::{AgentColors, FilePart, Message, MessageRole, Part, ReasoningPart, SessionStatus, ToolStatus};
 use std::time::Instant;
 use crate::util::tool_render::{self, ToolRenderState};
 
@@ -79,6 +79,50 @@ fn sanitize_text(text: &str) -> String {
 
 fn conceal_text(text: &str) -> String {
     text.chars().map(concealed_char).collect()
+}
+
+/// Hash message part metadata: lengths, statuses, counts.
+/// Extracted to avoid duplicating the match arms across `msg_change_token`
+/// and `msg_content_token`.
+fn hash_parts(msg: &Message) -> u64 {
+    let mut h: u64 = msg.parts.len() as u64;
+    for part in &msg.parts {
+        match part {
+            Part::Text(t) => {
+                h = h.wrapping_mul(31).wrapping_add(t.text.len() as u64);
+            }
+            Part::Tool(t) => {
+                h = h.wrapping_mul(31).wrapping_add(match &t.status {
+                    ToolStatus::Running => 1,
+                    ToolStatus::Completed => 2,
+                    ToolStatus::Failed(_) => 3,
+                } as u64);
+                if let Some(ref out) = t.output {
+                    h = h.wrapping_mul(31).wrapping_add(out.len() as u64);
+                }
+            }
+            Part::Reasoning(r) => {
+                h = h.wrapping_mul(31).wrapping_add(r.text.len() as u64);
+            }
+            Part::File(f) => {
+                h = h.wrapping_mul(31).wrapping_add(f.filename.len() as u64);
+            }
+        }
+    }
+    h
+}
+
+/// Combined hash of part metadata (lengths, statuses, counts).
+/// Used to detect streaming/tool-status changes without full re-parse.
+fn msg_change_token(msg: &Message) -> u64 {
+    hash_parts(msg)
+}
+
+fn msg_content_token(msg: &Message, config_token: u64, max_w: u16) -> u64 {
+    let mut h = hash_parts(msg);
+    h = h.wrapping_mul(31).wrapping_add(config_token);
+    h = h.wrapping_mul(31).wrapping_add(max_w as u64);
+    h
 }
 
 /// A run of rendered text at a given content position.
@@ -147,11 +191,22 @@ pub struct SessionView {
 
     // ── Height cache (avoids duplicate pulldown_cmark parses) ──────────────────
     msg_height_cache: Vec<i32>,
+    part_heights_cache: Vec<Vec<u16>>,
     cache_max_w: u16,
     cache_config_token: u64,
+    /// Change-detection token of the last message when caches were last built.
+    /// Used to detect streaming/tool-status changes without a full cache rebuild.
+    last_msg_change_token: u64,
 
     // ── text_regions dirty flag (skip rebuild when nothing changed) ────────────
     text_regions_gen: u64,
+
+    // ── Per-message render cache (skip full re-render of unchanged messages) ───
+    msg_cache_tokens: Vec<u64>,
+    /// Cached rendered cells per message, flattened row-major (w × h).
+    msg_cache_cells: Vec<Option<Vec<ratatui::buffer::Cell>>>,
+    msg_cache_w: Vec<u16>,
+    msg_cache_h: Vec<u16>,
 }
 
 fn text_regions_generation(session: &crate::types::Session, config: &TuiConfig, max_w: u16) -> u64 {
@@ -159,18 +214,7 @@ fn text_regions_generation(session: &crate::types::Session, config: &TuiConfig, 
     g = g.wrapping_mul(31).wrapping_add(max_w as u64);
     g = g.wrapping_mul(31).wrapping_add(config_token(config));
     if let Some(last) = session.messages.last() {
-        let content_len: usize = last
-            .parts
-            .iter()
-            .map(|p| match p {
-                crate::types::Part::Text(t) => t.text.len(),
-                crate::types::Part::Tool(t) => {
-                    t.tool_call_id.as_deref().unwrap_or("").len()
-                }
-                _ => 0,
-            })
-            .sum();
-        g = g.wrapping_mul(31).wrapping_add(content_len as u64);
+        g = g.wrapping_mul(31).wrapping_add(msg_change_token(last));
     }
     g
 }
@@ -211,9 +255,15 @@ impl SessionView {
             scroll_accumulator_y: 0.0,
             scroll_accel: 3.0,
             msg_height_cache: Vec::new(),
+            part_heights_cache: Vec::new(),
             cache_max_w: 0,
             cache_config_token: 0,
+            last_msg_change_token: 0,
             text_regions_gen: 0,
+            msg_cache_tokens: Vec::new(),
+            msg_cache_cells: Vec::new(),
+            msg_cache_w: Vec::new(),
+            msg_cache_h: Vec::new(),
         }
     }
 
@@ -450,6 +500,8 @@ impl SessionView {
         theme: &Theme,
         tool_state: &ToolRenderState,
         config: &TuiConfig,
+        opt_heights: Option<&[u16]>,
+        streaming: bool,
     ) -> u16 {
         let mut y = y_start;
         let bottom = y_start + max_h;
@@ -459,7 +511,7 @@ impl SessionView {
             theme.text
         };
 
-        for part in parts {
+        for (pi, part) in parts.iter().enumerate() {
             if y >= bottom {
                 break;
             }
@@ -471,7 +523,10 @@ impl SessionView {
                     } else {
                         sanitize_text(&t.text)
                     };
-                    let est_h = Self::estimate_part_height(part, max_w, config, role);
+                    let est_h = opt_heights
+                        .and_then(|ph| ph.get(pi))
+                        .copied()
+                        .unwrap_or_else(|| Self::estimate_part_height(part, max_w, config, role));
                     let render_h = (est_h * 3).max(100).min(bottom.saturating_sub(y));
                     let area = Rect::new(x, y, max_w, render_h);
                     let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
@@ -480,6 +535,7 @@ impl SessionView {
                     md.set_fg(Some(ColorInput::RGBA(fg_color)));
                     md.set_bg(Some(ColorInput::RGBA(theme.background)));
                     md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
+                    md.set_streaming(streaming);
                     md.render_self(buf, area);
                     let actual_h = Self::scan_content_height(buf, x, y, max_w, render_h);
                     y += actual_h.max(1);
@@ -490,7 +546,10 @@ impl SessionView {
                     } else {
                         sanitize_text(&t.text)
                     };
-                    let h = Self::estimate_part_height(part, max_w, config, role)
+                    let h = opt_heights
+                        .and_then(|ph| ph.get(pi))
+                        .copied()
+                        .unwrap_or_else(|| Self::estimate_part_height(part, max_w, config, role))
                         .min(bottom - y)
                         .max(1);
                     let text_style = Style::default()
@@ -692,6 +751,8 @@ impl SessionView {
         config: &TuiConfig,
         is_queued: bool,
         is_compacted: bool,
+        part_heights: Option<&[u16]>,
+        streaming: bool,
     ) {
         let mut border_box = BoxRenderable::new();
         border_box.set_background_color(Some(theme.background_panel.into()));
@@ -732,6 +793,8 @@ impl SessionView {
             theme,
             tool_state,
             config,
+            part_heights,
+            streaming,
         );
 
         if is_queued {
@@ -757,6 +820,8 @@ impl SessionView {
         config: &TuiConfig,
         is_queued: bool,
         is_compacted: bool,
+        part_heights: &[u16],
+        streaming: bool,
     ) -> u16 {
         let is_error = msg.id.starts_with("msg-err-");
         let x_off = area.x + 3;
@@ -835,6 +900,8 @@ impl SessionView {
             theme,
             tool_state,
             config,
+            Some(part_heights),
+            streaming,
         );
 
         if is_compacted {
@@ -881,12 +948,14 @@ impl SessionView {
         let click_x = i32::from(mouse.x);
         let click_y = i32::from(mouse.y);
 
+        self.ensure_height_caches_fresh(session, max_w, config);
+
         for (idx, msg) in session.messages.iter().enumerate() {
             if idx > 0 {
                 y += 1;
             }
 
-            let msg_h = Self::render_message_height(msg, max_w, config);
+            let msg_h = self.msg_height_cache[idx];
             let msg_top = y;
             let msg_bottom = y + msg_h;
 
@@ -902,9 +971,13 @@ impl SessionView {
                 };
                 let mut part_y = msg_top + border_offset;
 
-                for part in &msg.parts {
+                for (pi, part) in msg.parts.iter().enumerate() {
                     let part_h = i32::from(
-                        Self::estimate_part_height(part, max_w, config, &msg.role).max(1),
+                        self.part_heights_cache[idx]
+                            .get(pi)
+                            .copied()
+                            .unwrap_or(1)
+                            .max(1),
                     );
 
                     if click_y >= part_y && click_y < part_y + part_h {
@@ -957,7 +1030,10 @@ impl SessionView {
         false
     }
 
-    pub fn render_message_height(msg: &Message, max_w: u16, config: &TuiConfig) -> i32 {
+    pub fn render_message_height(
+        msg: &Message, max_w: u16, config: &TuiConfig,
+        part_heights: Option<&[u16]>,
+    ) -> i32 {
         let border_h: i32 = match msg.role {
             MessageRole::User => 1,
             MessageRole::Assistant => 0,
@@ -1000,6 +1076,8 @@ impl SessionView {
                 lines += 1;
             }
             i32::from(lines)
+        } else if let Some(heights) = part_heights {
+            i32::from(heights.iter().copied().sum::<u16>())
         } else {
             msg.parts
                 .iter()
@@ -1012,6 +1090,68 @@ impl SessionView {
             MessageRole::Assistant => 0,
         };
         border_h + parts_h + padding_bottom
+    }
+
+    /// Ensure height caches match the current session. Performs a full rebuild
+    /// if message count changed, terminal width changed, or config changed.
+    /// Otherwise, incrementally updates only the last message if its content
+    /// changed (streaming — tool status, output, reasoning, text).
+    /// Returns `true` if a full rebuild occurred (callers may need to clear
+    /// additional caches on rebuild).
+    fn ensure_height_caches_fresh(
+        &mut self,
+        session: &crate::types::Session,
+        max_w: u16,
+        config: &TuiConfig,
+    ) -> bool {
+        let config_tok = config_token(config);
+        let cache_stale = self.msg_height_cache.len() != session.messages.len()
+            || self.cache_max_w != max_w
+            || self.cache_config_token != config_tok;
+
+        if cache_stale {
+            let _start = Instant::now();
+            self.msg_height_cache.clear();
+            self.part_heights_cache.clear();
+            for m in session.messages.iter() {
+                let part_hs: Vec<u16> = m.parts.iter()
+                    .map(|p| Self::estimate_part_height(p, max_w, config, &m.role))
+                    .collect();
+                let msg_h = Self::render_message_height(m, max_w, config, Some(&part_hs));
+                self.part_heights_cache.push(part_hs);
+                self.msg_height_cache.push(msg_h);
+            }
+            self.cache_max_w = max_w;
+            self.cache_config_token = config_tok;
+            self.last_msg_change_token = session.messages.last()
+                .map(msg_change_token)
+                .unwrap_or(0);
+            log::debug!("[PERF] msg_height_cache: cold_build={}us msgs={}", _start.elapsed().as_micros(), session.messages.len());
+            true
+        } else {
+            // Incremental update: refresh only the last message when its
+            // content/status changes (streaming token generation, tool completion).
+            let current_token = session.messages.last()
+                .map(msg_change_token)
+                .unwrap_or(0);
+            if current_token != self.last_msg_change_token && !self.msg_height_cache.is_empty() {
+                let last_idx = session.messages.len() - 1;
+                let last_msg = &session.messages[last_idx];
+                let part_hs: Vec<u16> = last_msg.parts.iter()
+                    .map(|p| Self::estimate_part_height(p, max_w, config, &last_msg.role))
+                    .collect();
+                let msg_h = Self::render_message_height(last_msg, max_w, config, Some(&part_hs));
+                if last_idx < self.part_heights_cache.len() {
+                    self.part_heights_cache[last_idx] = part_hs;
+                    self.msg_height_cache[last_idx] = msg_h;
+                }
+                self.last_msg_change_token = current_token;
+                log::debug!("[PERF] msg_height_cache: updated last msg (streaming)");
+            } else {
+                log::debug!("[PERF] msg_height_cache: hit (cached)");
+            }
+            false
+        }
     }
 
     #[allow(clippy::too_many_lines, clippy::cast_sign_loss)]
@@ -1049,9 +1189,14 @@ impl SessionView {
                 };
                 let mut part_y = msg_top + border_offset;
 
-                for part in &msg.parts {
+                for (pi, part) in msg.parts.iter().enumerate() {
                     let part_h = i32::from(
-                        Self::estimate_part_height(part, max_w, config, &msg.role).max(1),
+                        self.part_heights_cache
+                            .get(idx)
+                            .and_then(|ph| ph.get(pi))
+                            .copied()
+                            .unwrap_or_else(|| Self::estimate_part_height(part, max_w, config, &msg.role))
+                            .max(1),
                     );
                     let p_top = part_y;
                     let p_bottom = part_y + part_h;
@@ -1382,28 +1527,25 @@ impl SessionView {
         let unique_agents = state.unique_agents();
         let agent_colors = AgentColors::from_theme(theme);
         let max_w = inner_area.width.saturating_sub(6);
+        let streaming = state.status == SessionStatus::Working;
 
         let _frame_start = Instant::now();
 
-        // ── Height cache: populate on first render or when config/msgs/resize change ──
         let config_tok = config_token(config);
-        let cache_stale = self.msg_height_cache.len() != session.messages.len()
-            || self.cache_max_w != max_w
-            || self.cache_config_token != config_tok;
+        let cache_rebuilt = self.ensure_height_caches_fresh(session, max_w, config);
 
-        if cache_stale {
-            let _cache_start = Instant::now();
-            self.msg_height_cache.clear();
-            for msg in session.messages.iter() {
-                let msg_h = Self::render_message_height(msg, max_w, config);
-                self.msg_height_cache.push(msg_h);
-            }
-            self.cache_max_w = max_w;
-            self.cache_config_token = config_tok;
-            log::debug!("[PERF] msg_height_cache: cold_build={}us msgs={}", _cache_start.elapsed().as_micros(), session.messages.len());
-        } else {
-            log::debug!("[PERF] msg_height_cache: hit (cached)");
+        // Ensure render cache vectors match message count
+        let n_msgs = session.messages.len();
+        if cache_rebuilt {
+            self.msg_cache_tokens.clear();
+            self.msg_cache_cells.clear();
+            self.msg_cache_w.clear();
+            self.msg_cache_h.clear();
         }
+        self.msg_cache_tokens.resize(n_msgs, !0);
+        self.msg_cache_cells.resize(n_msgs, None);
+        self.msg_cache_w.resize(n_msgs, 0);
+        self.msg_cache_h.resize(n_msgs, 0);
 
         let mut total_height: i32 = 0;
         for (idx, _msg) in session.messages.iter().enumerate() {
@@ -1485,6 +1627,7 @@ impl SessionView {
                     let actual_h = Self::render_assistant_message(
                         &mut temp, full_area, msg, theme,
                         &self.tool_state, config, false, false,
+                        &self.part_heights_cache[idx], streaming,
                     ) as i32;
 
                     let vis_h = (actual_h.min(vp_bottom - msg_top) - src_y as i32).max(0) as u16;
@@ -1522,12 +1665,14 @@ impl SessionView {
                                     &mut temp, full_area, msg, theme,
                                     agent_color, &self.tool_state, config,
                                     false, false,
+                                    Some(&self.part_heights_cache[idx]), streaming,
                                 );
                             }
                             MessageRole::Assistant => {
                                 Self::render_assistant_message(
                                     &mut temp, full_area, msg, theme,
                                     &self.tool_state, config, false, false,
+                                    &self.part_heights_cache[idx], streaming,
                                 );
                             }
                         }
@@ -1553,15 +1698,62 @@ impl SessionView {
                     let visible_h = (visible_bottom - i32::from(visible_top)) as u16;
 
                     if visible_h > 0 {
-                        let msg_area =
-                            Rect::new(inner_area.x, visible_top, inner_area.width, visible_h);
+                        let is_streaming_msg = idx == session.messages.len() - 1 && streaming;
+                        let token = msg_content_token(msg, config_tok, max_w);
+                        let cache_hit = !is_streaming_msg
+                            && token == self.msg_cache_tokens[idx]
+                            && self.msg_cache_w[idx] == inner_area.width
+                            && self.msg_cache_h[idx] > 0;
 
-                        let actual_h = Self::render_assistant_message(
-                            buf, msg_area, msg, theme,
-                            &self.tool_state, config, false, false,
-                        ) as i32;
+                        if cache_hit {
+                            if let Some(ref cached_cells) = self.msg_cache_cells[idx] {
+                                let w = self.msg_cache_w[idx] as usize;
+                                let h = self.msg_cache_h[idx];
+                                for dy in 0..visible_h.min(h) {
+                                    let base = dy as usize * w;
+                                    for dx in 0..w {
+                                        if let Some(cell) = buf.cell_mut(
+                                            (inner_area.x + dx as u16, visible_top + dy),
+                                        ) {
+                                            *cell = cached_cells[base + dx].clone();
+                                        }
+                                    }
+                                }
+                                render_actual_h = h as i32;
+                            }
+                        } else {
+                            let msg_area = Rect::new(
+                                inner_area.x, visible_top, inner_area.width, visible_h,
+                            );
 
-                        render_actual_h = actual_h.max(1);
+                            let actual_h = Self::render_assistant_message(
+                                buf, msg_area, msg, theme,
+                                &self.tool_state, config, false, false,
+                                &self.part_heights_cache[idx], streaming,
+                            ) as i32;
+
+                            render_actual_h = actual_h.max(1);
+
+                            // Save non-streaming messages to cache
+                            if !is_streaming_msg {
+                                let ah = render_actual_h as u16;
+                                let w = inner_area.width as usize;
+                                let mut cells = Vec::with_capacity(w * ah as usize);
+                                for dy in 0..ah {
+                                    for dx in 0..w {
+                                        let c = buf
+                                            .cell((inner_area.x + dx as u16, visible_top + dy))
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        cells.push(c);
+                                    }
+                                }
+                                self.msg_cache_tokens[idx] = token;
+                                self.msg_cache_w[idx] = inner_area.width;
+                                self.msg_cache_h[idx] = ah;
+                                self.msg_cache_cells[idx] = Some(cells);
+                            }
+                        }
                     }
                 } else {
                     // ── Not top-clipped user/error or bottom-clipped: render directly ──
@@ -1581,12 +1773,14 @@ impl SessionView {
                                     buf, msg_area, msg, theme,
                                     agent_color, &self.tool_state, config,
                                     false, false,
+                                    Some(&self.part_heights_cache[idx]), streaming,
                                 );
                             }
                             MessageRole::Assistant => {
                                 Self::render_assistant_message(
                                     buf, msg_area, msg, theme,
                                     &self.tool_state, config, false, false,
+                                    &self.part_heights_cache[idx], streaming,
                                 );
                             }
                         }
