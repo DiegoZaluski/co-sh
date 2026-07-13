@@ -440,10 +440,7 @@ impl QuestionDialog {
             if tab_count > 1 {
                 fx += 4 + 4; // "⇆" + "tab"
             }
-            if !is_confirm {
-                fx += 4 + 7; // "↑↓" + "select"
-            }
-            fx += 6; // "enter"
+            fx += 5; // "enter"
             fx += if is_confirm {
                 "submit".len() as u16
             } else {
@@ -551,9 +548,6 @@ impl QuestionDialog {
                 let mut fx = inner_x;
                 if tab_count > 1 {
                     fx += 4 + 4;
-                }
-                if !is_confirm {
-                    fx += 4 + 7;
                 }
                 let enter_x = fx;
                 let enter_label = "enter";
@@ -987,7 +981,10 @@ impl QuestionDialog {
         let mut fx = inner_x;
 
         macro_rules! hint {
-            ($key:expr, $desc:expr, $gap:expr) => {{
+            ($key:expr, $desc:expr, $gap:expr) => {
+                hint!($key, $desc, $gap, 1)
+            };
+            ($key:expr, $desc:expr, $gap:expr, $key_gap:expr) => {{
                 let kw = $key.len() as u16;
                 let dw = $desc.len() as u16;
                 draw_text_line(
@@ -998,7 +995,7 @@ impl QuestionDialog {
                     inner_w.saturating_sub(fx - inner_x),
                     Style::default().fg(key_fg).bg(bg),
                 );
-                fx += kw + 1;
+                fx += kw + $key_gap;
                 draw_text_line(
                     buf,
                     $desc,
@@ -1012,13 +1009,11 @@ impl QuestionDialog {
         }
 
         if tab_count > 1 {
-            hint!("⇆", "tab", 2);
+            hint!("⇆", "tab", 1);
         }
-        if !is_confirm {
-            hint!("↑↓", "select", 2);
-        }
-        let enter_label = if is_confirm { "submit" } else { "select" };
-        hint!("enter", enter_label, 2);
+
+        let enter_label = if is_confirm { "submit" } else { "confirm" };
+        hint!("enter", enter_label, 1);
         hint!("esc", "dismiss", 0);
         // Suppress "value assigned to `fx` is never read" warning
         let _ = fx;
