@@ -546,6 +546,59 @@ impl PromptView {
             draw_text_line(buf, line, x_off, ly, max_line_w, style);
         }
 
+        // ── Selection highlight ────────────────────────────────────────────────
+        // Swap fg/bg on cells that fall within sel_start..sel_end so the user can
+        // see which text they are dragging over.  Only applied when there is real
+        // input text (not placeholder) and a non-empty selection range.
+        if !display_placeholder
+            && !self.input.is_empty()
+            && let (Some(sel_s), Some(sel_e)) = (self.sel_start, self.sel_end)
+            && sel_s != sel_e
+        {
+            let sel_a = sel_s.min(sel_e);
+            let sel_b = sel_s.max(sel_e);
+            let input_start = self.input.as_ptr() as usize;
+
+            for (i, line) in display_lines.iter().enumerate() {
+                let ly = text_start + i as u16;
+                if ly >= input_area.bottom() {
+                    break;
+                }
+                if line.is_empty() {
+                    continue;
+                }
+                let line_byte_start = line.as_ptr() as usize - input_start;
+                let line_byte_end = line_byte_start + line.len();
+
+                // Check whether the selection overlaps this display line.
+                if sel_a < line_byte_end && sel_b > line_byte_start {
+                    let overlap_a = sel_a.max(line_byte_start);
+                    let overlap_b = sel_b.min(line_byte_end);
+                    if overlap_a >= overlap_b {
+                        continue;
+                    }
+
+                    // Convert the within-line byte range to a column range.
+                    let within_start = overlap_a - line_byte_start;
+                    let within_end = overlap_b - line_byte_start;
+                    let col_start = line[..within_start].chars().count();
+                    let col_end = line[..within_end].chars().count();
+
+                    for col in col_start..col_end {
+                        let cx = x_off + col as u16;
+                        if cx < input_area.right()
+                            && let Some(cell) = buf.cell_mut((cx, ly))
+                        {
+                            let fg = cell.fg;
+                            let bg = cell.bg;
+                            cell.set_fg(bg);
+                            cell.set_bg(fg);
+                        }
+                    }
+                }
+            }
+        }
+
         let agent_label = capitalize(agent_name);
         let label_style = Style::default().fg(rgba_color(agent_color));
         let label_y = input_area.y + BASE_H + n;

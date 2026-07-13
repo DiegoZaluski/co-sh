@@ -2228,17 +2228,18 @@ impl App {
                 self.mouse_down_pos = Some((x, y));
                 self.mouse_drag_active = false;
                 self.drag_selection = None;
+
+                // Reset session selection values until we know this is NOT a prompt click.
+                // They will be set below for non-prompt clicks.
+                self.session_view.selection_anchor_content_y = 0;
+                self.session_view.selection_focus_content_y = 0;
                 self.session_view.mouse_down_scroll_y = self.session_view.scroll_y;
-                // Store anchor and focus in content space so the visual highlight
-                // moves with content during auto-scroll drag.
-                if let Some(session_area) = self.session_view.session_area {
-                    let vp_top = i32::from(session_area.1);
-                    let content_y = (y as i32) - vp_top + self.session_view.mouse_down_scroll_y;
-                    self.session_view.selection_anchor_content_y = content_y;
-                    self.session_view.selection_focus_content_y = content_y;
-                }
 
                 // If the click is inside the prompt area, start a text selection.
+                // We must skip the session-content-space computation below so that
+                // drag_selection / selection_*_content_y never get values from the
+                // prompt row (which sits below the session viewport and would cause
+                // a spurious full-width highlight bar at the bottom of the session area).
                 if matches!(self.mode(), AppMode::Session)
                     && let Some(prompt_area) = self.compute_prompt_area()
                     && x >= prompt_area.x
@@ -2254,37 +2255,56 @@ impl App {
                     }
                     return Ok(true);
                 }
+
+                // Store anchor and focus in content space so the visual highlight
+                // moves with content during auto-scroll drag.  Only reached when
+                // the click is NOT inside the prompt area.
+                if let Some(session_area) = self.session_view.session_area {
+                    let vp_top = i32::from(session_area.1);
+                    let content_y = (y as i32) - vp_top + self.session_view.mouse_down_scroll_y;
+                    self.session_view.selection_anchor_content_y = content_y;
+                    self.session_view.selection_focus_content_y = content_y;
+                }
             }
             (MouseEventType::Drag, MouseButton::Left) => {
                 if self.mouse_down_pos.is_some() {
                     self.mouse_drag_active = true;
-                    // Update visual selection rectangle.
-                    if let Some((sx, sy)) = self.mouse_down_pos {
-                        // Store anchor (sx,sy) and focus (x,y) WITHOUT normalising,
-                        // so the renderer can apply flow-based selection highlighting.
-                        self.drag_selection = Some((sx, sy, x, y));
-                        // Store focus in content space so the visual highlight follows
-                        // content during auto-scroll drag.
-                        if let Some(session_area) = self.session_view.session_area {
-                            let vp_top = i32::from(session_area.1);
-                            self.session_view.selection_focus_content_y =
-                                (y as i32) - vp_top + self.session_view.scroll_y;
+
+                    // Determine whether we are dragging inside the prompt area.
+                    // We need prompt_area to be in scope below, so compute it first.
+                    let prompt_area = self.compute_prompt_area();
+                    let is_prompt_drag = matches!(self.mode(), AppMode::Session)
+                        && self.prompt_view.sel_start.is_some()
+                        && prompt_area.is_some_and(|pa| y >= pa.y && y < pa.bottom());
+
+                    if !is_prompt_drag {
+                        // Update visual selection rectangle (session content).
+                        if let Some((sx, sy)) = self.mouse_down_pos {
+                            // Store anchor (sx,sy) and focus (x,y) WITHOUT normalising,
+                            // so the renderer can apply flow-based selection highlighting.
+                            self.drag_selection = Some((sx, sy, x, y));
+                            // Store focus in content space so the visual highlight follows
+                            // content during auto-scroll drag.
+                            if let Some(session_area) = self.session_view.session_area {
+                                let vp_top = i32::from(session_area.1);
+                                self.session_view.selection_focus_content_y =
+                                    (y as i32) - vp_top + self.session_view.scroll_y;
+                            }
                         }
                     }
+
                     // If drag is within the prompt area, extend the text selection.
-                    if matches!(self.mode(), AppMode::Session)
-                        && self.prompt_view.sel_start.is_some()
-                        && let Some(prompt_area) = self.compute_prompt_area()
-                        && y >= prompt_area.y
-                        && y < prompt_area.bottom()
-                        && let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, prompt_area)
+                    if is_prompt_drag
+                        && let Some(pa) = prompt_area
+                        && let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, pa)
                     {
                         self.prompt_view.cursor_pos = pos;
                         self.prompt_view.sel_end = Some(pos);
                     }
 
-                    // Update auto-scroll on selection drag in the session view.
-                    if matches!(self.mode(), AppMode::Session) {
+                    // Update auto-scroll on selection drag in the session view
+                    // (only when NOT dragging in the prompt).
+                    if matches!(self.mode(), AppMode::Session) && !is_prompt_drag {
                         self.session_view.update_auto_scroll(x, y);
                     }
                 }

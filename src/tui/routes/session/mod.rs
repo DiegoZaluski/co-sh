@@ -1514,7 +1514,7 @@ impl SessionView {
             return 0;
         };
 
-        self.session_area = Some((area.x, area.y + 1, area.right(), area.bottom()));
+        self.session_area = Some((area.x, area.y, area.right(), area.bottom()));
 
         let margin = 2;
         let inner_area = Rect::new(
