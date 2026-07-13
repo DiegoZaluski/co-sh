@@ -42,7 +42,7 @@ impl Connector {
     /// Supported providers: `claude`, `openai`, `groq`, `mistral`, `together`, `openrouter`,
     /// `xai`, `deepseek`, `perplexity`, `fireworks`, `cohere`, `huggingface`,
     /// `sambanova`, `poe`, `cerebras`, `nvidia`, `anyscale`, `vercel`, `cloudflare`,
-    /// `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `gemini`.
+    /// `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `gemini`, `zai`.
     ///
     /// # Errors
     ///

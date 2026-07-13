@@ -268,6 +268,16 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             needs_extra_headers: false,
         },
     ),
+    (
+        "zai",
+        ProviderConfig {
+            name: "zai",
+            family: Family::OpenAICompatible,
+            base_url: "https://api.z.ai/api/paas/v4",
+            default_model: "",
+            needs_extra_headers: false,
+        },
+    ),
 ];
 
 const API_KEY_ENVS: &[(&str, &str)] = &[
@@ -294,6 +304,7 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     ("azure", "AZURE_OPENAI_KEY"),
     ("gemini", "GEMINI_API_KEY"),
     ("claude", "ANTHROPIC_API_KEY"),
+    ("zai", "ZAI_API_KEY"),
 ];
 
 pub fn get_provider(name: &str) -> Option<&'static ProviderConfig> {
