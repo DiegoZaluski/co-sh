@@ -24,4 +24,11 @@ pub const TOOL_FORMAT: &str = concat!(
     "## Tool format\n",
     "To call a tool, respond with a JSON object:\n",
     "{\"name\": \"tool_name\", \"arguments\": { ... }}\n\n",
+    "Warning: Do not wrap tool calls in a code block or any markdown formatting. Emit the tool call as raw, unformatted JSON only — no backticks, no language tags, no surrounding text.\n\n",
+    "INCORRECT (do not do this):\n",
+    "```json\n",
+    "    {\"name\": \"tool_name\", \"arguments\": {...}}\n",
+    "```\n\n",
+    "CORRECT:",
+    "{\"name\": \"tool_name\", \"arguments\": {...}}\n"
 );

@@ -45,6 +45,7 @@ enum Depth1State {
     InValue,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 struct StreamState {
     buffer: String,
@@ -189,14 +190,14 @@ impl ExtractAction {
                 items.push(Item::Text(candidate.to_string()));
                 last_end = end + 1;
                 continue;
-            }                    if let Some(tool_call) = self.parse_and_validate(candidate) {
-                        items.push(Item::ToolCall(tool_call));
-                    } else {
-                        // Invalid unfenced JSON — suppress, show warning instead
-                        self.tool_failure_count += 1;
-                        self.last_failed_raw = candidate.to_string();
-                        items.push(Item::Text(self.tool_failure_message.clone()));
-                    }
+            } else if let Some(tool_call) = self.parse_and_validate(candidate) {
+                items.push(Item::ToolCall(tool_call));
+            } else {
+                // Invalid unfenced JSON — suppress, show warning instead
+                self.tool_failure_count += 1;
+                self.last_failed_raw = candidate.to_string();
+                items.push(Item::Text(self.tool_failure_message.clone()));
+            }
 
             last_end = end + 1;
         }
@@ -565,10 +566,8 @@ fn validate_against_schema(value: &JsonValue, schema: &JsonValue) -> bool {
                         return false;
                     }
                 } else {
-                    if let Some(const_val) = field_schema.get("const") {
-                        if field_value != const_val {
-                            return false;
-                        }
+                    if let Some(const_val) = field_schema.get("const") && field_value != const_val {
+                        return false;
                     }
                     if let Some(expected_type) = field_schema.get("type").and_then(|t| t.as_str())
                         && !value_type_matches(field_value, expected_type)

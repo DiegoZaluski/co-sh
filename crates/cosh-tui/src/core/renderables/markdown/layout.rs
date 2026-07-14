@@ -11,6 +11,7 @@ use super::context::MarkdownContext;
 ///
 /// Uses `MarkdownContext` under the hood so that list markers, code blocks,
 /// and other constructs are counted identically to the renderer.
+#[must_use]
 pub fn estimate_height(text: &str, max_w: u16) -> u16 {
     if text.is_empty() || max_w == 0 {
         return 1;
@@ -35,8 +36,8 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
     for event in parser {
         // ── Table buffering mode ───────────────────────────────
         if in_table {
-            match event {
-                Event::End(tag_end) => match &tag_end {
+            if let Event::End(tag_end) = &event {
+                match &tag_end {
                     TagEnd::TableRow => {
                         tbl_rows_count += 1;
                     }
@@ -45,15 +46,13 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                         let table_h = 4 + tbl_rows_count;
                         if x != area_x {
                             y += 1;
-                            // x is overwritten right after the if
                         }
                         y += table_h;
                         x = area_x;
                         in_table = false;
                     }
                     _ => {}
-                },
-                _ => {}
+                }
             }
             // Forward End events to context for state tracking
             if let Event::End(end) = &event {
@@ -76,19 +75,15 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                             // x is reset at TagEnd::Table, no need to assign here
                         }
                     }
-                    Tag::Paragraph | Tag::BlockQuote(_) | Tag::Heading { .. } => {
+                    Tag::Paragraph
+                    | Tag::BlockQuote(_)
+                    | Tag::Heading { .. }
+                    | Tag::CodeBlock(_) => {
                         if x != area_x {
                             y += 1;
                             x = area_x;
                         }
                     }
-                    Tag::CodeBlock(_) => {
-                        if x != area_x {
-                            y += 1;
-                            x = area_x;
-                        }
-                    }
-                    Tag::List(_) => {}
                     Tag::Item => {
                         if x != area_x {
                             y += 1;
@@ -114,7 +109,8 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                             x += w;
                         }
                     }
-                    Tag::TableHead
+                    Tag::List(_)
+                    | Tag::TableHead
                     | Tag::TableRow
                     | Tag::TableCell
                     | Tag::FootnoteDefinition(_)
@@ -138,11 +134,8 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                     | TagEnd::Heading(_)
                     | TagEnd::BlockQuote(_)
                     | TagEnd::Item
+                    | TagEnd::CodeBlock
                     | TagEnd::TableRow => {
-                        y += 1;
-                        x = area_x;
-                    }
-                    TagEnd::CodeBlock => {
                         y += 1;
                         x = area_x;
                     }
@@ -228,13 +221,9 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                     x += w;
                 }
             }
-            Event::SoftBreak | Event::HardBreak => {
+            Event::SoftBreak | Event::HardBreak | Event::Rule => {
                 x = area_x;
                 y += 1;
-            }
-            Event::Rule => {
-                y += 1;
-                x = area_x;
             }
             Event::TaskListMarker(_checked) => {
                 let marker = "[ ] ";

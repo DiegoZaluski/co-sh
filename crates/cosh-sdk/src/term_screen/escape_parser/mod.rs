@@ -134,7 +134,7 @@ impl core::fmt::Debug for ShortDeviceControl {
         write!(
             fmt,
             "ShortDeviceControl(params: {:?}, intermediates: [",
-            &self.params
+            self.params
         )?;
         for b in &self.intermediates {
             write!(fmt, "{:?} 0x{:x}, ", *b as char, *b)?;
@@ -189,7 +189,7 @@ impl core::fmt::Debug for EnterDeviceControlMode {
         write!(
             fmt,
             "EnterDeviceControlMode(params: {:?}, intermediates: [",
-            &self.params
+            self.params
         )?;
         for b in &self.intermediates {
             write!(fmt, "{:?} 0x{:x}, ", *b as char, *b)?;

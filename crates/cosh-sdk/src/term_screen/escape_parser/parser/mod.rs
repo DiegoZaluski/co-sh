@@ -154,7 +154,7 @@ struct Performer<'a, F: FnMut(Action) + 'a> {
 }
 
 fn is_short_dcs(intermediates: &[u8], byte: u8) -> bool {
-    if intermediates == [b'$'] && byte == b'q' {
+    if intermediates == b"$" && byte == b'q' {
         // DECRQSS
         true
     } else {
@@ -190,7 +190,7 @@ impl<F: FnMut(Action)> VTActor for Performer<'_, F> {
     ) {
         self.state.get_tcap.take();
         self.state.dcs.take();
-        if byte == b'q' && intermediates == [b'+'] {
+        if byte == b'q' && intermediates == b"+" {
             self.state.get_tcap.replace(GetTcapBuilder::default());
         } else if !ignored_extra_intermediates && is_short_dcs(intermediates, byte) {
             self.state.dcs.replace(ShortDeviceControl {

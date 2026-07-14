@@ -315,7 +315,7 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
             if matches!(part.status, ToolStatus::Running)
                 || part.output.as_deref().unwrap_or("").trim().is_empty()
             {
-                format!("Writing {}...", &part.tool)
+                format!("Writing {}...", part.tool)
             } else {
                 match part.tool.as_str() {
                     "plan_todo_write" => "\u{270F} TODO Write".to_string(),
@@ -331,7 +331,7 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
             if matches!(part.status, ToolStatus::Completed) {
                 part.tool.clone()
             } else {
-                format!("Writing {}...", &part.tool)
+                format!("Writing {}...", part.tool)
             }
         }
     };
@@ -962,7 +962,7 @@ pub fn render_todo(
             && json
                 .get("nags")
                 .and_then(|n| n.as_array())
-                .map_or(true, |n| n.is_empty())
+                .is_none_or(|n| n.is_empty())
         {
             lines.push("  (empty)".to_string());
         }

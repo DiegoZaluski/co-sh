@@ -685,10 +685,10 @@ impl App {
                             Some(next)
                         }
                     };
-                    if let Some(ns) = new_selected {
-                        if let Some(d_mut) = self.dialog.current_mut() {
-                            d_mut.selected = ns;
-                        }
+                    if let Some(ns) = new_selected
+                        && let Some(d_mut) = self.dialog.current_mut()
+                    {
+                        d_mut.selected = ns;
                     }
                 }
                 true
@@ -713,10 +713,10 @@ impl App {
                             Some(next)
                         }
                     };
-                    if let Some(ns) = new_selected {
-                        if let Some(d_mut) = self.dialog.current_mut() {
-                            d_mut.selected = ns;
-                        }
+                    if let Some(ns) = new_selected
+                        && let Some(d_mut) = self.dialog.current_mut()
+                    {
+                        d_mut.selected = ns;
                     }
                 }
                 true
@@ -2650,14 +2650,14 @@ impl App {
             // Don't dispatch to question dialog if text selection is in progress
             if !self.mouse_drag_active && self.drag_selection.is_none() {
                 let consumed = self.question_dialog.handle_mouse(&mouse, question_area);
-                if consumed {
-                    if self.question_dialog.submitted {
+                    if consumed
+                        && self.question_dialog.submitted
+                    {
                         let answers = self.question_dialog.build_answers();
                         let _ = self.answer_tx.send(Ok(answers));
                         self.question_dialog.visible = false;
                         self.question_dialog.submitted = false;
                     }
-                }
                 return Ok(true);
             }
         }

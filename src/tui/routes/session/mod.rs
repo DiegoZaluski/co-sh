@@ -167,7 +167,6 @@ struct TextRegion {
 /// Cached heights per message (avoids duplicate pulldown_cmark parses).
 /// Messages are immutable after receipt, so results are valid until
 /// config/max_w changes or new messages arrive.
-
 pub struct SessionView {
     pub scroll_y: i32,
     pub tool_state: ToolRenderState,
@@ -382,11 +381,7 @@ impl SessionView {
         let max_scroll = (self.total_height - self.visible_height).max(0);
         let has_scrollable_content = max_scroll > 1;
 
-        if has_scrollable_content && !self.is_at_sticky_position() {
-            self.has_manual_scroll = true;
-        } else {
-            self.has_manual_scroll = false;
-        }
+        self.has_manual_scroll = has_scrollable_content && !self.is_at_sticky_position();
 
         self.update_sticky_state();
     }
@@ -400,7 +395,7 @@ impl SessionView {
         } else if self.scroll_y >= max_scroll {
             self.is_sticky_bottom = true;
         } else {
-            self.is_sticky_bottom = false;
+            self.is_sticky_bottom = self.scroll_y >= max_scroll;
         }
     }
 
@@ -548,11 +543,11 @@ impl SessionView {
         let mut last_row: Option<u16> = None;
         for check_y in y..y + h {
             for cx in x..x + w {
-                if let Some(cell) = buf.cell((cx, check_y)) {
-                    if cell.symbol().chars().next().unwrap_or(' ') != ' ' {
-                        last_row = Some(check_y);
-                        break;
-                    }
+                if let Some(cell) = buf.cell((cx, check_y))
+                    && cell.symbol().chars().next().unwrap_or(' ') != ' '
+                {
+                    last_row = Some(check_y);
+                    break;
                 }
             }
         }
@@ -1384,11 +1379,11 @@ impl SessionView {
                                         .msg_cache_text_regions
                                         .get(idx)
                                         .and_then(|r| r.as_ref())
-                                        .map_or(false, |cached| {
+                                        .is_some_and(|cached| {
                                             let p_start_cs = content_offset;
                                             let p_end_cs = content_offset + part_h;
                                             let vp_start_cs = scroll;
-                                            let vp_end_cs = scroll + i32::from(vp_bottom - vp_top);
+                                            let vp_end_cs = scroll + (vp_bottom - vp_top);
                                             let cs_start = p_start_cs.max(vp_start_cs);
                                             let cs_end = p_end_cs.min(vp_end_cs);
                                             for region in cached {
@@ -1407,7 +1402,7 @@ impl SessionView {
 
                                     if !used_cache {
                                         let generous_h =
-                                            ((part_h as u16).saturating_mul(3)).max(200).min(5000);
+                                            ((part_h as u16).saturating_mul(3)).clamp(200, 5000);
                                         let scan_area = Rect::new(0, 0, max_w, generous_h);
                                         let mut temp = ratatui::buffer::Buffer::empty(scan_area);
 
@@ -1433,10 +1428,10 @@ impl SessionView {
                                         )));
                                         md.render_self(&mut temp, scan_area);
 
-                                        let mut screen_line_y = p_top.max(vp_top) as u16;
                                         let screen_end = p_bottom.min(vp_bottom) as u16;
-
-                                        for ty in 0..generous_h {
+                                        for (screen_line_y, ty) in (p_top.max(vp_top) as u16..)
+                                            .zip(0..generous_h)
+                                        {
                                             if screen_line_y >= screen_end {
                                                 break;
                                             }
@@ -1457,12 +1452,11 @@ impl SessionView {
                                                 y2: cy + 1,
                                                 x1: x_off,
                                                 x2: x_off + max_w,
-                                                text: trimmed,
-                                            });
-                                            screen_line_y += 1;
-                                        }
-                                    }
-                                } else {
+                                                 text: trimmed,
+                                             });
+                                         }
+                                     }
+                                 } else {
                                     // ── User text: width-aware wrapping (CJK, emoji, flags = 2 cols) ──
                                     let max_w_usize = max_w as usize;
                                     let mut screen_line_y = p_top.max(vp_top) as u16;
@@ -1478,9 +1472,8 @@ impl SessionView {
                                                     x1: x_off,
                                                     x2: x_off + max_w,
                                                     text: String::new(),
-                                                });
-                                                screen_line_y += 1;
-                                            }
+                                            });
+                                        }
                                             continue;
                                         }
                                         let mut remaining = logical_line;
@@ -1850,8 +1843,7 @@ impl SessionView {
                         let src_y = (vp_top - msg_top) as u16;
                         let dst_y = vp_top as u16;
                         let generous_h = ((msg_h as u16).saturating_add(inner_area.height))
-                            .max(100)
-                            .min(5000);
+                            .clamp(100, 5000);
                         let full_area = Rect::new(0, 0, inner_area.width, generous_h);
                         let mut temp = Buffer::empty(full_area);
                         temp.set_style(

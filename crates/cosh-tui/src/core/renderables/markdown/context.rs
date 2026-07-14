@@ -2,7 +2,7 @@ use pulldown_cmark::{CodeBlockKind, HeadingLevel, Tag, TagEnd};
 
 /// Semantic element types that influence text styling.
 ///
-/// Mirrors OpenTUI's style-groups (e.g. `markup.heading`, `markup.strong`)
+/// Mirrors `OpenTUI`'s style-groups (e.g. \`markup.heading\`, \`markup.strong\`)
 /// so that the palette can assign distinct visual styles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkdownElement {
@@ -71,7 +71,8 @@ pub struct MarkdownContext {
 }
 
 impl MarkdownContext {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             heading_level: 0,
             emphasis_depth: 0,
@@ -205,9 +206,10 @@ impl MarkdownContext {
     /// (block-level context like heading / blockquote can be checked separately).
     ///
     /// Priority: innermost (most nested) wins.
-    /// In pulldown_cmark `***text***` = Start(Emphasis), Start(Strong), ...
+    /// In `pulldown_cmark` `***text***` = Start(Emphasis), Start(Strong), ...
     /// so Strong is innermost and should be preferred.
-    pub fn current_element(&self) -> Option<MarkdownElement> {
+    #[must_use]
+    pub const fn current_element(&self) -> Option<MarkdownElement> {
         if self.in_code_block {
             return Some(MarkdownElement::CodeBlock);
         }
@@ -228,7 +230,8 @@ impl MarkdownContext {
     }
 
     /// Current heading level (1-6), or `None` if outside any heading.
-    pub fn heading_level(&self) -> Option<u8> {
+    #[must_use]
+    pub const fn heading_level(&self) -> Option<u8> {
         if self.heading_level > 0 {
             Some(self.heading_level)
         } else {
@@ -236,19 +239,23 @@ impl MarkdownContext {
         }
     }
 
-    pub fn in_code_block(&self) -> bool {
+    #[must_use]
+    pub const fn in_code_block(&self) -> bool {
         self.in_code_block
     }
 
+    #[must_use]
     pub fn code_block_lang(&self) -> &str {
         &self.code_block_lang
     }
 
-    pub fn in_blockquote(&self) -> bool {
+    #[must_use]
+    pub const fn in_blockquote(&self) -> bool {
         self.in_blockquote
     }
 
     /// Whether the innermost list is ordered (`true`) or unordered (`false`).
+    #[must_use]
     pub fn list_ordered(&self) -> Option<bool> {
         self.list_ordered.last().copied()
     }
@@ -256,6 +263,7 @@ impl MarkdownContext {
     /// The current list-item counter value (always `Some` inside a list item).
     /// For ordered lists this is the number to display; for unordered it is
     /// meaningless — the palette should emit `•` regardless.
+    #[must_use]
     pub fn list_marker(&self) -> Option<(bool, usize)> {
         let ordered = self.list_ordered.last().copied()?;
         // We incremented at Tag::Item, so the current value is (start + item_index + 1).
@@ -264,8 +272,7 @@ impl MarkdownContext {
         let display = self
             .list_counters
             .last()
-            .map(|c| c.saturating_sub(1))
-            .unwrap_or(1);
+            .map_or(1, |c| c.saturating_sub(1));
         Some((ordered, display))
     }
 }

@@ -22,6 +22,7 @@ use super::styles::MarkdownPalette;
 
 static NEXT_MARKDOWN_NUM: AtomicU64 = AtomicU64::new(1);
 
+#[allow(clippy::unwrap_used)]
 static HIGHLIGHT_CACHE: std::sync::LazyLock<Mutex<LruCache<u64, Vec<HighlightSpan>>>> =
     std::sync::LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(1000).unwrap())));
 
@@ -32,9 +33,9 @@ fn highlight_cache_key(text: &str, lang: &str) -> u64 {
     hasher.finish()
 }
 
-/// Renders markdown content into a fixed-area `Buffer`.
+/// Renders markdown content into a fixed-area \`Buffer\`.
 ///
-/// Mirrors OpenTUI's `MarkdownRenderable` in spirit:
+/// Mirrors \``OpenTUI`\`'s \``MarkdownRenderable`\` in spirit:
 /// - Processes a `pulldown_cmark` event stream
 /// - Uses a `MarkdownContext` to track nesting (headings, emphasis, lists, etc.)
 /// - Applies theme-derived styles through `MarkdownPalette`
@@ -57,12 +58,13 @@ pub struct MarkdownRenderable {
     /// Optional table border colour. Falls back to the palette's muted colour.
     table_border_color: Option<RGBA>,
     /// When true, skip tree-sitter syntax highlighting and render code blocks
-    /// as plain text. Set during LLM streaming to avoid ~10ms highlight() calls
+    /// as plain text. Set during LLM streaming to avoid ~10ms `highlight()` calls
     /// on every frame while code block text is still growing.
     streaming: bool,
 }
 
 impl MarkdownRenderable {
+    #[must_use]
     pub fn new(content: Option<String>) -> Self {
         let num = NEXT_MARKDOWN_NUM.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -103,12 +105,13 @@ impl MarkdownRenderable {
 
     /// When streaming, skip tree-sitter syntax highlighting to avoid
     /// re-highlighting every frame as code block text grows.
-    pub fn set_streaming(&mut self, streaming: bool) {
+    pub const fn set_streaming(&mut self, streaming: bool) {
         self.streaming = streaming;
     }
 
     // ── Accessors ──────────────────────────────────────────────
 
+    #[must_use]
     pub fn content(&self) -> &str {
         &self.content
     }
@@ -170,7 +173,9 @@ impl MarkdownRenderable {
             }
             if let Some(cell) = buf.cell_mut((*x, *y)) {
                 if grapheme.len() == 1 {
-                    cell.set_char(grapheme.chars().next().unwrap());
+                    if let Some(c) = grapheme.chars().next() {
+                        cell.set_char(c);
+                    }
                 } else {
                     cell.set_symbol(grapheme);
                 }
@@ -285,7 +290,7 @@ impl Renderable for MarkdownRenderable {
             return;
         }
 
-        let _start = std::time::Instant::now();
+        let start = std::time::Instant::now();
 
         let max_x = area.x.saturating_add(area.width);
         let max_y = area.y.saturating_add(area.height);
@@ -489,23 +494,15 @@ impl Renderable for MarkdownRenderable {
                         TagEnd::Paragraph
                         | TagEnd::Heading(_)
                         | TagEnd::BlockQuote(_)
-                        | TagEnd::Item => {
+                        | TagEnd::Item
+                        | TagEnd::CodeBlock
+                        | TagEnd::TableRow
+                        | TagEnd::Table => {
                             y += 1;
                             x = area.x;
                         }
-                        TagEnd::CodeBlock => {
-                            y += 1;
-                            x = area.x;
-                        }
-                        TagEnd::TableRow | TagEnd::Table => {
-                            y += 1;
-                            x = area.x;
-                        }
-                        TagEnd::List(_) => {}
-                        TagEnd::TableCell => {
-                            x = x.saturating_add(2);
-                        }
-                        TagEnd::TableHead
+                        TagEnd::List(_)
+                        | TagEnd::TableHead
                         | TagEnd::FootnoteDefinition
                         | TagEnd::DefinitionList
                         | TagEnd::DefinitionListTitle
@@ -519,6 +516,9 @@ impl Renderable for MarkdownRenderable {
                         | TagEnd::HtmlBlock
                         | TagEnd::Superscript
                         | TagEnd::Subscript => {}
+                        TagEnd::TableCell => {
+                            x = x.saturating_add(2);
+                        }
                     }
                     ctx.handle_end(&tag_end);
                 }
@@ -593,10 +593,10 @@ impl Renderable for MarkdownRenderable {
             }
         }
 
-        let _elapsed = _start.elapsed().as_micros();
-        if _elapsed > 500 {
+        let elapsed = start.elapsed().as_micros();
+        if elapsed > 500 {
             log::debug!(
-                "[PERF] markdown_render_self: content_len={} area={}x{} elapsed={_elapsed}us",
+                "[PERF] markdown_render_self: content_len={} area={}x{} elapsed={elapsed}us",
                 self.content.len(),
                 area.width,
                 area.height
@@ -622,7 +622,7 @@ impl MarkdownRenderable {
         max_y: u16,
         lang: &str,
     ) {
-        let _cb_start = std::time::Instant::now();
+        let cb_start = std::time::Instant::now();
         let palette = self.palette();
         let code_bg = palette.code_bg_color();
         let default_fg = rgba_to_color(palette.text_color());
@@ -637,16 +637,15 @@ impl MarkdownRenderable {
             None
         } else {
             let key = highlight_cache_key(text, effective_lang);
+            #[allow(clippy::unwrap_used)]
             let mut cache = HIGHLIGHT_CACHE.lock().unwrap();
-            if let Some(cached) = cache.get(&key) {
-                Some(cached.clone())
-            } else {
+            cache.get(&key).cloned().or_else(|| {
                 let computed = highlight(text, effective_lang);
                 if let Some(ref spans) = computed {
                     cache.push(key, spans.clone());
                 }
                 computed
-            }
+            })
         };
         let mut cat_map: Vec<Option<HighlightCategory>> = vec![None; text.len()];
         if let Some(ref spans) = spans {
@@ -687,7 +686,9 @@ impl MarkdownRenderable {
                 let style = Self::highlight_style(cat, default_fg, code_bg);
                 if let Some(cell) = buf.cell_mut((*x, *y)) {
                     if grapheme.len() == 1 {
-                        cell.set_char(grapheme.chars().next().unwrap());
+                        if let Some(c) = grapheme.chars().next() {
+                            cell.set_char(c);
+                        }
                     } else {
                         cell.set_symbol(grapheme);
                     }
@@ -706,10 +707,10 @@ impl MarkdownRenderable {
             byte_offset += line.len() + 1;
         }
 
-        let _cb_us = _cb_start.elapsed().as_micros();
-        if _cb_us > 500 {
+        let cb_us = cb_start.elapsed().as_micros();
+        if cb_us > 500 {
             log::debug!(
-                "[PERF] code_block_render: text_len={} lang={} elapsed={_cb_us}us",
+                "[PERF] code_block_render: text_len={} lang={} elapsed={cb_us}us",
                 text.len(),
                 if lang.is_empty() { "none" } else { lang }
             );
@@ -762,15 +763,13 @@ impl MarkdownRenderable {
         let available = max_x.saturating_sub(area_x);
         if total_w > available {
             // Scale columns proportionally
-            let scale = available as f64 / total_w as f64;
+            let scale = f64::from(available) / f64::from(total_w);
             for w in &mut col_widths {
-                *w = (*w as f64 * scale).max(3.0) as u16; // min 3 chars per column
+                *w = (f64::from(*w) * scale).max(3.0) as u16; // min 3 chars per column
             }
         }
 
-        let border_color = table_border_color
-            .map(|c| rgba_to_color(*c))
-            .unwrap_or_else(|| rgba_to_color(palette.muted_color()));
+        let border_color = table_border_color.map_or_else(|| rgba_to_color(palette.muted_color()), |c| rgba_to_color(*c));
         let border_style = Style::default().fg(border_color);
         let text_style = Style::default().fg(rgba_to_color(palette.text_color()));
         let header_style = Style::default()
@@ -830,14 +829,12 @@ impl MarkdownRenderable {
             let cell_style = if is_header { header_style } else { text_style };
             for ci in 0..col_count {
                 let sx = col_starts[ci];
-                let content = cells.get(ci).map(|s| s.as_str()).unwrap_or("");
+                let content = cells.get(ci).map_or("", |s| s.as_str());
 
                 // Vertical border on the left of first cell
-                if ci == 0 {
-                    if let Some(cell) = buf.cell_mut((sx.saturating_sub(1), y)) {
-                        cell.set_char('│');
-                        cell.set_style(border_style);
-                    }
+                if let Some(cell) = buf.cell_mut((sx.saturating_sub(1), y)) && ci == 0 {
+                    cell.set_char('│');
+                    cell.set_style(border_style);
                 }
 
                 // Render cell content with padding
@@ -899,7 +896,7 @@ impl MarkdownRenderable {
 
 // ── Colour helpers ───────────────────────────────────────────────
 
-fn rgba_to_color(c: RGBA) -> Color {
+const fn rgba_to_color(c: RGBA) -> Color {
     let (r, g, b, _) = c.to_ints();
     Color::Rgb(r, g, b)
 }
@@ -910,6 +907,7 @@ fn rgba_to_color(c: RGBA) -> Color {
 /// Uses the same `pulldown_cmark` parser and `MarkdownContext` that
 /// the renderer uses, so the output word-wraps and line-breaks
 /// identically to the rendered output.
+#[must_use]
 pub fn markdown_to_visible_text(markdown: &str) -> String {
     if markdown.is_empty() {
         return String::new();
@@ -944,10 +942,8 @@ pub fn markdown_to_visible_text(markdown: &str) -> String {
                     Tag::Paragraph
                     | Tag::BlockQuote(_)
                     | Tag::Heading { .. }
-                    | Tag::CodeBlock(_) => {
-                        if !result.is_empty() && !result.ends_with('\n') {
-                            result.push('\n');
-                        }
+                    | Tag::CodeBlock(_) if !result.is_empty() && !result.ends_with('\n') => {
+                        result.push('\n');
                     }
                     _ => {}
                 }
@@ -959,10 +955,8 @@ pub fn markdown_to_visible_text(markdown: &str) -> String {
                     | TagEnd::BlockQuote(_)
                     | TagEnd::Item
                     | TagEnd::CodeBlock
-                    | TagEnd::TableRow => {
-                        if !result.ends_with('\n') {
-                            result.push('\n');
-                        }
+                    | TagEnd::TableRow if !result.ends_with('\n') => {
+                        result.push('\n');
                     }
                     _ => {}
                 }
@@ -981,10 +975,8 @@ pub fn markdown_to_visible_text(markdown: &str) -> String {
                     result.push_str("[ ] ");
                 }
             }
-            Event::Rule => {
-                if !result.ends_with('\n') {
-                    result.push('\n');
-                }
+            Event::Rule if !result.ends_with('\n') => {
+                result.push('\n');
             }
             _ => {}
         }

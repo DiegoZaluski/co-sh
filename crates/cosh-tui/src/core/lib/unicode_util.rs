@@ -61,7 +61,6 @@ pub fn grapheme_display_width(g: &str) -> u16 {
 pub fn char_display_width(c: char) -> u16 {
     match unicode_width::UnicodeWidthChar::width(c) {
         Some(0) => 0,
-        Some(1) => 1,
         Some(2) => 2,
         _ => 1,
     }
@@ -75,7 +74,7 @@ pub fn char_display_width(c: char) -> u16 {
 #[must_use]
 pub fn str_display_width(s: &str) -> usize {
     Graphemes::new(s)
-        .map(|g| grapheme_display_width(&g) as usize)
+        .map(|g| grapheme_display_width(g) as usize)
         .sum()
 }
 
@@ -85,7 +84,7 @@ pub fn str_display_width(s: &str) -> usize {
 /// This is the primary rendering primitive: instead of iterating
 /// `text.chars()`, iterate `graphemes_with_width(text)` to correctly
 /// position each visual unit in the terminal grid.
-pub fn graphemes_with_width<'a>(text: &'a str) -> impl Iterator<Item = (&'a str, u16)> + 'a {
+pub fn graphemes_with_width(text: &str) -> impl Iterator<Item = (&str, u16)> + '_ {
     Graphemes::new(text).map(|g| {
         let w = grapheme_display_width(g);
         (g, w)

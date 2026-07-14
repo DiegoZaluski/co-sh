@@ -207,7 +207,9 @@ impl Renderable for DiffRenderable {
                 }
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     if grapheme.len() == 1 {
-                        cell.set_char(grapheme.chars().next().unwrap());
+                        if let Some(c) = grapheme.chars().next() {
+                            cell.set_char(c);
+                        }
                     } else {
                         cell.set_symbol(grapheme);
                     }

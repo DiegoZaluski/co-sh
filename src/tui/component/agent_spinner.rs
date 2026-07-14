@@ -189,7 +189,7 @@ impl AgentSpinner {
         self.frames_elapsed = self.frames_elapsed.saturating_add(1);
 
         // Only advance cycling character step every N frames
-        if frame % CYCLE_STEP_DIVIDER == 0 {
+        if frame.is_multiple_of(CYCLE_STEP_DIVIDER) {
             self.step = (self.step + 1) % PRERENDERED_FRAMES as u32;
         }
 

@@ -309,7 +309,9 @@ impl Renderable for TextRenderable {
 
                 if let Some(cell) = buf.cell_mut((current_col, current_line)) {
                     if grapheme.len() == 1 {
-                        cell.set_char(grapheme.chars().next().unwrap());
+                        if let Some(c) = grapheme.chars().next() {
+                            cell.set_char(c);
+                        }
                     } else {
                         cell.set_symbol(grapheme);
                     }
