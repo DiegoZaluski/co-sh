@@ -74,7 +74,8 @@ impl MarkdownPalette {
                 (tb as u16 * 8 / 12).min(255) as u8,
                 255,
             ),
-            RGBA::from_ints( // H6 ≈ muted
+            RGBA::from_ints(
+                // H6 ≈ muted
                 (tr as u16 * 3 / 4 + br as u16 / 4) as u8,
                 (tg as u16 * 3 / 4 + _bg as u16 / 4) as u8,
                 (tb as u16 * 3 / 4 + bb as u16 / 4) as u8,
@@ -83,12 +84,7 @@ impl MarkdownPalette {
         ];
 
         // Link: cyan-ish tint on top of text color
-        let link = RGBA::from_ints(
-            (tr / 3).max(80),
-            (tg).max(180),
-            (tb).max(220),
-            255,
-        );
+        let link = RGBA::from_ints((tr / 3).max(80), (tg).max(180), (tb).max(220), 255);
 
         // Inline code: slightly off-white fg, dim bg
         let inline_code_fg = RGBA::from_ints(

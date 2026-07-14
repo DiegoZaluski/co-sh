@@ -879,7 +879,11 @@ impl App {
             }
             let _bg_us = _bg_start.elapsed().as_micros();
             if _bg_us > 200 {
-                log::debug!("[PERF] bg_fill: {_bg_us}us area={}x{}", area.width, area.height);
+                log::debug!(
+                    "[PERF] bg_fill: {_bg_us}us area={}x{}",
+                    area.width,
+                    area.height
+                );
             }
 
             let header_style = Style::default().fg(rgba_color(self.theme.text_muted));
@@ -2645,15 +2649,15 @@ impl App {
             );
             // Don't dispatch to question dialog if text selection is in progress
             if !self.mouse_drag_active && self.drag_selection.is_none() {
-                            let consumed = self.question_dialog.handle_mouse(&mouse, question_area);
-            if consumed {
-                if self.question_dialog.submitted {
-                    let answers = self.question_dialog.build_answers();
-                    let _ = self.answer_tx.send(Ok(answers));
-                    self.question_dialog.visible = false;
-                    self.question_dialog.submitted = false;
+                let consumed = self.question_dialog.handle_mouse(&mouse, question_area);
+                if consumed {
+                    if self.question_dialog.submitted {
+                        let answers = self.question_dialog.build_answers();
+                        let _ = self.answer_tx.send(Ok(answers));
+                        self.question_dialog.visible = false;
+                        self.question_dialog.submitted = false;
+                    }
                 }
-            }
                 return Ok(true);
             }
         }
@@ -2971,4 +2975,3 @@ fn save_provider_api_key(provider: &str, env_var: &str, api_key: &str) {
         // Silently fail - env var is still set for the current process
     }
 }
-

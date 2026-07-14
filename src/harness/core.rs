@@ -647,9 +647,8 @@ impl Harness {
             // Record extraction failures in the correction memory so the model
             // sees the pattern even when no specific dispatch error is available.
             if extraction_failures > 0 {
-                self.correction_memory.push(
-                    "Invalid JSON tool call — no registered schema matched",
-                );
+                self.correction_memory
+                    .push("Invalid JSON tool call — no registered schema matched");
             }
 
             if check_stop!() {

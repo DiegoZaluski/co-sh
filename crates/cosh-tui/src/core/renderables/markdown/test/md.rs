@@ -5,8 +5,8 @@ use ratatui::style::{Color, Modifier};
 use crate::core::renderable::Renderable;
 use crate::core::rgba::{ColorInput, RGBA};
 
-use super::super::MarkdownRenderable;
 use super::super::MarkdownPalette;
+use super::super::MarkdownRenderable;
 
 fn make_md(content: &str) -> MarkdownRenderable {
     let mut md = MarkdownRenderable::new(Some(content.to_string()));
@@ -111,8 +111,12 @@ fn test_code_block_syntax_highlighting() {
     md.render_self(&mut buf, Rect::new(0, 0, 60, 10));
 
     // Verify that the code block renders characters
-    let has_fn = (0..10).any(|row| (0..60).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "f")));
-    assert!(has_fn, "'fn' should be rendered somewhere in the code block");
+    let has_fn = (0..10)
+        .any(|row| (0..60).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "f")));
+    assert!(
+        has_fn,
+        "'fn' should be rendered somewhere in the code block"
+    );
 }
 
 #[test]
@@ -121,7 +125,10 @@ fn test_blockquote_muted_text() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
     md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
 
-    let palette = MarkdownPalette::new(RGBA::from_ints(220, 220, 220, 255), RGBA::from_ints(0, 0, 0, 0));
+    let palette = MarkdownPalette::new(
+        RGBA::from_ints(220, 220, 220, 255),
+        RGBA::from_ints(0, 0, 0, 0),
+    );
     let muted_color = rgba_to_color(palette.muted_color());
     assert_eq!(
         buf.cell((0, 0)).unwrap().style().fg,
@@ -174,7 +181,13 @@ fn test_simple_table_renders() {
     // Header row: content at sx+padding
     assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "A");
     assert_eq!(buf.cell((5, 1)).unwrap().symbol(), "B");
-    assert!(buf.cell((1, 1)).unwrap().style().add_modifier.contains(Modifier::BOLD));
+    assert!(
+        buf.cell((1, 1))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
 
     // Header/body separator
     assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "├");
@@ -184,7 +197,13 @@ fn test_simple_table_renders() {
     // Body row
     assert_eq!(buf.cell((1, 3)).unwrap().symbol(), "1");
     assert_eq!(buf.cell((5, 3)).unwrap().symbol(), "2");
-    assert!(!buf.cell((1, 3)).unwrap().style().add_modifier.contains(Modifier::BOLD));
+    assert!(
+        !buf.cell((1, 3))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
 
     // Bottom border
     assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "└");
@@ -242,7 +261,10 @@ fn test_table_border_color_default_is_muted() {
     md.render_self(&mut buf, Rect::new(0, 0, 30, 10));
 
     // Without custom colour, border should use palette's muted colour
-    let palette = MarkdownPalette::new(RGBA::from_ints(220, 220, 220, 255), RGBA::from_ints(0, 0, 0, 0));
+    let palette = MarkdownPalette::new(
+        RGBA::from_ints(220, 220, 220, 255),
+        RGBA::from_ints(0, 0, 0, 0),
+    );
     let muted_color = rgba_to_color(palette.muted_color());
     assert_eq!(
         buf.cell((0, 0)).unwrap().style().fg,
@@ -371,9 +393,8 @@ fn test_code_block_no_lang_fallback() {
     md.render_self(&mut buf, Rect::new(0, 0, 60, 10));
 
     // Code block should render characters
-    let has_fn = (0..10).any(|row| {
-        (0..60).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "f"))
-    });
+    let has_fn = (0..10)
+        .any(|row| (0..60).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "f")));
     assert!(has_fn, "Code block without lang should still render");
 }
 
@@ -476,7 +497,10 @@ fn test_blockquote_multiple_paragraphs() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
     md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
 
-    let palette = MarkdownPalette::new(RGBA::from_ints(220, 220, 220, 255), RGBA::from_ints(0, 0, 0, 0));
+    let palette = MarkdownPalette::new(
+        RGBA::from_ints(220, 220, 220, 255),
+        RGBA::from_ints(0, 0, 0, 0),
+    );
     let muted_color = rgba_to_color(palette.muted_color());
 
     // First paragraph text should be muted
@@ -527,10 +551,12 @@ fn test_code_block_with_empty_lines() {
     md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
 
     // Content should render despite empty lines
-    let has_middle = (0..10).any(|row| {
-        (0..40).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "m"))
-    });
-    assert!(has_middle, "Code block with empty lines should render 'middle'");
+    let has_middle = (0..10)
+        .any(|row| (0..40).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "m")));
+    assert!(
+        has_middle,
+        "Code block with empty lines should render 'middle'"
+    );
 }
 
 #[test]
@@ -563,8 +589,16 @@ fn test_table_custom_border_color_with_headers() {
 
     // All border corners should use custom green color
     let green = Color::Rgb(0, 200, 0);
-    assert_eq!(buf.cell((0, 0)).unwrap().style().fg, Some(green), "Top-left corner should be green");
-    assert_eq!(buf.cell((0, 4)).unwrap().style().fg, Some(green), "Bottom-left corner should be green");
+    assert_eq!(
+        buf.cell((0, 0)).unwrap().style().fg,
+        Some(green),
+        "Top-left corner should be green"
+    );
+    assert_eq!(
+        buf.cell((0, 4)).unwrap().style().fg,
+        Some(green),
+        "Bottom-left corner should be green"
+    );
 }
 
 #[test]
@@ -575,17 +609,26 @@ fn test_heading_level_color_distinction() {
 
     // Both headings should be bold
     assert!(
-        buf.cell((0, 0)).unwrap().style().add_modifier.contains(Modifier::BOLD),
+        buf.cell((0, 0))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD),
         "H1 should be bold"
     );
     assert!(
-        buf.cell((0, 1)).unwrap().style().add_modifier.contains(Modifier::BOLD),
+        buf.cell((0, 1))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD),
         "H6 should be bold"
     );
     // H1 should be brighter than H6
-    if let (Some(Color::Rgb(r1, g1, b1)), Some(Color::Rgb(r2, g2, b2))) =
-        (buf.cell((0, 0)).unwrap().style().fg, buf.cell((0, 1)).unwrap().style().fg)
-    {
+    if let (Some(Color::Rgb(r1, g1, b1)), Some(Color::Rgb(r2, g2, b2))) = (
+        buf.cell((0, 0)).unwrap().style().fg,
+        buf.cell((0, 1)).unwrap().style().fg,
+    ) {
         let lum1 = r1 as u32 + g1 as u32 + b1 as u32;
         let lum2 = r2 as u32 + g2 as u32 + b2 as u32;
         assert!(

@@ -1,7 +1,7 @@
 use pulldown_cmark::{CodeBlockKind, CowStr, HeadingLevel, Tag, TagEnd};
 
-use super::super::context::MarkdownElement;
 use super::super::MarkdownContext;
+use super::super::context::MarkdownElement;
 
 #[test]
 fn test_empty_context() {
@@ -281,7 +281,12 @@ fn test_list_counter_with_custom_start() {
 fn test_empty_after_all_ends() {
     let mut ctx = MarkdownContext::new();
     // Simulate full document
-    ctx.handle_start(&Tag::Heading { level: HeadingLevel::H1, id: None, classes: Vec::new(), attrs: Vec::new() });
+    ctx.handle_start(&Tag::Heading {
+        level: HeadingLevel::H1,
+        id: None,
+        classes: Vec::new(),
+        attrs: Vec::new(),
+    });
     ctx.handle_start(&Tag::Emphasis);
     ctx.handle_start(&Tag::Strong);
     ctx.handle_end(&TagEnd::Strong);

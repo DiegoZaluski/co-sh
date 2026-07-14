@@ -40,7 +40,10 @@ fn test_mixed_lists() {
     let h1 = estimate_height(text, 80);
     let text2 = "1. a\n2. b";
     let h2 = estimate_height(text2, 80);
-    assert_eq!(h1, h2, "ordered and unordered with same content should have same height");
+    assert_eq!(
+        h1, h2,
+        "ordered and unordered with same content should have same height"
+    );
 }
 
 #[test]
@@ -65,7 +68,10 @@ fn test_zero_width() {
 fn test_blockquote() {
     let text = "> line 1\n> line 2";
     let h = estimate_height(text, 80);
-    assert!(h == 2 || h == 3, "two blockquote lines = 2-3 lines (got {h})");
+    assert!(
+        h == 2 || h == 3,
+        "two blockquote lines = 2-3 lines (got {h})"
+    );
 }
 
 #[test]
@@ -96,7 +102,10 @@ fn test_wide_table_needs_multiple_rows() {
     let text = "| A | B | C | D | E |\n|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 |\n";
     let h = estimate_height(text, 20);
     // Should include top border + header + separator + body + bottom border = at least 5
-    assert!(h >= 5, "Wide table should estimate at least 5 rows, got {h}");
+    assert!(
+        h >= 5,
+        "Wide table should estimate at least 5 rows, got {h}"
+    );
 }
 
 #[test]
@@ -104,7 +113,10 @@ fn test_code_block_fenced_height() {
     let text = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```";
     let h = estimate_height(text, 80);
     // Code block: newline before(0 or 1) + 4 lines of code + newline after(0 or 1)
-    assert!(h >= 3, "Fenced code block with 4 lines should be >= 3, got {h}");
+    assert!(
+        h >= 3,
+        "Fenced code block with 4 lines should be >= 3, got {h}"
+    );
 }
 
 #[test]
@@ -134,7 +146,10 @@ fn test_hard_break_height() {
 fn test_mixed_content_height() {
     let text = "# Title\n\nSome paragraph text here.\n\n- list item 1\n- list item 2\n\n```\ncode block\n```\n\n> blockquote";
     let h = estimate_height(text, 80);
-    assert!(h >= 7, "Mixed content should estimate at least 7 lines, got {h}");
+    assert!(
+        h >= 7,
+        "Mixed content should estimate at least 7 lines, got {h}"
+    );
 }
 
 #[test]
@@ -142,7 +157,10 @@ fn test_table_without_data_rows() {
     let text = "| H1 | H2 |\n|---|---|";
     let h = estimate_height(text, 80);
     // top + header + separator + bottom = 4
-    assert_eq!(h, 4, "Empty table (headers only) should estimate 4 lines, got {h}");
+    assert_eq!(
+        h, 4,
+        "Empty table (headers only) should estimate 4 lines, got {h}"
+    );
 }
 
 #[test]

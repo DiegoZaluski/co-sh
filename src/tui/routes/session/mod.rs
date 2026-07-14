@@ -22,9 +22,11 @@ use std::hash::Hasher;
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::Theme;
-use crate::types::{AgentColors, FilePart, Message, MessageRole, Part, ReasoningPart, SessionStatus, ToolStatus};
-use std::time::Instant;
+use crate::types::{
+    AgentColors, FilePart, Message, MessageRole, Part, ReasoningPart, SessionStatus, ToolStatus,
+};
 use crate::util::tool_render::{self, ToolRenderState};
+use std::time::Instant;
 
 const fn left_border_chars() -> BorderCharacters {
     BorderCharacters {
@@ -250,10 +252,18 @@ fn text_regions_generation(session: &crate::types::Session, config: &TuiConfig, 
 
 fn config_token(config: &TuiConfig) -> u64 {
     let mut token: u64 = 0;
-    if config.conceal { token |= 1; }
-    if config.show_tool_details { token |= 2; }
-    if config.show_generic_tool_output { token |= 4; }
-    if config.thinking_mode { token |= 8; }
+    if config.conceal {
+        token |= 1;
+    }
+    if config.show_tool_details {
+        token |= 2;
+    }
+    if config.show_generic_tool_output {
+        token |= 4;
+    }
+    if config.thinking_mode {
+        token |= 8;
+    }
     token
 }
 
@@ -588,14 +598,18 @@ impl SessionView {
                         .and_then(|ph| ph.get(pi))
                         .copied()
                         .unwrap_or_else(|| Self::estimate_part_height(part, max_w, config, role));
-                    let render_h = (est_h.saturating_mul(3)).max(10).min(bottom.saturating_sub(y));
+                    let render_h = (est_h.saturating_mul(3))
+                        .max(10)
+                        .min(bottom.saturating_sub(y));
                     let area = Rect::new(x, y, max_w, render_h);
                     let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
                         Some(content),
                     );
                     md.set_fg(Some(ColorInput::RGBA(fg_color)));
                     md.set_bg(Some(ColorInput::RGBA(theme.background)));
-                    md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
+                    md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(
+                        255, 200, 0, 255,
+                    ))));
                     md.set_streaming(streaming);
                     md.render_self(buf, area);
                     let actual_h = Self::scan_content_height(buf, x, y, max_w, render_h);
@@ -935,7 +949,9 @@ impl SessionView {
                 .collect();
             let mut line_x = x_off;
             let mut line_y = area.y + 1;
-            for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(&error_text) {
+            for (grapheme, w) in
+                cosh_tui::core::lib::unicode_util::graphemes_with_width(&error_text)
+            {
                 if grapheme == "\n" {
                     line_x = x_off;
                     line_y += 1;
@@ -1117,7 +1133,9 @@ impl SessionView {
     }
 
     pub fn render_message_height(
-        msg: &Message, max_w: u16, config: &TuiConfig,
+        msg: &Message,
+        max_w: u16,
+        config: &TuiConfig,
         part_heights: Option<&[u16]>,
     ) -> i32 {
         let border_h: i32 = match msg.role {
@@ -1143,7 +1161,9 @@ impl SessionView {
                 .collect();
             let mut lines = 0u16;
             let mut col = 0u16;
-            for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(&error_text) {
+            for (grapheme, w) in
+                cosh_tui::core::lib::unicode_util::graphemes_with_width(&error_text)
+            {
                 if grapheme == "\n" {
                     lines += 1;
                     col = 0;
@@ -1207,10 +1227,10 @@ impl SessionView {
             || self.cache_config_token != config_tok;
 
         if cache_stale {
-            let config_or_width_changed = self.cache_max_w != max_w
-                || self.cache_config_token != config_tok;
-            let count_grew = !config_or_width_changed
-                && session.messages.len() > self.msg_height_cache.len();
+            let config_or_width_changed =
+                self.cache_max_w != max_w || self.cache_config_token != config_tok;
+            let count_grew =
+                !config_or_width_changed && session.messages.len() > self.msg_height_cache.len();
 
             if config_or_width_changed || !count_grew {
                 // Full rebuild: config/width changed, or count decreased
@@ -1218,7 +1238,9 @@ impl SessionView {
                 self.msg_height_cache.clear();
                 self.part_heights_cache.clear();
                 for m in session.messages.iter() {
-                    let part_hs: Vec<u16> = m.parts.iter()
+                    let part_hs: Vec<u16> = m
+                        .parts
+                        .iter()
                         .map(|p| Self::estimate_part_height(p, max_w, config, &m.role))
                         .collect();
                     let msg_h = Self::render_message_height(m, max_w, config, Some(&part_hs));
@@ -1227,17 +1249,22 @@ impl SessionView {
                 }
                 self.cache_max_w = max_w;
                 self.cache_config_token = config_tok;
-                self.last_msg_change_token = session.messages.last()
-                    .map(msg_change_token)
-                    .unwrap_or(0);
+                self.last_msg_change_token =
+                    session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.cached_total_height = self.recompute_total_height(session);
-                log::debug!("[PERF] msg_height_cache: cold_build={}us msgs={}", _start.elapsed().as_micros(), session.messages.len());
+                log::debug!(
+                    "[PERF] msg_height_cache: cold_build={}us msgs={}",
+                    _start.elapsed().as_micros(),
+                    session.messages.len()
+                );
                 true
             } else {
                 // Extend cache with new messages only (same width/config)
                 let prev_len = self.msg_height_cache.len();
                 for m in session.messages.iter().skip(prev_len) {
-                    let part_hs: Vec<u16> = m.parts.iter()
+                    let part_hs: Vec<u16> = m
+                        .parts
+                        .iter()
                         .map(|p| Self::estimate_part_height(p, max_w, config, &m.role))
                         .collect();
                     let msg_h = Self::render_message_height(m, max_w, config, Some(&part_hs));
@@ -1246,23 +1273,26 @@ impl SessionView {
                 }
                 self.cache_max_w = max_w;
                 self.cache_config_token = config_tok;
-                self.last_msg_change_token = session.messages.last()
-                    .map(msg_change_token)
-                    .unwrap_or(0);
+                self.last_msg_change_token =
+                    session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.cached_total_height = self.recompute_total_height(session);
-                log::debug!("[PERF] msg_height_cache: extended prev={} now={}", prev_len, session.messages.len());
+                log::debug!(
+                    "[PERF] msg_height_cache: extended prev={} now={}",
+                    prev_len,
+                    session.messages.len()
+                );
                 false
             }
         } else {
             // Incremental update: refresh only the last message when its
             // content/status changes (streaming token generation, tool completion).
-            let current_token = session.messages.last()
-                .map(msg_change_token)
-                .unwrap_or(0);
+            let current_token = session.messages.last().map(msg_change_token).unwrap_or(0);
             if current_token != self.last_msg_change_token && !self.msg_height_cache.is_empty() {
                 let last_idx = session.messages.len() - 1;
                 let last_msg = &session.messages[last_idx];
-                let part_hs: Vec<u16> = last_msg.parts.iter()
+                let part_hs: Vec<u16> = last_msg
+                    .parts
+                    .iter()
                     .map(|p| Self::estimate_part_height(p, max_w, config, &last_msg.role))
                     .collect();
                 let msg_h = Self::render_message_height(last_msg, max_w, config, Some(&part_hs));
@@ -1321,7 +1351,9 @@ impl SessionView {
                             .get(idx)
                             .and_then(|ph| ph.get(pi))
                             .copied()
-                            .unwrap_or_else(|| Self::estimate_part_height(part, max_w, config, &msg.role))
+                            .unwrap_or_else(|| {
+                                Self::estimate_part_height(part, max_w, config, &msg.role)
+                            })
                             .max(1),
                     );
                     let p_top = part_y;
@@ -1348,7 +1380,9 @@ impl SessionView {
                                 // First tries cached text regions (from the render loop on a previous
                                 // frame); falls back to a direct markdown render into a temp buffer.
                                 if msg.role == MessageRole::Assistant {
-                                    let used_cache = self.msg_cache_text_regions.get(idx)
+                                    let used_cache = self
+                                        .msg_cache_text_regions
+                                        .get(idx)
                                         .and_then(|r| r.as_ref())
                                         .map_or(false, |cached| {
                                             let p_start_cs = content_offset;
@@ -1372,7 +1406,8 @@ impl SessionView {
                                         });
 
                                     if !used_cache {
-                                        let generous_h = ((part_h as u16).saturating_mul(3)).max(200).min(5000);
+                                        let generous_h =
+                                            ((part_h as u16).saturating_mul(3)).max(200).min(5000);
                                         let scan_area = Rect::new(0, 0, max_w, generous_h);
                                         let mut temp = ratatui::buffer::Buffer::empty(scan_area);
 
@@ -1393,7 +1428,9 @@ impl SessionView {
                                         );
                                         md.set_fg(Some(ColorInput::RGBA(theme.text)));
                                         md.set_bg(Some(ColorInput::RGBA(theme.background)));
-                                        md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
+                                        md.set_table_border_color(Some(ColorInput::RGBA(
+                                            RGBA::from_ints(255, 200, 0, 255),
+                                        )));
                                         md.render_self(&mut temp, scan_area);
 
                                         let mut screen_line_y = p_top.max(vp_top) as u16;
@@ -1407,23 +1444,25 @@ impl SessionView {
                                             let mut line_text = String::new();
                                             for tx in 0..max_w {
                                                 if let Some(cell) = temp.cell((tx, ty)) {
-                                                    line_text.push(cell.symbol().chars().next().unwrap_or(' '));
+                                                    line_text.push(
+                                                        cell.symbol().chars().next().unwrap_or(' '),
+                                                    );
                                                 }
                                             }
 
                                             let trimmed = line_text.trim_end().to_string();
                                             let cy = (screen_line_y as i32) - vp_top + scroll;
-                                        self.text_regions.push(TextRegion {
-                                            y1: cy,
-                                            y2: cy + 1,
-                                            x1: x_off,
-                                            x2: x_off + max_w,
-                                            text: trimmed,
-                                        });
-                                        screen_line_y += 1;
+                                            self.text_regions.push(TextRegion {
+                                                y1: cy,
+                                                y2: cy + 1,
+                                                x1: x_off,
+                                                x2: x_off + max_w,
+                                                text: trimmed,
+                                            });
+                                            screen_line_y += 1;
+                                        }
                                     }
-                                }
-                            } else {
+                                } else {
                                     // ── User text: width-aware wrapping (CJK, emoji, flags = 2 cols) ──
                                     let max_w_usize = max_w as usize;
                                     let mut screen_line_y = p_top.max(vp_top) as u16;
@@ -1496,8 +1535,7 @@ impl SessionView {
                                 }
                                 // Add inline tool label (only when visible)
                                 if p_top >= vp_top {
-                                    let label =
-                                        crate::util::tool_render::tool_inline_text(t);
+                                    let label = crate::util::tool_render::tool_inline_text(t);
                                     self.text_regions.push(TextRegion {
                                         y1: content_offset,
                                         y2: content_offset + 1,
@@ -1522,8 +1560,7 @@ impl SessionView {
                                             )
                                             .output
                                         };
-                                        let first_output_screen =
-                                            (p_top.max(vp_top) + 1) as u16;
+                                        let first_output_screen = (p_top.max(vp_top) + 1) as u16;
                                         let screen_end = p_bottom.min(vp_bottom) as u16;
                                         let mut out_screen_y = first_output_screen;
                                         for display_line in display.lines() {
@@ -1734,7 +1771,10 @@ impl SessionView {
             let _regions_start = Instant::now();
             self.build_text_regions(session, inner_area, max_w, config, theme);
             self.text_regions_gen = regions_gen;
-            log::debug!("[PERF] text_regions: {}us (built)", _regions_start.elapsed().as_micros());
+            log::debug!(
+                "[PERF] text_regions: {}us (built)",
+                _regions_start.elapsed().as_micros()
+            );
         } else {
             log::debug!("[PERF] text_regions: skipped (no change)");
         }
@@ -1767,110 +1807,135 @@ impl SessionView {
             let msg_h = self.msg_height_cache[idx];
             let msg_top = y;
             let msg_bottom = y + msg_h;
-            let is_assistant_non_error = matches!(msg.role, MessageRole::Assistant)
-                && !msg.id.starts_with("msg-err-");
+            let is_assistant_non_error =
+                matches!(msg.role, MessageRole::Assistant) && !msg.id.starts_with("msg-err-");
             let mut render_actual_h = msg_h;
 
             // Check if message overlaps with viewport (using i32, no u16 wrap)
             if msg_bottom > vp_top && msg_top < vp_bottom {
                 let is_top_clipped = msg_top < vp_top;
 
-                    if is_top_clipped && is_assistant_non_error {
-                        // ── Top-clipped assistant (non-error) ──
-                        let is_streaming_msg = idx == session.messages.len() - 1 && streaming;
-                        let token = msg_content_token(msg, config_tok, max_w);
-                        let cache_hit = !is_streaming_msg
-                            && token == self.msg_cache_tokens[idx]
-                            && self.msg_cache_w[idx] == inner_area.width
-                            && self.msg_cache_h[idx] > 0
-                            && self.msg_cache_cells[idx].is_some();
+                if is_top_clipped && is_assistant_non_error {
+                    // ── Top-clipped assistant (non-error) ──
+                    let is_streaming_msg = idx == session.messages.len() - 1 && streaming;
+                    let token = msg_content_token(msg, config_tok, max_w);
+                    let cache_hit = !is_streaming_msg
+                        && token == self.msg_cache_tokens[idx]
+                        && self.msg_cache_w[idx] == inner_area.width
+                        && self.msg_cache_h[idx] > 0
+                        && self.msg_cache_cells[idx].is_some();
 
-                        if cache_hit {
-                            // ── Use cached cells ──
-                            let cached_cells = self.msg_cache_cells[idx].as_ref().unwrap();
-                            let cached_h = self.msg_cache_h[idx];
-                            let cached_w = self.msg_cache_w[idx] as usize;
-                            let src_y = (vp_top - msg_top) as u16;
-                            let dst_y = vp_top as u16;
-                            let vis_h = ((cached_h as i32).min(vp_bottom - msg_top) - src_y as i32).max(0) as u16;
-                            for dy in 0..vis_h {
-                                let base = (src_y + dy) as usize * cached_w;
-                                for dx in 0..cached_w {
-                                    if let Some(dst) = buf.cell_mut((inner_area.x + dx as u16, dst_y + dy)) {
-                                        *dst = cached_cells[base + dx].clone();
-                                    }
+                    if cache_hit {
+                        // ── Use cached cells ──
+                        let cached_cells = self.msg_cache_cells[idx].as_ref().unwrap();
+                        let cached_h = self.msg_cache_h[idx];
+                        let cached_w = self.msg_cache_w[idx] as usize;
+                        let src_y = (vp_top - msg_top) as u16;
+                        let dst_y = vp_top as u16;
+                        let vis_h = ((cached_h as i32).min(vp_bottom - msg_top) - src_y as i32)
+                            .max(0) as u16;
+                        for dy in 0..vis_h {
+                            let base = (src_y + dy) as usize * cached_w;
+                            for dx in 0..cached_w {
+                                if let Some(dst) =
+                                    buf.cell_mut((inner_area.x + dx as u16, dst_y + dy))
+                                {
+                                    *dst = cached_cells[base + dx].clone();
                                 }
                             }
-                            render_actual_h = cached_h as i32;
-                        } else {
-                            // ── Fall back: temp buffer render ──
-                            let src_y = (vp_top - msg_top) as u16;
-                            let dst_y = vp_top as u16;
-                            let generous_h = ((msg_h as u16).saturating_add(inner_area.height)).max(100).min(5000);
-                            let full_area = Rect::new(0, 0, inner_area.width, generous_h);
-                            let mut temp = Buffer::empty(full_area);
-                            temp.set_style(full_area, Style::default().bg(rgba_color(theme.background)));
+                        }
+                        render_actual_h = cached_h as i32;
+                    } else {
+                        // ── Fall back: temp buffer render ──
+                        let src_y = (vp_top - msg_top) as u16;
+                        let dst_y = vp_top as u16;
+                        let generous_h = ((msg_h as u16).saturating_add(inner_area.height))
+                            .max(100)
+                            .min(5000);
+                        let full_area = Rect::new(0, 0, inner_area.width, generous_h);
+                        let mut temp = Buffer::empty(full_area);
+                        temp.set_style(
+                            full_area,
+                            Style::default().bg(rgba_color(theme.background)),
+                        );
 
-                            let actual_h = Self::render_assistant_message(
-                                &mut temp, full_area, msg, theme,
-                                &self.tool_state, config, false, false,
-                                &self.part_heights_cache[idx], streaming,
-                            ) as i32;
+                        let actual_h = Self::render_assistant_message(
+                            &mut temp,
+                            full_area,
+                            msg,
+                            theme,
+                            &self.tool_state,
+                            config,
+                            false,
+                            false,
+                            &self.part_heights_cache[idx],
+                            streaming,
+                        ) as i32;
 
-                            let msg_content_top = msg_top - vp_top + self.scroll_y;
-                            if actual_h > 0 {
-                                let x_off_text = inner_area.x + 3;
-                                let temp_cells = temp.content();
-                                let line_stride = inner_area.width as usize;
-                                let regions = Self::cells_to_text_regions(
-                                    temp_cells, line_stride, actual_h as u16,
-                                    msg_content_top, x_off_text, max_w,
-                                );
-                                self.msg_cache_text_regions[idx] = Some(regions);
-                            }
-
-                            let vis_h = (actual_h.min(vp_bottom - msg_top) - src_y as i32).max(0) as u16;
+                        let msg_content_top = msg_top - vp_top + self.scroll_y;
+                        if actual_h > 0 {
+                            let x_off_text = inner_area.x + 3;
                             let temp_cells = temp.content();
                             let line_stride = inner_area.width as usize;
-                            let dst_x = inner_area.x;
-                            for dy in 0..vis_h {
-                                let temp_y = src_y + dy;
-                                let dst_line_y = dst_y + dy;
-                                let base = temp_y as usize * line_stride;
-                                for dx in 0..line_stride {
-                                    if let Some(dst) = buf.cell_mut((dst_x + dx as u16, dst_line_y)) {
-                                        *dst = temp_cells[base + dx].clone();
-                                    }
-                                }
-                            }
-
-                            // Save non-streaming messages to cache
-                            if !is_streaming_msg && actual_h > 0 {
-                                let ah = actual_h as u16;
-                                let w = inner_area.width as usize;
-                                let temp_cells = temp.content();
-                                let line_stride = inner_area.width as usize;
-                                let mut cells = Vec::with_capacity(w * ah as usize);
-                                for dy in 0..ah {
-                                    let base = dy as usize * line_stride;
-                                    for dx in 0..w {
-                                        cells.push(temp_cells[base + dx].clone());
-                                    }
-                                }
-                                let x_off_text = inner_area.x + 3;
-                                let msg_content_top = msg_top - vp_top + self.scroll_y;
-                                let regions = Self::cells_to_text_regions(
-                                    &cells, w, ah, msg_content_top, x_off_text, max_w,
-                                );
-                                self.msg_cache_tokens[idx] = token;
-                                self.msg_cache_w[idx] = inner_area.width;
-                                self.msg_cache_h[idx] = ah;
-                                self.msg_cache_cells[idx] = Some(cells);
-                                self.msg_cache_text_regions[idx] = Some(regions);
-                            }
-
-                            render_actual_h = actual_h.max(1);
+                            let regions = Self::cells_to_text_regions(
+                                temp_cells,
+                                line_stride,
+                                actual_h as u16,
+                                msg_content_top,
+                                x_off_text,
+                                max_w,
+                            );
+                            self.msg_cache_text_regions[idx] = Some(regions);
                         }
+
+                        let vis_h =
+                            (actual_h.min(vp_bottom - msg_top) - src_y as i32).max(0) as u16;
+                        let temp_cells = temp.content();
+                        let line_stride = inner_area.width as usize;
+                        let dst_x = inner_area.x;
+                        for dy in 0..vis_h {
+                            let temp_y = src_y + dy;
+                            let dst_line_y = dst_y + dy;
+                            let base = temp_y as usize * line_stride;
+                            for dx in 0..line_stride {
+                                if let Some(dst) = buf.cell_mut((dst_x + dx as u16, dst_line_y)) {
+                                    *dst = temp_cells[base + dx].clone();
+                                }
+                            }
+                        }
+
+                        // Save non-streaming messages to cache
+                        if !is_streaming_msg && actual_h > 0 {
+                            let ah = actual_h as u16;
+                            let w = inner_area.width as usize;
+                            let temp_cells = temp.content();
+                            let line_stride = inner_area.width as usize;
+                            let mut cells = Vec::with_capacity(w * ah as usize);
+                            for dy in 0..ah {
+                                let base = dy as usize * line_stride;
+                                for dx in 0..w {
+                                    cells.push(temp_cells[base + dx].clone());
+                                }
+                            }
+                            let x_off_text = inner_area.x + 3;
+                            let msg_content_top = msg_top - vp_top + self.scroll_y;
+                            let regions = Self::cells_to_text_regions(
+                                &cells,
+                                w,
+                                ah,
+                                msg_content_top,
+                                x_off_text,
+                                max_w,
+                            );
+                            self.msg_cache_tokens[idx] = token;
+                            self.msg_cache_w[idx] = inner_area.width;
+                            self.msg_cache_h[idx] = ah;
+                            self.msg_cache_cells[idx] = Some(cells);
+                            self.msg_cache_text_regions[idx] = Some(regions);
+                        }
+
+                        render_actual_h = actual_h.max(1);
+                    }
                 } else if is_top_clipped {
                     // ── Top-clipped user/error: fixed-size temp buffer ──
                     let src_y = (vp_top - msg_top) as u16;
@@ -1880,24 +1945,41 @@ impl SessionView {
                     if vis_h > 0 && msg_h > 0 {
                         let full_area = Rect::new(0, 0, inner_area.width, msg_h as u16);
                         let mut temp = Buffer::empty(full_area);
-                        temp.set_style(full_area, Style::default().bg(rgba_color(theme.background)));
+                        temp.set_style(
+                            full_area,
+                            Style::default().bg(rgba_color(theme.background)),
+                        );
 
                         match msg.role {
                             MessageRole::User => {
                                 let agent_name = msg.agent.as_deref().unwrap_or("default");
                                 let agent_color = agent_colors.get(agent_name, &unique_agents);
                                 Self::render_user_message(
-                                    &mut temp, full_area, msg, theme,
-                                    agent_color, &self.tool_state, config,
-                                    false, false,
-                                    Some(&self.part_heights_cache[idx]), streaming,
+                                    &mut temp,
+                                    full_area,
+                                    msg,
+                                    theme,
+                                    agent_color,
+                                    &self.tool_state,
+                                    config,
+                                    false,
+                                    false,
+                                    Some(&self.part_heights_cache[idx]),
+                                    streaming,
                                 );
                             }
                             MessageRole::Assistant => {
                                 Self::render_assistant_message(
-                                    &mut temp, full_area, msg, theme,
-                                    &self.tool_state, config, false, false,
-                                    &self.part_heights_cache[idx], streaming,
+                                    &mut temp,
+                                    full_area,
+                                    msg,
+                                    theme,
+                                    &self.tool_state,
+                                    config,
+                                    false,
+                                    false,
+                                    &self.part_heights_cache[idx],
+                                    streaming,
                                 );
                             }
                         }
@@ -1937,9 +2019,9 @@ impl SessionView {
                                 for dy in 0..visible_h.min(h) {
                                     let base = dy as usize * w;
                                     for dx in 0..w {
-                                        if let Some(cell) = buf.cell_mut(
-                                            (inner_area.x + dx as u16, visible_top + dy),
-                                        ) {
+                                        if let Some(cell) = buf
+                                            .cell_mut((inner_area.x + dx as u16, visible_top + dy))
+                                        {
                                             *cell = cached_cells[base + dx].clone();
                                         }
                                     }
@@ -1951,20 +2033,31 @@ impl SessionView {
                                     let x_off_text = inner_area.x + 3;
                                     let msg_content_top = msg_top - vp_top + self.scroll_y;
                                     let regions = Self::cells_to_text_regions(
-                                        cached_cells, w, h, msg_content_top, x_off_text, max_w,
+                                        cached_cells,
+                                        w,
+                                        h,
+                                        msg_content_top,
+                                        x_off_text,
+                                        max_w,
                                     );
                                     self.msg_cache_text_regions[idx] = Some(regions);
                                 }
                             }
                         } else {
-                            let msg_area = Rect::new(
-                                inner_area.x, visible_top, inner_area.width, visible_h,
-                            );
+                            let msg_area =
+                                Rect::new(inner_area.x, visible_top, inner_area.width, visible_h);
 
                             let actual_h = Self::render_assistant_message(
-                                buf, msg_area, msg, theme,
-                                &self.tool_state, config, false, false,
-                                &self.part_heights_cache[idx], streaming,
+                                buf,
+                                msg_area,
+                                msg,
+                                theme,
+                                &self.tool_state,
+                                config,
+                                false,
+                                false,
+                                &self.part_heights_cache[idx],
+                                streaming,
                             ) as i32;
 
                             render_actual_h = actual_h.max(1);
@@ -1986,7 +2079,12 @@ impl SessionView {
                                     }
                                 }
                                 let regions = Self::cells_to_text_regions(
-                                    &cells, w, ah, msg_content_top, x_off_text, max_w,
+                                    &cells,
+                                    w,
+                                    ah,
+                                    msg_content_top,
+                                    x_off_text,
+                                    max_w,
                                 );
                                 self.msg_cache_tokens[idx] = token;
                                 self.msg_cache_w[idx] = inner_area.width;
@@ -2011,14 +2109,22 @@ impl SessionView {
                                 let agent_name = msg.agent.as_deref().unwrap_or("default");
                                 let agent_color = agent_colors.get(agent_name, &unique_agents);
                                 Self::render_user_message(
-                                    buf, msg_area, msg, theme,
-                                    agent_color, &self.tool_state, config,
-                                    false, false,
-                                    Some(&self.part_heights_cache[idx]), streaming,
+                                    buf,
+                                    msg_area,
+                                    msg,
+                                    theme,
+                                    agent_color,
+                                    &self.tool_state,
+                                    config,
+                                    false,
+                                    false,
+                                    Some(&self.part_heights_cache[idx]),
+                                    streaming,
                                 );
                             }
                             MessageRole::Assistant => {
-                                let is_streaming_msg = idx == session.messages.len() - 1 && streaming;
+                                let is_streaming_msg =
+                                    idx == session.messages.len() - 1 && streaming;
                                 let token = msg_content_token(msg, config_tok, max_w);
                                 let cache_hit = !is_streaming_msg
                                     && token == self.msg_cache_tokens[idx]
@@ -2033,9 +2139,10 @@ impl SessionView {
                                     for dy in 0..visible_h.min(cached_h) {
                                         let base = dy as usize * cached_w;
                                         for dx in 0..cached_w {
-                                            if let Some(cell) = buf.cell_mut(
-                                                (inner_area.x + dx as u16, visible_top + dy),
-                                            ) {
+                                            if let Some(cell) = buf.cell_mut((
+                                                inner_area.x + dx as u16,
+                                                visible_top + dy,
+                                            )) {
                                                 *cell = cached_cells[base + dx].clone();
                                             }
                                         }
@@ -2043,9 +2150,16 @@ impl SessionView {
                                     render_actual_h = cached_h as i32;
                                 } else {
                                     let actual_h = Self::render_assistant_message(
-                                        buf, msg_area, msg, theme,
-                                        &self.tool_state, config, false, false,
-                                        &self.part_heights_cache[idx], streaming,
+                                        buf,
+                                        msg_area,
+                                        msg,
+                                        theme,
+                                        &self.tool_state,
+                                        config,
+                                        false,
+                                        false,
+                                        &self.part_heights_cache[idx],
+                                        streaming,
                                     ) as i32;
 
                                     render_actual_h = actual_h.max(1);
@@ -2058,7 +2172,10 @@ impl SessionView {
                                         for dy in 0..ah {
                                             for dx in 0..w {
                                                 let c = buf
-                                                    .cell((inner_area.x + dx as u16, visible_top + dy))
+                                                    .cell((
+                                                        inner_area.x + dx as u16,
+                                                        visible_top + dy,
+                                                    ))
                                                     .cloned()
                                                     .unwrap_or_default();
                                                 cells.push(c);
@@ -2067,7 +2184,12 @@ impl SessionView {
                                         let x_off_text = inner_area.x + 3;
                                         let msg_content_top = msg_top - vp_top + self.scroll_y;
                                         let regions = Self::cells_to_text_regions(
-                                            &cells, w, ah, msg_content_top, x_off_text, max_w,
+                                            &cells,
+                                            w,
+                                            ah,
+                                            msg_content_top,
+                                            x_off_text,
+                                            max_w,
                                         );
                                         self.msg_cache_tokens[idx] = token;
                                         self.msg_cache_w[idx] = inner_area.width;
@@ -2090,12 +2212,12 @@ impl SessionView {
             // Both are stored in content space so the visual highlight follows
             // content during auto-scroll.
             let vp_top = i32::from(inner_area.y);
-            let anchor_screen_y =
-                (self.selection_anchor_content_y - self.scroll_y + vp_top)
-                    .clamp(vp_top, vp_top + i32::from(inner_area.height) - 1) as u16;
-            let focus_screen_y =
-                (self.selection_focus_content_y - self.scroll_y + vp_top)
-                    .clamp(vp_top, vp_top + i32::from(inner_area.height) - 1) as u16;
+            let anchor_screen_y = (self.selection_anchor_content_y - self.scroll_y + vp_top)
+                .clamp(vp_top, vp_top + i32::from(inner_area.height) - 1)
+                as u16;
+            let focus_screen_y = (self.selection_focus_content_y - self.scroll_y + vp_top)
+                .clamp(vp_top, vp_top + i32::from(inner_area.height) - 1)
+                as u16;
 
             let start_y = anchor_screen_y.min(focus_screen_y);
             let end_y = anchor_screen_y.max(focus_screen_y);
@@ -2141,7 +2263,11 @@ impl SessionView {
 
         let _frame_us = _frame_start.elapsed().as_micros();
         if _frame_us > 5000 {
-            log::debug!("[PERF] session_render_total: {_frame_us}us msgs={} scroll_y={}", session.messages.len(), self.scroll_y);
+            log::debug!(
+                "[PERF] session_render_total: {_frame_us}us msgs={} scroll_y={}",
+                session.messages.len(),
+                self.scroll_y
+            );
         }
 
         total_height

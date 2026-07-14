@@ -304,11 +304,17 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
         }
         "task" => {
             let desc = input_value(&part.input, "description").unwrap_or_default();
-            if desc.is_empty() { "Delegating...".to_string() } else { desc }
+            if desc.is_empty() {
+                "Delegating...".to_string()
+            } else {
+                desc
+            }
         }
         "question" => "Asking questions...".to_string(),
         "todo" => {
-            if matches!(part.status, ToolStatus::Running) || part.output.as_deref().unwrap_or("").trim().is_empty() {
+            if matches!(part.status, ToolStatus::Running)
+                || part.output.as_deref().unwrap_or("").trim().is_empty()
+            {
                 format!("Writing {}...", &part.tool)
             } else {
                 match part.tool.as_str() {
@@ -898,15 +904,17 @@ pub fn render_todo(
 
     let mut lines: Vec<String> = Vec::new();
 
-    lines.push(match tool_name {
-        "plan_todo_write" => "\u{270F} TODO Write",
-        "plan_todo_edit" => "\u{270F} TODO Edit",
-        "plan_todo_cross_off" => "\u{2713} TODO Cross Off",
-        "plan_todo_read" => "\u{2630} TODO Read",
-        "plan_load_from_md" => "\u{1F4C2} TODO Load",
-        _ => "\u{2630} TODO",
-    }
-    .to_string());
+    lines.push(
+        match tool_name {
+            "plan_todo_write" => "\u{270F} TODO Write",
+            "plan_todo_edit" => "\u{270F} TODO Edit",
+            "plan_todo_cross_off" => "\u{2713} TODO Cross Off",
+            "plan_todo_read" => "\u{2630} TODO Read",
+            "plan_load_from_md" => "\u{1F4C2} TODO Load",
+            _ => "\u{2630} TODO",
+        }
+        .to_string(),
+    );
 
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&output) {
         let groups = json
@@ -929,10 +937,7 @@ pub fn render_todo(
                             .get("description")
                             .and_then(|d| d.as_str())
                             .unwrap_or("");
-                        let status = item
-                            .get("status")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("?");
+                        let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("?");
                         let icon = match status {
                             "Completed" => "\u{2713}",
                             "InProgress" => "\u{25CF}",
@@ -953,7 +958,11 @@ pub fn render_todo(
             }
         }
 
-        if groups.is_none() && json.get("nags").and_then(|n| n.as_array()).map_or(true, |n| n.is_empty())
+        if groups.is_none()
+            && json
+                .get("nags")
+                .and_then(|n| n.as_array())
+                .map_or(true, |n| n.is_empty())
         {
             lines.push("  (empty)".to_string());
         }

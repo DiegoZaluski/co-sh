@@ -1,8 +1,8 @@
 use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lru::LruCache;
 
@@ -11,11 +11,11 @@ use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight, HighlightSpan};
+use cosh_sdk::tree_sitter::highlight::{HighlightCategory, HighlightSpan, highlight};
 
 use crate::core::renderable::Renderable;
-use crate::core::rgba::{ColorInput, parse_color};
 use crate::core::rgba::RGBA;
+use crate::core::rgba::{ColorInput, parse_color};
 
 use super::context::{MarkdownContext, MarkdownElement};
 use super::styles::MarkdownPalette;
@@ -371,9 +371,14 @@ impl Renderable for MarkdownRenderable {
                             TagEnd::Table => {
                                 // Render the complete table
                                 Self::render_table(
-                                    buf, &mut x, &mut y,
-                                    area.x, max_x, max_y,
-                                    &tbl_headers, &tbl_rows,
+                                    buf,
+                                    &mut x,
+                                    &mut y,
+                                    area.x,
+                                    max_x,
+                                    max_y,
+                                    &tbl_headers,
+                                    &tbl_rows,
                                     &palette,
                                     self.table_border_color.as_ref(),
                                 );
@@ -414,8 +419,7 @@ impl Renderable for MarkdownRenderable {
                                 x = area.x;
                             }
                         }
-                        Tag::Paragraph | Tag::BlockQuote(_)
-                        | Tag::Heading { .. } => {
+                        Tag::Paragraph | Tag::BlockQuote(_) | Tag::Heading { .. } => {
                             if x != area.x {
                                 y += 1;
                                 x = area.x;
@@ -437,19 +441,27 @@ impl Renderable for MarkdownRenderable {
                                 y += 1;
                                 x = area.x;
                             }
-                            let marker_style = Style::default().fg(rgba_to_color(palette.list_marker_color()));
-                            let marker = ctx
-                                .list_marker()
-                                .map_or_else(|| "• ".to_string(), |(ordered, num)| {
+                            let marker_style =
+                                Style::default().fg(rgba_to_color(palette.list_marker_color()));
+                            let marker = ctx.list_marker().map_or_else(
+                                || "• ".to_string(),
+                                |(ordered, num)| {
                                     if ordered {
                                         format!("{num}. ")
                                     } else {
                                         "• ".to_string()
                                     }
-                                });
+                                },
+                            );
                             Self::render_text(
-                                &marker, buf, &mut x, &mut y,
-                                area.x, max_x, max_y, marker_style,
+                                &marker,
+                                buf,
+                                &mut x,
+                                &mut y,
+                                area.x,
+                                max_x,
+                                max_y,
+                                marker_style,
                             );
                         }
                         Tag::TableHead
@@ -485,8 +497,7 @@ impl Renderable for MarkdownRenderable {
                             y += 1;
                             x = area.x;
                         }
-                        TagEnd::TableRow
-                        | TagEnd::Table => {
+                        TagEnd::TableRow | TagEnd::Table => {
                             y += 1;
                             x = area.x;
                         }
@@ -520,8 +531,14 @@ impl Renderable for MarkdownRenderable {
                 | Event::InlineHtml(text) => {
                     if ctx.in_code_block() {
                         self.render_code_block(
-                            &text, buf, &mut x, &mut y,
-                            area.x, max_x, max_y, ctx.code_block_lang(),
+                            &text,
+                            buf,
+                            &mut x,
+                            &mut y,
+                            area.x,
+                            max_x,
+                            max_y,
+                            ctx.code_block_lang(),
                         );
                     } else {
                         let element = ctx.current_element();
@@ -530,29 +547,20 @@ impl Renderable for MarkdownRenderable {
                         if ctx.in_blockquote() {
                             style = style.fg(rgba_to_color(palette.muted_color()));
                         }
-                        Self::render_text(
-                            &text, buf, &mut x, &mut y,
-                            area.x, max_x, max_y, style,
-                        );
+                        Self::render_text(&text, buf, &mut x, &mut y, area.x, max_x, max_y, style);
                     }
                 }
 
                 // ── Inline code ─────────────────────────────────
                 Event::Code(text) => {
                     let style = palette.style_for(Some(MarkdownElement::InlineCode), None);
-                    Self::render_text(
-                        &text, buf, &mut x, &mut y,
-                        area.x, max_x, max_y, style,
-                    );
+                    Self::render_text(&text, buf, &mut x, &mut y, area.x, max_x, max_y, style);
                 }
 
                 // ── Raw HTML ────────────────────────────────────
                 Event::Html(html) => {
                     let style = Style::default().fg(rgba_to_color(palette.muted_color()));
-                    Self::render_text(
-                        &html, buf, &mut x, &mut y,
-                        area.x, max_x, max_y, style,
-                    );
+                    Self::render_text(&html, buf, &mut x, &mut y, area.x, max_x, max_y, style);
                 }
 
                 // ── Line breaks ─────────────────────────────────
@@ -580,17 +588,19 @@ impl Renderable for MarkdownRenderable {
                 Event::TaskListMarker(checked) => {
                     let marker = if checked { "[x] " } else { "[ ] " };
                     let style = Style::default().fg(rgba_to_color(palette.list_marker_color()));
-                    Self::render_text(
-                        marker, buf, &mut x, &mut y,
-                        area.x, max_x, max_y, style,
-                    );
+                    Self::render_text(marker, buf, &mut x, &mut y, area.x, max_x, max_y, style);
                 }
             }
         }
 
         let _elapsed = _start.elapsed().as_micros();
         if _elapsed > 500 {
-            log::debug!("[PERF] markdown_render_self: content_len={} area={}x{} elapsed={_elapsed}us", self.content.len(), area.width, area.height);
+            log::debug!(
+                "[PERF] markdown_render_self: content_len={} area={}x{} elapsed={_elapsed}us",
+                self.content.len(),
+                area.width,
+                area.height
+            );
         }
     }
 }
@@ -670,7 +680,10 @@ impl MarkdownRenderable {
                     break;
                 }
                 // Use the byte offset of the first char in the grapheme for highlighting
-                let cat = cat_map.get(byte_offset + remaining_offset).copied().flatten();
+                let cat = cat_map
+                    .get(byte_offset + remaining_offset)
+                    .copied()
+                    .flatten();
                 let style = Self::highlight_style(cat, default_fg, code_bg);
                 if let Some(cell) = buf.cell_mut((*x, *y)) {
                     if grapheme.len() == 1 {
@@ -695,7 +708,11 @@ impl MarkdownRenderable {
 
         let _cb_us = _cb_start.elapsed().as_micros();
         if _cb_us > 500 {
-            log::debug!("[PERF] code_block_render: text_len={} lang={} elapsed={_cb_us}us", text.len(), if lang.is_empty() { "none" } else { lang });
+            log::debug!(
+                "[PERF] code_block_render: text_len={} lang={} elapsed={_cb_us}us",
+                text.len(),
+                if lang.is_empty() { "none" } else { lang }
+            );
         }
     }
 }
@@ -736,7 +753,11 @@ impl MarkdownRenderable {
 
         // Clamp total width to available space
         let padding: u16 = 1; // 1 char padding on each side
-        let border_gaps = if col_count > 1 { col_count as u16 - 1 } else { 0 };
+        let border_gaps = if col_count > 1 {
+            col_count as u16 - 1
+        } else {
+            0
+        };
         let total_w: u16 = col_widths.iter().map(|w| w + 2 * padding).sum::<u16>() + border_gaps;
         let available = max_x.saturating_sub(area_x);
         if total_w > available {
@@ -766,39 +787,40 @@ impl MarkdownRenderable {
         }
 
         // Helper to render a border line
-        let render_border = |buf: &mut Buffer, y: u16, left: char, _mid: char, right: char, sep: char| {
-            if y >= max_y {
-                return;
-            }
-            for ci in 0..col_count {
-                let sx = col_starts[ci];
-                let cw = col_widths[ci] + 2 * padding;
-                let start_char = if ci == 0 { left } else { sep };
-                // Left edge: draw corner/sep at sx-1 (saturates to 0 for ci=0)
-                let corner_pos = sx.saturating_sub(1);
-                if let Some(cell) = buf.cell_mut((corner_pos, y)) {
-                    cell.set_char(start_char);
-                    cell.set_style(border_style);
+        let render_border =
+            |buf: &mut Buffer, y: u16, left: char, _mid: char, right: char, sep: char| {
+                if y >= max_y {
+                    return;
                 }
-                // Horizontal line: skip the corner position (already drawn above)
-                for dx in 0..cw {
-                    let px = sx + dx;
-                    if px == corner_pos && ci == 0 {
-                        continue;
+                for ci in 0..col_count {
+                    let sx = col_starts[ci];
+                    let cw = col_widths[ci] + 2 * padding;
+                    let start_char = if ci == 0 { left } else { sep };
+                    // Left edge: draw corner/sep at sx-1 (saturates to 0 for ci=0)
+                    let corner_pos = sx.saturating_sub(1);
+                    if let Some(cell) = buf.cell_mut((corner_pos, y)) {
+                        cell.set_char(start_char);
+                        cell.set_style(border_style);
                     }
-                    if let Some(cell) = buf.cell_mut((px, y)) {
-                        cell.set_char('─');
+                    // Horizontal line: skip the corner position (already drawn above)
+                    for dx in 0..cw {
+                        let px = sx + dx;
+                        if px == corner_pos && ci == 0 {
+                            continue;
+                        }
+                        if let Some(cell) = buf.cell_mut((px, y)) {
+                            cell.set_char('─');
+                            cell.set_style(border_style);
+                        }
+                    }
+                    let ex = sx + cw;
+                    let corner = if ci + 1 < col_count { sep } else { right };
+                    if let Some(cell) = buf.cell_mut((ex, y)) {
+                        cell.set_char(corner);
                         cell.set_style(border_style);
                     }
                 }
-                let ex = sx + cw;
-                let corner = if ci + 1 < col_count { sep } else { right };
-                if let Some(cell) = buf.cell_mut((ex, y)) {
-                    cell.set_char(corner);
-                    cell.set_style(border_style);
-                }
-            }
-        };
+            };
 
         // Helper to render a row of cells
         let render_row = |buf: &mut Buffer, y: u16, cells: &[String], is_header: bool| {
@@ -907,15 +929,16 @@ pub fn markdown_to_visible_text(markdown: &str) -> String {
                 ctx.handle_start(&tag);
                 match &tag {
                     Tag::Item => {
-                        let marker = ctx
-                            .list_marker()
-                            .map_or_else(|| "• ".to_string(), |(ordered, num)| {
+                        let marker = ctx.list_marker().map_or_else(
+                            || "• ".to_string(),
+                            |(ordered, num)| {
                                 if ordered {
                                     format!("{num}. ")
                                 } else {
                                     "• ".to_string()
                                 }
-                            });
+                            },
+                        );
                         result.push_str(&marker);
                     }
                     Tag::Paragraph

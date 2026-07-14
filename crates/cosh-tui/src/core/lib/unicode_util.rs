@@ -11,7 +11,6 @@
 /// Uses `finl_unicode::grapheme_clusters::Graphemes` to split text into
 /// grapheme clusters, then `unicode_width::UnicodeWidthStr::width` to
 /// measure each cluster's display width (capped at 2 columns).
-
 use finl_unicode::grapheme_clusters::Graphemes;
 
 /// Returns the display width of a single grapheme in terminal columns.
@@ -86,9 +85,7 @@ pub fn str_display_width(s: &str) -> usize {
 /// This is the primary rendering primitive: instead of iterating
 /// `text.chars()`, iterate `graphemes_with_width(text)` to correctly
 /// position each visual unit in the terminal grid.
-pub fn graphemes_with_width<'a>(
-    text: &'a str,
-) -> impl Iterator<Item = (&'a str, u16)> + 'a {
+pub fn graphemes_with_width<'a>(text: &'a str) -> impl Iterator<Item = (&'a str, u16)> + 'a {
     Graphemes::new(text).map(|g| {
         let w = grapheme_display_width(g);
         (g, w)

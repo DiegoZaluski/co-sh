@@ -94,16 +94,19 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                             y += 1;
                             x = area_x;
                         }
-                        let marker = ctx
-                            .list_marker()
-                            .map_or_else(|| "• ".to_string(), |(ordered, num)| {
+                        let marker = ctx.list_marker().map_or_else(
+                            || "• ".to_string(),
+                            |(ordered, num)| {
                                 if ordered {
                                     format!("{num}. ")
                                 } else {
                                     "• ".to_string()
                                 }
-                            });
-                        for (_grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(&marker) {
+                            },
+                        );
+                        for (_grapheme, w) in
+                            crate::core::lib::unicode_util::graphemes_with_width(&marker)
+                        {
                             if x >= max_w {
                                 y += 1;
                                 x = area_x;
@@ -181,7 +184,8 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                         x = x.saturating_add(line_chars.min(max_w.saturating_sub(x)));
                     }
                 } else {
-                    for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
+                    for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text)
+                    {
                         if x + w > max_w {
                             y += 1;
                             x = area_x;
