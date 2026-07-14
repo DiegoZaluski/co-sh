@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use lru::LruCache;
 
 use pulldown_cmark::{Event, Options, Tag, TagEnd};
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
@@ -175,6 +175,13 @@ impl MarkdownRenderable {
                     cell.set_symbol(grapheme);
                 }
                 cell.set_style(style);
+            }
+            if w > 1 {
+                for dx in 1..w {
+                    if let Some(cell) = buf.cell_mut((*x + dx, *y)) {
+                        cell.set_diff_option(CellDiffOption::Skip);
+                    }
+                }
             }
             *x += w;
         }
@@ -672,6 +679,13 @@ impl MarkdownRenderable {
                         cell.set_symbol(grapheme);
                     }
                     cell.set_style(style);
+                }
+                if w > 1 {
+                    for dx in 1..w {
+                        if let Some(next_cell) = buf.cell_mut((*x + dx, *y)) {
+                            next_cell.set_diff_option(CellDiffOption::Skip);
+                        }
+                    }
                 }
                 *x += w;
                 remaining_offset += grapheme.len();

@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
@@ -314,6 +314,14 @@ impl Renderable for TextRenderable {
                         cell.set_symbol(grapheme);
                     }
                     cell.set_style(style);
+                }
+
+                if w > 1 {
+                    for dx in 1..w {
+                        if let Some(cell) = buf.cell_mut((current_col + dx, current_line)) {
+                            cell.set_diff_option(CellDiffOption::Skip);
+                        }
+                    }
                 }
 
                 current_col += w;

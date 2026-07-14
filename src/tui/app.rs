@@ -12,6 +12,7 @@ use crossterm::event::{
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use tokio::runtime::Handle;
@@ -872,6 +873,7 @@ impl App {
                     if let Some(cell) = buf.cell_mut((x, y)) {
                         cell.set_style(Style::default().bg(bg_color));
                         cell.set_char(' ');
+                        cell.set_diff_option(CellDiffOption::None);
                     }
                 }
             }

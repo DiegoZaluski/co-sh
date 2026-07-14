@@ -4,7 +4,7 @@ pub mod question;
 pub mod sidebar;
 pub mod subagent_footer;
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
@@ -714,6 +714,13 @@ impl SessionView {
                 }
                 cell.set_style(style);
             }
+            if w > 1 {
+                for dx in 1..w {
+                    if let Some(cell) = buf.cell_mut((cx + dx, y)) {
+                        cell.set_diff_option(CellDiffOption::Skip);
+                    }
+                }
+            }
             cx += w;
         }
         (y - y_ + 1).max(1)
@@ -951,6 +958,13 @@ impl SessionView {
                         cell.set_symbol(grapheme);
                     }
                     cell.set_style(error_style);
+                }
+                if w > 1 {
+                    for dx in 1..w {
+                        if let Some(cell) = buf.cell_mut((line_x + dx, line_y)) {
+                            cell.set_diff_option(CellDiffOption::Skip);
+                        }
+                    }
                 }
                 line_x += w;
             }
