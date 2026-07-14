@@ -495,15 +495,30 @@ impl Harness {
         let context = self.build_chat_context();
         log::debug!("stream_chat context_len={}", context.len());
 
-        let mut stream = match self
-            .connector
-            .stream_chat_with_system(input, &context)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                log::debug!("stream_chat CONNECTOR_ERR={e}");
-                return Err(e.to_string());
+        let mut stream = tokio::select! {
+            result = self.connector.stream_chat_with_system(input, &context) => {
+                match result {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::debug!("stream_chat CONNECTOR_ERR={e}");
+                        return Err(e.to_string());
+                    }
+                }
+            }
+            _ = async {
+                loop {
+                    if self
+                        .stop_signal
+                        .as_ref()
+                        .is_some_and(|s| s.load(Ordering::Relaxed))
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            } => {
+                log::debug!("stream_chat STOPPED during connect");
+                return Err("Interrupted by user".to_string());
             }
         };
 
@@ -747,13 +762,51 @@ impl Harness {
                 } else {
                     // Normal dispatch for all other tools
                     log::debug!("run_agent_loop dispatch_next start");
-                    match self.dispatch_next().await {
-                        Ok(output) => {
+
+                    /// Outcome of a tool dispatch, possibly interrupted by stop.
+                    #[derive(Debug)]
+                    enum DispatchOut {
+                        Ok(String),
+                        Err(String),
+                        Stopped,
+                    }
+
+                    // Scope dispatch_fut tightly so its &mut self borrow is
+                    // released BEFORE we match on the result below.
+                    let dispatch_out = {
+                        let dispatch_fut = self.dispatch_next();
+                        tokio::pin!(dispatch_fut);
+
+                        tokio::select! {
+                            result = &mut dispatch_fut => match result {
+                                Ok(output) => DispatchOut::Ok(output),
+                                Err(e) => DispatchOut::Err(e),
+                            },
+                            _ = async {
+                                loop {
+                                    if stop_signal.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(
+                                        50,
+                                    ))
+                                    .await;
+                                }
+                            } => DispatchOut::Stopped,
+                        }
+                        // dispatch_fut dropped here → &mut self released
+                    };
+
+                    match dispatch_out {
+                        DispatchOut::Ok(output) => {
                             self.tool_failure_count = 0;
-                            log::debug!("run_agent_loop dispatch_next OK len={}", output.len());
+                            log::debug!(
+                                "run_agent_loop dispatch_next OK len={}",
+                                output.len()
+                            );
                             let _ = tx.send(HarnessEvent::ToolResult { output });
                         }
-                        Err(e) => {
+                        DispatchOut::Err(e) => {
                             self.tool_failure_count += 1;
                             self.correction_memory.push(&format!(
                                 "Tool `{}` failed: {}",
@@ -761,19 +814,28 @@ impl Harness {
                                 e,
                             ));
                             log::debug!(
-                                "run_agent_loop dispatch_next ERR={e} (failure #{}/{MAX_TOOL_RETRIES})",
+                                "run_agent_loop dispatch_next ERR={e} \
+                                 (failure #{}/{MAX_TOOL_RETRIES})",
                                 self.tool_failure_count,
                             );
                             let _ = tx.send(HarnessEvent::ToolError { error: e });
                             if self.tool_failure_count >= MAX_TOOL_RETRIES {
                                 let msg = format!(
-                                    "{MAX_TOOL_RETRIES} consecutive tool call failures. \
-                                     Agent loop interrupted."
+                                    "{MAX_TOOL_RETRIES} consecutive tool call \
+                                     failures. Agent loop interrupted."
                                 );
                                 let _ = tx.send(HarnessEvent::Error(msg));
                                 self.stop = true;
                                 break;
                             }
+                        }
+                        DispatchOut::Stopped => {
+                            log::debug!(
+                                "run_agent_loop dispatch_next STOPPED by user"
+                            );
+                            self.stop = true;
+                            let _ = tx.send(HarnessEvent::Stopped);
+                            return; // Exit run_agent_loop entirely
                         }
                     }
                 }
