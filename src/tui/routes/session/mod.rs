@@ -2,6 +2,7 @@ pub mod footer;
 pub mod permission;
 pub mod question;
 pub mod sidebar;
+pub mod right_panel;
 pub mod subagent_footer;
 
 use ratatui::buffer::{Buffer, CellDiffOption};

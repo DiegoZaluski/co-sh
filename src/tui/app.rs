@@ -31,6 +31,7 @@ use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::sidebar::{SidebarAction, SidebarView};
+use crate::routes::session::right_panel::{render_right_panel, should_show_right_panel, RIGHT_PANEL_WIDTH};
 use crate::routes::tools::InternalToolsView;
 use crate::session_store::{
     SessionStore, format_session_timestamp, generate_session_id, is_valid_session,
@@ -897,14 +898,29 @@ impl App {
 
             let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
 
+            let right_panel_w = if matches!(self.mode(), AppMode::Session) && (should_show_right_panel(area.width, &self.state.right_panel) || self.state.right_panel.force_open) {
+                RIGHT_PANEL_WIDTH
+            } else {
+                0
+            };
             let main_area = Rect::new(
                 area.x + sidebar_w,
                 area.y,
-                area.width.saturating_sub(sidebar_w),
+                area.width.saturating_sub(sidebar_w + right_panel_w),
                 area.height,
             );
 
             if self.sidebar.open {
+            // Right panel
+            if right_panel_w > 0 {
+                render_right_panel(
+                    buf,
+                    Rect::new(area.right().saturating_sub(right_panel_w), area.y, right_panel_w, area.height),
+                    &self.state.right_panel,
+                    &self.theme,
+                    area.width,
+                );
+            }
                 self.sidebar.render(
                     buf,
                     Rect::new(area.x, area.y, sidebar_w, area.height),
@@ -1411,6 +1427,9 @@ impl App {
                         Some(crate::keymap::Action::ToggleSidebar) => {
                             self.sidebar.open = !self.sidebar.open;
                         }
+                        Some(crate::keymap::Action::ToggleRightPanel) => {
+                            self.state.right_panel.force_open = !self.state.right_panel.force_open;
+                        }
                         Some(crate::keymap::Action::ToggleHelp) => {
                             self.dialog.show(DialogType::Shortcuts { scroll: 0 });
                         }
@@ -1636,6 +1655,7 @@ impl App {
                                 self.dialog.pop();
                             } else if matches!(self.mode(), AppMode::Session) {
                                 self.state.current_session_id = None;
+                    self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
                             } else if matches!(self.mode(), AppMode::AddProvider) {
                                 self.show_add_provider = false;
                             } else if matches!(self.mode(), AppMode::Home) {
@@ -2022,6 +2042,22 @@ impl App {
                 }
 
                 HarnessEvent::ToolCall { tool, input } => {
+                    // Track plan_todo_write calls for right panel TODO list
+                    if tool == "plan_todo_write" {
+                        self.state.right_panel.pending_todo_update_count += 1;
+                    }
+                    // Also track plan_todo_cross_off for checkmarks
+                    if tool == "plan_todo_cross_off" {
+                        self.state.right_panel.pending_todo_update_count += 1;
+                    }
+                    // Start PTY tracking for bash calls
+                    if tool == "bash_run" {
+                        let command = input
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        self.state.right_panel.start_pty(command.to_string(), None);
+                    }
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
@@ -2048,6 +2084,50 @@ impl App {
                 }
 
                 HarnessEvent::ToolResult { output } => {
+                    // Try to parse as TODO output to update right panel
+                    if self.state.right_panel.pending_todo_update_count > 0 {
+                        self.state.right_panel.pending_todo_update_count -= 1;
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&output) {
+                            if let Some(groups) = val
+                                .get("list")
+                                .and_then(|l| l.get("groups"))
+                                .and_then(|g| g.as_array())
+                            {
+                                let todos: Vec<_> = groups
+                                    .iter()
+                                    .flat_map(|g| {
+                                        g.get("items")
+                                            .and_then(|items| items.as_array())
+                                            .into_iter()
+                                            .flatten()
+                                    })
+                                    .filter_map(|item| {
+                                        let status = item
+                                            .get("status")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("Pending");
+                                        let description = item
+                                            .get("description")
+                                            .and_then(|d| d.as_str())
+                                            .unwrap_or("");
+                                        Some(
+                                            crate::routes::session::right_panel::types::TodoItem {
+                                                status: match status {
+                                                    "InProgress" => "in_progress",
+                                                    "Completed" => "completed",
+                                                    "Cancelled" => "cancelled",
+                                                    _ => "pending",
+                                                }
+                                                .to_string(),
+                                                content: description.to_string(),
+                                            },
+                                        )
+                                    })
+                                    .collect();
+                                self.state.right_panel.set_todos(todos);
+                            }
+                        }
+                    }
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
@@ -2060,6 +2140,7 @@ impl App {
                             break;
                         }
                     }
+                    self.state.right_panel.complete_last_pty(output.clone());
                 }
 
                 HarnessEvent::ToolError { error } => {
@@ -2074,7 +2155,16 @@ impl App {
                             break;
                         }
                     }
+                    self.state.right_panel.fail_last_pty(error.clone());
                 }
+                HarnessEvent::ToolOutput { tool: _tool, output, finished } => {
+                    // Update right panel PTY with streaming output
+                    self.state.right_panel.update_last_pty(output.clone());
+                    if finished {
+                        self.state.right_panel.complete_last_pty(output.clone());
+                    }
+                }
+
 
                 HarnessEvent::Reasoning { text } => {
                     let Some(session) = self.state.current_session_mut() else {

@@ -1,3 +1,4 @@
+use crate::routes::session::right_panel::types::RightPanelState;
 use crate::types::{
     FilePart, Message, MessageRole, Part, ReasoningPart, Session, SessionStatus, TextPart,
     ToolPart, ToolStatus,
@@ -19,10 +20,12 @@ pub struct AppState {
     pub mcp_count: usize,
     pub mcp_errors: usize,
     pub permission_count: usize,
+    /// Right panel state (TODOs, PTY sessions).
+    pub right_panel: RightPanelState,
 }
 
 impl AppState {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             sessions: vec![],
             current_session_id: None,
@@ -36,6 +39,7 @@ impl AppState {
             mcp_count: 0,
             mcp_errors: 0,
             permission_count: 0,
+            right_panel: RightPanelState::new(),
         }
     }
 
