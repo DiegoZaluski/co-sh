@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fmt::Write;
 use std::sync::Mutex;
 
+use super::events::HarnessEvent;
 use cosh_sdk::extract_action::ToolSchema;
 use cosh_tools::{
     bash::{Bash, BashRunInput},
@@ -47,6 +48,8 @@ pub struct CoshTools {
     plan: Mutex<Plan>,
     question: Question,
     skills: Skills,
+    /// Optional event sender for streaming tool output.
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
 }
 
 impl CoshTools {
@@ -61,7 +64,13 @@ impl CoshTools {
             plan: Mutex::new(Plan::new()),
             question: Question::new(),
             skills: Skills::new(),
+            event_tx: None,
         }
+    }
+
+    /// Set the event sender for streaming tool output.
+    pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>) {
+        self.event_tx = Some(tx);
     }
 
     /// All tool descriptions, skipping disabled ones.
@@ -288,7 +297,7 @@ impl Tools for CoshTools {
                 tokio::pin!(stream);
                 let mut last = String::new();
                 while let Some(chunk) = stream.next().await {
-                    last = format!(
+                    let chunk_text = format!(
                         "stdout: {}\nstderr: {}\nexit_code: {:?}\nsignal: {:?}\ntruncated: {}",
                         String::from_utf8_lossy(&chunk.stdout),
                         String::from_utf8_lossy(&chunk.stderr),
@@ -296,6 +305,17 @@ impl Tools for CoshTools {
                         chunk.signal,
                         chunk.truncated,
                     );
+                    last = chunk_text.clone();
+
+                    // Send intermediate chunks for PTY streaming
+                    if let Some(ref tx) = self.event_tx {
+                        let finished = chunk.exit_code.is_some() || chunk.signal.is_some();
+                        let _ = tx.send(HarnessEvent::ToolOutput {
+                            tool: "bash_run".to_string(),
+                            output: chunk_text,
+                            finished,
+                        });
+                    }
                 }
                 Ok(last)
             }

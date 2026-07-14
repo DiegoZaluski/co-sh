@@ -613,6 +613,11 @@ impl Harness {
         // Store the stop signal so stream_chat can check it mid-stream.
         self.stop_signal = Some(stop_signal.clone());
 
+        // Pass the event tx to CoshTools for streaming tool output (e.g. bash)
+        if let Some(ref mut cosh) = self.cosh_tools {
+            cosh.set_event_tx(tx.clone());
+        }
+
         log::debug!(
             "run_agent_loop ENTER input={:?}",
             &input[..input.floor_char_boundary(input.len().min(80))]

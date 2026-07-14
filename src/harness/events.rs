@@ -28,6 +28,15 @@ pub enum HarnessEvent {
     Done,
     /// The agent loop was interrupted by a stop request.
     Stopped,
+    /// Intermediate output from a running tool (e.g. bash streaming).
+    ToolOutput {
+        /// The tool name that produced this output.
+        tool: String,
+        /// The output chunk text.
+        output: String,
+        /// Whether this is the final chunk for this tool call.
+        finished: bool,
+    },
     /// A fatal error occurred.
     Error(String),
     /// Models list loaded from the provider.
