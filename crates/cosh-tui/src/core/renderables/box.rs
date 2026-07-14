@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::core::border::{BorderCharacters, BorderSidesConfig, BorderStyle, border_chars};
 use crate::core::renderable::Renderable;
@@ -331,7 +331,9 @@ impl BoxRenderable {
         if a == 0 {
             return;
         }
-        let bg_style = Style::default().bg(Color::Rgb(r, g, b));
+        let bg_style = Style::default()
+            .bg(Color::Rgb(r, g, b))
+            .remove_modifier(Modifier::all());
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {
                 if let Some(cell) = buf.cell_mut((x, y)) {

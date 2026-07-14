@@ -519,7 +519,7 @@ impl DialogState {
                     for x in dialog_x..dialog_x + dialog_w {
                         if let Some(cell) = buf.cell_mut((x, y)) {
                             cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_color));
+                            cell.set_style(Style::default().bg(bg_color).remove_modifier(Modifier::all()));
                         }
                     }
                 }
@@ -667,7 +667,7 @@ impl DialogState {
                     for x in dialog_area.x..dialog_area.right() {
                         if let Some(cell) = buf.cell_mut((x, y)) {
                             cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_color));
+                            cell.set_style(Style::default().bg(bg_color).remove_modifier(Modifier::all()));
                         }
                     }
                 }
@@ -931,7 +931,7 @@ impl DialogState {
                     for x in dialog_x..dialog_x + dialog_w {
                         if let Some(cell) = buf.cell_mut((x, y)) {
                             cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_color));
+                            cell.set_style(Style::default().bg(bg_color).remove_modifier(Modifier::all()));
                         }
                     }
                 }
@@ -1013,7 +1013,7 @@ impl DialogState {
                     for x in dialog_x..dialog_x + dialog_w {
                         if let Some(cell) = buf.cell_mut((x, y)) {
                             cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_color));
+                            cell.set_style(Style::default().bg(bg_color).remove_modifier(Modifier::all()));
                         }
                     }
                 }
@@ -1200,7 +1200,7 @@ impl DialogState {
                     for x in dialog_area.x..dialog_area.right() {
                         if let Some(cell) = buf.cell_mut((x, y)) {
                             cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_color));
+                            cell.set_style(Style::default().bg(bg_color).remove_modifier(Modifier::all()));
                         }
                     }
                 }
