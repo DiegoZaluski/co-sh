@@ -15,11 +15,14 @@ use crate::theme::Theme;
 /// Number of scrambled characters in the cycling region.
 const NUM_CYCLING_CHARS: usize = 8;
 
-/// Maximum birth delay in frames (~1 s at 20 fps).
-const BIRTH_DELAY_MAX: u32 = 20;
+/// Maximum birth delay in frames (~0.6 s at 125 fps, ~4 s at 20 fps).
+const BIRTH_DELAY_MAX: u32 = 80;
 
 /// Ellipsis animation speed: number of frames per ellipsis step.
-const ELLIPSIS_ANIM_SPEED: u32 = 8;
+const ELLIPSIS_ANIM_SPEED: u32 = 32;
+
+/// Cycle divider: cycling characters change every N frames (smooth ≈ 30 fps at 125 fps).
+const CYCLE_STEP_DIVIDER: u32 = 4;
 
 /// Number of distinct animation frames (the sequence loops).
 const PRERENDERED_FRAMES: usize = 10;
@@ -179,9 +182,16 @@ impl AgentSpinner {
     }
 
     /// Advance the animation by one frame (call each render cycle).
-    pub const fn advance(&mut self) {
-        self.step = (self.step + 1) % PRERENDERED_FRAMES as u32;
+    /// Cycling characters advance only every `CYCLE_STEP_DIVIDER` frames
+    /// for a comfortable visual pace (≈30 character changes/sec at 125 fps).
+    pub fn advance(&mut self) {
+        let frame = self.frames_elapsed;
         self.frames_elapsed = self.frames_elapsed.saturating_add(1);
+
+        // Only advance cycling character step every N frames
+        if frame % CYCLE_STEP_DIVIDER == 0 {
+            self.step = (self.step + 1) % PRERENDERED_FRAMES as u32;
+        }
 
         // Birth animation finishes once we've passed the maximum delay
         if !self.initialized && self.frames_elapsed >= BIRTH_DELAY_MAX {
