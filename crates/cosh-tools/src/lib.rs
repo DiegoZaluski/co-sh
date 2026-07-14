@@ -19,3 +19,9 @@ pub mod web;
 /// so it can be passed directly to an rmcp server in the future.
 /// Structure: `{ "name": string, "description": string, "inputSchema": { ... } }`
 pub type ToolDescription = serde_json::Value;
+
+pub const TOOL_FORMAT: &str = concat!(
+    "## Tool format\n",
+    "To call a tool, respond with a JSON object:\n",
+    "{\"name\": \"tool_name\", \"arguments\": { ... }}\n\n",
+);

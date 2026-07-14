@@ -90,6 +90,9 @@ pub struct ExtractAction {
     state: StreamState,
     tool_failure_message: String,
     tool_failure_count: usize,
+    /// Stores the raw JSON of the most recent failed tool call attempt
+    /// so the correction memory can give the model specific feedback.
+    last_failed_raw: String,
 }
 
 fn extract_tool_property_keys(schema: &JsonValue) -> Vec<String> {
@@ -114,6 +117,7 @@ impl ExtractAction {
             state: StreamState::default(),
             tool_failure_message: "\n\n> ⚠ Tool call failure\n\n".to_string(),
             tool_failure_count: 0,
+            last_failed_raw: String::new(),
         }
     }
 
@@ -151,6 +155,12 @@ impl ExtractAction {
         std::mem::take(&mut self.tool_failure_count)
     }
 
+    /// Drain the raw JSON of the last failed tool call attempt.
+    #[must_use]
+    pub fn take_last_failed_raw(&mut self) -> String {
+        std::mem::take(&mut self.last_failed_raw)
+    }
+
     /// Process a complete text and extract all embedded tool calls.
     ///
     /// Returns the text split into alternating [`Item::Text`] and [`Item::ToolCall`]
@@ -179,15 +189,14 @@ impl ExtractAction {
                 items.push(Item::Text(candidate.to_string()));
                 last_end = end + 1;
                 continue;
-            }
-
-            if let Some(tool_call) = self.parse_and_validate(candidate) {
-                items.push(Item::ToolCall(tool_call));
-            } else {
-                // Invalid unfenced JSON — suppress, show warning instead
-                self.tool_failure_count += 1;
-                items.push(Item::Text(self.tool_failure_message.clone()));
-            }
+            }                    if let Some(tool_call) = self.parse_and_validate(candidate) {
+                        items.push(Item::ToolCall(tool_call));
+                    } else {
+                        // Invalid unfenced JSON — suppress, show warning instead
+                        self.tool_failure_count += 1;
+                        self.last_failed_raw = candidate.to_string();
+                        items.push(Item::Text(self.tool_failure_message.clone()));
+                    }
 
             last_end = end + 1;
         }
@@ -242,9 +251,11 @@ impl ExtractAction {
                         return StreamAction::Text(std::mem::take(&mut output));
                     }
                     self.tool_failure_count += 1;
+                    self.last_failed_raw = buffer;
                     output.push_str(&self.tool_failure_message);
                 } else if self.check_early_exit() {
                     self.tool_failure_count += 1;
+                    self.last_failed_raw = std::mem::take(&mut self.state.buffer);
                     output.push_str(&self.tool_failure_message);
                     self.state = StreamState::default();
                 }
@@ -474,19 +485,28 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
     {
         let tool = tools.iter().find(|t| t.name == name)?;
 
-        let args = obj
+        let args_ref = obj
             .get("arguments")
             .or_else(|| obj.get("input"))
             .or_else(|| obj.get("args"))
             .or_else(|| obj.get("parameters"))?;
 
-        if !validate_against_schema(args, &tool.input_schema) {
+        // Many LLMs output arguments as a JSON-encoded string (OpenAI-style).
+        // Try to parse it as JSON so we can validate the actual object.
+        let args = match args_ref {
+            JsonValue::String(s) => {
+                serde_json::from_str(s).unwrap_or_else(|_| args_ref.clone())
+            }
+            _ => args_ref.clone(),
+        };
+
+        if !validate_against_schema(&args, &tool.input_schema) {
             return None;
         }
 
         return Some(ToolCallData {
             name: name.to_string(),
-            arguments: args.clone(),
+            arguments: args,
         });
     }
 

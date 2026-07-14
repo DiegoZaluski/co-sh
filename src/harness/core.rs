@@ -3,6 +3,7 @@ use super::tools::{CoshTools, Tools};
 use cosh_recall::window::ContextWindow;
 use cosh_sdk::connector::Connector;
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
+use cosh_tools::TOOL_FORMAT;
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, Tool};
 use rmcp::service::{RoleClient, RunningService};
@@ -26,33 +27,34 @@ pub struct ServerSession {
 }
 
 pub const INSTRUCTIONS_BUILD: &str = concat!(
-    "You are an expert software engineering agent with access to tools.\n\n",
+    "You are Cosh, an expert software engineering agent with access to external tools.\n\n",
     "## Behaviour\n",
-    "- **Answer naturally.** If someone says \"hello\", just greet them back. ",
-    "Do not list tools or describe your capabilities.\n",
-    "- **Use tools only when necessary.** If you already know the answer, answer directly.\n",
-    "- **Be concise.** Skip narration of obvious actions.\n",
-    "- When done, call `stop_agent_loop`.\n\n",
-    "## Tool format\n",
-    "To call a tool, respond with a JSON object:\n",
-    "{\"name\": \"tool_name\", \"arguments\": { ... }}\n\n",
-    "The available tools and their schemas are listed below.\n"
+    "- Respond directly to the user's request.\n",
+    "- Do not introduce yourself unless the user explicitly asks who you are.\n",
+    "- Do not volunteer information about your internal capabilities or available tools.\n",
+    "- Use a tool only when it is required to produce or verify the requested result.\n",
+    "- If the request can be completed correctly without using any tool, answer directly.\n",
+    "- Avoid unnecessary narration or descriptions of obvious actions.\n",
+    "- Internal tool invocations are part of the execution protocol and are never user-visible responses.\n",
+    "- When the current user request has been fully completed and no further action is required, invoke `stop_agent_loop`.\n\n",
+    "Tool invocation is defined entirely by each tool specification.\n\n",
+    "The available tools and their specifications are listed below.\n"
 );
 
 pub const INSTRUCTIONS_ASK: &str = concat!(
-    "You are a technical discussion and planning agent with access to read-only tools.\n\n",
+    "You are Cosh, a technical discussion and planning agent with access to read-only tools.\n\n",
     "## Behaviour\n",
-    "- **Your role is to discuss, explore, and plan.** You help the user understand their ",
-    "codebase, clarify requirements, and outline implementation strategies.\n",
-    "- **Do not make changes.** You cannot edit, write, or run code.\n",
-    "- **Be conversational.** Ask clarifying questions to understand the user's intent.\n",
-    "- **Use tools to explore.** Read files, search code, fetch documentation, and research ",
-    "before answering.\n",
-    "- When the user is satisfied with the plan, call `stop_agent_loop` to end the session.\n\n",
-    "## Tool format\n",
-    "To call a tool, respond with a JSON object:\n",
-    "{\"name\": \"tool_name\", \"arguments\": { ... }}\n\n",
-    "The available tools and their schemas are listed below.\n"
+    "- Respond directly to the user's request.\n",
+    "- Do not introduce yourself unless the user explicitly asks who you are.\n",
+    "- Your purpose is to discuss, explore, and plan technical work.\n",
+    "- Help the user understand the codebase, clarify requirements, evaluate alternatives, and outline implementation strategies.\n",
+    "- Do not modify code or perform write operations.\n",
+    "- Ask clarifying questions whenever the user's intent is ambiguous or required information is missing.\n",
+    "- Use a tool only when it is required to inspect code, documentation, or other relevant information needed to answer correctly.\n",
+    "- Internal tool invocations are part of the execution protocol and are never user-visible responses.\n",
+    "- When the discussion has naturally concluded and no further exploration is required, invoke `stop_agent_loop`.\n\n",
+    "Tool invocation is defined entirely by each tool specification.\n\n",
+    "The available tools and their specifications are listed below.\n"
 );
 
 /// Default token budget for the context window.
@@ -114,6 +116,9 @@ pub struct Harness {
     /// Reset at the start of each [`stream_chat`](Self::stream_chat).
     tool_extraction_failure_count: usize,
 
+    /// Raw JSON of the last failed tool call attempt, for correction feedback.
+    last_failed_raw: String,
+
     /// Bounded, deduplicated memory of tool correction errors.
     /// Persists across agent loop iterations so the model never repeats the
     /// same mistake blindly.
@@ -147,6 +152,7 @@ impl Harness {
             disabled_tools,
             tool_failure_count: 0,
             tool_extraction_failure_count: 0,
+            last_failed_raw: String::new(),
             correction_memory: CorrectionMemory::new(5),
             #[cfg(test)]
             mock_chat_response: None,
@@ -273,7 +279,7 @@ impl Harness {
             Mode::Ask => INSTRUCTIONS_ASK,
         };
         let _ = write!(out, "{instructions}");
-
+        let _ = write!(out, "{TOOL_FORMAT}");
         for prompt in &self.system_prompts {
             let _ = write!(out, "## System: {}\n{}\n\n", prompt.title, prompt.text);
         }
@@ -290,7 +296,6 @@ impl Harness {
                 tool.name, tool.description, schema,
             );
         }
-
         if let Some(ref cosh) = self.cosh_tools {
             let _ = write!(out, "## System Tools\n\n");
             match self.mode {
@@ -428,7 +433,9 @@ impl Harness {
             .map_err(|e| e.to_string())?;
 
         let mut extractor = self.build_extractor();
-        Ok(self.process_extraction(out.message(), &mut extractor))
+        let result = self.process_extraction(out.message(), &mut extractor);
+        self.last_failed_raw = extractor.take_last_failed_raw();
+        Ok(result)
     }
 
     /// Process a stream chunk through the extractor, routing tool calls and
@@ -550,6 +557,9 @@ impl Harness {
             self.process_stream_chunk(token, &mut extractor, &mut on_token);
         }
 
+        // Capture the last failed tool call raw JSON for correction feedback
+        self.last_failed_raw = extractor.take_last_failed_raw();
+
         log::debug!("stream_chat DONE total_tokens={token_count}");
         Ok("done".into())
     }
@@ -647,8 +657,15 @@ impl Harness {
             // Record extraction failures in the correction memory so the model
             // sees the pattern even when no specific dispatch error is available.
             if extraction_failures > 0 {
-                self.correction_memory
-                    .push("Invalid JSON tool call — no registered schema matched");
+                let msg = if self.last_failed_raw.is_empty() {
+                    "Invalid JSON tool call — no registered schema matched".to_string()
+                } else {
+                    format!(
+                        "Tool call failed — you sent: {}\nThe JSON did not match any registered tool schema.\nFollow the Tool format and Schema definition above exactly.",
+                        self.last_failed_raw
+                    )
+                };
+                self.correction_memory.push(&msg);
             }
 
             if check_stop!() {
@@ -892,6 +909,7 @@ impl Harness {
             disabled_tools: HashSet::new(),
             tool_failure_count: 0,
             tool_extraction_failure_count: 0,
+            last_failed_raw: String::new(),
             correction_memory: CorrectionMemory::new(5),
             mock_chat_response: None,
             mock_stream_response: None,
