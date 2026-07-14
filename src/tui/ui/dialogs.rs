@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
@@ -520,6 +520,7 @@ impl DialogState {
                         if let Some(cell) = buf.cell_mut((x, y)) {
                             cell.set_char(' ');
                             cell.set_style(Style::default().bg(bg_color).remove_modifier(Modifier::all()));
+                            cell.set_diff_option(CellDiffOption::None);
                         }
                     }
                 }
@@ -668,6 +669,7 @@ impl DialogState {
                         if let Some(cell) = buf.cell_mut((x, y)) {
                             cell.set_char(' ');
                             cell.set_style(Style::default().bg(bg_color).remove_modifier(Modifier::all()));
+                            cell.set_diff_option(CellDiffOption::None);
                         }
                     }
                 }
@@ -932,6 +934,7 @@ impl DialogState {
                         if let Some(cell) = buf.cell_mut((x, y)) {
                             cell.set_char(' ');
                             cell.set_style(Style::default().bg(bg_color).remove_modifier(Modifier::all()));
+                            cell.set_diff_option(CellDiffOption::None);
                         }
                     }
                 }
@@ -1014,6 +1017,7 @@ impl DialogState {
                         if let Some(cell) = buf.cell_mut((x, y)) {
                             cell.set_char(' ');
                             cell.set_style(Style::default().bg(bg_color).remove_modifier(Modifier::all()));
+                            cell.set_diff_option(CellDiffOption::None);
                         }
                     }
                 }
@@ -1201,6 +1205,7 @@ impl DialogState {
                         if let Some(cell) = buf.cell_mut((x, y)) {
                             cell.set_char(' ');
                             cell.set_style(Style::default().bg(bg_color).remove_modifier(Modifier::all()));
+                            cell.set_diff_option(CellDiffOption::None);
                         }
                     }
                 }
