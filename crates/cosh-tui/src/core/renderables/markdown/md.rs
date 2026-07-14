@@ -147,6 +147,15 @@ impl MarkdownRenderable {
         style: Style,
     ) {
         for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
+            // Treat newline as an explicit line break
+            if grapheme == "\n" {
+                *y += 1;
+                *x = area_x;
+                if *y >= max_y {
+                    break;
+                }
+                continue;
+            }
             // Check if the grapheme fits in the remaining space
             if *x + w > max_x {
                 // Wrap to next line

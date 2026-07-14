@@ -209,6 +209,11 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
             Event::Html(text) => {
                 let text: &str = text.as_ref();
                 for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
+                    if grapheme == "\n" {
+                        y += 1;
+                        x = area_x;
+                        continue;
+                    }
                     if x + w > max_w {
                         y += 1;
                         x = area_x;

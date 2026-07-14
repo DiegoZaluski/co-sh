@@ -550,7 +550,7 @@ impl SessionView {
                         .and_then(|ph| ph.get(pi))
                         .copied()
                         .unwrap_or_else(|| Self::estimate_part_height(part, max_w, config, role));
-                    let render_h = (est_h * 3).max(100).min(bottom.saturating_sub(y));
+                    let render_h = (est_h.saturating_mul(3)).max(100).min(bottom.saturating_sub(y));
                     let area = Rect::new(x, y, max_w, render_h);
                     let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
                         Some(content),
@@ -1259,7 +1259,7 @@ impl SessionView {
                                 // sees on screen, fixing cut-off at the end of the last assistant
                                 // message and selection that lags behind cursor.
                                 if msg.role == MessageRole::Assistant {
-                                    let generous_h = (part_h as u16 * 3).max(200).min(5000);
+                                    let generous_h = ((part_h as u16).saturating_mul(3)).max(200).min(5000);
                                     let scan_area = Rect::new(0, 0, max_w, generous_h);
                                     let mut temp = ratatui::buffer::Buffer::empty(scan_area);
 
@@ -1668,7 +1668,7 @@ impl SessionView {
                     // ── Top-clipped assistant (non-error): temp buffer ──
                     let src_y = (vp_top - msg_top) as u16;
                     let dst_y = vp_top as u16;
-                    let generous_h = (msg_h as u16 + inner_area.height).max(100).min(5000);
+                    let generous_h = ((msg_h as u16).saturating_add(inner_area.height)).max(100).min(5000);
                     let full_area = Rect::new(0, 0, inner_area.width, generous_h);
                     let mut temp = Buffer::empty(full_area);
                     temp.set_style(full_area, Style::default().bg(rgba_color(theme.background)));
