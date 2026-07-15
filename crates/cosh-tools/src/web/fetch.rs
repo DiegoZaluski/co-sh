@@ -5,7 +5,11 @@
 //!   falls back to `rs_trafilatura`.
 //! - `false`: tries `rs_trafilatura` first, falls back to Exa.
 use serde::{Deserialize, Serialize};
+// On Unix we redirect stderr to /dev/null during rs_trafilatura extraction
+// to suppress debug messages that would corrupt the TUI.
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd};
 
 const EXA_CONTENTS: &str = "https://api.exa.ai/contents";
@@ -56,21 +60,36 @@ async fn fetch_url(url: &str) -> Result<String, String> {
             .await
             .map_err(|e| format!("read: {e}"))?;
 
-        // rs_trafilatura spams eprintln! debug messages that corrupt the TUI.
-        // Redirect stderr to /dev/null during extraction to suppress them.
-        let devnull =
-            unsafe { File::from_raw_fd(libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY)) };
-        let saved_fd = unsafe { libc::dup(2) };
-        unsafe { libc::dup2(devnull.as_raw_fd(), 2) };
-        // Drop the File handle — close devnull fd so the next open works.
-        drop(devnull);
+        let extract_result = {
+            #[cfg(unix)]
+            {
+                // rs_trafilatura spams eprintln! debug messages that corrupt the TUI.
+                // Redirect stderr to /dev/null during extraction to suppress them.
+                let devnull = unsafe {
+                    File::from_raw_fd(libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY))
+                };
+                let saved_fd = unsafe { libc::dup(2) };
+                unsafe { libc::dup2(devnull.as_raw_fd(), 2) };
+                // Drop the File handle — close devnull fd so the next open works.
+                drop(devnull);
 
-        let extract_result = rs_trafilatura::extract(&html);
+                let result = rs_trafilatura::extract(&html);
 
-        // Restore stderr before checking the result, so any subsequent
-        // error handling sees the real stderr.
-        unsafe { libc::dup2(saved_fd, 2) };
-        unsafe { libc::close(saved_fd) };
+                // Restore stderr before checking the result, so any subsequent
+                // error handling sees the real stderr.
+                unsafe { libc::dup2(saved_fd, 2) };
+                unsafe { libc::close(saved_fd) };
+
+                result
+            }
+
+            // On Windows there is no /dev/null and no simple equivalent for
+            // dup2; just run extraction without stderr suppression.
+            #[cfg(windows)]
+            {
+                rs_trafilatura::extract(&html)
+            }
+        };
 
         let extracted = extract_result.map_err(|e| format!("extract: {e}"))?;
 
