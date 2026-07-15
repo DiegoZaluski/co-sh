@@ -656,7 +656,7 @@ impl SessionView {
                 }
                 Part::Reasoning(r) => {
                     let expanded = config.thinking_mode
-                        || tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
+                        || tool_state.is_expanded(&r.text[..r.text.floor_char_boundary(32)]);
                     let mut line_h = 0u16;
                     Self::render_reasoning(buf, x, y, &mut line_h, max_w, r, expanded, theme);
                     y += line_h.max(1);
@@ -1106,7 +1106,7 @@ impl SessionView {
                         }
 
                         if let crate::types::Part::Reasoning(r) = part {
-                            let part_id = &r.text[..r.text.len().min(32)];
+                            let part_id = &r.text[..r.text.floor_char_boundary(32)];
                             if click_y == part_y {
                                 let header_x_end = x_off + 8;
                                 if click_x >= x_off && click_x < header_x_end {
@@ -1576,7 +1576,7 @@ impl SessionView {
                             }
                             crate::types::Part::Reasoning(r) => {
                                 let expanded = config.thinking_mode
-                                    || self.tool_state.is_expanded(&r.text[..r.text.len().min(32)]);
+                                    || self.tool_state.is_expanded(&r.text[..r.text.floor_char_boundary(32)]);
                                 let header = if expanded { "- Thought" } else { "+ Thought" };
                                 if p_top >= vp_top {
                                     self.text_regions.push(TextRegion {
@@ -2370,3 +2370,7 @@ impl SessionView {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;
