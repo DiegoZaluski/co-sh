@@ -788,10 +788,19 @@ impl Harness {
     /// The array includes all history entries with their proper roles
     /// (user, assistant with tool_calls, tool with tool_call_id) plus
     /// the current user input as the final message.
+    ///
+    /// Leading `tool` messages (which can be left behind after history
+    /// eviction) are skipped because some providers (notably Mistral)
+    /// reject `tool` right after `system`.
     fn build_conversation_messages(&self, current_input: &str) -> Vec<ChatMessage> {
         let mut messages: Vec<ChatMessage> = Vec::new();
 
-        for entry in &self.history {
+        // Skip leading tool messages — they have no preceding assistant
+        // message, and some providers (Mistral) reject the sequence
+        // system → tool → ... with HTTP 400.
+        let history = self.history.iter().skip_while(|entry| entry.role == "tool");
+
+        for entry in history {
             match entry.role.as_str() {
                 "assistant" if entry.tool_calls.is_some() => {
                     messages.push(assistant_tool_call_message(
