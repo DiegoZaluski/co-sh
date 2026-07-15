@@ -5,11 +5,13 @@
 //!   falls back to `rs_trafilatura`.
 //! - `false`: tries `rs_trafilatura` first, falls back to Exa.
 use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 
 const EXA_CONTENTS: &str = "https://api.exa.ai/contents";
 const EXA_MCP: &str = "https://mcp.exa.ai/mcp";
 
-const EXA_FIRST: bool = true;
+const EXA_FIRST: bool = false;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WebFetch {
@@ -35,7 +37,9 @@ async fn fetch_url(url: &str) -> Result<String, String> {
         {
             return rest_contents(url, &key).await;
         }
-        mcp_call("web_fetch_exa", serde_json::json!({ "url": url })).await
+        // The Exa MCP `web_fetch_exa` tool expects `urls` as an array,
+        // not a single `url` string. Match the format used by `rest_contents`.
+        mcp_call("web_fetch_exa", serde_json::json!({ "urls": [url] })).await
     };
 
     let try_local = || async {
@@ -51,7 +55,33 @@ async fn fetch_url(url: &str) -> Result<String, String> {
             .text()
             .await
             .map_err(|e| format!("read: {e}"))?;
-        let extracted = rs_trafilatura::extract(&html).map_err(|e| format!("extract: {e}"))?;
+
+        // rs_trafilatura spams eprintln! debug messages that corrupt the TUI.
+        // Redirect stderr to /dev/null during extraction to suppress them.
+        let devnull =
+            unsafe { File::from_raw_fd(libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY)) };
+        let saved_fd = unsafe { libc::dup(2) };
+        unsafe { libc::dup2(devnull.as_raw_fd(), 2) };
+        // Drop the File handle — close devnull fd so the next open works.
+        drop(devnull);
+
+        let extract_result = rs_trafilatura::extract(&html);
+
+        // Restore stderr before checking the result, so any subsequent
+        // error handling sees the real stderr.
+        unsafe { libc::dup2(saved_fd, 2) };
+        unsafe { libc::close(saved_fd) };
+
+        let extracted = extract_result.map_err(|e| format!("extract: {e}"))?;
+
+        // rs_trafilatura's extraction_quality heuristic (0.0–1.0) tells us
+        // whether the content was successfully extracted or fell back to the
+        // raw body (e.g. for JSON API responses). Low quality means we
+        // should fall through to the Exa backend.
+        if extracted.extraction_quality < 0.75_f64 {
+            return Err("low extraction quality".to_string());
+        }
+
         Ok(extracted.content_text)
     };
 
