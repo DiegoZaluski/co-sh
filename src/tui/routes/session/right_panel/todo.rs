@@ -1,9 +1,21 @@
+use cosh_tui::core::renderable::Renderable;
+use cosh_tui::core::renderables::r#box::BoxRenderable;
 use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use crate::theme::Theme;
 use super::types::TodoItem;
 use super::rgba_color;
+
+/// Gap above the box (1 blank line).
+const TOP_GAP: u16 = 1;
+/// Internal top padding inside the box (1 blank line).
+const TOP_PAD: u16 = 1;
+/// Internal bottom padding inside the box (1 blank line).
+const BOTTOM_PAD: u16 = 1;
+/// Internal left padding inside the box (1 column).
+const LEFT_PAD: u16 = 1;
 
 /// Render the TODO section. Returns the number of lines used.
 pub fn render_todo_section(
@@ -15,20 +27,40 @@ pub fn render_todo_section(
     todos: &[TodoItem],
     theme: &Theme,
 ) -> u16 {
-    if todos.is_empty() || max_h < 2 {
+    // Need at least: gap(1) + top_pad(1) + header(1) + 1 item + bottom_pad(1) = 5
+    if todos.is_empty() || max_h < TOP_GAP + TOP_PAD + 1 + 1 + BOTTOM_PAD {
         return 0;
     }
 
-    // Section header
+    // How many items can actually fit
+    let box_overhead = TOP_PAD + 1 + BOTTOM_PAD; // top_pad + header + bottom_pad
+    let visible_items = todos.len().min((max_h.saturating_sub(TOP_GAP + box_overhead)) as usize);
+    if visible_items == 0 {
+        return 0;
+    }
+
+    let box_h = box_overhead + visible_items as u16; // full box height
+    let box_y = y + TOP_GAP;                        // box starts after the gap
+    let total_used = TOP_GAP + box_h;               // total lines from section start
+
+    // Fill box background
+    let todo_area = Rect::new(x, box_y, max_w, box_h);
+    let mut bg_box = BoxRenderable::new();
+    bg_box.set_background_color(Some(theme.background_element.into()));
+    bg_box.render_self(buf, todo_area);
+
+    // Internal top padding (blank line)
+    let mut line_y = box_y + TOP_PAD;
+
+    // Section header — left-aligned with left padding
     let header_style = Style::default().fg(rgba_color(theme.text));
-    draw_text(buf, "Todos", x, y, max_w, header_style);
-    let mut used = 1u16;
+    draw_text(buf, "Todos", x + LEFT_PAD, line_y, max_w.saturating_sub(LEFT_PAD), header_style);
+    line_y += 1;
 
-    let mut line_y = y + 1;
-    let bottom = y + max_h;
-
-    for todo in todos {
-        if line_y >= bottom {
+    // Each todo item — left-aligned
+    let bottom_edge = y + total_used - BOTTOM_PAD;
+    for (i, todo) in todos.iter().enumerate() {
+        if i >= visible_items || line_y >= bottom_edge {
             break;
         }
 
@@ -38,49 +70,53 @@ pub fn render_todo_section(
             _ => (" ", rgba_color(theme.text_muted)),
         };
 
-        let checkbox_style = Style::default().fg(fg_color);
-        let text_style = Style::default().fg(if todo.status == "in_progress" {
-            rgba_color(theme.warning)
+        let checkbox = format!("[{}]", symbol);
+        let checkbox_w = checkbox.chars().count() as u16;
+
+        // Truncate content if needed
+        let max_text_w = max_w.saturating_sub(LEFT_PAD + checkbox_w + 2);
+        let display_text = if todo.content.chars().count() > max_text_w as usize && max_text_w > 1 {
+            let truncated: String = todo.content
+                .chars()
+                .take(max_text_w.saturating_sub(1) as usize)
+                .collect();
+            format!("{}…", truncated)
         } else {
-            rgba_color(theme.text_muted)
-        });
+            todo.content.clone()
+        };
 
-        // Checkbox
-        let label = format!("[{symbol}]");
-        draw_text(buf, &label, x, line_y, max_w.min(4), checkbox_style);
+        // Left-aligned with left padding
+        let item_x = x + LEFT_PAD;
+        draw_text(
+            buf,
+            &checkbox,
+            item_x,
+            line_y,
+            checkbox_w,
+            Style::default().fg(fg_color),
+        );
 
-        // Content (truncated)
-        let content_x = x + 4;
-        let content_w = max_w.saturating_sub(4);
-        if content_w > 0 {
-            let display = if todo.content.chars().count() > content_w as usize {
-                let truncated: String = todo.content.chars().take(content_w.saturating_sub(1) as usize).collect();
-                format!("{}…", truncated)
-            } else {
-                todo.content.clone()
-            };
-            draw_text(buf, &display, content_x, line_y, content_w, text_style);
+        let content_x = item_x + checkbox_w + 1;
+        let content_max_w = max_w.saturating_sub(content_x - x);
+        if content_max_w > 0 {
+            draw_text(
+                buf,
+                &display_text,
+                content_x,
+                line_y,
+                content_max_w,
+                Style::default().fg(if todo.status == "in_progress" {
+                    rgba_color(theme.warning)
+                } else {
+                    rgba_color(theme.text_muted)
+                }),
+            );
         }
 
         line_y += 1;
-        used += 1;
     }
 
-    // Separator after todos
-    if line_y < bottom {
-        let sep_style = Style::default().fg(rgba_color(theme.border));
-        if let Some(cell) = buf.cell_mut((x, line_y)) {
-            cell.set_char('─');
-            cell.set_style(sep_style);
-        }
-        if let Some(cell) = buf.cell_mut((x + max_w.saturating_sub(1), line_y)) {
-            cell.set_char('─');
-            cell.set_style(sep_style);
-        }
-        used += 1;
-    }
-
-    used
+    total_used
 }
 
 /// Estimate the height needed for the todo section.
@@ -88,8 +124,8 @@ pub fn todo_section_height(todos: &[TodoItem], _max_w: u16) -> u16 {
     if todos.is_empty() {
         return 0;
     }
-    // Header + each todo + separator
-    (todos.len() as u16).min(10) + 2
+    // gap + (top_pad + header + items + bottom_pad)
+    TOP_GAP + TOP_PAD + 1 + (todos.len() as u16).min(10) + BOTTOM_PAD
 }
 
 fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {

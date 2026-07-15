@@ -4,7 +4,7 @@ use cosh_tui::core::renderables::r#box::BoxRenderable;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Color;
 
 use crate::theme::Theme;
 
@@ -24,7 +24,7 @@ pub fn rgba_color(rgba: RGBA) -> Color {
 /// How many PTYs we attempt to show at most in the panel, depending on available height.
 const MAX_PTY_LINES_RUNNING: u16 = 8;
 const MAX_PTY_LINES_DONE: u16 = 3;
-const TODO_MIN_LINES: u16 = 2;
+const TODO_MIN_LINES: u16 = 5;
 
 /// Panel width in columns.
 pub const RIGHT_PANEL_WIDTH: u16 = 42;
@@ -112,25 +112,9 @@ pub fn render_right_panel(
     bg_box.set_background_color(Some(theme.background_panel.into()));
     bg_box.render_self(buf, area);
 
-    // Draw a subtle left border
-    let border_color = rgba_color(theme.border);
-    for y in area.y..area.bottom() {
-        if let Some(cell) = buf.cell_mut((area.x, y)) {
-            cell.set_style(Style::default().fg(border_color));
-            cell.set_char('▕');
-        }
-    }
-
-    // Header
-    let header_style = Style::default().fg(rgba_color(theme.text_muted));
-    if let Some(cell) = buf.cell_mut((area.x + 2, area.y)) {
-        cell.set_char('◧');
-        cell.set_style(header_style);
-    }
-
     let inner_x = area.x + 2;
     let inner_w = area.width.saturating_sub(4);
-    let mut y = area.y + 1;
+    let mut y = area.y;
     let bottom = area.bottom();
 
     let (max_ptys, show_todo) = compute_panel_layout(bottom.saturating_sub(y), state);
