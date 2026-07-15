@@ -264,6 +264,7 @@ fn config_token(config: &TuiConfig) -> u64 {
     if config.thinking_mode {
         token |= 8;
     }
+    token = token.wrapping_mul(31).wrapping_add(config.theme_gen);
     token
 }
 

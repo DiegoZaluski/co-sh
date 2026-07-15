@@ -401,6 +401,7 @@ impl App {
                     .clone();
                     if let Some(t) = self.theme_registry.get(&name) {
                         self.theme = t.clone();
+                        self.config.theme_gen += 1;
                     }
                     // Persist theme choice so it survives restarts
                     self.prefs_cache
@@ -416,6 +417,7 @@ impl App {
                     && let Some(t) = self.theme_registry.get(orig)
                 {
                     self.theme = t.clone();
+                    self.config.theme_gen += 1;
                 }
                 self.theme_dialog_original = None;
                 self.dialog.pop();
@@ -440,6 +442,7 @@ impl App {
                         && let Some(t) = self.theme_registry.get(orig)
                     {
                         self.theme = t.clone();
+                        self.config.theme_gen += 1;
                     }
                 } else {
                     self.apply_filtered_theme_preview();
@@ -485,6 +488,7 @@ impl App {
             && let Some(t) = self.theme_registry.get(&filtered[sel])
         {
             self.theme = t.clone();
+            self.config.theme_gen += 1;
         }
     }
 
@@ -2631,6 +2635,7 @@ impl App {
                         && let Some(t) = self.theme_registry.get(orig)
                     {
                         self.theme = t.clone();
+                        self.config.theme_gen += 1;
                     }
                     if self.is_model_dialog_visible()
                         && let Some(ref orig) = self.model_dialog_original

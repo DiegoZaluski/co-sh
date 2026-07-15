@@ -7,6 +7,10 @@ pub struct TuiConfig {
     pub show_tool_details: bool,
     pub show_generic_tool_output: bool,
     pub thinking_mode: bool,
+    /// Monotonically increasing generation counter bumped on every theme change.
+    /// Used as part of the message render cache key so cached cells with stale
+    /// colors are invalidated when the user switches themes.
+    pub theme_gen: u64,
 }
 
 impl Default for TuiConfig {
@@ -19,6 +23,7 @@ impl Default for TuiConfig {
             show_tool_details: true,
             show_generic_tool_output: true,
             thinking_mode: false,
+            theme_gen: 0,
         }
     }
 }
