@@ -2,9 +2,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use crate::theme::Theme;
-use super::types::{PtySession, PtyStatus};
 use super::rgba_color;
+use super::types::{PtySession, PtyStatus};
+use crate::theme::Theme;
 
 const PTY_RUNNING_LINES: u16 = 8;
 const PTY_DONE_LINES: u16 = 3;
@@ -68,10 +68,7 @@ fn render_one_pty(
     };
 
     let cmd_label = format!("{} {}", icon, session.command);
-    let cmd_truncated: String = cmd_label
-        .chars()
-        .take(max_w as usize)
-        .collect();
+    let cmd_truncated: String = cmd_label.chars().take(max_w as usize).collect();
     draw_text(buf, &cmd_truncated, x, y, max_w, cmd_style);
 
     if max_h <= 1 {
@@ -83,19 +80,18 @@ fn render_one_pty(
         let output_style = Style::default().fg(rgba_color(theme.text_muted));
         let output_x = x + 2;
         let output_w = max_w.saturating_sub(2);
-        let max_output_lines = max_h.saturating_sub(1).min(
-            if is_running { PTY_RUNNING_LINES - 1 } else { PTY_DONE_LINES - 1 }
-        );
+        let max_output_lines = max_h.saturating_sub(1).min(if is_running {
+            PTY_RUNNING_LINES - 1
+        } else {
+            PTY_DONE_LINES - 1
+        });
         let mut line_y = y + 1;
 
         for (i, line) in session.output.lines().enumerate() {
             if i >= max_output_lines as usize || line_y >= y + max_h {
                 break;
             }
-            let truncated: String = line
-                .chars()
-                .take(output_w as usize)
-                .collect();
+            let truncated: String = line.chars().take(output_w as usize).collect();
             draw_text(buf, &truncated, output_x, line_y, output_w, output_style);
             line_y += 1;
         }
@@ -124,17 +120,10 @@ pub fn render_pty_section(
             PTY_RUNNING_LINES
         } else {
             PTY_DONE_LINES
-        }.min(bottom.saturating_sub(y));
+        }
+        .min(bottom.saturating_sub(y));
 
-        render_one_pty(
-            buf,
-            area.x,
-            y,
-            area.width,
-            pty_h,
-            session,
-            theme,
-        );
+        render_one_pty(buf, area.x, y, area.width, pty_h, session, theme);
 
         y += pty_h;
     }

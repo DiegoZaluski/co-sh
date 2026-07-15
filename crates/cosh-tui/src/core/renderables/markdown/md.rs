@@ -769,7 +769,10 @@ impl MarkdownRenderable {
             }
         }
 
-        let border_color = table_border_color.map_or_else(|| rgba_to_color(palette.muted_color()), |c| rgba_to_color(*c));
+        let border_color = table_border_color.map_or_else(
+            || rgba_to_color(palette.muted_color()),
+            |c| rgba_to_color(*c),
+        );
         let border_style = Style::default().fg(border_color);
         let text_style = Style::default().fg(rgba_to_color(palette.text_color()));
         let header_style = Style::default()
@@ -832,7 +835,9 @@ impl MarkdownRenderable {
                 let content = cells.get(ci).map_or("", |s| s.as_str());
 
                 // Vertical border on the left of first cell
-                if let Some(cell) = buf.cell_mut((sx.saturating_sub(1), y)) && ci == 0 {
+                if let Some(cell) = buf.cell_mut((sx.saturating_sub(1), y))
+                    && ci == 0
+                {
                     cell.set_char('│');
                     cell.set_style(border_style);
                 }
@@ -942,7 +947,9 @@ pub fn markdown_to_visible_text(markdown: &str) -> String {
                     Tag::Paragraph
                     | Tag::BlockQuote(_)
                     | Tag::Heading { .. }
-                    | Tag::CodeBlock(_) if !result.is_empty() && !result.ends_with('\n') => {
+                    | Tag::CodeBlock(_)
+                        if !result.is_empty() && !result.ends_with('\n') =>
+                    {
                         result.push('\n');
                     }
                     _ => {}
@@ -955,7 +962,9 @@ pub fn markdown_to_visible_text(markdown: &str) -> String {
                     | TagEnd::BlockQuote(_)
                     | TagEnd::Item
                     | TagEnd::CodeBlock
-                    | TagEnd::TableRow if !result.ends_with('\n') => {
+                    | TagEnd::TableRow
+                        if !result.ends_with('\n') =>
+                    {
                         result.push('\n');
                     }
                     _ => {}

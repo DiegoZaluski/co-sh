@@ -495,9 +495,7 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
         // Many LLMs output arguments as a JSON-encoded string (OpenAI-style).
         // Try to parse it as JSON so we can validate the actual object.
         let args = match args_ref {
-            JsonValue::String(s) => {
-                serde_json::from_str(s).unwrap_or_else(|_| args_ref.clone())
-            }
+            JsonValue::String(s) => serde_json::from_str(s).unwrap_or_else(|_| args_ref.clone()),
             _ => args_ref.clone(),
         };
 
@@ -566,7 +564,9 @@ fn validate_against_schema(value: &JsonValue, schema: &JsonValue) -> bool {
                         return false;
                     }
                 } else {
-                    if let Some(const_val) = field_schema.get("const") && field_value != const_val {
+                    if let Some(const_val) = field_schema.get("const")
+                        && field_value != const_val
+                    {
                         return false;
                     }
                     if let Some(expected_type) = field_schema.get("type").and_then(|t| t.as_str())

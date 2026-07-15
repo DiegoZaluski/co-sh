@@ -30,8 +30,10 @@ use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
+use crate::routes::session::right_panel::{
+    RIGHT_PANEL_WIDTH, render_right_panel, should_show_right_panel,
+};
 use crate::routes::session::sidebar::{SidebarAction, SidebarView};
-use crate::routes::session::right_panel::{render_right_panel, should_show_right_panel, RIGHT_PANEL_WIDTH};
 use crate::routes::tools::InternalToolsView;
 use crate::session_store::{
     SessionStore, format_session_timestamp, generate_session_id, is_valid_session,
@@ -898,7 +900,9 @@ impl App {
 
             let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
 
-            let right_panel_w = if matches!(self.mode(), AppMode::Session) && (should_show_right_panel(area.width, &self.state.right_panel)) {
+            let right_panel_w = if matches!(self.mode(), AppMode::Session)
+                && (should_show_right_panel(area.width, &self.state.right_panel))
+            {
                 RIGHT_PANEL_WIDTH
             } else {
                 0
@@ -914,7 +918,12 @@ impl App {
             if right_panel_w > 0 {
                 render_right_panel(
                     buf,
-                    Rect::new(area.right().saturating_sub(right_panel_w), area.y, right_panel_w, area.height),
+                    Rect::new(
+                        area.right().saturating_sub(right_panel_w),
+                        area.y,
+                        right_panel_w,
+                        area.height,
+                    ),
                     &self.state.right_panel,
                     &self.theme,
                     area.width,
@@ -1245,7 +1254,7 @@ impl App {
                                             messages: vec![],
                                         });
                                         self.state.current_session_id =
-                                            Some(self.state.sessions.last().unwrap().id.clone());
+                                            self.state.sessions.last().map(|s| s.id.clone());
                                     }
                                     HomeAction::ToggleSidebar => {
                                         self.sidebar.open = !self.sidebar.open;
@@ -2050,10 +2059,7 @@ impl App {
                     }
                     // Start PTY tracking for bash calls
                     if tool == "bash_run" {
-                        let command = input
-                            .get("command")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
                         self.state.right_panel.start_pty(command.to_string(), None);
                     }
                     let Some(session) = self.state.current_session_mut() else {
@@ -2108,18 +2114,16 @@ impl App {
                                             .get("description")
                                             .and_then(|d| d.as_str())
                                             .unwrap_or("");
-                                        Some(
-                                            crate::routes::session::right_panel::types::TodoItem {
-                                                status: match status {
-                                                    "InProgress" => "in_progress",
-                                                    "Completed" => "completed",
-                                                    "Cancelled" => "cancelled",
-                                                    _ => "pending",
-                                                }
-                                                .to_string(),
-                                                content: description.to_string(),
-                                            },
-                                        )
+                                        Some(crate::routes::session::right_panel::types::TodoItem {
+                                            status: match status {
+                                                "InProgress" => "in_progress",
+                                                "Completed" => "completed",
+                                                "Cancelled" => "cancelled",
+                                                _ => "pending",
+                                            }
+                                            .to_string(),
+                                            content: description.to_string(),
+                                        })
                                     })
                                     .collect();
                                 self.state.right_panel.set_todos(todos);
@@ -2155,14 +2159,17 @@ impl App {
                     }
                     self.state.right_panel.fail_last_pty(error.clone());
                 }
-                HarnessEvent::ToolOutput { tool: _tool, output, finished } => {
+                HarnessEvent::ToolOutput {
+                    tool: _tool,
+                    output,
+                    finished,
+                } => {
                     // Update right panel PTY with streaming output
                     self.state.right_panel.update_last_pty(output.clone());
                     if finished {
                         self.state.right_panel.complete_last_pty(output.clone());
                     }
                 }
-
 
                 HarnessEvent::Reasoning { text } => {
                     let Some(session) = self.state.current_session_mut() else {
@@ -2738,14 +2745,12 @@ impl App {
             // Don't dispatch to question dialog if text selection is in progress
             if !self.mouse_drag_active && self.drag_selection.is_none() {
                 let consumed = self.question_dialog.handle_mouse(&mouse, question_area);
-                    if consumed
-                        && self.question_dialog.submitted
-                    {
-                        let answers = self.question_dialog.build_answers();
-                        let _ = self.answer_tx.send(Ok(answers));
-                        self.question_dialog.visible = false;
-                        self.question_dialog.submitted = false;
-                    }
+                if consumed && self.question_dialog.submitted {
+                    let answers = self.question_dialog.build_answers();
+                    let _ = self.answer_tx.send(Ok(answers));
+                    self.question_dialog.visible = false;
+                    self.question_dialog.submitted = false;
+                }
                 return Ok(true);
             }
         }
@@ -2767,7 +2772,8 @@ impl App {
             let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
             match self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
                 SidebarAction::SwitchTo(session_id) => {
-                    self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
+                    self.state.right_panel =
+                        crate::routes::session::right_panel::types::RightPanelState::new();
                     self.state.current_session_id = Some(session_id);
                     return Ok(true);
                 }
@@ -2858,7 +2864,7 @@ impl App {
                             messages: vec![],
                         });
                         self.state.current_session_id =
-                            Some(self.state.sessions.last().unwrap().id.clone());
+                            self.state.sessions.last().map(|s| s.id.clone());
                     }
                     crate::routes::home::HomeAction::ToggleSidebar => {
                         self.sidebar.open = !self.sidebar.open;

@@ -1,8 +1,8 @@
 pub mod footer;
 pub mod permission;
 pub mod question;
-pub mod sidebar;
 pub mod right_panel;
+pub mod sidebar;
 pub mod subagent_footer;
 
 use ratatui::buffer::{Buffer, CellDiffOption};
@@ -1430,8 +1430,8 @@ impl SessionView {
                                         md.render_self(&mut temp, scan_area);
 
                                         let screen_end = p_bottom.min(vp_bottom) as u16;
-                                        for (screen_line_y, ty) in (p_top.max(vp_top) as u16..)
-                                            .zip(0..generous_h)
+                                        for (screen_line_y, ty) in
+                                            (p_top.max(vp_top) as u16..).zip(0..generous_h)
                                         {
                                             if screen_line_y >= screen_end {
                                                 break;
@@ -1453,11 +1453,11 @@ impl SessionView {
                                                 y2: cy + 1,
                                                 x1: x_off,
                                                 x2: x_off + max_w,
-                                                 text: trimmed,
-                                             });
-                                         }
-                                     }
-                                 } else {
+                                                text: trimmed,
+                                            });
+                                        }
+                                    }
+                                } else {
                                     // ── User text: width-aware wrapping (CJK, emoji, flags = 2 cols) ──
                                     let max_w_usize = max_w as usize;
                                     let mut screen_line_y = p_top.max(vp_top) as u16;
@@ -1473,8 +1473,8 @@ impl SessionView {
                                                     x1: x_off,
                                                     x2: x_off + max_w,
                                                     text: String::new(),
-                                            });
-                                        }
+                                                });
+                                            }
                                             continue;
                                         }
                                         let mut remaining = logical_line;
@@ -1843,8 +1843,8 @@ impl SessionView {
                         // ── Fall back: temp buffer render ──
                         let src_y = (vp_top - msg_top) as u16;
                         let dst_y = vp_top as u16;
-                        let generous_h = ((msg_h as u16).saturating_add(inner_area.height))
-                            .clamp(100, 5000);
+                        let generous_h =
+                            ((msg_h as u16).saturating_add(inner_area.height)).clamp(100, 5000);
                         let full_area = Rect::new(0, 0, inner_area.width, generous_h);
                         let mut temp = Buffer::empty(full_area);
                         temp.set_style(

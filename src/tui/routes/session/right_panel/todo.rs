@@ -4,9 +4,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use crate::theme::Theme;
-use super::types::TodoItem;
 use super::rgba_color;
+use super::types::TodoItem;
+use crate::theme::Theme;
 
 /// Gap above the box (1 blank line).
 const TOP_GAP: u16 = 1;
@@ -34,14 +34,16 @@ pub fn render_todo_section(
 
     // How many items can actually fit
     let box_overhead = TOP_PAD + 1 + BOTTOM_PAD; // top_pad + header + bottom_pad
-    let visible_items = todos.len().min((max_h.saturating_sub(TOP_GAP + box_overhead)) as usize);
+    let visible_items = todos
+        .len()
+        .min((max_h.saturating_sub(TOP_GAP + box_overhead)) as usize);
     if visible_items == 0 {
         return 0;
     }
 
     let box_h = box_overhead + visible_items as u16; // full box height
-    let box_y = y + TOP_GAP;                        // box starts after the gap
-    let total_used = TOP_GAP + box_h;               // total lines from section start
+    let box_y = y + TOP_GAP; // box starts after the gap
+    let total_used = TOP_GAP + box_h; // total lines from section start
 
     // Fill box background
     let todo_area = Rect::new(x, box_y, max_w, box_h);
@@ -54,7 +56,14 @@ pub fn render_todo_section(
 
     // Section header — left-aligned with left padding
     let header_style = Style::default().fg(rgba_color(theme.text));
-    draw_text(buf, "Todos", x + LEFT_PAD, line_y, max_w.saturating_sub(LEFT_PAD), header_style);
+    draw_text(
+        buf,
+        "Todos",
+        x + LEFT_PAD,
+        line_y,
+        max_w.saturating_sub(LEFT_PAD),
+        header_style,
+    );
     line_y += 1;
 
     // Each todo item — left-aligned
@@ -76,7 +85,8 @@ pub fn render_todo_section(
         // Truncate content if needed
         let max_text_w = max_w.saturating_sub(LEFT_PAD + checkbox_w + 2);
         let display_text = if todo.content.chars().count() > max_text_w as usize && max_text_w > 1 {
-            let truncated: String = todo.content
+            let truncated: String = todo
+                .content
                 .chars()
                 .take(max_text_w.saturating_sub(1) as usize)
                 .collect();

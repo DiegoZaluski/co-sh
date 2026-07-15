@@ -12,8 +12,8 @@ pub mod pty;
 pub mod todo;
 pub mod types;
 
-use todo::{render_todo_section, todo_section_height};
 use pty::render_pty_section;
+use todo::{render_todo_section, todo_section_height};
 use types::RightPanelState;
 
 pub fn rgba_color(rgba: RGBA) -> Color {
@@ -44,10 +44,7 @@ pub fn should_show_right_panel(terminal_width: u16, state: &RightPanelState) -> 
 
 /// Determine the visible area thresholds for responsive PTY count.
 /// Returns (max_ptys, show_todo).
-fn compute_panel_layout(
-    panel_height: u16,
-    state: &RightPanelState,
-) -> (usize, bool) {
+fn compute_panel_layout(panel_height: u16, state: &RightPanelState) -> (usize, bool) {
     let has_todos = !state.todos.is_empty();
 
     // Available height for PTYs after accounting for TODO
@@ -80,14 +77,22 @@ fn compute_panel_layout(
     }
 
     // Don't show TODO if there are too many PTYs and not enough space
-    let show_todo = if has_todos && max_ptys == state.pty_sessions.len() && remaining >= TODO_MIN_LINES as i32 {
+    let show_todo = if has_todos
+        && max_ptys == state.pty_sessions.len()
+        && remaining >= TODO_MIN_LINES as i32
+    {
         true
     } else if has_todos && max_ptys < state.pty_sessions.len() {
         // PTYs overflow — give space to PTYs, hide TODO
         false
     } else if has_todos {
         // Enough space for both
-        todo_h <= panel_height.saturating_sub((max_ptys as u16).saturating_mul(MAX_PTY_LINES_DONE).max(MAX_PTY_LINES_RUNNING))
+        todo_h
+            <= panel_height.saturating_sub(
+                (max_ptys as u16)
+                    .saturating_mul(MAX_PTY_LINES_DONE)
+                    .max(MAX_PTY_LINES_RUNNING),
+            )
     } else {
         false
     };
@@ -121,17 +126,12 @@ pub fn render_right_panel(
 
     // Render TODO section (lower priority)
     if show_todo {
-        let todo_max_h = bottom.saturating_sub(y).saturating_sub(MAX_PTY_LINES_RUNNING);
+        let todo_max_h = bottom
+            .saturating_sub(y)
+            .saturating_sub(MAX_PTY_LINES_RUNNING);
         if todo_max_h >= TODO_MIN_LINES {
-            let todo_used = render_todo_section(
-                buf,
-                inner_x,
-                y,
-                inner_w,
-                todo_max_h,
-                &state.todos,
-                theme,
-            );
+            let todo_used =
+                render_todo_section(buf, inner_x, y, inner_w, todo_max_h, &state.todos, theme);
             y += todo_used;
         }
     }
@@ -139,12 +139,6 @@ pub fn render_right_panel(
     // Render PTY section (higher priority)
     if max_ptys > 0 {
         let pty_area = Rect::new(inner_x, y, inner_w, bottom.saturating_sub(y));
-        render_pty_section(
-            buf,
-            pty_area,
-            &state.pty_sessions,
-            max_ptys,
-            theme,
-        );
+        render_pty_section(buf, pty_area, &state.pty_sessions, max_ptys, theme);
     }
 }

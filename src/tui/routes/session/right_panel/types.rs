@@ -66,14 +66,24 @@ impl RightPanelState {
 
     /// Update output for the last running PTY session.
     pub fn update_last_pty(&mut self, output: String) {
-        if let Some(session) = self.pty_sessions.iter_mut().rev().find(|s| matches!(s.status, PtyStatus::Running)) {
+        if let Some(session) = self
+            .pty_sessions
+            .iter_mut()
+            .rev()
+            .find(|s| matches!(s.status, PtyStatus::Running))
+        {
             session.output = output;
         }
     }
 
     /// Mark the last running PTY session as completed.
     pub fn complete_last_pty(&mut self, final_output: String) {
-        if let Some(session) = self.pty_sessions.iter_mut().rev().find(|s| matches!(s.status, PtyStatus::Running)) {
+        if let Some(session) = self
+            .pty_sessions
+            .iter_mut()
+            .rev()
+            .find(|s| matches!(s.status, PtyStatus::Running))
+        {
             session.output = final_output;
             session.status = PtyStatus::Completed;
         }
@@ -81,7 +91,12 @@ impl RightPanelState {
 
     /// Mark the last running PTY session as failed.
     pub fn fail_last_pty(&mut self, error: String) {
-        if let Some(session) = self.pty_sessions.iter_mut().rev().find(|s| matches!(s.status, PtyStatus::Running)) {
+        if let Some(session) = self
+            .pty_sessions
+            .iter_mut()
+            .rev()
+            .find(|s| matches!(s.status, PtyStatus::Running))
+        {
             session.output = error;
             session.status = PtyStatus::Failed;
         }

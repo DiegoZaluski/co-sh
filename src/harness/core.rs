@@ -805,10 +805,7 @@ impl Harness {
                     match dispatch_out {
                         DispatchOut::Ok(output) => {
                             self.tool_failure_count = 0;
-                            log::debug!(
-                                "run_agent_loop dispatch_next OK len={}",
-                                output.len()
-                            );
+                            log::debug!("run_agent_loop dispatch_next OK len={}", output.len());
                             let _ = tx.send(HarnessEvent::ToolResult { output });
                         }
                         DispatchOut::Err(e) => {
@@ -835,9 +832,7 @@ impl Harness {
                             }
                         }
                         DispatchOut::Stopped => {
-                            log::debug!(
-                                "run_agent_loop dispatch_next STOPPED by user"
-                            );
+                            log::debug!("run_agent_loop dispatch_next STOPPED by user");
                             self.stop = true;
                             let _ = tx.send(HarnessEvent::Stopped);
                             return; // Exit run_agent_loop entirely

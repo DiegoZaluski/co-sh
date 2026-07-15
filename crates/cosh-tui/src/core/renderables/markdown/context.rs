@@ -269,10 +269,7 @@ impl MarkdownContext {
         // We incremented at Tag::Item, so the current value is (start + item_index + 1).
         // The counter was start. At first Item, it becomes start+1. We want to display
         // start for the first item. So we show counter-1.
-        let display = self
-            .list_counters
-            .last()
-            .map_or(1, |c| c.saturating_sub(1));
+        let display = self.list_counters.last().map_or(1, |c| c.saturating_sub(1));
         Some((ordered, display))
     }
 }
