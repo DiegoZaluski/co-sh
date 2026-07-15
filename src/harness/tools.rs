@@ -56,7 +56,7 @@ impl CoshTools {
     #[must_use]
     pub fn new(cwd: &str) -> Self {
         Self {
-            bash: Bash::new(),
+            bash: Bash::new().cwd(cwd),
             fs: Fs::new().cwd(cwd),
             find: Find::new(),
             web: Web::new(),
@@ -295,29 +295,56 @@ impl Tools for CoshTools {
                     })
                 })?;
                 tokio::pin!(stream);
-                let mut last = String::new();
-                while let Some(chunk) = stream.next().await {
-                    let chunk_text = format!(
-                        "stdout: {}\nstderr: {}\nexit_code: {:?}\nsignal: {:?}\ntruncated: {}",
-                        String::from_utf8_lossy(&chunk.stdout),
-                        String::from_utf8_lossy(&chunk.stderr),
-                        chunk.exit_code,
-                        chunk.signal,
-                        chunk.truncated,
-                    );
-                    last = chunk_text.clone();
 
-                    // Send intermediate chunks for PTY streaming
-                    if let Some(ref tx) = self.event_tx {
-                        let finished = chunk.exit_code.is_some() || chunk.signal.is_some();
-                        let _ = tx.send(HarnessEvent::ToolOutput {
-                            tool: "bash_run".to_string(),
-                            output: chunk_text,
-                            finished,
-                        });
+                let mut output = String::new();
+
+                while let Some(chunk) = stream.next().await {
+                    // Stream clean stdout for PTY display
+                    if !chunk.stdout.is_empty() {
+                        let text = String::from_utf8_lossy(&chunk.stdout).to_string();
+                        if let Some(ref tx) = self.event_tx {
+                            let _ = tx.send(HarnessEvent::ToolOutput {
+                                tool: "bash_run".to_string(),
+                                output: text.clone(),
+                                finished: false,
+                            });
+                        }
+                        output.push_str(&text);
+                    }
+
+                    // Stream clean stderr for PTY display and accumulate
+                    if !chunk.stderr.is_empty() {
+                        let text = String::from_utf8_lossy(&chunk.stderr).to_string();
+                        if let Some(ref tx) = self.event_tx {
+                            let _ = tx.send(HarnessEvent::ToolOutput {
+                                tool: "bash_run".to_string(),
+                                output: text.clone(),
+                                finished: false,
+                            });
+                        }
+                        output.push_str(&text);
+                    }
+
+                    // Append non-zero exit code
+                    if let Some(code) = chunk.exit_code
+                        && code != 0
+                    {
+                        if !output.is_empty() && !output.ends_with('\n') {
+                            output.push('\n');
+                        }
+                        let _ = write!(output, "exit code: {code}");
+                    }
+
+                    // Append signal info
+                    if let Some(sig) = chunk.signal {
+                        if !output.is_empty() && !output.ends_with('\n') {
+                            output.push('\n');
+                        }
+                        let _ = write!(output, "signal: {sig}");
                     }
                 }
-                Ok(last)
+
+                Ok(output)
             }
 
             "fs_read" => {

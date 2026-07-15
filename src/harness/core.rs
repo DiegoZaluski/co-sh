@@ -1,7 +1,9 @@
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
-use cosh_recall::window::ContextWindow;
-use cosh_sdk::connector::Connector;
+use cosh_sdk::connector::{
+    ChatMessage, Connector, ToolCallFunctionMsg, ToolCallMsg, ToolDefinition,
+    assistant_tool_call_message, tool_result_message, user_message,
+};
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use cosh_tools::TOOL_FORMAT;
 use rmcp::ServiceExt;
@@ -36,7 +38,10 @@ pub const INSTRUCTIONS_BUILD: &str = concat!(
     "- If the request can be completed correctly without using any tool, answer directly.\n",
     "- Avoid unnecessary narration or descriptions of obvious actions.\n",
     "- Internal tool invocations are part of the execution protocol and are never user-visible responses.\n",
-    "- When the current user request has been fully completed and no further action is required, invoke `stop_agent_loop`.\n\n",
+    "- When the current user request has been fully completed and no further action is required, invoke `stop_agent_loop`.\n",
+    "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
+    "  Use that result to continue your response — do not call the same tool again with the same arguments.\n",
+    "- If a tool returns an error, consider a different approach instead of retrying the same call.\n\n",
     "Tool invocation is defined entirely by each tool specification.\n\n",
     "The available tools and their specifications are listed below.\n"
 );
@@ -52,7 +57,10 @@ pub const INSTRUCTIONS_ASK: &str = concat!(
     "- Ask clarifying questions whenever the user's intent is ambiguous or required information is missing.\n",
     "- Use a tool only when it is required to inspect code, documentation, or other relevant information needed to answer correctly.\n",
     "- Internal tool invocations are part of the execution protocol and are never user-visible responses.\n",
-    "- When the discussion has naturally concluded and no further exploration is required, invoke `stop_agent_loop`.\n\n",
+    "- When the discussion has naturally concluded and no further exploration is required, invoke `stop_agent_loop`.\n",
+    "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
+    "  Use that result to continue your discussion — do not call the same tool again with the same arguments.\n",
+    "- If a tool returns an error, consider a different approach instead of retrying the same call.\n\n",
     "Tool invocation is defined entirely by each tool specification.\n\n",
     "The available tools and their specifications are listed below.\n"
 );
@@ -63,6 +71,10 @@ const MAX_TOKENS: usize = 10_000;
 /// Maximum consecutive tool-call failures before aborting the agent loop.
 const MAX_TOOL_RETRIES: usize = 3;
 
+/// Maximum total agent-loop iterations (tool calls + responses) before
+/// the harness stops the loop as a safety net against runaway tool-calling.
+const MAX_ITERATIONS: u64 = 20;
+
 pub struct PromptSystem {
     pub title: String,
     pub text: String,
@@ -72,6 +84,17 @@ pub struct HarnessTool {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+}
+
+/// A single turn in the structured conversation history with native
+/// tool-call roles (`user`, `assistant`, `tool`).
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    role: String,
+    content: String,
+    tool_calls: Option<Vec<ToolCallMsg>>,
+    tool_call_id: Option<String>,
+    token_count: usize,
 }
 
 fn default_harness_tools() -> Vec<HarnessTool> {
@@ -100,9 +123,13 @@ pub struct Harness {
     /// To stop the agent loop.
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
-    server_response: Vec<String>,
-    /// Context window for iterative agent sessions.
-    context_window: ContextWindow,
+    /// Structured conversation history with native tool-call roles.
+    /// This replaces the text-based history approach — each entry has
+    /// a proper role (user, assistant, tool) so the model sees the
+    /// native tool-call format it was trained on.
+    history: Vec<HistoryEntry>,
+    /// Total estimated tokens across all history entries, for budget management.
+    total_history_tokens: usize,
 
     /// Tools explicitly disabled by the user via the Internal Tools screen.
     /// These are excluded from both the prompt header and the extractor.
@@ -147,8 +174,8 @@ impl Harness {
             stop_signal: None,
             stop: false,
             tool_issuer: VecDeque::new(),
-            server_response: Vec::new(),
-            context_window: ContextWindow::new(MAX_TOKENS),
+            history: Vec::new(),
+            total_history_tokens: 0,
             disabled_tools,
             tool_failure_count: 0,
             tool_extraction_failure_count: 0,
@@ -163,18 +190,21 @@ impl Harness {
         }
     }
 
-    /// Load previous conversation turns into the context window so the
-    /// assistant sees history when it starts.
+    /// Load previous conversation turns into the history so the
+    /// assistant sees context when it starts.
     #[must_use]
     pub fn with_history(mut self, turns: &[(String, String)]) -> Self {
         for (role, text) in turns {
-            let line = if role == "user" {
-                format!("## User\n{text}")
-            } else {
-                format!("## Assistant\n{text}")
-            };
-            let count = crate::util::token_counter::estimate_tokens(&line);
-            self.context_window.push(line, count);
+            let count = crate::util::token_counter::estimate_tokens(text);
+            let role_str = role.as_str();
+            self.history.push(HistoryEntry {
+                role: role_str.to_string(),
+                content: text.clone(),
+                tool_calls: None,
+                tool_call_id: None,
+                token_count: count,
+            });
+            self.total_history_tokens += count;
         }
         self
     }
@@ -391,18 +421,15 @@ impl Harness {
         output
     }
 
-    /// Build the final context by appending pending server responses and
-    /// the context window to the header.
+    /// Build the system context for the LLM.
+    ///
+    /// Returns only the header context (instructions + tool definitions)
+    /// and correction memory. Conversation history is NOT included here —
+    /// it is sent as separate messages with proper roles (user, assistant
+    /// with tool_calls, tool with tool_call_id) via
+    /// [`stream_chat_with_messages`](Self::stream_chat_with_messages).
     fn build_chat_context(&mut self) -> String {
         let mut out = self.header_context.clone();
-        if !self.server_response.is_empty() {
-            let _ = write!(out, "\n## Tool Results\n\n");
-            for (i, resp) in self.server_response.iter().enumerate() {
-                let _ = writeln!(out, "### Result {}\n{}\n", i + 1, resp);
-            }
-            self.server_response.clear();
-        }
-        out.push_str(&self.context_window.format_context());
         let correction = self.correction_memory.format();
         out.push_str(&correction);
         out
@@ -436,6 +463,127 @@ impl Harness {
         let result = self.process_extraction(out.message(), &mut extractor);
         self.last_failed_raw = extractor.take_last_failed_raw();
         Ok(result)
+    }
+
+    /// Stream a chat completion using a proper messages array (native tool-call
+    /// format). This is the replacement for the old text-based
+    /// [`stream_chat`](Self::stream_chat) when using the native tool API.
+    ///
+    /// The `system` parameter is the system context (instructions + tool
+    /// definitions, no history). The `messages` array contains the
+    /// conversation history with roles (user, assistant with `tool_calls`,
+    /// tool with `tool_call_id`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connector stream fails to start.
+    pub async fn stream_chat_with_messages(
+        &mut self,
+        system: &str,
+        messages: &[ChatMessage],
+        mut on_token: impl FnMut(&str),
+    ) -> Result<String, String> {
+        #[cfg(test)]
+        if let Some(response) = self.mock_stream_response.take() {
+            match response {
+                Ok(tokens) => {
+                    let mut extractor = self.build_extractor();
+                    for token in &tokens {
+                        self.process_stream_chunk(token, &mut extractor, &mut on_token);
+                    }
+                    return Ok("done".into());
+                }
+                Err(msg) => {
+                    return Err(msg);
+                }
+            }
+        }
+
+        use tokio_stream::StreamExt;
+
+        log::debug!("stream_chat_with_messages messages={}", messages.len());
+
+        let mut stream = tokio::select! {
+            result = self.connector.stream_chat_with_messages(system, messages) => {
+                match result {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::debug!("stream_chat_with_messages CONNECTOR_ERR={e}");
+                        return Err(e.to_string());
+                    }
+                }
+            }
+            _ = async {
+                loop {
+                    if self
+                        .stop_signal
+                        .as_ref()
+                        .is_some_and(|s| s.load(Ordering::Relaxed))
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            } => {
+                log::debug!("stream_chat_with_messages STOPPED during connect");
+                return Err("Interrupted by user".to_string());
+            }
+        };
+
+        let mut extractor = self.build_extractor();
+        let mut token_count = 0u64;
+
+        loop {
+            {
+                let stop = self
+                    .stop_signal
+                    .as_ref()
+                    .is_some_and(|s| s.load(Ordering::Relaxed));
+                if stop {
+                    log::debug!("stream_chat_with_messages STOPPED by signal");
+                    break;
+                }
+            }
+
+            let chunk = {
+                let poll = tokio::select! {
+                    chunk = stream.next() => chunk.map(|c| c.map_err(|e| {
+                        log::debug!("stream_chat_with_messages STREAM_ERR={e}");
+                        e.to_string()
+                    })),
+                    () = tokio::time::sleep(Duration::from_millis(50)) => {
+                        continue;
+                    }
+                };
+                match poll {
+                    Some(Ok(c)) => c,
+                    Some(Err(e)) => return Err(e),
+                    None => break,
+                }
+            };
+            let token = chunk.token();
+            let fr = chunk.finish_reason();
+            token_count += 1;
+            if token_count <= 5
+                || token_count.is_multiple_of(100)
+                || !token.is_empty()
+                || fr.is_some()
+            {
+                log::debug!(
+                    "stream_chat_with_messages token#{} len={} fr={:?} first_50={:?}",
+                    token_count,
+                    token.len(),
+                    fr,
+                    &token[..token.floor_char_boundary(token.len().min(50))]
+                );
+            }
+            self.process_stream_chunk(token, &mut extractor, &mut on_token);
+        }
+
+        self.last_failed_raw = extractor.take_last_failed_raw();
+
+        log::debug!("stream_chat_with_messages DONE total_tokens={token_count}");
+        Ok("done".into())
     }
 
     /// Process a stream chunk through the extractor, routing tool calls and
@@ -579,6 +727,152 @@ impl Harness {
         Ok("done".into())
     }
 
+    // Populate the connector's native tool definitions once.
+    fn init_native_tools(&mut self) {
+        use cosh_sdk::connector::ToolFunction as TFunc;
+
+        let mut defs: Vec<ToolDefinition> = Vec::new();
+
+        // Harness tools (e.g. stop_agent_loop)
+        for tool in &self.harness_tools {
+            if self.disabled_tools.contains(&tool.name) {
+                continue;
+            }
+            defs.push(ToolDefinition::new(
+                TFunc::new(&tool.name)
+                    .with_description(&tool.description)
+                    .with_parameters(tool.input_schema.clone()),
+            ));
+        }
+
+        // Cosh tools (bash_run, fs_read, etc.)
+        if let Some(ref cosh) = self.cosh_tools {
+            for desc in cosh.tool_descriptions() {
+                let name = desc["name"].as_str().unwrap_or_default();
+                if self.disabled_tools.contains(name) {
+                    continue;
+                }
+                let description = desc["description"].as_str().unwrap_or_default();
+                if let Some(input_schema) = desc.get("inputSchema").cloned() {
+                    defs.push(ToolDefinition::new(
+                        TFunc::new(name)
+                            .with_description(description)
+                            .with_parameters(input_schema),
+                    ));
+                }
+            }
+        }
+
+        // MCP server tools
+        for session in &self.sessions {
+            for tool in &session.tools {
+                let name: &str = tool.name.as_ref();
+                if self.disabled_tools.contains(name) {
+                    continue;
+                }
+                let description = tool.description.as_deref().unwrap_or_default();
+                let input_schema = (*tool.input_schema).clone();
+                defs.push(ToolDefinition::new(
+                    TFunc::new(name)
+                        .with_description(description)
+                        .with_parameters(serde_json::Value::Object(input_schema)),
+                ));
+            }
+        }
+
+        self.connector.set_tools(defs);
+    }
+
+    /// Build the conversation messages array for the current iteration.
+    ///
+    /// The array includes all history entries with their proper roles
+    /// (user, assistant with tool_calls, tool with tool_call_id) plus
+    /// the current user input as the final message.
+    fn build_conversation_messages(&self, current_input: &str) -> Vec<ChatMessage> {
+        let mut messages: Vec<ChatMessage> = Vec::new();
+
+        for entry in &self.history {
+            match entry.role.as_str() {
+                "assistant" if entry.tool_calls.is_some() => {
+                    messages.push(assistant_tool_call_message(
+                        entry.tool_calls.clone().unwrap(),
+                    ));
+                }
+                "tool" => {
+                    messages.push(tool_result_message(
+                        &entry.tool_call_id.clone().unwrap_or_default(),
+                        &entry.content,
+                    ));
+                }
+                _ => {
+                    messages.push(ChatMessage {
+                        role: entry.role.clone(),
+                        content: Some(entry.content.clone()),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                }
+            }
+        }
+
+        if !current_input.is_empty() {
+            messages.push(user_message(current_input));
+        }
+
+        messages
+    }
+
+    /// Add a tool call + its result to the history.
+    fn push_tool_history(&mut self, id: &str, name: &str, args: &serde_json::Value, result: &str) {
+        let args_str = serde_json::to_string(args).unwrap_or_default();
+
+        // Estimate tokens for the pair (before moving args_str)
+        let assistant_tokens =
+            crate::util::token_counter::estimate_tokens(&format!("{name} {args_str}"));
+
+        let tc_msg = ToolCallMsg {
+            id: id.to_string(),
+            kind: "function".to_string(),
+            function: ToolCallFunctionMsg {
+                name: name.to_string(),
+                arguments: args_str,
+            },
+        };
+        let result_tokens = crate::util::token_counter::estimate_tokens(result);
+
+        self.history.push(HistoryEntry {
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_calls: Some(vec![tc_msg]),
+            tool_call_id: None,
+            token_count: assistant_tokens,
+        });
+        self.total_history_tokens += assistant_tokens;
+
+        self.history.push(HistoryEntry {
+            role: "tool".to_string(),
+            content: result.to_string(),
+            tool_calls: None,
+            tool_call_id: Some(id.to_string()),
+            token_count: result_tokens,
+        });
+        self.total_history_tokens += result_tokens;
+
+        self.evict_history_if_needed();
+    }
+
+    /// Evict the oldest history entries when the total token budget is exceeded.
+    fn evict_history_if_needed(&mut self) {
+        while self.total_history_tokens >= MAX_TOKENS && self.history.len() > 1 {
+            if let Some(evicted) = self.history.first() {
+                self.total_history_tokens = self
+                    .total_history_tokens
+                    .saturating_sub(evicted.token_count);
+            }
+            self.history.remove(0);
+        }
+    }
+
     /// Run the full agent loop: stream LLM response, dispatch tool calls,
     /// feed results back to the LLM, and repeat — until the model finishes
     /// without requesting tools, [`request_stop`](Self::request_stop) is called,
@@ -623,6 +917,22 @@ impl Harness {
             &input[..input.floor_char_boundary(input.len().min(80))]
         );
 
+        // Populate native tool definitions for the API so the model
+        // uses the native tool-calling mechanism instead of inline JSON.
+        self.init_native_tools();
+
+        // Add the initial user input to structured history so the model
+        // sees it as a proper `role: "user"` message in the conversation.
+        let input_tokens = crate::util::token_counter::estimate_tokens(input);
+        self.history.push(HistoryEntry {
+            role: "user".to_string(),
+            content: input.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            token_count: input_tokens,
+        });
+        self.total_history_tokens = input_tokens;
+
         macro_rules! check_stop {
             () => {
                 if self.stop || stop_signal.load(Ordering::Relaxed) {
@@ -638,21 +948,22 @@ impl Harness {
         loop {
             iteration += 1;
             log::debug!(
-                "run_agent_loop ITERATION={} input_len={} pending_tools={} server_responses={}",
+                "run_agent_loop ITERATION={} input_len={} pending_tools={}",
                 iteration,
                 current_input.len(),
-                self.tool_issuer.len(),
-                self.server_response.len()
+                self.tool_issuer.len()
             );
 
             if check_stop!() {
                 break;
             }
 
-            // Phase 1: stream the LLM response
+            // Phase 1: stream the LLM response using native tool-call format
             log::debug!("run_agent_loop PHASE1_START iteration={iteration}");
+            let messages = self.build_conversation_messages(&current_input);
+            let system_context = self.build_chat_context();
             let result = self
-                .stream_chat(&current_input, |token| {
+                .stream_chat_with_messages(&system_context, &messages, |token| {
                     let _ = tx.send(HarnessEvent::Token {
                         text: token.to_string(),
                     });
@@ -697,6 +1008,17 @@ impl Harness {
             log::debug!("run_agent_loop PHASE2 had_tools={had_tools}");
 
             while self.has_pending_tools() {
+                // Safety: stop the loop if we've exceeded the maximum
+                // number of iterations. This prevents runaway tool-calling
+                // when the model fails to recognise that its request is
+                // complete.
+                if iteration >= MAX_ITERATIONS {
+                    log::debug!("run_agent_loop MAX_ITERATIONS={MAX_ITERATIONS} reached");
+                    let _ = tx.send(HarnessEvent::Done);
+                    self.stop = true;
+                    break;
+                }
+
                 if check_stop!() {
                     break;
                 }
@@ -705,9 +1027,9 @@ impl Harness {
                 let info = self
                     .tool_issuer
                     .front()
-                    .map(|tc| (tc.name.clone(), tc.arguments.clone()));
+                    .map(|tc| (tc.id.clone(), tc.name.clone(), tc.arguments.clone()));
 
-                if let Some((ref name, ref args)) = info {
+                if let Some((ref _call_id, ref name, ref args)) = info {
                     log::debug!("run_agent_loop DISPATCH tool={name}");
                     let _ = tx.send(HarnessEvent::ToolCall {
                         tool: name.clone(),
@@ -716,11 +1038,13 @@ impl Harness {
                 }
 
                 // Intercept `ask_questions` — send to TUI, wait for user answer
-                if info.as_ref().is_some_and(|(n, _)| n == "ask_questions") {
+                if info.as_ref().is_some_and(|(_, n, _)| n == "ask_questions") {
                     log::debug!("run_agent_loop ASK_QUESTIONS intercepted");
 
-                    let input: Result<QuestionInput, String> = info
-                        .map(|(_, args)| args)
+                    // Clone info before consuming in .map() below
+                    let info_clone = info.clone();
+                    let input: Result<QuestionInput, String> = info_clone
+                        .map(|(_, _, args)| args)
                         .ok_or_else(|| "missing tool arguments".to_string())
                         .and_then(|args| serde_json::from_value(args).map_err(|e| e.to_string()));
 
@@ -744,8 +1068,15 @@ impl Harness {
                                     };
                                     let json = serde_json::to_string(&output)
                                         .unwrap_or_else(|_| "{}".to_string());
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    self.server_response.push(format!("[{ts}] {json}"));
+                                    // Save to structured history (native tool format)
+                                    if let Some((ref call_id, ref name, ref args)) = info {
+                                        let tool_id = if call_id.is_empty() {
+                                            format!("call_{:016x}", iteration)
+                                        } else {
+                                            call_id.clone()
+                                        };
+                                        self.push_tool_history(&tool_id, name, args, &json);
+                                    }
                                     let _ = tx.send(HarnessEvent::ToolResult { output: json });
                                 }
                                 Some(Err(e)) => {
@@ -806,13 +1137,23 @@ impl Harness {
                         DispatchOut::Ok(output) => {
                             self.tool_failure_count = 0;
                             log::debug!("run_agent_loop dispatch_next OK len={}", output.len());
+                            // Record the tool call + result in native history
+                            if let Some((ref call_id, ref name, ref args)) = info {
+                                let tool_id = if call_id.is_empty() {
+                                    // Generate a synthetic ID for inline tool calls
+                                    format!("call_{:016x}", iteration)
+                                } else {
+                                    call_id.clone()
+                                };
+                                self.push_tool_history(&tool_id, name, args, &output);
+                            }
                             let _ = tx.send(HarnessEvent::ToolResult { output });
                         }
                         DispatchOut::Err(e) => {
                             self.tool_failure_count += 1;
                             self.correction_memory.push(&format!(
                                 "Tool `{}` failed: {}",
-                                info.as_ref().map_or("?", |(n, _)| n),
+                                info.as_ref().map_or("?", |(_, n, _)| n),
                                 e,
                             ));
                             log::debug!(
@@ -860,13 +1201,12 @@ impl Harness {
             }
 
             log::debug!("run_agent_loop RESTARTING with tool results");
-            // Summarize this iteration into the context window
-            let summary = self.server_response.join("; ");
-            let token_count = crate::util::token_counter::estimate_tokens(&summary);
-            self.context_window.push(summary, token_count);
-            // Tool results were accumulated in server_response
-            // Next iteration sends an empty prompt with results in context
-            current_input.clear();
+            // The tool results have already been recorded in `self.history`
+            // via `push_tool_history` during dispatch, so we don't need to
+            // summarise them here. Just set the continuation prompt for the
+            // next iteration.
+            current_input =
+                "Please continue with your response based on the information above.".to_string();
         }
         log::debug!("run_agent_loop EXIT");
     }
@@ -903,8 +1243,6 @@ impl Harness {
             match cosh.dispatch(&tool_name, args).await {
                 Ok(result) => {
                     self.tool_issuer.pop_front();
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    self.server_response.push(format!("[{ts}] {result}"));
                     return Ok(result);
                 }
                 Err(err) if err.starts_with("unknown cosh tool") => {}
@@ -943,9 +1281,6 @@ impl Harness {
 
         let text = text.join("\n");
 
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        self.server_response.push(format!("[{ts}] {text}"));
-
         Ok(text)
     }
 }
@@ -965,9 +1300,9 @@ impl Harness {
             mode: Mode::Build,
             stop_signal: None,
             stop: false,
-            server_response: Vec::new(),
             tool_issuer: VecDeque::new(),
-            context_window: ContextWindow::new(MAX_TOKENS),
+            history: Vec::new(),
+            total_history_tokens: 0,
             disabled_tools: HashSet::new(),
             tool_failure_count: 0,
             tool_extraction_failure_count: 0,

@@ -10,6 +10,7 @@ fn make_harness() -> Harness {
 fn handle_harness_tool_rejects_unknown_tool() {
     let mut h = make_harness();
     let tc = ToolCallData {
+        id: String::new(),
         name: "mcp.tool".into(),
         arguments: json!({}),
     };
@@ -21,6 +22,7 @@ fn handle_harness_tool_rejects_unknown_tool() {
 fn handle_harness_tool_consumes_stop_agent_loop() {
     let mut h = make_harness();
     let tc = ToolCallData {
+        id: String::new(),
         name: "stop_agent_loop".into(),
         arguments: json!({}),
     };
