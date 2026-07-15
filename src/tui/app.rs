@@ -1248,13 +1248,12 @@ impl App {
                                         let id = format!("{now_ms}");
                                         let title = format_session_timestamp(now_ms);
                                         self.state.add_session(crate::types::Session {
-                                            id,
+                                            id: id.clone(),
                                             title,
                                             created_at: now_ms,
                                             messages: vec![],
                                         });
-                                        self.state.current_session_id =
-                                            self.state.sessions.last().map(|s| s.id.clone());
+                                        self.state.current_session_id = Some(id);
                                     }
                                     HomeAction::ToggleSidebar => {
                                         self.sidebar.open = !self.sidebar.open;
@@ -2856,15 +2855,15 @@ impl App {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis() as u64;
+                        let id = format!("{now_ms}");
                         let title = format_session_timestamp(now_ms);
                         self.state.add_session(crate::types::Session {
-                            id: format!("{now_ms}"),
+                            id: id.clone(),
                             title,
                             created_at: now_ms,
                             messages: vec![],
                         });
-                        self.state.current_session_id =
-                            self.state.sessions.last().map(|s| s.id.clone());
+                        self.state.current_session_id = Some(id);
                     }
                     crate::routes::home::HomeAction::ToggleSidebar => {
                         self.sidebar.open = !self.sidebar.open;

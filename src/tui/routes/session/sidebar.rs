@@ -60,6 +60,10 @@ impl SidebarView {
         let my = mouse.y;
         let mx = mouse.x;
 
+        if mx < area.x || mx >= area.right() {
+            return SidebarAction::None;
+        }
+
         for (i, session) in state.sessions.iter().enumerate() {
             let item_y = area.y + 2 + i as u16;
             if my != item_y {
