@@ -29,7 +29,6 @@ pub enum Action {
     NextSession,
     PrevSession,
     ToggleMode,
-    ToggleRightPanel,
 }
 
 #[derive(Debug, Clone)]
@@ -124,13 +123,6 @@ impl KeyMap {
                     Action::ToggleCommandPalette,
                     KeyBinding {
                         key: Char('p'),
-                        modifiers: KeyModifiers::CONTROL,
-                    },
-                ),
-                (
-                    Action::ToggleRightPanel,
-                    KeyBinding {
-                        key: Char('r'),
                         modifiers: KeyModifiers::CONTROL,
                     },
                 ),

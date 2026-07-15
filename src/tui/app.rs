@@ -898,7 +898,7 @@ impl App {
 
             let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
 
-            let right_panel_w = if matches!(self.mode(), AppMode::Session) && (should_show_right_panel(area.width, &self.state.right_panel) || self.state.right_panel.force_open) {
+            let right_panel_w = if matches!(self.mode(), AppMode::Session) && (should_show_right_panel(area.width, &self.state.right_panel)) {
                 RIGHT_PANEL_WIDTH
             } else {
                 0
@@ -910,8 +910,7 @@ impl App {
                 area.height,
             );
 
-            if self.sidebar.open {
-            // Right panel
+            // Right panel (independent of sidebar state)
             if right_panel_w > 0 {
                 render_right_panel(
                     buf,
@@ -921,6 +920,8 @@ impl App {
                     area.width,
                 );
             }
+
+            if self.sidebar.open {
                 self.sidebar.render(
                     buf,
                     Rect::new(area.x, area.y, sidebar_w, area.height),
@@ -1427,9 +1428,6 @@ impl App {
                         Some(crate::keymap::Action::ToggleSidebar) => {
                             self.sidebar.open = !self.sidebar.open;
                         }
-                        Some(crate::keymap::Action::ToggleRightPanel) => {
-                            self.state.right_panel.force_open = !self.state.right_panel.force_open;
-                        }
                         Some(crate::keymap::Action::ToggleHelp) => {
                             self.dialog.show(DialogType::Shortcuts { scroll: 0 });
                         }
@@ -1655,7 +1653,7 @@ impl App {
                                 self.dialog.pop();
                             } else if matches!(self.mode(), AppMode::Session) {
                                 self.state.current_session_id = None;
-                    self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
+                                self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
                             } else if matches!(self.mode(), AppMode::AddProvider) {
                                 self.show_add_provider = false;
                             } else if matches!(self.mode(), AppMode::Home) {
@@ -2769,6 +2767,7 @@ impl App {
             let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
             match self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
                 SidebarAction::SwitchTo(session_id) => {
+                    self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
                     self.state.current_session_id = Some(session_id);
                     return Ok(true);
                 }

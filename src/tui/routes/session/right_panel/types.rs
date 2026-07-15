@@ -30,8 +30,6 @@ pub struct RightPanelState {
     pub todos: Vec<TodoItem>,
     /// Active/completed PTY sessions.
     pub pty_sessions: Vec<PtySession>,
-    /// Whether the panel is force-opened by user toggle (overrides auto-hide).
-    pub force_open: bool,
     /// Counter for matching ToolResult back to plan_todo_write tool calls.
     pub pending_todo_update_count: u32,
     /// Counter for generating unique PTY IDs.
@@ -43,7 +41,6 @@ impl RightPanelState {
         Self {
             todos: Vec::new(),
             pty_sessions: Vec::new(),
-            force_open: false,
             pending_todo_update_count: 0,
             next_pty_id: 0,
         }
