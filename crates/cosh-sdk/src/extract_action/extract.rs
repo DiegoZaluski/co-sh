@@ -11,6 +11,9 @@ pub struct ToolSchema {
 /// A validated tool call extracted from LLM output.
 #[derive(Debug, Clone)]
 pub struct ToolCallData {
+    /// Tool call ID from the API's native `tool_calls` mechanism.
+    /// Empty string when the call was extracted from inline JSON text.
+    pub id: String,
     pub name: String,
     pub arguments: JsonValue,
 }
@@ -477,6 +480,14 @@ fn jsonish_value_to_json(value: &jsonish::Value) -> Option<JsonValue> {
 fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCallData> {
     let obj = value.as_object()?;
 
+    // Extract the tool call ID (from API's native mechanism or synthetic).
+    let id = obj
+        .get("id")
+        .or_else(|| obj.get("tool_call_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
     // Standard tool call envelope: {"name": "...", "arguments": {...}}
     if let Some(name) = obj
         .get("name")
@@ -504,6 +515,7 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
         }
 
         return Some(ToolCallData {
+            id,
             name: name.to_string(),
             arguments: args,
         });
@@ -521,6 +533,7 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
     }
     if matches.len() == 1 {
         return Some(ToolCallData {
+            id,
             name: matches[0].name.clone(),
             arguments: value.clone(),
         });

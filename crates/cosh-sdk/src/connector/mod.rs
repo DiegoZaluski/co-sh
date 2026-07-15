@@ -21,7 +21,10 @@ mod provider;
 pub use client::Connector;
 pub use error::ConnectorError;
 pub use output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
-pub use params::{ResponseFormat, ToolDefinition, ToolFunction};
+pub use params::{
+    ChatMessage, ResponseFormat, ToolCallFunctionMsg, ToolCallMsg, ToolDefinition, ToolFunction,
+    assistant_tool_call_message, system_message, tool_result_message, user_message,
+};
 pub use provider::{
     detect_provider, get_provider_env_var, known_providers, known_providers_with_env,
 };

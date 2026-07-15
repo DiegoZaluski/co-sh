@@ -9,16 +9,15 @@ use std::pin::Pin;
 use std::time::Duration;
 use tokio_stream::Stream;
 
-#[derive(serde::Serialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
+// Public ChatMessage from params module with native tool-call support.
+use super::super::params::{
+    ChatMessage as ApiChatMessage, system_message, user_message as pub_user_message,
+};
 
 #[derive(serde::Serialize)]
 struct ChatRequest {
     model: String,
-    messages: Vec<ChatMessage>,
+    messages: Vec<ApiChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,6 +163,8 @@ struct ToolCallFunctionChunk {
 /// Accumulated state for one tool call received over multiple SSE chunks.
 #[derive(Default, Debug)]
 struct PendingToolCall {
+    /// The `tool_call_id` from the API's native mechanism.
+    id: String,
     name: String,
     arguments: String,
 }
@@ -173,7 +174,7 @@ struct PendingToolCall {
 fn pending_tool_call_to_json(tc: &PendingToolCall) -> String {
     let args: serde_json::Value = serde_json::from_str(&tc.arguments)
         .unwrap_or_else(|_| serde_json::Value::String(tc.arguments.clone()));
-    serde_json::json!({"name": tc.name, "arguments": args}).to_string()
+    serde_json::json!({"name": tc.name, "arguments": args, "id": tc.id}).to_string()
 }
 
 /// Drain accumulated tool calls and return synthetic [`StreamChunk`] items
@@ -215,24 +216,167 @@ struct EmbeddingData {
     embedding: Vec<f32>,
 }
 
-fn build_messages(prompt: &str, system_prompt: Option<&str>) -> Vec<ChatMessage> {
+fn build_messages(prompt: &str, system_prompt: Option<&str>) -> Vec<ApiChatMessage> {
     let mut messages = Vec::new();
     if let Some(system) = system_prompt {
-        messages.push(ChatMessage {
+        messages.push(ApiChatMessage {
             role: "system".to_string(),
-            content: system.to_string(),
+            content: Some(system.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
         });
     }
-    messages.push(ChatMessage {
-        role: "user".to_string(),
-        content: prompt.to_string(),
-    });
+    messages.push(pub_user_message(prompt));
     messages
+}
+
+/// Build the full messages array including system message, conversation
+/// history, and tool results with native tool-call formatting.
+pub fn build_full_messages(system: &str, messages: &[ApiChatMessage]) -> Vec<ApiChatMessage> {
+    let mut out = Vec::with_capacity(messages.len() + 1);
+    out.push(system_message(system));
+    out.extend_from_slice(messages);
+    out
+}
+
+/// Shared SSE processing loop for streaming chat completions.
+///
+/// Handles parsing SSE frames, accumulating tool call deltas,
+/// yielding text tokens, and flushing tool calls on completion.
+/// Used by both [`chat_stream`] and [`chat_stream_with_messages`].
+fn process_sse_response(
+    response: reqwest::Response,
+) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> {
+    let buf = SseBuffer::new();
+
+    Box::pin(stream! {
+        let mut response = response;
+        let mut buf = buf;
+        // Accumulate streaming tool calls across chunks.
+        let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
+        // Keep the raw text of the last non-DONE data frame so we can
+        // use it when yielding synthetic tool-call tokens.
+        let mut last_raw: Option<String> = None;
+        loop {
+            let chunk = match tokio::time::timeout(Duration::from_secs(30), response.chunk()).await {
+                Ok(Ok(Some(c))) => {
+                    c
+                }
+                Ok(Ok(None)) => {
+                    break;
+                }
+                Ok(Err(e)) => {
+                    yield Err(ConnectorError::Network(e.to_string()));
+                    return;
+                }
+                Err(_) => {
+                    yield Err(ConnectorError::Network("stream timed out after 30s".to_string()));
+                    return;
+                }
+            };
+            for data in buf.push_and_drain(&chunk) {
+                if data == "[DONE]" {
+                    // Flush any accumulated tool calls before ending.
+                    for chunk in flush_tool_calls(&mut pending_tool_calls, &mut last_raw) {
+                        yield Ok(chunk);
+                    }
+                    return;
+                }
+                match serde_json::from_str::<ChatChunkResponse>(&data) {
+                    Ok(ccr) => {
+                        last_raw = Some(data.clone());
+
+                        // Accumulate tool call deltas from this chunk.
+                        if let Some(tcs) = ccr.choices.first()
+                            .and_then(|c| c.delta.tool_calls.as_ref())
+                        {
+                            for tc in tcs {
+                                let idx = tc.index.unwrap_or(0_i32) as usize;
+                                if idx >= pending_tool_calls.len() {
+                                    pending_tool_calls.resize_with(idx + 1, Default::default);
+                                }
+                                let ptc = &mut pending_tool_calls[idx];
+                                // Capture the tool_call_id from the first
+                                // chunk for this index (it only appears on
+                                // the first chunk of each tool call).
+                                if let Some(ref id) = tc.id {
+                                    id.clone_into(&mut ptc.id);
+                                }
+                                if let Some(ref func) = tc.function {
+                                    if let Some(ref name) = func.name {
+                                        name.clone_into(&mut ptc.name);
+                                    }
+                                    if let Some(ref args) = func.arguments {
+                                        ptc.arguments.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+
+                        let token = ccr.choices.first()
+                            .and_then(|c| c.delta.content.as_deref())
+                            .unwrap_or("")
+                            .to_owned();
+                        let finish_reason = ccr.choices.first()
+                            .and_then(|c| c.finish_reason.as_deref())
+                            .map(String::from);
+                        let should_stop = finish_reason.is_some();
+
+                        // Emit text token if there is any.
+                        if !token.is_empty() {
+                            yield Ok(StreamChunk {
+                                raw: data.clone(),
+                                token,
+                                finish_reason: None,
+                            });
+                        }
+
+                        // If the model signalled a tool call via the API-level
+                        // mechanism, convert the accumulated tool calls to inline
+                        // JSON text so the harness extractor can parse them.
+                        if should_stop && !pending_tool_calls.is_empty() {
+                            for chunk in flush_tool_calls(&mut pending_tool_calls, &mut last_raw) {
+                                yield Ok(chunk);
+                            }
+                            return;
+                        }
+
+                        if should_stop {
+                            yield Ok(StreamChunk {
+                                raw: data,
+                                token: String::new(),
+                                finish_reason,
+                            });
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&data) {
+                            yield Err(ConnectorError::HttpError {
+                                status: 200,
+                                body: api_err.error.message,
+                            });
+                            return;
+                        }
+                        yield Err(ConnectorError::Deserialization(format!(
+                            "{e}. Raw chunk: {data}"
+                        )));
+                        return;
+                    }
+                }
+            }
+        }
+        // Stream ended without [DONE]
+        for chunk in flush_tool_calls(&mut pending_tool_calls, &mut last_raw) {
+            yield Ok(chunk);
+        }
+        yield Err(ConnectorError::StreamTerminated);
+    })
 }
 
 fn build_chat_request(
     model: String,
-    messages: Vec<ChatMessage>,
+    messages: Vec<ApiChatMessage>,
     params: &Parameters,
     stream: bool,
 ) -> ChatRequest {
@@ -345,129 +489,45 @@ pub async fn chat_stream(
         send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
     log::debug!("chat_stream: got response status={}", response.status());
 
-    let buf = SseBuffer::new();
+    let stream = process_sse_response(response);
+    Ok(ChatStream::new(stream))
+}
 
-    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> = Box::pin(
-        stream! {
-            let mut response = response;
-            let mut buf = buf;
-            // Accumulate streaming tool calls across chunks.
-            let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
-            // Keep the raw text of the last non-DONE data frame so we can
-            // use it when yielding synthetic tool-call tokens.
-            let mut last_raw: Option<String> = None;
-            loop {
-                let chunk = match tokio::time::timeout(Duration::from_secs(30), response.chunk()).await {
-                    Ok(Ok(Some(c))) => {
-                        c
-                    }
-                    Ok(Ok(None)) => {
-                        break;
-                    }
-                    Ok(Err(e)) => {
-                        yield Err(ConnectorError::Network(e.to_string()));
-                        return;
-                    }
-                    Err(_) => {
-                        yield Err(ConnectorError::Network("stream timed out after 30s".to_string()));
-                        return;
-                    }
-                };
-                for data in buf.push_and_drain(&chunk) {
-                    if data == "[DONE]" {
-                        // Flush any accumulated tool calls before ending.
-                        for chunk in flush_tool_calls(&mut pending_tool_calls, &mut last_raw) {
-                            yield Ok(chunk);
-                        }
-                        return;
-                    }
-                    match serde_json::from_str::<ChatChunkResponse>(&data) {
-                        Ok(ccr) => {
-                            last_raw = Some(data.clone());
+/// Send a streaming chat completion with a full messages array including
+/// system, user, assistant (with `tool_calls`), and tool (with `tool_call_id`)
+/// messages.
+///
+/// This is the native tool-calling path: tool definitions are sent via the
+/// API's `tools` parameter, tool calls arrive as structured `delta.tool_calls`,
+/// and tool results are returned as `role: "tool"` messages.
+pub async fn chat_stream_with_messages(
+    config: &ProviderConfig,
+    params: &Parameters,
+    system: &str,
+    messages: &[ApiChatMessage],
+) -> Result<ChatStream, ConnectorError> {
+    let api_key = params
+        .api_key
+        .clone()
+        .or_else(|| get_api_key(config.name))
+        .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
+    let model = params
+        .model
+        .clone()
+        .unwrap_or_else(|| config.default_model.to_string());
 
-                            // Accumulate tool call deltas from this chunk.
-                            if let Some(tcs) = ccr.choices.first()
-                                .and_then(|c| c.delta.tool_calls.as_ref())
-                            {
-                                for tc in tcs {
-                                    let idx = tc.index.unwrap_or(0_i32) as usize;
-                                    if idx >= pending_tool_calls.len() {
-                                        pending_tool_calls.resize_with(idx + 1, Default::default);
-                                    }
-                                    let ptc = &mut pending_tool_calls[idx];
-                                    if let Some(ref func) = tc.function {
-                                        if let Some(ref name) = func.name {
-                                            name.clone_into(&mut ptc.name);
-                                        }
-                                        if let Some(ref args) = func.arguments {
-                                            ptc.arguments.push_str(args);
-                                        }
-                                    }
-                                }
-                            }
+    let all_messages = build_full_messages(system, messages);
+    let request = build_chat_request(model, all_messages, params, true);
+    let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
+    let url = format!("{base_url}/chat/completions");
 
-                            let token = ccr.choices.first()
-                                .and_then(|c| c.delta.content.as_deref())
-                                .unwrap_or("")
-                                .to_owned();
-                            let finish_reason = ccr.choices.first()
-                                .and_then(|c| c.finish_reason.as_deref())
-                                .map(String::from);
-                            let should_stop = finish_reason.is_some();
+    let auth = format!("Bearer {api_key}");
+    log::debug!("chat_stream_with_messages: sending request to {url}");
+    let response =
+        send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
 
-                            // Emit text token if there is any.
-                            if !token.is_empty() {
-                                yield Ok(StreamChunk {
-                                    raw: data.clone(),
-                                    token,
-                                    finish_reason: None,
-                                });
-                            }
-
-                            // If the model signalled a tool call via the API-level
-                            // mechanism, convert the accumulated tool calls to inline
-                            // JSON text so the harness extractor can parse them.
-                            if should_stop && !pending_tool_calls.is_empty() {
-                                for chunk in flush_tool_calls(&mut pending_tool_calls, &mut last_raw) {
-                                    yield Ok(chunk);
-                                }
-                                return;
-                            }
-
-                            if should_stop {
-                                yield Ok(StreamChunk {
-                                    raw: data,
-                                    token: String::new(),
-                                    finish_reason,
-                                });
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&data) {
-                                yield Err(ConnectorError::HttpError {
-                                    status: 200,
-                                    body: api_err.error.message,
-                                });
-                                return;
-                            }
-                            yield Err(ConnectorError::Deserialization(format!(
-                                "{e}. Raw chunk: {data}"
-                            )));
-                            return;
-                        }
-                    }
-                }
-            }
-            // Stream ended without [DONE]
-            for chunk in flush_tool_calls(&mut pending_tool_calls, &mut last_raw) {
-                yield Ok(chunk);
-            }
-            yield Err(ConnectorError::StreamTerminated);
-        },
-    );
-
-    Ok(ChatStream::new(inner))
+    let stream = process_sse_response(response);
+    Ok(ChatStream::new(stream))
 }
 
 /// Send an embedding request and return the embedding vector.

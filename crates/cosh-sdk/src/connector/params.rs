@@ -1,3 +1,79 @@
+/// A chat message for structured conversation history with native tool call support.
+///
+/// This mirrors the `OpenAI` Chat Completion message format so the model
+/// can natively understand tool calls (`role: "assistant"` with
+/// `tool_calls`) and tool results (`role: "tool"` with `tool_call_id`).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ChatMessage {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallMsg>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+/// A tool call within an assistant message (OpenAI-compatible format).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ToolCallMsg {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ToolCallFunctionMsg,
+}
+
+/// The function details within a tool call message.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ToolCallFunctionMsg {
+    pub name: String,
+    pub arguments: String,
+}
+
+/// Builder for `ChatMessage` with `role: "tool"`.
+#[must_use]
+pub fn tool_result_message(tool_call_id: &str, content: &str) -> ChatMessage {
+    ChatMessage {
+        role: "tool".to_string(),
+        content: Some(content.to_string()),
+        tool_calls: None,
+        tool_call_id: Some(tool_call_id.to_string()),
+    }
+}
+
+/// Builder for `ChatMessage` with `role: "assistant"` containing tool calls.
+#[must_use]
+pub fn assistant_tool_call_message(tool_calls: Vec<ToolCallMsg>) -> ChatMessage {
+    ChatMessage {
+        role: "assistant".to_string(),
+        content: None,
+        tool_calls: Some(tool_calls),
+        tool_call_id: None,
+    }
+}
+
+/// Builder for `ChatMessage` with `role: "user"`.
+#[must_use]
+pub fn user_message(content: &str) -> ChatMessage {
+    ChatMessage {
+        role: "user".to_string(),
+        content: Some(content.to_string()),
+        tool_calls: None,
+        tool_call_id: None,
+    }
+}
+
+/// Builder for `ChatMessage` with `role: "system"`.
+#[must_use]
+pub fn system_message(content: &str) -> ChatMessage {
+    ChatMessage {
+        role: "system".to_string(),
+        content: Some(content.to_string()),
+        tool_calls: None,
+        tool_call_id: None,
+    }
+}
+
 /// Constrain the model's output format (e.g., JSON).
 ///
 /// Use [`ResponseFormat::json_object`] to request valid JSON output.

@@ -1,6 +1,6 @@
 use super::error::ConnectorError;
 use super::output::{ChatOutput, ChatStream, LsOutput};
-use super::params::{Parameters, ResponseFormat, ToolDefinition};
+use super::params::{ChatMessage, Parameters, ResponseFormat, ToolDefinition};
 use super::provider::{Family, ProviderConfig, get_provider};
 
 use super::claude;
@@ -131,6 +131,11 @@ impl Connector {
         self
     }
 
+    /// Set tool definitions in-place (mutates the existing connector).
+    pub fn set_tools(&mut self, v: Vec<ToolDefinition>) {
+        self.params.tools = Some(v);
+    }
+
     /// Controls which tool is called (e.g., `"auto"`, `"none"`, or a specific tool).
     pub fn with_tool_choice(mut self, v: serde_json::Value) -> Self {
         self.params.tool_choice = Some(v);
@@ -256,6 +261,44 @@ impl Connector {
             }
             Family::Claude => {
                 claude::chat_stream(provider, &self.params, prompt, Some(system)).await
+            }
+        }
+    }
+
+    /// Stream a chat completion with a full messages array (including system,
+    /// user, assistant with `tool_calls`, and tool roles).
+    ///
+    /// The `system` parameter provides the base system prompt (instructions +
+    /// tool definitions). The `messages` array contains the conversation
+    /// history with proper roles, tool calls, and tool results.
+    ///
+    /// Use this method instead of [`stream_chat_with_system`] when the model
+    /// needs to see structured tool call history (`role: "tool"` messages).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MissingApiKey` if no API key is found, `HttpError` on non-2xx status,
+    /// or `Network` on transport failure before the stream starts.
+    pub async fn stream_chat_with_messages(
+        &self,
+        system: &str,
+        messages: &[ChatMessage],
+    ) -> Result<ChatStream, ConnectorError> {
+        let provider = self.provider()?;
+        let params = &self.params;
+        match provider.family {
+            Family::OpenAICompatible => {
+                openai_compatible::chat_stream_with_messages(provider, params, system, messages)
+                    .await
+            }
+            Family::Gemini => {
+                // TODO: implement for Gemini
+                Err(ConnectorError::NotImplemented(
+                    "stream_chat_with_messages for Gemini",
+                ))
+            }
+            Family::Claude => {
+                claude::chat_stream_with_messages(provider, params, system, messages).await
             }
         }
     }
