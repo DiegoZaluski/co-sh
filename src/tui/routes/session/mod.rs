@@ -1576,7 +1576,9 @@ impl SessionView {
                             }
                             crate::types::Part::Reasoning(r) => {
                                 let expanded = config.thinking_mode
-                                    || self.tool_state.is_expanded(&r.text[..r.text.floor_char_boundary(32)]);
+                                    || self
+                                        .tool_state
+                                        .is_expanded(&r.text[..r.text.floor_char_boundary(32)]);
                                 let header = if expanded { "- Thought" } else { "+ Thought" };
                                 if p_top >= vp_top {
                                     self.text_regions.push(TextRegion {

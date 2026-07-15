@@ -120,6 +120,8 @@ pub struct App {
     live_requested: bool,
     /// Timestamp of the previous frame (for delta_time calculation).
     last_frame_time: std::time::Instant,
+    /// Last known mouse X position (for keyboard scroll targeting).
+    last_mouse_x: u16,
 }
 
 impl App {
@@ -189,6 +191,7 @@ impl App {
             drag_selection: None,
             live_requested: false,
             last_frame_time: std::time::Instant::now(),
+            last_mouse_x: 0,
         }
     }
 
@@ -928,7 +931,7 @@ impl App {
                         right_panel_w,
                         area.height,
                     ),
-                    &self.state.right_panel,
+                    &mut self.state.right_panel,
                     &self.theme,
                     area.width,
                 );
@@ -1412,30 +1415,46 @@ impl App {
 
                     match action {
                         Some(crate::keymap::Action::ScrollUp) => {
-                            // OpenCode: 1/5 viewport per arrow key
-                            let vh = self.session_view.visible_height.max(1);
-                            let delta = -(vh as f64 / 5.0);
-                            self.session_view.scroll_by_raw(delta);
-                            self.session_view.reset_scroll_accumulator();
+                            if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                                self.state.right_panel.scroll_up(3);
+                            } else {
+                                let vh = self.session_view.visible_height.max(1);
+                                let delta = -(vh as f64 / 5.0);
+                                self.session_view.scroll_by_raw(delta);
+                                self.session_view.reset_scroll_accumulator();
+                            }
                         }
                         Some(crate::keymap::Action::ScrollDown) => {
-                            let vh = self.session_view.visible_height.max(1);
-                            let delta = vh as f64 / 5.0;
-                            self.session_view.scroll_by_raw(delta);
-                            self.session_view.reset_scroll_accumulator();
+                            if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                                self.state.right_panel.scroll_down(3);
+                            } else {
+                                let vh = self.session_view.visible_height.max(1);
+                                let delta = vh as f64 / 5.0;
+                                self.session_view.scroll_by_raw(delta);
+                                self.session_view.reset_scroll_accumulator();
+                            }
                         }
                         Some(crate::keymap::Action::ScrollUpPage) => {
-                            // OpenCode: 1/2 viewport per page key
-                            let vh = self.session_view.visible_height.max(1);
-                            let delta = -(vh as f64 / 2.0);
-                            self.session_view.scroll_by_raw(delta);
-                            self.session_view.reset_scroll_accumulator();
+                            if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                                let vh = self.state.right_panel.visible_height.max(1);
+                                self.state.right_panel.scroll_up(vh / 2);
+                            } else {
+                                let vh = self.session_view.visible_height.max(1);
+                                let delta = -(vh as f64 / 2.0);
+                                self.session_view.scroll_by_raw(delta);
+                                self.session_view.reset_scroll_accumulator();
+                            }
                         }
                         Some(crate::keymap::Action::ScrollDownPage) => {
-                            let vh = self.session_view.visible_height.max(1);
-                            let delta = vh as f64 / 2.0;
-                            self.session_view.scroll_by_raw(delta);
-                            self.session_view.reset_scroll_accumulator();
+                            if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                                let vh = self.state.right_panel.visible_height.max(1);
+                                self.state.right_panel.scroll_down(vh / 2);
+                            } else {
+                                let vh = self.session_view.visible_height.max(1);
+                                let delta = vh as f64 / 2.0;
+                                self.session_view.scroll_by_raw(delta);
+                                self.session_view.reset_scroll_accumulator();
+                            }
                         }
                         Some(crate::keymap::Action::ToggleSidebar) => {
                             self.sidebar.open = !self.sidebar.open;
@@ -1679,10 +1698,18 @@ impl App {
                             }
                         }
                         Some(crate::keymap::Action::ScrollToTop) => {
-                            self.session_view.scroll_to(0);
+                            if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                                self.state.right_panel.reset_scroll();
+                            } else {
+                                self.session_view.scroll_to(0);
+                            }
                         }
                         Some(crate::keymap::Action::ScrollToBottom) => {
-                            self.session_view.scroll_to_bottom();
+                            if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                                self.state.right_panel.scroll_to_bottom();
+                            } else {
+                                self.session_view.scroll_to_bottom();
+                            }
                         }
                         Some(crate::keymap::Action::ToggleConceal) => {
                             self.config.conceal = !self.config.conceal;
@@ -1806,11 +1833,17 @@ impl App {
                                 match key.code {
                                     KeyCode::Up => {
                                         if self.prompt_view.input.is_empty() {
-                                            // OpenCode: 1/5 viewport per arrow
-                                            let vh = self.session_view.visible_height.max(1);
-                                            let delta = -(vh as f64 / 5.0);
-                                            self.session_view.scroll_by_raw(delta);
-                                            self.session_view.reset_scroll_accumulator();
+                                            if Self::is_in_right_panel(
+                                                self.last_mouse_x,
+                                                self.terminal_size(),
+                                            ) {
+                                                self.state.right_panel.scroll_up(3);
+                                            } else {
+                                                let vh = self.session_view.visible_height.max(1);
+                                                let delta = -(vh as f64 / 5.0);
+                                                self.session_view.scroll_by_raw(delta);
+                                                self.session_view.reset_scroll_accumulator();
+                                            }
                                         } else {
                                             self.prompt_view.note_activity();
                                             self.prompt_view.cursor_up(
@@ -1820,10 +1853,17 @@ impl App {
                                     }
                                     KeyCode::Down => {
                                         if self.prompt_view.input.is_empty() {
-                                            let vh = self.session_view.visible_height.max(1);
-                                            let delta = vh as f64 / 5.0;
-                                            self.session_view.scroll_by_raw(delta);
-                                            self.session_view.reset_scroll_accumulator();
+                                            if Self::is_in_right_panel(
+                                                self.last_mouse_x,
+                                                self.terminal_size(),
+                                            ) {
+                                                self.state.right_panel.scroll_down(3);
+                                            } else {
+                                                let vh = self.session_view.visible_height.max(1);
+                                                let delta = vh as f64 / 5.0;
+                                                self.session_view.scroll_by_raw(delta);
+                                                self.session_view.reset_scroll_accumulator();
+                                            }
                                         } else {
                                             self.prompt_view.note_activity();
                                             self.prompt_view.cursor_down(
@@ -1883,17 +1923,32 @@ impl App {
                                         }
                                     }
                                     KeyCode::PageUp => {
-                                        // OpenCode: 1/2 viewport per page key
-                                        let vh = self.session_view.visible_height.max(1);
-                                        let delta = -(vh as f64 / 2.0);
-                                        self.session_view.scroll_by_raw(delta);
-                                        self.session_view.reset_scroll_accumulator();
+                                        if Self::is_in_right_panel(
+                                            self.last_mouse_x,
+                                            self.terminal_size(),
+                                        ) {
+                                            let vh = self.state.right_panel.visible_height.max(1);
+                                            self.state.right_panel.scroll_up(vh / 2);
+                                        } else {
+                                            let vh = self.session_view.visible_height.max(1);
+                                            let delta = -(vh as f64 / 2.0);
+                                            self.session_view.scroll_by_raw(delta);
+                                            self.session_view.reset_scroll_accumulator();
+                                        }
                                     }
                                     KeyCode::PageDown => {
-                                        let vh = self.session_view.visible_height.max(1);
-                                        let delta = vh as f64 / 2.0;
-                                        self.session_view.scroll_by_raw(delta);
-                                        self.session_view.reset_scroll_accumulator();
+                                        if Self::is_in_right_panel(
+                                            self.last_mouse_x,
+                                            self.terminal_size(),
+                                        ) {
+                                            let vh = self.state.right_panel.visible_height.max(1);
+                                            self.state.right_panel.scroll_down(vh / 2);
+                                        } else {
+                                            let vh = self.session_view.visible_height.max(1);
+                                            let delta = vh as f64 / 2.0;
+                                            self.session_view.scroll_by_raw(delta);
+                                            self.session_view.reset_scroll_accumulator();
+                                        }
                                     }
                                     KeyCode::Backspace => {
                                         // Ctrl+Backspace = delete word before cursor
@@ -2064,6 +2119,8 @@ impl App {
                     if tool == "bash_run" {
                         let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
                         self.state.right_panel.start_pty(command.to_string(), None);
+                        // Auto-scroll to bottom for new commands
+                        self.state.right_panel.scroll_to_bottom();
                     }
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
@@ -2145,6 +2202,9 @@ impl App {
                             break;
                         }
                     }
+                    if !self.state.right_panel.is_scrolled_up() {
+                        self.state.right_panel.scroll_to_bottom();
+                    }
                     self.state.right_panel.complete_last_pty(output.clone());
                 }
 
@@ -2169,6 +2229,10 @@ impl App {
                 } => {
                     // Update right panel PTY with streaming output
                     self.state.right_panel.update_last_pty(output.clone());
+                    // Auto-follow if user is at the bottom
+                    if !self.state.right_panel.is_scrolled_up() {
+                        self.state.right_panel.scroll_to_bottom();
+                    }
                     if finished {
                         self.state.right_panel.complete_last_pty(output.clone());
                     }
@@ -2282,12 +2346,21 @@ impl App {
         }
     }
 
+    /// Check if a mouse x-coordinate is within the right panel area.
+    fn is_in_right_panel(x: u16, terminal_size: Rect) -> bool {
+        let right_panel_x = terminal_size
+            .width
+            .saturating_sub(crate::routes::session::right_panel::RIGHT_PANEL_WIDTH);
+        x >= right_panel_x
+    }
+
     /// Handle a crossterm mouse event by converting it to a cosh-tui `MouseEvent`
     /// and dispatching to the appropriate component based on current layout.
     #[allow(clippy::too_many_lines, clippy::unnecessary_wraps)]
     fn handle_mouse_event(&mut self, evt: CrosstermMouseEvent) -> io::Result<bool> {
         let x = evt.column;
         let y = evt.row;
+        self.last_mouse_x = x;
 
         let modifiers = MouseModifiers {
             shift: evt.modifiers.contains(KeyModifiers::SHIFT),
@@ -2518,6 +2591,10 @@ impl App {
                         }
                         _ => {}
                     }
+                } else if matches!(self.mode(), AppMode::Session)
+                    && Self::is_in_right_panel(x, self.terminal_size())
+                {
+                    self.state.right_panel.scroll_up(3);
                 } else if matches!(self.mode(), AppMode::Session) {
                     self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
                 } else if matches!(self.mode(), AppMode::AddProvider) {
@@ -2537,6 +2614,10 @@ impl App {
                         }
                         _ => {}
                     }
+                } else if matches!(self.mode(), AppMode::Session)
+                    && Self::is_in_right_panel(x, self.terminal_size())
+                {
+                    self.state.right_panel.scroll_down(3);
                 } else if matches!(self.mode(), AppMode::Session) {
                     self.session_view.scroll_y = (self.session_view.scroll_y + 3).max(0);
                 } else if matches!(self.mode(), AppMode::AddProvider) {
