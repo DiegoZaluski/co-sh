@@ -774,9 +774,16 @@ impl SessionView {
                 {
                     return 1;
                 }
+                // Only tools that render block-style output (shell, write, edit, todo)
+                // should allocate height for the full output block. All other tool
+                // types render inline (1 line) regardless of whether they have output.
                 let is_block = t.output.is_some()
                     && matches!(t.status, ToolStatus::Completed)
-                    && !t.output.as_deref().unwrap_or("").trim().is_empty();
+                    && !t.output.as_deref().unwrap_or("").trim().is_empty()
+                    && matches!(
+                        tool_render::tool_display(&t.tool),
+                        "bash" | "write" | "edit" | "todo"
+                    );
                 if is_block {
                     let output = t.output.as_deref().unwrap_or("").trim();
                     let collapsed = crate::util::scroll::collapse_tool_output(output, 10, 800);
@@ -911,7 +918,7 @@ impl SessionView {
     ) -> u16 {
         let is_error = msg.id.starts_with("msg-err-");
         let x_off = area.x + 3;
-        let max_w = area.width.saturating_sub(6);
+        let max_w = area.width.saturating_sub(6).max(2);
 
         if is_error {
             let mut border_box = BoxRenderable::new();
@@ -1037,7 +1044,7 @@ impl SessionView {
             area.width.saturating_sub(margin * 2),
             area.height,
         );
-        let max_w = inner_area.width.saturating_sub(6);
+        let max_w = inner_area.width.saturating_sub(6).max(2);
         let x_off = i32::from(inner_area.x + 3);
         let max_w_i32 = i32::from(max_w);
 
@@ -1723,7 +1730,7 @@ impl SessionView {
 
         let unique_agents = state.unique_agents();
         let agent_colors = AgentColors::from_theme(theme);
-        let max_w = inner_area.width.saturating_sub(6);
+        let max_w = inner_area.width.saturating_sub(6).max(2);
         let streaming = state.status == SessionStatus::Working;
 
         let _frame_start = Instant::now();
@@ -2202,6 +2209,17 @@ impl SessionView {
 
             y += render_actual_h;
         }
+
+        // Sync cached total height with actual rendered height.
+        // The actual rendered total (from the render loop's y-advancement)
+        // can exceed the cached estimate when `scan_content_height` returns
+        // more rows than `estimate_height` predicted (due to the generous
+        // `(est_h * 3).max(10)` allocation in render_parts for assistant text).
+        // Without this correction, scroll_y is clamped to max_scroll based on
+        // the underestimated cached_total, cutting off the last message.
+        let actual_total = y - (vp_top - self.scroll_y);
+        self.cached_total_height = self.cached_total_height.max(actual_total);
+        self.total_height = self.cached_total_height;
 
         if let Some((anchor_x, _anchor_screen_y, focus_x, _focus_screen_y)) = self.drag_selection {
             // Convert content-space anchor and focus to current screen position.
