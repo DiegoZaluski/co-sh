@@ -2404,6 +2404,9 @@ impl App {
 
     /// Check if a mouse x-coordinate is within the right panel area.
     fn is_in_right_panel(x: u16, terminal_size: Rect) -> bool {
+        if terminal_size.width < 100 {
+            return false;
+        }
         let right_panel_x = terminal_size
             .width
             .saturating_sub(crate::routes::session::right_panel::RIGHT_PANEL_WIDTH);
