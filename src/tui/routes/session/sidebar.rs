@@ -64,27 +64,28 @@ impl SidebarView {
             return SidebarAction::None;
         }
 
-        for (i, session) in state.sessions.iter().enumerate() {
+        for (i, summary) in state.session_summaries.iter().enumerate() {
             let item_y = area.y + 2 + i as u16;
             if my != item_y {
                 continue;
             }
 
             // Calculate where 🗑 would be: right after the session title
-            let is_active = Some(session.id.as_str()) == state.current_session_id.as_deref();
+            let is_active =
+                Some(summary.session_id.as_str()) == state.current_session_id.as_deref();
             let prefix = if is_active { "\u{25b8} " } else { "  " };
-            let label_len = prefix.chars().count() + session.title.chars().count();
+            let label_len = prefix.chars().count() + summary.title.chars().count();
             let max_label_w = area.width.saturating_sub(3) as usize;
             let visible = label_len.min(max_label_w);
             let trash_x = area.x + 2 + visible as u16;
 
             // Click on 🗑 or the cleared cell after it
             if mx >= trash_x && mx < area.right() {
-                return SidebarAction::RequestDelete(session.id.clone());
+                return SidebarAction::RequestDelete(summary.session_id.clone());
             }
 
             // Otherwise, switch to this session
-            return SidebarAction::SwitchTo(session.id.clone());
+            return SidebarAction::SwitchTo(summary.session_id.clone());
         }
 
         SidebarAction::None
@@ -119,17 +120,18 @@ impl SidebarView {
         let active_style = Style::default().fg(rgba_color(theme.primary));
         let delete_style = Style::default().fg(rgba_color(theme.text_muted));
 
-        for (i, session) in state.sessions.iter().enumerate() {
+        for (i, summary) in state.session_summaries.iter().enumerate() {
             let y = area.y + 2 + i as u16;
             if y >= area.bottom() {
                 break;
             }
 
-            let is_active = Some(session.id.as_str()) == state.current_session_id.as_deref();
+            let is_active =
+                Some(summary.session_id.as_str()) == state.current_session_id.as_deref();
             let style = if is_active { active_style } else { item_style };
 
             let prefix = if is_active { "\u{25b8} " } else { "  " };
-            let label = format!("{}{}", prefix, session.title);
+            let label = format!("{}{}", prefix, summary.title);
             // Leave room for 🗑 after the text
             let max_label_w = area.width.saturating_sub(3);
             draw_text_line(buf, &label, area.x + 1, y, max_label_w, style);

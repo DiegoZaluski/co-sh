@@ -129,13 +129,10 @@ impl App {
         let mut state = AppState::new();
         state.working_directory = cwd;
 
-        // Load persisted sessions from disk
+        // Load session summaries (header-only, lightweight).
+        // Full sessions are loaded lazily into the LRU cache on demand.
         let session_store = SessionStore::new();
-        for summary in session_store.list_sessions() {
-            if let Some(session) = session_store.load_session(&summary.session_id) {
-                state.add_session(session);
-            }
-        }
+        state.session_summaries = session_store.list_sessions();
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
@@ -1254,12 +1251,7 @@ impl App {
                                             as u64;
                                         let id = format!("{now_ms}");
                                         let title = format_session_timestamp(now_ms);
-                                        self.state.add_session(crate::types::Session {
-                                            id: id.clone(),
-                                            title,
-                                            created_at: now_ms,
-                                            messages: vec![],
-                                        });
+                                        self.state.add_empty_session(id.clone(), title, now_ms);
                                         self.state.current_session_id = Some(id);
                                     }
                                     HomeAction::ToggleSidebar => {
@@ -1506,16 +1498,14 @@ impl App {
                             if self.state.current_session_id.is_none() {
                                 let id = generate_session_id();
                                 let title: String = msg.chars().take(40).collect();
-                                self.state.add_session(crate::types::Session {
-                                    id: id.clone(),
+                                self.state.add_empty_session(
+                                    id.clone(),
                                     title,
-                                    created_at: std::time::SystemTime::now()
+                                    std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default()
-                                        .as_millis()
-                                        as u64,
-                                    messages: vec![],
-                                });
+                                        .as_millis() as u64,
+                                );
                                 self.state.current_session_id = Some(id);
                             }
 
@@ -2918,7 +2908,8 @@ impl App {
                 SidebarAction::SwitchTo(session_id) => {
                     self.state.right_panel =
                         crate::routes::session::right_panel::types::RightPanelState::new();
-                    self.state.current_session_id = Some(session_id);
+                    self.state
+                        .switch_to_session(session_id, &self.session_store);
                     return Ok(true);
                 }
                 SidebarAction::RequestDelete(session_id) => {
@@ -3002,12 +2993,7 @@ impl App {
                             .as_millis() as u64;
                         let id = format!("{now_ms}");
                         let title = format_session_timestamp(now_ms);
-                        self.state.add_session(crate::types::Session {
-                            id: id.clone(),
-                            title,
-                            created_at: now_ms,
-                            messages: vec![],
-                        });
+                        self.state.add_empty_session(id.clone(), title, now_ms);
                         self.state.current_session_id = Some(id);
                     }
                     crate::routes::home::HomeAction::ToggleSidebar => {

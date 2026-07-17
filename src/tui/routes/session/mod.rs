@@ -225,6 +225,9 @@ pub struct SessionView {
     /// Change-detection token of the last message when caches were last built.
     /// Used to detect streaming/tool-status changes without a full cache rebuild.
     last_msg_change_token: u64,
+    /// ID of the session for which caches were last built.
+    /// Forces a full rebuild when switching sessions with the same message count.
+    last_session_id: Option<String>,
 
     // ── text_regions dirty flag (skip rebuild when nothing changed) ────────────
     text_regions_gen: u64,
@@ -306,6 +309,7 @@ impl SessionView {
             msg_cache_w: Vec::new(),
             msg_cache_h: Vec::new(),
             msg_cache_text_regions: Vec::new(),
+            last_session_id: None,
         }
     }
 
@@ -1253,7 +1257,9 @@ impl SessionView {
         config: &TuiConfig,
     ) -> bool {
         let config_tok = config_token(config);
-        let cache_stale = self.msg_height_cache.len() != session.messages.len()
+        let session_changed = self.last_session_id.as_deref() != Some(session.id.as_str());
+        let cache_stale = session_changed
+            || self.msg_height_cache.len() != session.messages.len()
             || self.cache_max_w != max_w
             || self.cache_config_token != config_tok;
 
@@ -1263,7 +1269,7 @@ impl SessionView {
             let count_grew =
                 !config_or_width_changed && session.messages.len() > self.msg_height_cache.len();
 
-            if config_or_width_changed || !count_grew {
+            if config_or_width_changed || !count_grew || session_changed {
                 // Full rebuild: config/width changed, or count decreased
                 let _start = Instant::now();
                 self.msg_height_cache.clear();
@@ -1282,6 +1288,7 @@ impl SessionView {
                 self.cache_config_token = config_tok;
                 self.last_msg_change_token =
                     session.messages.last().map(msg_change_token).unwrap_or(0);
+                self.last_session_id = Some(session.id.clone());
                 self.cached_total_height = self.recompute_total_height(session);
                 log::debug!(
                     "[PERF] msg_height_cache: cold_build={}us msgs={}",
@@ -1306,6 +1313,7 @@ impl SessionView {
                 self.cache_config_token = config_tok;
                 self.last_msg_change_token =
                     session.messages.last().map(msg_change_token).unwrap_or(0);
+                self.last_session_id = Some(session.id.clone());
                 self.cached_total_height = self.recompute_total_height(session);
                 log::debug!(
                     "[PERF] msg_height_cache: extended prev={} now={}",
@@ -1332,6 +1340,7 @@ impl SessionView {
                     self.msg_height_cache[last_idx] = msg_h;
                 }
                 self.last_msg_change_token = current_token;
+                self.last_session_id = Some(session.id.clone());
                 self.cached_total_height = self.recompute_total_height(session);
                 log::debug!("[PERF] msg_height_cache: updated last msg (streaming)");
             } else {

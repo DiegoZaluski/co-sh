@@ -1,14 +1,22 @@
+use std::num::NonZeroUsize;
+
+use lru::LruCache;
+
 use crate::routes::session::right_panel::types::RightPanelState;
+use crate::session_store::SessionSummary;
 use crate::types::{
     FilePart, Message, MessageRole, Part, ReasoningPart, Session, SessionStatus, TextPart,
     ToolPart, ToolStatus,
 };
 use cosh::harness::Mode;
 
-const MAX_SESSIONS: usize = 20;
+const SESSION_CACHE_SIZE: usize = 10;
 
 pub struct AppState {
-    pub sessions: Vec<Session>,
+    /// Header-only session summaries (always in RAM, sidebar uses these).
+    pub session_summaries: Vec<SessionSummary>,
+    /// Full session cache (LRU eviction, only recently accessed sessions stored).
+    pub session_cache: LruCache<String, Session>,
     pub current_session_id: Option<String>,
     pub status: SessionStatus,
     pub scroll_y: i32,
@@ -27,7 +35,8 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            sessions: vec![],
+            session_summaries: vec![],
+            session_cache: LruCache::new(NonZeroUsize::new(SESSION_CACHE_SIZE).unwrap()),
             current_session_id: None,
             status: SessionStatus::Idle,
             scroll_y: 0,
@@ -45,7 +54,9 @@ impl AppState {
 
     /// Remove a session by ID. Clears `current_session_id` if it matches.
     pub fn remove_session(&mut self, session_id: &str) {
-        self.sessions.retain(|s| s.id != session_id);
+        self.session_summaries
+            .retain(|s| s.session_id != session_id);
+        self.session_cache.pop(session_id);
         if self
             .current_session_id
             .as_deref()
@@ -55,31 +66,96 @@ impl AppState {
         }
     }
 
-    /// Add a session, evicting the oldest non-current session if at cap.
+    /// Add a full session (with its messages) and a matching summary.
     pub fn add_session(&mut self, session: Session) {
-        if self.sessions.len() >= MAX_SESSIONS {
-            // Evict the oldest session that isn't the current one
-            if let Some(idx) = self
-                .sessions
-                .iter()
-                .position(|s| Some(&s.id) != self.current_session_id.as_ref())
-            {
-                self.sessions.remove(idx);
-            }
-        }
-        self.sessions.push(session);
+        let summary = SessionSummary {
+            session_id: session.id.clone(),
+            title: session.title.clone(),
+            created_at: session.created_at,
+            message_count: session.messages.len(),
+            cwd: self.working_directory.clone(),
+            model: None,
+        };
+        self.session_summaries.push(summary);
+        self.session_cache.put(session.id.clone(), session);
     }
 
+    /// Add a session summary and a placeholder empty session to the cache.
+    /// Used when creating a brand-new session (no messages yet).
+    pub fn add_empty_session(&mut self, id: String, title: String, created_at: u64) {
+        let summary = SessionSummary {
+            session_id: id.clone(),
+            title: title.clone(),
+            created_at,
+            message_count: 0,
+            cwd: self.working_directory.clone(),
+            model: None,
+        };
+        self.session_summaries.push(summary);
+        self.session_cache.put(
+            id.clone(),
+            Session {
+                id: id.clone(),
+                title,
+                created_at,
+                messages: vec![],
+            },
+        );
+    }
+
+    /// Ensure a session is in the cache. If not, attempts to load from the
+    /// provided store. Returns `true` if the session is available after the call.
+    pub fn ensure_session_cached(
+        &mut self,
+        session_id: &str,
+        store: &crate::session_store::SessionStore,
+    ) -> bool {
+        if self.session_cache.contains(session_id) {
+            return true;
+        }
+        if let Some(session) = store.load_session(session_id) {
+            self.session_cache.put(session_id.to_string(), session);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the current session if one is selected and in cache.
+    /// Uses `peek` to avoid mutating LRU order on reads — the current session
+    /// is kept alive by `current_session_mut()` and `switch_to_session()`.
     pub fn current_session(&self) -> Option<&Session> {
         self.current_session_id
             .as_ref()
-            .and_then(|id| self.sessions.iter().find(|s| s.id == *id))
+            .and_then(|id| self.session_cache.peek(id.as_str()))
     }
 
+    /// Returns a mutable reference to the current session if one is selected
+    /// and in cache.
     pub fn current_session_mut(&mut self) -> Option<&mut Session> {
-        self.current_session_id
-            .as_ref()
-            .and_then(|id| self.sessions.iter_mut().find(|s| s.id == *id))
+        let id = self.current_session_id.clone()?;
+        self.session_cache.get_mut(&id)
+    }
+
+    /// Swap the current session: save one, load another. The old session is
+    /// upserted into the cache (so subsequent switches are fast).
+    pub fn switch_to_session(
+        &mut self,
+        session_id: String,
+        store: &crate::session_store::SessionStore,
+    ) {
+        // Save current session to cache
+        if let Some(old_id) = self.current_session_id.as_ref() {
+            // The current session is already in the cache (it's been modified in-place).
+            // Persist it.
+            if let Some(session) = self.session_cache.get(old_id.as_str()) {
+                store.save_session(session);
+            }
+        }
+
+        // Ensure target is cached
+        self.ensure_session_cached(&session_id, store);
+        self.current_session_id = Some(session_id);
     }
 
     pub fn max_scroll(&self) -> i32 {
@@ -100,6 +176,23 @@ impl AppState {
         seen
     }
 
+    /// Update the message count in the summary for the current session.
+    /// Called after a new message is appended during streaming.
+    pub fn update_summary_msg_count(&mut self) {
+        if let Some(id) = self.current_session_id.as_ref()
+            && let Some(session) = self.session_cache.get(id.as_str())
+        {
+            let count = session.messages.len();
+            if let Some(summary) = self
+                .session_summaries
+                .iter_mut()
+                .find(|s| s.session_id == *id)
+            {
+                summary.message_count = count;
+            }
+        }
+    }
+
     pub fn add_demo_data(&mut self) {
         let session = Session {
             id: "demo-1".to_string(),
@@ -112,7 +205,8 @@ impl AppState {
                     agent: Some("build".to_string()),
                     model: None,
                     parts: vec![Part::Text(TextPart {
-                        text: "Hi! Can you help me write a Rust CLI tool that processes JSON files?".to_string(),
+                        text: "Hi! Can you help me write a Rust CLI tool that processes JSON files?"
+                            .to_string(),
                         synthetic: false,
                     })],
                     created_at: 1000,
@@ -124,13 +218,17 @@ impl AppState {
                     model: Some("claude-3.5-sonnet".to_string()),
                     parts: vec![
                         Part::Text(TextPart {
-                            text: "I'd be happy to help! Let me first **look at what files** you have in the project.".to_string(),
+                            text: "I'd be happy to help! Let me first **look at what files** you have in the project."
+                                .to_string(),
                             synthetic: false,
                         }),
                         Part::Tool(ToolPart {
                             tool: "glob".to_string(),
                             input: serde_json::json!({"pattern": "**/*.rs", "path": "."}),
-                            output: Some("src/main.rs\nsrc/lib.rs\nsrc/config.rs\nsrc/processor.rs".to_string()),
+                            output: Some(
+                                "src/main.rs\nsrc/lib.rs\nsrc/config.rs\nsrc/processor.rs"
+                                    .to_string(),
+                            ),
                             status: ToolStatus::Completed,
                             tool_call_id: Some("glob-1".to_string()),
                             is_start: false,
@@ -153,7 +251,8 @@ impl AppState {
                     agent: Some("editor".to_string()),
                     model: None,
                     parts: vec![Part::Text(TextPart {
-                        text: "Let me read the current main.rs to understand the structure.".to_string(),
+                        text: "Let me read the current main.rs to understand the structure."
+                            .to_string(),
                         synthetic: false,
                     })],
                     created_at: 3000,
@@ -165,13 +264,16 @@ impl AppState {
                     model: Some("claude-3.5-sonnet".to_string()),
                     parts: vec![
                         Part::Reasoning(ReasoningPart {
-                            text: "The user wants a CLI tool for JSON processing. I should check what dependencies are available and look at the current code structure before suggesting changes.".to_string(),
+                            text: "The user wants a CLI tool for JSON processing. I should check what dependencies are available and look at the current code structure before suggesting changes."
+                                .to_string(),
                             collapsed: true,
                         }),
                         Part::Tool(ToolPart {
                             tool: "read".to_string(),
                             input: serde_json::json!({"filePath": "src/main.rs"}),
-                            output: Some("fn main() {\n    println!(\"Hello, world!\");\n}".to_string()),
+                            output: Some(
+                                "fn main() {\n    println!(\"Hello, world!\");\n}".to_string(),
+                            ),
                             status: ToolStatus::Completed,
                             tool_call_id: Some("read-1".to_string()),
                             is_start: false,
@@ -187,7 +289,8 @@ impl AppState {
                             is_streaming: false,
                         }),
                         Part::Text(TextPart {
-                            text: "I can see you have a basic Rust project. Let me add **clap** for CLI argument parsing and **serde_json** for JSON processing.".to_string(),
+                            text: "I can see you have a basic Rust project. Let me add **clap** for CLI argument parsing and **serde_json** for JSON processing."
+                                .to_string(),
                             synthetic: false,
                         }),
                     ],
@@ -206,7 +309,9 @@ impl AppState {
                         Part::Tool(ToolPart {
                             tool: "write".to_string(),
                             input: serde_json::json!({"filePath": "src/main.rs", "content": "use clap::Parser;\nuse serde_json::Value;\n\n#[derive(Parser)]\nstruct Args {\n    file: String,\n    #[arg(short, long)]\n    pretty: bool,\n}\n\nfn main() {\n    let args = Args::parse();\n    let content = std::fs::read_to_string(&args.file).unwrap();\n    let json: Value = serde_json::from_str(&content).unwrap();\n    if args.pretty {\n        println!(\"{}\", serde_json::to_string_pretty(&json).unwrap());\n    } else {\n        println!(\"{}\", content);\n    }\n}".to_string()}),
-                            output: Some("fn main() {\n    println!(\"Hello, world!\");\n}".to_string()),
+                            output: Some(
+                                "fn main() {\n    println!(\"Hello, world!\");\n}".to_string(),
+                            ),
                             status: ToolStatus::Completed,
                             tool_call_id: Some("write-1".to_string()),
                             is_start: false,
@@ -219,7 +324,10 @@ impl AppState {
                         Part::Tool(ToolPart {
                             tool: "edit".to_string(),
                             input: serde_json::json!({"filePath": "Cargo.toml", "oldString": "[dependencies]", "newString": "[dependencies]\nclap = { version = \"4\", features = [\"derive\"] }\nserde_json = \"1\""}),
-                            output: Some("--- a/Cargo.toml\n+++ b/Cargo.toml\n@@ -1,2 +1,4 @@\n [dependencies]\n+clap = { version = \"4\", features = [\"derive\"] }\n+serde_json = \"1\"".to_string()),
+                            output: Some(
+                                "--- a/Cargo.toml\n+++ b/Cargo.toml\n@@ -1,2 +1,4 @@\n [dependencies]\n+clap = { version = \"4\", features = [\"derive\"] }\n+serde_json = \"1\""
+                                    .to_string(),
+                            ),
                             status: ToolStatus::Completed,
                             tool_call_id: Some("edit-1".to_string()),
                             is_start: false,
@@ -234,7 +342,8 @@ impl AppState {
                     agent: Some("build".to_string()),
                     model: None,
                     parts: vec![Part::Text(TextPart {
-                        text: "That looks great! Can you also add error handling with proper messages?".to_string(),
+                        text: "That looks great! Can you also add error handling with proper messages?"
+                            .to_string(),
                         synthetic: false,
                     })],
                     created_at: 6000,
@@ -246,20 +355,25 @@ impl AppState {
                     model: Some("claude-3.5-sonnet".to_string()),
                     parts: vec![
                         Part::Reasoning(ReasoningPart {
-                            text: "The user wants better error handling. I should use anyhow or create proper error messages with context. Let me update the main.rs to use expect() with meaningful messages.".to_string(),
+                            text: "The user wants better error handling. I should use anyhow or create proper error messages with context. Let me update the main.rs to use expect() with meaningful messages."
+                                .to_string(),
                             collapsed: false,
                         }),
                         Part::Tool(ToolPart {
                             tool: "shell".to_string(),
                             input: serde_json::json!({"command": "cargo check 2>&1"}),
-                            output: Some("    Checking json-processor v0.1.0\n    Finished dev profile [unoptimized + debuginfo] target(s) in 0.32s".to_string()),
+                            output: Some(
+                                "    Checking json-processor v0.1.0\n    Finished dev profile [unoptimized + debuginfo] target(s) in 0.32s"
+                                    .to_string(),
+                            ),
                             status: ToolStatus::Completed,
                             tool_call_id: Some("shell-1".to_string()),
                             is_start: false,
                             is_streaming: false,
                         }),
                         Part::Text(TextPart {
-                            text: "The project compiles! Let me now add proper error handling:".to_string(),
+                            text: "The project compiles! Let me now add proper error handling:"
+                                .to_string(),
                             synthetic: false,
                         }),
                         Part::Tool(ToolPart {
