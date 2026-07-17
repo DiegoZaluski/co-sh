@@ -652,6 +652,8 @@ impl SessionView {
                         tool_state,
                         theme,
                     );
+                    let available = bottom.saturating_sub(y);
+                    line_h = line_h.min(available);
                     y += line_h.max(1);
                 }
                 Part::Reasoning(r) => {
@@ -1862,7 +1864,7 @@ impl SessionView {
                             Style::default().bg(rgba_color(theme.background)),
                         );
 
-                        let actual_h = Self::render_assistant_message(
+                        let mut actual_h = Self::render_assistant_message(
                             &mut temp,
                             full_area,
                             msg,
@@ -1874,16 +1876,26 @@ impl SessionView {
                             &self.part_heights_cache[idx],
                             streaming,
                         ) as i32;
+                        actual_h = actual_h.min(generous_h as i32);
 
                         let msg_content_top = msg_top - vp_top + self.scroll_y;
                         if actual_h > 0 {
                             let x_off_text = inner_area.x + 3;
                             let temp_cells = temp.content();
-                            let line_stride = inner_area.width as usize;
+                            let total_stride = inner_area.width as usize;
+                            let w = max_w as usize;
+                            let ah = actual_h as u16;
+                            let mut content_cells = Vec::with_capacity(w * ah as usize);
+                            for dy in 0..ah as usize {
+                                let base = dy * total_stride;
+                                for dx in 0..w {
+                                    content_cells.push(temp_cells[base + 3 + dx].clone());
+                                }
+                            }
                             let regions = Self::cells_to_text_regions(
-                                temp_cells,
-                                line_stride,
-                                actual_h as u16,
+                                &content_cells,
+                                w,
+                                ah,
                                 msg_content_top,
                                 x_off_text,
                                 max_w,
@@ -1894,15 +1906,15 @@ impl SessionView {
                         let vis_h =
                             (actual_h.min(vp_bottom - msg_top) - src_y as i32).max(0) as u16;
                         let temp_cells = temp.content();
-                        let line_stride = inner_area.width as usize;
+                        let total_stride = inner_area.width as usize;
                         let dst_x = inner_area.x;
                         for dy in 0..vis_h {
                             let temp_y = src_y + dy;
                             let dst_line_y = dst_y + dy;
-                            let base = temp_y as usize * line_stride;
-                            for dx in 0..line_stride {
+                            let base = temp_y as usize * total_stride;
+                            for dx in 0..max_w as usize {
                                 if let Some(dst) = buf.cell_mut((dst_x + dx as u16, dst_line_y)) {
-                                    *dst = temp_cells[base + dx].clone();
+                                    *dst = temp_cells[base + 3 + dx].clone();
                                 }
                             }
                         }
@@ -1910,14 +1922,14 @@ impl SessionView {
                         // Save non-streaming messages to cache
                         if !is_streaming_msg && actual_h > 0 {
                             let ah = actual_h as u16;
-                            let w = inner_area.width as usize;
+                            let w = max_w as usize;
                             let temp_cells = temp.content();
-                            let line_stride = inner_area.width as usize;
+                            let total_stride = inner_area.width as usize;
                             let mut cells = Vec::with_capacity(w * ah as usize);
                             for dy in 0..ah {
-                                let base = dy as usize * line_stride;
+                                let base = dy as usize * total_stride;
                                 for dx in 0..w {
-                                    cells.push(temp_cells[base + dx].clone());
+                                    cells.push(temp_cells[base + 3 + dx].clone());
                                 }
                             }
                             let x_off_text = inner_area.x + 3;
@@ -1931,7 +1943,7 @@ impl SessionView {
                                 max_w,
                             );
                             self.msg_cache_tokens[idx] = token;
-                            self.msg_cache_w[idx] = inner_area.width;
+                            self.msg_cache_w[idx] = max_w;
                             self.msg_cache_h[idx] = ah;
                             self.msg_cache_cells[idx] = Some(cells);
                             self.msg_cache_text_regions[idx] = Some(regions);

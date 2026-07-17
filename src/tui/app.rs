@@ -2170,43 +2170,42 @@ impl App {
                     // Try to parse as TODO output to update right panel
                     if self.state.right_panel.pending_todo_update_count > 0 {
                         self.state.right_panel.pending_todo_update_count -= 1;
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&output) {
-                            if let Some(groups) = val
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&output)
+                            && let Some(groups) = val
                                 .get("list")
                                 .and_then(|l| l.get("groups"))
                                 .and_then(|g| g.as_array())
-                            {
-                                let todos: Vec<_> = groups
-                                    .iter()
-                                    .flat_map(|g| {
-                                        g.get("items")
-                                            .and_then(|items| items.as_array())
-                                            .into_iter()
-                                            .flatten()
-                                    })
-                                    .filter_map(|item| {
-                                        let status = item
-                                            .get("status")
-                                            .and_then(|s| s.as_str())
-                                            .unwrap_or("Pending");
-                                        let description = item
-                                            .get("description")
-                                            .and_then(|d| d.as_str())
-                                            .unwrap_or("");
-                                        Some(crate::routes::session::right_panel::types::TodoItem {
-                                            status: match status {
-                                                "InProgress" => "in_progress",
-                                                "Completed" => "completed",
-                                                "Cancelled" => "cancelled",
-                                                _ => "pending",
-                                            }
-                                            .to_string(),
-                                            content: description.to_string(),
-                                        })
-                                    })
-                                    .collect();
-                                self.state.right_panel.set_todos(todos);
-                            }
+                        {
+                            let todos: Vec<_> = groups
+                                .iter()
+                                .flat_map(|g| {
+                                    g.get("items")
+                                        .and_then(|items| items.as_array())
+                                        .into_iter()
+                                        .flatten()
+                                })
+                                .map(|item| {
+                                    let status = item
+                                        .get("status")
+                                        .and_then(|s| s.as_str())
+                                        .unwrap_or("Pending");
+                                    let description = item
+                                        .get("description")
+                                        .and_then(|d| d.as_str())
+                                        .unwrap_or("");
+                                    crate::routes::session::right_panel::types::TodoItem {
+                                        status: match status {
+                                            "InProgress" => "in_progress",
+                                            "Completed" => "completed",
+                                            "Cancelled" => "cancelled",
+                                            _ => "pending",
+                                        }
+                                        .to_string(),
+                                        content: description.to_string(),
+                                    }
+                                })
+                                .collect();
+                            self.state.right_panel.set_todos(todos);
                         }
                     }
                     let Some(session) = self.state.current_session_mut() else {

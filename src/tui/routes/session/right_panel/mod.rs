@@ -13,7 +13,7 @@ pub mod pty;
 pub mod todo;
 pub mod types;
 
-use pty::{pty_entry_height, render_one_pty};
+
 use todo::{render_todo_section, todo_section_height};
 use types::RightPanelState;
 
@@ -24,6 +24,8 @@ pub fn rgba_color(rgba: RGBA) -> Color {
 
 /// Panel width in columns.
 pub const RIGHT_PANEL_WIDTH: u16 = 42;
+/// Gap (in rows) between consecutive sections.
+const SECTION_GAP: i32 = 1;
 
 /// Determine whether the right panel should be visible based on terminal width and content.
 pub fn should_show_right_panel(terminal_width: u16, state: &RightPanelState) -> bool {
@@ -60,18 +62,8 @@ fn natural_section_height(state: &RightPanelState, inner_w: u16, kind: types::Se
                 todo_section_height(&state.todos, inner_w) as i32
             }
         }
-        types::SectionKind::Bash => state
-            .pty_sessions
-            .iter()
-            .filter(|p| !p.command.starts_with("subagent:"))
-            .map(|p| pty_entry_height(p) as i32)
-            .sum(),
-        types::SectionKind::Subagent => state
-            .pty_sessions
-            .iter()
-            .filter(|p| p.command.starts_with("subagent:"))
-            .map(|p| pty_entry_height(p) as i32)
-            .sum(),
+        types::SectionKind::Bash => bash_buffer_lines(state).len() as i32,
+        types::SectionKind::Subagent => subagent_buffer_lines(state).len() as i32,
     }
 }
 
@@ -104,7 +96,10 @@ pub fn render_right_panel(
         return;
     }
 
-    let base_h = viewport_h / visible_count;
+    // Reserve space for gaps between visible sections
+    let gap_total = (visible_count - 1) * SECTION_GAP;
+    let available_for_content = viewport_h - gap_total;
+    let base_h = available_for_content / visible_count;
     let mut pool = 0i32;
     let mut cur_y = viewport_top;
 
@@ -143,7 +138,7 @@ pub fn render_right_panel(
                     // Not all content fits, need scroll
                     state.todo_scroll_y = state
                         .todo_scroll_y
-                        .min((natural_h - allocated) as i32);
+                        .min(natural_h - allocated);
                     Some(&mut state.todo_scroll_y)
                 } else {
                     None
@@ -186,27 +181,65 @@ pub fn render_right_panel(
         *cur_y += allocated;
     };
 
-    if has_todo {
+    let sections_list = [
+        (has_todo, types::SectionKind::Todo),
+        (has_bash, types::SectionKind::Bash),
+        (has_subagent, types::SectionKind::Subagent),
+    ];
+
+    for (i, &(visible, kind)) in sections_list.iter().enumerate() {
+        if !visible {
+            continue;
+        }
         allocate_section(
-            buf, state, types::SectionKind::Todo, theme,
+            buf, state, kind, theme,
             inner_x, inner_w, &mut cur_y, &mut pool, base_h,
         );
-    }
-    if has_bash {
-        allocate_section(
-            buf, state, types::SectionKind::Bash, theme,
-            inner_x, inner_w, &mut cur_y, &mut pool, base_h,
-        );
-    }
-    if has_subagent {
-        allocate_section(
-            buf, state, types::SectionKind::Subagent, theme,
-            inner_x, inner_w, &mut cur_y, &mut pool, base_h,
-        );
+        // Add a blank gap after every section except the last visible one
+        let remaining = sections_list[i + 1..].iter().any(|&(v, _)| v);
+        if remaining {
+            cur_y += SECTION_GAP;
+        }
     }
 }
 
-/// Render all bash PTYs into a single section.
+/// Build a continuous buffer of all subagent PTY command + output lines, in order.
+/// Same-agent entries are deduplicated by `app.rs` (retain by prefix).
+fn subagent_buffer_lines(state: &RightPanelState) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for pty in &state.pty_sessions {
+        if !pty.command.starts_with("subagent:") {
+            continue;
+        }
+        // Header: the command line (e.g., "subagent: opencode")
+        lines.push(pty.command.clone());
+        // Output lines
+        for line in pty.output.lines() {
+            lines.push(line.to_string());
+        }
+    }
+    lines
+}
+
+/// Build a continuous buffer of all bash command + output lines, in order.
+fn bash_buffer_lines(state: &RightPanelState) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for pty in &state.pty_sessions {
+        if pty.command.starts_with("subagent:") {
+            continue;
+        }
+        // Header: $ command (simulating a shell prompt)
+        lines.push(format!("$ {}", pty.command));
+        // Output lines
+        for line in pty.output.lines() {
+            lines.push(line.to_string());
+        }
+    }
+    lines
+}
+
+/// Render all bash PTYs as a single continuous text buffer with line-based scroll.
+#[allow(clippy::too_many_arguments)]
 fn render_bash_section(
     buf: &mut Buffer,
     x: u16,
@@ -216,70 +249,49 @@ fn render_bash_section(
     state: &mut RightPanelState,
     theme: &Theme,
 ) {
-    let bash_ptys: Vec<usize> = state
-        .pty_sessions
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| !p.command.starts_with("subagent:"))
-        .map(|(i, _)| i)
-        .collect();
-
-    if bash_ptys.is_empty() {
+    let buffer = bash_buffer_lines(state);
+    if buffer.is_empty() {
         return;
     }
 
-    // Calculate total natural height
-    let natural_h: i32 = bash_ptys
-        .iter()
-        .map(|&i| pty_entry_height(&state.pty_sessions[i]) as i32)
-        .sum();
-
-    let has_scroll = natural_h > max_h as i32;
+    let total_lines = buffer.len() as i32;
+    let has_scroll = total_lines > max_h as i32;
     let scroll_y = if has_scroll {
         state.bash_scroll_y = state
             .bash_scroll_y
-            .min((natural_h - max_h as i32) as i32);
+            .min(total_lines - max_h as i32);
         state.bash_scroll_y
     } else {
         0
     };
 
-    // Virtual scroll within the bash section
-    let mut cur_y = y as i32 - scroll_y;
-    let viewport_bottom = (y + max_h) as i32;
+    let start_line = scroll_y as usize;
+    let visible = max_h as usize;
 
-    for &idx in &bash_ptys {
-        let pty = &state.pty_sessions[idx];
-        let pty_h = pty_entry_height(pty) as i32;
-
-        if cur_y + pty_h > y as i32 && cur_y < viewport_bottom {
-            let render_y = cur_y.max(y as i32) as u16;
-            let clip_h = (cur_y + pty_h).min(viewport_bottom) - render_y as i32;
-            render_one_pty(
-                buf,
-                x,
-                render_y,
-                max_w,
-                clip_h as u16,
-                pty,
-                theme,
-            );
-        }
-        cur_y += pty_h;
+    for (i, line) in buffer.iter().skip(start_line).take(visible).enumerate() {
+        let line_y = y + i as u16;
+        // Command lines ($ cmd) in normal text, output in muted
+        let line_style = if line.starts_with("$ ") {
+            Style::default().fg(rgba_color(theme.text))
+        } else {
+            Style::default().fg(rgba_color(theme.text_muted))
+        };
+        let truncated: String = line.chars().take(max_w as usize).collect();
+        draw_text(buf, &truncated, x, line_y, max_w, line_style);
     }
 
-    // Draw a small scrollbar if content overflows
     if has_scroll {
-        draw_section_scrollbar(buf, x + max_w, y, max_h, natural_h, scroll_y, theme);
+        draw_section_scrollbar(buf, x + max_w, y, max_h, total_lines, scroll_y, theme);
     }
 }
 
-/// Render all subagent PTYs into a single section with virtual scroll.
+/// Render all subagent PTYs as a single continuous text buffer with line-based scroll.
 ///
-/// Each subagent occupies its natural height; when the total exceeds the
-/// allocated space, the section scrolls (like the bash section). Different
-/// agent CLIs (e.g. opencode + kilo) stack; the same agent called again
-/// replaces its previous entry (handled in `app.rs` via `retain`).
+/// Different agent CLIs (e.g. opencode + kilo) stack; the same agent called
+/// again replaces its previous entry (handled in `app.rs` via `retain`).
+/// Lines with "→ cosh:" prefix are the main agent's input (normal style);
+/// all other output lines use muted style.
+#[allow(clippy::too_many_arguments)]
 fn render_subagent_section(
     buf: &mut Buffer,
     x: u16,
@@ -289,65 +301,60 @@ fn render_subagent_section(
     state: &mut RightPanelState,
     theme: &Theme,
 ) {
-    let sub_ptys: Vec<usize> = state
-        .pty_sessions
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| p.command.starts_with("subagent:"))
-        .map(|(i, _)| i)
-        .collect();
-
-    if sub_ptys.is_empty() {
+    let buffer = subagent_buffer_lines(state);
+    if buffer.is_empty() {
         return;
     }
 
-    // Calculate total natural height
-    let natural_h: i32 = sub_ptys
-        .iter()
-        .map(|&i| pty_entry_height(&state.pty_sessions[i]) as i32)
-        .sum();
-
-    let has_scroll = natural_h > max_h as i32;
+    let total_lines = buffer.len() as i32;
+    let has_scroll = total_lines > max_h as i32;
     let scroll_y = if has_scroll {
         state.subagent_scroll_y = state
             .subagent_scroll_y
-            .min((natural_h - max_h as i32) as i32);
+            .min(total_lines - max_h as i32);
         state.subagent_scroll_y
     } else {
         0
     };
 
-    // Virtual scroll within the subagent section
-    let mut cur_y = y as i32 - scroll_y;
-    let viewport_bottom = (y + max_h) as i32;
+    let start_line = scroll_y as usize;
+    let visible = max_h as usize;
 
-    for &idx in &sub_ptys {
-        let pty = &state.pty_sessions[idx];
-        let pty_h = pty_entry_height(pty) as i32;
-
-        if cur_y + pty_h > y as i32 && cur_y < viewport_bottom {
-            let render_y = cur_y.max(y as i32) as u16;
-            let clip_h = (cur_y + pty_h).min(viewport_bottom) - render_y as i32;
-            render_one_pty(
-                buf,
-                x,
-                render_y,
-                max_w,
-                clip_h as u16,
-                pty,
-                theme,
-            );
-        }
-        cur_y += pty_h;
+    for (i, line) in buffer.iter().skip(start_line).take(visible).enumerate() {
+        let line_y = y + i as u16;
+        // Command headers and "→ cosh:" input lines in normal text;
+        // subagent response lines in muted text.
+        let line_style = if line.starts_with("subagent:") || line.starts_with("→ cosh:") {
+            Style::default().fg(rgba_color(theme.text))
+        } else {
+            Style::default().fg(rgba_color(theme.text_muted))
+        };
+        let truncated: String = line.chars().take(max_w as usize).collect();
+        draw_text(buf, &truncated, x, line_y, max_w, line_style);
     }
 
-    // Draw a small scrollbar if content overflows
     if has_scroll {
-        draw_section_scrollbar(buf, x + max_w, y, max_h, natural_h, scroll_y, theme);
+        draw_section_scrollbar(buf, x + max_w, y, max_h, total_lines, scroll_y, theme);
+    }
+}
+
+/// Simple text drawing helper (filters ASCII control chars to prevent ratatui panics).
+fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
+    let right = x + max_w;
+    for (i, ch) in text.chars().filter(|c| !c.is_ascii_control()).enumerate() {
+        let cx = x + i as u16;
+        if cx >= right {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((cx, y)) {
+            cell.set_char(ch);
+            cell.set_style(style);
+        }
     }
 }
 
 /// Draw a scrollbar within a section (not the full panel).
+#[allow(clippy::too_many_arguments)]
 fn draw_section_scrollbar(
     buf: &mut Buffer,
     sb_x: u16,
@@ -374,11 +381,11 @@ fn draw_section_scrollbar(
 
     for row in 0..sb_h {
         let y = sb_y + row as u16;
-        if let Some(cell) = buf.cell_mut((sb_x, y)) {
-            if row >= thumb_pos && row < thumb_pos + thumb_size {
-                cell.set_char('█');
-                cell.set_style(sb_style);
-            }
+        if let Some(cell) = buf.cell_mut((sb_x, y))
+            && row >= thumb_pos && row < thumb_pos + thumb_size
+        {
+            cell.set_char('█');
+            cell.set_style(sb_style);
         }
     }
 }

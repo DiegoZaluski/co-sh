@@ -108,7 +108,7 @@ pub fn detect_installed() -> &'static Vec<&'static str> {
         AGENTS
             .iter()
             .filter(|(_, binary, _)| {
-                std::env::var_os("PATH").map_or(false, |path| {
+                std::env::var_os("PATH").is_some_and(|path| {
                     std::env::split_paths(&path).any(|dir| {
                         let full = dir.join(binary);
                         full.is_file() || full.with_extension("exe").is_file()
@@ -270,11 +270,10 @@ pub fn call(
             let code = child
                 .wait()
                 .ok()
-                .map(|s| {
+                .map_or(-1_i32, |s| {
                     #[allow(clippy::cast_possible_wrap)]
                     { s.code().unwrap_or(-1_i32) }
-                })
-                .unwrap_or(-1_i32);
+                });
 
             let result = output.lock().unwrap().clone();
             let result = strip_ansi(&result);

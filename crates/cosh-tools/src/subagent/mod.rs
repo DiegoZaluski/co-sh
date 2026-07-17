@@ -48,7 +48,14 @@ impl SubAgent {
     /// Create a new `SubAgent` with a tool description tailored to
     /// only the agent CLIs that are actually installed in PATH.
     /// Detection runs once per process (cached by `detect_installed()`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if an agent returned by `detect_installed()` is not present
+    /// in [`AGENTS`](call::AGENTS). This is a logic invariant — detection
+    /// only returns names that exist in the table.
     #[must_use]
+    #[allow(clippy::expect_used, clippy::format_collect)]
     pub fn new() -> Self {
         let installed = call::detect_installed();
 
@@ -71,19 +78,20 @@ impl SubAgent {
                          These are separate tools with different purposes.",
             )
         } else {
-            let agents_desc: String = installed
+            let agents_desc = installed
                 .iter()
                 .map(|name| {
                     // SAFETY: `name` comes from detect_installed() which only
                     // returns entries present in AGENTS.
-                    let (_, binary, static_args) = call::AGENTS
+                    let entry = call::AGENTS
                         .iter()
                         .find(|(n, _, _)| *n == *name)
                         .expect("installed agent must be in AGENTS");
+                    let (_, binary, static_args) = entry;
                     let args = static_args.join(" ");
                     format!("- `{name}` → `{binary} {args} \"<input>\"`\n")
                 })
-                .collect();
+                .collect::<String>();
 
             format!(
                 "{common}\n\
