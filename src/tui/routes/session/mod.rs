@@ -595,7 +595,7 @@ impl SessionView {
                         .and_then(|ph| ph.get(pi))
                         .copied()
                         .unwrap_or_else(|| Self::estimate_part_height(part, max_w, config, role));
-                    let render_h = (est_h.saturating_mul(3))
+                    let render_h = (est_h.saturating_add(5))
                         .max(10)
                         .min(bottom.saturating_sub(y));
                     let area = Rect::new(x, y, max_w, render_h);
@@ -2270,7 +2270,7 @@ impl SessionView {
         // The actual rendered total (from the render loop's y-advancement)
         // can exceed the cached estimate when `scan_content_height` returns
         // more rows than `estimate_height` predicted (due to the generous
-        // `(est_h * 3).max(10)` allocation in render_parts for assistant text).
+        // `(est_h + 5).max(10)` allocation in render_parts for assistant text).
         // Without this correction, scroll_y is clamped to max_scroll based on
         // the underestimated cached_total, cutting off the last message.
         let actual_total = y - (vp_top - self.scroll_y);
