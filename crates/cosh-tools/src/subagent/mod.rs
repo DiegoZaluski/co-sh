@@ -45,51 +45,96 @@ impl Default for SubAgent {
 }
 
 impl SubAgent {
-    /// Create a new `SubAgent` with the tool description pre-configured.
+    /// Create a new `SubAgent` with a tool description tailored to
+    /// only the agent CLIs that are actually installed in PATH.
+    /// Detection runs once per process (cached by `detect_installed()`).
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            description_call: serde_json::json!({
-                "name": "subagent_call",
-                "description": concat!(
-                    "Call a supported agent CLI with the given input message and ",
-                    "return its output. The agent runs as a child process; output ",
-                    "is streamed in real time.\n\n",
-                    "## Supported agents\n",
-                    "- `opencode` → `opencode run \"<input>\"`\n",
-                    "- `kilo` → `kilo run \"<input>\"`\n",
-                    "- `claude` → `claude -p \"<input>\"`\n",
-                    "- `devin` → `devin -p \"<input>\"`\n",
-                    "- `codex` → `codex exec \"<input>\"`\n",
-                    "- `letta` → `letta -p \"<input>\"`\n",
-                    "- `vibe` → `vibe --prompt \"<input>\"`\n",
-                    "- `aider` → `aider --message \"<input>\"` (env `AIDER_YES=true` for headless)\n",
-                    "- `omp` → `omp -p \"<input>\"`\n",
-                    "- `goose` → `goose run -t \"<input>\"`\n",
-                    "- `gemini` → `gemini -p \"<input>\"`\n",
-                    "- `forge` → `forge -p \"<input>\"`\n",
-                    "## When to use\n",
-                    "- Use `subagent_call` with `agent` and `input` to delegate ",
-                    "a task to another agent CLI.\n",
-                    "- Use `bash_run` for regular shell commands. ",
-                    "These are separate tools with different purposes.",
-                ),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "agent": {
-                            "type": "string",
-                            "description": "The agent CLI to call. See the list of supported agents above.",
-                            "enum": call::AGENTS.iter().map(|(n, _, _)| serde_json::Value::String(n.to_string())).collect::<Vec<_>>(),
-                        },
-                        "input": {
-                            "type": "string",
-                            "description": "The message to send to the agent CLI as input.",
-                        },
+        let installed = call::detect_installed();
+
+        let description = if installed.is_empty() {
+            // No agents installed — the LLM will see this and likely
+            // avoid calling the tool, but the error message is helpful.
+            format!(
+                "{common}\n\
+                 ## Supported agents\n\
+                 (None detected — install one of: opencode, claude, aider, etc.\n\
+                  and restart cosh.)\n\
+                 {usage}",
+                common = "Call a supported agent CLI with the given input message and \
+                          return its output. The agent runs as a child process; output \
+                          is streamed in real time.",
+                usage = "## When to use\n\
+                         - Use `subagent_call` with `agent` and `input` to delegate \
+                         a task to another agent CLI.\n\
+                         - Use `bash_run` for regular shell commands. \
+                         These are separate tools with different purposes.",
+            )
+        } else {
+            let agents_desc: String = installed
+                .iter()
+                .map(|name| {
+                    // SAFETY: `name` comes from detect_installed() which only
+                    // returns entries present in AGENTS.
+                    let (_, binary, static_args) = call::AGENTS
+                        .iter()
+                        .find(|(n, _, _)| *n == *name)
+                        .expect("installed agent must be in AGENTS");
+                    let args = static_args.join(" ");
+                    format!("- `{name}` → `{binary} {args} \"<input>\"`\n")
+                })
+                .collect();
+
+            format!(
+                "{common}\n\
+                 ## Supported agents\n\
+                 {agents_desc}\n\
+                 {usage}",
+                common = "Call a supported agent CLI with the given input message and \
+                          return its output. The agent runs as a child process; output \
+                          is streamed in real time.",
+                usage = "## When to use\n\
+                         - Use `subagent_call` with `agent` and `input` to delegate \
+                         a task to another agent CLI.\n\
+                         - Use `bash_run` for regular shell commands. \
+                         These are separate tools with different purposes.",
+            )
+        };
+
+        let enum_values: Vec<serde_json::Value> = if installed.is_empty() {
+            // Even with no agents detected, keep the full enum so the
+            // LLM can still attempt the tool if we missed one.
+            call::AGENTS
+                .iter()
+                .map(|(n, _, _)| serde_json::Value::String(n.to_string()))
+                .collect()
+        } else {
+            installed
+                .iter()
+                .map(|n| serde_json::Value::String(n.to_string()))
+                .collect()
+        };
+
+        let description_call: ToolDescription = serde_json::json!({
+            "name": "subagent_call",
+            "description": description,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": {
+                        "type": "string",
+                        "description": "The agent CLI to call.",
+                        "enum": enum_values,
                     },
-                    "required": ["agent", "input"],
+                    "input": {
+                        "type": "string",
+                        "description": "The message to send to the agent CLI as input.",
+                    },
                 },
-            }),
-        }
+                "required": ["agent", "input"],
+            },
+        });
+
+        Self { description_call }
     }
 }

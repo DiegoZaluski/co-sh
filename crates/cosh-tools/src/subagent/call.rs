@@ -96,6 +96,30 @@ fn install_hint(agent: &str) -> &'static str {
     }
 }
 
+/// Check which agent CLIs the user has installed (binary found in PATH).
+///
+/// Results are cached in a `OnceLock` so detection runs exactly once
+/// per process lifetime. Subsequent calls return the cached list.
+pub fn detect_installed() -> &'static Vec<&'static str> {
+    use std::sync::OnceLock;
+
+    static INSTALLED: OnceLock<Vec<&'static str>> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        AGENTS
+            .iter()
+            .filter(|(_, binary, _)| {
+                std::env::var_os("PATH").map_or(false, |path| {
+                    std::env::split_paths(&path).any(|dir| {
+                        let full = dir.join(binary);
+                        full.is_file() || full.with_extension("exe").is_file()
+                    })
+                })
+            })
+            .map(|(name, _, _)| *name)
+            .collect()
+    })
+}
+
 /// Max time to wait for the child process to exit.
 const CALL_TIMEOUT: Duration = Duration::from_mins(2);
 /// Interval at which we poll whether the reader thread has finished.
