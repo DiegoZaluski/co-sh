@@ -18,6 +18,7 @@ const BOTTOM_PAD: u16 = 1;
 const LEFT_PAD: u16 = 1;
 
 /// Render the TODO section. Returns the number of lines used.
+#[allow(clippy::too_many_arguments)]
 pub fn render_todo_section(
     buf: &mut Buffer,
     x: u16,
@@ -147,9 +148,13 @@ pub fn todo_section_height(todos: &[TodoItem], _max_w: u16) -> u16 {
 }
 
 fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
+    let Some(right) = x.checked_add(max_w) else {
+        return;
+    };
     for (i, ch) in text.chars().enumerate() {
-        let cx = x + i as u16;
+        let Some(cx) = x.checked_add(i as u16) else {
+            break;
+        };
         if cx >= right {
             break;
         }

@@ -25,6 +25,7 @@ pub fn pty_entry_height(session: &PtySession) -> u16 {
 ///
 /// `max_h` controls how many rows are available — the virtual scroll
 /// system clips to the viewport, so we render as many lines as fit.
+#[allow(clippy::too_many_arguments)]
 pub fn render_one_pty(
     buf: &mut Buffer,
     x: u16,
@@ -83,8 +84,6 @@ pub fn render_one_pty(
 
         // Render output text
         let output_style = Style::default().fg(rgba_color(theme.text_muted));
-        // Subagent entries have a background box, so text padding is 1;
-        // regular bash entries keep the original 2-char indent.
         let text_x = if is_subagent {
             output_x + 1
         } else {
@@ -98,9 +97,6 @@ pub fn render_one_pty(
         let shown = available.min(total);
 
         for (i, line) in all_lines.iter().take(shown).enumerate() {
-            // Lines starting with "→ cosh:" are the main agent's input message;
-            // render them in the standard text color to visually distinguish
-            // the prompt from the subagent's response.
             // Lines starting with "→ cosh:" are the main agent's input message;
             // render them in the standard text color to visually distinguish
             // the prompt from the subagent's response.
@@ -122,16 +118,22 @@ pub fn render_one_pty(
     }
 }
 
+/// Simple text drawing helper. Filters ASCII control chars to prevent
+/// ratatui panics. Uses `checked_add` to avoid u16 overflow when
+/// computing character positions.
 fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    // Skip ASCII control characters (e.g. ESC \x1b from ANSI escape sequences)
-    // which would cause ratatui's cell_width() to panic via debug_assert!.
-    let printable = text
-        .chars()
-        .filter(|c| !c.is_ascii_control())
-        .collect::<String>();
-    for (i, ch) in printable.chars().enumerate() {
-        let cx = x + i as u16;
+    let Some(right) = x.checked_add(max_w) else {
+        return;
+    };
+    for (i, ch) in text.chars().enumerate() {
+        // Skip ASCII control characters (e.g. ESC \x1b from ANSI escape
+        // sequences) which would cause ratatui issues.
+        if ch.is_ascii_control() {
+            continue;
+        }
+        let Some(cx) = x.checked_add(i as u16) else {
+            break;
+        };
         if cx >= right {
             break;
         }

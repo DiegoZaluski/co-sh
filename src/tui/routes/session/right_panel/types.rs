@@ -31,6 +31,14 @@ pub enum SectionKind {
     Subagent,
 }
 
+pub(crate) const fn section_kind_index(kind: SectionKind) -> usize {
+    match kind {
+        SectionKind::Todo => 0,
+        SectionKind::Bash => 1,
+        SectionKind::Subagent => 2,
+    }
+}
+
 /// State for the right panel.
 #[derive(Debug, Clone)]
 pub struct RightPanelState {
@@ -42,6 +50,11 @@ pub struct RightPanelState {
     pub pending_todo_update_count: u32,
     /// Counter for generating unique PTY IDs.
     next_pty_id: u64,
+    /// Monotonically increasing counter for section activation order.
+    /// Higher value = more recently activated.
+    next_activity_id: u64,
+    /// Per-section activation order values. Index by `section_kind_index()`.
+    section_activity_order: [u64; 3],
 
     // ── Per-section scroll state ───────────────────────────────────
     /// Scroll offset within the TODO section (only when items overflow).
@@ -70,6 +83,8 @@ impl RightPanelState {
             pty_sessions: Vec::new(),
             pending_todo_update_count: 0,
             next_pty_id: 0,
+            next_activity_id: 1,
+            section_activity_order: [0; 3],
             todo_scroll_y: 0,
             bash_scroll_y: 0,
             subagent_scroll_y: 0,
@@ -78,6 +93,20 @@ impl RightPanelState {
             content_height: 0,
             visible_height: 0,
         }
+    }
+
+    /// Mark a section as recently activated. The section with the highest
+    /// activity value is rendered at the top of the panel.
+    pub fn mark_activity(&mut self, kind: SectionKind) {
+        let idx = section_kind_index(kind);
+        self.section_activity_order[idx] = self.next_activity_id;
+        self.next_activity_id += 1;
+    }
+
+    /// Activity order value for a given section kind. 0 = never activated.
+    pub fn section_activity(&self, kind: SectionKind) -> u64 {
+        let idx = section_kind_index(kind);
+        self.section_activity_order[idx]
     }
 
     /// Scroll the first section with overflow (prefers bash > subagent > todo) up by `delta` lines.
@@ -151,12 +180,19 @@ impl RightPanelState {
     /// Set the current todos, replacing any existing ones.
     pub fn set_todos(&mut self, todos: Vec<TodoItem>) {
         self.todos = todos;
+        self.mark_activity(SectionKind::Todo);
     }
 
     /// Start a new PTY session for a bash command.
     pub fn start_pty(&mut self, command: String, workdir: Option<String>) {
         self.next_pty_id += 1;
         let id = format!("pty-{}", self.next_pty_id);
+        let kind = if command.starts_with("subagent:") {
+            SectionKind::Subagent
+        } else {
+            SectionKind::Bash
+        };
+        self.mark_activity(kind);
         self.pty_sessions.push(PtySession {
             id,
             command,
@@ -168,13 +204,22 @@ impl RightPanelState {
 
     /// Append output for the last running PTY session.
     pub fn update_last_pty(&mut self, output: String) {
+        let mut found_kind = None;
         if let Some(session) = self
             .pty_sessions
             .iter_mut()
             .rev()
             .find(|s| matches!(s.status, PtyStatus::Running))
         {
+            found_kind = if session.command.starts_with("subagent:") {
+                Some(SectionKind::Subagent)
+            } else {
+                Some(SectionKind::Bash)
+            };
             session.output.push_str(&output);
+        }
+        if let Some(kind) = found_kind {
+            self.mark_activity(kind);
         }
     }
 

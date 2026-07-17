@@ -51,9 +51,13 @@ fn rgba_color(rgba: RGBA) -> Color {
 }
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
+    let Some(right) = x.checked_add(max_w) else {
+        return;
+    };
     for (i, ch) in text.chars().enumerate() {
-        let cx = x + i as u16;
+        let Some(cx) = x.checked_add(i as u16) else {
+            break;
+        };
         if cx >= right {
             break;
         }
@@ -696,8 +700,12 @@ impl SessionView {
         max_h: u16,
         style: Style,
     ) -> u16 {
-        let right = x + max_w;
-        let bottom = y_ + max_h;
+        let Some(right) = x.checked_add(max_w) else {
+            return 1;
+        };
+        let Some(bottom) = y_.checked_add(max_h) else {
+            return 1;
+        };
         for row in y_..bottom {
             for col in x..right {
                 if let Some(cell) = buf.cell_mut((col, row)) {
@@ -721,7 +729,7 @@ impl SessionView {
             if grapheme.len() == 1 && grapheme.chars().next().unwrap().is_control() {
                 continue;
             }
-            if cx + w > right {
+            if cx.checked_add(w).is_some_and(|next| next > right) {
                 y += 1;
                 cx = x;
                 if y >= bottom {

@@ -52,6 +52,10 @@ fn count_sections(state: &RightPanelState) -> (bool, bool, bool) {
 }
 
 /// Compute the natural height (in rows) that a section would occupy if unlimited.
+/// Box framing overhead included in each section's natural height.
+/// Mirrors the TOP_GAP / TOP_PAD / BOTTOM_PAD constants in each section.
+const BOX_OVERHEAD: i32 = 1 + 1 + 1;
+
 fn natural_section_height(state: &RightPanelState, inner_w: u16, kind: types::SectionKind) -> i32 {
     match kind {
         types::SectionKind::Todo => {
@@ -61,8 +65,14 @@ fn natural_section_height(state: &RightPanelState, inner_w: u16, kind: types::Se
                 todo_section_height(&state.todos, inner_w) as i32
             }
         }
-        types::SectionKind::Bash => bash_buffer_lines(state).len() as i32,
-        types::SectionKind::Subagent => subagent_buffer_lines(state).len() as i32,
+        types::SectionKind::Bash => {
+            let lines = bash_buffer_lines(state).len() as i32;
+            if lines == 0 { 0 } else { BOX_OVERHEAD + lines }
+        }
+        types::SectionKind::Subagent => {
+            let lines = subagent_buffer_lines(state).len() as i32;
+            if lines == 0 { 0 } else { BOX_OVERHEAD + lines }
+        }
     }
 }
 
@@ -89,51 +99,82 @@ pub fn render_right_panel(
 
     state.visible_height = viewport_h;
 
-    let (has_todo, has_bash, has_subagent) = count_sections(state);
-    let visible_count = has_todo as i32 + has_bash as i32 + has_subagent as i32;
-    if visible_count == 0 {
+    // ── Phase 1: collect visible sections and their natural heights ──
+    let sections_info = [
+        (types::SectionKind::Todo, count_sections(state).0),
+        (types::SectionKind::Bash, count_sections(state).1),
+        (types::SectionKind::Subagent, count_sections(state).2),
+    ];
+
+    let visible: Vec<(types::SectionKind, i32)> = sections_info
+        .iter()
+        .filter(|(_, visible)| *visible)
+        .map(|(kind, _)| {
+            let h = natural_section_height(state, inner_w, *kind);
+            (*kind, h)
+        })
+        .collect();
+
+    if visible.is_empty() {
         return;
     }
 
-    // Reserve space for gaps between visible sections
-    let gap_total = (visible_count - 1) * SECTION_GAP;
-    let available_for_content = viewport_h - gap_total;
-    let base_h = available_for_content / visible_count;
+    // ── Phase 2: allocate space fairly (independent of render order) ──
+    let count = visible.len() as i32;
+    let gap_total = (count - 1) * SECTION_GAP;
+    let available = viewport_h - gap_total;
+    let base_h = available / count;
+
+    let mut allocations = vec![0i32; visible.len()];
     let mut pool = 0i32;
-    let mut cur_y = viewport_top;
 
-    // ── Helper: allocate a section ─────────────────────────────────
-    let allocate_section = |buf: &mut Buffer,
-                            state: &mut RightPanelState,
-                            kind: types::SectionKind,
-                            theme: &Theme,
-                            inner_x: u16,
-                            inner_w: u16,
-                            cur_y: &mut i32,
-                            pool: &mut i32,
-                            available_h: i32| {
-        let natural_h = natural_section_height(state, inner_w, kind);
-
-        // How much this section can actually use (base + borrow from pool)
-        let allocated = if natural_h <= available_h {
-            // Section uses less than its base → surplus goes to pool
-            let surplus = available_h - natural_h;
-            *pool += surplus;
-            natural_h
+    // First pass: each section gets min(natural, base_h); surplus goes to pool
+    for (i, &(_, natural_h)) in visible.iter().enumerate() {
+        if natural_h <= base_h {
+            allocations[i] = natural_h;
+            pool += base_h - natural_h;
         } else {
-            // Section needs more → borrow from pool if available
-            let extra = (natural_h - available_h).min(*pool);
-            *pool -= extra;
-            available_h + extra
-        };
+            allocations[i] = base_h;
+        }
+    }
 
-        let allocated = allocated.max(1); // at least 1 row
+    // Second pass: distribute pool to sections that still need more
+    if pool > 0 {
+        let needy: Vec<usize> = (0..visible.len())
+            .filter(|&i| visible[i].1 > allocations[i])
+            .collect();
+
+        let per_needy = pool / needy.len().max(1) as i32;
+        for &i in &needy {
+            let deficit = visible[i].1 - allocations[i];
+            let extra = per_needy.min(deficit);
+            allocations[i] += extra;
+            pool -= extra;
+        }
+        // Leftover goes to the first needy section
+        if pool > 0 && let Some(&i) = needy.first() {
+            allocations[i] += pool;
+        }
+    }
+
+    // ── Phase 3: render order by activity (most recent first) ──
+    let mut render_order: Vec<usize> = (0..visible.len()).collect();
+    render_order.sort_by(|&a, &b| {
+        let a_act = state.section_activity(visible[a].0);
+        let b_act = state.section_activity(visible[b].0);
+        b_act.cmp(&a_act)
+    });
+
+    // ── Phase 4: render sections in activity order ──
+    let mut cur_y = viewport_top;
+    for (pos, &idx) in render_order.iter().enumerate() {
+        let (kind, natural_h) = visible[idx];
+        let allocated = allocations[idx].max(1) as u16;
 
         match kind {
             types::SectionKind::Todo => {
-                let scroll = if natural_h > allocated {
-                    // Not all content fits, need scroll
-                    state.todo_scroll_y = state.todo_scroll_y.min(natural_h - allocated);
+                let scroll = if natural_h > allocated as i32 {
+                    state.todo_scroll_y = state.todo_scroll_y.min(natural_h - allocated as i32);
                     Some(&mut state.todo_scroll_y)
                 } else {
                     None
@@ -141,57 +182,32 @@ pub fn render_right_panel(
                 render_todo_section(
                     buf,
                     inner_x,
-                    *cur_y as u16,
+                    cur_y as u16,
                     inner_w,
-                    allocated as u16,
+                    allocated,
                     &state.todos,
                     theme,
                     scroll,
                 );
             }
             types::SectionKind::Bash => {
-                render_bash_section(
-                    buf,
-                    inner_x,
-                    *cur_y as u16,
-                    inner_w,
-                    allocated as u16,
-                    state,
-                    theme,
-                );
+                render_bash_section(buf, inner_x, cur_y as u16, inner_w, allocated, state, theme);
             }
             types::SectionKind::Subagent => {
                 render_subagent_section(
                     buf,
                     inner_x,
-                    *cur_y as u16,
+                    cur_y as u16,
                     inner_w,
-                    allocated as u16,
+                    allocated,
                     state,
                     theme,
                 );
             }
         }
 
-        *cur_y += allocated;
-    };
-
-    let sections_list = [
-        (has_todo, types::SectionKind::Todo),
-        (has_bash, types::SectionKind::Bash),
-        (has_subagent, types::SectionKind::Subagent),
-    ];
-
-    for (i, &(visible, kind)) in sections_list.iter().enumerate() {
-        if !visible {
-            continue;
-        }
-        allocate_section(
-            buf, state, kind, theme, inner_x, inner_w, &mut cur_y, &mut pool, base_h,
-        );
-        // Add a blank gap after every section except the last visible one
-        let remaining = sections_list[i + 1..].iter().any(|&(v, _)| v);
-        if remaining {
+        cur_y += allocated as i32;
+        if pos < render_order.len() - 1 {
             cur_y += SECTION_GAP;
         }
     }
@@ -243,33 +259,50 @@ fn render_bash_section(
     state: &mut RightPanelState,
     theme: &Theme,
 ) {
+    const LEFT_PAD: u16 = 1;
+    const TOP_GAP: u16 = 1;
+    const TOP_PAD: u16 = 1;
+    const BOTTOM_PAD: u16 = 1;
+
     let buffer = bash_buffer_lines(state);
     if buffer.is_empty() {
         return;
     }
 
+    let box_y = y + TOP_GAP;
+    let box_h = max_h.saturating_sub(TOP_GAP);
+
+    // Fill section background
+    let mut bg = BoxRenderable::new();
+    bg.set_background_color(Some(theme.background_element.into()));
+    bg.render_self(buf, Rect::new(x, box_y, max_w, box_h));
+
+    let inner_y = box_y + TOP_PAD;
+    let inner_h = box_h.saturating_sub(TOP_PAD + BOTTOM_PAD);
+    let inner_w = max_w.saturating_sub(LEFT_PAD);
+
     let total_lines = buffer.len() as i32;
-    let has_scroll = total_lines > max_h as i32;
+    let has_scroll = total_lines > inner_h as i32;
     let scroll_y = if has_scroll {
-        state.bash_scroll_y = state.bash_scroll_y.min(total_lines - max_h as i32);
+        state.bash_scroll_y = state.bash_scroll_y.min(total_lines - inner_h as i32);
         state.bash_scroll_y
     } else {
         0
     };
 
     let start_line = scroll_y as usize;
-    let visible = max_h as usize;
+    let visible = inner_h as usize;
 
     for (i, line) in buffer.iter().skip(start_line).take(visible).enumerate() {
-        let line_y = y + i as u16;
+        let line_y = inner_y + i as u16;
         // Command lines ($ cmd) in normal text, output in muted
         let line_style = if line.starts_with("$ ") {
             Style::default().fg(rgba_color(theme.text))
         } else {
             Style::default().fg(rgba_color(theme.text_muted))
         };
-        let truncated: String = line.chars().take(max_w as usize).collect();
-        draw_text(buf, &truncated, x, line_y, max_w, line_style);
+        let truncated: String = line.chars().take(inner_w as usize).collect();
+        draw_text(buf, &truncated, x + LEFT_PAD, line_y, inner_w, line_style);
     }
 
     if has_scroll {
@@ -293,25 +326,42 @@ fn render_subagent_section(
     state: &mut RightPanelState,
     theme: &Theme,
 ) {
+    const LEFT_PAD: u16 = 1;
+    const TOP_GAP: u16 = 1;
+    const TOP_PAD: u16 = 1;
+    const BOTTOM_PAD: u16 = 1;
+
     let buffer = subagent_buffer_lines(state);
     if buffer.is_empty() {
         return;
     }
 
+    let box_y = y + TOP_GAP;
+    let box_h = max_h.saturating_sub(TOP_GAP);
+
+    // Fill section background
+    let mut bg = BoxRenderable::new();
+    bg.set_background_color(Some(theme.background_element.into()));
+    bg.render_self(buf, Rect::new(x, box_y, max_w, box_h));
+
+    let inner_y = box_y + TOP_PAD;
+    let inner_h = box_h.saturating_sub(TOP_PAD + BOTTOM_PAD);
+    let inner_w = max_w.saturating_sub(LEFT_PAD);
+
     let total_lines = buffer.len() as i32;
-    let has_scroll = total_lines > max_h as i32;
+    let has_scroll = total_lines > inner_h as i32;
     let scroll_y = if has_scroll {
-        state.subagent_scroll_y = state.subagent_scroll_y.min(total_lines - max_h as i32);
+        state.subagent_scroll_y = state.subagent_scroll_y.min(total_lines - inner_h as i32);
         state.subagent_scroll_y
     } else {
         0
     };
 
     let start_line = scroll_y as usize;
-    let visible = max_h as usize;
+    let visible = inner_h as usize;
 
     for (i, line) in buffer.iter().skip(start_line).take(visible).enumerate() {
-        let line_y = y + i as u16;
+        let line_y = inner_y + i as u16;
         // Command headers and "→ cosh:" input lines in normal text;
         // subagent response lines in muted text.
         let line_style = if line.starts_with("subagent:") || line.starts_with("→ cosh:") {
@@ -319,8 +369,8 @@ fn render_subagent_section(
         } else {
             Style::default().fg(rgba_color(theme.text_muted))
         };
-        let truncated: String = line.chars().take(max_w as usize).collect();
-        draw_text(buf, &truncated, x, line_y, max_w, line_style);
+        let truncated: String = line.chars().take(inner_w as usize).collect();
+        draw_text(buf, &truncated, x + LEFT_PAD, line_y, inner_w, line_style);
     }
 
     if has_scroll {
@@ -329,10 +379,15 @@ fn render_subagent_section(
 }
 
 /// Simple text drawing helper (filters ASCII control chars to prevent ratatui panics).
+/// Uses `checked_add` to avoid u16 overflow when computing character positions.
 fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
+    let Some(right) = x.checked_add(max_w) else {
+        return;
+    };
     for (i, ch) in text.chars().filter(|c| !c.is_ascii_control()).enumerate() {
-        let cx = x + i as u16;
+        let Some(cx) = x.checked_add(i as u16) else {
+            break;
+        };
         if cx >= right {
             break;
         }
@@ -355,6 +410,9 @@ fn draw_section_scrollbar(
     theme: &Theme,
 ) {
     let sb_h = sb_h as i32;
+    if sb_h <= 0 || content_h <= 0 {
+        return;
+    }
     let thumb_size = (sb_h as f64 * sb_h as f64 / content_h as f64)
         .max(1.0)
         .min(sb_h as f64) as i32;
@@ -370,7 +428,9 @@ fn draw_section_scrollbar(
     let sb_style = Style::default().fg(rgba_color(theme.text_muted));
 
     for row in 0..sb_h {
-        let y = sb_y + row as u16;
+        let Some(y) = sb_y.checked_add(row as u16) else {
+            break;
+        };
         if let Some(cell) = buf.cell_mut((sb_x, y))
             && row >= thumb_pos
             && row < thumb_pos + thumb_size

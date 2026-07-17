@@ -15,9 +15,13 @@ fn rgba_color(rgba: RGBA) -> Color {
 }
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
+    let Some(right) = x.checked_add(max_w) else {
+        return;
+    };
     for (i, ch) in text.chars().enumerate() {
-        let cx = x + i as u16;
+        let Some(cx) = x.checked_add(i as u16) else {
+            break;
+        };
         if cx >= right {
             break;
         }
