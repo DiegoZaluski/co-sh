@@ -19,6 +19,7 @@ use cosh_tools::{
         Skills,
         types::{SkillsMatchInput, SkillsReadAssetInput, SkillsReadInput},
     },
+    subagent::{SubAgent, types::{SubAgentCallInput, SubAgentCallOutput}},
     vision::{TerminalInput, Vision},
     web::{Web, WebFetch, WebSearchInput},
 };
@@ -48,6 +49,7 @@ pub struct CoshTools {
     plan: Mutex<Plan>,
     question: Question,
     skills: Skills,
+    subagent: SubAgent,
     /// Optional event sender for streaming tool output.
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
 }
@@ -64,6 +66,7 @@ impl CoshTools {
             plan: Mutex::new(Plan::new()),
             question: Question::new(),
             skills: Skills::new(),
+            subagent: SubAgent::new(),
             event_tx: None,
         }
     }
@@ -156,6 +159,7 @@ impl CoshTools {
             &self.plan.lock().unwrap().description_load_from_md,
         ));
         v.push(extract_schema(&self.question.description_ask));
+        v.push(extract_schema(&self.subagent.description_call));
         v.push(extract_schema(&self.skills.description_list));
         v.push(extract_schema(&self.skills.description_read));
         v.push(extract_schema(&self.skills.description_read_asset));
@@ -210,6 +214,7 @@ impl Tools for CoshTools {
             write_single_tool(out, &plan.description_load_from_md);
         }
         write_single_tool(out, &self.question.description_ask);
+        write_single_tool(out, &self.subagent.description_call);
         write_single_tool(out, &self.skills.description_list);
         write_single_tool(out, &self.skills.description_read);
         write_single_tool(out, &self.skills.description_read_asset);
@@ -237,6 +242,7 @@ impl Tools for CoshTools {
         v.push(self.plan.lock().unwrap().description_todo_read.clone());
         v.push(self.plan.lock().unwrap().description_load_from_md.clone());
         v.push(self.question.description_ask.clone());
+        v.push(self.subagent.description_call.clone());
         v.push(self.skills.description_list.clone());
         v.push(self.skills.description_read.clone());
         v.push(self.skills.description_read_asset.clone());
@@ -273,6 +279,7 @@ impl Tools for CoshTools {
             &self.plan.lock().unwrap().description_load_from_md,
         ));
         v.push(extract_schema(&self.question.description_ask));
+        v.push(extract_schema(&self.subagent.description_call));
         v.push(extract_schema(&self.skills.description_list));
         v.push(extract_schema(&self.skills.description_read));
         v.push(extract_schema(&self.skills.description_read_asset));
@@ -486,6 +493,61 @@ impl Tools for CoshTools {
                     .match_skills(input.match_paths)
                     .map_err(|e| e.to_string())?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "subagent_call" => {
+                let input: SubAgentCallInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let agent = input.agent.clone();
+                let call_input = input.input.clone();
+                let event_tx_during = self.event_tx.clone();
+
+                let (chunk_tx, mut chunk_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<String>();
+
+                let mut call_handle = tokio::task::spawn_blocking(move || {
+                    cosh_tools::subagent::call::call(&agent, &call_input, chunk_tx)
+                });
+
+                // Stream chunks while waiting for the blocking call to complete.
+                let call_result = loop {
+                    tokio::select! {
+                        result = &mut call_handle => {
+                            break result;
+                        }
+                        chunk = chunk_rx.recv() => {
+                            match chunk {
+                                Some(c) => {
+                                    if let Some(ref tx) = event_tx_during {
+                                        let _ = tx.send(HarnessEvent::ToolOutput {
+                                            tool: "subagent_call".to_string(),
+                                            output: c,
+                                            finished: false,
+                                        });
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                };
+
+                let (accumulated, exit_code) =
+                    call_result.map_err(|e| e.to_string())??;
+
+                if let Some(ref tx) = self.event_tx {
+                    let _ = tx.send(HarnessEvent::ToolOutput {
+                        tool: "subagent_call".to_string(),
+                        output: accumulated.clone(),
+                        finished: true,
+                    });
+                }
+
+                let result = SubAgentCallOutput {
+                    output: accumulated,
+                    exit_code,
+                };
+                serde_json::to_string(&result).map_err(|e| e.to_string())
             }
 
             "ask_questions" => {

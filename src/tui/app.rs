@@ -2119,7 +2119,13 @@ impl App {
                     if tool == "bash_run" {
                         let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
                         self.state.right_panel.start_pty(command.to_string(), None);
-                        // Auto-scroll to bottom for new commands
+                        self.state.right_panel.scroll_to_bottom();
+                    }
+                    // Start PTY tracking for subagent calls
+                    if tool == "subagent_call" {
+                        let agent = input.get("agent").and_then(|v| v.as_str()).unwrap_or("");
+                        let cmd = format!("subagent: {agent}");
+                        self.state.right_panel.start_pty(cmd, None);
                         self.state.right_panel.scroll_to_bottom();
                     }
                     let Some(session) = self.state.current_session_mut() else {
@@ -2205,6 +2211,9 @@ impl App {
                     if !self.state.right_panel.is_scrolled_up() {
                         self.state.right_panel.scroll_to_bottom();
                     }
+                    // Harmless for subagent_call (PTY already Completed via finished:true,
+                    // complete_last_pty is a no-op for non-Running sessions).
+                    // Required for bash_run which only completes via ToolResult.
                     self.state.right_panel.complete_last_pty(output.clone());
                 }
 

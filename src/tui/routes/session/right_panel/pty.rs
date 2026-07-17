@@ -1,4 +1,7 @@
+use cosh_tui::core::renderable::Renderable;
+use cosh_tui::core::renderables::r#box::BoxRenderable;
 use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use super::rgba_color;
@@ -10,10 +13,16 @@ pub const PTY_MAX_LINES: usize = 200;
 /// Compute the height (in terminal rows) that a PTY entry occupies.
 pub fn pty_entry_height(session: &PtySession) -> u16 {
     let output_lines = session.output.lines().count().min(PTY_MAX_LINES);
+    // +1 for the command line
     1 + output_lines as u16
 }
 
 /// Render a single PTY entry at the given position.
+///
+/// For subagent sessions (command starts with "subagent:"), the output
+/// area is rendered inside a subtle box with a background fill, making
+/// it visually distinct as a "chat" area.
+///
 /// `max_h` controls how many rows are available — the virtual scroll
 /// system clips to the viewport, so we render as many lines as fit.
 pub fn render_one_pty(
@@ -27,6 +36,7 @@ pub fn render_one_pty(
 ) {
     let is_running = matches!(session.status, PtyStatus::Running);
     let is_failed = matches!(session.status, PtyStatus::Failed);
+    let is_subagent = session.command.starts_with("subagent:");
 
     let icon = if is_running {
         "▸"
@@ -59,23 +69,41 @@ pub fn render_one_pty(
     }
 
     if !session.output.is_empty() {
-        let output_style = Style::default().fg(rgba_color(theme.text_muted));
-        let output_x = x + 2;
-        let output_w = max_w.saturating_sub(2);
+        let output_box_h = max_h.saturating_sub(1);
+        let output_x = x;
+        let output_y = y + 1;
+        let output_w = max_w;
 
-        let available = (max_h.saturating_sub(1)) as usize;
+        // Draw a background box for subagent entries to create a "chat" area
+        if is_subagent {
+            let mut bg = BoxRenderable::new();
+            bg.set_background_color(Some(theme.background_element.into()));
+            bg.render_self(
+                buf,
+                Rect::new(output_x, output_y, output_w, output_box_h),
+            );
+        }
+
+        // Render output text
+        let output_style = Style::default().fg(rgba_color(theme.text_muted));
+        // Subagent entries have a background box, so text padding is 1;
+        // regular bash entries keep the original 2-char indent.
+        let text_x = if is_subagent { output_x + 1 } else { output_x + 2 };
+        let text_w = output_w.saturating_sub(2);
+
+        let available = output_box_h as usize;
         let all_lines: Vec<&str> = session.output.lines().collect();
         let total = all_lines.len().min(PTY_MAX_LINES);
         let shown = available.min(total);
 
         for (i, line) in all_lines.iter().take(shown).enumerate() {
-            let truncated: String = line.chars().take(output_w as usize).collect();
+            let truncated: String = line.chars().take(text_w as usize).collect();
             draw_text(
                 buf,
                 &truncated,
-                output_x,
-                y + 1 + i as u16,
-                output_w,
+                text_x,
+                output_y + i as u16,
+                text_w,
                 output_style,
             );
         }
@@ -84,7 +112,13 @@ pub fn render_one_pty(
 
 fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
+    // Skip ASCII control characters (e.g. ESC \x1b from ANSI escape sequences)
+    // which would cause ratatui's cell_width() to panic via debug_assert!.
+    let printable = text
+        .chars()
+        .filter(|c| !c.is_ascii_control())
+        .collect::<String>();
+    for (i, ch) in printable.chars().enumerate() {
         let cx = x + i as u16;
         if cx >= right {
             break;
