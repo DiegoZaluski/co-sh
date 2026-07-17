@@ -19,7 +19,10 @@ use cosh_tools::{
         Skills,
         types::{SkillsMatchInput, SkillsReadAssetInput, SkillsReadInput},
     },
-    subagent::{SubAgent, types::{SubAgentCallInput, SubAgentCallOutput}},
+    subagent::{
+        SubAgent,
+        types::{SubAgentCallInput, SubAgentCallOutput},
+    },
     vision::{TerminalInput, Vision},
     web::{Web, WebFetch, WebSearchInput},
 };
@@ -502,8 +505,7 @@ impl Tools for CoshTools {
                 let call_input = input.input.clone();
                 let event_tx_during = self.event_tx.clone();
 
-                let (chunk_tx, mut chunk_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<String>();
+                let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
                 let mut call_handle = tokio::task::spawn_blocking(move || {
                     cosh_tools::subagent::call::call(&agent, &call_input, chunk_tx)
@@ -532,8 +534,7 @@ impl Tools for CoshTools {
                     }
                 };
 
-                let (accumulated, exit_code) =
-                    call_result.map_err(|e| e.to_string())??;
+                let (accumulated, exit_code) = call_result.map_err(|e| e.to_string())??;
 
                 if let Some(ref tx) = self.event_tx {
                     let _ = tx.send(HarnessEvent::ToolOutput {

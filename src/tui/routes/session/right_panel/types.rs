@@ -89,7 +89,11 @@ impl RightPanelState {
             .any(|p| !p.command.starts_with("subagent:"))
         {
             self.bash_scroll_y = (self.bash_scroll_y - delta).max(0);
-        } else if self.pty_sessions.iter().any(|p| p.command.starts_with("subagent:")) {
+        } else if self
+            .pty_sessions
+            .iter()
+            .any(|p| p.command.starts_with("subagent:"))
+        {
             self.subagent_scroll_y = (self.subagent_scroll_y - delta).max(0);
         } else if !self.todos.is_empty() {
             self.todo_scroll_y = (self.todo_scroll_y - delta).max(0);
@@ -105,7 +109,11 @@ impl RightPanelState {
             .any(|p| !p.command.starts_with("subagent:"))
         {
             self.bash_scroll_y = (self.bash_scroll_y + delta).max(0);
-        } else if self.pty_sessions.iter().any(|p| p.command.starts_with("subagent:")) {
+        } else if self
+            .pty_sessions
+            .iter()
+            .any(|p| p.command.starts_with("subagent:"))
+        {
             self.subagent_scroll_y = (self.subagent_scroll_y + delta).max(0);
         } else if !self.todos.is_empty() {
             self.todo_scroll_y = (self.todo_scroll_y + delta).max(0);

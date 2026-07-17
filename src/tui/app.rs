@@ -2128,7 +2128,8 @@ impl App {
                         // Remove previous PTY entries for this specific agent only,
                         // so different agents (e.g. opencode vs claude) can coexist.
                         let subagent_prefix = format!("subagent: {agent}");
-                        self.state.right_panel
+                        self.state
+                            .right_panel
                             .pty_sessions
                             .retain(|s| !s.command.starts_with(&subagent_prefix));
                         let cmd = format!("subagent: {agent}");
@@ -2136,7 +2137,8 @@ impl App {
                         // Show the input message as the first line of the dialogue,
                         // visually prefixed to indicate it came from the main agent.
                         if !msg.is_empty() {
-                            self.state.right_panel
+                            self.state
+                                .right_panel
                                 .update_last_pty(format!("→ cosh: {msg}\n"));
                         }
                         self.state.right_panel.scroll_to_bottom();
@@ -2211,15 +2213,48 @@ impl App {
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
-                    for part in session.messages.iter_mut().rev().flat_map(|m| &mut m.parts) {
-                        if let Part::Tool(tp) = part
-                            && tp.status == ToolStatus::Running
-                        {
-                            tp.status = ToolStatus::Completed;
-                            tp.output = Some(output.clone());
-                            break;
+
+                    // Find and complete the running tool part, capture its name
+                    let mut completed_tool_name: Option<String> = None;
+                    'find_running: for msg in session.messages.iter_mut().rev() {
+                        for part in msg.parts.iter_mut().rev() {
+                            if let Part::Tool(tp) = part
+                                && tp.status == ToolStatus::Running
+                            {
+                                completed_tool_name = Some(tp.tool.clone());
+                                tp.status = ToolStatus::Completed;
+                                tp.output = Some(output.clone());
+                                break 'find_running;
+                            }
                         }
                     }
+
+                    // Deduplicate plan_todo_write: only the LAST completed one keeps its output.
+                    // Previous completed plan_todo_write parts get cleared so they render
+                    // inline ("☰ TODO Write") instead of as full block TODOs.
+                    if completed_tool_name.as_deref() == Some("plan_todo_write") {
+                        let mut found_current = false;
+                        for msg in session.messages.iter_mut().rev() {
+                            for part in msg.parts.iter_mut().rev() {
+                                if let Part::Tool(tp) = part
+                                    && tp.tool == "plan_todo_write"
+                                {
+                                    if !found_current {
+                                        // Skip the current (latest) plan_todo_write
+                                        found_current = true;
+                                    } else if tp.status == ToolStatus::Completed {
+                                        // Clear output of previous completed plan_todo_write
+                                        tp.output = None;
+                                    }
+                                }
+                            }
+                            // Only search the current assistant message
+                            if msg.role == crate::types::MessageRole::User {
+                                break;
+                            }
+                        }
+                    }
+
                     if !self.state.right_panel.is_scrolled_up() {
                         self.state.right_panel.scroll_to_bottom();
                     }

@@ -243,7 +243,9 @@ pub fn tool_display(tool: &str) -> &str {
     if TOOL_DISPLAYS.contains(&tool) {
         return tool;
     }
-    if tool.starts_with("plan_") {
+    // Only plan_todo_write renders as a block TODO box (matching OpenCode's todowrite).
+    // Other plan_* tools (read, cross_off, edit, load) are generic/inline.
+    if tool == "plan_todo_write" {
         return "todo";
     }
     "generic"
@@ -876,47 +878,24 @@ pub fn render_question_tool(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn render_todo(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    _state: &ToolRenderState,
-    theme: &Theme,
-) {
-    let tool_name: &str = &part.tool;
-    let output = part.output.as_deref().unwrap_or("").trim().to_string();
-    let is_running = matches!(part.status, ToolStatus::Running);
-
-    if is_running || output.is_empty() {
-        let icon = "\u{2630}";
-        let label = format!("Writing {tool_name}...");
-        let fg = theme.text;
-        *line_h = 1;
-        render_inline_tool(
-            buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
-        );
-        return;
-    }
-
+/// Parse the tool output JSON and return formatted display lines for TODO items.
+/// Shared by both `render_todo` and `estimate_part_height` so the line count
+/// is consistent between rendering and height estimation.
+///
+/// Matches OpenCode's inline TodoWrite style: flat list of items with
+/// bracket status symbols and no group headers or IDs.
+pub fn format_todo_output(output: &str, tool_name: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
     lines.push(
         match tool_name {
-            "plan_todo_write" => "\u{270F} TODO Write",
-            "plan_todo_edit" => "\u{270F} TODO Edit",
-            "plan_todo_cross_off" => "\u{2713} TODO Cross Off",
-            "plan_todo_read" => "\u{2630} TODO Read",
-            "plan_load_from_md" => "\u{1F4C2} TODO Load",
+            "plan_todo_write" => "# Todos",
             _ => "\u{2630} TODO",
         }
         .to_string(),
     );
 
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&output) {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
         let groups = json
             .get("list")
             .and_then(|l| l.get("groups"))
@@ -924,27 +903,24 @@ pub fn render_todo(
             .and_then(|g| g.as_array());
 
         if let Some(groups) = groups {
+            // Flatten all items from all groups into a single flat list
+            // (matching OpenCode's todo-item style: no group headers, no IDs)
             for group in groups {
-                let title = group
-                    .get("title")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("Untitled");
-                lines.push(format!("  {title}:"));
                 if let Some(items) = group.get("items").and_then(|i| i.as_array()) {
                     for item in items {
-                        let id = item.get("id").and_then(|i| i.as_str()).unwrap_or("?");
                         let desc = item
                             .get("description")
                             .and_then(|d| d.as_str())
                             .unwrap_or("");
                         let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("?");
-                        let icon = match status {
+                        // OpenCode-style bracket status markers
+                        let symbol = match status {
                             "Completed" => "\u{2713}",
                             "InProgress" => "\u{25CF}",
                             "Cancelled" => "\u{2717}",
-                            _ => "\u{25CB}",
+                            _ => " ",
                         };
-                        lines.push(format!("    {icon} {desc}  ({id})"));
+                        lines.push(format!("[{symbol}] {desc}"));
                     }
                 }
             }
@@ -958,7 +934,15 @@ pub fn render_todo(
             }
         }
 
-        if groups.is_none()
+        // Check if we had any items (via groups) or nags
+        let has_items = groups.is_some_and(|g| {
+            g.iter().any(|gr| {
+                gr.get("items")
+                    .and_then(|i| i.as_array())
+                    .is_some_and(|a| !a.is_empty())
+            })
+        });
+        if !has_items
             && json
                 .get("nags")
                 .and_then(|n| n.as_array())
@@ -972,11 +956,58 @@ pub fn render_todo(
         }
     }
 
-    let display = lines.join("\n");
-    let line_count = display.lines().count() as u16;
-    let area = Rect::new(x, y, max_w.saturating_add(3), line_count.saturating_add(2));
-    *line_h = area.height;
+    lines
+}
 
+#[allow(clippy::too_many_arguments)]
+pub fn render_todo(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    line_h: &mut u16,
+    max_w: u16,
+    part: &ToolPart,
+    _state: &ToolRenderState,
+    theme: &Theme,
+) {
+    let tool_name: &str = &part.tool;
+    let output = part.output.as_deref().unwrap_or("").trim();
+    let is_running = matches!(part.status, ToolStatus::Running);
+
+    // Hide tool call for running/completed-but-empty — only show the final block.
+    // In case of failure, show the label inline so the user knows something went wrong.
+    if is_running || output.is_empty() {
+        let is_failed = matches!(part.status, ToolStatus::Failed(_));
+        if is_failed {
+            let label = match tool_name {
+                "plan_todo_write" => "\u{270F} TODO Write".to_string(),
+                _ => tool_name.to_string(),
+            };
+            let style = Style::default().fg(rgba_color(theme.text_muted));
+            *line_h = 1;
+            draw_text_line(buf, &label, x, y, max_w, style);
+        } else {
+            // Take 1 line of space but draw nothing — the blank line is invisible
+            // against the terminal background.
+            *line_h = 1;
+        }
+        return;
+    }
+
+    // Format the todo lines (same for both height estimation and rendering)
+    let formatted = format_todo_output(output, tool_name);
+    if formatted.is_empty() {
+        *line_h = 1;
+        return;
+    }
+    let total_lines = formatted.len() as u16;
+    // OpenCode-style BlockTool: left border + background + 1 padding top + 1 padding bottom
+    let box_h = total_lines.saturating_add(2);
+    *line_h = box_h;
+
+    let area = Rect::new(x, y, max_w.saturating_add(3), box_h);
+
+    // Simple left-border box matching OpenCode's BlockTool style
     let mut border_box = BoxRenderable::new();
     border_box.set_background_color(Some(theme.background_panel.into()));
     border_box.set_border_color(Some(theme.background.into()));
@@ -1001,17 +1032,21 @@ pub fn render_todo(
     });
     border_box.render_self(buf, area);
 
+    // Title line (muted) at y + 1 (padding top)
     let title_style = Style::default().fg(rgba_color(theme.text_muted));
-    let title = &lines[0];
-    draw_text_line(buf, title, x + 3, y, max_w.saturating_sub(3), title_style);
+    let content_x = x + 3; // border + 2 padding
+    let content_w = max_w.saturating_sub(3);
+    draw_text_line(buf, &formatted[0], content_x, y + 1, content_w, title_style);
 
-    let content_style = Style::default().fg(rgba_color(theme.text));
-    for (i, line) in display.lines().enumerate().skip(1) {
+    // Item lines starting at y + 2 (after title)
+    let item_style = Style::default().fg(rgba_color(theme.text));
+    let content_bottom = area.bottom().saturating_sub(1); // -1 for padding bottom
+    for (i, line) in formatted.iter().enumerate().skip(1) {
         let ly = y + 1 + i as u16;
-        if ly >= area.bottom() {
+        if ly >= content_bottom {
             break;
         }
-        draw_text_line(buf, line, x + 3, ly, max_w.saturating_sub(3), content_style);
+        draw_text_line(buf, line, content_x, ly, content_w, item_style);
     }
 }
 

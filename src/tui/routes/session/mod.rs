@@ -631,6 +631,14 @@ impl SessionView {
                     y += rendered;
                 }
                 Part::Tool(tool) => {
+                    // Skip hidden TODO tools entirely (no visual space, no copyable text)
+                    if tool_render::tool_display(&tool.tool) == "todo"
+                        && !matches!(tool.status, ToolStatus::Failed(_))
+                        && (matches!(tool.status, ToolStatus::Running)
+                            || tool.output.as_deref().unwrap_or("").trim().is_empty())
+                    {
+                        continue;
+                    }
                     if !config.show_tool_details && matches!(tool.status, ToolStatus::Completed) {
                         y += 1;
                         continue;
@@ -654,7 +662,7 @@ impl SessionView {
                     );
                     let available = bottom.saturating_sub(y);
                     line_h = line_h.min(available);
-                    y += line_h.max(1);
+                    y += line_h;
                 }
                 Part::Reasoning(r) => {
                     let expanded = config.thinking_mode
@@ -776,6 +784,15 @@ impl SessionView {
                 {
                     return 1;
                 }
+                // Hide TODO tools that are running or have no output (cleared by dedup)
+                // — they take no visual space and no copyable text. Only show on failure.
+                if tool_render::tool_display(&t.tool) == "todo"
+                    && !matches!(t.status, ToolStatus::Failed(_))
+                    && (matches!(t.status, ToolStatus::Running)
+                        || t.output.as_deref().unwrap_or("").trim().is_empty())
+                {
+                    return 0;
+                }
                 // Only tools that render block-style output (shell, write, edit, todo)
                 // should allocate height for the full output block. All other tool
                 // types render inline (1 line) regardless of whether they have output.
@@ -788,10 +805,18 @@ impl SessionView {
                     );
                 if is_block {
                     let output = t.output.as_deref().unwrap_or("").trim();
-                    let collapsed = crate::util::scroll::collapse_tool_output(output, 10, 800);
-                    let display = &collapsed.output;
-                    let lines = display.lines().count().max(1) as u16;
-                    lines + 2
+                    // For todo tools, compute the exact rendered line count from formatted
+                    // output (same logic as render_todo) to guarantee height cache matches.
+                    if tool_render::tool_display(&t.tool) == "todo" {
+                        let formatted = tool_render::format_todo_output(output, &t.tool);
+                        let lines = formatted.len().max(1) as u16;
+                        lines + 2
+                    } else {
+                        let collapsed = crate::util::scroll::collapse_tool_output(output, 10, 800);
+                        let lines = collapsed.output.lines().count().max(1) as u16
+                            + u16::from(collapsed.overflow);
+                        lines + 2
+                    }
                 } else {
                     1
                 }
@@ -1525,6 +1550,14 @@ impl SessionView {
                                 }
                             }
                             crate::types::Part::Tool(t) => {
+                                // Skip hidden TODO tools entirely (no text regions, no spacing)
+                                if crate::util::tool_render::tool_display(&t.tool) == "todo"
+                                    && !matches!(t.status, crate::types::ToolStatus::Failed(_))
+                                    && (matches!(t.status, crate::types::ToolStatus::Running)
+                                        || t.output.as_deref().unwrap_or("").trim().is_empty())
+                                {
+                                    continue;
+                                }
                                 if !config.show_tool_details
                                     && matches!(t.status, crate::types::ToolStatus::Completed)
                                 {

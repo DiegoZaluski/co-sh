@@ -13,7 +13,6 @@ pub mod pty;
 pub mod todo;
 pub mod types;
 
-
 use todo::{render_todo_section, todo_section_height};
 use types::RightPanelState;
 
@@ -104,17 +103,15 @@ pub fn render_right_panel(
     let mut cur_y = viewport_top;
 
     // ── Helper: allocate a section ─────────────────────────────────
-    let allocate_section = |
-        buf: &mut Buffer,
-        state: &mut RightPanelState,
-        kind: types::SectionKind,
-        theme: &Theme,
-        inner_x: u16,
-        inner_w: u16,
-        cur_y: &mut i32,
-        pool: &mut i32,
-        available_h: i32,
-    | {
+    let allocate_section = |buf: &mut Buffer,
+                            state: &mut RightPanelState,
+                            kind: types::SectionKind,
+                            theme: &Theme,
+                            inner_x: u16,
+                            inner_w: u16,
+                            cur_y: &mut i32,
+                            pool: &mut i32,
+                            available_h: i32| {
         let natural_h = natural_section_height(state, inner_w, kind);
 
         // How much this section can actually use (base + borrow from pool)
@@ -136,9 +133,7 @@ pub fn render_right_panel(
             types::SectionKind::Todo => {
                 let scroll = if natural_h > allocated {
                     // Not all content fits, need scroll
-                    state.todo_scroll_y = state
-                        .todo_scroll_y
-                        .min(natural_h - allocated);
+                    state.todo_scroll_y = state.todo_scroll_y.min(natural_h - allocated);
                     Some(&mut state.todo_scroll_y)
                 } else {
                     None
@@ -192,8 +187,7 @@ pub fn render_right_panel(
             continue;
         }
         allocate_section(
-            buf, state, kind, theme,
-            inner_x, inner_w, &mut cur_y, &mut pool, base_h,
+            buf, state, kind, theme, inner_x, inner_w, &mut cur_y, &mut pool, base_h,
         );
         // Add a blank gap after every section except the last visible one
         let remaining = sections_list[i + 1..].iter().any(|&(v, _)| v);
@@ -257,9 +251,7 @@ fn render_bash_section(
     let total_lines = buffer.len() as i32;
     let has_scroll = total_lines > max_h as i32;
     let scroll_y = if has_scroll {
-        state.bash_scroll_y = state
-            .bash_scroll_y
-            .min(total_lines - max_h as i32);
+        state.bash_scroll_y = state.bash_scroll_y.min(total_lines - max_h as i32);
         state.bash_scroll_y
     } else {
         0
@@ -309,9 +301,7 @@ fn render_subagent_section(
     let total_lines = buffer.len() as i32;
     let has_scroll = total_lines > max_h as i32;
     let scroll_y = if has_scroll {
-        state.subagent_scroll_y = state
-            .subagent_scroll_y
-            .min(total_lines - max_h as i32);
+        state.subagent_scroll_y = state.subagent_scroll_y.min(total_lines - max_h as i32);
         state.subagent_scroll_y
     } else {
         0
@@ -382,7 +372,8 @@ fn draw_section_scrollbar(
     for row in 0..sb_h {
         let y = sb_y + row as u16;
         if let Some(cell) = buf.cell_mut((sb_x, y))
-            && row >= thumb_pos && row < thumb_pos + thumb_size
+            && row >= thumb_pos
+            && row < thumb_pos + thumb_size
         {
             cell.set_char('█');
             cell.set_style(sb_style);

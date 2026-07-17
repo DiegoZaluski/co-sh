@@ -65,9 +65,8 @@ async fn fetch_url(url: &str) -> Result<String, String> {
             {
                 // rs_trafilatura spams eprintln! debug messages that corrupt the TUI.
                 // Redirect stderr to /dev/null during extraction to suppress them.
-                let devnull = unsafe {
-                    File::from_raw_fd(libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY))
-                };
+                let devnull =
+                    unsafe { File::from_raw_fd(libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY)) };
                 let saved_fd = unsafe { libc::dup(2) };
                 unsafe { libc::dup2(devnull.as_raw_fd(), 2) };
                 // Drop the File handle — close devnull fd so the next open works.

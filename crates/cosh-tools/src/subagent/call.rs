@@ -13,9 +13,8 @@
 
 use std::io::BufRead;
 use std::sync::{
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
-    Arc,
-    Mutex,
 };
 use std::time::{Duration, Instant};
 
@@ -31,17 +30,17 @@ use std::time::{Duration, Instant};
 /// interactive TUIs cannot be driven this way.
 pub const AGENTS: &[(&str, &str, &[&str])] = &[
     ("opencode", "opencode", &["run"]),
-    ("kilo",     "kilo",     &["run"]),
-    ("claude",   "claude",   &["-p"]),
-    ("devin",    "devin",    &["-p"]),
-    ("codex",    "codex",    &["exec"]),
-    ("letta",    "letta",    &["-p"]),
-    ("vibe",     "vibe",     &["--prompt"]),
-    ("aider",    "aider",    &["--message"]),
-    ("omp",      "omp",      &["-p"]),
-    ("goose",    "goose",    &["run", "-t"]),
-    ("gemini",   "gemini",   &["-p"]),
-    ("forge",    "forge",    &["-p"]),
+    ("kilo", "kilo", &["run"]),
+    ("claude", "claude", &["-p"]),
+    ("devin", "devin", &["-p"]),
+    ("codex", "codex", &["exec"]),
+    ("letta", "letta", &["-p"]),
+    ("vibe", "vibe", &["--prompt"]),
+    ("aider", "aider", &["--message"]),
+    ("omp", "omp", &["-p"]),
+    ("goose", "goose", &["run", "-t"]),
+    ("gemini", "gemini", &["-p"]),
+    ("forge", "forge", &["-p"]),
 ];
 
 /// Strip ANSI escape sequences from `s`, returning the clean string.
@@ -68,12 +67,8 @@ fn install_hint(agent: &str) -> &'static str {
         "devin" => {
             "Install: curl -fsSL https://cli.devin.ai/install.sh | bash. For headless mode also use --permission-mode (e.g. --permission-mode dangerous). More: https://devin.ai/cli"
         }
-        "codex" => {
-            "Install: npm install -g @openai/codex. More: https://learn.chatgpt.com/docs"
-        }
-        "letta" => {
-            "Install: npm install -g @letta-ai/letta-code. More: https://docs.letta.com"
-        }
+        "codex" => "Install: npm install -g @openai/codex. More: https://learn.chatgpt.com/docs",
+        "letta" => "Install: npm install -g @letta-ai/letta-code. More: https://docs.letta.com",
         "vibe" => {
             "Install: curl -LsSf https://mistral.ai/vibe/install.sh | bash. For headless mode also use --auto-approve. More: https://github.com/mistralai/mistral-vibe"
         }
@@ -267,13 +262,12 @@ pub fn call(
     let start = Instant::now();
     while start.elapsed() < CALL_TIMEOUT {
         if reader_done.load(Ordering::Acquire) {
-            let code = child
-                .wait()
-                .ok()
-                .map_or(-1_i32, |s| {
-                    #[allow(clippy::cast_possible_wrap)]
-                    { s.code().unwrap_or(-1_i32) }
-                });
+            let code = child.wait().ok().map_or(-1_i32, |s| {
+                #[allow(clippy::cast_possible_wrap)]
+                {
+                    s.code().unwrap_or(-1_i32)
+                }
+            });
 
             let result = output.lock().unwrap().clone();
             let result = strip_ansi(&result);
