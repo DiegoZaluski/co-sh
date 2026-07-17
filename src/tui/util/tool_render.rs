@@ -1005,32 +1005,26 @@ pub fn render_todo(
     let box_h = total_lines.saturating_add(2);
     *line_h = box_h;
 
-    let area = Rect::new(x, y, max_w.saturating_add(3), box_h);
+    let area_w = max_w.saturating_add(3);
+    let area = Rect::new(x, y, area_w, box_h);
 
-    // Simple left-border box matching OpenCode's BlockTool style
-    let mut border_box = BoxRenderable::new();
-    border_box.set_background_color(Some(theme.background_panel.into()));
-    border_box.set_border_color(Some(theme.background.into()));
-    border_box.set_border_sides(BorderSidesConfig {
-        left: true,
-        top: false,
-        right: false,
-        bottom: false,
-    });
-    border_box.set_custom_border_chars(BorderCharacters {
-        top_left: ' ',
-        top_right: ' ',
-        bottom_left: ' ',
-        bottom_right: ' ',
-        horizontal: ' ',
-        vertical: '\u{2503}',
-        top_t: ' ',
-        bottom_t: ' ',
-        left_t: '\u{2503}',
-        right_t: ' ',
-        cross: ' ',
-    });
-    border_box.render_self(buf, area);
+    // Lightweight left-border + background fill (avoids BoxRenderable overhead).
+    let bg_style = Style::default().bg(rgba_color(theme.background_panel));
+    let border_style = Style::default()
+        .fg(rgba_color(theme.background))
+        .bg(rgba_color(theme.background_panel));
+    for ly in y..y + box_h {
+        if let Some(cell) = buf.cell_mut((x, ly)) {
+            cell.set_char('\u{2503}');
+            cell.set_style(border_style);
+        }
+        for lx in x + 1..x + area_w {
+            if let Some(cell) = buf.cell_mut((lx, ly)) {
+                cell.set_char(' ');
+                cell.set_style(bg_style);
+            }
+        }
+    }
 
     // Title line (muted) at y + 1 (padding top)
     let title_style = Style::default().fg(rgba_color(theme.text_muted));

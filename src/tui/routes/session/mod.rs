@@ -1377,16 +1377,17 @@ impl SessionView {
                 let mut part_y = msg_top + border_offset;
 
                 for (pi, part) in msg.parts.iter().enumerate() {
-                    let part_h = i32::from(
-                        self.part_heights_cache
-                            .get(idx)
-                            .and_then(|ph| ph.get(pi))
-                            .copied()
-                            .unwrap_or_else(|| {
-                                Self::estimate_part_height(part, max_w, config, &msg.role)
-                            })
-                            .max(1),
-                    );
+                    // No .max(1): hidden parts (e.g. plan_todo_write running/cleared) have
+                    // height 0 and must not advance part_y to avoid scroll inconsistencies.
+                    let raw_h = self
+                        .part_heights_cache
+                        .get(idx)
+                        .and_then(|ph| ph.get(pi))
+                        .copied()
+                        .unwrap_or_else(|| {
+                            Self::estimate_part_height(part, max_w, config, &msg.role)
+                        });
+                    let part_h = i32::from(raw_h);
                     let p_top = part_y;
                     let p_bottom = part_y + part_h;
 
