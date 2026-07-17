@@ -101,7 +101,10 @@ pub fn render_one_pty(
             // Lines starting with "→ cosh:" are the main agent's input message;
             // render them in the standard text color to visually distinguish
             // the prompt from the subagent's response.
-            let line_style = if line.starts_with("cosh → ") {
+            // Lines starting with "→ cosh:" are the main agent's input message;
+            // render them in the standard text color to visually distinguish
+            // the prompt from the subagent's response.
+            let line_style = if line.starts_with("→ cosh:") {
                 Style::default().fg(rgba_color(theme.text))
             } else {
                 output_style

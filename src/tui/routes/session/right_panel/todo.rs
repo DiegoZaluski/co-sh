@@ -26,6 +26,7 @@ pub fn render_todo_section(
     max_h: u16,
     todos: &[TodoItem],
     theme: &Theme,
+    scroll_y: Option<&mut i32>,
 ) -> u16 {
     // Need at least: gap(1) + top_pad(1) + header(1) + 1 item + bottom_pad(1) = 5
     if todos.is_empty() || max_h < TOP_GAP + TOP_PAD + 1 + 1 + BOTTOM_PAD {
@@ -34,12 +35,18 @@ pub fn render_todo_section(
 
     // How many items can actually fit
     let box_overhead = TOP_PAD + 1 + BOTTOM_PAD; // top_pad + header + bottom_pad
-    let visible_items = todos
-        .len()
-        .min((max_h.saturating_sub(TOP_GAP + box_overhead)) as usize);
-    if visible_items == 0 {
+    let max_visible = (max_h.saturating_sub(TOP_GAP + box_overhead)) as usize;
+    if max_visible == 0 {
         return 0;
     }
+
+    // Apply scroll offset for the TODO items
+    let scroll_offset = scroll_y.map_or(0, |s| {
+        let max_scroll = todos.len().saturating_sub(max_visible);
+        *s = (*s).min(max_scroll as i32).max(0);
+        *s as usize
+    });
+    let visible_items = max_visible.min(todos.len().saturating_sub(scroll_offset));
 
     let box_h = box_overhead + visible_items as u16; // full box height
     let box_y = y + TOP_GAP; // box starts after the gap
@@ -68,7 +75,7 @@ pub fn render_todo_section(
 
     // Each todo item — left-aligned
     let bottom_edge = y + total_used - BOTTOM_PAD;
-    for (i, todo) in todos.iter().enumerate() {
+    for (i, todo) in todos.iter().skip(scroll_offset).enumerate() {
         if i >= visible_items || line_y >= bottom_edge {
             break;
         }
@@ -135,7 +142,8 @@ pub fn todo_section_height(todos: &[TodoItem], _max_w: u16) -> u16 {
         return 0;
     }
     // gap + (top_pad + header + items + bottom_pad)
-    TOP_GAP + TOP_PAD + 1 + (todos.len() as u16).min(10) + BOTTOM_PAD
+    // Cap at 30 items to avoid extreme natural_h values.
+    TOP_GAP + TOP_PAD + 1 + (todos.len() as u16).min(30) + BOTTOM_PAD
 }
 
 fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {

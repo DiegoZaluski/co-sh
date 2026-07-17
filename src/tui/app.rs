@@ -2125,11 +2125,12 @@ impl App {
                     if tool == "subagent_call" {
                         let agent = input.get("agent").and_then(|v| v.as_str()).unwrap_or("");
                         let msg = input.get("input").and_then(|v| v.as_str()).unwrap_or("");
-                        // Remove previous subagent PTY entries so the panel
-                        // shows only the latest dialogue, avoiding accumulation.
+                        // Remove previous PTY entries for this specific agent only,
+                        // so different agents (e.g. opencode vs claude) can coexist.
+                        let subagent_prefix = format!("subagent: {agent}");
                         self.state.right_panel
                             .pty_sessions
-                            .retain(|s| !s.command.starts_with("subagent:"));
+                            .retain(|s| !s.command.starts_with(&subagent_prefix));
                         let cmd = format!("subagent: {agent}");
                         self.state.right_panel.start_pty(cmd, None);
                         // Show the input message as the first line of the dialogue,

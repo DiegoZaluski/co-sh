@@ -23,6 +23,14 @@ pub struct PtySession {
     pub status: PtyStatus,
 }
 
+/// Identifies which section of the right panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionKind {
+    Todo,
+    Bash,
+    Subagent,
+}
+
 /// State for the right panel.
 #[derive(Debug, Clone)]
 pub struct RightPanelState {
@@ -34,11 +42,28 @@ pub struct RightPanelState {
     pub pending_todo_update_count: u32,
     /// Counter for generating unique PTY IDs.
     next_pty_id: u64,
-    /// Vertical scroll offset for the panel content.
+
+    // ── Per-section scroll / chunk state ──────────────────────────
+    /// Scroll offset within the TODO section (only when items overflow).
+    pub todo_scroll_y: i32,
+    /// Scroll offset within the bash section (shared across all bash PTYs).
+    pub bash_scroll_y: i32,
+    /// Which chunk of the subagent output is currently displayed.
+    pub subagent_chunk_index: usize,
+    /// Total number of chunks the subagent output was split into.
+    pub subagent_chunk_count: usize,
+    /// How many lines of content fit in one subagent chunk (cached from render).
+    pub subagent_chunk_capacity: usize,
+
+    // ── Auto-scroll tracking ────────────────────────────────────────
+    /// Set to `true` when the user manually scrolls (up/down);
+    /// set to `false` by `scroll_to_bottom()`. Used by `is_scrolled_up()`
+    /// to decide whether to auto-scroll on new output.
+    pub user_scrolled_away: bool,
+
+    // ── Legacy (kept for external consumers) ───────────────────────
     pub scroll_y: i32,
-    /// Total content height in rows (computed during render).
     pub content_height: i32,
-    /// Visible viewport height in rows (set during render).
     pub visible_height: i32,
 }
 
@@ -49,45 +74,70 @@ impl RightPanelState {
             pty_sessions: Vec::new(),
             pending_todo_update_count: 0,
             next_pty_id: 0,
+            todo_scroll_y: 0,
+            bash_scroll_y: 0,
+            subagent_chunk_index: 0,
+            subagent_chunk_count: 0,
+            subagent_chunk_capacity: 0,
+            user_scrolled_away: false,
             scroll_y: 0,
             content_height: 0,
             visible_height: 0,
         }
     }
 
-    /// Scroll up by `delta` lines.
+    /// Scroll the first section with overflow (prefers bash, then todo) up by `delta` lines.
     pub fn scroll_up(&mut self, delta: i32) {
-        self.scroll_y = (self.scroll_y - delta).max(0);
+        self.user_scrolled_away = true;
+        if self
+            .pty_sessions
+            .iter()
+            .any(|p| !p.command.starts_with("subagent:"))
+        {
+            self.bash_scroll_y = (self.bash_scroll_y - delta).max(0);
+        } else if !self.todos.is_empty() {
+            self.todo_scroll_y = (self.todo_scroll_y - delta).max(0);
+        }
     }
 
-    /// Scroll down by `delta` lines.
+    /// Scroll the first section with overflow (prefers bash, then todo) down by `delta` lines.
     pub fn scroll_down(&mut self, delta: i32) {
-        let max_scroll = (self.content_height - self.visible_height).max(0);
-        self.scroll_y = (self.scroll_y + delta).min(max_scroll);
+        self.user_scrolled_away = true;
+        if self
+            .pty_sessions
+            .iter()
+            .any(|p| !p.command.starts_with("subagent:"))
+        {
+            self.bash_scroll_y = (self.bash_scroll_y + delta).max(0);
+        } else if !self.todos.is_empty() {
+            self.todo_scroll_y = (self.todo_scroll_y + delta).max(0);
+        }
     }
 
-    /// Scroll to the bottom of the content.
+    /// Scroll the bash section to the bottom (auto-scroll on new output).
     pub fn scroll_to_bottom(&mut self) {
-        let max_scroll = (self.content_height - self.visible_height).max(0);
-        self.scroll_y = max_scroll;
+        self.user_scrolled_away = false;
+        self.bash_scroll_y = i32::MAX;
+        self.todo_scroll_y = i32::MAX;
     }
 
-    /// Reset scroll to top.
+    /// Reset all per-section scrolls to top.
     pub fn reset_scroll(&mut self) {
+        self.user_scrolled_away = false;
+        self.bash_scroll_y = 0;
+        self.todo_scroll_y = 0;
         self.scroll_y = 0;
     }
 
-    /// Set the viewport height (called from render).
+    /// Set the viewport height (called from render). The per-section scrolls
+    /// are clamped during render by each section's render function.
     pub fn set_visible_height(&mut self, h: i32) {
         self.visible_height = h;
-        let max_scroll = (self.content_height - h).max(0);
-        self.scroll_y = self.scroll_y.min(max_scroll);
     }
 
-    /// Whether the user has scrolled up from the bottom (manual scroll).
+    /// Whether the user has manually scrolled away from the bottom.
     pub fn is_scrolled_up(&self) -> bool {
-        let max_scroll = (self.content_height - self.visible_height).max(0);
-        self.scroll_y < max_scroll
+        self.user_scrolled_away
     }
 
     /// Set the current todos, replacing any existing ones.
