@@ -1917,18 +1917,18 @@ impl SessionView {
                             let x_off_text = inner_area.x + 3;
                             let temp_cells = temp.content();
                             let total_stride = inner_area.width as usize;
-                            let w = max_w as usize;
+                            let content_w = (max_w as usize).min(total_stride.saturating_sub(3));
                             let ah = actual_h as u16;
-                            let mut content_cells = Vec::with_capacity(w * ah as usize);
+                            let mut content_cells = Vec::with_capacity(content_w * ah as usize);
                             for dy in 0..ah as usize {
                                 let base = dy * total_stride;
-                                for dx in 0..w {
+                                for dx in 0..content_w {
                                     content_cells.push(temp_cells[base + 3 + dx].clone());
                                 }
                             }
                             let regions = Self::cells_to_text_regions(
                                 &content_cells,
-                                w,
+                                content_w,
                                 ah,
                                 msg_content_top,
                                 x_off_text,
@@ -1946,9 +1946,9 @@ impl SessionView {
                             let temp_y = src_y + dy;
                             let dst_line_y = dst_y + dy;
                             let base = temp_y as usize * total_stride;
-                            for dx in 0..max_w as usize {
+                            for dx in 0..total_stride {
                                 if let Some(dst) = buf.cell_mut((dst_x + dx as u16, dst_line_y)) {
-                                    *dst = temp_cells[base + 3 + dx].clone();
+                                    *dst = temp_cells[base + dx].clone();
                                 }
                             }
                         }
@@ -1956,28 +1956,38 @@ impl SessionView {
                         // Save non-streaming messages to cache
                         if !is_streaming_msg && actual_h > 0 {
                             let ah = actual_h as u16;
-                            let w = max_w as usize;
                             let temp_cells = temp.content();
                             let total_stride = inner_area.width as usize;
-                            let mut cells = Vec::with_capacity(w * ah as usize);
+                            // Store full-width cells (including border/margin) for consistent
+                            // alignment regardless of scroll state.
+                            let mut cells = Vec::with_capacity(total_stride * ah as usize);
                             for dy in 0..ah {
                                 let base = dy as usize * total_stride;
-                                for dx in 0..w {
-                                    cells.push(temp_cells[base + 3 + dx].clone());
+                                for dx in 0..total_stride {
+                                    cells.push(temp_cells[base + dx].clone());
                                 }
                             }
+                            // Text regions are still content-only (no border/margin text).
                             let x_off_text = inner_area.x + 3;
                             let msg_content_top = msg_top - vp_top + self.scroll_y;
+                            let content_w = (max_w as usize).min(total_stride.saturating_sub(3));
+                            let mut text_cells = Vec::with_capacity(content_w * ah as usize);
+                            for dy in 0..ah {
+                                let base = dy as usize * total_stride;
+                                for dx in 0..content_w {
+                                    text_cells.push(temp_cells[base + 3 + dx].clone());
+                                }
+                            }
                             let regions = Self::cells_to_text_regions(
-                                &cells,
-                                w,
+                                &text_cells,
+                                content_w,
                                 ah,
                                 msg_content_top,
                                 x_off_text,
                                 max_w,
                             );
                             self.msg_cache_tokens[idx] = token;
-                            self.msg_cache_w[idx] = max_w;
+                            self.msg_cache_w[idx] = inner_area.width;
                             self.msg_cache_h[idx] = ah;
                             self.msg_cache_cells[idx] = Some(cells);
                             self.msg_cache_text_regions[idx] = Some(regions);
