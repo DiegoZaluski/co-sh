@@ -1,4 +1,4 @@
-//! Tool for calling sub-agent CLIs (e.g. `opencode run`).
+//! Tool for calling sub-agent CLIs.
 //!
 //! Each call spawns the agent CLI as a child process with the input passed
 //! as a command-line argument, streams output in real time, and returns
@@ -6,9 +6,23 @@
 //!
 //! # Supported agents
 //!
-//! | Name | Binary | Args |
-//! |------|--------|------|
-//! | `opencode` | `opencode` | `run` |
+//! Each agent must support a **non-interactive / headless mode** (e.g. `-p`,
+//! `--message`, `run`, `exec`) — purely interactive TUIs cannot be driven.
+//!
+//! | Name | Binary | Invocation |
+//! |------|--------|------------|
+//! | `opencode` | `opencode` | `opencode run "<input>"` |
+//! | `kilo` | `kilo` | `kilo run "<input>"` |
+//! | `claude` | `claude` | `claude -p "<input>"` |
+//! | `devin` | `devin` | `devin -p "<input>"` |
+//! | `codex` | `codex` | `codex exec "<input>"` |
+//! | `letta` | `letta` | `letta -p "<input>"` |
+//! | `vibe` | `vibe` | `vibe --prompt "<input>"` |
+//! | `aider` | `aider` | `aider --message "<input>"` (needs `AIDER_YES=true`) |
+//! | `omp` | `omp` | `omp -p "<input>"` |
+//! | `goose` | `goose` | `goose run -t "<input>"` |
+//! | `gemini` | `gemini` | `gemini -p "<input>"` |
+//! | `forge` | `forge` | `forge -p "<input>"` |
 //!
 //! See [`AGENTS`](call::AGENTS) for the full list.
 
@@ -43,6 +57,17 @@ impl SubAgent {
                     "is streamed in real time.\n\n",
                     "## Supported agents\n",
                     "- `opencode` → `opencode run \"<input>\"`\n",
+                    "- `kilo` → `kilo run \"<input>\"`\n",
+                    "- `claude` → `claude -p \"<input>\"`\n",
+                    "- `devin` → `devin -p \"<input>\"`\n",
+                    "- `codex` → `codex exec \"<input>\"`\n",
+                    "- `letta` → `letta -p \"<input>\"`\n",
+                    "- `vibe` → `vibe --prompt \"<input>\"`\n",
+                    "- `aider` → `aider --message \"<input>\"` (env `AIDER_YES=true` for headless)\n",
+                    "- `omp` → `omp -p \"<input>\"`\n",
+                    "- `goose` → `goose run -t \"<input>\"`\n",
+                    "- `gemini` → `gemini -p \"<input>\"`\n",
+                    "- `forge` → `forge -p \"<input>\"`\n",
                     "## When to use\n",
                     "- Use `subagent_call` with `agent` and `input` to delegate ",
                     "a task to another agent CLI.\n",
