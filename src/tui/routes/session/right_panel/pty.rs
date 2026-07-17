@@ -78,17 +78,18 @@ pub fn render_one_pty(
         if is_subagent {
             let mut bg = BoxRenderable::new();
             bg.set_background_color(Some(theme.background_element.into()));
-            bg.render_self(
-                buf,
-                Rect::new(output_x, output_y, output_w, output_box_h),
-            );
+            bg.render_self(buf, Rect::new(output_x, output_y, output_w, output_box_h));
         }
 
         // Render output text
         let output_style = Style::default().fg(rgba_color(theme.text_muted));
         // Subagent entries have a background box, so text padding is 1;
         // regular bash entries keep the original 2-char indent.
-        let text_x = if is_subagent { output_x + 1 } else { output_x + 2 };
+        let text_x = if is_subagent {
+            output_x + 1
+        } else {
+            output_x + 2
+        };
         let text_w = output_w.saturating_sub(2);
 
         let available = output_box_h as usize;
@@ -97,6 +98,14 @@ pub fn render_one_pty(
         let shown = available.min(total);
 
         for (i, line) in all_lines.iter().take(shown).enumerate() {
+            // Lines starting with "→ cosh:" are the main agent's input message;
+            // render them in the standard text color to visually distinguish
+            // the prompt from the subagent's response.
+            let line_style = if line.starts_with("cosh → ") {
+                Style::default().fg(rgba_color(theme.text))
+            } else {
+                output_style
+            };
             let truncated: String = line.chars().take(text_w as usize).collect();
             draw_text(
                 buf,
@@ -104,7 +113,7 @@ pub fn render_one_pty(
                 text_x,
                 output_y + i as u16,
                 text_w,
-                output_style,
+                line_style,
             );
         }
     }

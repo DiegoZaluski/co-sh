@@ -2124,8 +2124,20 @@ impl App {
                     // Start PTY tracking for subagent calls
                     if tool == "subagent_call" {
                         let agent = input.get("agent").and_then(|v| v.as_str()).unwrap_or("");
+                        let msg = input.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                        // Remove previous subagent PTY entries so the panel
+                        // shows only the latest dialogue, avoiding accumulation.
+                        self.state.right_panel
+                            .pty_sessions
+                            .retain(|s| !s.command.starts_with("subagent:"));
                         let cmd = format!("subagent: {agent}");
                         self.state.right_panel.start_pty(cmd, None);
+                        // Show the input message as the first line of the dialogue,
+                        // visually prefixed to indicate it came from the main agent.
+                        if !msg.is_empty() {
+                            self.state.right_panel
+                                .update_last_pty(format!("→ cosh: {msg}\n"));
+                        }
                         self.state.right_panel.scroll_to_bottom();
                     }
                     let Some(session) = self.state.current_session_mut() else {
