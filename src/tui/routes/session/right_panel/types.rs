@@ -43,17 +43,13 @@ pub struct RightPanelState {
     /// Counter for generating unique PTY IDs.
     next_pty_id: u64,
 
-    // ── Per-section scroll / chunk state ──────────────────────────
+    // ── Per-section scroll state ───────────────────────────────────
     /// Scroll offset within the TODO section (only when items overflow).
     pub todo_scroll_y: i32,
     /// Scroll offset within the bash section (shared across all bash PTYs).
     pub bash_scroll_y: i32,
-    /// Which chunk of the subagent output is currently displayed.
-    pub subagent_chunk_index: usize,
-    /// Total number of chunks the subagent output was split into.
-    pub subagent_chunk_count: usize,
-    /// How many lines of content fit in one subagent chunk (cached from render).
-    pub subagent_chunk_capacity: usize,
+    /// Scroll offset within the subagent section (shared across all subagent PTYs).
+    pub subagent_scroll_y: i32,
 
     // ── Auto-scroll tracking ────────────────────────────────────────
     /// Set to `true` when the user manually scrolls (up/down);
@@ -76,9 +72,7 @@ impl RightPanelState {
             next_pty_id: 0,
             todo_scroll_y: 0,
             bash_scroll_y: 0,
-            subagent_chunk_index: 0,
-            subagent_chunk_count: 0,
-            subagent_chunk_capacity: 0,
+            subagent_scroll_y: 0,
             user_scrolled_away: false,
             scroll_y: 0,
             content_height: 0,
@@ -86,7 +80,7 @@ impl RightPanelState {
         }
     }
 
-    /// Scroll the first section with overflow (prefers bash, then todo) up by `delta` lines.
+    /// Scroll the first section with overflow (prefers bash > subagent > todo) up by `delta` lines.
     pub fn scroll_up(&mut self, delta: i32) {
         self.user_scrolled_away = true;
         if self
@@ -95,12 +89,14 @@ impl RightPanelState {
             .any(|p| !p.command.starts_with("subagent:"))
         {
             self.bash_scroll_y = (self.bash_scroll_y - delta).max(0);
+        } else if self.pty_sessions.iter().any(|p| p.command.starts_with("subagent:")) {
+            self.subagent_scroll_y = (self.subagent_scroll_y - delta).max(0);
         } else if !self.todos.is_empty() {
             self.todo_scroll_y = (self.todo_scroll_y - delta).max(0);
         }
     }
 
-    /// Scroll the first section with overflow (prefers bash, then todo) down by `delta` lines.
+    /// Scroll the first section with overflow (prefers bash > subagent > todo) down by `delta` lines.
     pub fn scroll_down(&mut self, delta: i32) {
         self.user_scrolled_away = true;
         if self
@@ -109,15 +105,18 @@ impl RightPanelState {
             .any(|p| !p.command.starts_with("subagent:"))
         {
             self.bash_scroll_y = (self.bash_scroll_y + delta).max(0);
+        } else if self.pty_sessions.iter().any(|p| p.command.starts_with("subagent:")) {
+            self.subagent_scroll_y = (self.subagent_scroll_y + delta).max(0);
         } else if !self.todos.is_empty() {
             self.todo_scroll_y = (self.todo_scroll_y + delta).max(0);
         }
     }
 
-    /// Scroll the bash section to the bottom (auto-scroll on new output).
+    /// Scroll sections to bottom (auto-scroll on new output).
     pub fn scroll_to_bottom(&mut self) {
         self.user_scrolled_away = false;
         self.bash_scroll_y = i32::MAX;
+        self.subagent_scroll_y = i32::MAX;
         self.todo_scroll_y = i32::MAX;
     }
 
@@ -125,6 +124,7 @@ impl RightPanelState {
     pub fn reset_scroll(&mut self) {
         self.user_scrolled_away = false;
         self.bash_scroll_y = 0;
+        self.subagent_scroll_y = 0;
         self.todo_scroll_y = 0;
         self.scroll_y = 0;
     }

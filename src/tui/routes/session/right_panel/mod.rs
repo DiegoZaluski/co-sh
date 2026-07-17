@@ -69,9 +69,9 @@ fn natural_section_height(state: &RightPanelState, inner_w: u16, kind: types::Se
         types::SectionKind::Subagent => state
             .pty_sessions
             .iter()
-            .rposition(|p| p.command.starts_with("subagent:"))
-            .map(|i| pty_entry_height(&state.pty_sessions[i]) as i32)
-            .unwrap_or(0),
+            .filter(|p| p.command.starts_with("subagent:"))
+            .map(|p| pty_entry_height(p) as i32)
+            .sum(),
     }
 }
 
@@ -274,7 +274,12 @@ fn render_bash_section(
     }
 }
 
-/// Render subagent PTYs into a single section with chunk-based scrolling.
+/// Render all subagent PTYs into a single section with virtual scroll.
+///
+/// Each subagent occupies its natural height; when the total exceeds the
+/// allocated space, the section scrolls (like the bash section). Different
+/// agent CLIs (e.g. opencode + kilo) stack; the same agent called again
+/// replaces its previous entry (handled in `app.rs` via `retain`).
 fn render_subagent_section(
     buf: &mut Buffer,
     x: u16,
@@ -284,92 +289,61 @@ fn render_subagent_section(
     state: &mut RightPanelState,
     theme: &Theme,
 ) {
-    // Find the last (most recent) subagent PTY
-    let sub_idx = state
+    let sub_ptys: Vec<usize> = state
         .pty_sessions
         .iter()
-        .rposition(|p| p.command.starts_with("subagent:"));
-    let Some(idx) = sub_idx else {
+        .enumerate()
+        .filter(|(_, p)| p.command.starts_with("subagent:"))
+        .map(|(i, _)| i)
+        .collect();
+
+    if sub_ptys.is_empty() {
         return;
+    }
+
+    // Calculate total natural height
+    let natural_h: i32 = sub_ptys
+        .iter()
+        .map(|&i| pty_entry_height(&state.pty_sessions[i]) as i32)
+        .sum();
+
+    let has_scroll = natural_h > max_h as i32;
+    let scroll_y = if has_scroll {
+        state.subagent_scroll_y = state
+            .subagent_scroll_y
+            .min((natural_h - max_h as i32) as i32);
+        state.subagent_scroll_y
+    } else {
+        0
     };
 
-    let session = &state.pty_sessions[idx];
-    let natural_h = pty_entry_height(session) as i32;
-    let max_content_h = (max_h as i32 - 1).max(1) as usize; // -1 for command line
+    // Virtual scroll within the subagent section
+    let mut cur_y = y as i32 - scroll_y;
+    let viewport_bottom = (y + max_h) as i32;
 
-    let output_lines: Vec<&str> = session.output.lines().collect();
-    let total_lines = output_lines.len();
+    for &idx in &sub_ptys {
+        let pty = &state.pty_sessions[idx];
+        let pty_h = pty_entry_height(pty) as i32;
 
-    if total_lines == 0 {
-        render_one_pty(buf, x, y, max_w, max_h, session, theme);
-        return;
-    }
-
-    // If content fits, render directly
-    if natural_h <= max_h as i32 {
-        state.subagent_chunk_index = 0;
-        state.subagent_chunk_count = 1;
-        state.subagent_chunk_capacity = max_content_h;
-        render_one_pty(buf, x, y, max_w, max_h, session, theme);
-        return;
-    }
-
-    // Content doesn't fit — split into chunks
-    let chunk_count = total_lines.div_ceil(max_content_h);
-    state.subagent_chunk_capacity = max_content_h;
-
-    if state.subagent_chunk_count == 0 {
-        // First render — start at chunk 0 so we don't skip initial output.
-        state.subagent_chunk_index = 0;
-    } else if chunk_count > state.subagent_chunk_count {
-        // New output arrived, advance to next chunk (smooth transition).
-        state.subagent_chunk_index =
-            (state.subagent_chunk_index + 1).min(chunk_count.saturating_sub(1));
-    }
-    state.subagent_chunk_count = chunk_count;
-
-    let chunk = state.subagent_chunk_index.min(chunk_count.saturating_sub(1));
-    let start = chunk * max_content_h;
-    let end = (start + max_content_h).min(total_lines);
-
-    // Build a "virtual" PTY with just this chunk's output
-    let chunk_output: String = output_lines[start..end].join("\n");
-    let mut virtual_pty = session.clone();
-    virtual_pty.output = chunk_output;
-
-    render_one_pty(buf, x, y, max_w, max_h, &virtual_pty, theme);
-
-    // Show chunk indicator
-    if chunk_count > 1 {
-        let indicator = format!(
-            " [{}/{}]",
-            chunk + 1,
-            chunk_count
-        );
-        let style = Style::default().fg(rgba_color(theme.text_muted));
-        draw_simple_text(
-            buf,
-            &indicator,
-            x + max_w.saturating_sub(indicator.chars().count() as u16 + 1),
-            y,
-            indicator.chars().count() as u16,
-            style,
-        );
-    }
-}
-
-/// Minimal text drawing helper (no control-char filtering, used for indicators).
-fn draw_simple_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
-        let cx = x + i as u16;
-        if cx >= right {
-            break;
+        if cur_y + pty_h > y as i32 && cur_y < viewport_bottom {
+            let render_y = cur_y.max(y as i32) as u16;
+            let clip_h = (cur_y + pty_h).min(viewport_bottom) - render_y as i32;
+            render_one_pty(
+                buf,
+                x,
+                render_y,
+                max_w,
+                clip_h as u16,
+                pty,
+                theme,
+            );
         }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
+        cur_y += pty_h;
+    }
+
+    // Draw a small scrollbar if content overflows
+    if has_scroll {
+        draw_section_scrollbar(buf, x + max_w, y, max_h, natural_h, scroll_y, theme);
     }
 }
 
