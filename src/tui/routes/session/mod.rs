@@ -2152,8 +2152,12 @@ impl SessionView {
                                         }
                                     }
                                     render_actual_h = cached_h as i32;
-                                } else {
-                                    let actual_h = Self::render_assistant_message(
+                                } else if msg.id.starts_with("msg-err-") {
+                                    // Error messages: render directly to buf.
+                                    // render_assistant_message returns 0 for errors
+                                    // (content is rendered as a side-effect), so the
+                                    // temp buffer approach would lose the output.
+                                    Self::render_assistant_message(
                                         buf,
                                         msg_area,
                                         msg,
@@ -2164,33 +2168,107 @@ impl SessionView {
                                         false,
                                         &self.part_heights_cache[idx],
                                         streaming,
-                                    ) as i32;
+                                    );
+                                    render_actual_h = msg_h;
+                                } else {
+                                    // Render full message to temp buffer, then copy
+                                    // visible portion to buf. This ensures the full
+                                    // message height is cached, not just the clipped
+                                    // viewport portion — preventing partial cut-off
+                                    // on subsequent frames (e.g. after theme change).
+                                    let generous_h = ((msg_h as u16)
+                                        .saturating_add(inner_area.height))
+                                        .clamp(100, 5000);
+                                    let full_area = Rect::new(
+                                        0,
+                                        0,
+                                        inner_area.width,
+                                        generous_h,
+                                    );
+                                    let mut temp = Buffer::empty(full_area);
+                                    temp.set_style(
+                                        full_area,
+                                        Style::default()
+                                            .bg(rgba_color(theme.background)),
+                                    );
 
-                                    if msg.id.starts_with("msg-err-") {
-                                        render_actual_h = msg_h;
-                                    } else {
-                                        render_actual_h = actual_h.max(1);
+                                    let mut actual_h = Self::render_assistant_message(
+                                        &mut temp,
+                                        full_area,
+                                        msg,
+                                        theme,
+                                        &self.tool_state,
+                                        config,
+                                        false,
+                                        false,
+                                        &self.part_heights_cache[idx],
+                                        streaming,
+                                    ) as i32;
+                                    actual_h = actual_h.min(generous_h as i32);
+
+                                    let msg_content_top = msg_top - vp_top + self.scroll_y;
+                                    if actual_h > 0 {
+                                        let x_off_text = inner_area.x + 3;
+                                        let temp_cells = temp.content();
+                                        let total_stride = inner_area.width as usize;
+                                        let content_w = (max_w as usize)
+                                            .min(total_stride.saturating_sub(3));
+                                        let ah = actual_h as u16;
+                                        let mut content_cells =
+                                            Vec::with_capacity(content_w * ah as usize);
+                                        for dy in 0..ah as usize {
+                                            let base = dy * total_stride;
+                                            for dx in 0..content_w {
+                                                content_cells.push(
+                                                    temp_cells[base + 3 + dx].clone(),
+                                                );
+                                            }
+                                        }
+                                        let regions = Self::cells_to_text_regions(
+                                            &content_cells,
+                                            content_w,
+                                            ah,
+                                            msg_content_top,
+                                            x_off_text,
+                                            max_w,
+                                        );
+                                        self.msg_cache_text_regions[idx] = Some(regions);
                                     }
 
-                                    // Save non-streaming messages to cache
+                                    // Copy visible portion from temp to buf
+                                    let dst_y = visible_top;
+                                    let vis_h = actual_h.min(i32::from(visible_h)) as u16;
+                                    let temp_cells = temp.content();
+                                    let total_stride = inner_area.width as usize;
+                                    let dst_x = inner_area.x;
+                                    for dy in 0..vis_h {
+                                        let base = dy as usize * total_stride;
+                                        let dst_line_y = dst_y + dy;
+                                        for dx in 0..total_stride {
+                                            if let Some(dst) = buf.cell_mut((
+                                                dst_x + dx as u16,
+                                                dst_line_y,
+                                            )) {
+                                                *dst = temp_cells[base + dx].clone();
+                                            }
+                                        }
+                                    }
+
+                                    render_actual_h = actual_h.max(1);
+
+                                    // Save non-streaming messages to cache (full height)
                                     if !is_streaming_msg && actual_h > 0 {
                                         let ah = render_actual_h as u16;
                                         let w = inner_area.width as usize;
-                                        let mut cells = Vec::with_capacity(w * ah as usize);
+                                        let mut cells =
+                                            Vec::with_capacity(w * ah as usize);
                                         for dy in 0..ah {
+                                            let base = dy as usize * total_stride;
                                             for dx in 0..w {
-                                                let c = buf
-                                                    .cell((
-                                                        inner_area.x + dx as u16,
-                                                        visible_top + dy,
-                                                    ))
-                                                    .cloned()
-                                                    .unwrap_or_default();
-                                                cells.push(c);
+                                                cells.push(temp_cells[base + dx].clone());
                                             }
                                         }
                                         let x_off_text = inner_area.x + 3;
-                                        let msg_content_top = msg_top - vp_top + self.scroll_y;
                                         let regions = Self::cells_to_text_regions(
                                             &cells,
                                             w,
