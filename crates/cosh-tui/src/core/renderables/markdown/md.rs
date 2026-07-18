@@ -148,6 +148,7 @@ impl MarkdownRenderable {
         max_x: u16,
         max_y: u16,
         style: Style,
+        bq_indent: u16,
     ) {
         let mut word = String::new();
         let mut word_w = 0u16;
@@ -164,12 +165,13 @@ impl MarkdownRenderable {
                     max_x,
                     max_y,
                     style,
+                    bq_indent,
                 );
                 if *y >= max_y {
                     return;
                 }
                 *y += 1;
-                *x = area_x;
+                *x = area_x.saturating_add(bq_indent);
                 continue;
             }
 
@@ -184,11 +186,12 @@ impl MarkdownRenderable {
                     max_x,
                     max_y,
                     style,
+                    bq_indent,
                 );
                 if *y >= max_y {
                     return;
                 }
-                if *x < max_x && *x > area_x {
+                if *x < max_x && *x > area_x.saturating_add(bq_indent) {
                     if let Some(cell) = buf.cell_mut((*x, *y)) {
                         cell.set_char(' ');
                         cell.set_style(style);
@@ -212,6 +215,7 @@ impl MarkdownRenderable {
             max_x,
             max_y,
             style,
+            bq_indent,
         );
     }
 
@@ -227,13 +231,14 @@ impl MarkdownRenderable {
         max_x: u16,
         max_y: u16,
         style: Style,
+        bq_indent: u16,
     ) {
         if *word_w == 0 {
             return;
         }
-        if *x + *word_w > max_x && *x > area_x {
+        if *x + *word_w > max_x && *x > area_x.saturating_add(bq_indent) {
             *y += 1;
-            *x = area_x;
+            *x = area_x.saturating_add(bq_indent);
         }
         if *y >= max_y {
             word.clear();
@@ -277,13 +282,14 @@ impl MarkdownRenderable {
         max_x: u16,
         max_y: u16,
         code_bg: Color,
+        code_pad: u16,
     ) {
         if *word_w == 0 {
             return;
         }
-        if *x + *word_w > max_x && *x > area_x {
+        if *x + *word_w > max_x && *x > area_x + code_pad {
             *y += 1;
-            *x = area_x;
+            *x = area_x + code_pad;
             if *y < max_y {
                 Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
             }
@@ -553,6 +559,17 @@ impl Renderable for MarkdownRenderable {
                                 y += 1;
                                 x = area.x;
                             }
+                            if let Tag::BlockQuote(_) = &tag
+                                && y < max_y
+                            {
+                                let bar_fg = rgba_to_color(palette.blockquote_bar_color());
+                                let bar_style = Style::default().fg(bar_fg);
+                                if let Some(cell) = buf.cell_mut((area.x, y)) {
+                                    cell.set_char('│');
+                                    cell.set_style(bar_style);
+                                }
+                                x = area.x.saturating_add(2);
+                            }
                         }
                         Tag::CodeBlock(_) => {
                             if x != area.x {
@@ -591,6 +608,7 @@ impl Renderable for MarkdownRenderable {
                                 max_x,
                                 max_y,
                                 marker_style,
+                                0,
                             );
                         }
                         Tag::TableHead
@@ -668,23 +686,26 @@ impl Renderable for MarkdownRenderable {
                         let element = ctx.current_element();
                         let heading_level = ctx.heading_level();
                         let mut style = palette.style_for(element, heading_level);
+                        let bq_indent = if ctx.in_blockquote() { 2u16 } else { 0u16 };
                         if ctx.in_blockquote() {
                             style = style.fg(rgba_to_color(palette.muted_color()));
                         }
-                        Self::render_text(&text, buf, &mut x, &mut y, area.x, max_x, max_y, style);
+                        Self::render_text(
+                            &text, buf, &mut x, &mut y, area.x, max_x, max_y, style, bq_indent,
+                        );
                     }
                 }
 
                 // ── Inline code ─────────────────────────────────
                 Event::Code(text) => {
                     let style = palette.style_for(Some(MarkdownElement::InlineCode), None);
-                    Self::render_text(&text, buf, &mut x, &mut y, area.x, max_x, max_y, style);
+                    Self::render_text(&text, buf, &mut x, &mut y, area.x, max_x, max_y, style, 0);
                 }
 
                 // ── Raw HTML ────────────────────────────────────
                 Event::Html(html) => {
                     let style = Style::default().fg(rgba_to_color(palette.muted_color()));
-                    Self::render_text(&html, buf, &mut x, &mut y, area.x, max_x, max_y, style);
+                    Self::render_text(&html, buf, &mut x, &mut y, area.x, max_x, max_y, style, 0);
                 }
 
                 // ── Line breaks ─────────────────────────────────
@@ -712,7 +733,7 @@ impl Renderable for MarkdownRenderable {
                 Event::TaskListMarker(checked) => {
                     let marker = if checked { "[x] " } else { "[ ] " };
                     let style = Style::default().fg(rgba_to_color(palette.list_marker_color()));
-                    Self::render_text(marker, buf, &mut x, &mut y, area.x, max_x, max_y, style);
+                    Self::render_text(marker, buf, &mut x, &mut y, area.x, max_x, max_y, style, 0);
                 }
             }
         }
@@ -781,18 +802,29 @@ impl MarkdownRenderable {
         }
 
         let mut byte_offset = 0;
+        let code_pad = 2u16;
+        let code_pad_v = 1u16;
 
-        for (i, line) in text.lines().enumerate() {
-            if i > 0 {
-                *y += 1;
-                *x = area_x;
-                if *y >= max_y {
-                    break;
-                }
+        // The CodeBlock start handler already drew the top gap row (filled
+        // with the code background), so the first code line begins on the
+        // next row via the loop below. Only a bottom gap is added here.
+        *x = area_x.saturating_add(code_pad);
+
+        for line in text.lines() {
+            // Every code line (including the first) gets its own fresh row,
+            // so the top-gap row above is preserved.
+            if *y >= max_y {
+                break;
+            }
+            *y += 1;
+            *x = area_x.saturating_add(code_pad);
+            if *y >= max_y {
+                break;
             }
 
             // Fill the entire line with code-block background
             Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
+            *x = area_x.saturating_add(code_pad);
 
             // Word-aware rendering with syntax highlighting preservation.
             // Non-space graphemes are buffered into "words"; when a space or
@@ -820,12 +852,13 @@ impl MarkdownRenderable {
                         max_x,
                         max_y,
                         code_bg,
+                        code_pad,
                     );
                     if *y >= max_y {
                         break;
                     }
                     *y += 1;
-                    *x = area_x;
+                    *x = area_x.saturating_add(code_pad);
                     if *y < max_y {
                         Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
                     }
@@ -843,6 +876,7 @@ impl MarkdownRenderable {
                         max_x,
                         max_y,
                         code_bg,
+                        code_pad,
                     );
                     if *y >= max_y {
                         break;
@@ -871,8 +905,19 @@ impl MarkdownRenderable {
                 max_x,
                 max_y,
                 code_bg,
+                code_pad,
             );
             byte_offset += line.len() + 1;
+        }
+
+        // Internal bottom padding (blank background rows)
+        *x = area_x;
+        for _ in 0..code_pad_v {
+            if *y >= max_y {
+                break;
+            }
+            *y += 1;
+            Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
         }
 
         let cb_us = cb_start.elapsed().as_micros();

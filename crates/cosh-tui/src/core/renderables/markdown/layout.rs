@@ -168,9 +168,13 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
             | Event::InlineHtml(text) => {
                 let text: &str = text.as_ref();
                 if ctx.in_code_block() {
+                    let code_max_w = max_w.saturating_sub(2).max(1);
+                    let code_pad_v = 1u16;
+                    // Internal top + bottom padding rows
+                    y = y.saturating_add(code_pad_v * 2);
                     let mut first = true;
                     for line in text.lines() {
-                        let wrapped = crate::core::lib::unicode_util::word_wrap(line, max_w);
+                        let wrapped = crate::core::lib::unicode_util::word_wrap(line, code_max_w);
                         for wl in &wrapped {
                             if !first {
                                 y += 1;
