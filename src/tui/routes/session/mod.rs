@@ -2238,7 +2238,11 @@ impl SessionView {
                                         streaming,
                                     ) as i32;
 
-                                    render_actual_h = actual_h.max(1);
+                                    if msg.id.starts_with("msg-err-") {
+                                        render_actual_h = msg_h;
+                                    } else {
+                                        render_actual_h = actual_h.max(1);
+                                    }
 
                                     // Save non-streaming messages to cache
                                     if !is_streaming_msg && actual_h > 0 {
