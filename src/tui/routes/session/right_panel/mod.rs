@@ -152,7 +152,9 @@ pub fn render_right_panel(
             pool -= extra;
         }
         // Leftover goes to the first needy section
-        if pool > 0 && let Some(&i) = needy.first() {
+        if pool > 0
+            && let Some(&i) = needy.first()
+        {
             allocations[i] += pool;
         }
     }

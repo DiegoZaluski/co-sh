@@ -2310,10 +2310,12 @@ impl App {
                     self.agent_spinner = None;
 
                     // Persist session to disk if it has valid dialog
-                    if let Some(session) = self.state.current_session()
+                    if let Some(id) = self.state.current_session_id.clone()
+                        && let Some(session) = self.state.session_cache.get(&id)
                         && is_valid_session(session)
                     {
                         self.session_store.save_session(session);
+                        self.state.ensure_session_summary(&id);
                     }
                 }
 
@@ -2328,10 +2330,12 @@ impl App {
                     });
 
                     // Persist session to disk even when stopped (partial dialog is still valuable)
-                    if let Some(session) = self.state.current_session()
+                    if let Some(id) = self.state.current_session_id.clone()
+                        && let Some(session) = self.state.session_cache.get(&id)
                         && is_valid_session(session)
                     {
                         self.session_store.save_session(session);
+                        self.state.ensure_session_summary(&id);
                     }
                 }
 

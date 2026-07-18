@@ -80,18 +80,10 @@ impl AppState {
         self.session_cache.put(session.id.clone(), session);
     }
 
-    /// Add a session summary and a placeholder empty session to the cache.
-    /// Used when creating a brand-new session (no messages yet).
+    /// Add a placeholder empty session to the cache. No summary is created yet —
+    /// the session only appears in the sidebar once it has been persisted (i.e.,
+    /// it has valid content and has been saved to disk).
     pub fn add_empty_session(&mut self, id: String, title: String, created_at: u64) {
-        let summary = SessionSummary {
-            session_id: id.clone(),
-            title: title.clone(),
-            created_at,
-            message_count: 0,
-            cwd: self.working_directory.clone(),
-            model: None,
-        };
-        self.session_summaries.push(summary);
         self.session_cache.put(
             id.clone(),
             Session {
@@ -101,6 +93,29 @@ impl AppState {
                 messages: vec![],
             },
         );
+    }
+
+    /// Ensure a summary exists in `session_summaries` for the session with the
+    /// given id. If it already exists, this is a no-op.
+    pub fn ensure_session_summary(&mut self, session_id: &str) {
+        if self
+            .session_summaries
+            .iter()
+            .any(|s| s.session_id == session_id)
+        {
+            return;
+        }
+        if let Some(session) = self.session_cache.peek(session_id) {
+            let summary = SessionSummary {
+                session_id: session.id.clone(),
+                title: session.title.clone(),
+                created_at: session.created_at,
+                message_count: session.messages.len(),
+                cwd: self.working_directory.clone(),
+                model: None,
+            };
+            self.session_summaries.push(summary);
+        }
     }
 
     /// Ensure a session is in the cache. If not, attempts to load from the
@@ -144,12 +159,19 @@ impl AppState {
         session_id: String,
         store: &crate::session_store::SessionStore,
     ) {
-        // Save current session to cache
-        if let Some(old_id) = self.current_session_id.as_ref() {
-            // The current session is already in the cache (it's been modified in-place).
-            // Persist it.
-            if let Some(session) = self.session_cache.get(old_id.as_str()) {
-                store.save_session(session);
+        // Save current session to disk only if it has real content
+        let old_id = self.current_session_id.clone();
+        if let Some(ref oid) = old_id {
+            let should_save = self
+                .session_cache
+                .get(oid)
+                .is_some_and(crate::session_store::is_valid_session);
+            if should_save {
+                // Reborrow to avoid borrow conflict with ensure_session_summary
+                if let Some(session) = self.session_cache.get(oid) {
+                    store.save_session(session);
+                }
+                self.ensure_session_summary(oid);
             }
         }
 
