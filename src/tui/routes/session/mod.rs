@@ -657,6 +657,20 @@ impl SessionView {
                         y += 1;
                         continue;
                     }
+
+                    // Determine if this tool renders as a block (bordered box)
+                    // so we can add a small vertical margin around it.
+                    let tool_display = tool_render::tool_display(&tool.tool);
+                    let is_block = matches!(tool.status, ToolStatus::Completed)
+                        && tool.output.as_deref().is_some_and(|o| !o.trim().is_empty())
+                        && matches!(tool_display, "bash" | "write" | "edit" | "todo");
+
+                    // Top margin — skip if this is the first part in the message
+                    // or if there isn't room for at least 1 row after it.
+                    if is_block && y > y_start && y + 1 < bottom {
+                        y += 1;
+                    }
+
                     let mut line_h = 0u16;
                     tool_render::dispatch_tool(
                         buf,
@@ -671,6 +685,11 @@ impl SessionView {
                     let available = bottom.saturating_sub(y);
                     line_h = line_h.min(available);
                     y += line_h;
+
+                    // Bottom margin
+                    if is_block && y < bottom {
+                        y += 1;
+                    }
                 }
                 Part::Reasoning(r) => {
                     let expanded = config.thinking_mode
@@ -791,17 +810,18 @@ impl SessionView {
                     );
                 if is_block {
                     let output = t.output.as_deref().unwrap_or("").trim();
-                    // For todo tools, compute the exact rendered line count from formatted
-                    // output (same logic as render_todo) to guarantee height cache matches.
+                    // Add 2 rows for the block's internal padding (top/bottom border lines),
+                    // plus 2 rows for the external vertical margin that render_parts adds
+                    // around block-type tools (1 top, 1 bottom).
                     if tool_render::tool_display(&t.tool) == "todo" {
                         let formatted = tool_render::format_todo_output(output, &t.tool);
                         let lines = formatted.len().max(1) as u16;
-                        lines + 2
+                        lines + 4
                     } else {
                         let collapsed = crate::util::scroll::collapse_tool_output(output, 10, 800);
                         let lines = collapsed.output.lines().count().max(1) as u16
                             + u16::from(collapsed.overflow);
-                        lines + 2
+                        lines + 4
                     }
                 } else {
                     1
@@ -2178,18 +2198,12 @@ impl SessionView {
                                     // on subsequent frames (e.g. after theme change).
                                     let generous_h = ((msg_h as u16)
                                         .saturating_add(inner_area.height))
-                                        .clamp(100, 5000);
-                                    let full_area = Rect::new(
-                                        0,
-                                        0,
-                                        inner_area.width,
-                                        generous_h,
-                                    );
+                                    .clamp(100, 5000);
+                                    let full_area = Rect::new(0, 0, inner_area.width, generous_h);
                                     let mut temp = Buffer::empty(full_area);
                                     temp.set_style(
                                         full_area,
-                                        Style::default()
-                                            .bg(rgba_color(theme.background)),
+                                        Style::default().bg(rgba_color(theme.background)),
                                     );
 
                                     let mut actual_h = Self::render_assistant_message(
@@ -2211,17 +2225,16 @@ impl SessionView {
                                         let x_off_text = inner_area.x + 3;
                                         let temp_cells = temp.content();
                                         let total_stride = inner_area.width as usize;
-                                        let content_w = (max_w as usize)
-                                            .min(total_stride.saturating_sub(3));
+                                        let content_w =
+                                            (max_w as usize).min(total_stride.saturating_sub(3));
                                         let ah = actual_h as u16;
                                         let mut content_cells =
                                             Vec::with_capacity(content_w * ah as usize);
                                         for dy in 0..ah as usize {
                                             let base = dy * total_stride;
                                             for dx in 0..content_w {
-                                                content_cells.push(
-                                                    temp_cells[base + 3 + dx].clone(),
-                                                );
+                                                content_cells
+                                                    .push(temp_cells[base + 3 + dx].clone());
                                             }
                                         }
                                         let regions = Self::cells_to_text_regions(
@@ -2245,10 +2258,9 @@ impl SessionView {
                                         let base = dy as usize * total_stride;
                                         let dst_line_y = dst_y + dy;
                                         for dx in 0..total_stride {
-                                            if let Some(dst) = buf.cell_mut((
-                                                dst_x + dx as u16,
-                                                dst_line_y,
-                                            )) {
+                                            if let Some(dst) =
+                                                buf.cell_mut((dst_x + dx as u16, dst_line_y))
+                                            {
                                                 *dst = temp_cells[base + dx].clone();
                                             }
                                         }
@@ -2260,8 +2272,7 @@ impl SessionView {
                                     if !is_streaming_msg && actual_h > 0 {
                                         let ah = render_actual_h as u16;
                                         let w = inner_area.width as usize;
-                                        let mut cells =
-                                            Vec::with_capacity(w * ah as usize);
+                                        let mut cells = Vec::with_capacity(w * ah as usize);
                                         for dy in 0..ah {
                                             let base = dy as usize * total_stride;
                                             for dx in 0..w {

@@ -130,8 +130,9 @@ fn test_blockquote_muted_text() {
         RGBA::from_ints(0, 0, 0, 0),
     );
     let muted_color = rgba_to_color(palette.muted_color());
+    // Blockquote starts on row 1 due to blank separator row at row 0
     assert_eq!(
-        buf.cell((0, 0)).unwrap().style().fg,
+        buf.cell((0, 1)).unwrap().style().fg,
         Some(muted_color),
         "Blockquote text should be muted"
     );
@@ -503,9 +504,9 @@ fn test_blockquote_multiple_paragraphs() {
     );
     let muted_color = rgba_to_color(palette.muted_color());
 
-    // First paragraph text should be muted
+    // First paragraph text should be muted (starts on row 1 due to blank separator)
     assert_eq!(
-        buf.cell((0, 0)).unwrap().style().fg,
+        buf.cell((0, 1)).unwrap().style().fg,
         Some(muted_color),
         "Blockquote first paragraph should be muted"
     );

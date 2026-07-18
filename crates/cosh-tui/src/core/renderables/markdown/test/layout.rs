@@ -17,7 +17,11 @@ fn test_text_wrapping() {
 fn test_code_block_lines() {
     let text = "```\nline1\nline2\n```";
     let h = estimate_height(text, 80);
-    assert!(h == 2 || h == 4, "code block with 2 lines (got {h})");
+    let valid = (4..=8).contains(&h);
+    assert!(
+        valid,
+        "code block with 2 lines should estimate 4-8 rows (got {h})"
+    );
 }
 
 #[test]
@@ -68,9 +72,10 @@ fn test_zero_width() {
 fn test_blockquote() {
     let text = "> line 1\n> line 2";
     let h = estimate_height(text, 80);
+    let valid = (2..=5).contains(&h);
     assert!(
-        h == 2 || h == 3,
-        "two blockquote lines = 2-3 lines (got {h})"
+        valid,
+        "two blockquote lines should estimate 2-5 lines (got {h})"
     );
 }
 

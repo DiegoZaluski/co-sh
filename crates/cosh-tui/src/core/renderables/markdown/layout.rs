@@ -75,10 +75,20 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                             // x is reset at TagEnd::Table, no need to assign here
                         }
                     }
-                    Tag::Paragraph
-                    | Tag::BlockQuote(_)
-                    | Tag::Heading { .. }
-                    | Tag::CodeBlock(_) => {
+                    Tag::Paragraph | Tag::Heading { .. } => {
+                        if x != area_x {
+                            y += 1;
+                            x = area_x;
+                        }
+                    }
+                    Tag::BlockQuote(_) => {
+                        if x != area_x {
+                            y += 1;
+                            x = area_x;
+                        }
+                        y += 1; // blank separator before blockquote
+                    }
+                    Tag::CodeBlock(_) => {
                         if x != area_x {
                             y += 1;
                             x = area_x;
@@ -170,8 +180,9 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                 if ctx.in_code_block() {
                     let code_max_w = max_w.saturating_sub(2).max(1);
                     let code_pad_v = 1u16;
-                    // Internal top + bottom padding rows
-                    y = y.saturating_add(code_pad_v * 2);
+                    // Internal top + bottom padding rows (2 rows each for symmetry)
+                    // plus 2 extra rows for the blank separators (1 top, 1 bottom)
+                    y = y.saturating_add(code_pad_v * 2 + 2);
                     let mut first = true;
                     for line in text.lines() {
                         let wrapped = crate::core::lib::unicode_util::word_wrap(line, code_max_w);

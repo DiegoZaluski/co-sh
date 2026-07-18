@@ -554,14 +554,23 @@ impl Renderable for MarkdownRenderable {
                                 x = area.x;
                             }
                         }
-                        Tag::Paragraph | Tag::BlockQuote(_) | Tag::Heading { .. } => {
+                        Tag::Paragraph | Tag::Heading { .. } => {
                             if x != area.x {
                                 y += 1;
                                 x = area.x;
                             }
-                            if let Tag::BlockQuote(_) = &tag
-                                && y < max_y
-                            {
+                        }
+                        Tag::BlockQuote(_) => {
+                            if x != area.x {
+                                y += 1;
+                                x = area.x;
+                            }
+                            // Blank separator row before blockquote content
+                            if y < max_y {
+                                y += 1;
+                                x = area.x;
+                            }
+                            if y < max_y {
                                 let bar_fg = rgba_to_color(palette.blockquote_bar_color());
                                 let bar_style = Style::default().fg(bar_fg);
                                 if let Some(cell) = buf.cell_mut((area.x, y)) {
@@ -573,6 +582,11 @@ impl Renderable for MarkdownRenderable {
                         }
                         Tag::CodeBlock(_) => {
                             if x != area.x {
+                                y += 1;
+                                x = area.x;
+                            }
+                            // Code block background fill row (1 row of margin via para TagEnd)
+                            if y < max_y {
                                 y += 1;
                                 x = area.x;
                             }
@@ -918,6 +932,15 @@ impl MarkdownRenderable {
             }
             *y += 1;
             Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
+        }
+
+        // Blank separator row after code block bottom padding
+        if *y < max_y {
+            *y += 1;
+            *x = area_x;
+            // This row keeps the default background (not code_bg),
+            // providing a true blank separator between the code block
+            // background area and the following content.
         }
 
         let cb_us = cb_start.elapsed().as_micros();
