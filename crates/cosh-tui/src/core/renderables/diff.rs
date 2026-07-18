@@ -181,9 +181,6 @@ impl Renderable for DiffRenderable {
             let line_type = Self::parse_line_type(line);
             let (sign_style, content_style) = self.line_style(line_type);
 
-            let mut x = area.x;
-
-            // sign column
             let sign = if line_type == DiffLineType::Add {
                 '+'
             } else if line_type == DiffLineType::Remove {
@@ -191,41 +188,52 @@ impl Renderable for DiffRenderable {
             } else {
                 ' '
             };
-            if x < max_x {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(sign);
-                    cell.set_style(sign_style);
-                }
-                x += 1;
-            }
 
-            // content
             let content = if line.is_empty() { line } else { &line[1..] };
-            for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(content) {
-                if x + w > max_x {
+            let content_max_w = area.width.saturating_sub(1);
+            let wrapped = crate::core::lib::unicode_util::word_wrap(content, content_max_w);
+
+            for wl in &wrapped {
+                if y >= max_y {
                     break;
                 }
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    if grapheme.len() == 1 {
-                        if let Some(c) = grapheme.chars().next() {
-                            cell.set_char(c);
-                        }
-                    } else {
-                        cell.set_symbol(grapheme);
-                    }
-                    cell.set_style(content_style);
-                }
-                if w > 1 {
-                    for dx in 1..w {
-                        if let Some(cell) = buf.cell_mut((x + dx, y)) {
-                            cell.set_diff_option(CellDiffOption::Skip);
-                        }
-                    }
-                }
-                x += w;
-            }
+                let mut x = area.x;
 
-            y += 1;
+                // sign column (repeated on every wrapped line)
+                if x < max_x {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_char(sign);
+                        cell.set_style(sign_style);
+                    }
+                    x += 1;
+                }
+
+                // content
+                for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(wl) {
+                    if x + w > max_x {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        if grapheme.len() == 1 {
+                            if let Some(c) = grapheme.chars().next() {
+                                cell.set_char(c);
+                            }
+                        } else {
+                            cell.set_symbol(grapheme);
+                        }
+                        cell.set_style(content_style);
+                    }
+                    if w > 1 {
+                        for dx in 1..w {
+                            if let Some(cell) = buf.cell_mut((x + dx, y)) {
+                                cell.set_diff_option(CellDiffOption::Skip);
+                            }
+                        }
+                    }
+                    x += w;
+                }
+                y += 1;
+            }
         }
     }
 }

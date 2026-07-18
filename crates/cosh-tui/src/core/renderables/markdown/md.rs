@@ -149,28 +149,151 @@ impl MarkdownRenderable {
         max_y: u16,
         style: Style,
     ) {
+        let mut word = String::new();
+        let mut word_w = 0u16;
+
         for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
-            // Treat newline as an explicit line break
             if grapheme == "\n" {
+                Self::flush_render_word(
+                    &mut word,
+                    &mut word_w,
+                    buf,
+                    x,
+                    y,
+                    area_x,
+                    max_x,
+                    max_y,
+                    style,
+                );
+                if *y >= max_y {
+                    return;
+                }
                 *y += 1;
                 *x = area_x;
+                continue;
+            }
+
+            if grapheme == " " {
+                Self::flush_render_word(
+                    &mut word,
+                    &mut word_w,
+                    buf,
+                    x,
+                    y,
+                    area_x,
+                    max_x,
+                    max_y,
+                    style,
+                );
                 if *y >= max_y {
-                    break;
+                    return;
+                }
+                if *x < max_x && *x > area_x {
+                    if let Some(cell) = buf.cell_mut((*x, *y)) {
+                        cell.set_char(' ');
+                        cell.set_style(style);
+                    }
+                    *x += 1;
                 }
                 continue;
             }
-            // Check if the grapheme fits in the remaining space
-            if *x + w > max_x {
-                // Wrap to next line
-                *y += 1;
-                *x = area_x;
-                if *y >= max_y {
-                    break;
+
+            word.push_str(grapheme);
+            word_w += w;
+        }
+
+        Self::flush_render_word(
+            &mut word,
+            &mut word_w,
+            buf,
+            x,
+            y,
+            area_x,
+            max_x,
+            max_y,
+            style,
+        );
+    }
+
+    /// Flush the accumulated word to the buffer, wrapping to the next line if
+    /// it doesn't fit on the current line.
+    fn flush_render_word(
+        word: &mut String,
+        word_w: &mut u16,
+        buf: &mut Buffer,
+        x: &mut u16,
+        y: &mut u16,
+        area_x: u16,
+        max_x: u16,
+        max_y: u16,
+        style: Style,
+    ) {
+        if *word_w == 0 {
+            return;
+        }
+        if *x + *word_w > max_x && *x > area_x {
+            *y += 1;
+            *x = area_x;
+        }
+        if *y >= max_y {
+            word.clear();
+            *word_w = 0;
+            return;
+        }
+        for (g, gw) in crate::core::lib::unicode_util::graphemes_with_width(word) {
+            if let Some(cell) = buf.cell_mut((*x, *y)) {
+                if g.len() == 1 {
+                    if let Some(c) = g.chars().next() {
+                        cell.set_char(c);
+                    }
+                } else {
+                    cell.set_symbol(g);
                 }
-                if grapheme == " " {
-                    continue;
+                cell.set_style(style);
+            }
+            if gw > 1 {
+                for dx in 1..gw {
+                    if let Some(cell) = buf.cell_mut((*x + dx, *y)) {
+                        cell.set_diff_option(CellDiffOption::Skip);
+                    }
                 }
             }
+            *x += gw;
+        }
+        word.clear();
+        *word_w = 0;
+    }
+
+    /// Flush the accumulated word parts for code-block rendering.
+    /// If the word doesn't fit on the current line, wraps to the next line
+    /// (including filling its background row).
+    fn flush_code_word(
+        word_parts: &mut Vec<(&str, u16, Style)>,
+        word_w: &mut u16,
+        buf: &mut Buffer,
+        x: &mut u16,
+        y: &mut u16,
+        area_x: u16,
+        max_x: u16,
+        max_y: u16,
+        code_bg: Color,
+    ) {
+        if *word_w == 0 {
+            return;
+        }
+        if *x + *word_w > max_x && *x > area_x {
+            *y += 1;
+            *x = area_x;
+            if *y < max_y {
+                Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
+            }
+        }
+        if *y >= max_y {
+            word_parts.clear();
+            *word_w = 0;
+            return;
+        }
+        for (grapheme, w, style) in word_parts.drain(..) {
             if let Some(cell) = buf.cell_mut((*x, *y)) {
                 if grapheme.len() == 1 {
                     if let Some(c) = grapheme.chars().next() {
@@ -183,13 +306,14 @@ impl MarkdownRenderable {
             }
             if w > 1 {
                 for dx in 1..w {
-                    if let Some(cell) = buf.cell_mut((*x + dx, *y)) {
-                        cell.set_diff_option(CellDiffOption::Skip);
+                    if let Some(next_cell) = buf.cell_mut((*x + dx, *y)) {
+                        next_cell.set_diff_option(CellDiffOption::Skip);
                     }
                 }
             }
             *x += w;
         }
+        *word_w = 0;
     }
 
     /// Fill a whole row with a solid background style.
@@ -670,40 +794,84 @@ impl MarkdownRenderable {
             // Fill the entire line with code-block background
             Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
 
-            // Render each character with its highlight style, accounting
-            // for display width (CJK, emoji, flag pairs, ZWJ sequences)
-            // Use byte offset to map to highlight categories
+            // Word-aware rendering with syntax highlighting preservation.
+            // Non-space graphemes are buffered into "words"; when a space or
+            // overflow is encountered, the whole word is flushed to the buffer.
             let mut remaining_offset = 0;
+            let mut word_parts: Vec<(&str, u16, Style)> = Vec::new();
+            let mut word_w = 0u16;
+
             for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(line) {
-                if *x + w > max_x {
-                    break;
-                }
-                // Use the byte offset of the first char in the grapheme for highlighting
                 let cat = cat_map
                     .get(byte_offset + remaining_offset)
                     .copied()
                     .flatten();
                 let style = Self::highlight_style(cat, default_fg, code_bg);
-                if let Some(cell) = buf.cell_mut((*x, *y)) {
-                    if grapheme.len() == 1 {
-                        if let Some(c) = grapheme.chars().next() {
-                            cell.set_char(c);
-                        }
-                    } else {
-                        cell.set_symbol(grapheme);
-                    }
-                    cell.set_style(style);
-                }
-                if w > 1 {
-                    for dx in 1..w {
-                        if let Some(next_cell) = buf.cell_mut((*x + dx, *y)) {
-                            next_cell.set_diff_option(CellDiffOption::Skip);
-                        }
-                    }
-                }
-                *x += w;
                 remaining_offset += grapheme.len();
+
+                if grapheme == "\n" {
+                    Self::flush_code_word(
+                        &mut word_parts,
+                        &mut word_w,
+                        buf,
+                        x,
+                        y,
+                        area_x,
+                        max_x,
+                        max_y,
+                        code_bg,
+                    );
+                    if *y >= max_y {
+                        break;
+                    }
+                    *y += 1;
+                    *x = area_x;
+                    if *y < max_y {
+                        Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
+                    }
+                    continue;
+                }
+
+                if grapheme == " " {
+                    Self::flush_code_word(
+                        &mut word_parts,
+                        &mut word_w,
+                        buf,
+                        x,
+                        y,
+                        area_x,
+                        max_x,
+                        max_y,
+                        code_bg,
+                    );
+                    if *y >= max_y {
+                        break;
+                    }
+                    if *x < max_x {
+                        if let Some(cell) = buf.cell_mut((*x, *y)) {
+                            cell.set_char(' ');
+                            cell.set_style(style);
+                        }
+                        *x += 1;
+                    }
+                    continue;
+                }
+
+                word_parts.push((grapheme, w, style));
+                word_w += w;
             }
+
+            Self::flush_code_word(
+                &mut word_parts,
+                &mut word_w,
+                buf,
+                x,
+                y,
+                area_x,
+                max_x,
+                max_y,
+                code_bg,
+            );
             byte_offset += line.len() + 1;
         }
 

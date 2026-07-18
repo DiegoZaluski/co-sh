@@ -298,38 +298,121 @@ impl Renderable for TextRenderable {
                 .bg(ratatui_bg)
                 .add_modifier(modifier);
 
+            let mut word = String::new();
+            let mut word_w = 0u16;
+
             for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(&chunk.text) {
-                if current_col + w > max_x {
-                    current_col = x;
+                if grapheme == "\n" {
+                    flush_text_word(
+                        &mut word,
+                        &mut word_w,
+                        buf,
+                        &mut current_col,
+                        &mut current_line,
+                        x,
+                        max_x,
+                        max_y,
+                        style,
+                    );
+                    if current_line >= max_y {
+                        break;
+                    }
                     current_line += 1;
-                }
-                if current_line >= max_y {
-                    break;
+                    current_col = x;
+                    continue;
                 }
 
-                if let Some(cell) = buf.cell_mut((current_col, current_line)) {
-                    if grapheme.len() == 1 {
-                        if let Some(c) = grapheme.chars().next()
-                            && !c.is_control()
-                        {
-                            cell.set_char(c);
-                        }
-                    } else {
-                        cell.set_symbol(grapheme);
+                if grapheme == " " {
+                    flush_text_word(
+                        &mut word,
+                        &mut word_w,
+                        buf,
+                        &mut current_col,
+                        &mut current_line,
+                        x,
+                        max_x,
+                        max_y,
+                        style,
+                    );
+                    if current_line >= max_y {
+                        break;
                     }
-                    cell.set_style(style);
-                }
-
-                if w > 1 {
-                    for dx in 1..w {
-                        if let Some(cell) = buf.cell_mut((current_col + dx, current_line)) {
-                            cell.set_diff_option(CellDiffOption::Skip);
+                    if current_col < max_x && current_col > x {
+                        if let Some(cell) = buf.cell_mut((current_col, current_line)) {
+                            cell.set_char(' ');
+                            cell.set_style(style);
                         }
+                        current_col += 1;
                     }
+                    continue;
                 }
 
-                current_col += w;
+                word.push_str(grapheme);
+                word_w += w;
+            }
+            flush_text_word(
+                &mut word,
+                &mut word_w,
+                buf,
+                &mut current_col,
+                &mut current_line,
+                x,
+                max_x,
+                max_y,
+                style,
+            );
+            if current_line >= max_y {
+                break;
             }
         }
     }
+}
+
+fn flush_text_word(
+    word: &mut String,
+    word_w: &mut u16,
+    buf: &mut Buffer,
+    current_col: &mut u16,
+    current_line: &mut u16,
+    area_x: u16,
+    max_x: u16,
+    max_y: u16,
+    style: Style,
+) {
+    if *word_w == 0 {
+        return;
+    }
+    if *current_col + *word_w > max_x && *current_col > area_x {
+        *current_line += 1;
+        *current_col = area_x;
+    }
+    if *current_line >= max_y {
+        word.clear();
+        *word_w = 0;
+        return;
+    }
+    for (g, gw) in crate::core::lib::unicode_util::graphemes_with_width(word) {
+        if let Some(cell) = buf.cell_mut((*current_col, *current_line)) {
+            if g.len() == 1 {
+                if let Some(c) = g.chars().next()
+                    && !c.is_control()
+                {
+                    cell.set_char(c);
+                }
+            } else {
+                cell.set_symbol(g);
+            }
+            cell.set_style(style);
+        }
+        if gw > 1 {
+            for dx in 1..gw {
+                if let Some(cell) = buf.cell_mut((*current_col + dx, *current_line)) {
+                    cell.set_diff_option(CellDiffOption::Skip);
+                }
+            }
+        }
+        *current_col += gw;
+    }
+    word.clear();
+    *word_w = 0;
 }

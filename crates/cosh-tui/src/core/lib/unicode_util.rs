@@ -91,6 +91,94 @@ pub fn graphemes_with_width(text: &str) -> impl Iterator<Item = (&str, u16)> + '
     })
 }
 
+/// Word-wrap text so that each line fits within `max_width` display columns.
+/// Words are kept intact (no mid-word breaks). If a single word exceeds
+/// `max_width` it is placed on its own line (it may overflow the terminal
+/// rather than being cut).
+#[must_use]
+pub fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w: u16 = 0;
+    let mut word = String::new();
+    let mut word_w: u16 = 0;
+
+    for grapheme in Graphemes::new(text) {
+        if grapheme == "\n" {
+            flush_word(
+                &mut word,
+                &mut word_w,
+                &mut current,
+                &mut current_w,
+                &mut lines,
+                max_width,
+            );
+            lines.push(current);
+            current = String::new();
+            current_w = 0;
+            continue;
+        }
+
+        let w = grapheme_display_width(grapheme);
+
+        if grapheme == " " {
+            flush_word(
+                &mut word,
+                &mut word_w,
+                &mut current,
+                &mut current_w,
+                &mut lines,
+                max_width,
+            );
+            if current_w < max_width {
+                current.push(' ');
+                current_w += 1;
+            }
+            continue;
+        }
+
+        word.push_str(grapheme);
+        word_w += w;
+    }
+
+    flush_word(
+        &mut word,
+        &mut word_w,
+        &mut current,
+        &mut current_w,
+        &mut lines,
+        max_width,
+    );
+
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
+fn flush_word(
+    word: &mut String,
+    word_w: &mut u16,
+    current: &mut String,
+    current_w: &mut u16,
+    lines: &mut Vec<String>,
+    max_width: u16,
+) {
+    if *word_w == 0 {
+        return;
+    }
+    if *current_w + *word_w > max_width && !current.is_empty() {
+        lines.push(current.clone());
+        current.clear();
+        *current_w = 0;
+    }
+    current.push_str(word);
+    *current_w += *word_w;
+    word.clear();
+    *word_w = 0;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

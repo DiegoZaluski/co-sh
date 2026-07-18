@@ -181,31 +181,37 @@ impl Renderable for CodeRenderable {
             if y >= max_y {
                 break;
             }
-            let mut x = area.x;
-            for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(line) {
-                if x + w > max_x {
+            let wrapped = crate::core::lib::unicode_util::word_wrap(line, area.width);
+            for wl in &wrapped {
+                if y >= max_y {
                     break;
                 }
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    if grapheme.len() == 1 {
-                        if let Some(c) = grapheme.chars().next() {
-                            cell.set_char(c);
-                        }
-                    } else {
-                        cell.set_symbol(grapheme);
+                let mut x = area.x;
+                for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(wl) {
+                    if x + w > max_x {
+                        break;
                     }
-                    cell.set_style(style);
-                }
-                if w > 1 {
-                    for dx in 1..w {
-                        if let Some(next_cell) = buf.cell_mut((x + dx, y)) {
-                            next_cell.set_diff_option(CellDiffOption::Skip);
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        if grapheme.len() == 1 {
+                            if let Some(c) = grapheme.chars().next() {
+                                cell.set_char(c);
+                            }
+                        } else {
+                            cell.set_symbol(grapheme);
+                        }
+                        cell.set_style(style);
+                    }
+                    if w > 1 {
+                        for dx in 1..w {
+                            if let Some(next_cell) = buf.cell_mut((x + dx, y)) {
+                                next_cell.set_diff_option(CellDiffOption::Skip);
+                            }
                         }
                     }
+                    x += w;
                 }
-                x += w;
+                y += 1;
             }
-            y += 1;
         }
     }
 }

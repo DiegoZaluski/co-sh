@@ -168,58 +168,25 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
             | Event::InlineHtml(text) => {
                 let text: &str = text.as_ref();
                 if ctx.in_code_block() {
-                    for (i, line) in text.lines().enumerate() {
-                        if i > 0 {
-                            y += 1;
-                            x = area_x;
+                    let mut first = true;
+                    for line in text.lines() {
+                        let wrapped = crate::core::lib::unicode_util::word_wrap(line, max_w);
+                        for wl in &wrapped {
+                            if !first {
+                                y += 1;
+                                x = area_x;
+                            }
+                            first = false;
+                            let w = crate::core::lib::unicode_util::str_display_width(wl) as u16;
+                            x = x.saturating_add(w.min(max_w.saturating_sub(x)));
                         }
-                        let line_chars = line.chars().count() as u16;
-                        x = x.saturating_add(line_chars.min(max_w.saturating_sub(x)));
                     }
                 } else {
-                    for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text)
-                    {
-                        if x + w > max_w {
-                            y += 1;
-                            x = area_x;
-                            if grapheme == " " {
-                                continue;
-                            }
-                        }
-                        x += w;
-                    }
+                    layout_word_wrap(text, max_w, &mut x, &mut y, area_x);
                 }
             }
-            Event::Code(text) => {
-                let text: &str = text.as_ref();
-                for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
-                    if x + w > max_w {
-                        y += 1;
-                        x = area_x;
-                        if grapheme == " " {
-                            continue;
-                        }
-                    }
-                    x += w;
-                }
-            }
-            Event::Html(text) => {
-                let text: &str = text.as_ref();
-                for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
-                    if grapheme == "\n" {
-                        y += 1;
-                        x = area_x;
-                        continue;
-                    }
-                    if x + w > max_w {
-                        y += 1;
-                        x = area_x;
-                        if grapheme == " " {
-                            continue;
-                        }
-                    }
-                    x += w;
-                }
+            Event::Code(text) | Event::Html(text) => {
+                layout_word_wrap(text.as_ref(), max_w, &mut x, &mut y, area_x);
             }
             Event::SoftBreak | Event::HardBreak | Event::Rule => {
                 x = area_x;
@@ -239,4 +206,45 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
     }
 
     y.max(1)
+}
+
+/// Word-aware width tracking for layout estimation. Accumulates non-space
+/// graphemes as a "word" and only advances past the word if it fits on the
+/// current line; otherwise wraps to the next line first.
+fn layout_word_wrap(text: &str, max_w: u16, x: &mut u16, y: &mut u16, area_x: u16) {
+    let mut word_w = 0u16;
+
+    for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
+        if grapheme == "\n" {
+            *x += word_w;
+            word_w = 0;
+            *y += 1;
+            *x = area_x;
+            continue;
+        }
+
+        if grapheme == " " {
+            if *x + word_w > max_w && *x > area_x {
+                *y += 1;
+                *x = area_x;
+            }
+            *x += word_w;
+            word_w = 0;
+            if *x < max_w {
+                *x += 1;
+            }
+            continue;
+        }
+
+        word_w += w;
+    }
+
+    // Flush last word
+    if word_w > 0 {
+        if *x + word_w > max_w && *x > area_x {
+            *y += 1;
+            *x = area_x;
+        }
+        *x += word_w;
+    }
 }

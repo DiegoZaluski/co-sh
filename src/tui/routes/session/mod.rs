@@ -714,49 +714,37 @@ impl SessionView {
                 }
             }
         }
+        let lines = cosh_tui::core::lib::unicode_util::word_wrap(text, max_w);
         let mut y = y_;
-        let mut cx = x;
-        for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(text) {
-            if grapheme == "\n" {
-                y += 1;
-                cx = x;
-                if y >= bottom {
+        for line in &lines {
+            if y >= bottom {
+                break;
+            }
+            let mut cx = x;
+            for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(line) {
+                if cx >= right {
                     break;
                 }
-                continue;
-            }
-            // Skip other control characters
-            if grapheme.len() == 1 && grapheme.chars().next().unwrap().is_control() {
-                continue;
-            }
-            if cx.checked_add(w).is_some_and(|next| next > right) {
-                y += 1;
-                cx = x;
-                if y >= bottom {
-                    break;
+                if let Some(cell) = buf.cell_mut((cx, y)) {
+                    if grapheme.len() == 1 {
+                        cell.set_char(grapheme.chars().next().unwrap());
+                    } else {
+                        cell.set_symbol(grapheme);
+                    }
+                    cell.set_style(style);
                 }
-                if grapheme == " " {
-                    continue;
-                }
-            }
-            if let Some(cell) = buf.cell_mut((cx, y)) {
-                if grapheme.len() == 1 {
-                    cell.set_char(grapheme.chars().next().unwrap());
-                } else {
-                    cell.set_symbol(grapheme);
-                }
-                cell.set_style(style);
-            }
-            if w > 1 {
-                for dx in 1..w {
-                    if let Some(cell) = buf.cell_mut((cx + dx, y)) {
-                        cell.set_diff_option(CellDiffOption::Skip);
+                if w > 1 {
+                    for dx in 1..w {
+                        if let Some(cell) = buf.cell_mut((cx + dx, y)) {
+                            cell.set_diff_option(CellDiffOption::Skip);
+                        }
                     }
                 }
+                cx += w;
             }
-            cx += w;
+            y += 1;
         }
-        (y - y_ + 1).max(1)
+        (y - y_).max(1)
     }
 
     fn estimate_part_height(
@@ -770,22 +758,8 @@ impl SessionView {
                 estimate_height(&t.text, max_w)
             }
             Part::Text(t) if !t.synthetic => {
-                let chars_per_line = max_w as usize;
-                if chars_per_line > 0 {
-                    let mut total_lines: usize = 0;
-                    for line in t.text.lines() {
-                        if line.is_empty() {
-                            continue;
-                        }
-                        // Use display width instead of char count to correctly
-                        // handle CJK, emoji, and flag Regional Indicators
-                        let line_len = cosh_tui::core::lib::unicode_util::str_display_width(line);
-                        total_lines += line_len.div_ceil(chars_per_line);
-                    }
-                    total_lines.max(1) as u16
-                } else {
-                    1
-                }
+                let lines = cosh_tui::core::lib::unicode_util::word_wrap(&t.text, max_w);
+                lines.len().max(1) as u16
             }
             Part::Tool(t) => {
                 if !config.show_tool_details && matches!(t.status, ToolStatus::Completed) {
@@ -990,42 +964,35 @@ impl SessionView {
                 .chars()
                 .filter(|ch| !ch.is_control())
                 .collect();
-            let mut line_x = x_off;
+            let lines = cosh_tui::core::lib::unicode_util::word_wrap(&error_text, max_w);
             let mut line_y = area.y + 1;
-            for (grapheme, w) in
-                cosh_tui::core::lib::unicode_util::graphemes_with_width(&error_text)
-            {
-                if grapheme == "\n" {
-                    line_x = x_off;
-                    line_y += 1;
-                    continue;
-                }
-                if grapheme.len() == 1 && grapheme.chars().next().unwrap().is_control() {
-                    continue;
-                }
-                if line_x + w > x_off + max_w {
-                    line_x = x_off;
-                    line_y += 1;
-                }
+            for line in &lines {
                 if line_y >= area.bottom() {
                     break;
                 }
-                if let Some(cell) = buf.cell_mut((line_x, line_y)) {
-                    if grapheme.len() == 1 {
-                        cell.set_char(grapheme.chars().next().unwrap());
-                    } else {
-                        cell.set_symbol(grapheme);
+                let mut line_x = x_off;
+                for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(line) {
+                    if line_x > x_off + max_w {
+                        break;
                     }
-                    cell.set_style(error_style);
-                }
-                if w > 1 {
-                    for dx in 1..w {
-                        if let Some(cell) = buf.cell_mut((line_x + dx, line_y)) {
-                            cell.set_diff_option(CellDiffOption::Skip);
+                    if let Some(cell) = buf.cell_mut((line_x, line_y)) {
+                        if grapheme.len() == 1 {
+                            cell.set_char(grapheme.chars().next().unwrap());
+                        } else {
+                            cell.set_symbol(grapheme);
+                        }
+                        cell.set_style(error_style);
+                    }
+                    if w > 1 {
+                        for dx in 1..w {
+                            if let Some(cell) = buf.cell_mut((line_x + dx, line_y)) {
+                                cell.set_diff_option(CellDiffOption::Skip);
+                            }
                         }
                     }
+                    line_x += w;
                 }
-                line_x += w;
+                line_y += 1;
             }
             return 0;
         }
@@ -1202,29 +1169,7 @@ impl SessionView {
                 .chars()
                 .filter(|ch| !ch.is_control())
                 .collect();
-            let mut lines = 0u16;
-            let mut col = 0u16;
-            for (grapheme, w) in
-                cosh_tui::core::lib::unicode_util::graphemes_with_width(&error_text)
-            {
-                if grapheme == "\n" {
-                    lines += 1;
-                    col = 0;
-                    continue;
-                }
-                if grapheme.len() == 1 && grapheme.chars().next().unwrap().is_control() {
-                    continue;
-                }
-                if col + w > max_w {
-                    lines += 1;
-                    col = 0;
-                }
-                col += w;
-            }
-            if col > 0 || error_text.is_empty() {
-                lines += 1;
-            }
-            i32::from(lines)
+            i32::from(cosh_tui::core::lib::unicode_util::word_wrap(&error_text, max_w).len() as u16)
         } else if let Some(heights) = part_heights {
             i32::from(heights.iter().copied().sum::<u16>())
         } else {
@@ -1512,7 +1457,6 @@ impl SessionView {
                                     }
                                 } else {
                                     // ── User text: width-aware wrapping (CJK, emoji, flags = 2 cols) ──
-                                    let max_w_usize = max_w as usize;
                                     let mut screen_line_y = p_top.max(vp_top) as u16;
                                     let screen_end = p_bottom.min(vp_bottom) as u16;
 
@@ -1530,39 +1474,23 @@ impl SessionView {
                                             }
                                             continue;
                                         }
-                                        let mut remaining = logical_line;
-                                        while !remaining.is_empty() && screen_line_y < screen_end {
-                                            // Use grapheme-based wrapping for correct width with CJK, emoji, flags
-                                            let mut width_so_far = 0usize;
-                                            let mut split_pos = 0usize;
-                                            for (g, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(remaining) {
-                                                let gw = w as usize;
-                                                if width_so_far + gw > max_w_usize {
-                                                    break;
-                                                }
-                                                width_so_far += gw;
-                                                split_pos += g.len();
+                                        let lines = cosh_tui::core::lib::unicode_util::word_wrap(
+                                            logical_line,
+                                            max_w,
+                                        );
+                                        for visual_line in &lines {
+                                            if screen_line_y >= screen_end {
+                                                break;
                                             }
-                                            // If nothing fit, force at least one grapheme to prevent infinite loop
-                                            if split_pos == 0 && !remaining.is_empty() {
-                                                // Take at least the first grapheme even if it's wider than max_w
-                                                let first_g = cosh_tui::core::lib::unicode_util::graphemes_with_width(remaining)
-                                                    .next()
-                                                    .map(|(g, _)| g.len())
-                                                    .unwrap_or(remaining.len());
-                                                split_pos = first_g;
-                                            }
-                                            let visual_line = &remaining[..split_pos];
                                             let cy = (screen_line_y as i32) - vp_top + scroll;
                                             self.text_regions.push(TextRegion {
                                                 y1: cy,
                                                 y2: cy + 1,
                                                 x1: x_off,
                                                 x2: x_off + max_w,
-                                                text: visual_line.to_string(),
+                                                text: visual_line.clone(),
                                             });
                                             screen_line_y += 1;
-                                            remaining = &remaining[split_pos..];
                                         }
                                     }
                                 }
