@@ -700,11 +700,12 @@ impl Renderable for MarkdownRenderable {
                         let heading_level = ctx.heading_level();
                         let mut style = palette.style_for(element, heading_level);
                         let bq_indent = if ctx.in_blockquote() { 2u16 } else { 0u16 };
-                        if ctx.in_blockquote() {
-                            let bq_bg = palette.quote_bg_color();
+                        if ctx.in_blockquote() && text.starts_with('⚠') {
+                            // Warning blockquote: apply yellow background + black text + bold
+                            // (Only for the warning, not regular blockquotes)
+                            let warning_bg = Color::Rgb(238, 241, 112);
 
-                            // Calculate box width: starts at left edge (area.x),
-                            // ends just past the text content.
+                            // Calculate box width
                             let first_line = text.lines().next().unwrap_or("");
                             let text_w =
                                 crate::core::lib::unicode_util::str_display_width(first_line)
@@ -719,14 +720,14 @@ impl Renderable for MarkdownRenderable {
                             // Fill the background from left edge to past text
                             for cx in area.x..box_end {
                                 if let Some(cell) = buf.cell_mut((cx, y)) {
-                                    cell.set_style(Style::default().bg(bq_bg));
+                                    cell.set_style(Style::default().bg(warning_bg));
                                     cell.set_char(' ');
                                 }
                             }
 
                             style = style
                                 .fg(Color::Rgb(0, 0, 0))
-                                .bg(bq_bg)
+                                .bg(warning_bg)
                                 .add_modifier(Modifier::BOLD);
                         }
                         Self::render_text(

@@ -126,11 +126,19 @@ fn test_blockquote_muted_text() {
     md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
 
     // Blockquote content starts at row 0, column 2 (indent)
-    // with black fg for contrast on yellow bg.
+    // with no explicit fg (inherits from container), no bold, no bg.
     assert_eq!(
         buf.cell((2, 0)).unwrap().style().fg,
-        Some(Color::Rgb(0, 0, 0)),
-        "Blockquote text should be black on yellow bg"
+        Some(Color::Reset),
+        "Blockquote text should have no explicit fg (inherits from container)"
+    );
+    assert!(
+        !buf.cell((2, 0))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD),
+        "Blockquote text should NOT be bold"
     );
 }
 
@@ -495,11 +503,11 @@ fn test_blockquote_multiple_paragraphs() {
     md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
 
     // First paragraph text starts at row 0, column 2 (indent).
-    // Foreground should be black for contrast on the yellow bg.
+    // No explicit fg (inherits from container), no bold, no bg.
     assert_eq!(
         buf.cell((2, 0)).unwrap().style().fg,
-        Some(Color::Rgb(0, 0, 0)),
-        "Blockquote first paragraph should be black on yellow bg"
+        Some(Color::Reset),
+        "Blockquote first paragraph should have no explicit fg"
     );
 }
 
@@ -628,6 +636,30 @@ fn test_heading_level_color_distinction() {
             "H1 ({lum1}) should be brighter than H6 ({lum2})"
         );
     }
+}
+
+#[test]
+fn test_warning_blockquote_yellow_background() {
+    // Warning text (starting with ⚠) inside a blockquote should get
+    // yellow background + black fg + bold.
+    let md = make_md("> ⚠ Tool call failure");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    // Warning text at column 2 (indent) should have black fg (for contrast on yellow bg)
+    assert_eq!(
+        buf.cell((2, 0)).unwrap().style().fg,
+        Some(Color::Rgb(0, 0, 0)),
+        "Warning blockquote text should be black on yellow bg"
+    );
+    assert!(
+        buf.cell((2, 0))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD),
+        "Warning blockquote text should be bold"
+    );
 }
 
 #[test]

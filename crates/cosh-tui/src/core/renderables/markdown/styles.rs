@@ -110,8 +110,8 @@ impl MarkdownPalette {
             255,
         );
 
-        // Blockquote bg = solid #eef170 (pure color, no blend)
-        let blockquote_bg = RGBA::from_ints(238, 241, 112, 255);
+        // Blockquote bg = transparent (no background fill — indented text with muted color is sufficient)
+        let blockquote_bg = RGBA::from_ints(0, 0, 0, 0);
 
         // Blockquote bar = muted
         let blockquote_bar = muted;
