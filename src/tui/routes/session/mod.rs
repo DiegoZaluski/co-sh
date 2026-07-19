@@ -1311,13 +1311,23 @@ impl SessionView {
                     session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.last_session_id = Some(session.id.clone());
                 self.cached_total_height = self.recompute_total_height(session);
-                // Sync actual_total_height using .max() to preserve the TRUE rendered
-                // height from the previous frame (which may exceed the cache estimate
-                // due to scan_content_height discrepancies). Without .max(), the
-                // actual_total_height is overwritten with the cache estimate, losing
-                // the real height and causing max_scroll to shrink, which pushes
-                // scroll_y up — creating a visible gap below the streaming message.
-                self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
+                // When the terminal width or config changed, the previous
+                // actual_total_height was computed for a DIFFERENT layout
+                // (different text wrapping, different content height) and is
+                // NOT comparable to the new cached height. Using .max() would
+                // preserve the old, larger value, inflating max_scroll. This
+                // allows scroll_y to point beyond the actual content, pushing
+                // all messages above the viewport — blank screen.
+                //
+                // Only preserve the previous actual_total_height via .max()
+                // when the width is unchanged — during streaming, the rendered
+                // height may slightly exceed the cache estimate, and .max()
+                // prevents a scroll gap below the streaming message.
+                if config_or_width_changed {
+                    self.actual_total_height = self.cached_total_height;
+                } else {
+                    self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
+                }
 
                 // When switching to a different session, scroll to the bottom
                 // so the user sees the latest messages without manual scrolling.
