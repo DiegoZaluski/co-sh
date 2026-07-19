@@ -15,14 +15,16 @@ use crate::theme::Theme;
 /// Number of scrambled characters in the cycling region.
 const NUM_CYCLING_CHARS: usize = 8;
 
-/// Maximum birth delay in frames (~0.6 s at 125 fps, ~4 s at 20 fps).
-const BIRTH_DELAY_MAX: u32 = 80;
+/// Maximum birth delay in frames (~0.6 s at 30 fps).
+const BIRTH_DELAY_MAX: u32 = 20;
 
 /// Ellipsis animation speed: number of frames per ellipsis step.
-const ELLIPSIS_ANIM_SPEED: u32 = 32;
+/// At 30 fps, 8 → ~3.75 steps/sec, quick but not distracting.
+const ELLIPSIS_ANIM_SPEED: u32 = 8;
 
-/// Cycle divider: cycling characters change every N frames (smooth ≈ 30 fps at 125 fps).
-const CYCLE_STEP_DIVIDER: u32 = 4;
+/// Cycle divider: cycling characters change every N frames.
+/// At 30 fps, 1 = every frame → lively scramble (~30 changes/sec).
+const CYCLE_STEP_DIVIDER: u32 = 1;
 
 /// Number of distinct animation frames (the sequence loops).
 const PRERENDERED_FRAMES: usize = 10;
