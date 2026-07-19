@@ -11,7 +11,7 @@ use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::lib::unicode_util;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
-use cosh_tui::core::renderables::diff::DiffRenderable;
+use cosh_tui::core::renderables::diff::{DiffRenderable, DiffViewMode};
 
 use crate::component::spinner::SpinnerState;
 use crate::theme::Theme;
@@ -69,68 +69,6 @@ fn code_highlight_style(cat: Option<HighlightCategory>, default_fg: Color) -> St
         None => default_fg,
     };
     Style::default().fg(fg)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_highlighted_code(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    max_w: u16,
-    content: &str,
-    lang: Option<&str>,
-    default_fg: Color,
-    max_lines: u16,
-) -> u16 {
-    let Some(lang) = lang else {
-        // Fallback to plain text
-        let style = Style::default().fg(default_fg);
-        for (i, line) in content.lines().enumerate().take(max_lines as usize) {
-            draw_text_line(buf, line, x, y + i as u16, max_w, style);
-        }
-        return content.lines().count().min(max_lines as usize) as u16;
-    };
-
-    let spans = highlight(content, lang);
-    let mut cat_map: Vec<Option<HighlightCategory>> = vec![None; content.len()];
-
-    if let Some(ref spans) = spans {
-        for span in spans {
-            for item in &mut cat_map[span.start..span.end.min(content.len())] {
-                *item = Some(span.category);
-            }
-        }
-    }
-
-    let mut y_pos = y;
-    let mut byte_offset = 0;
-    let mut lines_drawn = 0u16;
-
-    for (i, line) in content.lines().enumerate() {
-        if lines_drawn >= max_lines {
-            break;
-        }
-        if i > 0 {
-            y_pos += 1;
-        }
-
-        for (x_pos, (ci, ch)) in (x..).zip(line.char_indices()) {
-            if x_pos >= x + max_w {
-                break;
-            }
-            let byte_pos = byte_offset + ci;
-            let cat = cat_map.get(byte_pos).copied().flatten();
-            let style = code_highlight_style(cat, default_fg);
-            if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
-                cell.set_char(ch);
-                cell.set_style(style);
-            }
-        }
-        byte_offset += line.len() + 1;
-        lines_drawn += 1;
-    }
-
-    lines_drawn
 }
 
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
@@ -264,15 +202,25 @@ const TOOL_DISPLAYS: &[&str] = &[
 ];
 
 pub fn tool_display(tool: &str) -> &str {
+    // Direct match for opencode-style short names
     if TOOL_DISPLAYS.contains(&tool) {
         return tool;
     }
-    // Only plan_todo_write renders as a block TODO box (matching OpenCode's todowrite).
-    // Other plan_* tools (read, cross_off, edit, load) are generic/inline.
-    if tool == "plan_todo_write" {
-        return "todo";
+    // Map cosh-style tool names to their display equivalents
+    match tool {
+        "bash_run" => "bash",
+        "fs_read" => "read",
+        "fs_write" => "write",
+        "fs_edit" => "edit",
+        "find_glob" => "glob",
+        "find_grep" => "grep",
+        "web_fetch" => "webfetch",
+        "web_search" => "websearch",
+        "ask_questions" => "question",
+        "skills_list" | "skills_read" | "skills_read_asset" | "skills_match_skills" => "skill",
+        "plan_todo_write" => "todo",
+        _ => "generic",
     }
-    "generic"
 }
 
 /// Generate the visible inline text for a tool part (icon + label).
@@ -289,11 +237,11 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
             }
         }
         "write" => {
-            let fp = input_value(&part.input, "filePath").unwrap_or_default();
+            let fp = input_filepath(&part.input).unwrap_or_default();
             format!("Write {fp}")
         }
         "edit" => {
-            let fp = input_value(&part.input, "filePath").unwrap_or_default();
+            let fp = input_filepath(&part.input).unwrap_or_default();
             format!("Edit {fp}")
         }
         "glob" => {
@@ -401,6 +349,59 @@ pub(crate) fn input_value(input: &serde_json::Value, key: &str) -> Option<String
         serde_json::Value::Bool(b) => Some(b.to_string()),
         _ => None,
     })
+}
+
+/// Extract a filepath from tool input, supporting both opencode-style
+/// ({"filePath": "..."}) and cosh-style ({"targets": [{"path": "...", ...}]}).
+pub(crate) fn input_filepath(input: &serde_json::Value) -> Option<String> {
+    if let Some(fp) = input_value(input, "filePath") {
+        return Some(fp);
+    }
+    input.get("targets")
+        .and_then(|t| t.as_array())
+        .and_then(|a| a.first())
+        .and_then(|t| input_value(t, "path"))
+}
+
+/// Extract content from tool input, supporting both opencode-style
+/// ({"content": "..."}) and cosh-style ({"targets": [{"text": "...", ...}]}).
+/// Also handles fs_edit data ({"targets": [{"ops": "...", ...}]}) when use_ops is true.
+fn input_content(input: &serde_json::Value) -> Option<String> {
+    if let Some(c) = input_value(input, "content") {
+        return Some(c);
+    }
+    input.get("targets")
+        .and_then(|t| t.as_array())
+        .and_then(|a| a.first())
+        .and_then(|t| input_value(t, "text"))
+}
+
+/// Heuristic: does the output string look like a unified diff?
+fn looks_like_unified_diff(output: &str) -> bool {
+    output.starts_with("--- ") || output.starts_with("diff --git ")
+}
+
+/// Try to extract a unified diff string from a JSON tool output.
+/// Handles cosh-style `[{..., "diff": "..."}, ...]`.
+fn extract_diff_from_json(output: &str) -> Option<String> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(output) else {
+        return None;
+    };
+    match val {
+        serde_json::Value::Array(ref arr) => {
+            let diffs: Vec<&str> = arr
+                .iter()
+                .filter_map(|item| item.get("diff")?.as_str())
+                .filter(|d| looks_like_unified_diff(d))
+                .collect();
+            if diffs.is_empty() { None } else { Some(diffs.join("\n")) }
+        }
+        serde_json::Value::Object(ref obj) => {
+            let d = obj.get("diff")?.as_str()?;
+            if looks_like_unified_diff(d) { Some(d.to_string()) } else { None }
+        }
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -520,6 +521,104 @@ pub fn render_shell(
     }
 }
 
+/// Draw a code block with line numbers (matching opencode's `<line_number>` wrapper).
+#[allow(clippy::too_many_arguments)]
+fn draw_highlighted_code_with_ln(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    max_w: u16,
+    content: &str,
+    lang: Option<&str>,
+    default_fg: Color,
+    ln_fg: Color,
+    max_lines: u16,
+) -> u16 {
+    let ln_count = content.lines().count().min(max_lines as usize);
+    if ln_count == 0 { return 0; }
+    let ln_width = ((ln_count as f64).log10().floor() as u16 + 1).max(2);
+
+    let Some(lang) = lang else {
+        // Fallback to plain text with line numbers
+        let mut lines_drawn = 0u16;
+        for (i, line) in content.lines().enumerate() {
+            if lines_drawn >= max_lines { break; }
+            let ly = y + lines_drawn;
+            let ln_text = format!("{:>w$} ", i + 1, w = ln_width as usize);
+            draw_text_line(buf, &ln_text, x, ly, max_w, Style::default().fg(ln_fg));
+            draw_text_line(buf, line, x + ln_width + 1, ly, max_w.saturating_sub(ln_width + 1), Style::default().fg(default_fg));
+            lines_drawn += 1;
+        }
+        return lines_drawn;
+    };
+
+    let spans = highlight(content, lang);
+    let mut cat_map: Vec<Option<HighlightCategory>> = vec![None; content.len()];
+    if let Some(ref spans) = spans {
+        for span in spans {
+            let end = span.end.min(content.len());
+            for item in cat_map[span.start..end].iter_mut() {
+                *item = Some(span.category);
+            }
+        }
+    }
+
+    let mut lines_drawn = 0u16;
+    let mut byte_offset = 0usize;
+    let mut y_pos = y;
+
+    for (i, line) in content.lines().enumerate() {
+        if lines_drawn >= max_lines { break; }
+        if i > 0 { y_pos += 1; }
+
+        let mut x_pos = x;
+
+        // Draw line number (right-aligned)
+        let ln_text = format!("{:>w$}", i + 1, w = ln_width as usize);
+        for ch in ln_text.chars() {
+            if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
+                cell.set_char(ch);
+                cell.set_style(Style::default().fg(ln_fg));
+            }
+            x_pos += 1;
+        }
+
+        // Space after line number
+        if x_pos < x + max_w {
+            if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
+                cell.set_char(' ');
+                cell.set_style(Style::default().fg(ln_fg));
+            }
+            x_pos += 1;
+        }
+
+        // Draw highlighted content
+        for (ci, ch) in line.char_indices() {
+            if x_pos >= x + max_w { break; }
+            let byte_pos = byte_offset + ci;
+            let cat = cat_map.get(byte_pos).copied().flatten();
+            let style = code_highlight_style(cat, default_fg);
+            if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
+                cell.set_char(ch);
+                cell.set_style(style);
+            }
+            x_pos += 1;
+        }
+
+        // Fill remaining with default style
+        while x_pos < x + max_w {
+            if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
+                cell.set_style(Style::default().fg(default_fg));
+            }
+            x_pos += 1;
+        }
+
+        byte_offset += line.len() + 1;
+        lines_drawn += 1;
+    }
+    lines_drawn
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_write(
     buf: &mut Buffer,
@@ -531,14 +630,14 @@ pub fn render_write(
     _state: &ToolRenderState,
     theme: &Theme,
 ) {
-    let filepath = input_value(&part.input, "filePath").unwrap_or_default();
-    let content = input_value(&part.input, "content").unwrap_or_default();
+    let filepath = input_filepath(&part.input).unwrap_or_default();
+    let content = input_content(&part.input).unwrap_or_default();
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
     if is_completed && !content.is_empty() {
         let max_lines = 20u16;
-        let lines = content.lines().count() as u16;
-        let area = Rect::new(x, y, max_w.saturating_add(3), lines.min(max_lines) + 2);
+        let display_lines = content.lines().count().min(max_lines as usize) as u16;
+        let area = Rect::new(x, y, max_w.saturating_add(3), display_lines + 2);
         *line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
@@ -571,8 +670,9 @@ pub fn render_write(
 
         let max_w_inner = max_w.saturating_sub(3);
         let default_fg = rgba_color(theme.text);
+        let ln_fg = rgba_color(theme.text_muted);
         let lang = lang_name_from_path(&filepath);
-        draw_highlighted_code(
+        draw_highlighted_code_with_ln(
             buf,
             x + 3,
             y + 1,
@@ -580,6 +680,7 @@ pub fn render_write(
             &content,
             lang,
             default_fg,
+            ln_fg,
             max_lines,
         );
     } else {
@@ -608,13 +709,21 @@ pub fn render_edit(
     _state: &ToolRenderState,
     theme: &Theme,
 ) {
-    let filepath = input_value(&part.input, "filePath").unwrap_or_default();
-    let diff_content = part.output.as_deref().unwrap_or("").to_string();
+    let filepath = input_filepath(&part.input).unwrap_or_default();
+    let raw_output = part.output.as_deref().unwrap_or("").to_string();
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
-    if is_completed && !diff_content.is_empty() {
+    let diff_content = if is_completed && !raw_output.is_empty() && looks_like_unified_diff(&raw_output) {
+        Some(raw_output)
+    } else if is_completed && !raw_output.is_empty() {
+        extract_diff_from_json(&raw_output)
+    } else {
+        None
+    };
+
+    if let Some(ref diff_content) = diff_content {
         let diff_lines = diff_content.lines().count() as u16;
-        let area = Rect::new(x, y, max_w.saturating_add(3), diff_lines.min(30) + 2);
+        let area = Rect::new(x, y, max_w.saturating_add(3), diff_lines.min(30) + 3);
         *line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
@@ -641,12 +750,25 @@ pub fn render_edit(
         });
         border_box.render_self(buf, area);
 
-        let title = format!("\u{2190} Edit {filepath}");
+        let title = filepath.clone();
         let title_style = Style::default().fg(rgba_color(theme.text_muted));
-        draw_text_line(buf, &title, x + 3, y, max_w.saturating_sub(3), title_style);
+        draw_text_line(buf, &title, x + 3, y + 1, max_w.saturating_sub(3), title_style);
 
-        let diff_area = Rect::new(x + 3, y + 1, max_w.saturating_sub(3), diff_lines.min(30));
-        let diff = DiffRenderable::new(Some(diff_content));
+        let diff_area = Rect::new(x + 3, y + 2, max_w.saturating_sub(3), diff_lines.min(30));
+        let mut diff = DiffRenderable::new(Some(diff_content.clone()));
+        diff.set_show_line_numbers(true);
+        diff.set_added_bg(theme.diff_added_bg);
+        diff.set_removed_bg(theme.diff_removed_bg);
+        diff.set_context_bg(theme.diff_context_bg);
+        diff.set_added_sign_color(theme.diff_highlight_added);
+        diff.set_removed_sign_color(theme.diff_highlight_removed);
+        diff.set_hunk_header_fg(theme.diff_hunk_header);
+        diff.set_line_number_fg(theme.diff_line_number);
+        diff.set_added_line_number_bg(theme.diff_added_line_number_bg);
+        diff.set_removed_line_number_bg(theme.diff_removed_line_number_bg);
+        if max_w >= 100 {
+            diff.set_view_mode(DiffViewMode::Split);
+        }
         diff.render_self(buf, diff_area);
     } else {
         let icon = "\u{2190}";
@@ -706,7 +828,7 @@ pub fn render_read(
     state: &ToolRenderState,
     theme: &Theme,
 ) {
-    let filepath = input_value(&part.input, "filePath").unwrap_or_default();
+    let filepath = input_filepath(&part.input).unwrap_or_default();
     let is_running = matches!(part.status, ToolStatus::Running);
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
