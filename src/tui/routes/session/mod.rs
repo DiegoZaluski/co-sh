@@ -1352,7 +1352,11 @@ impl SessionView {
                 self.last_msg_change_token =
                     session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.last_session_id = Some(session.id.clone());
-                self.cached_total_height = self.recompute_total_height(session);
+                // Incremental: add new messages' heights plus a gap for each.
+                // All new messages have idx > 0 (prev_len >= 1), so gap = 1 per message.
+                let new_count = self.msg_height_cache.len() - prev_len;
+                let added_heights: i32 = self.msg_height_cache[prev_len..].iter().sum();
+                self.cached_total_height += added_heights + new_count as i32;
                 // Sync actual_total_height using .max() — see note above.
                 self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
                 log::debug!(
@@ -1375,13 +1379,16 @@ impl SessionView {
                     .map(|p| Self::estimate_part_height(p, max_w, config, &last_msg.role))
                     .collect();
                 let msg_h = Self::render_message_height(last_msg, max_w, config, Some(&part_hs));
+                let old_last_h = self.msg_height_cache[last_idx];
                 if last_idx < self.part_heights_cache.len() {
                     self.part_heights_cache[last_idx] = part_hs;
                     self.msg_height_cache[last_idx] = msg_h;
                 }
                 self.last_msg_change_token = current_token;
                 self.last_session_id = Some(session.id.clone());
-                self.cached_total_height = self.recompute_total_height(session);
+                // Incremental: update cached total by the height difference.
+                // Message count is unchanged, so no gap adjustment needed.
+                self.cached_total_height += msg_h - old_last_h;
                 // Sync actual_total_height using .max() — see note above.
                 self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
                 log::debug!("[PERF] msg_height_cache: updated last msg (streaming)");
@@ -1817,11 +1824,14 @@ impl SessionView {
             self.msg_cache_h.clear();
             self.msg_cache_text_regions.clear();
         }
-        self.msg_cache_tokens.resize(n_msgs, !0);
-        self.msg_cache_cells.resize(n_msgs, None);
-        self.msg_cache_w.resize(n_msgs, 0);
-        self.msg_cache_h.resize(n_msgs, 0);
-        self.msg_cache_text_regions.resize(n_msgs, None);
+        // Only resize when message count actually changed (avoids O(n) fill per frame).
+        if n_msgs != self.msg_cache_tokens.len() {
+            self.msg_cache_tokens.resize(n_msgs, !0);
+            self.msg_cache_cells.resize(n_msgs, None);
+            self.msg_cache_w.resize(n_msgs, 0);
+            self.msg_cache_h.resize(n_msgs, 0);
+            self.msg_cache_text_regions.resize(n_msgs, None);
+        }
 
         let total_height = self.cached_total_height;
         let visible_height = i32::from(inner_area.height);
