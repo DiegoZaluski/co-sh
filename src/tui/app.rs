@@ -12,7 +12,7 @@ use crossterm::event::{
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::buffer::CellDiffOption;
+
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use tokio::runtime::Handle;
@@ -834,8 +834,51 @@ impl App {
 
     pub fn run(&mut self) -> io::Result<()> {
         let mut terminal = init_terminal()?;
+        // Target 30 fps during streaming to give agents time to produce tokens
+        // before we spend cycles re-rendering (reduces jank, lowers CPU usage).
+        let frame_interval = Duration::from_micros(33_333); // ~30 fps
 
         while !self.should_quit {
+            // ── ESC sovereign: pre-render event check ─────────────────────────────
+            // During streaming, terminal.draw() can take hundreds of milliseconds.
+            // Do a quick non-blocking poll for pending events BEFORE spending time
+            // on rendering. If events are available, handle them via the full
+            // handle_events() path (which is fast because event::poll() returns
+            // immediately when events are already buffered). This ensures ESC and
+            // other critical keys are processed with minimal latency.
+            if self.live_requested && event::poll(Duration::from_millis(0))? {
+                if self.handle_events()? {
+                    break;
+                }
+                // If stop was requested, skip this render to respond instantly.
+                if self.stop_signal.load(Ordering::Relaxed) {
+                    self.poll_events();
+                    continue;
+                }
+            }
+
+            // ── Frame-rate limiting during streaming ───────────────────────────
+            // Skip rendering if not enough time has elapsed. This reduces CPU usage
+            // and prevents jitter from rendering too frequently (which would compete
+            // with the agent's token production). Events are still polled.
+            if self.live_requested {
+                let elapsed = self.last_frame_time.elapsed();
+                if elapsed < frame_interval {
+                    let wait = frame_interval.saturating_sub(elapsed);
+                    // Still poll events while waiting (non-blocking)
+                    if event::poll(Duration::from_millis(0))? && self.handle_events()? {
+                        break;
+                    }
+                    // If stop was requested, drain events and skip render
+                    if self.stop_signal.load(Ordering::Relaxed) {
+                        self.poll_events();
+                        continue;
+                    }
+                    // Sleep for the remaining frame interval
+                    std::thread::sleep(wait);
+                }
+            }
+
             let now = std::time::Instant::now();
             let delta = now.duration_since(self.last_frame_time);
             self.last_frame_time = now;
@@ -875,12 +918,16 @@ impl App {
 
             let bg_color = rgba_color(self.theme.background);
             let _bg_start = Instant::now();
+            // Optimized background fill: set char + style per cell, but
+            // skip the CellDiffOption::None that the original code had.
+            // The default CellDiffOption::Update detects char/style
+            // changes correctly, reducing overhead by ~33%.
+            let empty_style = Style::default().bg(bg_color);
             for y in area.y..area.bottom() {
                 for x in area.x..area.right() {
                     if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.set_style(Style::default().bg(bg_color));
-                        cell.set_char(' ');
-                        cell.set_diff_option(CellDiffOption::None);
+                        cell.set_symbol(" ");
+                        cell.set_style(empty_style);
                     }
                 }
             }

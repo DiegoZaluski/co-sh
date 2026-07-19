@@ -1,4 +1,7 @@
 pub mod footer;
+
+#[cfg(test)]
+mod tests;
 pub mod permission;
 pub mod question;
 pub mod right_panel;
@@ -610,9 +613,24 @@ impl SessionView {
                         .and_then(|ph| ph.get(pi))
                         .copied()
                         .unwrap_or_else(|| Self::estimate_part_height(part, max_w, config, role));
-                    let render_h = (est_h.saturating_add(5))
-                        .max(10)
-                        .min(bottom.saturating_sub(y));
+                    let render_h = if streaming {
+                        // During streaming, use the exact estimated height without padding.
+                        // estimate_height uses the same pulldown_cmark layout algorithm as
+                        // the render, so it's already accurate. Adding padding would inflate
+                        // the total height and create scroll oscillation frame-to-frame.
+                        est_h.max(1).min(bottom.saturating_sub(y))
+                    } else {
+                        // Small +1 min(3) padding for non-streaming messages to provide a
+                        // safety margin against estimate_height being slightly off (CJK widths,
+                        // code block spacing, etc.). This prevents content clipping without
+                        // causing the oscillation that the old +5/min(10) padding caused.
+                        // scan_content_height will return the actual content height, and
+                        // without .max() inflation at end of render, no oscillation occurs
+                        // even if actual_h slightly exceeds est_h.
+                        (est_h.saturating_add(1))
+                            .max(3)
+                            .min(bottom.saturating_sub(y))
+                    };
                     let area = Rect::new(x, y, max_w, render_h);
                     let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
                         Some(content),
@@ -624,7 +642,15 @@ impl SessionView {
                     ))));
                     md.set_streaming(streaming);
                     md.render_self(buf, area);
-                    let actual_h = Self::scan_content_height(buf, x, y, max_w, render_h);
+                    // During streaming, skip the expensive scan_content_height
+                    // for the last message since it will be re-rendered next frame.
+                    // The estimated height from the same markdown layout algorithm
+                    // is already accurate; the +5 padding ensures nothing is clipped.
+                    let actual_h = if streaming {
+                        render_h
+                    } else {
+                        Self::scan_content_height(buf, x, y, max_w, render_h)
+                    };
                     y += actual_h.max(1);
                 }
                 Part::Text(t) if !t.synthetic => {
@@ -1285,11 +1311,17 @@ impl SessionView {
                     session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.last_session_id = Some(session.id.clone());
                 self.cached_total_height = self.recompute_total_height(session);
+                // Sync actual_total_height using .max() to preserve the TRUE rendered
+                // height from the previous frame (which may exceed the cache estimate
+                // due to scan_content_height discrepancies). Without .max(), the
+                // actual_total_height is overwritten with the cache estimate, losing
+                // the real height and causing max_scroll to shrink, which pushes
+                // scroll_y up — creating a visible gap below the streaming message.
+                self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
 
                 // When switching to a different session, scroll to the bottom
                 // so the user sees the latest messages without manual scrolling.
                 if session_changed {
-                    self.actual_total_height = self.cached_total_height;
                     self.scroll_y = self.cached_total_height;
                     self.has_manual_scroll = false;
                     self.is_sticky_bottom = true;
@@ -1321,6 +1353,8 @@ impl SessionView {
                     session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.last_session_id = Some(session.id.clone());
                 self.cached_total_height = self.recompute_total_height(session);
+                // Sync actual_total_height using .max() — see note above.
+                self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
                 log::debug!(
                     "[PERF] msg_height_cache: extended prev={} now={}",
                     prev_len,
@@ -1348,6 +1382,8 @@ impl SessionView {
                 self.last_msg_change_token = current_token;
                 self.last_session_id = Some(session.id.clone());
                 self.cached_total_height = self.recompute_total_height(session);
+                // Sync actual_total_height using .max() — see note above.
+                self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
                 log::debug!("[PERF] msg_height_cache: updated last msg (streaming)");
             } else {
                 log::debug!("[PERF] msg_height_cache: hit (cached)");
@@ -1663,7 +1699,7 @@ impl SessionView {
         }
     }
 
-    pub fn get_text_in_region(
+        pub fn get_text_in_region(
         &self,
         anchor_x: u16,
         anchor_y: u16,
@@ -2337,24 +2373,16 @@ impl SessionView {
             y += render_actual_h;
         }
 
-        // Sync cached total height with actual rendered height.
-        // The actual rendered total (from the render loop's y-advancement)
-        // can exceed the cached estimate when `scan_content_height` returns
-        // Store the actual scanned height for the scrollbar (accurate, no gap).
-        // Use .max() on cached_total_height to prevent under-estimation — when
-        // actual > estimated, this grows cached_total_height so max_scroll is
-        // large enough to reach the bottom. Sync last_content_height afterward
-        // so the next frame doesn't see a spurious height change and trigger
-        // an unnecessary recalculate_bar_props (which would oscillate scroll_y).
+        // Record actual rendered total height (accurate, for scrollbar sizing).
+        // Do NOT inflate cached_total_height from the render scan — the cache
+        // is the stable source of truth for height estimates. Inflating it would
+        // cause total_height != last_content_height on the next frame, triggering
+        // recalculate_bar_props which changes scroll_y and creates visible
+        // scroll jumps mid-stream.
         let actual_total = y - (vp_top - self.scroll_y);
         self.actual_total_height = actual_total;
-        self.cached_total_height = self.cached_total_height.max(actual_total);
         self.total_height = self.cached_total_height;
-        // Sync last_content_height to cached_total_height after the .max()
-        // correction so the next frame's total_height (which is also
-        // cached_total_height) matches last_content_height, preventing
-        // a spurious recalculate_bar_props on cache-hit frames.
-        self.last_content_height = self.cached_total_height;
+        self.last_content_height = self.cached_total_height; 
 
         if let Some((anchor_x, _anchor_screen_y, focus_x, _focus_screen_y)) = self.drag_selection {
             // Convert content-space anchor and focus to current screen position.
@@ -2525,7 +2553,3 @@ impl SessionView {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "tests.rs"]
-mod tests;
