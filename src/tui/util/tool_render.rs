@@ -377,13 +377,13 @@ fn input_content(input: &serde_json::Value) -> Option<String> {
 }
 
 /// Heuristic: does the output string look like a unified diff?
-fn looks_like_unified_diff(output: &str) -> bool {
+pub(crate) fn looks_like_unified_diff(output: &str) -> bool {
     output.starts_with("--- ") || output.starts_with("diff --git ")
 }
 
 /// Try to extract a unified diff string from a JSON tool output.
 /// Handles cosh-style `[{..., "diff": "..."}, ...]`.
-fn extract_diff_from_json(output: &str) -> Option<String> {
+pub(crate) fn extract_diff_from_json(output: &str) -> Option<String> {
     let Ok(val) = serde_json::from_str::<serde_json::Value>(output) else {
         return None;
     };

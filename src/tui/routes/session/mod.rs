@@ -817,6 +817,21 @@ impl SessionView {
                         let formatted = tool_render::format_todo_output(output, &t.tool);
                         let lines = formatted.len().max(1) as u16;
                         lines + 4
+                    } else if tool_render::tool_display(&t.tool) == "edit" {
+                        // Extract diff from JSON (same logic as render_edit) to get
+                        // an accurate line count for height estimation.
+                        let diff_content = if tool_render::looks_like_unified_diff(output) {
+                            Some(output.to_string())
+                        } else {
+                            tool_render::extract_diff_from_json(output)
+                        };
+                        let diff_lines = diff_content
+                            .as_deref()
+                            .map(|d| d.lines().count().min(30) as u16)
+                            .unwrap_or(0);
+                        // line_h = diff_lines + 3 (padding + title + gap)
+                        // + 2 for external margins (top + bottom)
+                        diff_lines + 5
                     } else {
                         let collapsed = crate::util::scroll::collapse_tool_output(output, 10, 800);
                         let lines = collapsed.output.lines().count().max(1) as u16
