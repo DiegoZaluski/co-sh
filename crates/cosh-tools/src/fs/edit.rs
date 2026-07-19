@@ -1,4 +1,5 @@
 use cosh_sdk::hashline::{
+    diff::structured_patch,
     format::{HL_FILE_HASH_SEP, HL_FILE_PREFIX, compute_file_hash, format_hashline_header},
     fs::{DiskFilesystem, Filesystem},
     input::Patch,
@@ -16,6 +17,8 @@ pub struct EditResult {
     pub header: String,
     pub first_changed_line: Option<u32>,
     pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -107,6 +110,11 @@ async fn edit_target(
     let apply_result = section.apply_to(&normalized, Some(resolve_block_fn as BlockResolver));
 
     let after = apply_result.text;
+    let diff = if normalized == after {
+        None
+    } else {
+        Some(structured_patch(&normalized, &after, 3).to_unified_diff(&target.path, &target.path))
+    };
     let new_hash = compute_file_hash(&after);
     let header = format_hashline_header(&path_str, &new_hash);
 
@@ -125,5 +133,6 @@ async fn edit_target(
         header,
         first_changed_line: apply_result.first_changed_line,
         warnings: apply_result.warnings,
+        diff,
     })
 }

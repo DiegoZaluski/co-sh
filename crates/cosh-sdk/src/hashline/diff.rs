@@ -1,6 +1,8 @@
 //! Wrapper around the `similar` crate mirroring the Node.js `diff` package API.
 //! Used for structured unified-diff creation and application (3-way merge) in
 //! snapshot recovery.
+use std::fmt::Write;
+
 use similar::{ChangeTag, TextDiff};
 
 /// A unified-diff patch, analogous to the object returned by
@@ -17,6 +19,31 @@ pub struct Hunk {
     pub new_start: usize,
     pub new_lines: usize,
     pub lines: Vec<String>,
+}
+
+impl Patch {
+    /// Format this patch as a standard unified-diff string.
+    ///
+    /// `old_path` and `new_path` are rendered in the `--- a/` and `+++ b/`
+    /// header lines respectively.
+    #[must_use]
+    pub fn to_unified_diff(&self, old_path: &str, new_path: &str) -> String {
+        let mut result = String::new();
+        let _ = writeln!(result, "--- a/{old_path}");
+        let _ = writeln!(result, "+++ b/{new_path}");
+        for hunk in &self.hunks {
+            let _ = writeln!(
+                result,
+                "@@ -{},{} +{},{} @@",
+                hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+            );
+            for line in &hunk.lines {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+        result
+    }
 }
 
 /// Build a `Patch` describing the changes from `old` to `new`,
