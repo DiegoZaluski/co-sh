@@ -191,6 +191,8 @@ pub struct SessionView {
     pub total_height: i32,
     /// Visible viewport height from last render.
     pub visible_height: i32,
+    /// Actual scanned content height from last render (used by scrollbar for accurate sizing).
+    actual_total_height: i32,
 
     // ── Scroll position at mouse-down (for content-space selection) ────────────
     /// The `scroll_y` value when the current drag selection started.
@@ -292,6 +294,7 @@ impl SessionView {
             auto_scroll_speed_fast: 72.0,
             total_height: 0,
             visible_height: 0,
+            actual_total_height: 0,
             mouse_down_scroll_y: 0,
             selection_anchor_content_y: 0,
             selection_focus_content_y: 0,
@@ -323,7 +326,7 @@ impl SessionView {
     /// Uses fractional accumulator for smooth scrolling.
     /// Mirrors OpenCode's `onMouseEvent` for scroll type.
     pub fn scroll_by(&mut self, delta: f64) {
-        let max_scroll = (self.total_height - self.visible_height).max(0);
+        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
 
         let scroll_amount = delta * self.scroll_accel;
         self.scroll_accumulator_y += scroll_amount;
@@ -339,7 +342,7 @@ impl SessionView {
     /// Raw scroll (for keyboard / programmatic). No acceleration, uses accumulator.
     /// Mirrors OpenCode's `scrollBy` + `handleKeyPress` pattern.
     pub fn scroll_by_raw(&mut self, delta: f64) {
-        let max_scroll = (self.total_height - self.visible_height).max(0);
+        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
 
         self.scroll_accumulator_y += delta;
         let int_scroll = self.scroll_accumulator_y.trunc() as i32;
@@ -363,7 +366,7 @@ impl SessionView {
 
     /// Absolute scroll to position. Mirrors OpenCode's `scrollTo`.
     pub fn scroll_to(&mut self, position: i32) {
-        let max_scroll = (self.total_height - self.visible_height).max(0);
+        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
         self.scroll_y = position.clamp(0, max_scroll);
         self.scroll_accumulator_y = 0.0;
         self.sync_manual_scroll_state();
@@ -372,7 +375,7 @@ impl SessionView {
     /// Scroll to bottom. Mirrors OpenCode's `toBottom()`:
     ///   `scroll.scrollTo(scroll.scrollHeight)`
     pub fn scroll_to_bottom(&mut self) {
-        let max_scroll = (self.total_height - self.visible_height).max(0);
+        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
         self.scroll_y = max_scroll;
         self.scroll_accumulator_y = 0.0;
         self.has_manual_scroll = false;
@@ -388,7 +391,7 @@ impl SessionView {
             return;
         }
 
-        let max_scroll = (self.total_height - self.visible_height).max(0);
+        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
         let has_scrollable_content = max_scroll > 1;
 
         self.has_manual_scroll = has_scrollable_content && !self.is_at_sticky_position();
@@ -398,7 +401,7 @@ impl SessionView {
 
     /// Update sticky state flags. Mirrors OpenCode's `updateStickyState()`.
     fn update_sticky_state(&mut self) {
-        let max_scroll = (self.total_height - self.visible_height).max(0);
+        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
 
         if self.scroll_y <= 0 {
             self.is_sticky_bottom = false;
@@ -412,7 +415,7 @@ impl SessionView {
     /// Check if at sticky position. Mirrors OpenCode's `isAtStickyPosition()`.
     /// For "bottom": `scrollTop >= maxScrollTop` (accepts >=, not strict equality).
     fn is_at_sticky_position(&self) -> bool {
-        let max_scroll = (self.total_height - self.visible_height).max(0);
+        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
 
         // stickyStart = "bottom"
         if max_scroll <= 0 {
@@ -424,7 +427,7 @@ impl SessionView {
     /// Check if at sticky re-engage point. Mirrors OpenCode's `isAtStickyReengagePoint()`.
     /// For "bottom": `maxScrollTop > 0 && scrollTop >= maxScrollTop - 1`
     pub fn is_at_bottom(&self) -> bool {
-        let max_scroll = (self.total_height - self.visible_height).max(0);
+        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
         if max_scroll <= 0 {
             return true;
         }
@@ -437,7 +440,9 @@ impl SessionView {
         let was_applying = self.is_applying_sticky_scroll;
         self.is_applying_sticky_scroll = true;
 
-        let max_scroll = (self.total_height - self.visible_height).max(0);
+        // Scroll to the actual bottom, not the estimated bottom,
+        // to prevent creating a gap below the content.
+        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
         self.scroll_y = max_scroll;
         self.is_sticky_bottom = true;
 
@@ -450,11 +455,13 @@ impl SessionView {
     /// 2. If `!hasManualScroll` → `applyStickyStart(stickyStart)`
     /// 3. If `hasManualScroll && isAtStickyReengagePoint()` → re-engage
     /// 4. Updates `last_content_height`
-    fn recalculate_bar_props(&mut self, total_height: i32, visible_height: i32) {
+    fn recalculate_bar_props(&mut self, _total_height: i32, visible_height: i32) {
         let was_applying = self.is_applying_sticky_scroll;
         self.is_applying_sticky_scroll = true;
 
-        let new_max_scroll = (total_height - visible_height).max(0);
+        // Use actual_total_height for max_scroll so we snap to the real
+        // bottom, not an inflated estimated bottom that would create a gap.
+        let new_max_scroll = (self.actual_total_height - visible_height).max(0);
 
         if !self.has_manual_scroll {
             // No manual scroll → apply sticky start
@@ -1278,6 +1285,17 @@ impl SessionView {
                     session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.last_session_id = Some(session.id.clone());
                 self.cached_total_height = self.recompute_total_height(session);
+
+                // When switching to a different session, scroll to the bottom
+                // so the user sees the latest messages without manual scrolling.
+                if session_changed {
+                    self.actual_total_height = self.cached_total_height;
+                    self.scroll_y = self.cached_total_height;
+                    self.has_manual_scroll = false;
+                    self.is_sticky_bottom = true;
+                    self.scroll_accumulator_y = 0.0;
+                }
+
                 log::debug!(
                     "[PERF] msg_height_cache: cold_build={}us msgs={}",
                     _start.elapsed().as_micros(),
@@ -1771,7 +1789,7 @@ impl SessionView {
 
         let total_height = self.cached_total_height;
         let visible_height = i32::from(inner_area.height);
-        let max_scroll = (total_height - visible_height).max(0);
+        let max_scroll = (self.actual_total_height - visible_height).max(0);
         self.scroll_y = self.scroll_y.clamp(0, max_scroll);
 
         // Cache dimensions for app.rs
@@ -1807,7 +1825,7 @@ impl SessionView {
                 inner_area.height,
             );
             let mut scrollbar = ScrollBarRenderable::new(ScrollBarOrientation::Vertical);
-            scrollbar.set_scroll_size(f64::from(total_height));
+            scrollbar.set_scroll_size(f64::from(self.actual_total_height.max(1)));
             scrollbar.set_viewport_size(f64::from(visible_height));
             scrollbar.set_scroll_position(f64::from(self.scroll_y));
             scrollbar.set_track_color(Some(theme.background.into()));
@@ -2322,13 +2340,21 @@ impl SessionView {
         // Sync cached total height with actual rendered height.
         // The actual rendered total (from the render loop's y-advancement)
         // can exceed the cached estimate when `scan_content_height` returns
-        // more rows than `estimate_height` predicted (due to the generous
-        // `(est_h + 5).max(10)` allocation in render_parts for assistant text).
-        // Without this correction, scroll_y is clamped to max_scroll based on
-        // the underestimated cached_total, cutting off the last message.
+        // Store the actual scanned height for the scrollbar (accurate, no gap).
+        // Use .max() on cached_total_height to prevent under-estimation — when
+        // actual > estimated, this grows cached_total_height so max_scroll is
+        // large enough to reach the bottom. Sync last_content_height afterward
+        // so the next frame doesn't see a spurious height change and trigger
+        // an unnecessary recalculate_bar_props (which would oscillate scroll_y).
         let actual_total = y - (vp_top - self.scroll_y);
+        self.actual_total_height = actual_total;
         self.cached_total_height = self.cached_total_height.max(actual_total);
         self.total_height = self.cached_total_height;
+        // Sync last_content_height to cached_total_height after the .max()
+        // correction so the next frame's total_height (which is also
+        // cached_total_height) matches last_content_height, preventing
+        // a spurious recalculate_bar_props on cache-hit frames.
+        self.last_content_height = self.cached_total_height;
 
         if let Some((anchor_x, _anchor_screen_y, focus_x, _focus_screen_y)) = self.drag_selection {
             // Convert content-space anchor and focus to current screen position.
@@ -2457,7 +2483,7 @@ impl SessionView {
         }
     }
 
-    fn handle_auto_scroll(&mut self, delta_time: f64, total_height: i32, visible_height: i32) {
+    fn handle_auto_scroll(&mut self, delta_time: f64, _total_height: i32, visible_height: i32) {
         if !self.is_auto_scrolling {
             return;
         }
@@ -2480,7 +2506,7 @@ impl SessionView {
         let int_scroll = self.auto_scroll_accumulator.trunc() as i32;
         if int_scroll != 0 {
             self.auto_scroll_accumulator -= int_scroll as f64;
-            let max_scroll = (total_height - visible_height).max(0);
+            let max_scroll = (self.actual_total_height - visible_height).max(0);
             let new_scroll = (self.scroll_y + int_scroll).clamp(0, max_scroll);
             if new_scroll == self.scroll_y {
                 // Already at boundary, stop

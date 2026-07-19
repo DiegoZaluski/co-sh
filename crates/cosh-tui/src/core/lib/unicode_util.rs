@@ -91,10 +91,7 @@ pub fn graphemes_with_width(text: &str) -> impl Iterator<Item = (&str, u16)> + '
     })
 }
 
-/// Word-wrap text so that each line fits within `max_width` display columns.
-/// Words are kept intact (no mid-word breaks). If a single word exceeds
-/// `max_width` it is placed on its own line (it may overflow the terminal
-/// rather than being cut).
+/// Word-wrap text to fit within `max_width` display columns, keeping words intact.
 #[must_use]
 pub fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();

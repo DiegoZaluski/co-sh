@@ -11,7 +11,7 @@ use crate::core::rgba::RGBA;
 
 static NEXT_DIFF_NUM: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiffLineType {
     Context,
     Add,
@@ -20,7 +20,7 @@ enum DiffLineType {
     FileHeader,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffViewMode {
     Unified,
     Split,
@@ -70,6 +70,7 @@ fn rgba_color(c: RGBA) -> Color {
 
 impl DiffRenderable {
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn new(diff: Option<String>) -> Self {
         let num = NEXT_DIFF_NUM.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -96,17 +97,17 @@ impl DiffRenderable {
     }
 
     pub fn set_diff(&mut self, value: String) { self.diff = value; }
-    pub fn set_view_mode(&mut self, value: DiffViewMode) { self.view_mode = value; }
-    pub fn set_added_bg(&mut self, value: RGBA) { self.added_bg = value; }
-    pub fn set_removed_bg(&mut self, value: RGBA) { self.removed_bg = value; }
-    pub fn set_context_bg(&mut self, value: RGBA) { self.context_bg = value; }
-    pub fn set_added_sign_color(&mut self, value: RGBA) { self.added_sign_color = value; }
-    pub fn set_removed_sign_color(&mut self, value: RGBA) { self.removed_sign_color = value; }
-    pub fn set_hunk_header_fg(&mut self, value: RGBA) { self.hunk_header_fg = value; }
-    pub fn set_line_number_fg(&mut self, value: RGBA) { self.line_number_fg = value; }
-    pub fn set_added_line_number_bg(&mut self, value: RGBA) { self.added_line_number_bg = value; }
-    pub fn set_removed_line_number_bg(&mut self, value: RGBA) { self.removed_line_number_bg = value; }
-    pub fn set_show_line_numbers(&mut self, value: bool) { self.show_line_numbers = value; }
+    pub const fn set_view_mode(&mut self, value: DiffViewMode) { self.view_mode = value; }
+    pub const fn set_added_bg(&mut self, value: RGBA) { self.added_bg = value; }
+    pub const fn set_removed_bg(&mut self, value: RGBA) { self.removed_bg = value; }
+    pub const fn set_context_bg(&mut self, value: RGBA) { self.context_bg = value; }
+    pub const fn set_added_sign_color(&mut self, value: RGBA) { self.added_sign_color = value; }
+    pub const fn set_removed_sign_color(&mut self, value: RGBA) { self.removed_sign_color = value; }
+    pub const fn set_hunk_header_fg(&mut self, value: RGBA) { self.hunk_header_fg = value; }
+    pub const fn set_line_number_fg(&mut self, value: RGBA) { self.line_number_fg = value; }
+    pub const fn set_added_line_number_bg(&mut self, value: RGBA) { self.added_line_number_bg = value; }
+    pub const fn set_removed_line_number_bg(&mut self, value: RGBA) { self.removed_line_number_bg = value; }
+    pub const fn set_show_line_numbers(&mut self, value: bool) { self.show_line_numbers = value; }
 
     fn classify_line(line: &str) -> DiffLineType {
         if line.starts_with("+++") || line.starts_with("---") { DiffLineType::FileHeader }
@@ -224,12 +225,12 @@ impl DiffRenderable {
             .unwrap_or(0);
 
         let left_ln_w = if self.show_line_numbers && left_max_n > 0 {
-            (left_max_n as f64).log10().floor() as u16 + 1
+            f64::from(left_max_n).log10().floor() as u16 + 1
         } else {
             1
         };
         let right_ln_w = if self.show_line_numbers && right_max_n > 0 {
-            (right_max_n as f64).log10().floor() as u16 + 1
+            f64::from(right_max_n).log10().floor() as u16 + 1
         } else {
             1
         };
@@ -256,19 +257,17 @@ impl DiffRenderable {
 
             // Left side
             self.render_split_line(buf, left_x, y, left_panel_w, left_gutter_w, left_ln_w,
-                left_content_w, max_x, true, &sl.left);
+                left_content_w, max_x, true, sl.left.as_ref());
 
             // Separator column
-            if sep_x < max_x {
-                if let Some(cell) = buf.cell_mut((sep_x, y)) {
-                    cell.set_char(' ');
-                    cell.set_style(Style::default());
-                }
+            if sep_x < max_x && let Some(cell) = buf.cell_mut((sep_x, y)) {
+                cell.set_char(' ');
+                cell.set_style(Style::default());
             }
 
             // Right side
             self.render_split_line(buf, right_x, y, right_panel_w, right_gutter_w, right_ln_w,
-                right_content_w, max_x, false, &sl.right);
+                right_content_w, max_x, false, sl.right.as_ref());
 
             y += 1;
         }
@@ -287,12 +286,16 @@ impl DiffRenderable {
         _content_w: u16,
         max_x: u16,
         is_left: bool,
-        line: &Option<LineInfo>,
+        line: Option<&LineInfo>,
     ) {
         let max_x_panel = (panel_x + panel_w).min(max_x);
 
-        let (default_bg, sign_ch, line_num) = match line {
-            Some(li) => {
+        let (default_bg, sign_ch, line_num) = line.map_or_else(
+            || {
+                let bg = if is_left { rgba_color(self.removed_bg) } else { rgba_color(self.added_bg) };
+                (bg, ' ', None)
+            },
+            |li| {
                 let bg = if is_left {
                     match li.line_type {
                         DiffLineType::Remove => rgba_color(self.removed_bg),
@@ -311,12 +314,8 @@ impl DiffRenderable {
                 };
                 let ln = if is_left { li.old_ln } else { li.new_ln };
                 (bg, sign, ln)
-            }
-            None => {
-                let bg = if is_left { rgba_color(self.removed_bg) } else { rgba_color(self.added_bg) };
-                (bg, ' ', None)
-            }
-        };
+            },
+        );
 
         let content_style = Style::default().bg(default_bg);
         let ln_style = Style::default().bg(default_bg).fg(rgba_color(self.line_number_fg));
@@ -325,26 +324,17 @@ impl DiffRenderable {
 
         // Line number
         if self.show_line_numbers {
-            if let Some(n) = line_num {
-                let prefix = format!("{:>w$}", n, w = ln_w as usize);
-                for ch in prefix.chars() {
-                    if x >= max_x_panel { break; }
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.set_char(ch);
-                        cell.set_style(ln_style);
-                    }
-                    x += 1;
+            let ln_str = line_num.map_or_else(
+                || " ".repeat(ln_w as usize),
+                |n| format!("{:>w$}", n, w = ln_w as usize),
+            );
+            for ch in ln_str.chars() {
+                if x >= max_x_panel { break; }
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_char(ch);
+                    cell.set_style(ln_style);
                 }
-            } else {
-                let blank = " ".repeat(ln_w as usize);
-                for ch in blank.chars() {
-                    if x >= max_x_panel { break; }
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.set_char(ch);
-                        cell.set_style(ln_style);
-                    }
-                    x += 1;
-                }
+                x += 1;
             }
         }
 
@@ -401,7 +391,7 @@ impl DiffRenderable {
     fn max_ln(lines: &[LineInfo]) -> u16 {
         let mx = lines.iter().filter_map(|l| l.old_ln.or(l.new_ln)).max().unwrap_or(0);
         if mx == 0 { return 1; }
-        (mx as f64).log10().floor() as u16 + 1
+        f64::from(mx).log10().floor() as u16 + 1
     }
 
     fn content_part(content: &str, lt: DiffLineType) -> &str {
@@ -501,18 +491,16 @@ impl DiffRenderable {
             let content_w = Self::content_part(&li.content, li.line_type);
             let line_num = match li.line_type {
                 DiffLineType::Add => li.new_ln,
-                DiffLineType::Remove => li.old_ln,
-                DiffLineType::Context => li.old_ln,
+                DiffLineType::Remove | DiffLineType::Context => li.old_ln,
                 _ => None,
             };
 
             // Build prefix (gutter) for the first visual line
             let prefix = if self.show_line_numbers {
-                if let Some(n) = line_num {
-                    format!("{:>w$} ", n, w = max_ln_width as usize)
-                } else {
-                    format!("{:>w$} ", "", w = max_ln_width as usize)
-                }
+                line_num.map_or_else(
+                    || format!("{:>w$} ", "", w = max_ln_width as usize),
+                    |n| format!("{:>w$} ", n, w = max_ln_width as usize),
+                )
             } else {
                 String::from(" ")
             };

@@ -75,19 +75,10 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                             x = area_x;
                         }
                     }
-                    Tag::Paragraph | Tag::Heading { .. } => {
-                        if x != area_x {
-                            y += 1;
-                            x = area_x;
-                        }
-                    }
-                    Tag::BlockQuote(_) => {
-                        if x != area_x {
-                            y += 1;
-                            x = area_x;
-                        }
-                    }
-                    Tag::CodeBlock(_) => {
+                    Tag::Paragraph
+                    | Tag::Heading { .. }
+                    | Tag::BlockQuote(_)
+                    | Tag::CodeBlock(_) => {
                         if x != area_x {
                             y += 1;
                             x = area_x;
