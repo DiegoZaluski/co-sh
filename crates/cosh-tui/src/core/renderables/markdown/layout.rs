@@ -86,7 +86,6 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                             y += 1;
                             x = area_x;
                         }
-                        y += 1; // blank separator before blockquote
                     }
                     Tag::CodeBlock(_) => {
                         if x != area_x {

@@ -9,7 +9,7 @@ use lru::LruCache;
 use pulldown_cmark::{Event, Options, Tag, TagEnd};
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 use cosh_sdk::tree_sitter::highlight::{HighlightCategory, HighlightSpan, highlight};
 
@@ -556,8 +556,18 @@ impl Renderable for MarkdownRenderable {
                         }
                         Tag::Paragraph | Tag::Heading { .. } => {
                             if x != area.x {
-                                y += 1;
-                                x = area.x;
+                                if ctx.in_blockquote() {
+                                    // Inside a blockquote: x was set to area.x + 2 by
+                                    // the BlockQuote handler (bar + indent). Don't advance
+                                    // y — content should stay on the same row as the bar.
+                                } else {
+                                    y += 1;
+                                    x = area.x;
+                                }
+                            }
+                            if ctx.in_blockquote() && x == area.x {
+                                // Second+ paragraph inside blockquote: re-apply indent.
+                                x = area.x.saturating_add(2);
                             }
                         }
                         Tag::BlockQuote(_) => {
@@ -565,18 +575,7 @@ impl Renderable for MarkdownRenderable {
                                 y += 1;
                                 x = area.x;
                             }
-                            // Blank separator row before blockquote content
                             if y < max_y {
-                                y += 1;
-                                x = area.x;
-                            }
-                            if y < max_y {
-                                let bar_fg = rgba_to_color(palette.blockquote_bar_color());
-                                let bar_style = Style::default().fg(bar_fg);
-                                if let Some(cell) = buf.cell_mut((area.x, y)) {
-                                    cell.set_char('│');
-                                    cell.set_style(bar_style);
-                                }
                                 x = area.x.saturating_add(2);
                             }
                         }
@@ -702,7 +701,33 @@ impl Renderable for MarkdownRenderable {
                         let mut style = palette.style_for(element, heading_level);
                         let bq_indent = if ctx.in_blockquote() { 2u16 } else { 0u16 };
                         if ctx.in_blockquote() {
-                            style = style.fg(rgba_to_color(palette.muted_color()));
+                            let bq_bg = palette.quote_bg_color();
+
+                            // Calculate box width: starts at left edge (area.x),
+                            // ends just past the text content.
+                            let first_line = text.lines().next().unwrap_or("");
+                            let text_w =
+                                crate::core::lib::unicode_util::str_display_width(first_line)
+                                    as u16;
+                            let box_end = area
+                                .x
+                                .saturating_add(2) // indent
+                                .saturating_add(text_w) // text width
+                                .saturating_add(2) // padding after text
+                                .min(max_x);
+
+                            // Fill the background from left edge to past text
+                            for cx in area.x..box_end {
+                                if let Some(cell) = buf.cell_mut((cx, y)) {
+                                    cell.set_style(Style::default().bg(bq_bg));
+                                    cell.set_char(' ');
+                                }
+                            }
+
+                            style = style
+                                .fg(Color::Rgb(0, 0, 0))
+                                .bg(bq_bg)
+                                .add_modifier(Modifier::BOLD);
                         }
                         Self::render_text(
                             &text, buf, &mut x, &mut y, area.x, max_x, max_y, style, bq_indent,

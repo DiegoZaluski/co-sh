@@ -1,4 +1,4 @@
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use std::collections::HashMap;
@@ -8,6 +8,7 @@ use std::path::Path;
 use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
+use cosh_tui::core::lib::unicode_util;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::diff::DiffRenderable;
@@ -132,17 +133,6 @@ fn draw_highlighted_code(
     lines_drawn
 }
 
-fn pad_right(text: &str, width: usize) -> String {
-    let len: usize = text.chars().count();
-    if len >= width {
-        text.chars().take(width).collect()
-    } else {
-        let mut s = text.to_string();
-        s.push_str(&" ".repeat(width - len));
-        s
-    }
-}
-
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn render_inline_tool(
     buf: &mut Buffer,
@@ -174,14 +164,48 @@ fn render_inline_tool(
         draw_text_line(buf, " ", x + 1, y, 1, icon_style);
         let label_x = x + 2;
         draw_text_line(buf, text, label_x, y, max_w.saturating_sub(2), base_style);
-    } else if icon.len() <= 2 {
-        let padded = pad_right(icon, 2);
-        draw_text_line(buf, &padded, x, y, 2, icon_style);
-        let label_x = x + 2;
-        draw_text_line(buf, text, label_x, y, max_w.saturating_sub(2), base_style);
-    } else {
-        draw_text_line(buf, icon, x, y, max_w, icon_style);
+    } else if icon.chars().count() <= 2 {
+        // Draw icon with proper display-width handling.
+        // Icons like ← → ⚙ ⚠ ☰ are single chars but 2+ columns wide.
+        // The old `icon.len() <= 2` check used byte length which failed for
+        // multi-byte Unicode, causing the text label to never be drawn.
+        let icon_display_w = unicode_util::str_display_width(icon) as u16;
+        let mut cx = x;
+        for (grapheme, w) in unicode_util::graphemes_with_width(icon) {
+            if cx >= x + max_w {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                if grapheme.len() == 1 {
+                    cell.set_char(grapheme.chars().next().unwrap());
+                } else {
+                    cell.set_symbol(grapheme);
+                }
+                cell.set_style(icon_style);
+            }
+            if w > 1 {
+                for dx in 1..w {
+                    if let Some(cell) = buf.cell_mut((cx + dx, y)) {
+                        cell.set_diff_option(CellDiffOption::Skip);
+                    }
+                }
+            }
+            cx += w;
+        }
+        // Pad icon area to at least 2 columns for visual separation from label
+        let icon_total = icon_display_w.max(2);
+        let label_x = x.saturating_add(icon_total);
+        draw_text_line(
+            buf,
+            text,
+            label_x,
+            y,
+            max_w.saturating_sub(icon_total),
+            base_style,
+        );
     }
+    // Icons with chars().count() > 2 don't exist in the codebase;
+    // they would fall through with no rendering, which is acceptable.
 }
 
 pub struct ToolRenderState {

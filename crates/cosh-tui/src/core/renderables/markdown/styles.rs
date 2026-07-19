@@ -27,6 +27,7 @@ pub struct MarkdownPalette {
 
     // ── Block element colors ───────────────────────────────────
     code_block_bg: RGBA,
+    blockquote_bg: RGBA,
     blockquote_bar: RGBA,
     list_marker: RGBA,
 }
@@ -109,6 +110,9 @@ impl MarkdownPalette {
             255,
         );
 
+        // Blockquote bg = solid #eef170 (pure color, no blend)
+        let blockquote_bg = RGBA::from_ints(238, 241, 112, 255);
+
         // Blockquote bar = muted
         let blockquote_bar = muted;
 
@@ -124,6 +128,7 @@ impl MarkdownPalette {
             inline_code_fg,
             inline_code_bg,
             code_block_bg,
+            blockquote_bg,
             blockquote_bar,
             list_marker,
         }
@@ -149,6 +154,11 @@ impl MarkdownPalette {
     #[must_use]
     pub const fn code_block_bg(&self) -> RGBA {
         self.code_block_bg
+    }
+
+    #[must_use]
+    pub const fn blockquote_bg_color(&self) -> RGBA {
+        self.blockquote_bg
     }
 
     #[must_use]
@@ -221,6 +231,12 @@ impl MarkdownPalette {
     #[must_use]
     pub const fn code_bg_color(&self) -> Color {
         rgba_to_ratatui(self.code_block_bg)
+    }
+
+    /// Convenience: ratatui `Color` for blockquote background fill.
+    #[must_use]
+    pub const fn quote_bg_color(&self) -> Color {
+        rgba_to_ratatui(self.blockquote_bg)
     }
 
     /// Convenience: background fill for the entire area.

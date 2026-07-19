@@ -125,16 +125,12 @@ fn test_blockquote_muted_text() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
     md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
 
-    let palette = MarkdownPalette::new(
-        RGBA::from_ints(220, 220, 220, 255),
-        RGBA::from_ints(0, 0, 0, 0),
-    );
-    let muted_color = rgba_to_color(palette.muted_color());
-    // Blockquote starts on row 1 due to blank separator row at row 0
+    // Blockquote content starts at row 0, column 2 (indent)
+    // with black fg for contrast on yellow bg.
     assert_eq!(
-        buf.cell((0, 1)).unwrap().style().fg,
-        Some(muted_color),
-        "Blockquote text should be muted"
+        buf.cell((2, 0)).unwrap().style().fg,
+        Some(Color::Rgb(0, 0, 0)),
+        "Blockquote text should be black on yellow bg"
     );
 }
 
@@ -498,17 +494,12 @@ fn test_blockquote_multiple_paragraphs() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
     md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
 
-    let palette = MarkdownPalette::new(
-        RGBA::from_ints(220, 220, 220, 255),
-        RGBA::from_ints(0, 0, 0, 0),
-    );
-    let muted_color = rgba_to_color(palette.muted_color());
-
-    // First paragraph text should be muted (starts on row 1 due to blank separator)
+    // First paragraph text starts at row 0, column 2 (indent).
+    // Foreground should be black for contrast on the yellow bg.
     assert_eq!(
-        buf.cell((0, 1)).unwrap().style().fg,
-        Some(muted_color),
-        "Blockquote first paragraph should be muted"
+        buf.cell((2, 0)).unwrap().style().fg,
+        Some(Color::Rgb(0, 0, 0)),
+        "Blockquote first paragraph should be black on yellow bg"
     );
 }
 
