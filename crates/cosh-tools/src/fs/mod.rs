@@ -162,11 +162,11 @@ impl Fs {
             description_edit: serde_json::json!({
                 "name": "fs_edit",
                 "description": concat!(
-                    "Apply targeted edits to one or more files using a diff-like ",
-                    "instruction format. Uses the file's current hash for safety -- ",
-                    "the operation fails if the file has changed since the hash was ",
-                    "recorded. Supports semantic operations like replace, insert, ",
-                    "and delete on specific text within the file."
+                    "Apply targeted edits to one or more files using hashline operations. ",
+                    "Uses the file's content hash for safety -- if the file changed since ",
+                    "it was read, the tool attempts automatic 3-way merge recovery. ",
+                    "Supports: replace, delete, insert (before/after/head/tail), and ",
+                    "tree-sitter block operations."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -184,15 +184,32 @@ impl Fs {
                                     "file_hash": {
                                         "type": "string",
                                         "description": concat!(
-                                            "Hash of the current file content for ",
-                                            "safety verification"
+                                            "4-hex content hash tag from the ",
+                                            "\u{00B6}path#TAG header in read/search output ",
+                                            "(e.g. \u{00B6}src/foo.ts#1A2B). ",
+                                            "Copy the tag verbatim from the read response."
                                         )
                                     },
                                     "ops": {
                                         "type": "string",
                                         "description": concat!(
-                                            "Edit operations string describing the changes ",
-                                            "to apply (search/replace format)"
+                                            "Hashline edit operations. Each operation is on its own line:\n",
+                                            "- replace N..M:  replace lines N through M with new content\n",
+                                            "   (prefix each replacement line with +)\n",
+                                            "- delete N..M   delete lines N through M\n",
+                                            "- insert before N:  insert lines before line N\n",
+                                            "- insert after N:   insert lines after line N\n",
+                                            "- insert head:      insert at start of file\n",
+                                            "- insert tail:      insert at end of file\n",
+                                            "- replace block N:  replace syntactic block at line N\n",
+                                            "Example:\n",
+                                            "  replace 5..7:\n",
+                                            "  +fn hello() {\n",
+                                            "  +    println!(\"hi\");\n",
+                                            "  +}\n",
+                                            "  delete 10..12\n",
+                                            "  insert after 15:\n",
+                                            "  +// new comment"
                                         )
                                     }
                                 },

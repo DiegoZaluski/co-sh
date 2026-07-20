@@ -221,7 +221,11 @@ async fn edit_returns_error_on_hash_mismatch() {
     )
     .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("hash mismatch"));
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("not from this session") || err.contains("edit failed"),
+        "expected a hash-mismatch error, got: {err}",
+    );
     assert_eq!(std::fs::read_to_string(path).unwrap(), "original\n");
     let _ = std::fs::remove_file(path);
 }

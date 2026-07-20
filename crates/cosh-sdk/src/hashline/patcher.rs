@@ -197,6 +197,25 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         }
     }
 
+    /// Create a patcher that shares an existing `Arc<Mutex<S>>` snapshot store.
+    ///
+    /// Use this when the store is already wrapped (e.g. the global session store
+    /// returned by [`rollback::session_store`]) so that the patcher records
+    /// snapshots into the same store used by other tools in the session.
+    pub fn new_shared(
+        fs: F,
+        snapshots: Arc<Mutex<S>>,
+        block_resolver: Option<BlockResolver>,
+    ) -> Self {
+        let recovery = Recovery::new(Arc::clone(&snapshots));
+        Self {
+            fs,
+            snapshots,
+            recovery,
+            block_resolver,
+        }
+    }
+
     /// Apply every section in `patch`. `prepare` runs the full apply for each
     /// section in memory before any write hits the filesystem, so a
     /// multi-section batch is naturally all-or-nothing. Returns one

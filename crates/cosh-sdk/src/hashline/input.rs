@@ -5,10 +5,9 @@
 //!
 //! The splitter is purely lexical — it doesn't know whether a section's path
 //! actually exists. That's the patcher's job.
-use std::cell::OnceCell;
 use std::fmt;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use regex::Regex;
 
@@ -292,7 +291,7 @@ pub struct PatchSection {
     pub path: String,
     pub file_hash: Option<String>,
     pub diff: String,
-    parsed: OnceCell<(Vec<Edit>, Vec<String>)>,
+    parsed: OnceLock<(Vec<Edit>, Vec<String>)>,
 }
 
 impl fmt::Debug for PatchSection {
@@ -312,7 +311,7 @@ impl PatchSection {
             path: raw.path,
             file_hash: raw.file_hash,
             diff: raw.diff,
-            parsed: OnceCell::new(),
+            parsed: OnceLock::new(),
         }
     }
 
