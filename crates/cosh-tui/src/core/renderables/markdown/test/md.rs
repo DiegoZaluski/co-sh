@@ -315,12 +315,10 @@ fn test_task_list_unchecked() {
 
     // Should have bullet marker
     assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "•");
-    // Checkbox should show unchecked
-    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "[");
-    assert_eq!(buf.cell((3, 0)).unwrap().symbol(), " ");
-    assert_eq!(buf.cell((4, 0)).unwrap().symbol(), "]");
+    // Checkbox should show unchecked Unicode symbol
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "☐");
     // Text should follow
-    assert_eq!(buf.cell((6, 0)).unwrap().symbol(), "t");
+    assert_eq!(buf.cell((4, 0)).unwrap().symbol(), "t");
 }
 
 #[test]
@@ -329,12 +327,10 @@ fn test_task_list_checked() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
     md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
 
-    // Checkbox should show checked
-    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "[");
-    assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "x");
-    assert_eq!(buf.cell((4, 0)).unwrap().symbol(), "]");
+    // Checkbox should show checked Unicode symbol
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "☑");
     // Text should follow
-    assert_eq!(buf.cell((6, 0)).unwrap().symbol(), "d");
+    assert_eq!(buf.cell((4, 0)).unwrap().symbol(), "d");
 }
 
 #[test]
@@ -343,16 +339,12 @@ fn test_task_list_multiple_items() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
     md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
 
-    // First row: checked
-    assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "x");
+    // First row: checked (☑at position 2 after bullet + space)
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "☑");
     // Second row: unchecked
-    assert_eq!(buf.cell((2, 1)).unwrap().symbol(), "[");
-    assert_eq!(buf.cell((3, 1)).unwrap().symbol(), " ");
-    assert_eq!(buf.cell((4, 1)).unwrap().symbol(), "]");
+    assert_eq!(buf.cell((2, 1)).unwrap().symbol(), "☐");
     // Third row: unchecked
-    assert_eq!(buf.cell((2, 2)).unwrap().symbol(), "[");
-    assert_eq!(buf.cell((3, 2)).unwrap().symbol(), " ");
-    assert_eq!(buf.cell((4, 2)).unwrap().symbol(), "]");
+    assert_eq!(buf.cell((2, 2)).unwrap().symbol(), "☐");
 }
 
 #[test]

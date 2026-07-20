@@ -22,10 +22,18 @@ fn lang_from_name(name: &str) -> Option<Language> {
     Some(match name {
         "rust" | "rs" => tree_sitter_rust::LANGUAGE.into(),
         "python" | "py" => tree_sitter_python::LANGUAGE.into(),
-        "javascript" | "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
-        "c#" | "csharp" | "cs" => tree_sitter_c_sharp::LANGUAGE.into(),
+        "javascript" | "js" | "jsx" | "mjs" | "cjs" | "json"
+        | "typescript" | "ts" | "tsx"
+        | "php"
+        | "lua"
+        | "dart"
+            => tree_sitter_javascript::LANGUAGE.into(),
+        "c#" | "csharp" | "cs"
+        | "c" | "h" | "cpp" | "c++" | "cxx" | "hpp"
+        | "objectivec" | "objc" | "m" | "mm"
+            => tree_sitter_c_sharp::LANGUAGE.into(),
         "go" | "golang" => tree_sitter_go::LANGUAGE.into(),
-        "java" => tree_sitter_java::LANGUAGE.into(),
+        "java" | "scala" | "groovy" => tree_sitter_java::LANGUAGE.into(),
         "haskell" | "hs" | "lhs" => tree_sitter_haskell::LANGUAGE.into(),
         "swift" => tree_sitter_swift::LANGUAGE.into(),
         "zig" | "zon" => tree_sitter_zig::LANGUAGE.into(),
@@ -120,7 +128,11 @@ fn query_for_language(lang: &str) -> Option<&'static str> {
              (function_definition name: (identifier) @function)
              (call function: (identifier) @function)"
         }
-        "javascript" | "js" | "jsx" | "mjs" | "cjs" => {
+        "javascript" | "js" | "jsx" | "mjs" | "cjs" | "json"
+        | "typescript" | "ts" | "tsx"
+        | "php"
+        | "lua"
+        | "dart" => {
             "\"function\" @keyword
              \"const\" @keyword
              \"let\" @keyword
@@ -164,8 +176,11 @@ fn query_for_language(lang: &str) -> Option<&'static str> {
              (function_declaration name: (identifier) @function)
              (call_expression function: (identifier) @function)"
         }
-        "c#" | "csharp" | "cs" | "go" | "java" | "haskell" | "hs" | "lhs" | "swift" | "zig"
-        | "zon" | "kotlin" | "kt" | "kts" => {
+        "c#" | "csharp" | "cs" | "go" | "java" | "scala" | "groovy"
+        | "haskell" | "hs" | "lhs" | "swift" | "zig"
+        | "zon" | "kotlin" | "kt" | "kts"
+        | "c" | "h" | "cpp" | "c++" | "cxx" | "hpp"
+        | "objectivec" | "objc" | "m" | "mm" => {
             "(string_literal) @string
              (comment) @comment
              (type_identifier) @type
@@ -253,6 +268,45 @@ mod tests {
         let spans = result.unwrap();
         println!("Python spans: {:?}", spans);
         assert!(!spans.is_empty(), "should have at least one span");
+    }
+
+    #[test]
+    fn test_highlight_json() {
+        let source = r#"{
+  "name": "test",
+  "count": 42,
+  "active": true,
+  "data": null
+}"#;
+        let result = highlight(source, "json");
+        assert!(
+            result.is_some(),
+            "highlight should return Some for json (uses JS grammar)"
+        );
+        let spans = result.unwrap();
+        println!("JSON spans: {:?}", spans);
+        assert!(!spans.is_empty(), "should have at least one span for JSON");
+
+        // JSON should have strings (the keys and values)
+        let strings: Vec<_> = spans
+            .iter()
+            .filter(|s| s.category == HighlightCategory::String)
+            .collect();
+        assert!(!strings.is_empty(), "JSON should have string spans");
+
+        // JSON should have numbers (42)
+        let numbers: Vec<_> = spans
+            .iter()
+            .filter(|s| s.category == HighlightCategory::Number)
+            .collect();
+        assert!(!numbers.is_empty(), "JSON should have number spans");
+
+        // JSON should have builtins (true, null)
+        let builtins: Vec<_> = spans
+            .iter()
+            .filter(|s| s.category == HighlightCategory::Builtin)
+            .collect();
+        assert!(!builtins.is_empty(), "JSON should have builtin spans (true, null)");
     }
 
     #[test]

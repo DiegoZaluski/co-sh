@@ -18,7 +18,15 @@ use crate::core::rgba::RGBA;
 use crate::core::rgba::{ColorInput, parse_color};
 
 use super::context::{MarkdownContext, MarkdownElement};
-use super::styles::MarkdownPalette;
+use super::styles::{rgba_to_ratatui as rgba_to_color, MarkdownPalette};
+
+// ── Constants ────────────────────────────────────────────────────
+/// Unicode bullet character for unordered list items.
+const LIST_BULLET: &str = "• ";
+/// Horizontal padding (left/right) inside code blocks.
+const CODE_PAD_H: u16 = 2;
+/// Vertical padding rows inside code blocks (top/bottom).
+const CODE_PAD_V: u16 = 1;
 
 static NEXT_MARKDOWN_NUM: AtomicU64 = AtomicU64::new(1);
 
@@ -592,6 +600,26 @@ impl Renderable for MarkdownRenderable {
                             if y < max_y {
                                 let cb_bg = palette.code_bg_color();
                                 Self::fill_row(buf, area.x, y, max_x, Style::default().bg(cb_bg));
+
+                                // Draw language label on the top gap row
+                                let lang = ctx.code_block_lang();
+                                if !lang.is_empty() {
+                                    let label_style = Style::default()
+                                        .fg(rgba_to_color(palette.muted_color()))
+                                        .bg(cb_bg)
+                                        .add_modifier(Modifier::ITALIC);
+                                    let mut lx = area.x.saturating_add(2);
+                                    for ch in lang.chars() {
+                                        if lx >= max_x {
+                                            break;
+                                        }
+                                        if let Some(cell) = buf.cell_mut((lx, y)) {
+                                            cell.set_char(ch);
+                                            cell.set_style(label_style);
+                                        }
+                                        lx += 1;
+                                    }
+                                }
                             }
                         }
                         Tag::List(_start) => {}
@@ -603,12 +631,12 @@ impl Renderable for MarkdownRenderable {
                             let marker_style =
                                 Style::default().fg(rgba_to_color(palette.list_marker_color()));
                             let marker = ctx.list_marker().map_or_else(
-                                || "• ".to_string(),
+                                || LIST_BULLET.to_string(),
                                 |(ordered, num)| {
                                     if ordered {
                                         format!("{num}. ")
                                     } else {
-                                        "• ".to_string()
+                                        LIST_BULLET.to_string()
                                     }
                                 },
                             );
@@ -771,7 +799,8 @@ impl Renderable for MarkdownRenderable {
 
                 // ── Task list markers ───────────────────────────
                 Event::TaskListMarker(checked) => {
-                    let marker = if checked { "[x] " } else { "[ ] " };
+                    // Use Unicode checkbox symbols for a more polished look
+                    let marker = if checked { "☑ " } else { "☐ " };
                     let style = Style::default().fg(rgba_to_color(palette.list_marker_color()));
                     Self::render_text(marker, buf, &mut x, &mut y, area.x, max_x, max_y, style, 0);
                 }
@@ -812,25 +841,40 @@ impl MarkdownRenderable {
         let code_bg = palette.code_bg_color();
         let default_fg = rgba_to_color(palette.text_color());
 
-        // When no language is specified (e.g. LLM output without ```lang),
-        // default to JavaScript — the most popular language, with syntax
-        // matching many others (C, Java, TypeScript, etc.).
-        let effective_lang = if lang.is_empty() { "javascript" } else { lang };
-
+        // Syntax highlighting strategy:
+        // - ``` (no language tag) → no highlighting, render as plain text
+        // - ```lang (known/supported) → use tree-sitter highlighting
+        // - ```lang (unknown/unsupported) → fall back to JavaScript (versatile default)
+        //
         // Build byte-to-category map for syntax highlighting (cached)
-        let spans: Option<Vec<HighlightSpan>> = if self.streaming {
+        let spans: Option<Vec<HighlightSpan>> = if self.streaming || lang.is_empty() {
             None
         } else {
-            let key = highlight_cache_key(text, effective_lang);
+            let key = highlight_cache_key(text, lang);
             #[allow(clippy::unwrap_used)]
             let mut cache = HIGHLIGHT_CACHE.lock().unwrap();
-            cache.get(&key).cloned().or_else(|| {
-                let computed = highlight(text, effective_lang);
+            let result = cache.get(&key).cloned().or_else(|| {
+                let computed = highlight(text, lang);
                 if let Some(ref spans) = computed {
                     cache.push(key, spans.clone());
                 }
                 computed
-            })
+            });
+
+            // Fallback: if the specified language is not supported by tree-sitter,
+            // retry with JavaScript as a versatile generic highlighter.
+            if result.is_none() && lang != "javascript" {
+                let js_key = highlight_cache_key(text, "javascript");
+                cache.get(&js_key).cloned().or_else(|| {
+                    let computed = highlight(text, "javascript");
+                    if let Some(ref spans) = computed {
+                        cache.push(js_key, spans.clone());
+                    }
+                    computed
+                })
+            } else {
+                result
+            }
         };
         let mut cat_map: Vec<Option<HighlightCategory>> = vec![None; text.len()];
         if let Some(ref spans) = spans {
@@ -842,13 +886,11 @@ impl MarkdownRenderable {
         }
 
         let mut byte_offset = 0;
-        let code_pad = 2u16;
-        let code_pad_v = 1u16;
 
         // The CodeBlock start handler already drew the top gap row (filled
         // with the code background), so the first code line begins on the
         // next row via the loop below. Only a bottom gap is added here.
-        *x = area_x.saturating_add(code_pad);
+        *x = area_x.saturating_add(CODE_PAD_H);
 
         for line in text.lines() {
             // Every code line (including the first) gets its own fresh row,
@@ -857,14 +899,14 @@ impl MarkdownRenderable {
                 break;
             }
             *y += 1;
-            *x = area_x.saturating_add(code_pad);
+            *x = area_x.saturating_add(CODE_PAD_H);
             if *y >= max_y {
                 break;
             }
 
             // Fill the entire line with code-block background
             Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
-            *x = area_x.saturating_add(code_pad);
+            *x = area_x.saturating_add(CODE_PAD_H);
 
             // Word-aware rendering with syntax highlighting preservation.
             // Non-space graphemes are buffered into "words"; when a space or
@@ -892,13 +934,13 @@ impl MarkdownRenderable {
                         max_x,
                         max_y,
                         code_bg,
-                        code_pad,
+                        CODE_PAD_H,
                     );
                     if *y >= max_y {
                         break;
                     }
                     *y += 1;
-                    *x = area_x.saturating_add(code_pad);
+                    *x = area_x.saturating_add(CODE_PAD_H);
                     if *y < max_y {
                         Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
                     }
@@ -916,7 +958,7 @@ impl MarkdownRenderable {
                         max_x,
                         max_y,
                         code_bg,
-                        code_pad,
+                        CODE_PAD_H,
                     );
                     if *y >= max_y {
                         break;
@@ -945,14 +987,14 @@ impl MarkdownRenderable {
                 max_x,
                 max_y,
                 code_bg,
-                code_pad,
+                CODE_PAD_H,
             );
             byte_offset += line.len() + 1;
         }
 
         // Internal bottom padding (blank background rows)
         *x = area_x;
-        for _ in 0..code_pad_v {
+        for _ in 0..CODE_PAD_V {
             if *y >= max_y {
                 break;
             }
@@ -978,6 +1020,19 @@ impl MarkdownRenderable {
             );
         }
     }
+}
+
+/// Blend two RGBA colors: result = base * (1 - factor) + overlay * factor.
+fn blend_color(base: RGBA, overlay: RGBA, factor: f64) -> RGBA {
+    let (br, bg, bb, _) = base.to_ints();
+    let (or_, og, ob, _) = overlay.to_ints();
+    let t = factor.clamp(0.0, 1.0);
+    RGBA::from_ints(
+        (f64::from(br) * (1.0 - t) + f64::from(or_) * t) as u8,
+        (f64::from(bg) * (1.0 - t) + f64::from(og) * t) as u8,
+        (f64::from(bb) * (1.0 - t) + f64::from(ob) * t) as u8,
+        255,
+    )
 }
 
 // ── Table rendering ─────────────────────────────────────────────
@@ -1041,6 +1096,13 @@ impl MarkdownRenderable {
             .fg(rgba_to_color(palette.text_color()))
             .add_modifier(ratatui::style::Modifier::BOLD);
 
+        // Alternating row background: slightly lighter/dimmer variant of the base bg
+        let alt_bg_color = rgba_to_color(blend_color(
+            palette.background_color(),
+            palette.text_color(),
+            0.06,
+        ));
+
         // Compute column start positions
         let mut col_starts: Vec<u16> = Vec::with_capacity(col_count);
         let mut cx = area_x;
@@ -1052,7 +1114,7 @@ impl MarkdownRenderable {
 
         // Helper to render a border line
         let render_border =
-            |buf: &mut Buffer, y: u16, left: char, _mid: char, right: char, sep: char| {
+            |buf: &mut Buffer, y: u16, left: char, right: char, sep: char| {
                 if y >= max_y {
                     return;
                 }
@@ -1060,8 +1122,13 @@ impl MarkdownRenderable {
                     let sx = col_starts[ci];
                     let cw = col_widths[ci] + 2 * padding;
                     let start_char = if ci == 0 { left } else { sep };
-                    // Left edge: draw corner/sep at sx-1 (saturates to 0 for ci=0)
-                    let corner_pos = sx.saturating_sub(1);
+                    // Corner position: for the first column (ci=0), the left edge is at `sx`;
+                    // for subsequent columns, the separator sits between this column and the previous one.
+                    let corner_pos = if ci == 0 {
+                        sx
+                    } else {
+                        sx.saturating_sub(1)
+                    };
                     if let Some(cell) = buf.cell_mut((corner_pos, y)) {
                         cell.set_char(start_char);
                         cell.set_style(border_style);
@@ -1069,7 +1136,7 @@ impl MarkdownRenderable {
                     // Horizontal line: skip the corner position (already drawn above)
                     for dx in 0..cw {
                         let px = sx + dx;
-                        if px == corner_pos && ci == 0 {
+                        if px == corner_pos {
                             continue;
                         }
                         if let Some(cell) = buf.cell_mut((px, y)) {
@@ -1086,22 +1153,46 @@ impl MarkdownRenderable {
                 }
             };
 
-        // Helper to render a row of cells
-        let render_row = |buf: &mut Buffer, y: u16, cells: &[String], is_header: bool| {
+        // Helper to render a row of cells with optional alternating background
+        let render_row = |buf: &mut Buffer, y: u16, cells: &[String], is_header: bool, row_idx: usize| {
             if y >= max_y {
                 return;
             }
             let cell_style = if is_header { header_style } else { text_style };
+
+            // Determine styles for alternating rows
+            let (actual_border_style, actual_cell_style) =
+                if !is_header && row_idx % 2 == 0 {
+                    // Pre-fill entire row area with alternating background for continuous stripe
+                    let right_bound = col_starts.last()
+                        .copied()
+                        .unwrap_or(area_x)
+                        .saturating_add(col_widths[col_count - 1] + 2 * padding + 1)
+                        .min(max_x);
+                    for cx in area_x..right_bound {
+                        if let Some(cell) = buf.cell_mut((cx, y)) {
+                            cell.set_style(Style::default().bg(alt_bg_color));
+                            cell.set_char(' ');
+                        }
+                    }
+                    (
+                        border_style.bg(alt_bg_color),
+                        cell_style.bg(alt_bg_color),
+                    )
+                } else {
+                    (border_style, cell_style)
+                };
+
             for ci in 0..col_count {
                 let sx = col_starts[ci];
                 let content = cells.get(ci).map_or("", |s| s.as_str());
 
-                // Vertical border on the left of first cell
-                if let Some(cell) = buf.cell_mut((sx.saturating_sub(1), y))
-                    && ci == 0
-                {
+                // Vertical border on the left of each cell (first cell starts at column `sx`,
+                // subsequent cells share the right border of the previous cell at `sx - 1`)
+                let vline_x = if ci == 0 { sx } else { sx.saturating_sub(1) };
+                if let Some(cell) = buf.cell_mut((vline_x, y)) {
                     cell.set_char('│');
-                    cell.set_style(border_style);
+                    cell.set_style(actual_border_style);
                 }
 
                 // Render cell content with padding
@@ -1112,7 +1203,7 @@ impl MarkdownRenderable {
                     }
                     if let Some(cell) = buf.cell_mut((cx, y)) {
                         cell.set_char(ch);
-                        cell.set_style(cell_style);
+                        cell.set_style(actual_cell_style);
                     }
                     cx += 1;
                 }
@@ -1121,39 +1212,39 @@ impl MarkdownRenderable {
                 let ex = sx + col_widths[ci] + 2 * padding;
                 if let Some(cell) = buf.cell_mut((ex, y)) {
                     cell.set_char('│');
-                    cell.set_style(border_style);
+                    cell.set_style(actual_border_style);
                 }
             }
         };
 
         // ── Top border ──────────────────────────────────────────
-        render_border(buf, *y, '┌', '─', '┐', '┬');
+        render_border(buf, *y, '┌', '┐', '┬');
         *y += 1;
 
         // ── Header row ──────────────────────────────────────────
         if *y < max_y {
-            render_row(buf, *y, headers, true);
+            render_row(buf, *y, headers, true, 0);
             *y += 1;
         }
 
         // ── Header/body separator ───────────────────────────────
         if *y < max_y {
-            render_border(buf, *y, '├', '─', '┤', '┼');
+            render_border(buf, *y, '├', '┤', '┼');
             *y += 1;
         }
 
-        // ── Body rows ───────────────────────────────────────────
-        for row in rows {
+        // ── Body rows (with alternating background) ────────────
+        for (row_idx, row) in rows.iter().enumerate() {
             if *y >= max_y {
                 break;
             }
-            render_row(buf, *y, row, false);
+            render_row(buf, *y, row, false, row_idx);
             *y += 1;
         }
 
         // ── Bottom border ───────────────────────────────────────
         if *y < max_y {
-            render_border(buf, *y, '└', '─', '┘', '┴');
+            render_border(buf, *y, '└', '┘', '┴');
             *y += 1;
         }
 
@@ -1161,12 +1252,7 @@ impl MarkdownRenderable {
     }
 }
 
-// ── Colour helpers ───────────────────────────────────────────────
 
-const fn rgba_to_color(c: RGBA) -> Color {
-    let (r, g, b, _) = c.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 /// Strip markdown formatting and return the visible text content,
 /// matching what `MarkdownRenderable` actually displays on screen.
@@ -1195,12 +1281,12 @@ pub fn markdown_to_visible_text(markdown: &str) -> String {
                 match &tag {
                     Tag::Item => {
                         let marker = ctx.list_marker().map_or_else(
-                            || "• ".to_string(),
+                            || LIST_BULLET.to_string(),
                             |(ordered, num)| {
                                 if ordered {
                                     format!("{num}. ")
                                 } else {
-                                    "• ".to_string()
+                                    LIST_BULLET.to_string()
                                 }
                             },
                         );
@@ -1240,10 +1326,11 @@ pub fn markdown_to_visible_text(markdown: &str) -> String {
                 result.push('\n');
             }
             Event::TaskListMarker(checked) => {
+                // Match the Unicode checkbox symbols used in rendered output
                 if checked {
-                    result.push_str("[x] ");
+                    result.push_str("☑ ");
                 } else {
-                    result.push_str("[ ] ");
+                    result.push_str("☐ ");
                 }
             }
             Event::Rule if !result.ends_with('\n') => {

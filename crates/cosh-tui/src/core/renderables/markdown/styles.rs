@@ -246,7 +246,7 @@ impl MarkdownPalette {
     }
 }
 
-const fn rgba_to_ratatui(c: RGBA) -> Color {
+pub const fn rgba_to_ratatui(c: RGBA) -> Color {
     let (r, g, b, _) = c.to_ints();
     Color::Rgb(r, g, b)
 }
