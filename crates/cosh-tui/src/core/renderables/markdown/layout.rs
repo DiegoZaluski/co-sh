@@ -23,9 +23,14 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
 
     let mut ctx = MarkdownContext::new();
 
-    // Table-buffering state (mirrors md.rs)
+    // Table-buffering state (mirrors md.rs — full cell content buffering
+    // for accurate multi-line height estimation)
     let mut in_table = false;
-    let mut tbl_rows_count: u16 = 0;
+    let mut tbl_headers: Vec<String> = Vec::new();
+    let mut tbl_rows: Vec<Vec<String>> = Vec::new();
+    let mut tbl_cur_row: Vec<String> = Vec::new();
+    let mut tbl_cur_cell = String::new();
+    let mut tbl_in_header = false;
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -36,29 +41,163 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
     for event in parser {
         // ── Table buffering mode ───────────────────────────────
         if in_table {
-            if let Event::End(tag_end) = &event {
-                match &tag_end {
-                    TagEnd::TableRow => {
-                        tbl_rows_count += 1;
-                    }
-                    TagEnd::Table => {
-                        // Height: top(1) + header(1) + sep(1) + body rows + bottom(1)
-                        let table_h = 4 + tbl_rows_count;
-                        if x != area_x {
-                            y += 1;
+            match &event {
+                Event::Start(tag) => {
+                    ctx.handle_start(tag);
+                    match tag {
+                        Tag::TableHead => {
+                            tbl_in_header = true;
+                            tbl_cur_row.clear();
                         }
-                        y += table_h;
-                        x = area_x;
-                        in_table = false;
+                        Tag::TableRow => {
+                            tbl_cur_row.clear();
+                        }
+                        Tag::TableCell => {
+                            tbl_cur_cell.clear();
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-            // Forward End events to context for state tracking
-            if let Event::End(end) = &event {
-                ctx.handle_end(end);
-            } else {
-                continue;
+                Event::End(tag_end) => {
+                    match tag_end {
+                        TagEnd::TableCell => {
+                            tbl_cur_row.push(std::mem::take(&mut tbl_cur_cell));
+                        }
+                        TagEnd::TableRow => {
+                            let row = std::mem::take(&mut tbl_cur_row);
+                            if tbl_in_header {
+                                tbl_headers = row;
+                            } else {
+                                tbl_rows.push(row);
+                            }
+                        }
+                        TagEnd::TableHead => {
+                            if tbl_in_header && !tbl_cur_row.is_empty() {
+                                tbl_headers = std::mem::take(&mut tbl_cur_row);
+                            }
+                            tbl_in_header = false;
+                        }
+                        TagEnd::Table => {
+                            // ── Calculate accurate height with wrapping ──
+                            let col_count = tbl_headers.len();
+                            if col_count > 0 && max_w > 0 {
+                                let padding: u16 = 1;
+                                let border_gaps = if col_count > 1 { col_count as u16 - 1 } else { 0 };
+
+                                // Calculate natural column widths
+                                let mut col_widths: Vec<u16> = tbl_headers
+                                    .iter()
+                                    .map(|h| h.chars().count() as u16)
+                                    .collect();
+                                for row in &tbl_rows {
+                                    for (ci, cell) in row.iter().enumerate() {
+                                        if ci < col_count {
+                                            col_widths[ci] = col_widths[ci].max(cell.chars().count() as u16);
+                                        }
+                                    }
+                                }
+
+                                // Scale and redistribute (same algorithm as render_table in md.rs)
+                                let total_w: u16 = col_widths
+                                    .iter()
+                                    .map(|w| w + 2 * padding)
+                                    .sum::<u16>()
+                                    + border_gaps;
+                                let available = max_w;
+                                if total_w > available {
+                                    let scale = f64::from(available) / f64::from(total_w);
+                                    for w in &mut col_widths {
+                                        *w = (f64::from(*w) * scale) as u16;
+                                    }
+                                    for w in &mut col_widths {
+                                        *w = (*w).max(1);
+                                    }
+                                    while col_widths
+                                        .iter()
+                                        .map(|w| w + 2 * padding)
+                                        .sum::<u16>()
+                                        + border_gaps
+                                        > available
+                                    {
+                                        if let Some(max_idx) = (0..col_widths.len())
+                                            .filter(|&i| col_widths[i] > 1)
+                                            .max_by_key(|&i| col_widths[i])
+                                        {
+                                            col_widths[max_idx] -= 1;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // Estimate wrapped line count per cell
+                                let estimate_cell_lines = |content: &str, col_w: u16| -> usize {
+                                    if col_w < 1 || content.is_empty() {
+                                        return 1;
+                                    }
+                                    let lines =
+                                        crate::core::lib::unicode_util::word_wrap(content, col_w);
+                                    let mut total = 0usize;
+                                    for line in &lines {
+                                        let lw = crate::core::lib::unicode_util::str_display_width(line) as u16;
+                                        if lw <= col_w {
+                                            total += 1;
+                                        } else {
+                                            // Character-level: ceil(lw / col_w)
+                                            total += ((lw + col_w - 1) / col_w) as usize;
+                                        }
+                                    }
+                                    total.max(1)
+                                };
+
+                                // Header wrapped lines
+                                let header_lines = tbl_headers
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(ci, h)| estimate_cell_lines(h, col_widths[ci]))
+                                    .max()
+                                    .unwrap_or(1);
+
+                                // Body wrapped lines
+                                let mut body_lines = 0usize;
+                                for row in &tbl_rows {
+                                    let row_lines = row
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(ci, cell)| estimate_cell_lines(cell, col_widths[ci]))
+                                        .max()
+                                        .unwrap_or(1);
+                                    body_lines += row_lines;
+                                }
+
+                                // Total: top(1) + header + sep(1) + body + bottom(1)
+                                let table_h = 1 + header_lines + 1 + body_lines + 1;
+                                if x != area_x {
+                                    y += 1;
+                                }
+                                y += table_h as u16;
+                            } else {
+                                if x != area_x {
+                                    y += 1;
+                                }
+                                y += 1;
+                            }
+                            x = area_x;
+                            in_table = false;
+                        }
+                        _ => {}
+                    }
+                    ctx.handle_end(tag_end);
+                }
+                Event::Text(text)
+                | Event::InlineHtml(text)
+                | Event::Code(text) => {
+                    tbl_cur_cell.push_str(text.as_ref());
+                }
+                Event::SoftBreak | Event::HardBreak => {
+                    tbl_cur_cell.push('\n');
+                }
+                _ => {}
             }
             continue;
         }
@@ -69,7 +208,11 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                 match &tag {
                     Tag::Table(_) => {
                         in_table = true;
-                        tbl_rows_count = 0;
+                        tbl_headers.clear();
+                        tbl_rows.clear();
+                        tbl_cur_row.clear();
+                        tbl_cur_cell.clear();
+                        tbl_in_header = false;
                         if x != area_x {
                             y += 1;
                             x = area_x;
