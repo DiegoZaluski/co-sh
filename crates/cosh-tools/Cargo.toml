@@ -39,6 +39,10 @@ features = ["json"]
 version = "1"
 features = ["derive"]
 
+[dependencies.cosh-recall]
+path = "../cosh-recall"
+features = ["lancedb"]
+
 [dependencies.cosh-sdk]
 path = "../cosh-sdk"
 

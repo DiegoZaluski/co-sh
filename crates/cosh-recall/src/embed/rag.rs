@@ -141,19 +141,19 @@ impl Embedder {
 
     /// Embed a batch of texts, returning one vector per input.
     #[allow(clippy::unused_async)]
-    pub(crate) async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, RagError> {
+    pub(crate) async fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, RagError> {
         match self {
             #[cfg(feature = "fastembed")]
             Self::Local { model, dim: _ } => {
                 let mut guard = model.lock().map_err(|_| RagError::LockPoisoned)?;
-                let embeddings = guard.embed(texts, None)?;
+                let embeddings = guard.embed(_texts, None)?;
                 drop(guard);
                 Ok(embeddings)
             }
             #[cfg(feature = "cloud")]
             Self::Cloud { connector, dim: _ } => {
-                let mut results = Vec::with_capacity(texts.len());
-                for text in texts {
+                let mut results = Vec::with_capacity(_texts.len());
+                for text in _texts {
                     let emb = connector.embed(text).await?;
                     results.push(emb);
                 }

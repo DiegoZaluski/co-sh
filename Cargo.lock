@@ -1268,6 +1268,7 @@ name = "cosh-tools"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "cosh-recall",
  "cosh-sdk",
  "libc",
  "log",

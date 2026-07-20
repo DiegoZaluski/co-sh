@@ -8,6 +8,7 @@ pub mod find;
 pub mod fs;
 pub mod plan;
 pub mod question;
+pub mod recall;
 pub mod skills;
 pub mod subagent;
 pub mod util;

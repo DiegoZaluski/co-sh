@@ -96,6 +96,11 @@ pub struct VecDb {
 }
 
 impl VecDb {
+    /// Open an existing LanceDB table (read-write).
+    ///
+    /// If the table does not exist it is **created** with the given
+    /// `vector_dim`. For a pure read-only open see
+    /// [`connect_readonly`](Self::connect_readonly).
     pub async fn connect(
         uri: &str,
         table_name: &str,
@@ -115,6 +120,59 @@ impl VecDb {
         };
 
         Ok(Self { table, vector_dim })
+    }
+
+    /// Open an existing LanceDB table for **read-only** access.
+    ///
+    /// Unlike [`connect`](Self::connect), this returns an error if the
+    /// table does not exist — no table is created. The vector dimension
+    /// is inferred from the table schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VecDbError::Database`] if the table cannot be opened or
+    /// the schema is malformed.
+    pub async fn connect_readonly(
+        uri: &str,
+        table_name: &str,
+    ) -> Result<Self, VecDbError> {
+        let connection = lancedb::connect(uri).execute().await?;
+        let table = connection
+            .open_table(table_name)
+            .execute()
+            .await
+            .map_err(|e| {
+                VecDbError::NotFound(format!(
+                    "table '{table_name}' does not exist at '{uri}': {e}"
+                ))
+            })?;
+
+        // Infer vector dimension from the table schema.
+        let schema = table.schema().await?;
+        let vector_dim = Self::infer_vector_dim(&schema)?;
+
+        Ok(Self { table, vector_dim })
+    }
+
+    /// Return the vector dimension of this database instance.
+    #[must_use]
+    pub const fn vector_dim(&self) -> usize {
+        self.vector_dim
+    }
+
+    /// Extract the vector dimension from a LanceDB table schema.
+    fn infer_vector_dim(schema: &Schema) -> Result<usize, VecDbError> {
+        for field in schema.fields() {
+            if let DataType::FixedSizeList(_, dim) = field.data_type()
+                && field.name() == "vector"
+            {
+                return usize::try_from(*dim)
+                    .map_err(|_| VecDbError::Database("negative vector dimension".into()));
+            }
+        }
+        Err(VecDbError::Database(
+            "table schema has no 'vector' column of type FixedSizeList".into(),
+        ))
     }
 
     pub async fn post(
