@@ -1,12 +1,12 @@
 pub mod footer;
 
-#[cfg(test)]
-mod tests;
 pub mod permission;
 pub mod question;
 pub mod right_panel;
 pub mod sidebar;
 pub mod subagent_footer;
+#[cfg(test)]
+mod tests;
 
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
@@ -1326,7 +1326,8 @@ impl SessionView {
                 if config_or_width_changed {
                     self.actual_total_height = self.cached_total_height;
                 } else {
-                    self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
+                    self.actual_total_height =
+                        self.actual_total_height.max(self.cached_total_height);
                 }
 
                 // When switching to a different session, scroll to the bottom
@@ -1716,7 +1717,7 @@ impl SessionView {
         }
     }
 
-        pub fn get_text_in_region(
+    pub fn get_text_in_region(
         &self,
         anchor_x: u16,
         anchor_y: u16,
@@ -2402,7 +2403,7 @@ impl SessionView {
         let actual_total = y - (vp_top - self.scroll_y);
         self.actual_total_height = actual_total;
         self.total_height = self.cached_total_height;
-        self.last_content_height = self.cached_total_height; 
+        self.last_content_height = self.cached_total_height;
 
         if let Some((anchor_x, _anchor_screen_y, focus_x, _focus_screen_y)) = self.drag_selection {
             // Convert content-space anchor and focus to current screen position.

@@ -82,7 +82,11 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                             let col_count = tbl_headers.len();
                             if col_count > 0 && max_w > 0 {
                                 let padding: u16 = 1;
-                                let border_gaps = if col_count > 1 { col_count as u16 - 1 } else { 0 };
+                                let border_gaps = if col_count > 1 {
+                                    col_count as u16 - 1
+                                } else {
+                                    0
+                                };
 
                                 // Calculate natural column widths
                                 let mut col_widths: Vec<u16> = tbl_headers
@@ -92,17 +96,16 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                                 for row in &tbl_rows {
                                     for (ci, cell) in row.iter().enumerate() {
                                         if ci < col_count {
-                                            col_widths[ci] = col_widths[ci].max(cell.chars().count() as u16);
+                                            col_widths[ci] =
+                                                col_widths[ci].max(cell.chars().count() as u16);
                                         }
                                     }
                                 }
 
                                 // Scale and redistribute (same algorithm as render_table in md.rs)
-                                let total_w: u16 = col_widths
-                                    .iter()
-                                    .map(|w| w + 2 * padding)
-                                    .sum::<u16>()
-                                    + border_gaps;
+                                let total_w: u16 =
+                                    col_widths.iter().map(|w| w + 2 * padding).sum::<u16>()
+                                        + border_gaps;
                                 let available = max_w;
                                 if total_w > available {
                                     let scale = f64::from(available) / f64::from(total_w);
@@ -112,10 +115,7 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                                     for w in &mut col_widths {
                                         *w = (*w).max(1);
                                     }
-                                    while col_widths
-                                        .iter()
-                                        .map(|w| w + 2 * padding)
-                                        .sum::<u16>()
+                                    while col_widths.iter().map(|w| w + 2 * padding).sum::<u16>()
                                         + border_gaps
                                         > available
                                     {
@@ -139,7 +139,9 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                                         crate::core::lib::unicode_util::word_wrap(content, col_w);
                                     let mut total = 0usize;
                                     for line in &lines {
-                                        let lw = crate::core::lib::unicode_util::str_display_width(line) as u16;
+                                        let lw =
+                                            crate::core::lib::unicode_util::str_display_width(line)
+                                                as u16;
                                         if lw <= col_w {
                                             total += 1;
                                         } else {
@@ -189,9 +191,7 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                     }
                     ctx.handle_end(tag_end);
                 }
-                Event::Text(text)
-                | Event::InlineHtml(text)
-                | Event::Code(text) => {
+                Event::Text(text) | Event::InlineHtml(text) | Event::Code(text) => {
                     tbl_cur_cell.push_str(text.as_ref());
                 }
                 Event::SoftBreak | Event::HardBreak => {

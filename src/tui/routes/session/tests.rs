@@ -8,8 +8,8 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
@@ -18,9 +18,7 @@ use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::{Theme, ThemeRegistry};
-use crate::types::{
-    Message, MessageRole, Part, Session, SessionStatus, TextPart,
-};
+use crate::types::{Message, MessageRole, Part, Session, SessionStatus, TextPart};
 
 use super::SessionView;
 
@@ -166,10 +164,7 @@ fn test_render_performance_scaling() {
         let mut buf = Buffer::empty(area);
 
         let elapsed = render_and_time(&mut view, &mut buf, area, &state, &theme, &config);
-        eprintln!(
-            "[BENCH] size={size:>5} words, render_time={:>8?}",
-            elapsed,
-        );
+        eprintln!("[BENCH] size={size:>5} words, render_time={:>8?}", elapsed,);
 
         assert!(
             elapsed.as_millis() < 5000,
@@ -179,8 +174,8 @@ fn test_render_performance_scaling() {
 
         if prev_time > std::time::Duration::ZERO && size >= 2000 {
             let ratio = elapsed.as_nanos() as f64 / prev_time.as_nanos().max(1) as f64;
-            let size_ratio = size as f64
-                / sizes[sizes.iter().position(|&s| s == size).unwrap() - 1] as f64;
+            let size_ratio =
+                size as f64 / sizes[sizes.iter().position(|&s| s == size).unwrap() - 1] as f64;
             eprintln!("[BENCH]   growth ratio: {ratio:.2}x time vs {size_ratio:.1}x size");
         }
 
@@ -271,10 +266,9 @@ fn test_streaming_incremental_growth() {
         );
 
         if prev_elapsed > std::time::Duration::ZERO {
-            let time_ratio =
-                elapsed.as_nanos() as f64 / prev_elapsed.as_nanos().max(1) as f64;
-            let size_ratio = size as f64
-                / sizes[sizes.iter().position(|&s| s == size).unwrap() - 1] as f64;
+            let time_ratio = elapsed.as_nanos() as f64 / prev_elapsed.as_nanos().max(1) as f64;
+            let size_ratio =
+                size as f64 / sizes[sizes.iter().position(|&s| s == size).unwrap() - 1] as f64;
             eprintln!("[BENCH]   time_ratio={time_ratio:.2}x, size_ratio={size_ratio:.1}x");
         }
 
@@ -297,9 +291,7 @@ fn test_full_chat_history_performance() {
             id: format!("user-{i}"),
             role: MessageRole::User,
             parts: vec![Part::Text(TextPart {
-                text: format!(
-                    "Can you help me with task number {i}?"
-                ),
+                text: format!("Can you help me with task number {i}?"),
                 synthetic: false,
             })],
             created_at: i as u64 * 1000,
@@ -362,8 +354,7 @@ fn test_full_chat_history_performance() {
     let second = render_and_time(&mut view, &mut buf, area, &state, &theme, &config);
     eprintln!("[BENCH] full chat (cached): {:?}", second);
     assert!(
-        second <= elapsed
-            || (second.as_micros() as f64) < (elapsed.as_micros() as f64) * 0.8,
+        second <= elapsed || (second.as_micros() as f64) < (elapsed.as_micros() as f64) * 0.8,
         "Cached render ({:?}) should be faster than cold ({:?})",
         second,
         elapsed
@@ -407,7 +398,10 @@ fn test_large_streaming_render_is_fast() {
                 .is_some_and(|c| c.symbol().chars().next().unwrap_or(' ') != ' ')
         })
     });
-    assert!(has_content, "Rendered buffer should contain visible content");
+    assert!(
+        has_content,
+        "Rendered buffer should contain visible content"
+    );
 }
 
 /// Test that stop_signal → status transition works correctly.
@@ -594,7 +588,10 @@ fn test_scroll_does_not_oscillate_between_frames() {
         );
     }
 
-    eprintln!("[OSCILLATE] PASS: scroll position stable across {}", scroll_positions.len());
+    eprintln!(
+        "[OSCILLATE] PASS: scroll position stable across {}",
+        scroll_positions.len()
+    );
 }
 
 /// Test that actual_total_height and cached_total_height are in sync after
@@ -615,30 +612,32 @@ fn test_height_sync_after_render() {
 
     eprintln!(
         "[SYNC] after render: actual_total={} cached_total={} total={}",
-        view.actual_total_height,
-        view.cached_total_height,
-        view.total_height
+        view.actual_total_height, view.cached_total_height, view.total_height
     );
 
     // cached_total_height should NOT be inflated above actual_total_height
     // The .max() was removed — cache is the stable source of truth
 
     // Both should be positive and reasonable
-    assert!(view.actual_total_height > 0, "actual_total_height should be > 0");
-    assert!(view.cached_total_height > 0, "cached_total_height should be > 0");
+    assert!(
+        view.actual_total_height > 0,
+        "actual_total_height should be > 0"
+    );
+    assert!(
+        view.cached_total_height > 0,
+        "cached_total_height should be > 0"
+    );
 
     // total_height should match cached_total_height (not actual_total)
     assert_eq!(
-        view.total_height,
-        view.cached_total_height,
+        view.total_height, view.cached_total_height,
         "total_height should equal cached_total_height, not actual_total_height"
     );
 
     // last_content_height should match cached_total_height (to prevent
     // spurious recalculate_bar_props on next frame)
     assert_eq!(
-        view.last_content_height,
-        view.cached_total_height,
+        view.last_content_height, view.cached_total_height,
         "last_content_height should equal cached_total_height to prevent oscillation"
     );
 }
@@ -664,9 +663,7 @@ fn test_scroll_does_not_jump_on_repeated_streaming() {
 
         eprintln!(
             "[SCROLL_GROWTH] size={size:>4}w scroll_y={:>5} actual_total={:>5} sticky={}",
-            view.scroll_y,
-            view.actual_total_height,
-            view.is_sticky_bottom
+            view.scroll_y, view.actual_total_height, view.is_sticky_bottom
         );
 
         // Each size should be at bottom

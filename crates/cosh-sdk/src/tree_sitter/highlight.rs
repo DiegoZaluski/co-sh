@@ -22,16 +22,10 @@ fn lang_from_name(name: &str) -> Option<Language> {
     Some(match name {
         "rust" | "rs" => tree_sitter_rust::LANGUAGE.into(),
         "python" | "py" => tree_sitter_python::LANGUAGE.into(),
-        "javascript" | "js" | "jsx" | "mjs" | "cjs" | "json"
-        | "typescript" | "ts" | "tsx"
-        | "php"
-        | "lua"
-        | "dart"
-            => tree_sitter_javascript::LANGUAGE.into(),
-        "c#" | "csharp" | "cs"
-        | "c" | "h" | "cpp" | "c++" | "cxx" | "hpp"
-        | "objectivec" | "objc" | "m" | "mm"
-            => tree_sitter_c_sharp::LANGUAGE.into(),
+        "javascript" | "js" | "jsx" | "mjs" | "cjs" | "json" | "typescript" | "ts" | "tsx"
+        | "php" | "lua" | "dart" => tree_sitter_javascript::LANGUAGE.into(),
+        "c#" | "csharp" | "cs" | "c" | "h" | "cpp" | "c++" | "cxx" | "hpp" | "objectivec"
+        | "objc" | "m" | "mm" => tree_sitter_c_sharp::LANGUAGE.into(),
         "go" | "golang" => tree_sitter_go::LANGUAGE.into(),
         "java" | "scala" | "groovy" => tree_sitter_java::LANGUAGE.into(),
         "haskell" | "hs" | "lhs" => tree_sitter_haskell::LANGUAGE.into(),
@@ -128,11 +122,8 @@ fn query_for_language(lang: &str) -> Option<&'static str> {
              (function_definition name: (identifier) @function)
              (call function: (identifier) @function)"
         }
-        "javascript" | "js" | "jsx" | "mjs" | "cjs" | "json"
-        | "typescript" | "ts" | "tsx"
-        | "php"
-        | "lua"
-        | "dart" => {
+        "javascript" | "js" | "jsx" | "mjs" | "cjs" | "json" | "typescript" | "ts" | "tsx"
+        | "php" | "lua" | "dart" => {
             "\"function\" @keyword
              \"const\" @keyword
              \"let\" @keyword
@@ -176,11 +167,9 @@ fn query_for_language(lang: &str) -> Option<&'static str> {
              (function_declaration name: (identifier) @function)
              (call_expression function: (identifier) @function)"
         }
-        "c#" | "csharp" | "cs" | "go" | "java" | "scala" | "groovy"
-        | "haskell" | "hs" | "lhs" | "swift" | "zig"
-        | "zon" | "kotlin" | "kt" | "kts"
-        | "c" | "h" | "cpp" | "c++" | "cxx" | "hpp"
-        | "objectivec" | "objc" | "m" | "mm" => {
+        "c#" | "csharp" | "cs" | "go" | "java" | "scala" | "groovy" | "haskell" | "hs" | "lhs"
+        | "swift" | "zig" | "zon" | "kotlin" | "kt" | "kts" | "c" | "h" | "cpp" | "c++" | "cxx"
+        | "hpp" | "objectivec" | "objc" | "m" | "mm" => {
             "(string_literal) @string
              (comment) @comment
              (type_identifier) @type
@@ -306,7 +295,10 @@ mod tests {
             .iter()
             .filter(|s| s.category == HighlightCategory::Builtin)
             .collect();
-        assert!(!builtins.is_empty(), "JSON should have builtin spans (true, null)");
+        assert!(
+            !builtins.is_empty(),
+            "JSON should have builtin spans (true, null)"
+        );
     }
 
     #[test]

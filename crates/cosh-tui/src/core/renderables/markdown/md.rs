@@ -18,7 +18,7 @@ use crate::core::rgba::RGBA;
 use crate::core::rgba::{ColorInput, parse_color};
 
 use super::context::{MarkdownContext, MarkdownElement};
-use super::styles::{rgba_to_ratatui as rgba_to_color, MarkdownPalette};
+use super::styles::{MarkdownPalette, rgba_to_ratatui as rgba_to_color};
 
 // ── Constants ────────────────────────────────────────────────────
 /// Unicode bullet character for unordered list items.
@@ -1091,7 +1091,8 @@ impl MarkdownRenderable {
             // Greedy redistribution: iteratively reduce the largest column
             // until the total fits within the available width.
             // This corrects rounding errors from proportional scaling.
-            while col_widths.iter().map(|w| w + 2 * padding).sum::<u16>() + border_gaps > available {
+            while col_widths.iter().map(|w| w + 2 * padding).sum::<u16>() + border_gaps > available
+            {
                 if let Some(max_idx) = (0..col_widths.len())
                     .filter(|&i| col_widths[i] > 1)
                     .max_by_key(|&i| col_widths[i])
@@ -1130,45 +1131,40 @@ impl MarkdownRenderable {
         }
 
         // Helper to render a border line
-        let render_border =
-            |buf: &mut Buffer, y: u16, left: char, right: char, sep: char| {
-                if y >= max_y {
-                    return;
+        let render_border = |buf: &mut Buffer, y: u16, left: char, right: char, sep: char| {
+            if y >= max_y {
+                return;
+            }
+            for ci in 0..col_count {
+                let sx = col_starts[ci];
+                let cw = col_widths[ci] + 2 * padding;
+                let start_char = if ci == 0 { left } else { sep };
+                // Corner position: for the first column (ci=0), the left edge is at `sx`;
+                // for subsequent columns, the separator sits between this column and the previous one.
+                let corner_pos = if ci == 0 { sx } else { sx.saturating_sub(1) };
+                if let Some(cell) = buf.cell_mut((corner_pos, y)) {
+                    cell.set_char(start_char);
+                    cell.set_style(border_style);
                 }
-                for ci in 0..col_count {
-                    let sx = col_starts[ci];
-                    let cw = col_widths[ci] + 2 * padding;
-                    let start_char = if ci == 0 { left } else { sep };
-                    // Corner position: for the first column (ci=0), the left edge is at `sx`;
-                    // for subsequent columns, the separator sits between this column and the previous one.
-                    let corner_pos = if ci == 0 {
-                        sx
-                    } else {
-                        sx.saturating_sub(1)
-                    };
-                    if let Some(cell) = buf.cell_mut((corner_pos, y)) {
-                        cell.set_char(start_char);
-                        cell.set_style(border_style);
+                // Horizontal line: skip the corner position (already drawn above)
+                for dx in 0..cw {
+                    let px = sx + dx;
+                    if px == corner_pos {
+                        continue;
                     }
-                    // Horizontal line: skip the corner position (already drawn above)
-                    for dx in 0..cw {
-                        let px = sx + dx;
-                        if px == corner_pos {
-                            continue;
-                        }
-                        if let Some(cell) = buf.cell_mut((px, y)) {
-                            cell.set_char('─');
-                            cell.set_style(border_style);
-                        }
-                    }
-                    let ex = sx + cw;
-                    let corner = if ci + 1 < col_count { sep } else { right };
-                    if let Some(cell) = buf.cell_mut((ex, y)) {
-                        cell.set_char(corner);
+                    if let Some(cell) = buf.cell_mut((px, y)) {
+                        cell.set_char('─');
                         cell.set_style(border_style);
                     }
                 }
-            };
+                let ex = sx + cw;
+                let corner = if ci + 1 < col_count { sep } else { right };
+                if let Some(cell) = buf.cell_mut((ex, y)) {
+                    cell.set_char(corner);
+                    cell.set_style(border_style);
+                }
+            }
+        };
 
         // Helper to compute word-wrapped lines for a cell's content.
         // Falls back to character-level breaking when words exceed column width.
@@ -1206,26 +1202,28 @@ impl MarkdownRenderable {
         };
 
         // Helper to render a single display line from pre-wrapped cell content
-        let render_cell_line = |buf: &mut Buffer, y: u16, wrapped: &[Vec<String>], is_header: bool, row_idx: usize, line_idx: usize| {
+        let render_cell_line = |buf: &mut Buffer,
+                                y: u16,
+                                wrapped: &[Vec<String>],
+                                is_header: bool,
+                                row_idx: usize,
+                                line_idx: usize| {
             if y >= max_y {
                 return;
             }
             let cell_style = if is_header { header_style } else { text_style };
 
-            let (actual_border_style, actual_cell_style) =
-                if !is_header && row_idx % 2 == 0 {
-                    (
-                        border_style.bg(alt_bg_color),
-                        cell_style.bg(alt_bg_color),
-                    )
-                } else {
-                    (border_style, cell_style)
-                };
+            let (actual_border_style, actual_cell_style) = if !is_header && row_idx % 2 == 0 {
+                (border_style.bg(alt_bg_color), cell_style.bg(alt_bg_color))
+            } else {
+                (border_style, cell_style)
+            };
 
             for ci in 0..col_count {
                 let sx = col_starts[ci];
                 // Get the pre-wrapped line for this cell at the given line index
-                let content = wrapped.get(ci)
+                let content = wrapped
+                    .get(ci)
                     .and_then(|lines| lines.get(line_idx))
                     .map_or("", |s| s.as_str());
 
@@ -1275,7 +1273,8 @@ impl MarkdownRenderable {
         // Pre-fill alternating background for all display lines of a row.
         // Fills from the left edge to the rightmost border column (no +1 to avoid bleeding).
         let fill_alt_bg = |buf: &mut Buffer, start_y: u16, nlines: usize| {
-            let right_bound = col_starts.last()
+            let right_bound = col_starts
+                .last()
                 .copied()
                 .unwrap_or(area_x)
                 .saturating_add(col_widths[col_count - 1] + 2 * padding)
@@ -1348,8 +1347,6 @@ impl MarkdownRenderable {
         *x = area_x;
     }
 }
-
-
 
 /// Strip markdown formatting and return the visible text content,
 /// matching what `MarkdownRenderable` actually displays on screen.

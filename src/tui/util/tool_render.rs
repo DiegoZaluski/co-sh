@@ -357,7 +357,8 @@ pub(crate) fn input_filepath(input: &serde_json::Value) -> Option<String> {
     if let Some(fp) = input_value(input, "filePath") {
         return Some(fp);
     }
-    input.get("targets")
+    input
+        .get("targets")
         .and_then(|t| t.as_array())
         .and_then(|a| a.first())
         .and_then(|t| input_value(t, "path"))
@@ -370,7 +371,8 @@ fn input_content(input: &serde_json::Value) -> Option<String> {
     if let Some(c) = input_value(input, "content") {
         return Some(c);
     }
-    input.get("targets")
+    input
+        .get("targets")
         .and_then(|t| t.as_array())
         .and_then(|a| a.first())
         .and_then(|t| input_value(t, "text"))
@@ -394,11 +396,19 @@ pub(crate) fn extract_diff_from_json(output: &str) -> Option<String> {
                 .filter_map(|item| item.get("diff")?.as_str())
                 .filter(|d| looks_like_unified_diff(d))
                 .collect();
-            if diffs.is_empty() { None } else { Some(diffs.join("\n")) }
+            if diffs.is_empty() {
+                None
+            } else {
+                Some(diffs.join("\n"))
+            }
         }
         serde_json::Value::Object(ref obj) => {
             let d = obj.get("diff")?.as_str()?;
-            if looks_like_unified_diff(d) { Some(d.to_string()) } else { None }
+            if looks_like_unified_diff(d) {
+                Some(d.to_string())
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -535,18 +545,29 @@ fn draw_highlighted_code_with_ln(
     max_lines: u16,
 ) -> u16 {
     let ln_count = content.lines().count().min(max_lines as usize);
-    if ln_count == 0 { return 0; }
+    if ln_count == 0 {
+        return 0;
+    }
     let ln_width = ((ln_count as f64).log10().floor() as u16 + 1).max(2);
 
     let Some(lang) = lang else {
         // Fallback to plain text with line numbers
         let mut lines_drawn = 0u16;
         for (i, line) in content.lines().enumerate() {
-            if lines_drawn >= max_lines { break; }
+            if lines_drawn >= max_lines {
+                break;
+            }
             let ly = y + lines_drawn;
             let ln_text = format!("{:>w$} ", i + 1, w = ln_width as usize);
             draw_text_line(buf, &ln_text, x, ly, max_w, Style::default().fg(ln_fg));
-            draw_text_line(buf, line, x + ln_width + 1, ly, max_w.saturating_sub(ln_width + 1), Style::default().fg(default_fg));
+            draw_text_line(
+                buf,
+                line,
+                x + ln_width + 1,
+                ly,
+                max_w.saturating_sub(ln_width + 1),
+                Style::default().fg(default_fg),
+            );
             lines_drawn += 1;
         }
         return lines_drawn;
@@ -568,8 +589,12 @@ fn draw_highlighted_code_with_ln(
     let mut y_pos = y;
 
     for (i, line) in content.lines().enumerate() {
-        if lines_drawn >= max_lines { break; }
-        if i > 0 { y_pos += 1; }
+        if lines_drawn >= max_lines {
+            break;
+        }
+        if i > 0 {
+            y_pos += 1;
+        }
 
         let mut x_pos = x;
 
@@ -594,7 +619,9 @@ fn draw_highlighted_code_with_ln(
 
         // Draw highlighted content
         for (ci, ch) in line.char_indices() {
-            if x_pos >= x + max_w { break; }
+            if x_pos >= x + max_w {
+                break;
+            }
             let byte_pos = byte_offset + ci;
             let cat = cat_map.get(byte_pos).copied().flatten();
             let style = code_highlight_style(cat, default_fg);
@@ -713,13 +740,14 @@ pub fn render_edit(
     let raw_output = part.output.as_deref().unwrap_or("").to_string();
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
-    let diff_content = if is_completed && !raw_output.is_empty() && looks_like_unified_diff(&raw_output) {
-        Some(raw_output)
-    } else if is_completed && !raw_output.is_empty() {
-        extract_diff_from_json(&raw_output)
-    } else {
-        None
-    };
+    let diff_content =
+        if is_completed && !raw_output.is_empty() && looks_like_unified_diff(&raw_output) {
+            Some(raw_output)
+        } else if is_completed && !raw_output.is_empty() {
+            extract_diff_from_json(&raw_output)
+        } else {
+            None
+        };
 
     if let Some(ref diff_content) = diff_content {
         let diff_lines = diff_content.lines().count() as u16;
@@ -752,7 +780,14 @@ pub fn render_edit(
 
         let title = filepath.clone();
         let title_style = Style::default().fg(rgba_color(theme.text_muted));
-        draw_text_line(buf, &title, x + 3, y + 1, max_w.saturating_sub(3), title_style);
+        draw_text_line(
+            buf,
+            &title,
+            x + 3,
+            y + 1,
+            max_w.saturating_sub(3),
+            title_style,
+        );
 
         let diff_area = Rect::new(x + 3, y + 2, max_w.saturating_sub(3), diff_lines.min(30));
         let mut diff = DiffRenderable::new(Some(diff_content.clone()));
