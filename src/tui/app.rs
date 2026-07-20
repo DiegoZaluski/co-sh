@@ -1416,6 +1416,7 @@ impl App {
                             KeyCode::Esc => {
                                 self.prompt_view.note_activity();
                                 self.prompt_view.input.clear();
+                                self.prompt_view.pasted_parts.clear();
                                 self.prompt_view.cursor_pos = 0;
                                 self.slash_menu.visible = false;
                             }
@@ -1824,47 +1825,47 @@ impl App {
                                             }
                                             self.slash_menu.visible = false;
                                         }
-                                    }
-                                    KeyCode::Esc => {
-                                        self.prompt_view.note_activity();
-                                        self.prompt_view.input.clear();
-                                        self.prompt_view.cursor_pos = 0;
-                                        self.slash_menu.visible = false;
-                                    }
-                                    KeyCode::Backspace => {
-                                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                            self.prompt_view.delete_word_before_cursor();
-                                            self.slash_menu.update(&self.prompt_view.input);
-                                        } else {
-                                            self.prompt_view.note_activity();
-                                            if !self.prompt_view.input.is_empty() {
-                                                self.prompt_view.input.pop();
-                                                self.prompt_view.cursor_pos =
-                                                    self.prompt_view.input.len();
-                                                self.slash_menu.update(&self.prompt_view.input);
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Char(ch) => {
-                                        self.prompt_view.note_activity();
-                                        self.prompt_view.input.push(ch);
-                                        self.prompt_view.cursor_pos += ch.len_utf8();
-                                        let was_visible = self.slash_menu.visible;
-                                        self.slash_menu.update(&self.prompt_view.input);
-                                        // If menu closed (e.g., user typed space), remove the leading "/"
-                                        if was_visible
-                                            && !self.slash_menu.visible
-                                            && self.prompt_view.input.starts_with('/')
-                                        {
-                                            self.prompt_view.input.remove(0);
-                                            self.prompt_view.cursor_pos =
-                                                self.prompt_view.cursor_pos.saturating_sub(1);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                return Ok(false);
+                                    }                            KeyCode::Esc => {
+                                self.prompt_view.note_activity();
+                                self.prompt_view.input.clear();
+                                self.prompt_view.pasted_parts.clear();
+                                self.prompt_view.cursor_pos = 0;
+                                self.slash_menu.visible = false;
                             }
+                            KeyCode::Backspace => {
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    self.prompt_view.delete_word_before_cursor();
+                                    self.slash_menu.update(&self.prompt_view.input);
+                                } else {
+                                    self.prompt_view.note_activity();
+                                    if !self.prompt_view.input.is_empty() {
+                                        self.prompt_view.input.pop();
+                                        self.prompt_view.cursor_pos =
+                                            self.prompt_view.input.len();
+                                        self.slash_menu.update(&self.prompt_view.input);
+                                    }
+                                }
+                            }
+                            KeyCode::Char(ch) => {
+                                self.prompt_view.note_activity();
+                                self.prompt_view.input.push(ch);
+                                self.prompt_view.cursor_pos += ch.len_utf8();
+                                let was_visible = self.slash_menu.visible;
+                                self.slash_menu.update(&self.prompt_view.input);
+                                // If menu closed (e.g., user typed space), remove the leading "/"
+                                if was_visible
+                                    && !self.slash_menu.visible
+                                    && self.prompt_view.input.starts_with('/')
+                                {
+                                    self.prompt_view.input.remove(0);
+                                    self.prompt_view.cursor_pos =
+                                        self.prompt_view.cursor_pos.saturating_sub(1);
+                                }
+                            }
+                            _ => {}
+                        }
+                        return Ok(false);
+                    }
 
                             if matches!(self.mode(), AppMode::Session) {
                                 match key.code {
@@ -1947,17 +1948,7 @@ impl App {
                                         self.prompt_view.cursor_pos = self.prompt_view.input.len();
                                     }
                                     KeyCode::Delete => {
-                                        self.prompt_view.note_activity();
-                                        let pos = self.prompt_view.cursor_pos;
-                                        let len = self.prompt_view.input.len();
-                                        if pos < len {
-                                            let next = self
-                                                .prompt_view
-                                                .input
-                                                .floor_char_boundary(pos + 1)
-                                                .min(len);
-                                            self.prompt_view.input.drain(pos..next);
-                                        }
+                                        self.prompt_view.delete();
                                     }
                                     KeyCode::PageUp => {
                                         if Self::is_in_right_panel(
@@ -1992,19 +1983,7 @@ impl App {
                                         if key.modifiers.contains(KeyModifiers::CONTROL) {
                                             self.prompt_view.delete_word_before_cursor();
                                         } else {
-                                            self.prompt_view.note_activity();
-                                            let pos = self.prompt_view.cursor_pos;
-                                            if pos > 0 {
-                                                // Use floor_char_boundary to safely handle multi-byte chars
-                                                // (e.g. á, é, emoji). remove() panics if called at a
-                                                // non-char-boundary position.
-                                                let char_start = self
-                                                    .prompt_view
-                                                    .input
-                                                    .floor_char_boundary(pos - 1);
-                                                self.prompt_view.input.remove(char_start);
-                                                self.prompt_view.cursor_pos = char_start;
-                                            }
+                                            self.prompt_view.backspace();
                                         }
                                     }
                                     KeyCode::Char(ch) => {
@@ -2085,12 +2064,7 @@ impl App {
                     }
                 } else {
                     self.prompt_view.note_activity();
-                    // Strip newlines/carriage returns so paste doesn't trigger submission
-                    let cleaned: String =
-                        text.chars().filter(|&c| c != '\n' && c != '\r').collect();
-                    let pos = self.prompt_view.cursor_pos;
-                    self.prompt_view.input.insert_str(pos, &cleaned);
-                    self.prompt_view.cursor_pos = pos + cleaned.len();
+                    self.prompt_view.handle_paste(&text);
                     self.slash_menu.update(&self.prompt_view.input);
                 }
             }

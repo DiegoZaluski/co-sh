@@ -20,6 +20,19 @@ const CAP_H: u16 = 1;
 const FOOTER_H: u16 = 1;
 const PLACEHOLDER: &str = "Type a message...";
 
+/// Thresholds for triggering paste compression (matches opencode: >=3 lines or >150 chars).
+const PASTE_MIN_LINES: usize = 3;
+const PASTE_MIN_CHARS: usize = 150;
+
+/// A pasted text block that was compressed into a virtual-text placeholder.
+#[derive(Clone, Debug)]
+pub struct PastedPart {
+    /// The short placeholder shown in the input (e.g. "[Pasted ~5 lines]").
+    pub virtual_text: String,
+    /// The original pasted text that will be expanded on submit/copy.
+    pub actual_text: String,
+}
+
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
@@ -65,6 +78,9 @@ pub struct PromptView {
     pub cursor: Cursor,
     pub sel_start: Option<usize>,
     pub sel_end: Option<usize>,
+    /// Pasted text parts that were compressed into virtual-text placeholders.
+    /// Each entry maps a placeholder like `[Pasted ~N lines]` to the original text.
+    pub pasted_parts: Vec<PastedPart>,
 }
 
 impl PromptView {
@@ -79,6 +95,7 @@ impl PromptView {
             cursor: Cursor::new(),
             sel_start: None,
             sel_end: None,
+            pasted_parts: Vec::new(),
         }
     }
 
@@ -91,14 +108,23 @@ impl PromptView {
     }
 
     pub fn send_message(&mut self) -> String {
-        let msg = self.input.clone();
-        if !msg.is_empty() {
-            self.history.push(msg.clone());
+        let raw = self.input.clone();
+        if !raw.is_empty() {
+            // Expand any paste placeholders back to the original text before sending
+            let msg = self.expand_pasted_text(&raw);
+            self.history.push(raw);
+            self.input.clear();
+            self.cursor_pos = 0;
+            self.history_index = -1;
+            self.pasted_parts.clear();
+            msg
+        } else {
+            self.input.clear();
+            self.cursor_pos = 0;
+            self.history_index = -1;
+            self.pasted_parts.clear();
+            String::new()
         }
-        self.input.clear();
-        self.cursor_pos = 0;
-        self.history_index = -1;
-        msg
     }
 
     pub fn history_up(&mut self) {
@@ -142,7 +168,9 @@ impl PromptView {
                 let start = s.min(e);
                 let end = s.max(e);
                 let end = end.min(self.input.len());
-                self.input[start..end].to_string()
+                let raw = self.input[start..end].to_string();
+                // Expand any paste placeholders so the user copies the real content
+                self.expand_pasted_text(&raw)
             }
             _ => String::new(),
         }
@@ -153,8 +181,114 @@ impl PromptView {
         self.sel_end = None;
     }
 
+    /// Backspace: if the cursor is within or at the end of a pasted virtual-text placeholder,
+    /// delete the entire placeholder at once (matching opencode's atomic-virtual-text behaviour).
+    /// Otherwise, delete a single character before the cursor.
+    pub fn backspace(&mut self) {
+        self.note_activity();
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let char_start = self.input.floor_char_boundary(self.cursor_pos - 1);
+        // Check whether the character we are about to delete belongs to a pasted virtual text.
+        if let Some((vt_pos, vt_end, idx)) = self.find_paste_overlapping(char_start, self.cursor_pos)
+        {
+            // Delete the ENTIRE virtual-text placeholder atomically.
+            self.input.drain(vt_pos..vt_end);
+            self.cursor_pos = vt_pos;
+            self.pasted_parts.remove(idx);
+            return;
+        }
+        // Normal backspace: delete one character before the cursor.
+        self.input.remove(char_start);
+        self.cursor_pos = char_start;
+    }
+
+    /// Delete (forward): if the cursor is within or at the start of a pasted virtual-text
+    /// placeholder, delete the entire placeholder at once. Otherwise delete one character
+    /// at the cursor position.
+    pub fn delete(&mut self) {
+        self.note_activity();
+        let len = self.input.len();
+        if self.cursor_pos >= len {
+            return;
+        }
+        let next = self.input.floor_char_boundary(self.cursor_pos + 1).min(len);
+        // Check whether the character at the cursor belongs to a pasted virtual text.
+        if let Some((vt_pos, vt_end, idx)) = self.find_paste_overlapping(self.cursor_pos, next) {
+            // Delete the ENTIRE virtual-text placeholder atomically.
+            self.input.drain(vt_pos..vt_end);
+            if self.cursor_pos > vt_pos {
+                self.cursor_pos = vt_pos;
+            }
+            self.pasted_parts.remove(idx);
+            return;
+        }
+        // Normal forward-delete: delete one character at the cursor.
+        self.input.drain(self.cursor_pos..next);
+    }
+
+    /// Returns `(byte_start, byte_end, part_index)` if any pasted virtual-text placeholder
+    /// overlaps with the byte range `[start, end)` in `self.input`.
+    fn find_paste_overlapping(&self, start: usize, end: usize) -> Option<(usize, usize, usize)> {
+        for (idx, part) in self.pasted_parts.iter().enumerate() {
+            if let Some(pos) = self.input.find(&part.virtual_text) {
+                let vt_end = pos + part.virtual_text.len();
+                if start < vt_end && end > pos {
+                    return Some((pos, vt_end, idx));
+                }
+            }
+        }
+        None
+    }
+
     /// Delete the word (or run of whitespace then word) immediately before the cursor.
     /// Behaves like Ctrl+Backspace in most terminals/editors.
+    /// Handle pasted text. If the text is long (>=3 lines or >150 chars), compress it
+    /// into a virtual-text placeholder like `[Pasted ~N lines]` and store the original
+    /// text for later expansion. Otherwise, insert the text directly at the cursor.
+    /// Matches the behaviour of opencode's `pasteInputText` + `pasteText`.
+    pub fn handle_paste(&mut self, text: &str) {
+        // Normalize line endings (CRLF -> LF, CR -> LF), matching opencode
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let trimmed = normalized.trim().to_string();
+
+        let line_count = trimmed.matches('\n').count() + 1;
+        let is_long = line_count >= PASTE_MIN_LINES || trimmed.len() > PASTE_MIN_CHARS;
+
+        if is_long {
+            let virtual_text = format!("[Pasted ~{line_count} lines]");
+            let actual_text = trimmed;
+
+            // Insert virtual placeholder at cursor position
+            let pos = self.cursor_pos;
+            self.input.insert_str(pos, &virtual_text);
+            self.cursor_pos = pos + virtual_text.len();
+
+            // Store mapping for expansion on submit/copy
+            self.pasted_parts.push(PastedPart {
+                virtual_text,
+                actual_text,
+            });
+        } else {
+            // Short paste: insert text directly
+            let pos = self.cursor_pos;
+            self.input.insert_str(pos, &normalized);
+            self.cursor_pos = pos + normalized.len();
+        }
+    }
+
+    /// Expand any virtual-text placeholders in `input` back to their original pasted text.
+    /// Applies replacements in insertion order (oldest first), matching opencode's
+    /// `expandTrackedPastedText` semantics.
+    pub fn expand_pasted_text(&self, input: &str) -> String {
+        let mut result = input.to_string();
+        for part in &self.pasted_parts {
+            result = result.replace(&part.virtual_text, &part.actual_text);
+        }
+        result
+    }
+
     pub fn delete_word_before_cursor(&mut self) {
         if self.cursor_pos == 0 {
             return;
@@ -533,17 +667,43 @@ impl PromptView {
         let text_start = input_area.y + 1;
         let max_line_w = input_area.width.saturating_sub(5) as u16;
 
+        // Pre-compute which visual lines overlap with pasted virtual-text placeholders.
+        // Uses cumulative byte-offset tracking (same approach as `char_pos_at_mouse`)
+        // instead of pointer arithmetic, which is fragile across string reallocations.
+        let mut is_paste_line = vec![false; display_lines.len()];
+        if !display_placeholder {
+            let mut line_byte_start = 0usize;
+            for (i, line) in display_lines.iter().enumerate() {
+                let line_byte_end = line_byte_start + line.len();
+                for part in &self.pasted_parts {
+                    if let Some(vt_pos) = self.input.find(&part.virtual_text) {
+                        let vt_end = vt_pos + part.virtual_text.len();
+                        if line_byte_start < vt_end && line_byte_end > vt_pos {
+                            is_paste_line[i] = true;
+                            break;
+                        }
+                    }
+                }
+                line_byte_start = line_byte_end;
+            }
+        }
+
         for (i, line) in display_lines.iter().enumerate() {
             let ly = text_start + i as u16;
             if ly >= input_area.bottom() {
                 break;
             }
-            let style = if display_placeholder && i == 0 {
+            let base_style = if display_placeholder && i == 0 {
                 Style::default().fg(rgba_color(theme.text_muted))
             } else {
                 Style::default().fg(rgba_color(theme.text))
             };
-            draw_text_line(buf, line, x_off, ly, max_line_w, style);
+
+            if is_paste_line[i] {
+                draw_text_line(buf, line, x_off, ly, max_line_w, base_style.fg(rgba_color(theme.secondary)));
+            } else {
+                draw_text_line(buf, line, x_off, ly, max_line_w, base_style);
+            }
         }
 
         // ── Selection highlight ────────────────────────────────────────────────
