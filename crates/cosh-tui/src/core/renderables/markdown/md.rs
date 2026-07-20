@@ -1079,10 +1079,27 @@ impl MarkdownRenderable {
         let total_w: u16 = col_widths.iter().map(|w| w + 2 * padding).sum::<u16>() + border_gaps;
         let available = max_x.saturating_sub(area_x);
         if total_w > available {
-            // Scale columns proportionally
+            // Scale columns proportionally (floor division, never round up)
             let scale = f64::from(available) / f64::from(total_w);
             for w in &mut col_widths {
-                *w = (f64::from(*w) * scale).max(3.0) as u16; // min 3 chars per column
+                *w = (f64::from(*w) * scale) as u16;
+            }
+            // Ensure minimum width of 1 for every column
+            for w in &mut col_widths {
+                *w = (*w).max(1);
+            }
+            // Greedy redistribution: iteratively reduce the largest column
+            // until the total fits within the available width.
+            // This corrects rounding errors from proportional scaling.
+            while col_widths.iter().map(|w| w + 2 * padding).sum::<u16>() + border_gaps > available {
+                if let Some(max_idx) = (0..col_widths.len())
+                    .filter(|&i| col_widths[i] > 1)
+                    .max_by_key(|&i| col_widths[i])
+                {
+                    col_widths[max_idx] -= 1;
+                } else {
+                    break; // All columns at minimum width, can't reduce further
+                }
             }
         }
 
@@ -1153,28 +1170,50 @@ impl MarkdownRenderable {
                 }
             };
 
-        // Helper to render a row of cells with optional alternating background
-        let render_row = |buf: &mut Buffer, y: u16, cells: &[String], is_header: bool, row_idx: usize| {
+        // Helper to compute word-wrapped lines for a cell's content.
+        // Falls back to character-level breaking when words exceed column width.
+        let word_wrap_cell = |content: &str, col_w: u16| -> Vec<String> {
+            if col_w < 1 || content.is_empty() {
+                return vec![String::new()];
+            }
+            // First try word-level wrapping (splits on spaces)
+            let lines = crate::core::lib::unicode_util::word_wrap(content, col_w);
+            // Then break any resulting line that still exceeds col_w at character level
+            let mut final_lines: Vec<String> = Vec::new();
+            for line in &lines {
+                let line_w = crate::core::lib::unicode_util::str_display_width(line) as u16;
+                if line_w <= col_w {
+                    final_lines.push(line.clone());
+                } else {
+                    // Character-level breaking for lines wider than col_w
+                    let mut current = String::new();
+                    let mut current_w = 0u16;
+                    for (g, gw) in crate::core::lib::unicode_util::graphemes_with_width(line) {
+                        if current_w + gw > col_w && !current.is_empty() {
+                            final_lines.push(current);
+                            current = String::new();
+                            current_w = 0;
+                        }
+                        current.push_str(g);
+                        current_w += gw;
+                    }
+                    if !current.is_empty() {
+                        final_lines.push(current);
+                    }
+                }
+            }
+            final_lines
+        };
+
+        // Helper to render a single display line from pre-wrapped cell content
+        let render_cell_line = |buf: &mut Buffer, y: u16, wrapped: &[Vec<String>], is_header: bool, row_idx: usize, line_idx: usize| {
             if y >= max_y {
                 return;
             }
             let cell_style = if is_header { header_style } else { text_style };
 
-            // Determine styles for alternating rows
             let (actual_border_style, actual_cell_style) =
                 if !is_header && row_idx % 2 == 0 {
-                    // Pre-fill entire row area with alternating background for continuous stripe
-                    let right_bound = col_starts.last()
-                        .copied()
-                        .unwrap_or(area_x)
-                        .saturating_add(col_widths[col_count - 1] + 2 * padding + 1)
-                        .min(max_x);
-                    for cx in area_x..right_bound {
-                        if let Some(cell) = buf.cell_mut((cx, y)) {
-                            cell.set_style(Style::default().bg(alt_bg_color));
-                            cell.set_char(' ');
-                        }
-                    }
                     (
                         border_style.bg(alt_bg_color),
                         cell_style.bg(alt_bg_color),
@@ -1185,17 +1224,19 @@ impl MarkdownRenderable {
 
             for ci in 0..col_count {
                 let sx = col_starts[ci];
-                let content = cells.get(ci).map_or("", |s| s.as_str());
+                // Get the pre-wrapped line for this cell at the given line index
+                let content = wrapped.get(ci)
+                    .and_then(|lines| lines.get(line_idx))
+                    .map_or("", |s| s.as_str());
 
-                // Vertical border on the left of each cell (first cell starts at column `sx`,
-                // subsequent cells share the right border of the previous cell at `sx - 1`)
+                // Vertical border on the left of each cell
                 let vline_x = if ci == 0 { sx } else { sx.saturating_sub(1) };
                 if let Some(cell) = buf.cell_mut((vline_x, y)) {
                     cell.set_char('│');
                     cell.set_style(actual_border_style);
                 }
 
-                // Render cell content with padding
+                // Render cell content line with padding
                 let mut cx = sx + padding;
                 for ch in content.chars() {
                     if cx >= sx + col_widths[ci] + padding {
@@ -1217,14 +1258,56 @@ impl MarkdownRenderable {
             }
         };
 
+        // Pre-compute word-wrapped lines for all cells in a logical row.
+        // Returns (wrapped_cells, max_line_count).
+        let precompute_wrapped = |cells: &[String]| -> (Vec<Vec<String>>, usize) {
+            let mut wrapped: Vec<Vec<String>> = Vec::with_capacity(col_count);
+            let mut max_lines = 1usize;
+            for ci in 0..col_count {
+                let content = cells.get(ci).map_or("", |s| s.as_str());
+                let lines = word_wrap_cell(content, col_widths[ci]);
+                max_lines = max_lines.max(lines.len());
+                wrapped.push(lines);
+            }
+            (wrapped, max_lines)
+        };
+
+        // Pre-fill alternating background for all display lines of a row.
+        // Fills from the left edge to the rightmost border column (no +1 to avoid bleeding).
+        let fill_alt_bg = |buf: &mut Buffer, start_y: u16, nlines: usize| {
+            let right_bound = col_starts.last()
+                .copied()
+                .unwrap_or(area_x)
+                .saturating_add(col_widths[col_count - 1] + 2 * padding)
+                .min(max_x);
+            for li in 0..nlines {
+                let y_line = start_y + li as u16;
+                if y_line >= max_y {
+                    break;
+                }
+                for cx in area_x..right_bound {
+                    if let Some(cell) = buf.cell_mut((cx, y_line)) {
+                        cell.set_style(Style::default().bg(alt_bg_color));
+                        cell.set_char(' ');
+                    }
+                }
+            }
+        };
+
         // ── Top border ──────────────────────────────────────────
         render_border(buf, *y, '┌', '┐', '┬');
         *y += 1;
 
-        // ── Header row ──────────────────────────────────────────
+        // ── Header row (with wrapping) ──────────────────────────
         if *y < max_y {
-            render_row(buf, *y, headers, true, 0);
-            *y += 1;
+            let (header_wrapped, header_lines) = precompute_wrapped(headers);
+            for li in 0..header_lines {
+                if *y >= max_y {
+                    break;
+                }
+                render_cell_line(buf, *y, &header_wrapped, true, 0, li);
+                *y += 1;
+            }
         }
 
         // ── Header/body separator ───────────────────────────────
@@ -1233,13 +1316,27 @@ impl MarkdownRenderable {
             *y += 1;
         }
 
-        // ── Body rows (with alternating background) ────────────
+        // ── Body rows (word-wrapped with alternating background) ─
         for (row_idx, row) in rows.iter().enumerate() {
             if *y >= max_y {
                 break;
             }
-            render_row(buf, *y, row, false, row_idx);
-            *y += 1;
+
+            let (wrapped, nlines) = precompute_wrapped(row);
+
+            // Pre-fill alternating background for ALL display lines of this row
+            if row_idx % 2 == 0 {
+                fill_alt_bg(buf, *y, nlines);
+            }
+
+            // Render each display line
+            for li in 0..nlines {
+                if *y >= max_y {
+                    break;
+                }
+                render_cell_line(buf, *y, &wrapped, false, row_idx, li);
+                *y += 1;
+            }
         }
 
         // ── Bottom border ───────────────────────────────────────
