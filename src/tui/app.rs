@@ -59,6 +59,7 @@ enum AppMode {
     Session,
     InternalTools,
     AddProvider,
+    Rag,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -77,6 +78,8 @@ pub struct App {
     pub show_internal_tools: bool,
     pub add_provider_view: AddProviderView,
     pub show_add_provider: bool,
+    pub rag_view: crate::routes::rag::RagView,
+    pub show_rag: bool,
     pub keymap: KeyMap,
     pub config: TuiConfig,
     pub toast_state: ToastState,
@@ -158,6 +161,8 @@ impl App {
             show_internal_tools: false,
             add_provider_view: AddProviderView::new(),
             show_add_provider: false,
+            rag_view: crate::routes::rag::RagView::new(),
+            show_rag: false,
             prompt_view: PromptView::new(),
             sidebar: SidebarView::new(),
             dialog: DialogState::new(),
@@ -825,6 +830,8 @@ impl App {
             AppMode::InternalTools
         } else if self.show_add_provider {
             AppMode::AddProvider
+        } else if self.show_rag {
+            AppMode::Rag
         } else if self.state.current_session().is_some() {
             AppMode::Session
         } else {
@@ -1080,6 +1087,17 @@ impl App {
                     );
                     self.add_provider_view.render(buf, tools_area, &self.theme);
                 }
+                AppMode::Rag => {
+                    self.prompt_view.blur();
+                    self.rag_view.advance_spinner();
+                    let tools_area = Rect::new(
+                        session_area.x,
+                        session_area.y,
+                        session_area.width,
+                        session_area.height.saturating_sub(1),
+                    );
+                    self.rag_view.render(buf, tools_area, &self.theme);
+                }
                 AppMode::Session => {
                     // Blur prompt when question dialog is visible, focus otherwise (like OpenCode)
                     if self.question_dialog.visible {
@@ -1135,7 +1153,7 @@ impl App {
                 }
             }
 
-            let show_home = !matches!(self.mode(), AppMode::InternalTools | AppMode::AddProvider);
+            let show_home = !matches!(self.mode(), AppMode::InternalTools | AppMode::AddProvider | AppMode::Rag);
             FooterView::render_with_mode(
                 buf,
                 Rect::new(main_area.x, footer_y, main_area.width, 1),
@@ -1313,6 +1331,9 @@ impl App {
                                     HomeAction::OpenAddProvider => {
                                         self.show_add_provider = true;
                                     }
+                                    HomeAction::OpenRag => {
+                                        self.show_rag = true;
+                                    }
                                 }
                                 return Ok(false);
                             }
@@ -1345,6 +1366,54 @@ impl App {
                             }
                             _ => {}
                         }
+                    }
+
+                    // RAG mode: handle via RagView
+                    if matches!(self.mode(), AppMode::Rag) && !self.dialog.visible() {
+                        use crate::routes::rag::RagAction;
+                        match self.rag_view.handle_key(key.code) {
+                            Some(RagAction::Back) => {
+                                self.show_rag = false;
+                            }
+                            Some(RagAction::FetchUrlOrPath(input)) => {
+                                self.rag_view.start_fetch(&input);
+                                if input.starts_with("http://") || input.starts_with("https://") {
+                                    // URL fetch in background thread
+                                    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+                                    let url = input.clone();
+                                    std::thread::spawn(move || {
+                                        let output = std::process::Command::new("curl")
+                                            .arg("-sL")
+                                            .arg(&url)
+                                            .output();
+                                        match output {
+                                            Ok(out) if out.status.success() => {
+                                                let text = String::from_utf8_lossy(&out.stdout).to_string();
+                                                let _ = tx.send(Ok(text));
+                                            }
+                                            Ok(out) => {
+                                                let err = String::from_utf8_lossy(&out.stderr).to_string();
+                                                let _ = tx.send(Err(err));
+                                            }
+                                            Err(_e) => {
+                                                let _ = tx.send(Err(_e.to_string()));
+                                            }
+                                        }
+                                    });
+                                    self.rag_view.set_fetch_rx(rx);
+                                } else {
+                                    // File path — read synchronously
+                                    match std::fs::read_to_string(&input) {
+                                        Ok(content) => self.rag_view.content_fetched(content),
+                                        Err(_) => {
+                                            self.rag_view.set_error();
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        return Ok(false);
                     }
 
                     // AddProvider mode: navigation and select
@@ -1725,6 +1794,8 @@ impl App {
                                 self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
                             } else if matches!(self.mode(), AppMode::AddProvider) {
                                 self.show_add_provider = false;
+                            } else if matches!(self.mode(), AppMode::Rag) {
+                                self.show_rag = false;
                             } else if matches!(self.mode(), AppMode::Home) {
                                 self.pending_delete_session_id = None;
                                 self.dialog.show(DialogType::Confirm {
@@ -2062,6 +2133,8 @@ impl App {
                         *cursor_pos += cleaned.len();
                         d.cursor.note_activity();
                     }
+                } else if matches!(self.mode(), AppMode::Rag) {
+                    self.rag_view.handle_paste(&text);
                 } else {
                     self.prompt_view.note_activity();
                     self.prompt_view.handle_paste(&text);
@@ -3033,6 +3106,9 @@ impl App {
                     crate::routes::home::HomeAction::OpenAddProvider => {
                         self.show_add_provider = true;
                     }
+                    crate::routes::home::HomeAction::OpenRag => {
+                        self.show_rag = true;
+                    }
                 }
                 return Ok(true);
             }
@@ -3057,6 +3133,40 @@ impl App {
             if let Some(clicked_idx) = self.internal_tools_view.handle_mouse(&mouse, tools_area) {
                 self.internal_tools_view.selected_index = clicked_idx;
                 self.internal_tools_view.toggle_current();
+                return Ok(true);
+            }
+        }                // 8ba. Rag view — mouse click on DB list row or Create DB button
+        if matches!(self.mode(), AppMode::Rag) && !self.dialog.visible() {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            let tools_area = Rect::new(
+                main_area.x,
+                area.y + 1,
+                main_area.width,
+                main_area.height.saturating_sub(4),
+            );
+            if let Some(clicked_idx) = self.rag_view.handle_mouse(&mouse, tools_area) {
+                self.rag_view.toggle_db(clicked_idx);
+                return Ok(true);
+            }
+            if self.rag_view.is_create_click(&mouse, tools_area) {
+                self.rag_view.toggle_create_db();
+                return Ok(true);
+            }
+            // Click on collapsed model line to toggle expand
+            if self.rag_view.is_model_click(&mouse, tools_area) {
+                self.rag_view.toggle_models_expanded();
+                return Ok(true);
+            }
+            // Dismiss Create DB form on click outside any target
+            if self.rag_view.form_open() {
+                self.rag_view.close_form();
                 return Ok(true);
             }
         }

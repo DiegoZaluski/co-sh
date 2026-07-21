@@ -94,6 +94,7 @@ pub const MENU_ITEMS: &[&str] = &[
     "Start a New Session",
     "Browse Session History",
     "Keyboard Shortcuts",
+    "RAG",
     "Internal Tools",
     "ADD Provider",
 ];
@@ -103,6 +104,7 @@ pub enum HomeAction {
     NewSession,
     ToggleSidebar,
     OpenShortcuts,
+    OpenRag,
     OpenInternalTools,
     OpenAddProvider,
 }
@@ -151,7 +153,8 @@ impl HomeView {
             0 => HomeAction::NewSession,
             1 => HomeAction::ToggleSidebar,
             2 => HomeAction::OpenShortcuts,
-            3 => HomeAction::OpenInternalTools,
+            3 => HomeAction::OpenRag,
+            4 => HomeAction::OpenInternalTools,
             _ => HomeAction::OpenAddProvider,
         }
     }
@@ -180,7 +183,8 @@ impl HomeView {
                     0 => HomeAction::NewSession,
                     1 => HomeAction::ToggleSidebar,
                     2 => HomeAction::OpenShortcuts,
-                    3 => HomeAction::OpenInternalTools,
+                    3 => HomeAction::OpenRag,
+                    4 => HomeAction::OpenInternalTools,
                     _ => HomeAction::OpenAddProvider,
                 });
             }

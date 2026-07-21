@@ -1158,6 +1158,7 @@ dependencies = [
  "crossterm",
  "directories",
  "dotenvy",
+ "fastembed",
  "log",
  "lru",
  "pulldown-cmark",

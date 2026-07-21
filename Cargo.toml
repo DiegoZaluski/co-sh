@@ -10,6 +10,8 @@ members = [
 [features]
 default = []
 lancedb = ["cosh-recall/lancedb"]
+fastembed = ["cosh-recall/fastembed", "dep:fastembed"]
+cloud = ["cosh-recall/cloud"]
 
 [package]
 description = "Coding agent for the terminal. No UI, no noise."
@@ -35,6 +37,10 @@ path = "crates/cosh-tools"
 
 [dependencies.cosh-tui]
 path = "crates/cosh-tui"
+
+[dependencies.fastembed]
+version = "5"
+optional = true
 
 [[bin]]
 name = "tui"
