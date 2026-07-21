@@ -141,7 +141,7 @@ impl Embedder {
 
     /// Embed a batch of texts, returning one vector per input.
     #[allow(clippy::unused_async)]
-    pub(crate) async fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, RagError> {
+    pub async fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, RagError> {
         match self {
             #[cfg(feature = "fastembed")]
             Self::Local { model, dim: _ } => {

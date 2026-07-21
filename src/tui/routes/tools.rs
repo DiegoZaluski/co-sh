@@ -27,6 +27,10 @@ const INTERNAL_TOOLS: &[(&str, &str)] = &[
     ("plan_todo_read", "Read todo items"),
     ("plan_load_from_md", "Load plan from markdown"),
     ("ask_questions", "Ask the user questions"),
+    (
+        "recall_search",
+        "Search knowledge bases for semantically similar entries",
+    ),
     ("skills_list", "List available skills"),
     ("skills_read", "Read a skill"),
     ("skills_read_asset", "Read a skill asset"),

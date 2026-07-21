@@ -32,11 +32,14 @@ fn recall_search_description_requires_fields() {
         .as_array()
         .unwrap();
     let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-    assert!(names.contains(&"db_uri"));
-    assert!(names.contains(&"table_name"));
-    assert!(names.contains(&"vector_dim"));
+    // The LLM-facing schema now only requires db_name + query.
+    // Internal details (uri, table, dim, vector) are handled by the harness.
+    assert!(names.contains(&"db_name"));
     assert!(names.contains(&"query"));
-    assert!(names.contains(&"query_vector"));
+    assert!(!names.contains(&"db_uri"));
+    assert!(!names.contains(&"table_name"));
+    assert!(!names.contains(&"vector_dim"));
+    assert!(!names.contains(&"query_vector"));
 }
 
 #[test]
@@ -89,7 +92,8 @@ fn recall_with_description_preserves_name_and_schema() {
         .as_array()
         .unwrap();
     let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-    assert!(names.contains(&"db_uri"));
+    assert!(names.contains(&"db_name"));
+    assert!(names.contains(&"query"));
 }
 
 // Input validation — structural (search is async, integration test only)

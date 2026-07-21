@@ -269,6 +269,28 @@ impl Harness {
         self
     }
 
+    /// Inject the RAG database context into the `recall_search` tool description.
+    ///
+    /// The `suffix` describes which knowledge bases are available so the
+    /// agent sees a tailored description. Must be called before
+    /// [`format_header_context`](Self::format_header_context).
+    pub fn set_recall_context(&mut self, suffix: String) {
+        if let Some(ref mut cosh) = self.cosh_tools {
+            cosh.set_recall_context(suffix);
+        }
+    }
+
+    /// Set the RAG database registry for the `recall_search` dispatch.
+    ///
+    /// Each entry holds the connection URI, table name, and embedder config
+    /// needed to embed a query and search the vector DB. Must be called
+    /// before [`format_header_context`](Self::format_header_context).
+    pub fn set_recall_dbs(&mut self, dbs: Vec<super::tools::RecallDb>) {
+        if let Some(ref mut cosh) = self.cosh_tools {
+            cosh.set_recall_dbs(dbs);
+        }
+    }
+
     /// Signal the agent loop to stop at the next safe opportunity.
     pub const fn request_stop(&mut self) {
         self.stop = true;

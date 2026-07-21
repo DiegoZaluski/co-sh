@@ -1725,7 +1725,51 @@ impl App {
                             let (answer_tx, answer_rx) = mpsc::unbounded_channel();
                             self.answer_tx = answer_tx;
 
-                            let disabled_tools = self.internal_tools_view.disabled.clone();
+                            let mut disabled_tools = self.internal_tools_view.disabled.clone();
+
+                            // ── RAG recall context ───────────────────────────────────────────
+                            // 1) Description suffix (what the model sees in the tool doc)
+                            let recall_suffix = self
+                                .rag_view
+                                .registry
+                                .build_tool_suffix(self.rag_view.active_dbs());
+
+                            // 2) DB registry (what the dispatch uses to resolve db_name → connect)
+                            use cosh::harness::tools::{RecallDb, RecallEmbedderConfig};
+                            let recall_dbs: Vec<RecallDb> = self
+                                .rag_view
+                                .registry
+                                .dbs
+                                .iter()
+                                .filter(|db| self.rag_view.active_dbs.contains(&db.name))
+                                .map(|db| RecallDb {
+                                    name: db.name.clone(),
+                                    uri: db.uri.clone(),
+                                    table_name: db.name.clone(),
+                                    embedder: match &db.embedder {
+                                        crate::routes::rag::models::EmbedderConfig::Local {
+                                            model,
+                                        } => RecallEmbedderConfig::Local {
+                                            model_name: serde_json::to_value(model)
+                                                .ok()
+                                                .and_then(|v| v.as_str().map(String::from))
+                                                .unwrap_or_default(),
+                                        },
+                                        crate::routes::rag::models::EmbedderConfig::Cloud(c) => {
+                                            RecallEmbedderConfig::Cloud {
+                                                provider: c.provider.clone(),
+                                                model: c.model.clone(),
+                                                dim: db.embedder.vector_dim(),
+                                            }
+                                        }
+                                    },
+                                })
+                                .collect();
+
+                            // 3) Auto-exclude tool if no databases exist at all
+                            if self.rag_view.registry.dbs.is_empty() {
+                                disabled_tools.insert("recall_search".into());
+                            }
 
                             let event_tx_panic = event_tx.clone();
                             // Build conversation history from existing session messages
@@ -1798,6 +1842,8 @@ impl App {
                                             Harness::new(connector, &cwd, disabled_tools)
                                                 .with_mode(mode)
                                                 .with_history(&history);
+                                        harness.set_recall_context(recall_suffix);
+                                        harness.set_recall_dbs(recall_dbs);
                                         harness.format_header_context();
                                         harness
                                             .run_agent_loop(

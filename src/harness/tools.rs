@@ -15,6 +15,7 @@ use cosh_tools::{
         },
     },
     question::{Question, types::QuestionInput},
+    recall::Recall,
     skills::{
         Skills,
         types::{SkillsMatchInput, SkillsReadAssetInput, SkillsReadInput},
@@ -26,6 +27,7 @@ use cosh_tools::{
     vision::{TerminalInput, Vision},
     web::{Web, WebFetch, WebSearchInput},
 };
+
 use tokio_stream::StreamExt;
 
 #[allow(async_fn_in_trait)]
@@ -43,6 +45,30 @@ pub trait Tools: Send + Sync {
     async fn dispatch(&self, name: &str, args: serde_json::Value) -> Result<String, String>;
 }
 
+/// Simplified embedder config for the `recall_search` dispatch.
+/// Does not depend on TUI types — model names are stored as strings.
+#[derive(Debug, Clone)]
+pub enum RecallEmbedderConfig {
+    /// Local fastembed model — model_name must match serde renames of
+    /// `fastembed::EmbeddingModel` (e.g. "AllMiniLML6V2", "BGESmallENV15Q").
+    Local { model_name: String },
+    /// Cloud embedding provider.
+    Cloud {
+        provider: String,
+        model: String,
+        dim: usize,
+    },
+}
+
+/// Minimal DB info needed by the recall_search dispatch.
+#[derive(Debug, Clone)]
+pub struct RecallDb {
+    pub name: String,
+    pub uri: String,
+    pub table_name: String,
+    pub embedder: RecallEmbedderConfig,
+}
+
 pub struct CoshTools {
     bash: Bash,
     fs: Fs,
@@ -51,6 +77,8 @@ pub struct CoshTools {
     vision: Vision,
     plan: Mutex<Plan>,
     question: Question,
+    recall: Recall,
+    recall_dbs: Vec<RecallDb>,
     skills: Skills,
     subagent: SubAgent,
     /// Optional event sender for streaming tool output.
@@ -68,6 +96,8 @@ impl CoshTools {
             vision: Vision::new(),
             plan: Mutex::new(Plan::new()),
             question: Question::new(),
+            recall: Recall::new(),
+            recall_dbs: Vec::new(),
             skills: Skills::new(),
             subagent: SubAgent::new(),
             event_tx: None,
@@ -77,6 +107,19 @@ impl CoshTools {
     /// Set the event sender for streaming tool output.
     pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    /// Set the list of RAG databases for the `recall_search` dispatch.
+    pub fn set_recall_dbs(&mut self, dbs: Vec<RecallDb>) {
+        self.recall_dbs = dbs;
+    }
+
+    /// Inject DB context into the `recall_search` tool description.
+    ///
+    /// The `suffix` is appended to the default description so the agent
+    /// sees which knowledge bases are currently available.
+    pub fn set_recall_context(&mut self, suffix: impl Into<String>) {
+        self.recall.rebuild_description(suffix);
     }
 
     /// All tool descriptions, skipping disabled ones.
@@ -118,6 +161,7 @@ impl CoshTools {
             write_tool_if_enabled(out, disabled_tools, &plan.description_load_from_md);
         }
         write_tool_if_enabled(out, disabled_tools, &self.question.description_ask);
+        write_tool_if_enabled(out, disabled_tools, &self.recall.description_search);
         write_tool_if_enabled(out, disabled_tools, &self.skills.description_list);
         write_tool_if_enabled(out, disabled_tools, &self.skills.description_read);
         write_tool_if_enabled(out, disabled_tools, &self.skills.description_read_asset);
@@ -162,6 +206,7 @@ impl CoshTools {
             &self.plan.lock().unwrap().description_load_from_md,
         ));
         v.push(extract_schema(&self.question.description_ask));
+        v.push(extract_schema(&self.recall.description_search));
         v.push(extract_schema(&self.subagent.description_call));
         v.push(extract_schema(&self.skills.description_list));
         v.push(extract_schema(&self.skills.description_read));
@@ -171,6 +216,115 @@ impl CoshTools {
             .filter(|schema| !disabled_tools.contains(&schema.name))
             .collect()
     }
+}
+
+// ── recall_search dispatch (embedding + search) ───────────────────────
+//
+// The model only provides { db_name, query, limit }. The harness resolves
+// the DB from the registry, creates an embedder, embeds the query, and
+// searches the vector database. This requires at least one of the
+// `fastembed` or `cloud` features to be enabled at build time.
+
+/// Convert `RecallEmbedderConfig` to a `cosh_recall::embed::Embedder`.
+#[cfg(any(feature = "fastembed", feature = "cloud"))]
+fn config_to_embedder(
+    config: &RecallEmbedderConfig,
+) -> Result<cosh_recall::embed::Embedder, String> {
+    match config {
+        #[cfg(feature = "fastembed")]
+        RecallEmbedderConfig::Local { model_name } => {
+            // Parse the model name string → fastembed::EmbeddingModel via serde
+            let fb_model: fastembed::EmbeddingModel =
+                serde_json::from_value(serde_json::json!(model_name))
+                    .map_err(|e| format!("unknown fastembed model '{model_name}': {e}"))?;
+            cosh_recall::embed::Embedder::try_new_local(fb_model)
+                .map_err(|e| format!("failed to create local embedder: {e}"))
+        }
+        #[cfg(not(feature = "fastembed"))]
+        RecallEmbedderConfig::Local { .. } => {
+            Err("Local embedding requires building with --features fastembed".into())
+        }
+        #[cfg(feature = "cloud")]
+        RecallEmbedderConfig::Cloud {
+            provider,
+            model,
+            dim,
+        } => {
+            let connector = cosh_sdk::connector::Connector::new(provider)
+                .map_err(|e| format!("connector error: {e}"))?
+                .with_model(model);
+            Ok(cosh_recall::embed::Embedder::new_cloud(connector, *dim))
+        }
+        #[cfg(not(feature = "cloud"))]
+        RecallEmbedderConfig::Cloud { .. } => {
+            Err("Cloud embedding requires building with --features cloud".into())
+        }
+    }
+}
+
+/// Execute `recall_search` by embedding `query` and searching the vector DB.
+///
+/// Uses `VecDb::connect_readonly` — fails with a clear error if the table
+/// does not exist (no silent table creation).
+///
+/// This function is only available when at least one embedding feature
+/// (`fastembed` or `cloud`) is enabled.
+#[cfg(any(feature = "fastembed", feature = "cloud"))]
+async fn dispatch_recall_search(
+    db: &RecallDb,
+    query: &str,
+    limit: usize,
+) -> Result<String, String> {
+    // 1. Create embedder from the DB's config
+    let embedder = config_to_embedder(&db.embedder)?;
+
+    // 2. Connect to the LanceDB table in READ-ONLY mode
+    let vec_db = cosh_recall::embed::VecDb::connect_readonly(&db.uri, &db.table_name)
+        .await
+        .map_err(|e| format!("database connection error: {e}"))?;
+
+    // 3. Embed the query text
+    let embeddings = embedder
+        .embed(&[query])
+        .await
+        .map_err(|e| format!("embedding error: {e}"))?;
+    let query_vector = &embeddings[0];
+
+    // 4. Vector search (read-only)
+    let entries = vec_db
+        .get(query_vector, limit)
+        .await
+        .map_err(|e| format!("search error: {e}"))?;
+
+    // 5. Serialize results
+    let results: Vec<cosh_tools::recall::types::RecallEntry> = entries
+        .into_iter()
+        .map(|e| cosh_tools::recall::types::RecallEntry {
+            id: e.id,
+            content: e.content,
+        })
+        .collect();
+
+    let output = cosh_tools::recall::types::RecallOutput {
+        query: query.to_string(),
+        results,
+        total: results.len(),
+    };
+
+    serde_json::to_string(&output).map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(feature = "fastembed", feature = "cloud")))]
+async fn dispatch_recall_search(
+    _db: &RecallDb,
+    _query: &str,
+    _limit: usize,
+) -> Result<String, String> {
+    Err(
+        "RAG search requires building with --features lancedb,fastembed \
+         or --features lancedb,cloud for embedding support"
+            .into(),
+    )
 }
 
 fn extract_schema(desc: &serde_json::Value) -> ToolSchema {
@@ -217,6 +371,7 @@ impl Tools for CoshTools {
             write_single_tool(out, &plan.description_load_from_md);
         }
         write_single_tool(out, &self.question.description_ask);
+        write_single_tool(out, &self.recall.description_search);
         write_single_tool(out, &self.subagent.description_call);
         write_single_tool(out, &self.skills.description_list);
         write_single_tool(out, &self.skills.description_read);
@@ -245,6 +400,7 @@ impl Tools for CoshTools {
         v.push(self.plan.lock().unwrap().description_todo_read.clone());
         v.push(self.plan.lock().unwrap().description_load_from_md.clone());
         v.push(self.question.description_ask.clone());
+        v.push(self.recall.description_search.clone());
         v.push(self.subagent.description_call.clone());
         v.push(self.skills.description_list.clone());
         v.push(self.skills.description_read.clone());
@@ -282,6 +438,7 @@ impl Tools for CoshTools {
             &self.plan.lock().unwrap().description_load_from_md,
         ));
         v.push(extract_schema(&self.question.description_ask));
+        v.push(extract_schema(&self.recall.description_search));
         v.push(extract_schema(&self.subagent.description_call));
         v.push(extract_schema(&self.skills.description_list));
         v.push(extract_schema(&self.skills.description_read));
@@ -556,6 +713,38 @@ impl Tools for CoshTools {
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let output = self.question.ask(&input)?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "recall_search" => {
+                // The model only provides db_name + query + limit.
+                // The harness resolves the DB, embeds the query, and searches.
+                let db_name = args["db_name"]
+                    .as_str()
+                    .ok_or_else(|| "missing 'db_name'".to_string())?;
+                let query = args["query"]
+                    .as_str()
+                    .ok_or_else(|| "missing 'query'".to_string())?;
+                let limit = args["limit"].as_u64().unwrap_or(5) as usize;
+
+                // Find the database in the registry
+                let db = self
+                    .recall_dbs
+                    .iter()
+                    .find(|d| d.name == db_name)
+                    .ok_or_else(|| {
+                        format!(
+                            "Database '{db_name}' not found. Active databases: {}",
+                            self.recall_dbs
+                                .iter()
+                                .map(|d| d.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })?;
+
+                // Embed the query and search — requires fastembed or cloud feature
+                let output = dispatch_recall_search(db, query, limit).await?;
+                Ok(output)
             }
 
             _ => Err(format!("unknown cosh tool: {name}")),
