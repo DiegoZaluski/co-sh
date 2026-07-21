@@ -1,16 +1,13 @@
-//! Registry of known vector databases for the RAG feature.
+//! Data models for the RAG Knowledge Base feature.
 //!
-//! Persisted as JSON in `$DATA_DIR/cosh/rag_dbs.json`.
-//! Each entry stores metadata about a LanceDB database: its name, path on disk,
-//! description (user-provided), and the embedding model used.
+//! Pure type definitions extracted from the original monolith:
+//! - Embedding model enums (local ONNX + cloud providers)
+//! - Database entry schema
+//! - UI action/mode enums
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::fs;
-use std::path::PathBuf;
-use std::fmt::Write;
 
-// ── Local fastembed models (all real models from fastembed v5.17.2) ────
+// ── Local fastembed models ─────────────────────────────────────────────
 
 /// All text-embedding models available in `fastembed` v5.17.2.
 ///
@@ -382,162 +379,6 @@ pub struct RagDb {
     pub created_at: u64,
 }
 
-// ── RagRegistry ────────────────────────────────────────────────────────
-
-/// The full registry of all known RAG databases.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RagRegistry {
-    pub dbs: Vec<RagDb>,
-}
-
-impl RagRegistry {
-    /// Load registry from disk. Returns empty registry if file doesn't exist.
-    pub fn load() -> Self {
-        let path = Self::registry_path();
-        if !path.exists() {
-            return Self { dbs: Vec::new() };
-        }
-        match fs::read_to_string(&path) {
-            Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| {
-                log::warn!("Failed to parse rag_dbs.json: {e}, using empty registry");
-                Self { dbs: Vec::new() }
-            }),
-            Err(e) => {
-                log::warn!("Failed to read rag_dbs.json: {e}, using empty registry");
-                Self { dbs: Vec::new() }
-            }
-        }
-    }
-
-    /// Save registry to disk.
-    pub fn save(&self) {
-        let path = Self::registry_path();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        match serde_json::to_string_pretty(self) {
-            Ok(json) => {
-                if let Err(e) = fs::write(&path, &json) {
-                    log::error!("Failed to write rag_dbs.json: {e}");
-                }
-            }
-            Err(e) => log::error!("Failed to serialize rag_dbs.json: {e}"),
-        }
-    }
-
-    /// Find a DB by name.
-    pub fn find(&self, name: &str) -> Option<&RagDb> {
-        self.dbs.iter().find(|db| db.name == name)
-    }
-
-    /// Find a DB by name (mutable).
-    pub fn find_mut(&mut self, name: &str) -> Option<&mut RagDb> {
-        self.dbs.iter_mut().find(|db| db.name == name)
-    }
-
-    /// Add or update a DB. If a DB with the same name exists, it is replaced.
-    /// Returns `true` if the DB already existed (update), `false` if new.
-    pub fn upsert(&mut self, db: RagDb) -> bool {
-        let existed = self.dbs.iter().any(|d| d.name == db.name);
-        self.dbs.retain(|d| d.name != db.name);
-        self.dbs.push(db);
-        self.save();
-        existed
-    }
-
-    /// Remove a DB by name.
-    pub fn remove(&mut self, name: &str) {
-        self.dbs.retain(|d| d.name != name);
-        self.save();
-    }
-
-    /// Get the set of active DB names (from the UI toggle state).
-    /// Persisted separately from the registry itself.
-    pub fn load_active() -> HashSet<String> {
-        let path = Self::active_path();
-        if !path.exists() {
-            return HashSet::new();
-        }
-        match fs::read_to_string(&path) {
-            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-            Err(_) => HashSet::new(),
-        }
-    }
-
-    /// Save the active DB names.
-    pub fn save_active(active: &HashSet<String>) {
-        let path = Self::active_path();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string(active) {
-            let _ = fs::write(&path, &json);
-        }
-    }
-
-    /// Build the tool description suffix for the recall_search tool.
-    /// Includes only the active databases.
-    pub fn build_tool_suffix(&self, active_dbs: &HashSet<String>) -> String {
-        let mut suffix = String::new();
-        suffix.push_str("Available databases:\n\n");
-
-        let mut any_active = false;
-        for db in &self.dbs {
-            if active_dbs.contains(&db.name) {
-                any_active = true;
-                let _ = write!(
-                    &mut suffix,
-                    "- Name: {}\n  Description: {}\n  DB URI: {}\n  Embedding: {}\n\n",
-                    db.name, db.description, db.uri, db.embedder.label(),
-                );
-            }
-        }
-
-        if !any_active {
-            suffix.push_str("(none active)\n");
-        }
-
-        suffix
-    }
-
-    /// Compute the data root directory (platform-specific).
-    fn data_dir() -> PathBuf {
-        directories::BaseDirs::new()
-            .map(|d| d.data_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("cosh")
-    }
-
-    /// Path to the registry JSON file.
-    fn registry_path() -> PathBuf {
-        Self::data_dir().join("rag_dbs.json")
-    }
-
-    /// Path to the active DBs file.
-    fn active_path() -> PathBuf {
-        Self::data_dir().join("rag_active.json")
-    }
-
-    /// Compute the URI for a new database with the given name.
-    pub fn db_uri(name: &str) -> String {
-        Self::data_dir()
-            .join(name)
-            .to_string_lossy()
-            .to_string()
-    }
-
-    /// Check if a database name already exists.
-    pub fn exists(&self, name: &str) -> bool {
-        self.dbs.iter().any(|db| db.name == name)
-    }
-}
-
-impl Default for RagRegistry {
-    fn default() -> Self {
-        Self::load()
-    }
-}
-
 // ── EmbedModelEntry for the UI selector ────────────────────────────────
 
 /// Entry in the embed model selector dropdown.
@@ -551,7 +392,7 @@ pub enum EmbedModelEntry {
 }
 
 impl EmbedModelEntry {
-    /// All available entries, filtered by compiled features and env vars.
+    /// All available models (local + cloud, gated by env vars).
     pub fn all_available() -> Vec<Self> {
         // ── Local models (all real fastembed text models) ─────────────
         #[allow(unused_mut)]
@@ -637,6 +478,7 @@ impl EmbedModelEntry {
         entries
     }
 
+    /// Human-readable label.
     pub fn label(&self) -> String {
         match self {
             Self::Local(m) => m.label(),
@@ -647,103 +489,44 @@ impl EmbedModelEntry {
         }
     }
 
+    /// Vector dimension for this model.
     pub fn vector_dim(&self) -> usize {
         match self {
             Self::Local(m) => m.vector_dim(),
             Self::Cloud(provider, model) => cloud_known_dim(provider, model),
         }
     }
-
-    pub fn to_embedder_config(&self) -> EmbedderConfig {
-        match self {
-            Self::Local(m) => EmbedderConfig::Local { model: *m },
-            Self::Cloud(provider, model) => EmbedderConfig::Cloud(CloudEmbedConfig {
-                provider: provider.clone(),
-                model: model.clone(),
-            }),
-        }
-    }
-
-    /// Whether this model is compatible with a given embedder config.
-    pub fn matches_config(&self, config: &EmbedderConfig) -> bool {
-        match (self, config) {
-            (Self::Local(a), EmbedderConfig::Local { model: b }) => a == b,
-            (
-                Self::Cloud(p1, m1),
-                EmbedderConfig::Cloud(c),
-            ) => p1 == &c.provider && m1 == &c.model,
-            _ => false,
-        }
-    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ── RagMode ────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_registry_roundtrip() {
-        let mut registry = RagRegistry { dbs: Vec::new() };
-        let db = RagDb {
-            name: "test-db".into(),
-            uri: "/tmp/test-db".into(),
-            description: "Test database".into(),
-            embedder: EmbedderConfig::Local {
-                model: LocalEmbedModel::BGESmallENV15,
-            },
-            created_at: 1000,
-        };
-        registry.upsert(db);
-        assert!(registry.exists("test-db"));
-        assert!(!registry.exists("other"));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RagMode {
+    Idle,
+    Fetching,
+    Previewing,
+    Embedding,
+}
 
-        let json = serde_json::to_string(&registry).unwrap();
-        let loaded: RagRegistry = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.dbs.len(), 1);
-        assert_eq!(loaded.dbs[0].name, "test-db");
-    }
+// ── RagAction ──────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_embedder_config_dims() {
-        let local = EmbedderConfig::Local {
-            model: LocalEmbedModel::BGESmallENV15,
-        };
-        assert_eq!(local.vector_dim(), 384);
-
-        let cloud_small = EmbedderConfig::Cloud(CloudEmbedConfig {
-            provider: "openai".into(),
-            model: "text-embedding-3-small".into(),
-        });
-        assert_eq!(cloud_small.vector_dim(), 1536);
-
-        let cloud_large = EmbedderConfig::Cloud(CloudEmbedConfig {
-            provider: "openai".into(),
-            model: "text-embedding-3-large".into(),
-        });
-        assert_eq!(cloud_large.vector_dim(), 3072);
-    }
-
-    #[test]
-    fn test_all_models_have_dimensions() {
-        let entries = EmbedModelEntry::all_available();
-        assert!(!entries.is_empty(), "must have at least some models");
-        for entry in &entries {
-            let dim = entry.vector_dim();
-            assert!(dim > 0, "model {:?} must have positive dim", entry.label());
-        }
-    }
-
-    #[test]
-    fn test_local_model_labels_include_dim() {
-        let local = LocalEmbedModel::AllMiniLML6V2;
-        let label = local.label();
-        assert!(label.contains("384d"), "label should contain dim: {label}");
-    }
-
-    #[test]
-    fn test_local_model_quantized_same_dim() {
-        let regular = LocalEmbedModel::BGESmallENV15;
-        let quant = LocalEmbedModel::BGESmallENV15Q;
-        assert_eq!(regular.vector_dim(), quant.vector_dim());
-    }
+/// Actions returned from the RAG view's input handlers.
+/// The caller (app.rs) interprets each action to mutate state.
+#[derive(Debug, Clone)]
+pub enum RagAction {
+    /// Key was consumed (no side-effect needed).
+    Consumed,
+    /// Exit the RAG view entirely (back to home).
+    Back,
+    /// Close the content preview overlay (stay in RAG view).
+    ClosePreview,
+    /// Fetch a URL or read a file path.
+    FetchUrlOrPath(String),
+    /// Embed the previewed content into a database.
+    EmbedContent {
+        content: String,
+        db_name: String,
+        db_description: String,
+        model: Option<EmbedModelEntry>,
+    },
 }

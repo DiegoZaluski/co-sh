@@ -913,11 +913,14 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn render(&mut self, frame: &mut Frame<'_>, delta_time: f64) {
-        // Sync live_requested from session_view auto-scroll and sticky scroll state.
-        // During streaming, sticky scroll needs continuous rendering to re-apply scroll position.
+        // Sync live_requested — keeps the render loop running smoothly.
+        // Session: during streaming, sticky scroll needs continuous re-rendering.
+        // RAG: when the spinner is active (fetching/embedding), enable live mode
+        //      so event::poll uses 8ms instead of 50ms, keeping animation smooth.
         self.live_requested = self.session_view.is_auto_scrolling
             || (self.state.status == crate::types::SessionStatus::Working
-                && self.session_view.is_sticky_bottom);
+                && self.session_view.is_sticky_bottom)
+            || (matches!(self.mode(), AppMode::Rag) && self.rag_view.is_spinner_active());
         let area = frame.area();
 
         {
@@ -1375,30 +1378,21 @@ impl App {
                             Some(RagAction::Back) => {
                                 self.show_rag = false;
                             }
+                            Some(RagAction::ClosePreview) => {
+                                // Preview already closed by handle_key
+                            }
                             Some(RagAction::FetchUrlOrPath(input)) => {
                                 self.rag_view.start_fetch(&input);
                                 if input.starts_with("http://") || input.starts_with("https://") {
-                                    // URL fetch in background thread
+                                    // Use cosh_tools web_fetch which extracts clean text
+                                    // via rs_trafilatura (replaces raw curl that leaked HTML)
                                     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
                                     let url = input.clone();
-                                    std::thread::spawn(move || {
-                                        let output = std::process::Command::new("curl")
-                                            .arg("-sL")
-                                            .arg(&url)
-                                            .output();
-                                        match output {
-                                            Ok(out) if out.status.success() => {
-                                                let text = String::from_utf8_lossy(&out.stdout).to_string();
-                                                let _ = tx.send(Ok(text));
-                                            }
-                                            Ok(out) => {
-                                                let err = String::from_utf8_lossy(&out.stderr).to_string();
-                                                let _ = tx.send(Err(err));
-                                            }
-                                            Err(_e) => {
-                                                let _ = tx.send(Err(_e.to_string()));
-                                            }
-                                        }
+                                    self.tokio_handle.spawn(async move {
+                                        use cosh_tools::web::{WebFetch, fetch as web_fetch_fn};
+                                        let fetch_input = WebFetch { url };
+                                        let result = web_fetch_fn(&fetch_input).await;
+                                        let _ = tx.send(result);
                                     });
                                     self.rag_view.set_fetch_rx(rx);
                                 } else {
@@ -3164,6 +3158,12 @@ impl App {
                 self.rag_view.toggle_models_expanded();
                 return Ok(true);
             }
+            // Click outside preview overlay → close preview
+            if self.rag_view.is_preview_visible() && self.rag_view.is_click_outside_preview(&mouse, tools_area) {
+                self.rag_view.close_preview();
+                return Ok(true);
+            }
+
             // Dismiss Create DB form on click outside any target
             if self.rag_view.form_open() {
                 self.rag_view.close_form();

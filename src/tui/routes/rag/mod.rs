@@ -1,5 +1,8 @@
-pub mod rag_registry;
+pub mod models;
+pub mod registry;
 mod view;
+mod render;
+mod handlers;
 
-pub use view::RagAction;
+pub use models::RagAction;
 pub use view::RagView;
