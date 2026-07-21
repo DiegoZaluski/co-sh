@@ -864,6 +864,25 @@ impl App {
     fn render_rag_view(&mut self, buf: &mut ratatui::buffer::Buffer, session_area: Rect) {
         self.prompt_view.blur();
         self.rag_view.advance_spinner();
+        // Show toast when embed completes
+        if self.rag_view.take_embed_completed() {
+            use crate::ui::toast::{ToastOptions, ToastVariant};
+            self.toast_state.show(ToastOptions {
+                title: Some("RAG".into()),
+                message: "Content embedded successfully.".into(),
+                variant: ToastVariant::Success,
+                duration_ms: 4000,
+            });
+        }
+        if let Some(err) = self.rag_view.take_embed_error() {
+            use crate::ui::toast::{ToastOptions, ToastVariant};
+            self.toast_state.show(ToastOptions {
+                title: Some("RAG".into()),
+                message: err,
+                variant: ToastVariant::Error,
+                duration_ms: 6000,
+            });
+        }
         let tools_area = Rect::new(
             session_area.x,
             session_area.y,
@@ -972,7 +991,7 @@ impl App {
 
     #[cfg(feature = "embed")]
     fn handle_rag_key_event(&mut self, key: KeyCode) -> bool {
-        if !self.dialog.visible() {
+        if self.is_rag_mode() && !self.dialog.visible() {
             use crate::routes::rag::RagAction;
             match self.rag_view.handle_key(key) {
                 Some(RagAction::Back) => {
@@ -1038,6 +1057,38 @@ impl App {
                         variant: ToastVariant::Warning,
                         duration_ms: 4000,
                     });
+                }
+                Some(RagAction::EmbedContent {
+                    content,
+                    db_name,
+                    db_description: _,
+                    model: _,
+                }) => {
+                    // Look up the DB from the registry to get its URI and embedder config
+                    let db_entry = self.rag_view.registry.find(&db_name).cloned();
+                    if let Some(db) = db_entry {
+                        self.rag_view.start_embedding();
+                        let uri = db.uri.clone();
+                        let table_name = db.name.clone();
+                        let embedder_config = db.embedder.clone();
+                        let embed_content = content.clone();
+                        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+                        self.tokio_handle.spawn(async move {
+                            let result =
+                                embed_document(&uri, &table_name, &embedder_config, &embed_content)
+                                    .await;
+                            let _ = tx.send(result);
+                        });
+                        self.rag_view.set_embed_rx(rx);
+                    } else {
+                        use crate::ui::toast::{ToastOptions, ToastVariant};
+                        self.toast_state.show(ToastOptions {
+                            title: Some("RAG".into()),
+                            message: format!("Database '{db_name}' not found."),
+                            variant: ToastVariant::Error,
+                            duration_ms: 4000,
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -2150,9 +2201,9 @@ impl App {
                                 self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
                             } else if matches!(self.mode(), AppMode::AddProvider) {
                                 self.show_add_provider = false;
-                            }
-                            self.handle_rag_cancel_action();
-                            if matches!(self.mode(), AppMode::Home) {
+                            } else if self.is_rag_mode() {
+                                self.handle_rag_cancel_action();
+                            } else if matches!(self.mode(), AppMode::Home) {
                                 self.pending_delete_session_id = None;
                                 self.dialog.show(DialogType::Confirm {
                                     message: "Quit cosh?".into(),
@@ -3684,4 +3735,78 @@ fn save_provider_api_key(provider: &str, env_var: &str, api_key: &str) {
     } else {
         // Silently fail - env var is still set for the current process
     }
+}
+
+// ── Embedding helpers (feature-gated) ───────────────────────────────────
+
+#[cfg(feature = "embed")]
+async fn embed_document(
+    uri: &str,
+    table_name: &str,
+    embedder_config: &crate::routes::rag::models::EmbedderConfig,
+    content: &str,
+) -> Result<(), String> {
+    use cosh_recall::embed::Rag;
+
+    let dim = embedder_config.vector_dim();
+    let embedder = match embedder_config {
+        crate::routes::rag::models::EmbedderConfig::Local { model } => {
+            create_local_embedder(*model)?
+        }
+        crate::routes::rag::models::EmbedderConfig::Cloud(c) => {
+            create_cloud_embedder(&c.provider, &c.model, dim)?
+        }
+    };
+
+    let rag = Rag::connect(uri, table_name, embedder)
+        .await
+        .map_err(|e| format!("Failed to connect to database: {e}"))?;
+
+    rag.ingest("content", content)
+        .await
+        .map_err(|e| format!("Failed to embed content: {e}"))?;
+
+    Ok(())
+}
+
+#[cfg(all(feature = "embed", feature = "fastembed"))]
+fn create_local_embedder(
+    model: crate::routes::rag::models::LocalEmbedModel,
+) -> Result<cosh_recall::embed::Embedder, String> {
+    use cosh_recall::embed::Embedder;
+    let fast_model = model.to_fastembed_model();
+    Embedder::try_new_local(fast_model).map_err(|e| format!("Failed to create local embedder: {e}"))
+}
+
+#[cfg(all(feature = "embed", not(feature = "fastembed")))]
+fn create_local_embedder(
+    _model: crate::routes::rag::models::LocalEmbedModel,
+) -> Result<cosh_recall::embed::Embedder, String> {
+    Err(
+        "Local embedding requires the 'fastembed' feature (enable with --features fastembed)"
+            .into(),
+    )
+}
+
+#[cfg(all(feature = "embed", feature = "cloud"))]
+fn create_cloud_embedder(
+    provider: &str,
+    model: &str,
+    dim: usize,
+) -> Result<cosh_recall::embed::Embedder, String> {
+    use cosh_recall::embed::Embedder;
+    use cosh_sdk::connector::Connector;
+    let connector = Connector::new(provider)
+        .map_err(|e| format!("Failed to create connector: {e}"))?
+        .with_model(model);
+    Ok(Embedder::new_cloud(connector, dim))
+}
+
+#[cfg(all(feature = "embed", not(feature = "cloud")))]
+fn create_cloud_embedder(
+    _provider: &str,
+    _model: &str,
+    _dim: usize,
+) -> Result<cosh_recall::embed::Embedder, String> {
+    Err("Cloud embedding requires the 'cloud' feature (enable with --features cloud)".into())
 }

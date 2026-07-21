@@ -57,6 +57,11 @@ pub struct RagView {
     // Description popup
     pub(crate) show_desc_for_db: Option<usize>,
     pub(crate) desc_scroll: usize,
+
+    // Async embed result channel
+    pub(crate) embed_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    pub(crate) embed_success: bool,
+    pub(crate) embed_error: Option<String>,
 }
 
 impl RagView {
@@ -93,6 +98,9 @@ impl RagView {
             db_picker_scroll_offset: 0,
             show_desc_for_db: None,
             desc_scroll: 0,
+            embed_rx: None,
+            embed_success: false,
+            embed_error: None,
         }
     }
 
@@ -145,6 +153,18 @@ impl RagView {
         self.fetch_rx = Some(rx);
     }
 
+    pub fn set_embed_rx(&mut self, rx: std::sync::mpsc::Receiver<Result<(), String>>) {
+        self.embed_rx = Some(rx);
+    }
+
+    pub fn take_embed_completed(&mut self) -> bool {
+        std::mem::take(&mut self.embed_success)
+    }
+
+    pub fn take_embed_error(&mut self) -> Option<String> {
+        self.embed_error.take()
+    }
+
     pub fn advance_spinner(&mut self) {
         self.spinner.advance();
         // Check if async URL fetch completed
@@ -159,6 +179,22 @@ impl RagView {
                     }
                     Err(_e) => {
                         self.mode = RagMode::Idle;
+                    }
+                }
+            }
+        }
+        // Check if async embed completed
+        if let Some(rx) = &self.embed_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.embed_rx = None;
+                match result {
+                    Ok(()) => {
+                        self.embedding_done();
+                        self.embed_success = true;
+                    }
+                    Err(e) => {
+                        self.set_error();
+                        self.embed_error = Some(e);
                     }
                 }
             }
