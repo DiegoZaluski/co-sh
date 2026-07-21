@@ -114,7 +114,10 @@ impl Embedder {
         let dim = fastembed::TextEmbedding::get_model_info(&model)
             .map_err(|e| RagError::Embedding(e.to_string()))?
             .dim;
-        let text_embedding = fastembed::TextEmbedding::try_new(fastembed::InitOptions::new(model))?;
+        // Suppress fastembed's download progress bar to avoid breaking the TUI.
+        let mut options = fastembed::InitOptions::new(model);
+        options.show_download_progress = false;
+        let text_embedding = fastembed::TextEmbedding::try_new(options)?;
         Ok(Self::Local {
             model: Box::new(Mutex::new(text_embedding)),
             dim,

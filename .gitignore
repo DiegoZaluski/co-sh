@@ -1,4 +1,5 @@
 /target
+.fastembed_cache
 .opencode/*
 .devin
 .crush

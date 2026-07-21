@@ -35,6 +35,36 @@ impl From<ArrowError> for VecDbError {
     }
 }
 
+/// Validate that `name` is a valid LanceDB table name.
+///
+/// LanceDB table names must be valid directory names on the local filesystem.
+/// We restrict to alphanumeric, hyphens, underscores — must start with a letter.
+pub fn validate_table_name(name: &str) -> Result<(), VecDbError> {
+    if name.is_empty() {
+        return Err(VecDbError::Database("table name must not be empty".into()));
+    }
+    if name.len() > 100 {
+        return Err(VecDbError::Database(
+            "table name must be at most 100 characters".into(),
+        ));
+    }
+    let first = name.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() {
+        return Err(VecDbError::Database(
+            "table name must start with a letter".into(),
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(VecDbError::Database(
+            "table name must only contain letters, numbers, hyphens, and underscores".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_id(id: &str) -> Result<(), VecDbError> {
     if id.is_empty() || id.len() > 100 {
         return Err(VecDbError::InvalidId(
@@ -106,6 +136,9 @@ impl VecDb {
         table_name: &str,
         vector_dim: usize,
     ) -> Result<Self, VecDbError> {
+        // Validate table name before passing to LanceDB to avoid panics.
+        validate_table_name(table_name)?;
+
         let connection = lancedb::connect(uri).execute().await?;
 
         let table = if let Ok(table) = connection.open_table(table_name).execute().await {

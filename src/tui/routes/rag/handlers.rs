@@ -228,9 +228,14 @@ impl RagView {
                         "Enter a database description first (required).".into(),
                     ))
                 } else {
-                    // Create the DB
-                    let name = self.db_name_input.clone();
-                    let description = self.db_description_input.clone();
+                    let name = self.db_name_input.trim().to_string();
+                    // Validate table name before creating the DB.
+                    if let Err(e) = cosh_recall::embed::validate_table_name(&name) {
+                        let msg = e.to_string();
+                        let clean = msg.strip_prefix("Database error: ").unwrap_or(&msg);
+                        return Some(RagAction::ShowWarning(clean.to_string()));
+                    }
+                    let description = self.db_description_input.trim().to_string();
                     let embedder = self
                         .available_models
                         .get(self.selected_model_index)

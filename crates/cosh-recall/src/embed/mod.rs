@@ -3,7 +3,7 @@ pub mod vec_db;
 pub mod rag;
 
 pub use rag::{Embedder, Rag, RagError};
-pub use vec_db::{Entry, VecDb, VecDbError};
+pub use vec_db::{Entry, VecDb, VecDbError, validate_table_name};
 
 /// Convert a model name string to `fastembed::EmbeddingModel`.
 ///
