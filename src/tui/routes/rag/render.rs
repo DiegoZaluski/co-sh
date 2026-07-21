@@ -703,7 +703,7 @@ impl RagView {
         area: Rect,
         theme: &Theme,
         fg: Color,
-        muted: Color,
+        _muted: Color,
         _success: Color,
         _primary: Color,
     ) {
@@ -732,17 +732,6 @@ impl RagView {
         );
 
         // Border
-        let border_color = rgba_color(theme.border_active);
-        let max_y = overlay_y + overlay_h - 1;
-        Self::draw_overlay_border(
-            buf,
-            overlay_x,
-            overlay_y,
-            overlay_w,
-            overlay_h,
-            border_color,
-        );
-
         let content_x = overlay_x + 2;
         let content_w = overlay_w.saturating_sub(4);
         let mut content_y = overlay_y + 1;
@@ -758,20 +747,9 @@ impl RagView {
             title_bg,
             title_fg,
         );
-        draw_text_line(
-            buf,
-            "esc",
-            content_x + content_w.saturating_sub("esc".len() as u16),
-            content_y,
-            content_w,
-            Style::default().fg(title_fg).bg(title_bg),
-        );
-        content_y += 1;
+        content_y += 2;
 
-        // Small gap after title bar (replaces old separator line)
-        content_y += 1;
-
-        // Scrollable content
+        // Scrollable content (no border, no footer)
         let max_content_h = (overlay_y + overlay_h - 1).saturating_sub(content_y);
         let total_lines = self.content_preview.lines().count();
         let max_scroll = total_lines.saturating_sub(max_content_h as usize).max(0);
@@ -794,23 +772,6 @@ impl RagView {
                 Style::default().fg(fg),
             );
         }
-
-        // Footer hints
-        let footer_y2 = max_y - 1;
-        let footer_text = if total_lines > max_content_h as usize {
-            let pct = scroll.saturating_mul(100) / max_scroll.max(1);
-            format!("\u{2191}\u{2193} scroll  {pct}%  Enter to embed  Esc")
-        } else {
-            "Enter to embed  Esc to close".to_string()
-        };
-        draw_text_line(
-            buf,
-            &footer_text,
-            content_x,
-            footer_y2,
-            content_w,
-            Style::default().fg(muted),
-        );
     }
 
     fn draw_overlay_border(
