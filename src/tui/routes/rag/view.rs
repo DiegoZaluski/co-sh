@@ -45,6 +45,11 @@ pub struct RagView {
     pub(crate) dbs_scroll_offset: usize,
     pub(crate) active_dbs: HashSet<String>,
     pub(crate) db_filter: SearchBar,
+
+    // Embed target DB selection
+    pub(crate) selected_db_for_embed: Option<String>,
+    pub(crate) show_db_picker: bool,
+    pub(crate) db_picker_scroll_offset: usize,
 }
 
 impl RagView {
@@ -73,6 +78,9 @@ impl RagView {
             dbs_scroll_offset: 0,
             active_dbs,
             db_filter: SearchBar::new(),
+            selected_db_for_embed: None,
+            show_db_picker: false,
+            db_picker_scroll_offset: 0,
         }
     }
 
@@ -102,6 +110,7 @@ impl RagView {
         self.db_name_input.clear();
         self.db_description_input.clear();
         self.show_create_db = false;
+        // Keep selected_db_for_embed (user may want to embed more content into same DB)
         self.registry = RagRegistry::load();
     }
 
@@ -114,6 +123,7 @@ impl RagView {
         self.mode = RagMode::Idle;
         self.content_preview.clear();
         self.preview_scroll = 0;
+        // Keep selected_db_for_embed (user doesn't need to re-select for next fetch)
     }
 
     pub fn set_fetch_rx(&mut self, rx: std::sync::mpsc::Receiver<Result<String, String>>) {
@@ -160,6 +170,7 @@ impl RagView {
 
     pub fn toggle_create_db(&mut self) {
         self.show_create_db = !self.show_create_db;
+        self.show_db_picker = false; // close DB picker if open
         self.models_expanded = false;
         if !self.show_create_db {
             self.selected_model_index = 0;
@@ -179,14 +190,12 @@ impl RagView {
     }
 
     pub fn close_form(&mut self) {
-        if self.show_create_db {
-            self.show_create_db = false;
-            self.models_expanded = false;
-            self.selected_model_index = 0;
-            self.model_scroll_offset = 0;
-            self.db_name_input.clear();
-            self.db_description_input.clear();
-        }
+        self.show_create_db = false;
+        self.models_expanded = false;
+        self.selected_model_index = 0;
+        self.model_scroll_offset = 0;
+        self.db_name_input.clear();
+        self.db_description_input.clear();
     }
 
     pub fn db_count(&self) -> usize {
@@ -199,6 +208,35 @@ impl RagView {
     }
 
     /// Whether the spinner animation is active (fetching or embedding).
+    // ── DB picker helpers ────────────────────────────────────────
+
+    pub fn toggle_db_picker(&mut self) {
+        self.show_db_picker = !self.show_db_picker;
+        self.show_create_db = false; // close create-db form if open
+        self.db_picker_scroll_offset = 0;
+    }
+
+    pub fn close_db_picker(&mut self) {
+        self.show_db_picker = false;
+        self.db_picker_scroll_offset = 0;
+    }
+
+    pub fn select_db_for_embed(&mut self, db_name: &str) {
+        self.selected_db_for_embed = Some(db_name.to_string());
+        self.show_db_picker = false;
+    }
+
+    pub fn has_selected_db(&self) -> bool {
+        self.selected_db_for_embed.is_some()
+    }
+
+    pub fn selected_db_display(&self) -> String {
+        match &self.selected_db_for_embed {
+            Some(name) => name.clone(),
+            None => String::new(),
+        }
+    }
+
     pub fn is_spinner_active(&self) -> bool {
         matches!(self.mode, RagMode::Fetching | RagMode::Embedding)
     }

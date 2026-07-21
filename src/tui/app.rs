@@ -1405,6 +1405,45 @@ impl App {
                                     }
                                 }
                             }
+                            Some(RagAction::CreateDb { name, description, embedder }) => {
+                                use crate::routes::rag::models::RagDb;
+                                let db = RagDb {
+                                    name: name.clone(),
+                                    uri: crate::routes::rag::registry::RagRegistry::db_uri(&name),
+                                    description: description.clone(),
+                                    embedder,
+                                    created_at: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as u64,
+                                };
+                                let mut registry = crate::routes::rag::registry::RagRegistry::load();
+                                registry.upsert(db);
+                                // Auto-select the newly created DB for embedding
+                                self.rag_view.selected_db_for_embed = Some(name.clone());
+                                // Also add it to active_dbs so it's ready to use
+                                self.rag_view.active_dbs.insert(name.clone());
+                                crate::routes::rag::registry::RagRegistry::save_active(&self.rag_view.active_dbs);
+                                // Reload registry
+                                self.rag_view.registry = crate::routes::rag::registry::RagRegistry::load();
+                                // Show success toast
+                                use crate::ui::toast::{ToastOptions, ToastVariant};
+                                self.toast_state.show(ToastOptions {
+                                    title: Some("Database Created".into()),
+                                    message: format!("'{name}' is now selected for embedding."),
+                                    variant: ToastVariant::Success,
+                                    duration_ms: 4000,
+                                });
+                            }
+                            Some(RagAction::ShowWarning(msg)) => {
+                                use crate::ui::toast::{ToastOptions, ToastVariant};
+                                self.toast_state.show(ToastOptions {
+                                    title: Some("RAG".into()),
+                                    message: msg,
+                                    variant: ToastVariant::Warning,
+                                    duration_ms: 4000,
+                                });
+                            }
                             _ => {}
                         }
                         return Ok(false);
@@ -3145,6 +3184,28 @@ impl App {
                 main_area.width,
                 main_area.height.saturating_sub(4),
             );
+            // DB picker row click (select DB for embed)
+            if self.rag_view.show_db_picker {
+                if let Some(picker_idx) = self.rag_view.is_db_picker_row_click(&mouse, tools_area) {
+                    let pick_name = self.rag_view.filtered_dbs()
+                        .get(picker_idx)
+                        .map(|db| db.name.clone());
+                    if let Some(ref name) = pick_name {
+                        self.rag_view.select_db_for_embed(name);
+                    }
+                    return Ok(true);
+                }
+                // Click outside picker → close it
+                self.rag_view.close_db_picker();
+                return Ok(true);
+            }
+
+            // "Select Database" button click
+            if self.rag_view.is_select_db_click(&mouse, tools_area) {
+                self.rag_view.toggle_db_picker();
+                return Ok(true);
+            }
+
             if let Some(clicked_idx) = self.rag_view.handle_mouse(&mouse, tools_area) {
                 self.rag_view.toggle_db(clicked_idx);
                 return Ok(true);

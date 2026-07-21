@@ -529,4 +529,12 @@ pub enum RagAction {
         db_description: String,
         model: Option<EmbedModelEntry>,
     },
+    /// Create a new database.
+    CreateDb {
+        name: String,
+        description: String,
+        embedder: EmbedderConfig,
+    },
+    /// Show a warning toast message.
+    ShowWarning(String),
 }

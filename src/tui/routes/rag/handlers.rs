@@ -12,6 +12,11 @@ use super::view::RagView;
 
 impl RagView {
     pub fn handle_key(&mut self, key: ratatui::crossterm::event::KeyCode) -> Option<RagAction> {
+        // When the DB picker is open, route keys there first
+        if self.show_db_picker {
+            return self.handle_db_picker_key(key);
+        }
+
         // When the Create DB form is expanded, route keys to it first
         if self.show_create_db {
             return self.handle_create_db_key(key);
@@ -47,15 +52,29 @@ impl RagView {
                     if input.is_empty() {
                         return Some(RagAction::Consumed);
                     }
+                    if !self.has_selected_db() {
+                        return Some(RagAction::ShowWarning(
+                            "Select a database first to embed the content.".into()
+                        ));
+                    }
                     return Some(RagAction::FetchUrlOrPath(input));
                 }
                 RagMode::Previewing => {
-                    if !self.content_preview.is_empty() && !self.db_name_input.is_empty() {
+                    if !self.content_preview.is_empty() {
+                        let db_name = match &self.selected_db_for_embed {
+                            Some(name) => name.clone(),
+                            None => return Some(RagAction::ShowWarning(
+                                "Select a database first to embed the content.".into()
+                            )),
+                        };
+                        let db_desc = self.registry.find(&db_name)
+                            .map(|db| db.description.clone())
+                            .unwrap_or_default();
                         let model = self.available_models.get(self.selected_model_index).cloned();
                         return Some(RagAction::EmbedContent {
                             content: self.content_preview.clone(),
-                            db_name: self.db_name_input.clone(),
-                            db_description: self.db_description_input.clone(),
+                            db_name,
+                            db_description: db_desc,
                             model,
                         });
                     }
@@ -64,6 +83,10 @@ impl RagView {
                 _ => Some(RagAction::Consumed),
             },
             ratatui::crossterm::event::KeyCode::Esc => {
+                if self.show_db_picker {
+                    self.close_db_picker();
+                    return Some(RagAction::Consumed);
+                }
                 if self.mode == RagMode::Previewing {
                     // Previewing: just close the preview overlay
                     self.close_preview();
@@ -78,6 +101,7 @@ impl RagView {
             }
             ratatui::crossterm::event::KeyCode::Tab => {
                 self.show_create_db = !self.show_create_db;
+                self.show_db_picker = false; // close DB picker if open
                 if !self.show_create_db {
                     self.selected_model_index = 0;
                     self.model_scroll_offset = 0;
@@ -129,6 +153,10 @@ impl RagView {
     }
 
     /// Handle keys when the Create DB form is focused.
+    /// Handle keys when the Create DB form is focused.
+    /// Returns CreateDb action when user confirms creation.
+    /// Handle keys when the Create DB form is focused.
+    /// Returns CreateDb action when user confirms creation.
     fn handle_create_db_key(&mut self, key: ratatui::crossterm::event::KeyCode) -> Option<RagAction> {
         match key {
             ratatui::crossterm::event::KeyCode::Up
@@ -159,9 +187,43 @@ impl RagView {
             }
             ratatui::crossterm::event::KeyCode::Enter => {
                 if self.models_expanded {
+                    // Collapse models
                     self.models_expanded = false;
+                    Some(RagAction::Consumed)
+                } else if !self.db_name_input.is_empty() {
+                    // Create the DB
+                    let name = self.db_name_input.clone();
+                    let description = self.db_description_input.clone();
+                    let embedder = self
+                        .available_models
+                        .get(self.selected_model_index)
+                        .map(|m| match m {
+                            super::models::EmbedModelEntry::Local(lm) => {
+                                super::models::EmbedderConfig::Local { model: *lm }
+                            }
+                            super::models::EmbedModelEntry::Cloud(p, m) => {
+                                super::models::EmbedderConfig::Cloud(
+                                    super::models::CloudEmbedConfig {
+                                        provider: p.clone(),
+                                        model: m.clone(),
+                                    }
+                                )
+                            }
+                        })
+                        .unwrap_or(super::models::EmbedderConfig::Local {
+                            model: super::models::LocalEmbedModel::AllMiniLML6V2,
+                        });
+                    // Close form
+                    self.show_create_db = false;
+                    self.models_expanded = false;
+                    self.selected_model_index = 0;
+                    self.model_scroll_offset = 0;
+                    self.db_name_input.clear();
+                    self.db_description_input.clear();
+                    Some(RagAction::CreateDb { name, description, embedder })
+                } else {
+                    Some(RagAction::ShowWarning("Enter a database name first.".into()))
                 }
-                Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Tab
             | ratatui::crossterm::event::KeyCode::Esc => {
@@ -201,6 +263,66 @@ impl RagView {
         }
     }
 
+    /// Handle keys when the DB picker overlay is open.
+    fn handle_db_picker_key(&mut self, key: ratatui::crossterm::event::KeyCode) -> Option<RagAction> {
+        let filtered = self.filtered_dbs();
+        if filtered.is_empty() {
+            // No DBs to pick — just close on any key
+            self.close_db_picker();
+            return Some(RagAction::Consumed);
+        }
+        match key {
+            ratatui::crossterm::event::KeyCode::Up => {
+                let total = filtered.len();
+                let cur_idx = filtered
+                    .iter()
+                    .position(|db| Some(db.name.as_str()) == self.selected_db_for_embed.as_deref())
+                    .unwrap_or(0);
+                let new = if cur_idx == 0 { total - 1 } else { cur_idx - 1 };
+                self.selected_db_for_embed = Some(filtered[new].name.clone());
+                // Clamp scroll
+                let scroll = &mut self.db_picker_scroll_offset;
+                let vis = 10usize.min(total);
+                if new >= *scroll + vis {
+                    *scroll = new.saturating_sub(vis.saturating_sub(1));
+                }
+                if new < *scroll {
+                    *scroll = new;
+                }
+                Some(RagAction::Consumed)
+            }
+            ratatui::crossterm::event::KeyCode::Down => {
+                let total = filtered.len();
+                let cur_idx = filtered
+                    .iter()
+                    .position(|db| Some(db.name.as_str()) == self.selected_db_for_embed.as_deref())
+                    .unwrap_or(0);
+                let new = (cur_idx + 1) % total;
+                self.selected_db_for_embed = Some(filtered[new].name.clone());
+                // Clamp scroll
+                let scroll = &mut self.db_picker_scroll_offset;
+                let vis = 10usize.min(total);
+                if new >= *scroll + vis {
+                    *scroll = new.saturating_sub(vis.saturating_sub(1));
+                }
+                if new < *scroll {
+                    *scroll = new;
+                }
+                Some(RagAction::Consumed)
+            }
+            ratatui::crossterm::event::KeyCode::Enter => {
+                // Pick the currently selected DB and close
+                self.close_db_picker();
+                Some(RagAction::Consumed)
+            }
+            ratatui::crossterm::event::KeyCode::Esc => {
+                self.close_db_picker();
+                Some(RagAction::Consumed)
+            }
+            _ => Some(RagAction::Consumed),
+        }
+    }
+
     pub fn handle_paste(&mut self, text: &str) {
         self.url_input.handle_paste(text);
     }
@@ -231,7 +353,44 @@ impl RagView {
 
     /// Public query for the create-DB button.
     pub fn is_create_click(&self, mouse: &MouseEvent, area: Rect) -> bool {
-        !self.show_create_db && self.is_create_db_clicked(mouse, area)
+        !self.show_create_db && !self.show_db_picker && self.is_create_db_clicked(mouse, area)
+    }
+
+    /// Public query for the "Select Database" button.
+    pub fn is_select_db_click(&self, mouse: &MouseEvent, area: Rect) -> bool {
+        !self.show_create_db && !self.show_db_picker && !self.registry.dbs.is_empty()
+            && self.is_select_db_btn_clicked(mouse, area)
+    }
+
+    /// Public query for DB picker row clicks.
+    pub fn is_db_picker_row_click(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
+        if !self.show_db_picker {
+            return None;
+        }
+        let inner_w = area.width.saturating_sub(4);
+        if inner_w < 10 {
+            return None;
+        }
+        let inner_x = area.x + 2;
+        let input_h = self.url_input.height();
+
+        // The picker renders at cy, with fixed height 5 (matching create form)
+        let picker_y = area.y + 2 + input_h;
+        let picker_h = 5u16;
+
+        let mx = mouse.x;
+        let my = mouse.y;
+
+        if my >= picker_y && my < picker_y + picker_h && mx >= inner_x && mx < inner_x + inner_w {
+            let filtered = self.filtered_dbs();
+            let list_start = picker_y + 1; // skip title line
+            let row = my.saturating_sub(list_start) as usize;
+            let idx = self.db_picker_scroll_offset + row;
+            if idx < filtered.len() {
+                return Some(idx);
+            }
+        }
+        None
     }
 
     /// Public query for model line clicks.
@@ -309,32 +468,28 @@ impl RagView {
         None
     }
 
-    /// Check if the mouse click is on the "+ Create New Database" button.
+    /// Check if the mouse click is on the "+ Create DB" button.
     fn is_create_db_clicked(&self, mouse: &MouseEvent, area: Rect) -> bool {
-        let avail_h = area.height;
-        let input_h = self.url_input.height();
-        let create_db_lines: u16 = 1; // button mode (not expanded)
-        let box1_h = {
-            let ideal = avail_h.saturating_mul(30) / 100;
-            ideal.max(7 + create_db_lines).min(avail_h.saturating_sub(8))
-        };
         let inner_w = area.width.saturating_sub(4);
         if inner_w < 10 {
             return false;
         }
+        let input_h = self.url_input.height();
         let input_w = inner_w.saturating_sub(4);
         let cx = area.x + 4;
-
-        let btn = " + Create New Database  (Tab)";
-        let btn_len = btn.len() as u16;
-        let btn_x = cx + input_w.saturating_sub(btn_len + 2);
         let mx = mouse.x;
         let my = mouse.y;
 
-        let box1_content_top = area.y + 2 + input_h;
-        let box1_bottom = area.y + box1_h;
-        my >= box1_content_top && my < box1_bottom
-            && mx >= btn_x && mx < btn_x + btn_len
+        // Button is on the status line cy = area.y + 2 + input_h
+        let btn_y = area.y + 2 + input_h;
+
+        // Rightmost button: "+ Create DB"
+        let btn = " +Create DB ";
+        let btn_len = btn.len() as u16;
+        let right_side_start = cx + input_w.saturating_sub(2);
+        let btn_x = right_side_start.saturating_sub(btn_len);
+
+        my == btn_y && mx >= btn_x && mx < btn_x + btn_len
     }
 
     /// Check if the mouse click is on the collapsed model line (to toggle expand).
@@ -354,6 +509,7 @@ impl RagView {
 
         my == model_y && mx >= cx + 2 && mx < cx + 2 + pad_w
     }
+
 
     /// Check if the mouse click is on the "Esc to close" label in the Create DB form.
     fn is_form_esc_clicked(&self, mouse: &MouseEvent, area: Rect) -> bool {
@@ -376,6 +532,32 @@ impl RagView {
         let mx = mouse.x;
 
         my == form_bottom && mx >= pad && mx < pad + esc_label.len() as u16
+    }    /// Check if mouse is on the "Select Database" button.
+    fn is_select_db_btn_clicked(&self, mouse: &MouseEvent, area: Rect) -> bool {
+        let inner_w = area.width.saturating_sub(4);
+        if inner_w < 10 {
+            return false;
+        }
+        let input_h = self.url_input.height();
+        let input_w = inner_w.saturating_sub(4);
+        let cx = area.x + 4;
+        let mx = mouse.x;
+        let my = mouse.y;
+
+        // Button is on the status line cy = area.y + 2 + input_h
+        let btn_y = area.y + 2 + input_h;
+
+        let sel_btn = " Select DB ";
+        let sel_btn_len = sel_btn.len() as u16;
+        let create_btn = " +Create DB ";
+        let right_side_start = cx + input_w.saturating_sub(2);
+        // Buttons are rendered right-to-left: first Create DB, then Select DB to its left
+        // Select DB starts at: right_side_start - len(Create) - len(Select)
+        let sel_btn_x = right_side_start
+            .saturating_sub(create_btn.len() as u16)
+            .saturating_sub(sel_btn_len);
+
+        my == btn_y && mx >= sel_btn_x && mx < sel_btn_x + sel_btn_len
     }
 
     /// Dismiss the Create DB form on click outside any target (used by app.rs).

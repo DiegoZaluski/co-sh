@@ -102,6 +102,8 @@ impl RagView {
             } else {
                 5
             }
+        } else if self.show_db_picker {
+            5
         } else {
             1
         };
@@ -149,6 +151,19 @@ impl RagView {
         // ── URL/path input ────────────────────────────────────────────
         let input_w = inner_w.saturating_sub(4);
         self.url_input.render(buf, cx, cy, input_w, _theme);
+
+        // ── DB indicator inside the input box (line 2, below placeholder) ──
+        let input_bg = rgba_color(_theme.background_element);
+        if let Some(db_name) = &self.selected_db_for_embed {
+            draw_text_line(buf, &format!("DB: {db_name}"), cx + 2, cy + 2,
+                           input_w.saturating_sub(4),
+                           Style::default().fg(fg).bg(input_bg));
+        } else {
+            draw_text_line(buf, "No DB selected", cx + 2, cy + 2,
+                           input_w.saturating_sub(4),
+                           Style::default().fg(warning).bg(input_bg));
+        }
+
         cy += input_h;
 
         // ── Preview / status ──────────────────────────────────────────
@@ -187,14 +202,34 @@ impl RagView {
             RagMode::Idle => {}
         }
 
-        // ── Create New Database form ──────────────────────────────────
+        // ── Action buttons (right side, only when form/picker not open) ──
+        if !self.show_create_db && !self.show_db_picker {
+            let right_side_start = cx + input_w.saturating_sub(2);
+            let mut btn_x = right_side_start;
+
+            // "+Create DB" button (rightmost) — primary bg
+            let create_btn = " +Create DB ";
+            btn_x = btn_x.saturating_sub(create_btn.len() as u16);
+            section_title(buf, btn_x, cy, create_btn, title_bg, title_fg);
+
+            // "Select DB" button (second from right) — success bg for visual distinction
+            if !self.registry.dbs.is_empty() {
+                let sel_btn = " Select DB ";
+                btn_x = btn_x.saturating_sub(sel_btn.len() as u16);
+                section_title(buf, btn_x, cy, sel_btn, success, title_fg);
+            }
+        }
+
+        // ── DB picker (replaces button line when open) ────────────────
+        if self.show_db_picker && !self.show_create_db {
+            self.render_db_picker(buf, cx, cy, input_w, _theme,
+                                  fg, muted, success, primary, title_bg, title_fg);
+        }
+
+        // ── Create New Database form (replaces button line when open) ──
         if self.show_create_db {
             self.render_create_db_form(buf, cx, cy, input_w, _theme,
                                        fg, muted, warning, primary, title_fg, panel_bg);
-        } else {
-            let btn = " + Create New Database  (Tab)";
-            let btn_x = cx + input_w.saturating_sub(btn.len() as u16 + 2);
-            section_title(buf, btn_x, cy, btn, title_bg, title_fg);
         }
 
         *y = *y + box1_h + 1;
@@ -288,7 +323,6 @@ impl RagView {
         let desc_trunc = truncate_label(&desc_text, max_name_w);
         draw_text_line(buf, &desc_trunc, pad, form_y, pad_w, Style::default().fg(muted));
 
-        draw_text_line(buf, "Esc to close", pad, form_y + 1, pad_w, Style::default().fg(muted));
     }
 
     fn create_db_mini_box_height(&self) -> u16 {
@@ -509,6 +543,63 @@ impl RagView {
                 cell.set_char(ch);
                 cell.set_style(Style::default().fg(border_color));
             }
+        }
+    }
+
+    // ── DB Picker (inline form, identical to create DB form) ─────────
+
+    fn render_db_picker(
+        &self, buf: &mut Buffer, cx: u16, cy: u16, input_w: u16, theme: &Theme,
+        fg: Color, muted: Color, _success: Color, primary: Color, _title_bg: Color, _title_fg: Color,
+    ) {
+        // Match create_db_mini_box_height() collapsed height: 5 lines
+        let picker_h = 5u16;
+        let bg_term = rgba_color(theme.background);
+        fill_rect(buf, cx, cy, input_w, picker_h, Style::default().bg(bg_term));
+
+        let pad = cx + 2;
+        let pad_w = input_w.saturating_sub(4);
+        let mut row_y = cy;
+
+        // Title line (matching "Model" label style in create form)
+        draw_text_line(buf, "Select Database", pad, row_y, pad_w,
+                       Style::default().fg(primary));
+        row_y += 1;
+
+        // DB list (up to 4 items fit in 5-line box: title + 4 list lines)
+        let filtered = self.filtered_dbs();
+        if filtered.is_empty() {
+            draw_text_line(buf, "   No databases found.", pad, row_y, pad_w,
+                           Style::default().fg(muted));
+            return;
+        }
+
+        let max_vis = 4usize;
+        let total = filtered.len();
+
+        let mut scroll = self.db_picker_scroll_offset;
+        if scroll + max_vis > total && total > max_vis {
+            scroll = total.saturating_sub(max_vis);
+        }
+
+        let visible_end = (scroll + max_vis).min(total);
+        for i in scroll..visible_end {
+            let db = filtered[i];
+            let is_sel = self.selected_db_for_embed.as_deref() == Some(&db.name);
+            let prefix = if is_sel { "\u{25cf} " } else { "  " };
+            let line = format!("{prefix}{} \u{2014} {}", db.name, db.description);
+            let max_desc = pad_w as usize;
+            let truncated = truncate_label(&line, max_desc);
+
+            if is_sel {
+                fill_rect(buf, cx, row_y, input_w, 1, Style::default().bg(primary));
+                draw_text_line(buf, &truncated, pad, row_y, pad_w,
+                               Style::default().fg(rgba_color(theme.background)).bg(primary));
+            } else {
+                draw_text_line(buf, &truncated, pad, row_y, pad_w,
+                               Style::default().fg(fg));
+            }
+            row_y += 1;
         }
     }
 }
