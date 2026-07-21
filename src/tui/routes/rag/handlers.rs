@@ -72,6 +72,7 @@ impl RagView {
                             "Select a database first to embed the content.".into(),
                         ));
                     }
+                    self.url_input.clear();
                     return Some(RagAction::FetchUrlOrPath(input));
                 }
                 RagMode::Previewing => {

@@ -91,12 +91,12 @@ const LOGO: &[&str] = &[
 const TAGLINE: &str = "Terminal AI Agent";
 
 pub const MENU_ITEMS: &[&str] = &[
-    "Start a New Session",
-    "Browse Session History",
-    "Keyboard Shortcuts",
-    "RAG",
-    "Internal Tools",
-    "ADD Provider",
+    "Start a new session",
+    "Browse session haistory",
+    "Keyboard shortcuts",
+    "RAG via file or URL",
+    "Internal tools",
+    "ADD provider",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]

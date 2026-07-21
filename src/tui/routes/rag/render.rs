@@ -200,7 +200,7 @@ impl RagView {
         if let Some(db_name) = &self.selected_db_for_embed {
             draw_text_line(
                 buf,
-                &format!("DB: {db_name}"),
+                &format!("DB {db_name}"),
                 cx + 2,
                 cy + 2,
                 input_w.saturating_sub(4),
@@ -229,7 +229,7 @@ impl RagView {
                 }
                 draw_text_line(
                     buf,
-                    " Fetching content...",
+                    " Fetching content",
                     cx + 2,
                     cy,
                     input_w.saturating_sub(2),
