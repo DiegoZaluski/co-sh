@@ -3769,23 +3769,13 @@ async fn embed_document(
     Ok(())
 }
 
-#[cfg(all(feature = "embed", feature = "fastembed"))]
+#[cfg(feature = "embed")]
 fn create_local_embedder(
     model: crate::routes::rag::models::LocalEmbedModel,
 ) -> Result<cosh_recall::embed::Embedder, String> {
     use cosh_recall::embed::Embedder;
     let fast_model = model.to_fastembed_model();
     Embedder::try_new_local(fast_model).map_err(|e| format!("Failed to create local embedder: {e}"))
-}
-
-#[cfg(all(feature = "embed", not(feature = "fastembed")))]
-fn create_local_embedder(
-    _model: crate::routes::rag::models::LocalEmbedModel,
-) -> Result<cosh_recall::embed::Embedder, String> {
-    Err(
-        "Local embedding requires the 'fastembed' feature (enable with --features fastembed)"
-            .into(),
-    )
 }
 
 #[cfg(all(feature = "embed", feature = "cloud"))]
