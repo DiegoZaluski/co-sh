@@ -6,6 +6,7 @@ use cosh_tui::core::types::MouseEvent;
 use ratatui::layout::Rect;
 
 use super::models::{CreateDbFocus, RagAction, RagMode};
+use super::render::truncate_label;
 use super::view::RagView;
 
 // ── Keyboard handling ──────────────────────────────────────────────────
@@ -24,7 +25,9 @@ impl RagView {
 
         match key {
             ratatui::crossterm::event::KeyCode::Up => {
-                if self.mode == RagMode::Previewing && self.preview_scroll > 0 {
+                if self.show_desc_for_db.is_some() && self.desc_scroll > 0 {
+                    self.desc_scroll = self.desc_scroll.saturating_sub(1);
+                } else if self.mode == RagMode::Previewing && self.preview_scroll > 0 {
                     self.preview_scroll = self.preview_scroll.saturating_sub(1);
                 } else if !self.registry.dbs.is_empty() {
                     let total = self.registry.dbs.len();
@@ -38,7 +41,16 @@ impl RagView {
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Down => {
-                if self.mode == RagMode::Previewing
+                if self.show_desc_for_db.is_some() {
+                    let total_lines = self
+                        .filtered_dbs()
+                        .get(self.show_desc_for_db.unwrap_or(usize::MAX))
+                        .map(|db| db.description.lines().count())
+                        .unwrap_or(0);
+                    if (self.desc_scroll as usize) < total_lines.saturating_sub(1) {
+                        self.desc_scroll = self.desc_scroll.saturating_add(1);
+                    }
+                } else if self.mode == RagMode::Previewing
                     && self.preview_scroll < self.max_preview_scroll()
                 {
                     self.preview_scroll = self.preview_scroll.saturating_add(1);
@@ -93,6 +105,10 @@ impl RagView {
                 _ => Some(RagAction::Consumed),
             },
             ratatui::crossterm::event::KeyCode::Esc => {
+                if self.show_desc_for_db.is_some() {
+                    self.show_desc_for_db = None;
+                    return Some(RagAction::Consumed);
+                }
                 if self.show_db_picker {
                     self.close_db_picker();
                     return Some(RagAction::Consumed);
@@ -777,6 +793,111 @@ impl RagView {
         // Only dismiss if the click is OUTSIDE the form's bounding box
         // (not just outside specific interactive elements).
         !self.is_click_inside_create_form(mouse, area)
+    }
+
+    /// Check if the mouse click is on a "show desc" button next to a DB row.
+    /// Returns the filtered index of the DB whose button was clicked.
+    pub fn is_show_desc_click(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
+        let avail_h = area.height;
+        let gap: u16 = 1;
+        let bottom_gap: u16 = 0;
+
+        let box1_h = {
+            let ideal = avail_h.saturating_mul(30) / 100;
+            let db_model_count = if self.show_create_db && self.models_expanded {
+                self.available_models.len().min(8)
+            } else {
+                0
+            };
+            let create_db_lines: u16 = if self.show_create_db {
+                if self.models_expanded {
+                    4 + db_model_count as u16 + 1
+                } else {
+                    5
+                }
+            } else if self.show_db_picker {
+                5
+            } else {
+                1
+            };
+            ideal
+                .max(7 + create_db_lines)
+                .min(avail_h.saturating_sub(8))
+        };
+
+        let box2_y = area.y + box1_h + gap;
+        let box2_available = avail_h.saturating_sub(box1_h + gap + bottom_gap);
+        let box2_h = box2_available.max(5);
+
+        let warning_h = 2u16;
+        let filter_h = if self.registry.dbs.len() > 5 {
+            1u16
+        } else {
+            0u16
+        };
+        let pad_bottom: u16 = 1;
+        let header_gap: u16 = 1;
+        let list_h = box2_h.saturating_sub(1 + header_gap + warning_h + filter_h + pad_bottom);
+        let list_start_y = box2_y + 1 + header_gap + warning_h + filter_h;
+
+        let filtered = self.filtered_dbs();
+        let max_visible = list_h as usize;
+        let render_count = max_visible.min(filtered.len());
+        let inner_w = area.width.saturating_sub(4);
+        let cx = area.x + 4;
+
+        let mx = mouse.x;
+        let my = mouse.y;
+
+        if my >= list_start_y && my < list_start_y + render_count as u16 {
+            let i = (my - list_start_y) as usize;
+            let idx = self.dbs_scroll_offset + i;
+            if idx < filtered.len() {
+                // Check if the click is on the "show desc" button area
+                // Button is placed right after the truncated name
+                let btn_text = " show desc ";
+                let btn_w = btn_text.len() as u16;
+                let gap_w: u16 = 1;
+                let avail_name_w =
+                    (inner_w.saturating_sub(6) as usize).saturating_sub((btn_w + gap_w) as usize);
+                let name_display = format!(" {}", filtered[idx].name);
+                let name_trunc = truncate_label(&name_display, avail_name_w);
+                let name_len = name_trunc.chars().count() as u16;
+                let btn_x = cx + 2 + name_len + gap_w;
+                if mx >= btn_x && mx < btn_x + btn_w {
+                    return Some(idx);
+                }
+            }
+        }
+        None
+    }
+
+    /// Compute the bounding rect of the description popup.
+    fn desc_popup_rect(&self, area: Rect) -> Option<Rect> {
+        let idx = self.show_desc_for_db?;
+        let filtered = self.filtered_dbs();
+        if idx >= filtered.len() {
+            return None;
+        }
+        let overlay_w = (area.width * 70 / 100)
+            .max(30)
+            .min(area.width.saturating_sub(8));
+        let overlay_h = (area.height * 50 / 100)
+            .max(5)
+            .min(area.height.saturating_sub(8));
+        let overlay_x = area.x + (area.width - overlay_w) / 2;
+        let overlay_y = area.y + (area.height - overlay_h) / 2;
+        Some(Rect::new(overlay_x, overlay_y, overlay_w, overlay_h))
+    }
+
+    /// Check if the mouse click is outside the description popup.
+    pub fn is_click_outside_desc_popup(&self, mouse: &MouseEvent, area: Rect) -> bool {
+        let Some(overlay) = self.desc_popup_rect(area) else {
+            return false;
+        };
+        let mx = mouse.x;
+        let my = mouse.y;
+        mx < overlay.x || mx >= overlay.right() || my < overlay.y || my >= overlay.bottom()
     }
 
     /// Check if a mouse click is inside the Create DB form's bounding box.

@@ -3242,6 +3242,12 @@ impl App {
                 return Ok(true);
             }
 
+            // "show desc" button click (shows description popup)
+            if let Some(desc_idx) = self.rag_view.is_show_desc_click(&mouse, tools_area) {
+                self.rag_view.toggle_desc_popup(desc_idx);
+                return Ok(true);
+            }
+
             if let Some(clicked_idx) = self.rag_view.handle_mouse(&mouse, tools_area) {
                 self.rag_view.toggle_db(clicked_idx);
                 return Ok(true);
@@ -3260,6 +3266,16 @@ impl App {
                 && self.rag_view.is_click_outside_preview(&mouse, tools_area)
             {
                 self.rag_view.close_preview();
+                return Ok(true);
+            }
+
+            // Click outside description popup → close it
+            if self.rag_view.show_desc_for_db.is_some()
+                && self
+                    .rag_view
+                    .is_click_outside_desc_popup(&mouse, tools_area)
+            {
+                self.rag_view.close_desc_popup();
                 return Ok(true);
             }
 

@@ -53,6 +53,10 @@ pub struct RagView {
     pub(crate) selected_db_for_embed: Option<String>,
     pub(crate) show_db_picker: bool,
     pub(crate) db_picker_scroll_offset: usize,
+
+    // Description popup
+    pub(crate) show_desc_for_db: Option<usize>,
+    pub(crate) desc_scroll: usize,
 }
 
 impl RagView {
@@ -87,6 +91,8 @@ impl RagView {
             selected_db_for_embed: None,
             show_db_picker: false,
             db_picker_scroll_offset: 0,
+            show_desc_for_db: None,
+            desc_scroll: 0,
         }
     }
 
@@ -235,6 +241,20 @@ impl RagView {
     pub fn close_db_picker(&mut self) {
         self.show_db_picker = false;
         self.db_picker_scroll_offset = 0;
+    }
+
+    pub fn toggle_desc_popup(&mut self, filtered_idx: usize) {
+        // Toggle: if already showing this DB, close; otherwise show
+        if self.show_desc_for_db == Some(filtered_idx) {
+            self.show_desc_for_db = None;
+        } else {
+            self.show_desc_for_db = Some(filtered_idx);
+        }
+    }
+
+    pub fn close_desc_popup(&mut self) {
+        self.show_desc_for_db = None;
+        self.desc_scroll = 0;
     }
 
     pub fn select_db_for_embed(&mut self, db_name: &str) {

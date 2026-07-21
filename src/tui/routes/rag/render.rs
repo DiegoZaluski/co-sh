@@ -59,7 +59,7 @@ fn section_title(buf: &mut Buffer, x: u16, y: u16, title: &str, bg: Color, fg: C
 }
 
 /// Truncate a string to at most `max_chars` characters, appending "…" if truncated.
-fn truncate_label(s: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_label(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
     } else {
@@ -585,18 +585,98 @@ impl RagView {
                     cell.set_style(Style::default().fg(if is_act { success } else { rc }));
                 }
 
-                let desc = format!(" {} \u{2014} {}", db.name, db.description);
-                let max_desc = inner_w.saturating_sub(6) as usize;
-                let truncated = truncate_label(&desc, max_desc);
+                let btn_text = " show desc ";
+                let btn_w = btn_text.len() as u16; // 12
+                let gap: u16 = 1;
+                let avail_name_w =
+                    (inner_w.saturating_sub(6) as usize).saturating_sub((btn_w + gap) as usize);
+                let name_display = format!(" {}", db.name);
+                let name_trunc = truncate_label(&name_display, avail_name_w);
+                let name_len = name_trunc.chars().count() as u16;
                 draw_text_line(
                     buf,
-                    &truncated,
+                    &name_trunc,
                     cx + 2,
                     db_y,
-                    inner_w.saturating_sub(6),
+                    avail_name_w as u16,
                     Style::default().fg(rc),
                 );
+
+                // "show desc" button right after the name (no background, just accent color)
+                let btn_x = cx + 2 + name_len + gap;
+                draw_text_line(
+                    buf,
+                    btn_text,
+                    btn_x,
+                    db_y,
+                    btn_w,
+                    Style::default().fg(success),
+                );
             }
+        }
+
+        // ── Description popup (simple overlay with just the description text) ──
+        self.render_desc_popup(buf, area, _theme, fg);
+    }
+
+    fn render_desc_popup(&self, buf: &mut Buffer, area: Rect, _theme: &Theme, fg: Color) {
+        let Some(idx) = self.show_desc_for_db else {
+            return;
+        };
+        let filtered = self.filtered_dbs();
+        if idx >= filtered.len() {
+            return;
+        }
+        let description = &filtered[idx].description;
+        if description.is_empty() {
+            return;
+        }
+
+        // Compute a centered overlay with scrollable content
+        let overlay_w = (area.width * 70 / 100)
+            .max(30)
+            .min(area.width.saturating_sub(8));
+        let overlay_h = (area.height * 50 / 100)
+            .max(5)
+            .min(area.height.saturating_sub(8));
+        let overlay_x = area.x + (area.width - overlay_w) / 2;
+        let overlay_y = area.y + (area.height - overlay_h) / 2;
+
+        // Fill background with main background color so it contrasts with panel_bg
+        let bg_color = rgba_color(_theme.background);
+        fill_rect(
+            buf,
+            overlay_x,
+            overlay_y,
+            overlay_w,
+            overlay_h,
+            Style::default().bg(bg_color),
+        );
+
+        // Scrollable description content
+        let content_x = overlay_x + 2;
+        let content_w = overlay_w.saturating_sub(4) as usize;
+        let content_h = (overlay_h.saturating_sub(2)) as usize;
+        let total_lines = description.lines().count();
+        let max_scroll = total_lines.saturating_sub(content_h).max(0);
+        let scroll = self.desc_scroll.min(max_scroll);
+        let lines: Vec<&str> = description.lines().collect();
+
+        for i in 0..content_h {
+            let idx = scroll + i;
+            if idx >= lines.len() {
+                break;
+            }
+            let line = lines[idx];
+            let truncated: String = line.chars().take(content_w).collect();
+            draw_text_line(
+                buf,
+                &truncated,
+                content_x,
+                overlay_y + 1 + i as u16,
+                content_w as u16,
+                Style::default().fg(fg),
+            );
         }
     }
 
