@@ -7,7 +7,7 @@ use super::types::{RecallEntry, RecallOutput, RecallSearchInput};
 ///
 /// This function:
 /// 1. Connects to the `LanceDB` database at the specified URI.
-/// 2. Opens (or creates) the named table.
+/// 2. Opens the named table (read-only).
 /// 3. Performs an ANN (approximate nearest neighbour) search using the
 ///    pre-computed query vector.
 /// 4. Returns the top `limit` entries with their ids and content.
@@ -49,11 +49,8 @@ pub async fn search(input: &RecallSearchInput) -> Result<RecallOutput, String> {
         })
         .collect();
 
-    let total = results.len();
-
     Ok(RecallOutput {
         query: input.query.clone(),
         results,
-        total,
     })
 }

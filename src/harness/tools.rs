@@ -316,11 +316,9 @@ async fn dispatch_recall_search(
         })
         .collect();
 
-    let total = results.len();
     let output = cosh_tools::recall::types::RecallOutput {
         query: query.to_string(),
         results,
-        total,
     };
 
     serde_json::to_string(&output).map_err(|e| e.to_string())

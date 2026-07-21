@@ -136,14 +136,13 @@ fn recall_search_input_limit_defaults_to_none() {
 fn recall_output_serialization() {
     let output = RecallOutput {
         query: "test".into(),
-        results: vec![],
-        total: 0,
+        results: Vec::new(),
     };
 
     let json = serde_json::to_value(&output).unwrap();
     assert_eq!(json["query"], "test");
     assert!(json["results"].as_array().unwrap().is_empty());
-    assert_eq!(json["total"], 0);
+    assert!(!json.as_object().unwrap().contains_key("total"));
 }
 
 #[test]
@@ -154,7 +153,6 @@ fn recall_output_with_results() {
             id: "doc-1".into(),
             content: "Rust is a systems language".into(),
         }],
-        total: 1,
     };
 
     let json = serde_json::to_value(&output).unwrap();

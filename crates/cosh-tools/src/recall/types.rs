@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// text so the tool itself doesn't need an embedding model dependency.
 /// The harness (or calling agent) is responsible for producing the vector
 /// via whatever embedding strategy is configured.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize)]
 pub struct RecallSearchInput {
     /// `LanceDB` database URI (local directory or cloud URI).
     pub db_uri: String,
@@ -41,6 +41,4 @@ pub struct RecallOutput {
     pub query: String,
     /// Matching entries sorted by relevance (most similar first).
     pub results: Vec<RecallEntry>,
-    /// Number of results returned.
-    pub total: usize,
 }
