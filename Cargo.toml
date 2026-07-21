@@ -9,6 +9,7 @@ members = [
 
 [features]
 default = []
+embed = ["cosh-tools/embed"]
 lancedb = ["cosh-recall/lancedb"]
 fastembed = ["cosh-recall/fastembed", "dep:fastembed"]
 cloud = ["cosh-recall/cloud"]

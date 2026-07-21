@@ -90,6 +90,7 @@ const LOGO: &[&str] = &[
 
 const TAGLINE: &str = "Terminal AI Agent";
 
+#[cfg(feature = "embed")]
 pub const MENU_ITEMS: &[&str] = &[
     "Start a new session",
     "Browse session haistory",
@@ -99,11 +100,21 @@ pub const MENU_ITEMS: &[&str] = &[
     "ADD provider",
 ];
 
+#[cfg(not(feature = "embed"))]
+pub const MENU_ITEMS: &[&str] = &[
+    "Start a new session",
+    "Browse session haistory",
+    "Keyboard shortcuts",
+    "Internal tools",
+    "ADD provider",
+];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HomeAction {
     NewSession,
     ToggleSidebar,
     OpenShortcuts,
+    #[cfg(feature = "embed")]
     OpenRag,
     OpenInternalTools,
     OpenAddProvider,
@@ -153,8 +164,16 @@ impl HomeView {
             0 => HomeAction::NewSession,
             1 => HomeAction::ToggleSidebar,
             2 => HomeAction::OpenShortcuts,
+            #[cfg(feature = "embed")]
             3 => HomeAction::OpenRag,
+            #[cfg(feature = "embed")]
             4 => HomeAction::OpenInternalTools,
+            #[cfg(feature = "embed")]
+            5 => HomeAction::OpenAddProvider,
+            #[cfg(not(feature = "embed"))]
+            3 => HomeAction::OpenInternalTools,
+            #[cfg(not(feature = "embed"))]
+            4 => HomeAction::OpenAddProvider,
             _ => HomeAction::OpenAddProvider,
         }
     }
@@ -183,8 +202,16 @@ impl HomeView {
                     0 => HomeAction::NewSession,
                     1 => HomeAction::ToggleSidebar,
                     2 => HomeAction::OpenShortcuts,
+                    #[cfg(feature = "embed")]
                     3 => HomeAction::OpenRag,
+                    #[cfg(feature = "embed")]
                     4 => HomeAction::OpenInternalTools,
+                    #[cfg(feature = "embed")]
+                    5 => HomeAction::OpenAddProvider,
+                    #[cfg(not(feature = "embed"))]
+                    3 => HomeAction::OpenInternalTools,
+                    #[cfg(not(feature = "embed"))]
+                    4 => HomeAction::OpenAddProvider,
                     _ => HomeAction::OpenAddProvider,
                 });
             }

@@ -15,7 +15,6 @@ use cosh_tools::{
         },
     },
     question::{Question, types::QuestionInput},
-    recall::Recall,
     skills::{
         Skills,
         types::{SkillsMatchInput, SkillsReadAssetInput, SkillsReadInput},
@@ -27,6 +26,9 @@ use cosh_tools::{
     vision::{TerminalInput, Vision},
     web::{Web, WebFetch, WebSearchInput},
 };
+
+#[cfg(feature = "embed")]
+use cosh_tools::recall::Recall;
 
 use tokio_stream::StreamExt;
 
@@ -47,6 +49,7 @@ pub trait Tools: Send + Sync {
 
 /// Simplified embedder config for the `recall_search` dispatch.
 /// Does not depend on TUI types — model names are stored as strings.
+#[cfg(feature = "embed")]
 #[derive(Debug, Clone)]
 pub enum RecallEmbedderConfig {
     /// Local fastembed model — model_name must match serde renames of
@@ -61,6 +64,7 @@ pub enum RecallEmbedderConfig {
 }
 
 /// Minimal DB info needed by the recall_search dispatch.
+#[cfg(feature = "embed")]
 #[derive(Debug, Clone)]
 pub struct RecallDb {
     pub name: String,
@@ -77,7 +81,9 @@ pub struct CoshTools {
     vision: Vision,
     plan: Mutex<Plan>,
     question: Question,
+    #[cfg(feature = "embed")]
     recall: Recall,
+    #[cfg(feature = "embed")]
     recall_dbs: Vec<RecallDb>,
     skills: Skills,
     subagent: SubAgent,
@@ -96,7 +102,9 @@ impl CoshTools {
             vision: Vision::new(),
             plan: Mutex::new(Plan::new()),
             question: Question::new(),
+            #[cfg(feature = "embed")]
             recall: Recall::new(),
+            #[cfg(feature = "embed")]
             recall_dbs: Vec::new(),
             skills: Skills::new(),
             subagent: SubAgent::new(),
@@ -110,6 +118,7 @@ impl CoshTools {
     }
 
     /// Set the list of RAG databases for the `recall_search` dispatch.
+    #[cfg(feature = "embed")]
     pub fn set_recall_dbs(&mut self, dbs: Vec<RecallDb>) {
         self.recall_dbs = dbs;
     }
@@ -118,6 +127,7 @@ impl CoshTools {
     ///
     /// The `suffix` is appended to the default description so the agent
     /// sees which knowledge bases are currently available.
+    #[cfg(feature = "embed")]
     pub fn set_recall_context(&mut self, suffix: impl Into<String>) {
         self.recall.rebuild_description(suffix);
     }
@@ -161,6 +171,7 @@ impl CoshTools {
             write_tool_if_enabled(out, disabled_tools, &plan.description_load_from_md);
         }
         write_tool_if_enabled(out, disabled_tools, &self.question.description_ask);
+        #[cfg(feature = "embed")]
         write_tool_if_enabled(out, disabled_tools, &self.recall.description_search);
         write_tool_if_enabled(out, disabled_tools, &self.skills.description_list);
         write_tool_if_enabled(out, disabled_tools, &self.skills.description_read);
@@ -206,6 +217,7 @@ impl CoshTools {
             &self.plan.lock().unwrap().description_load_from_md,
         ));
         v.push(extract_schema(&self.question.description_ask));
+        #[cfg(feature = "embed")]
         v.push(extract_schema(&self.recall.description_search));
         v.push(extract_schema(&self.subagent.description_call));
         v.push(extract_schema(&self.skills.description_list));
@@ -226,6 +238,7 @@ impl CoshTools {
 // `fastembed` or `cloud` features to be enabled at build time.
 
 /// Convert `RecallEmbedderConfig` to a `cosh_recall::embed::Embedder`.
+#[cfg(feature = "embed")]
 #[cfg(any(feature = "fastembed", feature = "cloud"))]
 fn config_to_embedder(
     config: &RecallEmbedderConfig,
@@ -269,6 +282,7 @@ fn config_to_embedder(
 ///
 /// This function is only available when at least one embedding feature
 /// (`fastembed` or `cloud`) is enabled.
+#[cfg(feature = "embed")]
 #[cfg(any(feature = "fastembed", feature = "cloud"))]
 async fn dispatch_recall_search(
     db: &RecallDb,
@@ -314,6 +328,7 @@ async fn dispatch_recall_search(
     serde_json::to_string(&output).map_err(|e| e.to_string())
 }
 
+#[cfg(feature = "embed")]
 #[cfg(not(any(feature = "fastembed", feature = "cloud")))]
 async fn dispatch_recall_search(
     _db: &RecallDb,
@@ -371,6 +386,7 @@ impl Tools for CoshTools {
             write_single_tool(out, &plan.description_load_from_md);
         }
         write_single_tool(out, &self.question.description_ask);
+        #[cfg(feature = "embed")]
         write_single_tool(out, &self.recall.description_search);
         write_single_tool(out, &self.subagent.description_call);
         write_single_tool(out, &self.skills.description_list);
@@ -400,6 +416,7 @@ impl Tools for CoshTools {
         v.push(self.plan.lock().unwrap().description_todo_read.clone());
         v.push(self.plan.lock().unwrap().description_load_from_md.clone());
         v.push(self.question.description_ask.clone());
+        #[cfg(feature = "embed")]
         v.push(self.recall.description_search.clone());
         v.push(self.subagent.description_call.clone());
         v.push(self.skills.description_list.clone());
@@ -438,6 +455,7 @@ impl Tools for CoshTools {
             &self.plan.lock().unwrap().description_load_from_md,
         ));
         v.push(extract_schema(&self.question.description_ask));
+        #[cfg(feature = "embed")]
         v.push(extract_schema(&self.recall.description_search));
         v.push(extract_schema(&self.subagent.description_call));
         v.push(extract_schema(&self.skills.description_list));
@@ -715,6 +733,7 @@ impl Tools for CoshTools {
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 
+            #[cfg(feature = "embed")]
             "recall_search" => {
                 // The model only provides db_name + query + limit.
                 // The harness resolves the DB, embeds the query, and searches.

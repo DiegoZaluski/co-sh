@@ -59,6 +59,7 @@ enum AppMode {
     Session,
     InternalTools,
     AddProvider,
+    #[cfg(feature = "embed")]
     Rag,
 }
 
@@ -78,7 +79,9 @@ pub struct App {
     pub show_internal_tools: bool,
     pub add_provider_view: AddProviderView,
     pub show_add_provider: bool,
+    #[cfg(feature = "embed")]
     pub rag_view: crate::routes::rag::RagView,
+    #[cfg(feature = "embed")]
     pub show_rag: bool,
     pub keymap: KeyMap,
     pub config: TuiConfig,
@@ -108,6 +111,7 @@ pub struct App {
     /// When set, the current Confirm dialog is asking about deleting a session.
     pending_delete_session_id: Option<String>,
     /// When set, the current Confirm dialog is asking about deleting a RAG database.
+    #[cfg(feature = "embed")]
     pending_delete_db_name: Option<String>,
 
     // ── Mouse drag / selection tracking ───────────────────────────────────────────
@@ -165,7 +169,9 @@ impl App {
             show_internal_tools: false,
             add_provider_view: AddProviderView::new(),
             show_add_provider: false,
+            #[cfg(feature = "embed")]
             rag_view: crate::routes::rag::RagView::new(),
+            #[cfg(feature = "embed")]
             show_rag: false,
             prompt_view: PromptView::new(),
             sidebar: SidebarView::new(),
@@ -183,6 +189,7 @@ impl App {
             prefs_cache,
             session_store,
             pending_delete_session_id: None,
+            #[cfg(feature = "embed")]
             pending_delete_db_name: None,
             should_quit: false,
             tokio_handle: Handle::current(),
@@ -831,13 +838,373 @@ impl App {
         grouped.values().flatten().copied().collect()
     }
 
+    // ── RAG helper methods (cfg-gated at method level, always compiles) ───
+
+    #[cfg(feature = "embed")]
+    fn is_rag_mode(&self) -> bool {
+        matches!(self.mode(), AppMode::Rag)
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn is_rag_mode(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "embed")]
+    fn rag_spinner_active(&self) -> bool {
+        self.rag_view.is_spinner_active()
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn rag_spinner_active(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "embed")]
+    fn render_rag_view(&mut self, buf: &mut ratatui::buffer::Buffer, session_area: Rect) {
+        self.prompt_view.blur();
+        self.rag_view.advance_spinner();
+        let tools_area = Rect::new(
+            session_area.x,
+            session_area.y,
+            session_area.width,
+            session_area.height.saturating_sub(1),
+        );
+        self.rag_view.render(buf, tools_area, &self.theme);
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn render_rag_view(&mut self, _buf: &mut ratatui::buffer::Buffer, _session_area: Rect) {}
+
+    #[cfg(feature = "embed")]
+    fn handle_rag_confirm_delete(&mut self) -> bool {
+        if let Some(db_name) = self.pending_delete_db_name.take() {
+            self.rag_view.registry.remove(&db_name);
+            self.rag_view.active_dbs.remove(&db_name);
+            crate::routes::rag::registry::RagRegistry::save_active(&self.rag_view.active_dbs);
+            if self.rag_view.selected_db_for_embed.as_deref() == Some(&db_name) {
+                self.rag_view.selected_db_for_embed = None;
+            }
+            self.dialog.pop();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn handle_rag_confirm_delete(&mut self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "embed")]
+    fn clear_rag_pending_state(&mut self) {
+        self.pending_delete_db_name = None;
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn clear_rag_pending_state(&mut self) {}
+
+    #[cfg(feature = "embed")]
+    fn handle_rag_cancel_action(&mut self) {
+        if matches!(self.mode(), AppMode::Rag) {
+            self.show_rag = false;
+        }
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn handle_rag_cancel_action(&mut self) {}
+
+    #[cfg(feature = "embed")]
+    fn recall_suffix(&self) -> String {
+        self.rag_view
+            .registry
+            .build_tool_suffix(self.rag_view.active_dbs())
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn recall_suffix(&self) -> String {
+        String::new()
+    }
+
+    #[cfg(feature = "embed")]
+    fn maybe_disable_recall_tool(&self, disabled: &mut std::collections::HashSet<String>) {
+        if self.rag_view.registry.dbs.is_empty() {
+            disabled.insert("recall_search".into());
+        }
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn maybe_disable_recall_tool(&self, _disabled: &mut std::collections::HashSet<String>) {}
+
+    #[cfg(feature = "embed")]
+    fn recall_dbs_vec(&self) -> Vec<cosh::harness::tools::RecallDb> {
+        use cosh::harness::tools::{RecallDb, RecallEmbedderConfig};
+        self.rag_view
+            .registry
+            .dbs
+            .iter()
+            .filter(|db| self.rag_view.active_dbs.contains(&db.name))
+            .map(|db| RecallDb {
+                name: db.name.clone(),
+                uri: db.uri.clone(),
+                table_name: db.name.clone(),
+                embedder: match &db.embedder {
+                    crate::routes::rag::models::EmbedderConfig::Local { model } => {
+                        RecallEmbedderConfig::Local {
+                            model_name: serde_json::to_value(model)
+                                .ok()
+                                .and_then(|v| v.as_str().map(String::from))
+                                .unwrap_or_default(),
+                        }
+                    }
+                    crate::routes::rag::models::EmbedderConfig::Cloud(c) => {
+                        RecallEmbedderConfig::Cloud {
+                            provider: c.provider.clone(),
+                            model: c.model.clone(),
+                            dim: db.embedder.vector_dim(),
+                        }
+                    }
+                },
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "embed")]
+    fn handle_rag_key_event(&mut self, key: KeyCode) -> bool {
+        if !self.dialog.visible() {
+            use crate::routes::rag::RagAction;
+            match self.rag_view.handle_key(key) {
+                Some(RagAction::Back) => {
+                    self.show_rag = false;
+                }
+                Some(RagAction::ClosePreview) => {}
+                Some(RagAction::FetchUrlOrPath(input)) => {
+                    self.rag_view.start_fetch(&input);
+                    if input.starts_with("http://") || input.starts_with("https://") {
+                        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+                        let url = input.clone();
+                        self.tokio_handle.spawn(async move {
+                            use cosh_tools::web::{WebFetch, fetch as web_fetch_fn};
+                            let fetch_input = WebFetch { url };
+                            let result = web_fetch_fn(&fetch_input).await;
+                            let _ = tx.send(result);
+                        });
+                        self.rag_view.set_fetch_rx(rx);
+                    } else {
+                        match std::fs::read_to_string(&input) {
+                            Ok(content) => self.rag_view.content_fetched(content),
+                            Err(_) => self.rag_view.set_error(),
+                        }
+                    }
+                }
+                Some(RagAction::CreateDb {
+                    name,
+                    description,
+                    embedder,
+                }) => {
+                    use crate::routes::rag::models::RagDb;
+                    let db = RagDb {
+                        name: name.clone(),
+                        uri: crate::routes::rag::registry::RagRegistry::db_uri(&name),
+                        description: description.clone(),
+                        embedder,
+                        created_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    };
+                    let mut registry = crate::routes::rag::registry::RagRegistry::load();
+                    registry.upsert(db);
+                    self.rag_view.selected_db_for_embed = Some(name.clone());
+                    self.rag_view.active_dbs.insert(name.clone());
+                    crate::routes::rag::registry::RagRegistry::save_active(
+                        &self.rag_view.active_dbs,
+                    );
+                    self.rag_view.registry = crate::routes::rag::registry::RagRegistry::load();
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Database Created".into()),
+                        message: format!("'{name}' is now selected for embedding."),
+                        variant: ToastVariant::Success,
+                        duration_ms: 4000,
+                    });
+                }
+                Some(RagAction::ShowWarning(msg)) => {
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    self.toast_state.show(ToastOptions {
+                        title: Some("RAG".into()),
+                        message: msg,
+                        variant: ToastVariant::Warning,
+                        duration_ms: 4000,
+                    });
+                }
+                _ => {}
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn handle_rag_key_event(&mut self, _key: KeyCode) -> bool {
+        false
+    }
+
+    #[cfg(feature = "embed")]
+    fn handle_rag_paste(&mut self, text: &str) {
+        self.rag_view.handle_paste(text);
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn handle_rag_paste(&mut self, _text: &str) {}
+
+    #[cfg(feature = "embed")]
+    fn try_rag_scroll_up(&mut self) -> bool {
+        if !self.dialog.visible() {
+            self.rag_view.handle_key(KeyCode::Up);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn try_rag_scroll_up(&mut self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "embed")]
+    fn try_rag_scroll_down(&mut self) -> bool {
+        if !self.dialog.visible() {
+            self.rag_view.handle_key(KeyCode::Down);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn try_rag_scroll_down(&mut self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "embed")]
+    fn handle_rag_mouse_click(&mut self, mouse: &MouseEvent) -> bool {
+        let area = self.terminal_size();
+        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+        let main_area = Rect::new(
+            area.x + sidebar_w,
+            area.y,
+            area.width.saturating_sub(sidebar_w),
+            area.height,
+        );
+        let tools_area = Rect::new(
+            main_area.x,
+            area.y + 1,
+            main_area.width,
+            main_area.height.saturating_sub(4),
+        );
+        // DB picker row click (select DB for embed)
+        if self.rag_view.show_db_picker {
+            if let Some(picker_idx) = self.rag_view.is_db_picker_row_click(mouse, tools_area) {
+                let pick_name = self
+                    .rag_view
+                    .filtered_dbs()
+                    .get(picker_idx)
+                    .map(|db| db.name.clone());
+                if let Some(ref name) = pick_name {
+                    self.rag_view.select_db_for_embed(name);
+                }
+                return true;
+            }
+            if !self.rag_view.is_click_inside_db_picker(mouse, tools_area) {
+                self.rag_view.close_db_picker();
+                return true;
+            }
+            return true;
+        }
+        // "Select Database" button click
+        if self.rag_view.is_select_db_click(mouse, tools_area) {
+            self.rag_view.toggle_db_picker();
+            return true;
+        }
+        // "show desc" button click
+        if let Some(desc_idx) = self.rag_view.is_show_desc_click(mouse, tools_area) {
+            self.rag_view.toggle_desc_popup(desc_idx);
+            return true;
+        }
+        // delete button click
+        if let Some(db_name) = self.rag_view.is_delete_click(mouse, tools_area) {
+            self.pending_delete_db_name = Some(db_name);
+            self.dialog.show(DialogType::Confirm {
+                message: "Delete this database?".into(),
+            });
+            if let Some(d) = self.dialog.current_mut() {
+                d.selected = 1;
+            }
+            return true;
+        }
+        // toggle DB active
+        if let Some(clicked_idx) = self.rag_view.handle_mouse(mouse, tools_area) {
+            self.rag_view.toggle_db(clicked_idx);
+            return true;
+        }
+        // Create DB button
+        if self.rag_view.is_create_click(mouse, tools_area) {
+            self.rag_view.toggle_create_db();
+            return true;
+        }
+        // Model line toggle
+        if self.rag_view.is_model_click(mouse, tools_area) {
+            self.rag_view.toggle_models_expanded();
+            return true;
+        }
+        // Click outside preview
+        if self.rag_view.is_preview_visible()
+            && self.rag_view.is_click_outside_preview(mouse, tools_area)
+        {
+            self.rag_view.close_preview();
+            return true;
+        }
+        // Click outside description popup
+        if self.rag_view.show_desc_for_db.is_some()
+            && self.rag_view.is_click_outside_desc_popup(mouse, tools_area)
+        {
+            self.rag_view.close_desc_popup();
+            return true;
+        }
+        // Create DB form field click
+        if self.rag_view.show_create_db
+            && self
+                .rag_view
+                .handle_create_db_field_click(mouse, tools_area)
+        {
+            return true;
+        }
+        // Dismiss Create DB form
+        if self.rag_view.is_dismiss_click(mouse, tools_area) {
+            self.rag_view.close_form();
+            return true;
+        }
+        false
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn handle_rag_mouse_click(&mut self, _mouse: &MouseEvent) -> bool {
+        false
+    }
+
     fn mode(&self) -> AppMode {
+        #[cfg(feature = "embed")]
+        if self.show_rag {
+            return AppMode::Rag;
+        }
         if self.show_internal_tools {
             AppMode::InternalTools
         } else if self.show_add_provider {
             AppMode::AddProvider
-        } else if self.show_rag {
-            AppMode::Rag
         } else if self.state.current_session().is_some() {
             AppMode::Session
         } else {
@@ -923,10 +1290,11 @@ impl App {
         // Session: during streaming, sticky scroll needs continuous re-rendering.
         // RAG: when the spinner is active (fetching/embedding), enable live mode
         //      so event::poll uses 8ms instead of 50ms, keeping animation smooth.
-        self.live_requested = self.session_view.is_auto_scrolling
+        let mut live = self.session_view.is_auto_scrolling
             || (self.state.status == crate::types::SessionStatus::Working
-                && self.session_view.is_sticky_bottom)
-            || (matches!(self.mode(), AppMode::Rag) && self.rag_view.is_spinner_active());
+                && self.session_view.is_sticky_bottom);
+        live = live || self.rag_spinner_active();
+        self.live_requested = live;
         let area = frame.area();
 
         {
@@ -1096,16 +1464,9 @@ impl App {
                     );
                     self.add_provider_view.render(buf, tools_area, &self.theme);
                 }
+                #[cfg(feature = "embed")]
                 AppMode::Rag => {
-                    self.prompt_view.blur();
-                    self.rag_view.advance_spinner();
-                    let tools_area = Rect::new(
-                        session_area.x,
-                        session_area.y,
-                        session_area.width,
-                        session_area.height.saturating_sub(1),
-                    );
-                    self.rag_view.render(buf, tools_area, &self.theme);
+                    self.render_rag_view(buf, session_area);
                 }
                 AppMode::Session => {
                     // Blur prompt when question dialog is visible, focus otherwise (like OpenCode)
@@ -1162,10 +1523,8 @@ impl App {
                 }
             }
 
-            let show_home = !matches!(
-                self.mode(),
-                AppMode::InternalTools | AppMode::AddProvider | AppMode::Rag
-            );
+            let show_home = !self.is_rag_mode()
+                && !matches!(self.mode(), AppMode::InternalTools | AppMode::AddProvider);
             FooterView::render_with_mode(
                 buf,
                 Rect::new(main_area.x, footer_y, main_area.width, 1),
@@ -1343,6 +1702,7 @@ impl App {
                                     HomeAction::OpenAddProvider => {
                                         self.show_add_provider = true;
                                     }
+                                    #[cfg(feature = "embed")]
                                     HomeAction::OpenRag => {
                                         self.show_rag = true;
                                     }
@@ -1381,90 +1741,7 @@ impl App {
                     }
 
                     // RAG mode: handle via RagView
-                    if matches!(self.mode(), AppMode::Rag) && !self.dialog.visible() {
-                        use crate::routes::rag::RagAction;
-                        match self.rag_view.handle_key(key.code) {
-                            Some(RagAction::Back) => {
-                                self.show_rag = false;
-                            }
-                            Some(RagAction::ClosePreview) => {
-                                // Preview already closed by handle_key
-                            }
-                            Some(RagAction::FetchUrlOrPath(input)) => {
-                                self.rag_view.start_fetch(&input);
-                                if input.starts_with("http://") || input.starts_with("https://") {
-                                    // Use cosh_tools web_fetch which extracts clean text
-                                    // via rs_trafilatura (replaces raw curl that leaked HTML)
-                                    let (tx, rx) =
-                                        std::sync::mpsc::channel::<Result<String, String>>();
-                                    let url = input.clone();
-                                    self.tokio_handle.spawn(async move {
-                                        use cosh_tools::web::{WebFetch, fetch as web_fetch_fn};
-                                        let fetch_input = WebFetch { url };
-                                        let result = web_fetch_fn(&fetch_input).await;
-                                        let _ = tx.send(result);
-                                    });
-                                    self.rag_view.set_fetch_rx(rx);
-                                } else {
-                                    // File path — read synchronously
-                                    match std::fs::read_to_string(&input) {
-                                        Ok(content) => self.rag_view.content_fetched(content),
-                                        Err(_) => {
-                                            self.rag_view.set_error();
-                                        }
-                                    }
-                                }
-                            }
-                            Some(RagAction::CreateDb {
-                                name,
-                                description,
-                                embedder,
-                            }) => {
-                                use crate::routes::rag::models::RagDb;
-                                let db = RagDb {
-                                    name: name.clone(),
-                                    uri: crate::routes::rag::registry::RagRegistry::db_uri(&name),
-                                    description: description.clone(),
-                                    embedder,
-                                    created_at: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis()
-                                        as u64,
-                                };
-                                let mut registry =
-                                    crate::routes::rag::registry::RagRegistry::load();
-                                registry.upsert(db);
-                                // Auto-select the newly created DB for embedding
-                                self.rag_view.selected_db_for_embed = Some(name.clone());
-                                // Also add it to active_dbs so it's ready to use
-                                self.rag_view.active_dbs.insert(name.clone());
-                                crate::routes::rag::registry::RagRegistry::save_active(
-                                    &self.rag_view.active_dbs,
-                                );
-                                // Reload registry
-                                self.rag_view.registry =
-                                    crate::routes::rag::registry::RagRegistry::load();
-                                // Show success toast
-                                use crate::ui::toast::{ToastOptions, ToastVariant};
-                                self.toast_state.show(ToastOptions {
-                                    title: Some("Database Created".into()),
-                                    message: format!("'{name}' is now selected for embedding."),
-                                    variant: ToastVariant::Success,
-                                    duration_ms: 4000,
-                                });
-                            }
-                            Some(RagAction::ShowWarning(msg)) => {
-                                use crate::ui::toast::{ToastOptions, ToastVariant};
-                                self.toast_state.show(ToastOptions {
-                                    title: Some("RAG".into()),
-                                    message: msg,
-                                    variant: ToastVariant::Warning,
-                                    duration_ms: 4000,
-                                });
-                            }
-                            _ => {}
-                        }
+                    if self.handle_rag_key_event(key.code) {
                         return Ok(false);
                     }
 
@@ -1645,25 +1922,14 @@ impl App {
                                         self.state.remove_session(&session_id);
                                         self.session_store.delete_session(&session_id);
                                         self.dialog.pop();
-                                    } else if let Some(db_name) = self.pending_delete_db_name.take()
-                                    {
-                                        self.rag_view.registry.remove(&db_name);
-                                        self.rag_view.active_dbs.remove(&db_name);
-                                        crate::routes::rag::registry::RagRegistry::save_active(
-                                            &self.rag_view.active_dbs,
-                                        );
-                                        if self.rag_view.selected_db_for_embed.as_deref()
-                                            == Some(&db_name)
-                                        {
-                                            self.rag_view.selected_db_for_embed = None;
-                                        }
-                                        self.dialog.pop();
+                                    } else if self.handle_rag_confirm_delete() {
+                                        // handled
                                     } else {
                                         self.should_quit = true;
                                     }
                                 } else {
                                     self.pending_delete_session_id = None;
-                                    self.pending_delete_db_name = None;
+                                    self.clear_rag_pending_state();
                                     self.dialog.pop();
                                 }
                                 return Ok(false);
@@ -1729,47 +1995,21 @@ impl App {
 
                             // ── RAG recall context ───────────────────────────────────────────
                             // 1) Description suffix (what the model sees in the tool doc)
-                            let recall_suffix = self
-                                .rag_view
-                                .registry
-                                .build_tool_suffix(self.rag_view.active_dbs());
+                            #[cfg(feature = "embed")]
+                            let recall_suffix = self.recall_suffix();
+                            #[cfg(not(feature = "embed"))]
+                            let _recall_suffix = String::new();
 
                             // 2) DB registry (what the dispatch uses to resolve db_name → connect)
-                            use cosh::harness::tools::{RecallDb, RecallEmbedderConfig};
-                            let recall_dbs: Vec<RecallDb> = self
-                                .rag_view
-                                .registry
-                                .dbs
-                                .iter()
-                                .filter(|db| self.rag_view.active_dbs.contains(&db.name))
-                                .map(|db| RecallDb {
-                                    name: db.name.clone(),
-                                    uri: db.uri.clone(),
-                                    table_name: db.name.clone(),
-                                    embedder: match &db.embedder {
-                                        crate::routes::rag::models::EmbedderConfig::Local {
-                                            model,
-                                        } => RecallEmbedderConfig::Local {
-                                            model_name: serde_json::to_value(model)
-                                                .ok()
-                                                .and_then(|v| v.as_str().map(String::from))
-                                                .unwrap_or_default(),
-                                        },
-                                        crate::routes::rag::models::EmbedderConfig::Cloud(c) => {
-                                            RecallEmbedderConfig::Cloud {
-                                                provider: c.provider.clone(),
-                                                model: c.model.clone(),
-                                                dim: db.embedder.vector_dim(),
-                                            }
-                                        }
-                                    },
-                                })
-                                .collect();
+                            #[cfg(feature = "embed")]
+                            let recall_dbs: Vec<
+                                cosh::harness::tools::RecallDb,
+                            > = self.recall_dbs_vec();
+                            #[cfg(not(feature = "embed"))]
+                            let _recall_dbs = std::vec::Vec::<()>::new();
 
                             // 3) Auto-exclude tool if no databases exist at all
-                            if self.rag_view.registry.dbs.is_empty() {
-                                disabled_tools.insert("recall_search".into());
-                            }
+                            self.maybe_disable_recall_tool(&mut disabled_tools);
 
                             let event_tx_panic = event_tx.clone();
                             // Build conversation history from existing session messages
@@ -1842,7 +2082,9 @@ impl App {
                                             Harness::new(connector, &cwd, disabled_tools)
                                                 .with_mode(mode)
                                                 .with_history(&history);
+                                        #[cfg(feature = "embed")]
                                         harness.set_recall_context(recall_suffix);
+                                        #[cfg(feature = "embed")]
                                         harness.set_recall_dbs(recall_dbs);
                                         harness.format_header_context();
                                         harness
@@ -1882,7 +2124,7 @@ impl App {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
                                 self.pending_delete_session_id = None;
-                                self.pending_delete_db_name = None;
+                                self.clear_rag_pending_state();
                                 self.dialog.pop();
                             }
                         }
@@ -1901,16 +2143,16 @@ impl App {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
                                 self.pending_delete_session_id = None;
-                                self.pending_delete_db_name = None;
+                                self.clear_rag_pending_state();
                                 self.dialog.pop();
                             } else if matches!(self.mode(), AppMode::Session) {
                                 self.state.current_session_id = None;
                                 self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
                             } else if matches!(self.mode(), AppMode::AddProvider) {
                                 self.show_add_provider = false;
-                            } else if matches!(self.mode(), AppMode::Rag) {
-                                self.show_rag = false;
-                            } else if matches!(self.mode(), AppMode::Home) {
+                            }
+                            self.handle_rag_cancel_action();
+                            if matches!(self.mode(), AppMode::Home) {
                                 self.pending_delete_session_id = None;
                                 self.dialog.show(DialogType::Confirm {
                                     message: "Quit cosh?".into(),
@@ -2248,8 +2490,8 @@ impl App {
                         *cursor_pos += cleaned.len();
                         d.cursor.note_activity();
                     }
-                } else if matches!(self.mode(), AppMode::Rag) {
-                    self.rag_view.handle_paste(&text);
+                } else if self.is_rag_mode() {
+                    self.handle_rag_paste(&text);
                 } else {
                     self.prompt_view.note_activity();
                     self.prompt_view.handle_paste(&text);
@@ -2875,8 +3117,7 @@ impl App {
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         let list_area = 20;
                         self.add_provider_view.select_prev(list_area);
-                    } else if matches!(self.mode(), AppMode::Rag) && !self.dialog.visible() {
-                        self.rag_view.handle_key(KeyCode::Up);
+                    } else if self.try_rag_scroll_up() {
                     }
                     return Ok(true);
                 }
@@ -2905,8 +3146,7 @@ impl App {
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         let list_area = 20;
                         self.add_provider_view.select_next(list_area);
-                    } else if matches!(self.mode(), AppMode::Rag) && !self.dialog.visible() {
-                        self.rag_view.handle_key(KeyCode::Down);
+                    } else if self.try_rag_scroll_down() {
                     }
                     return Ok(true);
                 }
@@ -2931,22 +3171,13 @@ impl App {
                             if let Some(session_id) = self.pending_delete_session_id.take() {
                                 self.state.remove_session(&session_id);
                                 self.session_store.delete_session(&session_id);
-                            } else if let Some(db_name) = self.pending_delete_db_name.take() {
-                                self.rag_view.registry.remove(&db_name);
-                                self.rag_view.active_dbs.remove(&db_name);
-                                crate::routes::rag::registry::RagRegistry::save_active(
-                                    &self.rag_view.active_dbs,
-                                );
-                                if self.rag_view.selected_db_for_embed.as_deref() == Some(&db_name)
-                                {
-                                    self.rag_view.selected_db_for_embed = None;
-                                }
+                            } else if self.handle_rag_confirm_delete() {
                             } else {
                                 self.should_quit = true;
                             }
                         } else {
                             self.pending_delete_session_id = None;
-                            self.pending_delete_db_name = None;
+                            self.clear_rag_pending_state();
                         }
                         self.dialog.pop();
                     }
@@ -3255,6 +3486,7 @@ impl App {
                     crate::routes::home::HomeAction::OpenAddProvider => {
                         self.show_add_provider = true;
                     }
+                    #[cfg(feature = "embed")]
                     crate::routes::home::HomeAction::OpenRag => {
                         self.show_rag = true;
                     }
@@ -3285,112 +3517,8 @@ impl App {
                 return Ok(true);
             }
         } // 8ba. Rag view — mouse click on DB list row or Create DB button
-        if matches!(self.mode(), AppMode::Rag) && !self.dialog.visible() {
-            let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
-            let tools_area = Rect::new(
-                main_area.x,
-                area.y + 1,
-                main_area.width,
-                main_area.height.saturating_sub(4),
-            );
-            // DB picker row click (select DB for embed)
-            if self.rag_view.show_db_picker {
-                if let Some(picker_idx) = self.rag_view.is_db_picker_row_click(&mouse, tools_area) {
-                    let pick_name = self
-                        .rag_view
-                        .filtered_dbs()
-                        .get(picker_idx)
-                        .map(|db| db.name.clone());
-                    if let Some(ref name) = pick_name {
-                        self.rag_view.select_db_for_embed(name);
-                    }
-                    return Ok(true);
-                }
-                // Only close picker when clicking OUTSIDE the picker's bounding box
-                if !self.rag_view.is_click_inside_db_picker(&mouse, tools_area) {
-                    self.rag_view.close_db_picker();
-                    return Ok(true);
-                }
-                // Click was inside the picker but not on a row — just consume
-                return Ok(true);
-            }
-
-            // "Select Database" button click
-            if self.rag_view.is_select_db_click(&mouse, tools_area) {
-                self.rag_view.toggle_db_picker();
-                return Ok(true);
-            }
-
-            // "show desc" button click (shows description popup)
-            if let Some(desc_idx) = self.rag_view.is_show_desc_click(&mouse, tools_area) {
-                self.rag_view.toggle_desc_popup(desc_idx);
-                return Ok(true);
-            }
-
-            // 🗑 delete button click → show confirm dialog
-            if let Some(db_name) = self.rag_view.is_delete_click(&mouse, tools_area) {
-                self.pending_delete_db_name = Some(db_name);
-                self.dialog.show(DialogType::Confirm {
-                    message: "Delete this database?".into(),
-                });
-                if let Some(d) = self.dialog.current_mut() {
-                    d.selected = 1;
-                }
-                return Ok(true);
-            }
-
-            if let Some(clicked_idx) = self.rag_view.handle_mouse(&mouse, tools_area) {
-                self.rag_view.toggle_db(clicked_idx);
-                return Ok(true);
-            }
-            if self.rag_view.is_create_click(&mouse, tools_area) {
-                self.rag_view.toggle_create_db();
-                return Ok(true);
-            }
-            // Click on collapsed model line to toggle expand
-            if self.rag_view.is_model_click(&mouse, tools_area) {
-                self.rag_view.toggle_models_expanded();
-                return Ok(true);
-            }
-            // Click outside preview overlay → close preview
-            if self.rag_view.is_preview_visible()
-                && self.rag_view.is_click_outside_preview(&mouse, tools_area)
-            {
-                self.rag_view.close_preview();
-                return Ok(true);
-            }
-
-            // Click outside description popup → close it
-            if self.rag_view.show_desc_for_db.is_some()
-                && self
-                    .rag_view
-                    .is_click_outside_desc_popup(&mouse, tools_area)
-            {
-                self.rag_view.close_desc_popup();
-                return Ok(true);
-            }
-
-            // Check if click is on Name or Description field in the Create DB form
-            if self.rag_view.show_create_db
-                && self
-                    .rag_view
-                    .handle_create_db_field_click(&mouse, tools_area)
-            {
-                return Ok(true);
-            }
-
-            // Dismiss Create DB form only when click is outside the form area
-            if self.rag_view.is_dismiss_click(&mouse, tools_area) {
-                self.rag_view.close_form();
-                return Ok(true);
-            }
+        if self.handle_rag_mouse_click(&mouse) {
+            return Ok(true);
         }
 
         // 8c. AddProvider view — mouse click on a provider row opens API key input

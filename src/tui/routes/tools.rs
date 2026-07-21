@@ -10,32 +10,35 @@ use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::Theme;
 
-const INTERNAL_TOOLS: &[(&str, &str)] = &[
-    ("bash_run", "Execute shell commands"),
-    ("fs_read", "Read file contents"),
-    ("fs_write", "Write file contents"),
-    ("fs_edit", "Edit file contents"),
-    ("fs_rollback", "Rollback file changes"),
-    ("find_glob", "Find files by glob pattern"),
-    ("find_grep", "Search file contents"),
-    ("web_fetch", "Fetch web page content"),
-    ("web_search", "Search the web"),
-    ("vision_terminal", "Capture terminal output"),
-    ("plan_todo_write", "Write todo items"),
-    ("plan_todo_edit", "Edit todo items"),
-    ("plan_todo_cross_off", "Cross off todo items"),
-    ("plan_todo_read", "Read todo items"),
-    ("plan_load_from_md", "Load plan from markdown"),
-    ("ask_questions", "Ask the user questions"),
-    (
-        "recall_search",
-        "Search knowledge bases for semantically similar entries",
-    ),
-    ("skills_list", "List available skills"),
-    ("skills_read", "Read a skill"),
-    ("skills_read_asset", "Read a skill asset"),
-    ("skills_match_skills", "Match skills to task"),
-];
+fn internal_tools() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("bash_run", "Execute shell commands"),
+        ("fs_read", "Read file contents"),
+        ("fs_write", "Write file contents"),
+        ("fs_edit", "Edit file contents"),
+        ("fs_rollback", "Rollback file changes"),
+        ("find_glob", "Find files by glob pattern"),
+        ("find_grep", "Search file contents"),
+        ("web_fetch", "Fetch web page content"),
+        ("web_search", "Search the web"),
+        ("vision_terminal", "Capture terminal output"),
+        ("plan_todo_write", "Write todo items"),
+        ("plan_todo_edit", "Edit todo items"),
+        ("plan_todo_cross_off", "Cross off todo items"),
+        ("plan_todo_read", "Read todo items"),
+        ("plan_load_from_md", "Load plan from markdown"),
+        ("ask_questions", "Ask the user questions"),
+        #[cfg(feature = "embed")]
+        (
+            "recall_search",
+            "Search knowledge bases for semantically similar entries",
+        ),
+        ("skills_list", "List available skills"),
+        ("skills_read", "Read a skill"),
+        ("skills_read_asset", "Read a skill asset"),
+        ("skills_match_skills", "Match skills to task"),
+    ]
+}
 
 pub struct InternalToolsView {
     pub selected_index: usize,
@@ -54,8 +57,8 @@ impl InternalToolsView {
         }
     }
 
-    pub const fn select_next(&mut self, visible_count: usize) {
-        let total = INTERNAL_TOOLS.len();
+    pub fn select_next(&mut self, visible_count: usize) {
+        let total = internal_tools().len();
         self.selected_index = (self.selected_index + 1) % total;
         if self.selected_index >= self.scroll_offset + visible_count {
             self.scroll_offset = self
@@ -64,8 +67,8 @@ impl InternalToolsView {
         }
     }
 
-    pub const fn select_prev(&mut self, _visible_count: usize) {
-        let total = INTERNAL_TOOLS.len();
+    pub fn select_prev(&mut self, _visible_count: usize) {
+        let total = internal_tools().len();
         self.selected_index = if self.selected_index == 0 {
             total - 1
         } else {
@@ -77,7 +80,7 @@ impl InternalToolsView {
     }
 
     pub fn toggle_current(&mut self) {
-        let (name, _) = INTERNAL_TOOLS[self.selected_index];
+        let (name, _) = internal_tools()[self.selected_index];
         if !self.disabled.remove(name) {
             self.disabled.insert(name.to_string());
         }
@@ -100,7 +103,7 @@ impl InternalToolsView {
         }
         for i in 0..visible_count {
             let idx = self.scroll_offset + i;
-            if idx >= INTERNAL_TOOLS.len() {
+            if idx >= internal_tools().len() {
                 break;
             }
             let item_y = list_start_y + i as u16;
@@ -122,7 +125,7 @@ impl InternalToolsView {
 
         // title
         let title = "Internal Tools";
-        let count = visible_items(area).min(INTERNAL_TOOLS.len());
+        let count = visible_items(area).min(internal_tools().len());
         let start_y = content_start_y(area);
 
         let max_w = max_row_width();
@@ -152,10 +155,10 @@ impl InternalToolsView {
 
         for i in 0..count {
             let idx = self.scroll_offset + i;
-            if idx >= INTERNAL_TOOLS.len() {
+            if idx >= internal_tools().len() {
                 break;
             }
-            let (name, desc) = INTERNAL_TOOLS[idx];
+            let (name, desc) = internal_tools()[idx];
             let y = list_start_y + i as u16;
             if y >= area.bottom() {
                 break;
@@ -197,13 +200,13 @@ fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
 
 /// Compute the Y position where title and list start (vertically centered).
 fn content_start_y(area: Rect) -> u16 {
-    let count = visible_items(area).min(INTERNAL_TOOLS.len());
+    let count = visible_items(area).min(internal_tools().len());
     let content_height = count + 2; // title + blank line + items
     area.y + (area.height.saturating_sub(content_height as u16)) / 2
 }
 
 fn max_row_width() -> usize {
-    INTERNAL_TOOLS
+    internal_tools()
         .iter()
         .map(|(name, desc)| 2 + name.len() + 4 + desc.len()) // "✔ name - desc"
         .max()

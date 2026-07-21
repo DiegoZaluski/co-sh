@@ -8,6 +8,7 @@ pub mod find;
 pub mod fs;
 pub mod plan;
 pub mod question;
+#[cfg(feature = "embed")]
 pub mod recall;
 pub mod skills;
 pub mod subagent;

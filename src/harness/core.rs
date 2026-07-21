@@ -274,6 +274,7 @@ impl Harness {
     /// The `suffix` describes which knowledge bases are available so the
     /// agent sees a tailored description. Must be called before
     /// [`format_header_context`](Self::format_header_context).
+    #[cfg(feature = "embed")]
     pub fn set_recall_context(&mut self, suffix: String) {
         if let Some(ref mut cosh) = self.cosh_tools {
             cosh.set_recall_context(suffix);
@@ -285,6 +286,7 @@ impl Harness {
     /// Each entry holds the connection URI, table name, and embedder config
     /// needed to embed a query and search the vector DB. Must be called
     /// before [`format_header_context`](Self::format_header_context).
+    #[cfg(feature = "embed")]
     pub fn set_recall_dbs(&mut self, dbs: Vec<super::tools::RecallDb>) {
         if let Some(ref mut cosh) = self.cosh_tools {
             cosh.set_recall_dbs(dbs);
