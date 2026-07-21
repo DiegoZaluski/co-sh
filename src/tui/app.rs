@@ -1156,7 +1156,10 @@ impl App {
                 }
             }
 
-            let show_home = !matches!(self.mode(), AppMode::InternalTools | AppMode::AddProvider | AppMode::Rag);
+            let show_home = !matches!(
+                self.mode(),
+                AppMode::InternalTools | AppMode::AddProvider | AppMode::Rag
+            );
             FooterView::render_with_mode(
                 buf,
                 Rect::new(main_area.x, footer_y, main_area.width, 1),
@@ -1386,7 +1389,8 @@ impl App {
                                 if input.starts_with("http://") || input.starts_with("https://") {
                                     // Use cosh_tools web_fetch which extracts clean text
                                     // via rs_trafilatura (replaces raw curl that leaked HTML)
-                                    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+                                    let (tx, rx) =
+                                        std::sync::mpsc::channel::<Result<String, String>>();
                                     let url = input.clone();
                                     self.tokio_handle.spawn(async move {
                                         use cosh_tools::web::{WebFetch, fetch as web_fetch_fn};
@@ -1405,7 +1409,11 @@ impl App {
                                     }
                                 }
                             }
-                            Some(RagAction::CreateDb { name, description, embedder }) => {
+                            Some(RagAction::CreateDb {
+                                name,
+                                description,
+                                embedder,
+                            }) => {
                                 use crate::routes::rag::models::RagDb;
                                 let db = RagDb {
                                     name: name.clone(),
@@ -1415,17 +1423,22 @@ impl App {
                                     created_at: std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default()
-                                        .as_millis() as u64,
+                                        .as_millis()
+                                        as u64,
                                 };
-                                let mut registry = crate::routes::rag::registry::RagRegistry::load();
+                                let mut registry =
+                                    crate::routes::rag::registry::RagRegistry::load();
                                 registry.upsert(db);
                                 // Auto-select the newly created DB for embedding
                                 self.rag_view.selected_db_for_embed = Some(name.clone());
                                 // Also add it to active_dbs so it's ready to use
                                 self.rag_view.active_dbs.insert(name.clone());
-                                crate::routes::rag::registry::RagRegistry::save_active(&self.rag_view.active_dbs);
+                                crate::routes::rag::registry::RagRegistry::save_active(
+                                    &self.rag_view.active_dbs,
+                                );
                                 // Reload registry
-                                self.rag_view.registry = crate::routes::rag::registry::RagRegistry::load();
+                                self.rag_view.registry =
+                                    crate::routes::rag::registry::RagRegistry::load();
                                 // Show success toast
                                 use crate::ui::toast::{ToastOptions, ToastVariant};
                                 self.toast_state.show(ToastOptions {
@@ -1929,47 +1942,48 @@ impl App {
                                             }
                                             self.slash_menu.visible = false;
                                         }
-                                    }                            KeyCode::Esc => {
-                                self.prompt_view.note_activity();
-                                self.prompt_view.input.clear();
-                                self.prompt_view.pasted_parts.clear();
-                                self.prompt_view.cursor_pos = 0;
-                                self.slash_menu.visible = false;
-                            }
-                            KeyCode::Backspace => {
-                                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    self.prompt_view.delete_word_before_cursor();
-                                    self.slash_menu.update(&self.prompt_view.input);
-                                } else {
-                                    self.prompt_view.note_activity();
-                                    if !self.prompt_view.input.is_empty() {
-                                        self.prompt_view.input.pop();
-                                        self.prompt_view.cursor_pos =
-                                            self.prompt_view.input.len();
-                                        self.slash_menu.update(&self.prompt_view.input);
                                     }
+                                    KeyCode::Esc => {
+                                        self.prompt_view.note_activity();
+                                        self.prompt_view.input.clear();
+                                        self.prompt_view.pasted_parts.clear();
+                                        self.prompt_view.cursor_pos = 0;
+                                        self.slash_menu.visible = false;
+                                    }
+                                    KeyCode::Backspace => {
+                                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                            self.prompt_view.delete_word_before_cursor();
+                                            self.slash_menu.update(&self.prompt_view.input);
+                                        } else {
+                                            self.prompt_view.note_activity();
+                                            if !self.prompt_view.input.is_empty() {
+                                                self.prompt_view.input.pop();
+                                                self.prompt_view.cursor_pos =
+                                                    self.prompt_view.input.len();
+                                                self.slash_menu.update(&self.prompt_view.input);
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char(ch) => {
+                                        self.prompt_view.note_activity();
+                                        self.prompt_view.input.push(ch);
+                                        self.prompt_view.cursor_pos += ch.len_utf8();
+                                        let was_visible = self.slash_menu.visible;
+                                        self.slash_menu.update(&self.prompt_view.input);
+                                        // If menu closed (e.g., user typed space), remove the leading "/"
+                                        if was_visible
+                                            && !self.slash_menu.visible
+                                            && self.prompt_view.input.starts_with('/')
+                                        {
+                                            self.prompt_view.input.remove(0);
+                                            self.prompt_view.cursor_pos =
+                                                self.prompt_view.cursor_pos.saturating_sub(1);
+                                        }
+                                    }
+                                    _ => {}
                                 }
+                                return Ok(false);
                             }
-                            KeyCode::Char(ch) => {
-                                self.prompt_view.note_activity();
-                                self.prompt_view.input.push(ch);
-                                self.prompt_view.cursor_pos += ch.len_utf8();
-                                let was_visible = self.slash_menu.visible;
-                                self.slash_menu.update(&self.prompt_view.input);
-                                // If menu closed (e.g., user typed space), remove the leading "/"
-                                if was_visible
-                                    && !self.slash_menu.visible
-                                    && self.prompt_view.input.starts_with('/')
-                                {
-                                    self.prompt_view.input.remove(0);
-                                    self.prompt_view.cursor_pos =
-                                        self.prompt_view.cursor_pos.saturating_sub(1);
-                                }
-                            }
-                            _ => {}
-                        }
-                        return Ok(false);
-                    }
 
                             if matches!(self.mode(), AppMode::Session) {
                                 match key.code {
@@ -3168,7 +3182,7 @@ impl App {
                 self.internal_tools_view.toggle_current();
                 return Ok(true);
             }
-        }                // 8ba. Rag view — mouse click on DB list row or Create DB button
+        } // 8ba. Rag view — mouse click on DB list row or Create DB button
         if matches!(self.mode(), AppMode::Rag) && !self.dialog.visible() {
             let area = self.terminal_size();
             let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
@@ -3187,7 +3201,9 @@ impl App {
             // DB picker row click (select DB for embed)
             if self.rag_view.show_db_picker {
                 if let Some(picker_idx) = self.rag_view.is_db_picker_row_click(&mouse, tools_area) {
-                    let pick_name = self.rag_view.filtered_dbs()
+                    let pick_name = self
+                        .rag_view
+                        .filtered_dbs()
                         .get(picker_idx)
                         .map(|db| db.name.clone());
                     if let Some(ref name) = pick_name {
@@ -3195,8 +3211,12 @@ impl App {
                     }
                     return Ok(true);
                 }
-                // Click outside picker → close it
-                self.rag_view.close_db_picker();
+                // Only close picker when clicking OUTSIDE the picker's bounding box
+                if !self.rag_view.is_click_inside_db_picker(&mouse, tools_area) {
+                    self.rag_view.close_db_picker();
+                    return Ok(true);
+                }
+                // Click was inside the picker but not on a row — just consume
                 return Ok(true);
             }
 
@@ -3220,13 +3240,24 @@ impl App {
                 return Ok(true);
             }
             // Click outside preview overlay → close preview
-            if self.rag_view.is_preview_visible() && self.rag_view.is_click_outside_preview(&mouse, tools_area) {
+            if self.rag_view.is_preview_visible()
+                && self.rag_view.is_click_outside_preview(&mouse, tools_area)
+            {
                 self.rag_view.close_preview();
                 return Ok(true);
             }
 
-            // Dismiss Create DB form on click outside any target
-            if self.rag_view.form_open() {
+            // Check if click is on Name or Description field in the Create DB form
+            if self.rag_view.show_create_db
+                && self
+                    .rag_view
+                    .handle_create_db_field_click(&mouse, tools_area)
+            {
+                return Ok(true);
+            }
+
+            // Dismiss Create DB form only when click is outside the form area
+            if self.rag_view.is_dismiss_click(&mouse, tools_area) {
                 self.rag_view.close_form();
                 return Ok(true);
             }

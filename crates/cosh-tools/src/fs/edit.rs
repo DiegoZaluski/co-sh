@@ -45,10 +45,7 @@ pub async fn edit(metadata: FsMetadata, tg: FsEdit) -> Result<Vec<EditResult>, S
 }
 
 use super::types;
-async fn edit_target(
-    target: EditTarget,
-    metadata: &FsMetadata,
-) -> Result<EditResult, String> {
+async fn edit_target(target: EditTarget, metadata: &FsMetadata) -> Result<EditResult, String> {
     let validated_path = match metadata.fs_guard(&target.path) {
         types::FsGuard::Allowed(path) => path,
         types::FsGuard::Denied => {
@@ -70,7 +67,10 @@ async fn edit_target(
     );
 
     let patch = Patch::parse(&hashline_input, &SplitOptions::default()).map_err(|e| {
-        format!("failed to parse edit operations for `{}`: {}", target.path, e)
+        format!(
+            "failed to parse edit operations for `{}`: {}",
+            target.path, e
+        )
     })?;
 
     let session_store = rollback::session_store().clone();
@@ -80,15 +80,17 @@ async fn edit_target(
         Some(resolve_block_fn as BlockResolver),
     );
 
-    let prepared = patcher.prepare(&patch.sections[0]).await.map_err(|e| {
-        format!("edit failed for `{}`: {}", target.path, e)
-    })?;
+    let prepared = patcher
+        .prepare(&patch.sections[0])
+        .await
+        .map_err(|e| format!("edit failed for `{}`: {}", target.path, e))?;
 
     let _ = rollback::record(&path_str, &prepared.normalized);
 
-    let section = patcher.commit(prepared).await.map_err(|e| {
-        format!("edit failed for `{}`: {}", target.path, e)
-    })?;
+    let section = patcher
+        .commit(prepared)
+        .await
+        .map_err(|e| format!("edit failed for `{}`: {}", target.path, e))?;
 
     cosh_sdk::tree_sitter::tree_sitter().invalidate(&path_str);
 

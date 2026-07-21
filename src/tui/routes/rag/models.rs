@@ -150,19 +150,22 @@ impl LocalEmbedModel {
             Self::BGEM3 => "BGE-M3 (1024d)".into(),
 
             Self::NomicEmbedTextV1 => "nomic-embed-text-v1 (768d)".into(),
-            Self::NomicEmbedTextV15 | Self::NomicEmbedTextV15Q => "nomic-embed-text-v1.5 (768d)".into(),
+            Self::NomicEmbedTextV15 | Self::NomicEmbedTextV15Q => {
+                "nomic-embed-text-v1.5 (768d)".into()
+            }
 
-            Self::ParaphraseMLMiniLML12V2 | Self::ParaphraseMLMiniLML12V2Q =>
-                "paraphrase-MiniLM-L12-v2 (384d)".into(),
-            Self::ParaphraseMLMpnetBaseV2 =>
-                "paraphrase-multilingual-mpnet-base-v2 (768d)".into(),
+            Self::ParaphraseMLMiniLML12V2 | Self::ParaphraseMLMiniLML12V2Q => {
+                "paraphrase-MiniLM-L12-v2 (384d)".into()
+            }
+            Self::ParaphraseMLMpnetBaseV2 => "paraphrase-multilingual-mpnet-base-v2 (768d)".into(),
 
             Self::MultilingualE5Small => "multilingual-e5-small (384d)".into(),
             Self::MultilingualE5Base => "multilingual-e5-base (768d)".into(),
             Self::MultilingualE5Large => "multilingual-e5-large (1024d)".into(),
 
-            Self::MxbaiEmbedLargeV1 | Self::MxbaiEmbedLargeV1Q =>
-                "mxbai-embed-large-v1 (1024d)".into(),
+            Self::MxbaiEmbedLargeV1 | Self::MxbaiEmbedLargeV1Q => {
+                "mxbai-embed-large-v1 (1024d)".into()
+            }
 
             Self::GTEBaseENV15 | Self::GTEBaseENV15Q => "GTE-Base-EN-v1.5 (768d)".into(),
             Self::GTELargeENV15 | Self::GTELargeENV15Q => "GTE-Large-EN-v1.5 (1024d)".into(),
@@ -172,29 +175,37 @@ impl LocalEmbedModel {
             Self::JinaEmbeddingsV2BaseCode => "jina-embeddings-v2-base-code (768d)".into(),
             Self::JinaEmbeddingsV2BaseEN => "jina-embeddings-v2-base-en (768d)".into(),
 
-            Self::EmbeddingGemma300M | Self::EmbeddingGemma300MQ4 | Self::EmbeddingGemma300MQ =>
-                "EmbeddingGemma-300M (3584d)".into(),
+            Self::EmbeddingGemma300M | Self::EmbeddingGemma300MQ4 | Self::EmbeddingGemma300MQ => {
+                "EmbeddingGemma-300M (3584d)".into()
+            }
 
             Self::ClipVitB32 => "CLIP-ViT-B-32 (text, 512d)".into(),
 
-            Self::SnowflakeArcticEmbedXS | Self::SnowflakeArcticEmbedXSQ =>
-                "snowflake-arctic-embed-xs (384d)".into(),
-            Self::SnowflakeArcticEmbedS | Self::SnowflakeArcticEmbedSQ =>
-                "snowflake-arctic-embed-s (384d)".into(),
-            Self::SnowflakeArcticEmbedM | Self::SnowflakeArcticEmbedMQ =>
-                "snowflake-arctic-embed-m (768d)".into(),
-            Self::SnowflakeArcticEmbedMLong | Self::SnowflakeArcticEmbedMLongQ =>
-                "snowflake-arctic-embed-m-long (768d)".into(),
-            Self::SnowflakeArcticEmbedL | Self::SnowflakeArcticEmbedLQ =>
-                "snowflake-arctic-embed-l (1024d)".into(),
+            Self::SnowflakeArcticEmbedXS | Self::SnowflakeArcticEmbedXSQ => {
+                "snowflake-arctic-embed-xs (384d)".into()
+            }
+            Self::SnowflakeArcticEmbedS | Self::SnowflakeArcticEmbedSQ => {
+                "snowflake-arctic-embed-s (384d)".into()
+            }
+            Self::SnowflakeArcticEmbedM | Self::SnowflakeArcticEmbedMQ => {
+                "snowflake-arctic-embed-m (768d)".into()
+            }
+            Self::SnowflakeArcticEmbedMLong | Self::SnowflakeArcticEmbedMLongQ => {
+                "snowflake-arctic-embed-m-long (768d)".into()
+            }
+            Self::SnowflakeArcticEmbedL | Self::SnowflakeArcticEmbedLQ => {
+                "snowflake-arctic-embed-l (1024d)".into()
+            }
         }
     }
 
     /// Vector dimension for this model.
     pub const fn vector_dim(&self) -> usize {
         match self {
-            Self::AllMiniLML6V2 | Self::AllMiniLML6V2Q
-            | Self::AllMiniLML12V2 | Self::AllMiniLML12V2Q => 384,
+            Self::AllMiniLML6V2
+            | Self::AllMiniLML6V2Q
+            | Self::AllMiniLML12V2
+            | Self::AllMiniLML12V2Q => 384,
 
             Self::AllMpnetBaseV2 => 768,
 
@@ -224,14 +235,20 @@ impl LocalEmbedModel {
 
             Self::JinaEmbeddingsV2BaseCode | Self::JinaEmbeddingsV2BaseEN => 768,
 
-            Self::EmbeddingGemma300M | Self::EmbeddingGemma300MQ4 | Self::EmbeddingGemma300MQ => 3584,
+            Self::EmbeddingGemma300M | Self::EmbeddingGemma300MQ4 | Self::EmbeddingGemma300MQ => {
+                3584
+            }
 
             Self::ClipVitB32 => 512,
 
-            Self::SnowflakeArcticEmbedXS | Self::SnowflakeArcticEmbedXSQ
-            | Self::SnowflakeArcticEmbedS | Self::SnowflakeArcticEmbedSQ => 384,
-            Self::SnowflakeArcticEmbedM | Self::SnowflakeArcticEmbedMQ
-            | Self::SnowflakeArcticEmbedMLong | Self::SnowflakeArcticEmbedMLongQ => 768,
+            Self::SnowflakeArcticEmbedXS
+            | Self::SnowflakeArcticEmbedXSQ
+            | Self::SnowflakeArcticEmbedS
+            | Self::SnowflakeArcticEmbedSQ => 384,
+            Self::SnowflakeArcticEmbedM
+            | Self::SnowflakeArcticEmbedMQ
+            | Self::SnowflakeArcticEmbedMLong
+            | Self::SnowflakeArcticEmbedMLongQ => 768,
             Self::SnowflakeArcticEmbedL | Self::SnowflakeArcticEmbedLQ => 1024,
         }
     }
@@ -294,7 +311,9 @@ impl LocalEmbedModel {
             Self::SnowflakeArcticEmbedM => fastembed::EmbeddingModel::SnowflakeArcticEmbedM,
             Self::SnowflakeArcticEmbedMQ => fastembed::EmbeddingModel::SnowflakeArcticEmbedMQ,
             Self::SnowflakeArcticEmbedMLong => fastembed::EmbeddingModel::SnowflakeArcticEmbedMLong,
-            Self::SnowflakeArcticEmbedMLongQ => fastembed::EmbeddingModel::SnowflakeArcticEmbedMLongQ,
+            Self::SnowflakeArcticEmbedMLongQ => {
+                fastembed::EmbeddingModel::SnowflakeArcticEmbedMLongQ
+            }
             Self::SnowflakeArcticEmbedL => fastembed::EmbeddingModel::SnowflakeArcticEmbedL,
             Self::SnowflakeArcticEmbedLQ => fastembed::EmbeddingModel::SnowflakeArcticEmbedLQ,
         }
@@ -330,7 +349,11 @@ impl EmbedderConfig {
             EmbedderConfig::Local { model } => model.label(),
             EmbedderConfig::Cloud(c) => {
                 let dim = self.vector_dim();
-                let dim_str = if dim > 0 { format!(" ({dim}d)") } else { String::new() };
+                let dim_str = if dim > 0 {
+                    format!(" ({dim}d)")
+                } else {
+                    String::new()
+                };
                 format!("{} / {}{dim_str}", c.provider, c.model)
             }
         }
@@ -459,9 +482,18 @@ impl EmbedModelEntry {
 
         // ── Cloud models (show if env var is set) ─────────────────────
         if std::env::var("OPENAI_API_KEY").is_ok() {
-            entries.push(Self::Cloud("openai".into(), "text-embedding-3-small".into()));
-            entries.push(Self::Cloud("openai".into(), "text-embedding-3-large".into()));
-            entries.push(Self::Cloud("openai".into(), "text-embedding-ada-002".into()));
+            entries.push(Self::Cloud(
+                "openai".into(),
+                "text-embedding-3-small".into(),
+            ));
+            entries.push(Self::Cloud(
+                "openai".into(),
+                "text-embedding-3-large".into(),
+            ));
+            entries.push(Self::Cloud(
+                "openai".into(),
+                "text-embedding-ada-002".into(),
+            ));
         }
         if std::env::var("GEMINI_API_KEY").is_ok() {
             entries.push(Self::Cloud("gemini".into(), "text-embedding-004".into()));
@@ -471,7 +503,10 @@ impl EmbedModelEntry {
             entries.push(Self::Cloud("ollama".into(), "nomic-embed-text".into()));
             entries.push(Self::Cloud("ollama".into(), "mxbai-embed-large".into()));
             entries.push(Self::Cloud("ollama".into(), "all-minilm".into()));
-            entries.push(Self::Cloud("ollama".into(), "snowflake-arctic-embed".into()));
+            entries.push(Self::Cloud(
+                "ollama".into(),
+                "snowflake-arctic-embed".into(),
+            ));
             entries.push(Self::Cloud("ollama".into(), "bge-m3".into()));
         }
 
@@ -496,6 +531,15 @@ impl EmbedModelEntry {
             Self::Cloud(provider, model) => cloud_known_dim(provider, model),
         }
     }
+}
+
+// ── CreateDbFocus ───────────────────────────────────────────────────────
+
+/// Which field inside the Create DB form is currently focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateDbFocus {
+    Name,
+    Description,
 }
 
 // ── RagMode ────────────────────────────────────────────────────────────

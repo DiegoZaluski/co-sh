@@ -1,8 +1,8 @@
+mod handlers;
 pub mod models;
 pub mod registry;
-mod view;
 mod render;
-mod handlers;
+mod view;
 
 pub use models::RagAction;
 pub use view::RagView;

@@ -2,14 +2,17 @@
 //!
 //! All drawing code extracted from the original monolithic view.rs.
 
+use std::time::SystemTime;
+
+use cosh_tui::core::lib::rgba::RGBA;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use cosh_tui::core::lib::rgba::RGBA;
 
+use crate::component::cursor::CursorState;
 use crate::theme::Theme;
 
-use super::models::RagMode;
+use super::models::{CreateDbFocus, RagMode};
 use super::view::RagView;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -109,7 +112,9 @@ impl RagView {
         };
         let box1_h = {
             let ideal = avail_h.saturating_mul(30) / 100;
-            ideal.max(7 + create_db_lines).min(avail_h.saturating_sub(8))
+            ideal
+                .max(7 + create_db_lines)
+                .min(avail_h.saturating_sub(8))
         };
         let box2_available = avail_h.saturating_sub(box1_h + gap + bottom_gap);
         let box2_h = box2_available.max(5);
@@ -117,14 +122,32 @@ impl RagView {
         let mut y = area.y;
 
         // ══════════ BOX 1: Embed Content ══════════════════════════════
-        self.render_box1(buf, inner_x, inner_w, box1_h, &mut y, theme,
-                         fg, muted, warning, success, primary, panel_bg, title_bg, title_fg,
-                         input_h, db_model_count as usize, create_db_lines);
+        self.render_box1(
+            buf,
+            inner_x,
+            inner_w,
+            box1_h,
+            &mut y,
+            theme,
+            fg,
+            muted,
+            warning,
+            success,
+            primary,
+            panel_bg,
+            title_bg,
+            title_fg,
+            input_h,
+            db_model_count as usize,
+            create_db_lines,
+        );
 
         // ══════════ BOX 2: Available Databases ════════════════════════
         if y < area.bottom() {
-            self.render_box2(buf, area, inner_x, inner_w, box2_h, &mut y, theme,
-                             fg, muted, warning, success, primary, panel_bg, title_bg, title_fg);
+            self.render_box2(
+                buf, area, inner_x, inner_w, box2_h, &mut y, theme, fg, muted, warning, success,
+                primary, panel_bg, title_bg, title_fg,
+            );
         }
 
         // ══════════ OVERLAY: Content Preview popup ═════════════════════
@@ -135,14 +158,34 @@ impl RagView {
 
     #[allow(clippy::too_many_arguments)]
     fn render_box1(
-        &mut self, buf: &mut Buffer, inner_x: u16, inner_w: u16, box1_h: u16,
-        y: &mut u16, _theme: &Theme,
-        fg: Color, muted: Color, warning: Color, success: Color, primary: Color,
-        panel_bg: Color, title_bg: Color, title_fg: Color,
-        input_h: u16, _db_model_count: usize, _create_db_lines: u16,
+        &mut self,
+        buf: &mut Buffer,
+        inner_x: u16,
+        inner_w: u16,
+        box1_h: u16,
+        y: &mut u16,
+        _theme: &Theme,
+        fg: Color,
+        muted: Color,
+        warning: Color,
+        success: Color,
+        primary: Color,
+        panel_bg: Color,
+        title_bg: Color,
+        title_fg: Color,
+        input_h: u16,
+        _db_model_count: usize,
+        _create_db_lines: u16,
     ) {
         let title = " Embed Content ";
-        fill_rect(buf, inner_x, *y, inner_w, box1_h, Style::default().bg(panel_bg));
+        fill_rect(
+            buf,
+            inner_x,
+            *y,
+            inner_w,
+            box1_h,
+            Style::default().bg(panel_bg),
+        );
         section_title(buf, inner_x + 1, *y, title, title_bg, title_fg);
 
         let cx = inner_x + 2;
@@ -155,13 +198,23 @@ impl RagView {
         // ── DB indicator inside the input box (line 2, below placeholder) ──
         let input_bg = rgba_color(_theme.background_element);
         if let Some(db_name) = &self.selected_db_for_embed {
-            draw_text_line(buf, &format!("DB: {db_name}"), cx + 2, cy + 2,
-                           input_w.saturating_sub(4),
-                           Style::default().fg(fg).bg(input_bg));
+            draw_text_line(
+                buf,
+                &format!("DB: {db_name}"),
+                cx + 2,
+                cy + 2,
+                input_w.saturating_sub(4),
+                Style::default().fg(fg).bg(input_bg),
+            );
         } else {
-            draw_text_line(buf, "No DB selected", cx + 2, cy + 2,
-                           input_w.saturating_sub(4),
-                           Style::default().fg(warning).bg(input_bg));
+            draw_text_line(
+                buf,
+                "No DB selected",
+                cx + 2,
+                cy + 2,
+                input_w.saturating_sub(4),
+                Style::default().fg(warning).bg(input_bg),
+            );
         }
 
         cy += input_h;
@@ -175,15 +228,21 @@ impl RagView {
                     cell.set_style(Style::default().fg(success));
                 }
                 draw_text_line(
-                    buf, " Fetching content...",
-                    cx + 2, cy, input_w.saturating_sub(2),
+                    buf,
+                    " Fetching content...",
+                    cx + 2,
+                    cy,
+                    input_w.saturating_sub(2),
                     Style::default().fg(muted),
                 );
             }
             RagMode::Previewing => {
                 draw_text_line(
-                    buf, "Preview available \u{2191}\u{2193} scroll  Esc to close",
-                    cx, cy, input_w,
+                    buf,
+                    "Preview available \u{2191}\u{2193} scroll  Esc to close",
+                    cx,
+                    cy,
+                    input_w,
                     Style::default().fg(muted),
                 );
             }
@@ -194,8 +253,11 @@ impl RagView {
                     cell.set_style(Style::default().fg(success));
                 }
                 draw_text_line(
-                    buf, " Embedding content...",
-                    cx + 2, cy, input_w.saturating_sub(2),
+                    buf,
+                    " Embedding content...",
+                    cx + 2,
+                    cy,
+                    input_w.saturating_sub(2),
                     Style::default().fg(muted),
                 );
             }
@@ -222,14 +284,16 @@ impl RagView {
 
         // ── DB picker (replaces button line when open) ────────────────
         if self.show_db_picker && !self.show_create_db {
-            self.render_db_picker(buf, cx, cy, input_w, _theme,
-                                  fg, muted, success, primary, title_bg, title_fg);
+            self.render_db_picker(
+                buf, cx, cy, input_w, _theme, fg, muted, success, primary, title_bg, title_fg,
+            );
         }
 
         // ── Create New Database form (replaces button line when open) ──
         if self.show_create_db {
-            self.render_create_db_form(buf, cx, cy, input_w, _theme,
-                                       fg, muted, warning, primary, title_fg, panel_bg);
+            self.render_create_db_form(
+                buf, cx, cy, input_w, _theme, fg, muted, warning, primary, title_fg, panel_bg,
+            );
         }
 
         *y = *y + box1_h + 1;
@@ -239,12 +303,29 @@ impl RagView {
 
     #[allow(clippy::too_many_arguments)]
     fn render_create_db_form(
-        &mut self, buf: &mut Buffer, cx: u16, cy: u16, input_w: u16, theme: &Theme,
-        fg: Color, muted: Color, _warning: Color, primary: Color, title_fg: Color, _panel_bg: Color,
+        &mut self,
+        buf: &mut Buffer,
+        cx: u16,
+        cy: u16,
+        input_w: u16,
+        theme: &Theme,
+        fg: Color,
+        muted: Color,
+        _warning: Color,
+        primary: Color,
+        title_fg: Color,
+        _panel_bg: Color,
     ) {
         let mini_box_h = self.create_db_mini_box_height();
         let bg_term = rgba_color(theme.background);
-        fill_rect(buf, cx, cy, input_w, mini_box_h, Style::default().bg(bg_term));
+        fill_rect(
+            buf,
+            cx,
+            cy,
+            input_w,
+            mini_box_h,
+            Style::default().bg(bg_term),
+        );
 
         let mut form_y = cy;
         let pad = cx + 2;
@@ -278,14 +359,15 @@ impl RagView {
                 if is_sel {
                     fill_rect(buf, cx, form_y, input_w, 1, Style::default().bg(primary));
                     draw_text_line(
-                        buf, &line, pad, form_y, pad_w,
+                        buf,
+                        &line,
+                        pad,
+                        form_y,
+                        pad_w,
                         Style::default().fg(title_fg).bg(primary),
                     );
                 } else {
-                    draw_text_line(
-                        buf, &line, pad, form_y, pad_w,
-                        Style::default().fg(fg),
-                    );
+                    draw_text_line(buf, &line, pad, form_y, pad_w, Style::default().fg(fg));
                 }
                 form_y += 1;
             }
@@ -303,6 +385,10 @@ impl RagView {
         }
 
         // ── Name & Description ─────────────────────────────────────────
+        let now = SystemTime::now();
+        let name_focused = self.create_db_focus == CreateDbFocus::Name;
+        let desc_focused = self.create_db_focus == CreateDbFocus::Description;
+
         let nd = if self.db_name_input.is_empty() {
             "Enter database name..."
         } else {
@@ -311,7 +397,35 @@ impl RagView {
         let name_text = format!("Name:  {nd}");
         let max_name_w = pad_w as usize;
         let name_trunc = truncate_label(&name_text, max_name_w);
-        draw_text_line(buf, &name_trunc, pad, form_y, pad_w, Style::default().fg(fg));
+        let name_style = if name_focused {
+            Style::default()
+                .fg(fg)
+                .bg(rgba_color(theme.background_element))
+        } else {
+            Style::default().fg(fg)
+        };
+        draw_text_line(buf, &name_trunc, pad, form_y, pad_w, name_style);
+        // Draw cursor on Name field using Cursor component's state for blink
+        if name_focused {
+            let cursor_x = pad + 6 + self.db_name_cursor_pos as u16; // "Name:  " = 6 chars
+            if cursor_x < pad + pad_w {
+                if let Some(cell) = buf.cell_mut((cursor_x, form_y)) {
+                    match self.db_name_cursor.current_state(now) {
+                        CursorState::On => {
+                            cell.set_style(Style::default().fg(primary).bg(fg));
+                        }
+                        CursorState::Off | CursorState::Blur => {
+                            cell.set_char('\u{2592}');
+                            cell.set_style(
+                                Style::default()
+                                    .fg(muted)
+                                    .bg(rgba_color(theme.background_element)),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         form_y += 1;
 
         let dd = if self.db_description_input.is_empty() {
@@ -321,11 +435,38 @@ impl RagView {
         };
         let desc_text = format!("Desc:  {dd}");
         let desc_trunc = truncate_label(&desc_text, max_name_w);
-        draw_text_line(buf, &desc_trunc, pad, form_y, pad_w, Style::default().fg(muted));
-
+        let desc_style = if desc_focused {
+            Style::default()
+                .fg(fg)
+                .bg(rgba_color(theme.background_element))
+        } else {
+            Style::default().fg(muted)
+        };
+        draw_text_line(buf, &desc_trunc, pad, form_y, pad_w, desc_style);
+        // Draw cursor on Description field using Cursor component's state for blink
+        if desc_focused {
+            let cursor_x = pad + 6 + self.db_description_cursor_pos as u16; // "Desc:  " = 6 chars
+            if cursor_x < pad + pad_w {
+                if let Some(cell) = buf.cell_mut((cursor_x, form_y)) {
+                    match self.db_description_cursor.current_state(now) {
+                        CursorState::On => {
+                            cell.set_style(Style::default().fg(primary).bg(fg));
+                        }
+                        CursorState::Off | CursorState::Blur => {
+                            cell.set_char('\u{2592}');
+                            cell.set_style(
+                                Style::default()
+                                    .fg(muted)
+                                    .bg(rgba_color(theme.background_element)),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    fn create_db_mini_box_height(&self) -> u16 {
+    pub(crate) fn create_db_mini_box_height(&self) -> u16 {
         if self.models_expanded {
             let max_vis = 8u16;
             4 + max_vis + 1
@@ -338,21 +479,43 @@ impl RagView {
 
     #[allow(clippy::too_many_arguments)]
     fn render_box2(
-        &mut self, buf: &mut Buffer, area: Rect,
-        inner_x: u16, inner_w: u16, box2_h: u16,
-        y: &mut u16, _theme: &Theme,
-        fg: Color, muted: Color, warning: Color, success: Color, primary: Color,
-        panel_bg: Color, title_bg: Color, title_fg: Color,
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        inner_x: u16,
+        inner_w: u16,
+        box2_h: u16,
+        y: &mut u16,
+        _theme: &Theme,
+        fg: Color,
+        muted: Color,
+        warning: Color,
+        success: Color,
+        primary: Color,
+        panel_bg: Color,
+        title_bg: Color,
+        title_fg: Color,
     ) {
         let title = " Available Databases ";
         let warning_h = 2u16;
-        let filter_h = if self.registry.dbs.len() > 5 { 1u16 } else { 0u16 };
+        let filter_h = if self.registry.dbs.len() > 5 {
+            1u16
+        } else {
+            0u16
+        };
         let pad_bottom: u16 = 1;
         let header_gap: u16 = 1;
         let list_h = box2_h.saturating_sub(1 + header_gap + warning_h + filter_h + pad_bottom);
 
         let content_h = 1 + header_gap + warning_h + filter_h + list_h + pad_bottom;
-        fill_rect(buf, inner_x, *y, inner_w, content_h, Style::default().bg(panel_bg));
+        fill_rect(
+            buf,
+            inner_x,
+            *y,
+            inner_w,
+            content_h,
+            Style::default().bg(panel_bg),
+        );
         section_title(buf, inner_x + 1, *y, title, title_bg, title_fg);
 
         let cx = inner_x + 2;
@@ -362,21 +525,28 @@ impl RagView {
 
         // ── Warning ───────────────────────────────────────────────────
         draw_text_line(
-            buf, "\u{26A0}  Many active DBs degrade LLM quality. Enable only relevant.",
-            cx, cy, inner_w.saturating_sub(4),
+            buf,
+            "\u{26A0}  Many active DBs degrade LLM quality. Enable only relevant.",
+            cx,
+            cy,
+            inner_w.saturating_sub(4),
             Style::default().fg(warning),
         );
         cy += 1;
         draw_text_line(
-            buf, "   Each active DB adds its description to the LLM's context.",
-            cx, cy, inner_w.saturating_sub(4),
+            buf,
+            "   Each active DB adds its description to the LLM's context.",
+            cx,
+            cy,
+            inner_w.saturating_sub(4),
             Style::default().fg(muted),
         );
         cy += 1;
 
         // ── SearchBar filter ──────────────────────────────────────────
         if filter_h > 0 {
-            self.db_filter.render(buf, cx, cy, inner_w.saturating_sub(4), _theme);
+            self.db_filter
+                .render(buf, cx, cy, inner_w.saturating_sub(4), _theme);
             cy += 1;
         }
 
@@ -386,8 +556,11 @@ impl RagView {
 
         if filtered.is_empty() {
             draw_text_line(
-                buf, "   No databases yet.",
-                cx, cy, inner_w.saturating_sub(4),
+                buf,
+                "   No databases yet.",
+                cx,
+                cy,
+                inner_w.saturating_sub(4),
                 Style::default().fg(muted),
             );
         } else {
@@ -416,8 +589,11 @@ impl RagView {
                 let max_desc = inner_w.saturating_sub(6) as usize;
                 let truncated = truncate_label(&desc, max_desc);
                 draw_text_line(
-                    buf, &truncated,
-                    cx + 2, db_y, inner_w.saturating_sub(6),
+                    buf,
+                    &truncated,
+                    cx + 2,
+                    db_y,
+                    inner_w.saturating_sub(6),
                     Style::default().fg(rc),
                 );
             }
@@ -428,26 +604,50 @@ impl RagView {
 
     #[allow(clippy::too_many_arguments)]
     fn render_preview_overlay(
-        &self, buf: &mut Buffer, area: Rect, theme: &Theme,
-        fg: Color, muted: Color, _success: Color, _primary: Color,
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        theme: &Theme,
+        fg: Color,
+        muted: Color,
+        _success: Color,
+        _primary: Color,
     ) {
         if !self.is_preview_visible() {
             return;
         }
 
-        let overlay_w = (area.width * 85 / 100).max(40).min(area.width.saturating_sub(4));
-        let overlay_h = (area.height * 80 / 100).max(10).min(area.height.saturating_sub(4));
+        let overlay_w = (area.width * 85 / 100)
+            .max(40)
+            .min(area.width.saturating_sub(4));
+        let overlay_h = (area.height * 80 / 100)
+            .max(10)
+            .min(area.height.saturating_sub(4));
         let overlay_x = area.x + (area.width - overlay_w) / 2;
         let overlay_y = area.y + (area.height - overlay_h) / 2;
 
         // Background fill
         let bg_color = rgba_color(theme.background_element);
-        fill_rect(buf, overlay_x, overlay_y, overlay_w, overlay_h, Style::default().bg(bg_color));
+        fill_rect(
+            buf,
+            overlay_x,
+            overlay_y,
+            overlay_w,
+            overlay_h,
+            Style::default().bg(bg_color),
+        );
 
         // Border
         let border_color = rgba_color(theme.border_active);
         let max_y = overlay_y + overlay_h - 1;
-        Self::draw_overlay_border(buf, overlay_x, overlay_y, overlay_w, overlay_h, border_color);
+        Self::draw_overlay_border(
+            buf,
+            overlay_x,
+            overlay_y,
+            overlay_w,
+            overlay_h,
+            border_color,
+        );
 
         let content_x = overlay_x + 2;
         let content_w = overlay_w.saturating_sub(4);
@@ -456,11 +656,20 @@ impl RagView {
         // Title bar with background (matching box titles)
         let title_bg = rgba_color(theme.primary);
         let title_fg = rgba_color(theme.background);
-        section_title(buf, content_x, content_y, " Content Preview ", title_bg, title_fg);
+        section_title(
+            buf,
+            content_x,
+            content_y,
+            " Content Preview ",
+            title_bg,
+            title_fg,
+        );
         draw_text_line(
-            buf, "esc",
+            buf,
+            "esc",
             content_x + content_w.saturating_sub("esc".len() as u16),
-            content_y, content_w,
+            content_y,
+            content_w,
             Style::default().fg(title_fg).bg(title_bg),
         );
         content_y += 1;
@@ -483,8 +692,11 @@ impl RagView {
             let line = lines[idx];
             let truncated: String = line.chars().take(content_w as usize).collect();
             draw_text_line(
-                buf, &truncated,
-                content_x, content_y + i, content_w,
+                buf,
+                &truncated,
+                content_x,
+                content_y + i,
+                content_w,
                 Style::default().fg(fg),
             );
         }
@@ -498,15 +710,21 @@ impl RagView {
             "Enter to embed  Esc to close".to_string()
         };
         draw_text_line(
-            buf, &footer_text,
-            content_x, footer_y2, content_w,
+            buf,
+            &footer_text,
+            content_x,
+            footer_y2,
+            content_w,
             Style::default().fg(muted),
         );
     }
 
     fn draw_overlay_border(
         buf: &mut Buffer,
-        overlay_x: u16, overlay_y: u16, overlay_w: u16, overlay_h: u16,
+        overlay_x: u16,
+        overlay_y: u16,
+        overlay_w: u16,
+        overlay_h: u16,
         border_color: Color,
     ) {
         let max_x = overlay_x + overlay_w - 1;
@@ -549,8 +767,18 @@ impl RagView {
     // ── DB Picker (inline form, identical to create DB form) ─────────
 
     fn render_db_picker(
-        &self, buf: &mut Buffer, cx: u16, cy: u16, input_w: u16, theme: &Theme,
-        fg: Color, muted: Color, _success: Color, primary: Color, _title_bg: Color, _title_fg: Color,
+        &self,
+        buf: &mut Buffer,
+        cx: u16,
+        cy: u16,
+        input_w: u16,
+        theme: &Theme,
+        fg: Color,
+        muted: Color,
+        _success: Color,
+        primary: Color,
+        _title_bg: Color,
+        _title_fg: Color,
     ) {
         // Match create_db_mini_box_height() collapsed height: 5 lines
         let picker_h = 5u16;
@@ -562,15 +790,27 @@ impl RagView {
         let mut row_y = cy;
 
         // Title line (matching "Model" label style in create form)
-        draw_text_line(buf, "Select Database", pad, row_y, pad_w,
-                       Style::default().fg(primary));
+        draw_text_line(
+            buf,
+            "Select Database",
+            pad,
+            row_y,
+            pad_w,
+            Style::default().fg(primary),
+        );
         row_y += 1;
 
         // DB list (up to 4 items fit in 5-line box: title + 4 list lines)
         let filtered = self.filtered_dbs();
         if filtered.is_empty() {
-            draw_text_line(buf, "   No databases found.", pad, row_y, pad_w,
-                           Style::default().fg(muted));
+            draw_text_line(
+                buf,
+                "   No databases found.",
+                pad,
+                row_y,
+                pad_w,
+                Style::default().fg(muted),
+            );
             return;
         }
 
@@ -593,11 +833,18 @@ impl RagView {
 
             if is_sel {
                 fill_rect(buf, cx, row_y, input_w, 1, Style::default().bg(primary));
-                draw_text_line(buf, &truncated, pad, row_y, pad_w,
-                               Style::default().fg(rgba_color(theme.background)).bg(primary));
+                draw_text_line(
+                    buf,
+                    &truncated,
+                    pad,
+                    row_y,
+                    pad_w,
+                    Style::default()
+                        .fg(rgba_color(theme.background))
+                        .bg(primary),
+                );
             } else {
-                draw_text_line(buf, &truncated, pad, row_y, pad_w,
-                               Style::default().fg(fg));
+                draw_text_line(buf, &truncated, pad, row_y, pad_w, Style::default().fg(fg));
             }
             row_y += 1;
         }

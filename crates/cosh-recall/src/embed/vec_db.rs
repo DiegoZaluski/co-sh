@@ -132,10 +132,7 @@ impl VecDb {
     ///
     /// Returns [`VecDbError::Database`] if the table cannot be opened or
     /// the schema is malformed.
-    pub async fn connect_readonly(
-        uri: &str,
-        table_name: &str,
-    ) -> Result<Self, VecDbError> {
+    pub async fn connect_readonly(uri: &str, table_name: &str) -> Result<Self, VecDbError> {
         let connection = lancedb::connect(uri).execute().await?;
         let table = connection
             .open_table(table_name)

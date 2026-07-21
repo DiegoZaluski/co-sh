@@ -75,7 +75,10 @@ impl RagInput {
     /// re-establishes it at the end of the inserted text).
     pub fn handle_paste(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        let cleaned: String = normalized.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+        let cleaned: String = normalized
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\n')
+            .collect();
         self.text.insert_str(self.cursor_pos, &cleaned);
         self.cursor_pos += cleaned.len();
         self.cursor.note_activity();
@@ -166,7 +169,11 @@ impl RagInput {
         let text_w = width.saturating_sub(4) as usize;
 
         let is_placeholder = self.text.is_empty();
-        let display_text = if is_placeholder { PLACEHOLDER } else { &self.text };
+        let display_text = if is_placeholder {
+            PLACEHOLDER
+        } else {
+            &self.text
+        };
         let text_color = if is_placeholder { muted } else { fg };
 
         let truncated: String = display_text.chars().take(text_w).collect();

@@ -59,11 +59,10 @@ fn recall_default_equals_new() {
 #[test]
 fn recall_with_description_appends_suffix() {
     let default = Recall::new();
-    let customized = Recall::new().with_description("This knowledge base covers Rust and WebAssembly.");
+    let customized =
+        Recall::new().with_description("This knowledge base covers Rust and WebAssembly.");
 
-    let default_desc = default.description_search["description"]
-        .as_str()
-        .unwrap();
+    let default_desc = default.description_search["description"].as_str().unwrap();
     let custom_desc = customized.description_search["description"]
         .as_str()
         .unwrap();
@@ -82,8 +81,7 @@ fn recall_with_description_empty_suffix_is_noop() {
 
 #[test]
 fn recall_with_description_preserves_name_and_schema() {
-    let customized = Recall::new()
-        .with_description("Custom context for testing.");
+    let customized = Recall::new().with_description("Custom context for testing.");
 
     assert_eq!(customized.description_search["name"], "recall_search");
 

@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 
-use super::models::{EmbedModelEntry, RagMode};
+use super::models::{CreateDbFocus, EmbedModelEntry, RagMode};
 use super::registry::RagRegistry;
 use crate::component::cursor::Cursor;
 use crate::component::rag_input::RagInput;
@@ -32,10 +32,13 @@ pub struct RagView {
     pub(crate) selected_model_index: usize,
     pub(crate) model_scroll_offset: usize,
     pub(crate) available_models: Vec<EmbedModelEntry>,
+    pub(crate) create_db_focus: CreateDbFocus,
     pub(crate) db_name_input: String,
     pub(crate) db_name_cursor: Cursor,
+    pub(crate) db_name_cursor_pos: usize,
     pub(crate) db_description_input: String,
     pub(crate) db_description_cursor: Cursor,
+    pub(crate) db_description_cursor_pos: usize,
 
     // DB registry + filter
     pub(crate) registry: RagRegistry,
@@ -68,10 +71,13 @@ impl RagView {
             selected_model_index: 0,
             model_scroll_offset: 0,
             available_models,
+            create_db_focus: CreateDbFocus::Name,
             db_name_input: String::new(),
             db_name_cursor: Cursor::new(),
+            db_name_cursor_pos: 0,
             db_description_input: String::new(),
             db_description_cursor: Cursor::new(),
+            db_description_cursor_pos: 0,
             registry,
             fetch_rx: None,
             selected_db_index: 0,
@@ -109,6 +115,9 @@ impl RagView {
         self.url_input.clear();
         self.db_name_input.clear();
         self.db_description_input.clear();
+        self.db_name_cursor_pos = 0;
+        self.db_description_cursor_pos = 0;
+        self.create_db_focus = CreateDbFocus::Name;
         self.show_create_db = false;
         // Keep selected_db_for_embed (user may want to embed more content into same DB)
         self.registry = RagRegistry::load();
@@ -177,6 +186,10 @@ impl RagView {
             self.model_scroll_offset = 0;
             self.db_name_input.clear();
             self.db_description_input.clear();
+            self.db_name_cursor_pos = 0;
+            self.db_description_cursor_pos = 0;
+        } else {
+            self.create_db_focus = CreateDbFocus::Name;
         }
     }
 
@@ -196,6 +209,9 @@ impl RagView {
         self.model_scroll_offset = 0;
         self.db_name_input.clear();
         self.db_description_input.clear();
+        self.db_name_cursor_pos = 0;
+        self.db_description_cursor_pos = 0;
+        self.create_db_focus = CreateDbFocus::Name;
     }
 
     pub fn db_count(&self) -> usize {
@@ -259,8 +275,9 @@ impl RagView {
         }
         let visible = 20usize.min(total);
         if self.selected_db_index >= self.dbs_scroll_offset + visible {
-            self.dbs_scroll_offset =
-                self.selected_db_index.saturating_sub(visible.saturating_sub(1));
+            self.dbs_scroll_offset = self
+                .selected_db_index
+                .saturating_sub(visible.saturating_sub(1));
         }
         if self.selected_db_index < self.dbs_scroll_offset {
             self.dbs_scroll_offset = self.selected_db_index;

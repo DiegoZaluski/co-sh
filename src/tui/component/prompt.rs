@@ -191,7 +191,8 @@ impl PromptView {
         }
         let char_start = self.input.floor_char_boundary(self.cursor_pos - 1);
         // Check whether the character we are about to delete belongs to a pasted virtual text.
-        if let Some((vt_pos, vt_end, idx)) = self.find_paste_overlapping(char_start, self.cursor_pos)
+        if let Some((vt_pos, vt_end, idx)) =
+            self.find_paste_overlapping(char_start, self.cursor_pos)
         {
             // Delete the ENTIRE virtual-text placeholder atomically.
             self.input.drain(vt_pos..vt_end);
@@ -700,7 +701,14 @@ impl PromptView {
             };
 
             if is_paste_line[i] {
-                draw_text_line(buf, line, x_off, ly, max_line_w, base_style.fg(rgba_color(theme.secondary)));
+                draw_text_line(
+                    buf,
+                    line,
+                    x_off,
+                    ly,
+                    max_line_w,
+                    base_style.fg(rgba_color(theme.secondary)),
+                );
             } else {
                 draw_text_line(buf, line, x_off, ly, max_line_w, base_style);
             }

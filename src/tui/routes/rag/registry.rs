@@ -5,9 +5,9 @@
 //! description (user-provided), and the embedding model used.
 
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::fs;
 use std::path::PathBuf;
-use std::fmt::Write;
 
 use super::models::RagDb;
 
@@ -115,7 +115,10 @@ impl RagRegistry {
                 let _ = write!(
                     &mut suffix,
                     "- Name: {}\n  Description: {}\n  DB URI: {}\n  Embedding: {}\n\n",
-                    db.name, db.description, db.uri, db.embedder.label(),
+                    db.name,
+                    db.description,
+                    db.uri,
+                    db.embedder.label(),
                 );
             }
         }
@@ -147,10 +150,7 @@ impl RagRegistry {
 
     /// Compute the URI for a new database with the given name.
     pub fn db_uri(name: &str) -> String {
-        Self::data_dir()
-            .join(name)
-            .to_string_lossy()
-            .to_string()
+        Self::data_dir().join(name).to_string_lossy().to_string()
     }
 
     /// Check if a database name already exists.
