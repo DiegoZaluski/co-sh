@@ -2821,6 +2821,9 @@ impl App {
                         self.state.right_panel.scroll_up(3);
                     } else if matches!(self.mode(), AppMode::Session) {
                         self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
+                    } else if matches!(self.mode(), AppMode::InternalTools) {
+                        let list_area = 20;
+                        self.internal_tools_view.select_prev(list_area);
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         let list_area = 20;
                         self.add_provider_view.select_prev(list_area);
@@ -2846,6 +2849,9 @@ impl App {
                         self.state.right_panel.scroll_down(3);
                     } else if matches!(self.mode(), AppMode::Session) {
                         self.session_view.scroll_y = (self.session_view.scroll_y + 3).max(0);
+                    } else if matches!(self.mode(), AppMode::InternalTools) {
+                        let list_area = 20;
+                        self.internal_tools_view.select_next(list_area);
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         let list_area = 20;
                         self.add_provider_view.select_next(list_area);

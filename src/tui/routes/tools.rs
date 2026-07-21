@@ -1,5 +1,5 @@
-// TODO: Stumb para adicionar lógica de persistência das opções de ferramentas.
-// Atualmente as opções reiniciam ao fechar o programa.
+// TODO: Stub for adding tool-option persistence logic.
+// Currently, options reset on program restart.
 use std::collections::HashSet;
 
 use ratatui::buffer::Buffer;
