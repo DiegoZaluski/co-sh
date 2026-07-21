@@ -107,6 +107,8 @@ pub struct App {
     session_store: SessionStore,
     /// When set, the current Confirm dialog is asking about deleting a session.
     pending_delete_session_id: Option<String>,
+    /// When set, the current Confirm dialog is asking about deleting a RAG database.
+    pending_delete_db_name: Option<String>,
 
     // ── Mouse drag / selection tracking ───────────────────────────────────────────
     /// Position where the mouse was pressed down (for detecting drag selections).
@@ -181,6 +183,7 @@ impl App {
             prefs_cache,
             session_store,
             pending_delete_session_id: None,
+            pending_delete_db_name: None,
             should_quit: false,
             tokio_handle: Handle::current(),
             event_tx,
@@ -1642,11 +1645,25 @@ impl App {
                                         self.state.remove_session(&session_id);
                                         self.session_store.delete_session(&session_id);
                                         self.dialog.pop();
+                                    } else if let Some(db_name) = self.pending_delete_db_name.take()
+                                    {
+                                        self.rag_view.registry.remove(&db_name);
+                                        self.rag_view.active_dbs.remove(&db_name);
+                                        crate::routes::rag::registry::RagRegistry::save_active(
+                                            &self.rag_view.active_dbs,
+                                        );
+                                        if self.rag_view.selected_db_for_embed.as_deref()
+                                            == Some(&db_name)
+                                        {
+                                            self.rag_view.selected_db_for_embed = None;
+                                        }
+                                        self.dialog.pop();
                                     } else {
                                         self.should_quit = true;
                                     }
                                 } else {
                                     self.pending_delete_session_id = None;
+                                    self.pending_delete_db_name = None;
                                     self.dialog.pop();
                                 }
                                 return Ok(false);
@@ -1819,6 +1836,7 @@ impl App {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
                                 self.pending_delete_session_id = None;
+                                self.pending_delete_db_name = None;
                                 self.dialog.pop();
                             }
                         }
@@ -1837,6 +1855,7 @@ impl App {
                                 self.permission_dialog.visible = false;
                             } else if self.dialog.visible() {
                                 self.pending_delete_session_id = None;
+                                self.pending_delete_db_name = None;
                                 self.dialog.pop();
                             } else if matches!(self.mode(), AppMode::Session) {
                                 self.state.current_session_id = None;
@@ -2856,11 +2875,22 @@ impl App {
                             if let Some(session_id) = self.pending_delete_session_id.take() {
                                 self.state.remove_session(&session_id);
                                 self.session_store.delete_session(&session_id);
+                            } else if let Some(db_name) = self.pending_delete_db_name.take() {
+                                self.rag_view.registry.remove(&db_name);
+                                self.rag_view.active_dbs.remove(&db_name);
+                                crate::routes::rag::registry::RagRegistry::save_active(
+                                    &self.rag_view.active_dbs,
+                                );
+                                if self.rag_view.selected_db_for_embed.as_deref() == Some(&db_name)
+                                {
+                                    self.rag_view.selected_db_for_embed = None;
+                                }
                             } else {
                                 self.should_quit = true;
                             }
                         } else {
                             self.pending_delete_session_id = None;
+                            self.pending_delete_db_name = None;
                         }
                         self.dialog.pop();
                     }
@@ -3245,6 +3275,18 @@ impl App {
             // "show desc" button click (shows description popup)
             if let Some(desc_idx) = self.rag_view.is_show_desc_click(&mouse, tools_area) {
                 self.rag_view.toggle_desc_popup(desc_idx);
+                return Ok(true);
+            }
+
+            // 🗑 delete button click → show confirm dialog
+            if let Some(db_name) = self.rag_view.is_delete_click(&mouse, tools_area) {
+                self.pending_delete_db_name = Some(db_name);
+                self.dialog.show(DialogType::Confirm {
+                    message: "Delete this database?".into(),
+                });
+                if let Some(d) = self.dialog.current_mut() {
+                    d.selected = 1;
+                }
                 return Ok(true);
             }
 

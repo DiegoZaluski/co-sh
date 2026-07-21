@@ -587,9 +587,11 @@ impl RagView {
 
                 let btn_text = " show desc ";
                 let btn_w = btn_text.len() as u16; // 12
+                let trash_w: u16 = 2; // 🗑 wide emoji takes 2 cells
                 let gap: u16 = 1;
-                let avail_name_w =
-                    (inner_w.saturating_sub(6) as usize).saturating_sub((btn_w + gap) as usize);
+                let total_btns_w = btn_w + gap + trash_w;
+                let avail_name_w = (inner_w.saturating_sub(6) as usize)
+                    .saturating_sub((total_btns_w + gap) as usize);
                 let name_display = format!(" {}", db.name);
                 let name_trunc = truncate_label(&name_display, avail_name_w);
                 let name_len = name_trunc.chars().count() as u16;
@@ -612,6 +614,18 @@ impl RagView {
                     btn_w,
                     Style::default().fg(success),
                 );
+
+                // 🗑 trash / delete button after "show desc"
+                let trash_x = btn_x + btn_w + gap;
+                if let Some(cell) = buf.cell_mut((trash_x, db_y)) {
+                    cell.set_char('\u{1F5D1}');
+                    cell.set_style(Style::default().fg(muted));
+                }
+                // Clear the cell after the wide emoji (handles both 1-cell and 2-cell rendering)
+                if let Some(cell) = buf.cell_mut((trash_x + 1, db_y)) {
+                    cell.set_char(' ');
+                    cell.set_style(Style::default());
+                }
             }
         }
 
