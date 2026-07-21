@@ -114,11 +114,8 @@ impl RagRegistry {
                 any_active = true;
                 let _ = write!(
                     &mut suffix,
-                    "- Name: {}\n  Description: {}\n  DB URI: {}\n  Embedding: {}\n\n",
-                    db.name,
-                    db.description,
-                    db.uri,
-                    db.embedder.label(),
+                    "- Name: {}\n  Description: {}\n\n",
+                    db.name, db.description,
                 );
             }
         }
