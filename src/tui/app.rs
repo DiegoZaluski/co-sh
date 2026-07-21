@@ -125,6 +125,8 @@ pub struct App {
     last_frame_time: std::time::Instant,
     /// Last known mouse X position (for keyboard scroll targeting).
     last_mouse_x: u16,
+    /// Timestamp of last scroll wheel event (for debouncing rapid scrolls).
+    last_scroll_time: Instant,
 }
 
 impl App {
@@ -194,6 +196,7 @@ impl App {
             live_requested: false,
             last_frame_time: std::time::Instant::now(),
             last_mouse_x: 0,
+            last_scroll_time: Instant::now(),
         }
     }
 
@@ -2773,54 +2776,67 @@ impl App {
         }
 
         // ── Mouse wheel scrolling ───────────────────────────────────────────
-        match event_type {
-            MouseEventType::ScrollUp => {
-                if let Some(d) = self.dialog.current_mut() {
-                    match &d.dialog_type {
-                        DialogType::ModelList { .. } => {
-                            self.handle_model_dialog_key(KeyCode::Up);
+        // Debounce: ignore scroll events that arrive within 50ms of the last one.
+        // Different terminal emulators emit different numbers of events per physical
+        // scroll tick (e.g. tmux/kitty emit 2-3, gnome-terminal emits 1). Without
+        // debouncing, fast-emitters cause list navigation to skip items.
+        let now = Instant::now();
+        let scroll_elapsed = now.duration_since(self.last_scroll_time);
+        if scroll_elapsed >= Duration::from_millis(50) {
+            self.last_scroll_time = now;
+            match event_type {
+                MouseEventType::ScrollUp => {
+                    if let Some(d) = self.dialog.current_mut() {
+                        match &d.dialog_type {
+                            DialogType::ModelList { .. } => {
+                                self.handle_model_dialog_key(KeyCode::Up);
+                            }
+                            DialogType::ThemeList { .. } => {
+                                self.handle_theme_dialog_key(KeyCode::Up);
+                            }
+                            _ => {}
                         }
-                        DialogType::ThemeList { .. } => {
-                            self.handle_theme_dialog_key(KeyCode::Up);
-                        }
-                        _ => {}
+                    } else if matches!(self.mode(), AppMode::Session)
+                        && Self::is_in_right_panel(x, self.terminal_size())
+                    {
+                        self.state.right_panel.scroll_up(3);
+                    } else if matches!(self.mode(), AppMode::Session) {
+                        self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
+                    } else if matches!(self.mode(), AppMode::AddProvider) {
+                        let list_area = 20;
+                        self.add_provider_view.select_prev(list_area);
+                    } else if matches!(self.mode(), AppMode::Rag) && !self.dialog.visible() {
+                        self.rag_view.handle_key(KeyCode::Up);
                     }
-                } else if matches!(self.mode(), AppMode::Session)
-                    && Self::is_in_right_panel(x, self.terminal_size())
-                {
-                    self.state.right_panel.scroll_up(3);
-                } else if matches!(self.mode(), AppMode::Session) {
-                    self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
-                } else if matches!(self.mode(), AppMode::AddProvider) {
-                    let list_area = 20;
-                    self.add_provider_view.select_prev(list_area);
+                    return Ok(true);
                 }
-                return Ok(true);
-            }
-            MouseEventType::ScrollDown => {
-                if let Some(d) = self.dialog.current_mut() {
-                    match &d.dialog_type {
-                        DialogType::ModelList { .. } => {
-                            self.handle_model_dialog_key(KeyCode::Down);
+                MouseEventType::ScrollDown => {
+                    if let Some(d) = self.dialog.current_mut() {
+                        match &d.dialog_type {
+                            DialogType::ModelList { .. } => {
+                                self.handle_model_dialog_key(KeyCode::Down);
+                            }
+                            DialogType::ThemeList { .. } => {
+                                self.handle_theme_dialog_key(KeyCode::Down);
+                            }
+                            _ => {}
                         }
-                        DialogType::ThemeList { .. } => {
-                            self.handle_theme_dialog_key(KeyCode::Down);
-                        }
-                        _ => {}
+                    } else if matches!(self.mode(), AppMode::Session)
+                        && Self::is_in_right_panel(x, self.terminal_size())
+                    {
+                        self.state.right_panel.scroll_down(3);
+                    } else if matches!(self.mode(), AppMode::Session) {
+                        self.session_view.scroll_y = (self.session_view.scroll_y + 3).max(0);
+                    } else if matches!(self.mode(), AppMode::AddProvider) {
+                        let list_area = 20;
+                        self.add_provider_view.select_next(list_area);
+                    } else if matches!(self.mode(), AppMode::Rag) && !self.dialog.visible() {
+                        self.rag_view.handle_key(KeyCode::Down);
                     }
-                } else if matches!(self.mode(), AppMode::Session)
-                    && Self::is_in_right_panel(x, self.terminal_size())
-                {
-                    self.state.right_panel.scroll_down(3);
-                } else if matches!(self.mode(), AppMode::Session) {
-                    self.session_view.scroll_y = (self.session_view.scroll_y + 3).max(0);
-                } else if matches!(self.mode(), AppMode::AddProvider) {
-                    let list_area = 20;
-                    self.add_provider_view.select_next(list_area);
+                    return Ok(true);
                 }
-                return Ok(true);
+                _ => {}
             }
-            _ => {}
         }
 
         // Only handle left-click UP events (standard "click" action)
