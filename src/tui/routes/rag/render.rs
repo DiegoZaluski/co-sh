@@ -13,7 +13,7 @@ use crate::component::cursor::CursorState;
 use crate::theme::Theme;
 
 use super::models::{CreateDbFocus, RagMode};
-use super::view::RagView;
+use super::view::{RagLayout, RagView};
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -82,71 +82,26 @@ impl RagView {
         let title_bg = primary;
         let title_fg = rgba_color(theme.background);
 
-        let inner_x = area.x + 2;
         let inner_w = area.width.saturating_sub(4);
         if inner_w < 10 {
             return;
         }
 
-        let avail_h = area.height;
-        let gap: u16 = 1;
-        let bottom_gap: u16 = 0;
-
-        // ── Layout (fixed proportional split) ──────────────────────────
-        let input_h = self.url_input.height(); // 3
-        let db_model_count = if self.show_create_db && self.models_expanded {
-            self.available_models.len().min(max_visible_models(avail_h))
-        } else {
-            0
-        };
-        let create_db_lines: u16 = if self.show_create_db {
-            if self.models_expanded {
-                4 + db_model_count as u16 + 1
-            } else {
-                5
-            }
-        } else if self.show_db_picker {
-            5
-        } else {
-            1
-        };
-        let box1_h = {
-            let ideal = avail_h.saturating_mul(30) / 100;
-            ideal
-                .max(7 + create_db_lines)
-                .min(avail_h.saturating_sub(8))
-        };
-        let box2_available = avail_h.saturating_sub(box1_h + gap + bottom_gap);
-        let box2_h = box2_available.max(5);
-
+        // ── Layout (computed once, shared with mouse hit-testing) ─────
+        let layout = self.compute_layout(area);
         let mut y = area.y;
 
         // ══════════ BOX 1: Embed Content ══════════════════════════════
         self.render_box1(
-            buf,
-            inner_x,
-            inner_w,
-            box1_h,
-            &mut y,
-            theme,
-            fg,
-            muted,
-            warning,
-            success,
-            primary,
-            panel_bg,
-            title_bg,
-            title_fg,
-            input_h,
-            db_model_count as usize,
-            create_db_lines,
+            buf, inner_w, layout, &mut y, theme, fg, muted, warning, success, primary, panel_bg,
+            title_bg, title_fg,
         );
 
         // ══════════ BOX 2: Available Databases ════════════════════════
         if y < area.bottom() {
             self.render_box2(
-                buf, area, inner_x, inner_w, box2_h, &mut y, theme, fg, muted, warning, success,
-                primary, panel_bg, title_bg, title_fg,
+                buf, area, layout, &mut y, theme, fg, muted, warning, success, primary, panel_bg,
+                title_bg, title_fg,
             );
         }
 
@@ -160,9 +115,8 @@ impl RagView {
     fn render_box1(
         &mut self,
         buf: &mut Buffer,
-        inner_x: u16,
         inner_w: u16,
-        box1_h: u16,
+        layout: RagLayout,
         y: &mut u16,
         _theme: &Theme,
         fg: Color,
@@ -173,22 +127,19 @@ impl RagView {
         panel_bg: Color,
         title_bg: Color,
         title_fg: Color,
-        input_h: u16,
-        _db_model_count: usize,
-        _create_db_lines: u16,
     ) {
         let title = " Embed Content ";
         fill_rect(
             buf,
-            inner_x,
+            layout.inner_x,
             *y,
             inner_w,
-            box1_h,
+            layout.box1_h,
             Style::default().bg(panel_bg),
         );
-        section_title(buf, inner_x + 1, *y, title, title_bg, title_fg);
+        section_title(buf, layout.inner_x + 1, *y, title, title_bg, title_fg);
 
-        let cx = inner_x + 2;
+        let cx = layout.cx;
         let mut cy = *y + 2;
 
         // ── URL/path input ────────────────────────────────────────────
@@ -217,7 +168,7 @@ impl RagView {
             );
         }
 
-        cy += input_h;
+        cy += layout.input_h;
 
         // ── Preview / status ──────────────────────────────────────────
         match self.mode {
@@ -296,7 +247,7 @@ impl RagView {
             );
         }
 
-        *y = *y + box1_h + 1;
+        *y = *y + layout.box1_h + 1;
     }
 
     // ── Create DB form ─────────────────────────────────────────────────
@@ -407,7 +358,12 @@ impl RagView {
         draw_text_line(buf, &name_trunc, pad, form_y, pad_w, name_style);
         // Draw cursor on Name field using Cursor component's state for blink
         if name_focused {
-            let cursor_x = pad + 6 + self.db_name_cursor_pos as u16; // "Name:  " = 6 chars
+            // "Name:  " = 7 chars label before the actual input
+            let cursor_col = self.db_name_input
+                [..self.db_name_cursor_pos.min(self.db_name_input.len())]
+                .chars()
+                .count() as u16;
+            let cursor_x = pad + 7 + cursor_col;
             if cursor_x < pad + pad_w {
                 if let Some(cell) = buf.cell_mut((cursor_x, form_y)) {
                     match self.db_name_cursor.current_state(now) {
@@ -445,7 +401,13 @@ impl RagView {
         draw_text_line(buf, &desc_trunc, pad, form_y, pad_w, desc_style);
         // Draw cursor on Description field using Cursor component's state for blink
         if desc_focused {
-            let cursor_x = pad + 6 + self.db_description_cursor_pos as u16; // "Desc:  " = 6 chars
+            // "Desc:  " = 7 chars label before the actual input
+            let cursor_col = self.db_description_input[..self
+                .db_description_cursor_pos
+                .min(self.db_description_input.len())]
+                .chars()
+                .count() as u16;
+            let cursor_x = pad + 7 + cursor_col;
             if cursor_x < pad + pad_w {
                 if let Some(cell) = buf.cell_mut((cursor_x, form_y)) {
                     match self.db_description_cursor.current_state(now) {
@@ -466,11 +428,17 @@ impl RagView {
         }
     }
 
+    /// Total height of the Create DB mini-form popup.
+    ///
+    /// When collapsed: title + gap + name + description + gap = 5 lines.
+    /// When expanded: label + model_items + name + description + padding = (4 + model_count + 1) lines.
     pub(crate) fn create_db_mini_box_height(&self) -> u16 {
         if self.models_expanded {
+            // 4 = header(1) + name(1) + description(1) + bottom_padding(1)
             let max_vis = 8u16;
             4 + max_vis + 1
         } else {
+            // 5 = model_line(1) + gap(1) + name(1) + description(1) + bottom_padding(1)
             5
         }
     }
@@ -482,9 +450,7 @@ impl RagView {
         &mut self,
         buf: &mut Buffer,
         area: Rect,
-        inner_x: u16,
-        inner_w: u16,
-        box2_h: u16,
+        layout: RagLayout,
         y: &mut u16,
         _theme: &Theme,
         fg: Color,
@@ -497,17 +463,15 @@ impl RagView {
         title_fg: Color,
     ) {
         let title = " Available Databases ";
-        let warning_h = 2u16;
-        let filter_h = if self.registry.dbs.len() > 5 {
-            1u16
-        } else {
-            0u16
-        };
-        let pad_bottom: u16 = 1;
-        let header_gap: u16 = 1;
-        let list_h = box2_h.saturating_sub(1 + header_gap + warning_h + filter_h + pad_bottom);
+        let inner_w = layout.inner_w;
+        let inner_x = layout.inner_x;
 
-        let content_h = 1 + header_gap + warning_h + filter_h + list_h + pad_bottom;
+        let content_h = 1
+            + layout.header_gap
+            + layout.warning_h
+            + layout.filter_h
+            + layout.list_h
+            + layout.pad_bottom;
         fill_rect(
             buf,
             inner_x,
@@ -518,7 +482,7 @@ impl RagView {
         );
         section_title(buf, inner_x + 1, *y, title, title_bg, title_fg);
 
-        let cx = inner_x + 2;
+        let cx = layout.cx;
         let mut cy = *y + 1; // title row
 
         cy += 1; // gap
@@ -544,7 +508,7 @@ impl RagView {
         cy += 1;
 
         // ── SearchBar filter ──────────────────────────────────────────
-        if filter_h > 0 {
+        if layout.filter_h > 0 {
             self.db_filter
                 .render(buf, cx, cy, inner_w.saturating_sub(4), _theme);
             cy += 1;
@@ -552,7 +516,7 @@ impl RagView {
 
         // ── DB list ───────────────────────────────────────────────────
         let filtered = self.filtered_dbs();
-        let max_visible = list_h as usize;
+        let max_visible = layout.list_h as usize;
 
         if filtered.is_empty() {
             draw_text_line(
@@ -774,51 +738,6 @@ impl RagView {
         }
     }
 
-    fn draw_overlay_border(
-        buf: &mut Buffer,
-        overlay_x: u16,
-        overlay_y: u16,
-        overlay_w: u16,
-        overlay_h: u16,
-        border_color: Color,
-    ) {
-        let max_x = overlay_x + overlay_w - 1;
-        let max_y = overlay_y + overlay_h - 1;
-
-        for x in (overlay_x + 1)..max_x {
-            if let Some(cell) = buf.cell_mut((x, overlay_y)) {
-                cell.set_char('\u{2500}');
-                cell.set_style(Style::default().fg(border_color));
-            }
-            if let Some(cell) = buf.cell_mut((x, max_y)) {
-                cell.set_char('\u{2500}');
-                cell.set_style(Style::default().fg(border_color));
-            }
-        }
-        for yb in (overlay_y + 1)..max_y {
-            if let Some(cell) = buf.cell_mut((overlay_x, yb)) {
-                cell.set_char('\u{2502}');
-                cell.set_style(Style::default().fg(border_color));
-            }
-            if let Some(cell) = buf.cell_mut((max_x, yb)) {
-                cell.set_char('\u{2502}');
-                cell.set_style(Style::default().fg(border_color));
-            }
-        }
-        // Rounded corners
-        for (xx, yy, ch) in [
-            (overlay_x, overlay_y, '\u{256D}'),
-            (max_x, overlay_y, '\u{256E}'),
-            (overlay_x, max_y, '\u{2570}'),
-            (max_x, max_y, '\u{256F}'),
-        ] {
-            if let Some(cell) = buf.cell_mut((xx, yy)) {
-                cell.set_char(ch);
-                cell.set_style(Style::default().fg(border_color));
-            }
-        }
-    }
-
     // ── DB Picker (inline form, identical to create DB form) ─────────
 
     fn render_db_picker(
@@ -908,17 +827,10 @@ impl RagView {
 
 // ── Free helpers ────────────────────────────────────────────────────────
 
-/// Max number of models to show in the expanded selector (depends on terminal height).
-fn max_visible_models(avail_h: u16) -> usize {
-    // Show at most 8 models, or fewer if the terminal is very small.
-    let cap = (avail_h.saturating_sub(10) / 2) as usize;
-    cap.clamp(3, 8)
-}
+/// Max visible models in the form's expanded list (fits inside the box).
+pub(crate) const MAX_VISIBLE_MODELS_IN_FORM: usize = 8;
 
 /// Max visible models in the form's expanded list (fits inside the box).
-const MAX_VISIBLE_MODELS_IN_FORM: usize = 8;
-
-/// Max visible models in the form's expanded list (fits inside the box).
-fn max_visible_models_for_form() -> usize {
+pub(crate) fn max_visible_models_for_form() -> usize {
     MAX_VISIBLE_MODELS_IN_FORM
 }

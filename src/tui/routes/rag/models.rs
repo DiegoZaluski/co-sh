@@ -370,7 +370,7 @@ impl EmbedderConfig {
 
 /// Lookup known vector dimensions for cloud embedding models.
 fn cloud_known_dim(provider: &str, model: &str) -> usize {
-    match (provider, model) {
+    let result = match (provider, model) {
         ("openai", "text-embedding-3-small") => 1536,
         ("openai", "text-embedding-3-large") => 3072,
         ("openai", "text-embedding-ada-002") => 1536,
@@ -381,8 +381,12 @@ fn cloud_known_dim(provider: &str, model: &str) -> usize {
         ("ollama", "all-minilm") => 384,
         ("ollama", "snowflake-arctic-embed") => 1024,
         ("ollama", "bge-m3") => 1024,
-        _ => 384, // fallback
-    }
+        _ => {
+            log::warn!("unknown cloud embedding model '{provider}/{model}', falling back to 384d");
+            384
+        }
+    };
+    result
 }
 
 // ── RagDb ──────────────────────────────────────────────────────────────
@@ -418,67 +422,66 @@ impl EmbedModelEntry {
     /// All available models (local + cloud, gated by env vars).
     pub fn all_available() -> Vec<Self> {
         // ── Local models (all real fastembed text models) ─────────────
-        #[allow(unused_mut)]
-        let mut entries: Vec<Self> = vec![
-            // sentence-transformers
-            Self::Local(LocalEmbedModel::AllMiniLML6V2),
-            Self::Local(LocalEmbedModel::AllMiniLML6V2Q),
-            Self::Local(LocalEmbedModel::AllMiniLML12V2),
-            Self::Local(LocalEmbedModel::AllMiniLML12V2Q),
-            Self::Local(LocalEmbedModel::AllMpnetBaseV2),
-            // BAAI/bge
-            Self::Local(LocalEmbedModel::BGEBaseENV15),
-            Self::Local(LocalEmbedModel::BGEBaseENV15Q),
-            Self::Local(LocalEmbedModel::BGELargeENV15),
-            Self::Local(LocalEmbedModel::BGELargeENV15Q),
-            Self::Local(LocalEmbedModel::BGESmallENV15),
-            Self::Local(LocalEmbedModel::BGESmallENV15Q),
-            Self::Local(LocalEmbedModel::BGESmallZHV15),
-            Self::Local(LocalEmbedModel::BGELargeZHV15),
-            Self::Local(LocalEmbedModel::BGEM3),
-            // nomic-ai
-            Self::Local(LocalEmbedModel::NomicEmbedTextV1),
-            Self::Local(LocalEmbedModel::NomicEmbedTextV15),
-            Self::Local(LocalEmbedModel::NomicEmbedTextV15Q),
-            // paraphrase
-            Self::Local(LocalEmbedModel::ParaphraseMLMiniLML12V2),
-            Self::Local(LocalEmbedModel::ParaphraseMLMiniLML12V2Q),
-            Self::Local(LocalEmbedModel::ParaphraseMLMpnetBaseV2),
-            // intfloat/multilingual-e5
-            Self::Local(LocalEmbedModel::MultilingualE5Small),
-            Self::Local(LocalEmbedModel::MultilingualE5Base),
-            Self::Local(LocalEmbedModel::MultilingualE5Large),
-            // mixedbread-ai
-            Self::Local(LocalEmbedModel::MxbaiEmbedLargeV1),
-            Self::Local(LocalEmbedModel::MxbaiEmbedLargeV1Q),
-            // Alibaba-NLP/gte
-            Self::Local(LocalEmbedModel::GTEBaseENV15),
-            Self::Local(LocalEmbedModel::GTEBaseENV15Q),
-            Self::Local(LocalEmbedModel::GTELargeENV15),
-            Self::Local(LocalEmbedModel::GTELargeENV15Q),
-            // modernbert
-            Self::Local(LocalEmbedModel::ModernBertEmbedLarge),
-            // jina-ai
-            Self::Local(LocalEmbedModel::JinaEmbeddingsV2BaseCode),
-            Self::Local(LocalEmbedModel::JinaEmbeddingsV2BaseEN),
-            // EmbeddingGemma
-            Self::Local(LocalEmbedModel::EmbeddingGemma300M),
-            Self::Local(LocalEmbedModel::EmbeddingGemma300MQ4),
-            Self::Local(LocalEmbedModel::EmbeddingGemma300MQ),
-            // CLIP text
-            Self::Local(LocalEmbedModel::ClipVitB32),
-            // snowflake/arctic-embed
-            Self::Local(LocalEmbedModel::SnowflakeArcticEmbedXS),
-            Self::Local(LocalEmbedModel::SnowflakeArcticEmbedXSQ),
-            Self::Local(LocalEmbedModel::SnowflakeArcticEmbedS),
-            Self::Local(LocalEmbedModel::SnowflakeArcticEmbedSQ),
-            Self::Local(LocalEmbedModel::SnowflakeArcticEmbedM),
-            Self::Local(LocalEmbedModel::SnowflakeArcticEmbedMQ),
-            Self::Local(LocalEmbedModel::SnowflakeArcticEmbedMLong),
-            Self::Local(LocalEmbedModel::SnowflakeArcticEmbedMLongQ),
-            Self::Local(LocalEmbedModel::SnowflakeArcticEmbedL),
-            Self::Local(LocalEmbedModel::SnowflakeArcticEmbedLQ),
-        ];
+        let mut entries: Vec<Self> = Vec::with_capacity(50);
+
+        // sentence-transformers
+        entries.push(Self::Local(LocalEmbedModel::AllMiniLML6V2));
+        entries.push(Self::Local(LocalEmbedModel::AllMiniLML6V2Q));
+        entries.push(Self::Local(LocalEmbedModel::AllMiniLML12V2));
+        entries.push(Self::Local(LocalEmbedModel::AllMiniLML12V2Q));
+        entries.push(Self::Local(LocalEmbedModel::AllMpnetBaseV2));
+        // BAAI/bge
+        entries.push(Self::Local(LocalEmbedModel::BGEBaseENV15));
+        entries.push(Self::Local(LocalEmbedModel::BGEBaseENV15Q));
+        entries.push(Self::Local(LocalEmbedModel::BGELargeENV15));
+        entries.push(Self::Local(LocalEmbedModel::BGELargeENV15Q));
+        entries.push(Self::Local(LocalEmbedModel::BGESmallENV15));
+        entries.push(Self::Local(LocalEmbedModel::BGESmallENV15Q));
+        entries.push(Self::Local(LocalEmbedModel::BGESmallZHV15));
+        entries.push(Self::Local(LocalEmbedModel::BGELargeZHV15));
+        entries.push(Self::Local(LocalEmbedModel::BGEM3));
+        // nomic-ai
+        entries.push(Self::Local(LocalEmbedModel::NomicEmbedTextV1));
+        entries.push(Self::Local(LocalEmbedModel::NomicEmbedTextV15));
+        entries.push(Self::Local(LocalEmbedModel::NomicEmbedTextV15Q));
+        // paraphrase
+        entries.push(Self::Local(LocalEmbedModel::ParaphraseMLMiniLML12V2));
+        entries.push(Self::Local(LocalEmbedModel::ParaphraseMLMiniLML12V2Q));
+        entries.push(Self::Local(LocalEmbedModel::ParaphraseMLMpnetBaseV2));
+        // intfloat/multilingual-e5
+        entries.push(Self::Local(LocalEmbedModel::MultilingualE5Small));
+        entries.push(Self::Local(LocalEmbedModel::MultilingualE5Base));
+        entries.push(Self::Local(LocalEmbedModel::MultilingualE5Large));
+        // mixedbread-ai
+        entries.push(Self::Local(LocalEmbedModel::MxbaiEmbedLargeV1));
+        entries.push(Self::Local(LocalEmbedModel::MxbaiEmbedLargeV1Q));
+        // Alibaba-NLP/gte
+        entries.push(Self::Local(LocalEmbedModel::GTEBaseENV15));
+        entries.push(Self::Local(LocalEmbedModel::GTEBaseENV15Q));
+        entries.push(Self::Local(LocalEmbedModel::GTELargeENV15));
+        entries.push(Self::Local(LocalEmbedModel::GTELargeENV15Q));
+        // modernbert
+        entries.push(Self::Local(LocalEmbedModel::ModernBertEmbedLarge));
+        // jina-ai
+        entries.push(Self::Local(LocalEmbedModel::JinaEmbeddingsV2BaseCode));
+        entries.push(Self::Local(LocalEmbedModel::JinaEmbeddingsV2BaseEN));
+        // EmbeddingGemma
+        entries.push(Self::Local(LocalEmbedModel::EmbeddingGemma300M));
+        entries.push(Self::Local(LocalEmbedModel::EmbeddingGemma300MQ4));
+        entries.push(Self::Local(LocalEmbedModel::EmbeddingGemma300MQ));
+        // CLIP text
+        entries.push(Self::Local(LocalEmbedModel::ClipVitB32));
+        // snowflake/arctic-embed
+        entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedXS));
+        entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedXSQ));
+        entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedS));
+        entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedSQ));
+        entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedM));
+        entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedMQ));
+        entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedMLong));
+        entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedMLongQ));
+        entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedL));
+        entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedLQ));
 
         // ── Cloud models (show if env var is set) ─────────────────────
         if std::env::var("OPENAI_API_KEY").is_ok() {

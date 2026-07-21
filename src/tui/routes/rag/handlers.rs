@@ -251,15 +251,7 @@ impl RagView {
                             model: super::models::LocalEmbedModel::AllMiniLML6V2,
                         });
                     // Close form
-                    self.show_create_db = false;
-                    self.models_expanded = false;
-                    self.selected_model_index = 0;
-                    self.model_scroll_offset = 0;
-                    self.db_name_input.clear();
-                    self.db_description_input.clear();
-                    self.db_name_cursor_pos = 0;
-                    self.db_description_cursor_pos = 0;
-                    self.create_db_focus = CreateDbFocus::Name;
+                    self.reset_create_db_form();
                     Some(RagAction::CreateDb {
                         name,
                         description,
@@ -278,15 +270,7 @@ impl RagView {
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Esc => {
-                self.show_create_db = false;
-                self.models_expanded = false;
-                self.selected_model_index = 0;
-                self.model_scroll_offset = 0;
-                self.db_name_input.clear();
-                self.db_description_input.clear();
-                self.db_name_cursor_pos = 0;
-                self.db_description_cursor_pos = 0;
-                self.create_db_focus = CreateDbFocus::Name;
+                self.reset_create_db_form();
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Char(ch) => {
@@ -601,60 +585,19 @@ impl RagView {
 
     /// Find which DB row was clicked (if any).
     fn find_db_row_for_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
-        let avail_h = area.height;
-        let gap: u16 = 1;
-        let bottom_gap: u16 = 0;
-
-        let db_model_count = if self.show_create_db && self.models_expanded {
-            self.available_models.len().min(8)
-        } else {
-            0
-        };
-        let create_db_lines: u16 = if self.show_create_db {
-            if self.models_expanded {
-                4 + db_model_count as u16 + 1
-            } else {
-                5
-            }
-        } else {
-            1
-        };
-        let box1_h = {
-            let ideal = avail_h.saturating_mul(30) / 100;
-            ideal
-                .max(7 + create_db_lines)
-                .min(avail_h.saturating_sub(8))
-        };
-
-        let box2_y = area.y + box1_h + gap;
-        let box2_available = avail_h.saturating_sub(box1_h + gap + bottom_gap);
-        let box2_h = box2_available.max(5);
-
-        let warning_h = 2u16;
-        let filter_h = if self.registry.dbs.len() > 5 {
-            1u16
-        } else {
-            0u16
-        };
-        let pad_bottom: u16 = 1;
-        let header_gap: u16 = 1;
-        let list_h = box2_h.saturating_sub(1 + header_gap + warning_h + filter_h + pad_bottom);
-        let list_start_y = box2_y + 1 + header_gap + warning_h + filter_h;
-
+        let layout = self.compute_layout(area);
         let filtered = self.filtered_dbs();
-        let max_visible = list_h as usize;
+        let max_visible = layout.list_h as usize;
         let render_count = max_visible.min(filtered.len());
-        let inner_w = area.width.saturating_sub(4);
-        let row_max_w = inner_w.saturating_sub(4);
-        let cx = area.x + 4;
+        let row_max_w = layout.inner_w.saturating_sub(4);
 
         let my = mouse.y;
         let mx = mouse.x;
 
-        if my >= list_start_y && my < list_start_y + render_count as u16 {
-            let i = (my - list_start_y) as usize;
+        if my >= layout.list_start_y && my < layout.list_start_y + render_count as u16 {
+            let i = (my - layout.list_start_y) as usize;
             let idx = self.dbs_scroll_offset + i;
-            if idx < filtered.len() && mx >= cx && mx < cx + row_max_w {
+            if idx < filtered.len() && mx >= layout.cx + 2 && mx < layout.cx + 2 + row_max_w {
                 return Some(idx);
             }
         }
@@ -799,59 +742,16 @@ impl RagView {
     /// Check if the mouse click is on a "show desc" button next to a DB row.
     /// Returns the filtered index of the DB whose button was clicked.
     pub fn is_show_desc_click(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
-        let avail_h = area.height;
-        let gap: u16 = 1;
-        let bottom_gap: u16 = 0;
-
-        let box1_h = {
-            let ideal = avail_h.saturating_mul(30) / 100;
-            let db_model_count = if self.show_create_db && self.models_expanded {
-                self.available_models.len().min(8)
-            } else {
-                0
-            };
-            let create_db_lines: u16 = if self.show_create_db {
-                if self.models_expanded {
-                    4 + db_model_count as u16 + 1
-                } else {
-                    5
-                }
-            } else if self.show_db_picker {
-                5
-            } else {
-                1
-            };
-            ideal
-                .max(7 + create_db_lines)
-                .min(avail_h.saturating_sub(8))
-        };
-
-        let box2_y = area.y + box1_h + gap;
-        let box2_available = avail_h.saturating_sub(box1_h + gap + bottom_gap);
-        let box2_h = box2_available.max(5);
-
-        let warning_h = 2u16;
-        let filter_h = if self.registry.dbs.len() > 5 {
-            1u16
-        } else {
-            0u16
-        };
-        let pad_bottom: u16 = 1;
-        let header_gap: u16 = 1;
-        let list_h = box2_h.saturating_sub(1 + header_gap + warning_h + filter_h + pad_bottom);
-        let list_start_y = box2_y + 1 + header_gap + warning_h + filter_h;
-
+        let layout = self.compute_layout(area);
         let filtered = self.filtered_dbs();
-        let max_visible = list_h as usize;
+        let max_visible = layout.list_h as usize;
         let render_count = max_visible.min(filtered.len());
-        let inner_w = area.width.saturating_sub(4);
-        let cx = area.x + 4;
 
         let mx = mouse.x;
         let my = mouse.y;
 
-        if my >= list_start_y && my < list_start_y + render_count as u16 {
-            let i = (my - list_start_y) as usize;
+        if my >= layout.list_start_y && my < layout.list_start_y + render_count as u16 {
+            let i = (my - layout.list_start_y) as usize;
             let idx = self.dbs_scroll_offset + i;
             if idx < filtered.len() {
                 // Check if the click is on the "show desc" button area
@@ -859,12 +759,12 @@ impl RagView {
                 let btn_text = " show desc ";
                 let btn_w = btn_text.len() as u16;
                 let gap_w: u16 = 1;
-                let avail_name_w =
-                    (inner_w.saturating_sub(6) as usize).saturating_sub((btn_w + gap_w) as usize);
+                let avail_name_w = (layout.inner_w.saturating_sub(6) as usize)
+                    .saturating_sub((btn_w + gap_w) as usize);
                 let name_display = format!(" {}", filtered[idx].name);
                 let name_trunc = truncate_label(&name_display, avail_name_w);
                 let name_len = name_trunc.chars().count() as u16;
-                let btn_x = cx + 2 + name_len + gap_w;
+                let btn_x = layout.cx + 2 + name_len + gap_w;
                 if mx >= btn_x && mx < btn_x + btn_w {
                     return Some(idx);
                 }
@@ -876,60 +776,16 @@ impl RagView {
     /// Check if the mouse click is on the 🗑 delete button next to a DB row.
     /// Returns the name of the DB whose delete button was clicked.
     pub fn is_delete_click(&self, mouse: &MouseEvent, area: Rect) -> Option<String> {
-        // Same layout computation as render_box2 and is_show_desc_click
-        let avail_h = area.height;
-        let gap: u16 = 1;
-        let bottom_gap: u16 = 0;
-
-        let box1_h = {
-            let ideal = avail_h.saturating_mul(30) / 100;
-            let db_model_count = if self.show_create_db && self.models_expanded {
-                self.available_models.len().min(8)
-            } else {
-                0
-            };
-            let create_db_lines: u16 = if self.show_create_db {
-                if self.models_expanded {
-                    4 + db_model_count as u16 + 1
-                } else {
-                    5
-                }
-            } else if self.show_db_picker {
-                5
-            } else {
-                1
-            };
-            ideal
-                .max(7 + create_db_lines)
-                .min(avail_h.saturating_sub(8))
-        };
-
-        let box2_y = area.y + box1_h + gap;
-        let box2_available = avail_h.saturating_sub(box1_h + gap + bottom_gap);
-        let box2_h = box2_available.max(5);
-
-        let warning_h = 2u16;
-        let filter_h = if self.registry.dbs.len() > 5 {
-            1u16
-        } else {
-            0u16
-        };
-        let pad_bottom: u16 = 1;
-        let header_gap: u16 = 1;
-        let list_h = box2_h.saturating_sub(1 + header_gap + warning_h + filter_h + pad_bottom);
-        let list_start_y = box2_y + 1 + header_gap + warning_h + filter_h;
-
+        let layout = self.compute_layout(area);
         let filtered = self.filtered_dbs();
-        let max_visible = list_h as usize;
+        let max_visible = layout.list_h as usize;
         let render_count = max_visible.min(filtered.len());
-        let inner_w = area.width.saturating_sub(4);
-        let cx = area.x + 4;
 
         let mx = mouse.x;
         let my = mouse.y;
 
-        if my >= list_start_y && my < list_start_y + render_count as u16 {
-            let i = (my - list_start_y) as usize;
+        if my >= layout.list_start_y && my < layout.list_start_y + render_count as u16 {
+            let i = (my - layout.list_start_y) as usize;
             let idx = self.dbs_scroll_offset + i;
             if idx < filtered.len() {
                 // Compute the 🗑 x position (matches render_box2)
@@ -938,12 +794,12 @@ impl RagView {
                 let trash_w: u16 = 2;
                 let gap_w: u16 = 1;
                 let total_btns_w = btn_w + gap_w + trash_w;
-                let avail_name_w = (inner_w.saturating_sub(6) as usize)
+                let avail_name_w = (layout.inner_w.saturating_sub(6) as usize)
                     .saturating_sub((total_btns_w + gap_w) as usize);
                 let name_display = format!(" {}", filtered[idx].name);
                 let name_trunc = truncate_label(&name_display, avail_name_w);
                 let name_len = name_trunc.chars().count() as u16;
-                let btn_x = cx + 2 + name_len + gap_w;
+                let btn_x = layout.cx + 2 + name_len + gap_w;
                 let trash_x = btn_x + btn_w + gap_w;
 
                 if mx >= trash_x && mx < trash_x + trash_w {
