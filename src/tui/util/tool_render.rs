@@ -219,6 +219,7 @@ pub fn tool_display(tool: &str) -> &str {
         "ask_questions" => "question",
         "skills_list" | "skills_read" | "skills_read_asset" | "skills_match_skills" => "skill",
         "plan_todo_write" => "todo",
+        "recall_search" => "recall_search",
         _ => "generic",
     }
 }
@@ -301,6 +302,7 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
                 }
             }
         }
+        "recall_search" => part.tool.clone(),
         _ => {
             if matches!(part.status, ToolStatus::Completed) {
                 part.tool.clone()
