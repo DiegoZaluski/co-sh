@@ -1,4 +1,6 @@
-pub use cosh_recall::embed::models::{cloud_known_dim, CloudEmbedConfig, EmbedderConfig, LocalEmbedModel};
+pub use cosh_recall::embed::models::{
+    CloudEmbedConfig, EmbedderConfig, LocalEmbedModel, cloud_known_dim,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,9 +18,12 @@ pub enum EmbedModelEntry {
     Cloud(String, String),
 }
 
+/// Initial capacity hint for the model list (avoids reallocation during build).
+const MODEL_LIST_INITIAL_CAPACITY: usize = 50;
+
 impl EmbedModelEntry {
     pub fn all_available() -> Vec<Self> {
-        let mut entries: Vec<Self> = Vec::with_capacity(50);
+        let mut entries: Vec<Self> = Vec::with_capacity(MODEL_LIST_INITIAL_CAPACITY);
 
         entries.push(Self::Local(LocalEmbedModel::AllMiniLML6V2));
         entries.push(Self::Local(LocalEmbedModel::AllMiniLML6V2Q));
@@ -68,9 +73,18 @@ impl EmbedModelEntry {
         entries.push(Self::Local(LocalEmbedModel::SnowflakeArcticEmbedLQ));
 
         if std::env::var("OPENAI_API_KEY").is_ok() {
-            entries.push(Self::Cloud("openai".into(), "text-embedding-3-small".into()));
-            entries.push(Self::Cloud("openai".into(), "text-embedding-3-large".into()));
-            entries.push(Self::Cloud("openai".into(), "text-embedding-ada-002".into()));
+            entries.push(Self::Cloud(
+                "openai".into(),
+                "text-embedding-3-small".into(),
+            ));
+            entries.push(Self::Cloud(
+                "openai".into(),
+                "text-embedding-3-large".into(),
+            ));
+            entries.push(Self::Cloud(
+                "openai".into(),
+                "text-embedding-ada-002".into(),
+            ));
         }
         if std::env::var("GEMINI_API_KEY").is_ok() {
             entries.push(Self::Cloud("gemini".into(), "text-embedding-004".into()));
@@ -80,7 +94,10 @@ impl EmbedModelEntry {
             entries.push(Self::Cloud("ollama".into(), "nomic-embed-text".into()));
             entries.push(Self::Cloud("ollama".into(), "mxbai-embed-large".into()));
             entries.push(Self::Cloud("ollama".into(), "all-minilm".into()));
-            entries.push(Self::Cloud("ollama".into(), "snowflake-arctic-embed".into()));
+            entries.push(Self::Cloud(
+                "ollama".into(),
+                "snowflake-arctic-embed".into(),
+            ));
             entries.push(Self::Cloud("ollama".into(), "bge-m3".into()));
         }
 

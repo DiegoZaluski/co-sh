@@ -7,6 +7,12 @@ use ratatui::layout::Rect;
 
 use super::models::{CreateDbFocus, RagAction, RagMode};
 use super::render::truncate_label;
+use super::render::{
+    DB_PICKER_VISIBLE, DB_ROW_H_PADDING, DESC_POPUP_HEIGHT_PCT, DESC_POPUP_MIN_H, DESC_POPUP_MIN_W,
+    DESC_POPUP_WIDTH_PCT, MIN_CONTENT_WIDTH, PICKER_BOX_HEIGHT, PREVIEW_OVERLAY_HEIGHT_PCT,
+    PREVIEW_OVERLAY_MIN_H, PREVIEW_OVERLAY_MIN_W, PREVIEW_OVERLAY_WIDTH_PCT, SHOW_DESC_BTN_TEXT,
+    TRASH_EMOJI_WIDTH,
+};
 use super::view::RagView;
 
 // ── Keyboard handling ──────────────────────────────────────────────────
@@ -186,7 +192,10 @@ impl RagView {
     fn focused_input(&mut self) -> (&mut String, &mut usize) {
         match self.create_db_focus {
             CreateDbFocus::Name => (&mut self.db_name_input, &mut self.db_name_cursor_pos),
-            CreateDbFocus::Description => (&mut self.db_description_input, &mut self.db_description_cursor_pos),
+            CreateDbFocus::Description => (
+                &mut self.db_description_input,
+                &mut self.db_description_cursor_pos,
+            ),
         }
     }
 
@@ -306,9 +315,7 @@ impl RagView {
                 self.note_cursor_activity();
                 let (input, pos) = self.focused_input();
                 if *pos < input.len() {
-                    let next = input
-                        .floor_char_boundary(*pos + 1)
-                        .min(input.len());
+                    let next = input.floor_char_boundary(*pos + 1).min(input.len());
                     input.drain(*pos..next);
                 }
                 Some(RagAction::Consumed)
@@ -325,9 +332,7 @@ impl RagView {
                 self.note_cursor_activity();
                 let (input, pos) = self.focused_input();
                 if *pos < input.len() {
-                    let next = input
-                        .floor_char_boundary(*pos + 1)
-                        .min(input.len());
+                    let next = input.floor_char_boundary(*pos + 1).min(input.len());
                     *pos = next;
                 }
                 Some(RagAction::Consumed)
@@ -354,6 +359,18 @@ impl RagView {
         self.db_description_cursor.note_activity();
     }
 
+    /// Clamp the DB picker scroll offset so the newly selected index `new`
+    /// stays within the visible window of size `DB_PICKER_VISIBLE`.
+    fn clamp_picker_scroll(&mut self, new: usize, total: usize) {
+        let vis = DB_PICKER_VISIBLE.min(total);
+        if new >= self.db_picker_scroll_offset + vis {
+            self.db_picker_scroll_offset = new.saturating_sub(vis.saturating_sub(1));
+        }
+        if new < self.db_picker_scroll_offset {
+            self.db_picker_scroll_offset = new;
+        }
+    }
+
     /// Handle keys when the DB picker overlay is open.
     fn handle_db_picker_key(
         &mut self,
@@ -374,15 +391,7 @@ impl RagView {
                     .unwrap_or(0);
                 let new = if cur_idx == 0 { total - 1 } else { cur_idx - 1 };
                 self.selected_db_for_embed = Some(filtered[new].name.clone());
-                // Clamp scroll
-                let scroll = &mut self.db_picker_scroll_offset;
-                let vis = 10usize.min(total);
-                if new >= *scroll + vis {
-                    *scroll = new.saturating_sub(vis.saturating_sub(1));
-                }
-                if new < *scroll {
-                    *scroll = new;
-                }
+                self.clamp_picker_scroll(new, total);
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Down => {
@@ -393,15 +402,7 @@ impl RagView {
                     .unwrap_or(0);
                 let new = (cur_idx + 1) % total;
                 self.selected_db_for_embed = Some(filtered[new].name.clone());
-                // Clamp scroll
-                let scroll = &mut self.db_picker_scroll_offset;
-                let vis = 10usize.min(total);
-                if new >= *scroll + vis {
-                    *scroll = new.saturating_sub(vis.saturating_sub(1));
-                }
-                if new < *scroll {
-                    *scroll = new;
-                }
+                self.clamp_picker_scroll(new, total);
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Enter => {
@@ -428,11 +429,11 @@ impl RagView {
         if !self.is_preview_visible() {
             return None;
         }
-        let overlay_w = (area.width * 85 / 100)
-            .max(40)
+        let overlay_w = (area.width * PREVIEW_OVERLAY_WIDTH_PCT / 100)
+            .max(PREVIEW_OVERLAY_MIN_W)
             .min(area.width.saturating_sub(4));
-        let overlay_h = (area.height * 80 / 100)
-            .max(10)
+        let overlay_h = (area.height * PREVIEW_OVERLAY_HEIGHT_PCT / 100)
+            .max(PREVIEW_OVERLAY_MIN_H)
             .min(area.height.saturating_sub(4));
         let overlay_x = area.x + (area.width - overlay_w) / 2;
         let overlay_y = area.y + (area.height - overlay_h) / 2;
@@ -468,15 +469,15 @@ impl RagView {
             return None;
         }
         let inner_w = area.width.saturating_sub(4);
-        if inner_w < 10 {
+        if inner_w < MIN_CONTENT_WIDTH {
             return None;
         }
         let inner_x = area.x + 2;
         let input_h = self.url_input.height();
 
-        // The picker renders at cy, with fixed height 5 (matching create form)
+        // The picker renders at cy, with fixed height matching create form
         let picker_y = area.y + 2 + input_h;
-        let picker_h = 5u16;
+        let picker_h = PICKER_BOX_HEIGHT;
 
         let mx = mouse.x;
         let my = mouse.y;
@@ -500,13 +501,13 @@ impl RagView {
             return false;
         }
         let inner_w = area.width.saturating_sub(4);
-        if inner_w < 10 {
+        if inner_w < MIN_CONTENT_WIDTH {
             return false;
         }
         let inner_x = area.x + 2;
         let input_h = self.url_input.height();
         let picker_y = area.y + 2 + input_h;
-        let picker_h = 5u16;
+        let picker_h = PICKER_BOX_HEIGHT;
         let mx = mouse.x;
         let my = mouse.y;
         my >= picker_y && my < picker_y + picker_h && mx >= inner_x && mx < inner_x + inner_w
@@ -552,7 +553,7 @@ impl RagView {
     /// Check if the mouse click is on the "+ Create DB" button.
     fn is_create_db_clicked(&self, mouse: &MouseEvent, area: Rect) -> bool {
         let inner_w = area.width.saturating_sub(4);
-        if inner_w < 10 {
+        if inner_w < MIN_CONTENT_WIDTH {
             return false;
         }
         let input_h = self.url_input.height();
@@ -580,7 +581,7 @@ impl RagView {
         }
         let model_y = area.y + 2 + self.url_input.height();
         let inner_w = area.width.saturating_sub(4);
-        if inner_w < 10 {
+        if inner_w < MIN_CONTENT_WIDTH {
             return false;
         }
         let cx = area.x + 4;
@@ -594,7 +595,7 @@ impl RagView {
     /// Check if mouse is on the "Select Database" button.
     fn is_select_db_btn_clicked(&self, mouse: &MouseEvent, area: Rect) -> bool {
         let inner_w = area.width.saturating_sub(4);
-        if inner_w < 10 {
+        if inner_w < MIN_CONTENT_WIDTH {
             return false;
         }
         let input_h = self.url_input.height();
@@ -626,7 +627,7 @@ impl RagView {
             return false;
         }
         let inner_w = area.width.saturating_sub(4);
-        if inner_w < 10 {
+        if inner_w < MIN_CONTENT_WIDTH {
             return false;
         }
         let inner_x = area.x + 2;
@@ -701,10 +702,9 @@ impl RagView {
             if idx < filtered.len() {
                 // Check if the click is on the "show desc" button area
                 // Button is placed right after the truncated name
-                let btn_text = " show desc ";
-                let btn_w = btn_text.len() as u16;
+                let btn_w = SHOW_DESC_BTN_TEXT.len() as u16;
                 let gap_w: u16 = 1;
-                let avail_name_w = (layout.inner_w.saturating_sub(6) as usize)
+                let avail_name_w = (layout.inner_w.saturating_sub(DB_ROW_H_PADDING) as usize)
                     .saturating_sub((btn_w + gap_w) as usize);
                 let name_display = format!(" {}", filtered[idx].name);
                 let name_trunc = truncate_label(&name_display, avail_name_w);
@@ -734,12 +734,10 @@ impl RagView {
             let idx = self.dbs_scroll_offset + i;
             if idx < filtered.len() {
                 // Compute the 🗑 x position (matches render_box2)
-                let btn_text = " show desc ";
-                let btn_w = btn_text.len() as u16;
-                let trash_w: u16 = 2;
+                let btn_w = SHOW_DESC_BTN_TEXT.len() as u16;
                 let gap_w: u16 = 1;
-                let total_btns_w = btn_w + gap_w + trash_w;
-                let avail_name_w = (layout.inner_w.saturating_sub(6) as usize)
+                let total_btns_w = btn_w + gap_w + TRASH_EMOJI_WIDTH;
+                let avail_name_w = (layout.inner_w.saturating_sub(DB_ROW_H_PADDING) as usize)
                     .saturating_sub((total_btns_w + gap_w) as usize);
                 let name_display = format!(" {}", filtered[idx].name);
                 let name_trunc = truncate_label(&name_display, avail_name_w);
@@ -747,7 +745,7 @@ impl RagView {
                 let btn_x = layout.cx + 2 + name_len + gap_w;
                 let trash_x = btn_x + btn_w + gap_w;
 
-                if mx >= trash_x && mx < trash_x + trash_w {
+                if mx >= trash_x && mx < trash_x + TRASH_EMOJI_WIDTH {
                     return Some(filtered[idx].name.clone());
                 }
             }
@@ -762,11 +760,11 @@ impl RagView {
         if idx >= filtered.len() {
             return None;
         }
-        let overlay_w = (area.width * 70 / 100)
-            .max(30)
+        let overlay_w = (area.width * DESC_POPUP_WIDTH_PCT / 100)
+            .max(DESC_POPUP_MIN_W)
             .min(area.width.saturating_sub(8));
-        let overlay_h = (area.height * 50 / 100)
-            .max(5)
+        let overlay_h = (area.height * DESC_POPUP_HEIGHT_PCT / 100)
+            .max(DESC_POPUP_MIN_H)
             .min(area.height.saturating_sub(8));
         let overlay_x = area.x + (area.width - overlay_w) / 2;
         let overlay_y = area.y + (area.height - overlay_h) / 2;
@@ -789,7 +787,7 @@ impl RagView {
             return false;
         }
         let inner_w = area.width.saturating_sub(4);
-        if inner_w < 10 {
+        if inner_w < MIN_CONTENT_WIDTH {
             return false;
         }
         let inner_x = area.x + 2;

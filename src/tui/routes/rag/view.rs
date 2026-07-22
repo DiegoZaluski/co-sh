@@ -4,18 +4,43 @@
 //! Input handling lives in `handlers.rs`, rendering lives in `render.rs`.
 //!
 //! Layout — two boxed sections:
-//! 1. **Embed Content** — URL/path input (thin prompt-style) + spacious content preview
-//! 2. **Available Databases** — toggleable DB list with inline \"+ Create New Database\"
-//!    at the bottom (Tab expands the creation form inside this same box)
+//! 1. **Embed Content** — URL/path input with inline status + content preview overlay
+//! 2. **Available Databases** — toggleable DB list with inline "+ Create New Database"
+//!    form that appears inside the Embed Content box when Tab is pressed.
 
 use std::collections::HashSet;
 
 use super::models::{CreateDbFocus, EmbedModelEntry, RagMode};
 use super::registry::RagRegistry;
+use super::render::MAX_VISIBLE_MODELS_IN_FORM;
 use crate::component::cursor::Cursor;
 use crate::component::rag_input::RagInput;
 use crate::component::search_bar::SearchBar;
 use crate::component::spinner::SpinnerState;
+
+// ── Layout constants ────────────────────────────────────────────────────
+
+/// Percentage of available height used for Box 1 (Embed Content).
+const BOX1_HEIGHT_PCT: u16 = 30;
+
+/// Show the search/filter bar when DB count exceeds this threshold.
+const DB_LIST_FILTER_THRESHOLD: usize = 5;
+
+/// Number of visible DB rows kept during scroll clamping.
+const DB_SCROLL_VISIBLE: usize = 20;
+
+/// Minimum number of models always visible in the expanded selector.
+const MIN_VISIBLE_MODELS: usize = 3;
+
+/// Minimum height reserved for Box 1 (Embed Content) when no form is open
+/// (title + gap + input(3 lines) + status + gap).
+const BOX1_MIN_BASE: u16 = 7;
+
+/// Bottom margin subtracted from available height for Box 1 max clamp.
+const BOX1_BOTTOM_MARGIN: u16 = 8;
+
+/// Terminal rows reserved for the model count calculation in the expanded selector.
+const MODEL_COUNT_HEADROOM: u16 = 10;
 
 // ── RagLayout ────────────────────────────────────────────────────────────
 
@@ -82,17 +107,17 @@ impl RagView {
             1
         };
         let box1_h = {
-            let ideal = avail_h.saturating_mul(30) / 100;
+            let ideal = avail_h.saturating_mul(BOX1_HEIGHT_PCT) / 100;
             ideal
-                .max(7 + create_db_lines)
-                .min(avail_h.saturating_sub(8))
+                .max(BOX1_MIN_BASE + create_db_lines)
+                .min(avail_h.saturating_sub(BOX1_BOTTOM_MARGIN))
         };
         let box2_y = area.y + box1_h + gap;
         let box2_available = avail_h.saturating_sub(box1_h + gap + bottom_gap);
         let box2_h = box2_available.max(5);
 
         let warning_h = 2u16;
-        let filter_h = if self.registry.dbs.len() > 5 {
+        let filter_h = if self.registry.dbs.len() > DB_LIST_FILTER_THRESHOLD {
             1u16
         } else {
             0u16
@@ -443,7 +468,7 @@ impl RagView {
             self.dbs_scroll_offset = 0;
             return;
         }
-        let visible = 20usize.min(total);
+        let visible = DB_SCROLL_VISIBLE.min(total);
         if self.selected_db_index >= self.dbs_scroll_offset + visible {
             self.dbs_scroll_offset = self
                 .selected_db_index
@@ -481,7 +506,6 @@ impl Default for RagView {
 
 /// Max number of models to show in the expanded selector (depends on terminal height).
 pub(crate) fn max_visible_models(avail_h: u16) -> usize {
-    // Show at most 8 models, or fewer if the terminal is very small.
-    let cap = (avail_h.saturating_sub(10) / 2) as usize;
-    cap.clamp(3, 8)
+    let cap = (avail_h.saturating_sub(MODEL_COUNT_HEADROOM) / 2) as usize;
+    cap.clamp(MIN_VISIBLE_MODELS, MAX_VISIBLE_MODELS_IN_FORM)
 }

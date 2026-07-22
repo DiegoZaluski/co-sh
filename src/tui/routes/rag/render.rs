@@ -9,11 +9,68 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use crate::component::cursor::CursorState;
+use crate::component::cursor::{Cursor, CursorState};
 use crate::theme::Theme;
 
 use super::models::{CreateDbFocus, RagMode};
 use super::view::{RagLayout, RagView};
+
+// ── Named constants ─────────────────────────────────────────────────────
+
+/// Max visible models in the form's expanded list (fits inside the box).
+pub(crate) const MAX_VISIBLE_MODELS_IN_FORM: usize = 8;
+
+/// Label text for the "show desc" button (also used in hit-testing).
+pub(crate) const SHOW_DESC_BTN_TEXT: &str = " show desc ";
+
+/// Number of padding cells subtracted from label width for model list items.
+const MODEL_LABEL_PAD: u16 = 3;
+
+/// Number of padding cells subtracted from label width for collapsed model line.
+const MODEL_COLLAPSED_PAD: u16 = 20;
+
+/// Offset of the input cursor relative to the label start
+/// (e.g. "Name:  " = 7 chars before the cursor position).
+const INPUT_LABEL_OFFSET: u16 = 7;
+
+/// Visible items in the DB picker scroll list.
+pub(crate) const DB_PICKER_VISIBLE: usize = 10;
+
+/// Height of the DB picker / create-form popup (when collapsed).
+pub(crate) const PICKER_BOX_HEIGHT: u16 = 5;
+
+/// Maximum visible items in the DB picker list.
+pub(crate) const DB_PICKER_LIST_VISIBLE: usize = 4;
+
+/// Minimum area width below which rendering/sizing is skipped.
+pub(crate) const MIN_CONTENT_WIDTH: u16 = 10;
+
+/// Width of the 🗑 trash emoji in terminal cells.
+pub(crate) const TRASH_EMOJI_WIDTH: u16 = 2;
+
+/// Total horizontal padding per side for a DB row
+/// (cx: 2 + checkbox: 1 + gap: 1 + right-pad: 2 = 6).
+pub(crate) const DB_ROW_H_PADDING: u16 = 6;
+
+// ── Overlay geometry constants ──────────────────────────────────────────
+
+/// Preview overlay width as percentage of area width.
+pub(crate) const PREVIEW_OVERLAY_WIDTH_PCT: u16 = 85;
+/// Preview overlay height as percentage of area height.
+pub(crate) const PREVIEW_OVERLAY_HEIGHT_PCT: u16 = 80;
+/// Minimum width for the preview overlay.
+pub(crate) const PREVIEW_OVERLAY_MIN_W: u16 = 40;
+/// Minimum height for the preview overlay.
+pub(crate) const PREVIEW_OVERLAY_MIN_H: u16 = 10;
+
+/// Description popup width as percentage of area width.
+pub(crate) const DESC_POPUP_WIDTH_PCT: u16 = 70;
+/// Description popup height as percentage of area height.
+pub(crate) const DESC_POPUP_HEIGHT_PCT: u16 = 50;
+/// Minimum width for the description popup.
+pub(crate) const DESC_POPUP_MIN_W: u16 = 30;
+/// Minimum height for the description popup.
+pub(crate) const DESC_POPUP_MIN_H: u16 = 5;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -68,6 +125,51 @@ pub(crate) fn truncate_label(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Draw a blinking cursor on a text input field.
+///
+/// `cursor` — the [`Cursor`] component with blink state.
+/// `input` — the current text content.
+/// `cursor_pos` — the logical cursor position (byte offset).
+/// `now` — the current time for blink timing.
+/// `pad` — X position of the label start.
+/// `form_y` — Y position of the field row.
+/// `pad_w` — available width for the field.
+fn draw_input_cursor(
+    buf: &mut Buffer,
+    cursor: &Cursor,
+    input: &str,
+    cursor_pos: usize,
+    now: SystemTime,
+    pad: u16,
+    form_y: u16,
+    pad_w: u16,
+    theme: &Theme,
+    fg: Color,
+    muted: Color,
+    primary: Color,
+) {
+    let cursor_col = input[..cursor_pos.min(input.len())].chars().count() as u16;
+    let cursor_x = pad + INPUT_LABEL_OFFSET + cursor_col;
+    if cursor_x >= pad + pad_w {
+        return;
+    }
+    if let Some(cell) = buf.cell_mut((cursor_x, form_y)) {
+        match cursor.current_state(now) {
+            CursorState::On => {
+                cell.set_style(Style::default().fg(primary).bg(fg));
+            }
+            CursorState::Off | CursorState::Blur => {
+                cell.set_char('\u{2592}');
+                cell.set_style(
+                    Style::default()
+                        .fg(muted)
+                        .bg(rgba_color(theme.background_element)),
+                );
+            }
+        }
+    }
+}
+
 // ── Render implementation ───────────────────────────────────────────────
 
 impl RagView {
@@ -83,7 +185,7 @@ impl RagView {
         let title_fg = rgba_color(theme.background);
 
         let inner_w = area.width.saturating_sub(4);
-        if inner_w < 10 {
+        if inner_w < MIN_CONTENT_WIDTH {
             return;
         }
 
@@ -172,15 +274,19 @@ impl RagView {
 
         // ── Preview / status ──────────────────────────────────────────
         match self.mode {
-            RagMode::Fetching => {
+            RagMode::Fetching | RagMode::Embedding => {
                 let ch = self.spinner.current_char();
                 if let Some(cell) = buf.cell_mut((cx, cy)) {
                     cell.set_char(ch);
                     cell.set_style(Style::default().fg(success));
                 }
+                let label = match self.mode {
+                    RagMode::Fetching => "Fetching content",
+                    _ => "Embedding content",
+                };
                 draw_text_line(
                     buf,
-                    " Fetching content",
+                    label,
                     cx + 2,
                     cy,
                     input_w.saturating_sub(2),
@@ -194,21 +300,6 @@ impl RagView {
                     cx,
                     cy,
                     input_w,
-                    Style::default().fg(muted),
-                );
-            }
-            RagMode::Embedding => {
-                let ch = self.spinner.current_char();
-                if let Some(cell) = buf.cell_mut((cx, cy)) {
-                    cell.set_char(ch);
-                    cell.set_style(Style::default().fg(success));
-                }
-                draw_text_line(
-                    buf,
-                    " Embedding content...",
-                    cx + 2,
-                    cy,
-                    input_w.saturating_sub(2),
                     Style::default().fg(muted),
                 );
             }
@@ -287,7 +378,7 @@ impl RagView {
             draw_text_line(buf, "Model", pad, form_y, pad_w, Style::default().fg(muted));
             form_y += 1;
 
-            let max_vis = max_visible_models_for_form();
+            let max_vis = MAX_VISIBLE_MODELS_IN_FORM;
             let total = self.available_models.len();
 
             // Clamp scroll offset
@@ -302,7 +393,7 @@ impl RagView {
                 }
                 let is_sel = i == self.selected_model_index;
                 let lbl = self.available_models[i].label();
-                let max_label_w = pad_w.saturating_sub(3) as usize;
+                let max_label_w = pad_w.saturating_sub(MODEL_LABEL_PAD) as usize;
                 let truncated = truncate_label(&lbl, max_label_w);
                 let prefix = if is_sel { "\u{25cf} " } else { "  " };
                 let line = format!("{prefix}{truncated}");
@@ -328,7 +419,7 @@ impl RagView {
                 .get(self.selected_model_index)
                 .map(|m| m.label())
                 .unwrap_or_else(|| "No models".to_string());
-            let max_label_w = pad_w.saturating_sub(20) as usize;
+            let max_label_w = pad_w.saturating_sub(MODEL_COLLAPSED_PAD) as usize;
             let truncated = truncate_label(&model_lbl, max_label_w);
             let coll = format!("Model: {truncated}  (Click to expand)");
             draw_text_line(buf, &coll, pad, form_y, pad_w, Style::default().fg(primary));
@@ -356,31 +447,21 @@ impl RagView {
             Style::default().fg(fg)
         };
         draw_text_line(buf, &name_trunc, pad, form_y, pad_w, name_style);
-        // Draw cursor on Name field using Cursor component's state for blink
         if name_focused {
-            // "Name:  " = 7 chars label before the actual input
-            let cursor_col = self.db_name_input
-                [..self.db_name_cursor_pos.min(self.db_name_input.len())]
-                .chars()
-                .count() as u16;
-            let cursor_x = pad + 7 + cursor_col;
-            if cursor_x < pad + pad_w {
-                if let Some(cell) = buf.cell_mut((cursor_x, form_y)) {
-                    match self.db_name_cursor.current_state(now) {
-                        CursorState::On => {
-                            cell.set_style(Style::default().fg(primary).bg(fg));
-                        }
-                        CursorState::Off | CursorState::Blur => {
-                            cell.set_char('\u{2592}');
-                            cell.set_style(
-                                Style::default()
-                                    .fg(muted)
-                                    .bg(rgba_color(theme.background_element)),
-                            );
-                        }
-                    }
-                }
-            }
+            draw_input_cursor(
+                buf,
+                &self.db_name_cursor,
+                &self.db_name_input,
+                self.db_name_cursor_pos,
+                now,
+                pad,
+                form_y,
+                pad_w,
+                theme,
+                fg,
+                muted,
+                primary,
+            );
         }
         form_y += 1;
 
@@ -399,45 +480,34 @@ impl RagView {
             Style::default().fg(muted)
         };
         draw_text_line(buf, &desc_trunc, pad, form_y, pad_w, desc_style);
-        // Draw cursor on Description field using Cursor component's state for blink
         if desc_focused {
-            // "Desc:  " = 7 chars label before the actual input
-            let cursor_col = self.db_description_input[..self
-                .db_description_cursor_pos
-                .min(self.db_description_input.len())]
-                .chars()
-                .count() as u16;
-            let cursor_x = pad + 7 + cursor_col;
-            if cursor_x < pad + pad_w {
-                if let Some(cell) = buf.cell_mut((cursor_x, form_y)) {
-                    match self.db_description_cursor.current_state(now) {
-                        CursorState::On => {
-                            cell.set_style(Style::default().fg(primary).bg(fg));
-                        }
-                        CursorState::Off | CursorState::Blur => {
-                            cell.set_char('\u{2592}');
-                            cell.set_style(
-                                Style::default()
-                                    .fg(muted)
-                                    .bg(rgba_color(theme.background_element)),
-                            );
-                        }
-                    }
-                }
-            }
+            draw_input_cursor(
+                buf,
+                &self.db_description_cursor,
+                &self.db_description_input,
+                self.db_description_cursor_pos,
+                now,
+                pad,
+                form_y,
+                pad_w,
+                theme,
+                fg,
+                muted,
+                primary,
+            );
         }
     }
 
     /// Total height of the Create DB mini-form popup.
     ///
-    /// When collapsed: title + gap + name + description + gap = 5 lines.
-    /// When expanded: label + model_items + name + description + padding = (4 + model_count + 1) lines.
+    /// When collapsed: model_line + gap + name + description + bottom_padding = 5 lines.
+    /// When expanded:    header + model_items* + name + description + bottom_padding
+    ///                  = 4 + MAX_VISIBLE_MODELS_IN_FORM + 1 lines.
     pub(crate) fn create_db_mini_box_height(&self) -> u16 {
         if self.models_expanded {
             // 4 = header(1) + name(1) + description(1) + bottom_padding(1)
             4 + MAX_VISIBLE_MODELS_IN_FORM as u16 + 1
         } else {
-            // 5 = model_line(1) + gap(1) + name(1) + description(1) + bottom_padding(1)
             5
         }
     }
@@ -548,12 +618,10 @@ impl RagView {
                     cell.set_style(Style::default().fg(if is_act { success } else { rc }));
                 }
 
-                let btn_text = " show desc ";
-                let btn_w = btn_text.len() as u16; // 12
-                let trash_w: u16 = 2; // 🗑 wide emoji takes 2 cells
+                let btn_w = SHOW_DESC_BTN_TEXT.len() as u16;
                 let gap: u16 = 1;
-                let total_btns_w = btn_w + gap + trash_w;
-                let avail_name_w = (inner_w.saturating_sub(6) as usize)
+                let total_btns_w = btn_w + gap + TRASH_EMOJI_WIDTH;
+                let avail_name_w = (inner_w.saturating_sub(DB_ROW_H_PADDING) as usize)
                     .saturating_sub((total_btns_w + gap) as usize);
                 let name_display = format!(" {}", db.name);
                 let name_trunc = truncate_label(&name_display, avail_name_w);
@@ -571,7 +639,7 @@ impl RagView {
                 let btn_x = cx + 2 + name_len + gap;
                 draw_text_line(
                     buf,
-                    btn_text,
+                    SHOW_DESC_BTN_TEXT,
                     btn_x,
                     db_y,
                     btn_w,
@@ -750,10 +818,15 @@ impl RagView {
         _title_bg: Color,
         _title_fg: Color,
     ) {
-        // Match create_db_mini_box_height() collapsed height: 5 lines
-        let picker_h = 5u16;
         let bg_term = rgba_color(theme.background);
-        fill_rect(buf, cx, cy, input_w, picker_h, Style::default().bg(bg_term));
+        fill_rect(
+            buf,
+            cx,
+            cy,
+            input_w,
+            PICKER_BOX_HEIGHT,
+            Style::default().bg(bg_term),
+        );
 
         let pad = cx + 2;
         let pad_w = input_w.saturating_sub(4);
@@ -784,7 +857,7 @@ impl RagView {
             return;
         }
 
-        let max_vis = 4usize;
+        let max_vis = DB_PICKER_LIST_VISIBLE;
         let total = filtered.len();
 
         let mut scroll = self.db_picker_scroll_offset;
@@ -823,10 +896,4 @@ impl RagView {
 
 // ── Free helpers ────────────────────────────────────────────────────────
 
-/// Max visible models in the form's expanded list (fits inside the box).
-pub(crate) const MAX_VISIBLE_MODELS_IN_FORM: usize = 8;
-
-/// Max visible models in the form's expanded list (fits inside the box).
-pub(crate) fn max_visible_models_for_form() -> usize {
-    MAX_VISIBLE_MODELS_IN_FORM
-}
+// All constants are declared at the top of this file.

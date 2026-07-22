@@ -118,9 +118,7 @@ impl LocalEmbedModel {
             Self::ParaphraseMLMiniLML12V2 | Self::ParaphraseMLMiniLML12V2Q => {
                 "paraphrase-MiniLM-L12-v2 (384d)".into()
             }
-            Self::ParaphraseMLMpnetBaseV2 => {
-                "paraphrase-multilingual-mpnet-base-v2 (768d)".into()
-            }
+            Self::ParaphraseMLMpnetBaseV2 => "paraphrase-multilingual-mpnet-base-v2 (768d)".into(),
             Self::MultilingualE5Small => "multilingual-e5-small (384d)".into(),
             Self::MultilingualE5Base => "multilingual-e5-base (768d)".into(),
             Self::MultilingualE5Large => "multilingual-e5-large (1024d)".into(),
@@ -242,9 +240,7 @@ impl LocalEmbedModel {
             Self::SnowflakeArcticEmbedSQ => fastembed::EmbeddingModel::SnowflakeArcticEmbedSQ,
             Self::SnowflakeArcticEmbedM => fastembed::EmbeddingModel::SnowflakeArcticEmbedM,
             Self::SnowflakeArcticEmbedMQ => fastembed::EmbeddingModel::SnowflakeArcticEmbedMQ,
-            Self::SnowflakeArcticEmbedMLong => {
-                fastembed::EmbeddingModel::SnowflakeArcticEmbedMLong
-            }
+            Self::SnowflakeArcticEmbedMLong => fastembed::EmbeddingModel::SnowflakeArcticEmbedMLong,
             Self::SnowflakeArcticEmbedMLongQ => {
                 fastembed::EmbeddingModel::SnowflakeArcticEmbedMLongQ
             }
@@ -344,8 +340,6 @@ impl EmbedderConfig {
             Self::Local { model } => model.vector_dim(),
             Self::Cloud(c) => cloud_known_dim(&c.provider, &c.model),
         }
-
-
     }
 }
 
