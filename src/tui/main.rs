@@ -1,4 +1,3 @@
-#![allow(clippy::cast_possible_truncation)]
 #![allow(dead_code)]
 
 mod app;

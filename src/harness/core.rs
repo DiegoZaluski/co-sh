@@ -921,7 +921,6 @@ impl Harness {
     ///
     /// The `stop_signal` is an external flag (usually an `Arc<AtomicBool>`)
     /// that allows the caller to interrupt the loop from another thread.
-    #[allow(clippy::too_many_lines)]
     pub async fn run_agent_loop(
         &mut self,
         input: &str,

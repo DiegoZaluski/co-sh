@@ -495,7 +495,6 @@ impl SessionView {
         draw_text_line(buf, &label, x, y, max_w, style);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_reasoning(
         buf: &mut Buffer,
         x: u16,
@@ -574,7 +573,6 @@ impl SessionView {
         last_row.map(|r| r - y + 1).unwrap_or(0)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_parts(
         buf: &mut Buffer,
         x: u16,
@@ -742,7 +740,6 @@ impl SessionView {
         y - y_start
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn draw_text_wrap(
         buf: &mut Buffer,
         text: &str,
@@ -914,7 +911,6 @@ impl SessionView {
         draw_text_line(buf, &format!(" [{ts_str}]"), x, y, 12, ts_style);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_user_message(
         buf: &mut Buffer,
         area: Rect,

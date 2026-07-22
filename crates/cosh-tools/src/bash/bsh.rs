@@ -233,7 +233,6 @@ pub fn run<'a>(
 ///
 /// Panics if the child process stdout or stderr pipe cannot be taken (this
 /// only happens if [`std::process::Stdio::piped`] was not set).
-#[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_bash<'a>(
     env: Option<Vec<(String, String)>>,
     cwd: &'a str,
@@ -416,7 +415,6 @@ pub(crate) fn spawn_bash<'a>(
 ///
 /// [`poll(2)`]: https://man7.org/linux/man-pages/man2/poll.2.html
 #[cfg(unix)]
-#[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_bash_pty(
     env: Option<Vec<(String, String)>>,
     cwd: &str,

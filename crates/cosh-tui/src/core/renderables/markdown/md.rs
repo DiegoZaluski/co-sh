@@ -146,7 +146,6 @@ impl MarkdownRenderable {
     ///
     /// Leading spaces after a wrap are skipped to avoid visual indentation
     /// on continuation lines.
-    #[allow(clippy::too_many_arguments)]
     fn render_text(
         text: &str,
         buf: &mut Buffer,
@@ -422,7 +421,6 @@ impl Renderable for MarkdownRenderable {
         &self.children
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         if self.content.is_empty() || area.width == 0 || area.height == 0 {
             return;
@@ -824,7 +822,6 @@ impl Renderable for MarkdownRenderable {
 impl MarkdownRenderable {
     /// Render a code block segment with syntax highlighting (via tree-sitter)
     /// when a language is declared.
-    #[allow(clippy::too_many_arguments)]
     fn render_code_block(
         &self,
         text: &str,
@@ -1039,7 +1036,6 @@ fn blend_color(base: RGBA, overlay: RGBA, factor: f64) -> RGBA {
 
 impl MarkdownRenderable {
     /// Render a markdown table as a grid with borders.
-    #[allow(clippy::too_many_arguments)]
     fn render_table(
         buf: &mut Buffer,
         x: &mut u16,

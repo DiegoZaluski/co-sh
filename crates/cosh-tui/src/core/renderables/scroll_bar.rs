@@ -199,7 +199,6 @@ impl Renderable for ScrollBarRenderable {
         &self.children
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;

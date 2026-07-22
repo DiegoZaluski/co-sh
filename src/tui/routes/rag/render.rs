@@ -15,7 +15,7 @@ use crate::theme::Theme;
 use super::models::{CreateDbFocus, RagMode};
 use super::view::{RagLayout, RagView};
 
-// ── Named constants ─────────────────────────────────────────────────────
+// Named constants
 
 /// Max visible models in the form's expanded list (fits inside the box).
 pub(crate) const MAX_VISIBLE_MODELS_IN_FORM: usize = 8;
@@ -52,7 +52,7 @@ pub(crate) const TRASH_EMOJI_WIDTH: u16 = 2;
 /// (cx: 2 + checkbox: 1 + gap: 1 + right-pad: 2 = 6).
 pub(crate) const DB_ROW_H_PADDING: u16 = 6;
 
-// ── Overlay geometry constants ──────────────────────────────────────────
+// Overlay geometry constants
 
 /// Preview overlay width as percentage of area width.
 pub(crate) const PREVIEW_OVERLAY_WIDTH_PCT: u16 = 85;
@@ -72,8 +72,7 @@ pub(crate) const DESC_POPUP_MIN_W: u16 = 30;
 /// Minimum height for the description popup.
 pub(crate) const DESC_POPUP_MIN_H: u16 = 5;
 
-// ── Helpers ─────────────────────────────────────────────────────────────
-
+// Helpers
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
@@ -170,10 +169,9 @@ fn draw_input_cursor(
     }
 }
 
-// ── Render implementation ───────────────────────────────────────────────
+// Render implementation
 
 impl RagView {
-    #[allow(clippy::too_many_lines)]
     pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme) {
         let fg = rgba_color(theme.text);
         let muted = rgba_color(theme.text_muted);
@@ -189,17 +187,17 @@ impl RagView {
             return;
         }
 
-        // ── Layout (computed once, shared with mouse hit-testing) ─────
+        // Layout (computed once, shared with mouse hit-testing)
         let layout = self.compute_layout(area);
         let mut y = area.y;
 
-        // ══════════ BOX 1: Embed Content ══════════════════════════════
+        // BOX 1: Embed Content
         self.render_box1(
             buf, inner_w, layout, &mut y, theme, fg, muted, warning, success, primary, panel_bg,
             title_bg, title_fg,
         );
 
-        // ══════════ BOX 2: Available Databases ════════════════════════
+        // BOX 2: Available Databases
         if y < area.bottom() {
             self.render_box2(
                 buf, area, layout, &mut y, theme, fg, muted, warning, success, primary, panel_bg,
@@ -207,13 +205,12 @@ impl RagView {
             );
         }
 
-        // ══════════ OVERLAY: Content Preview popup ═════════════════════
+        // OVERLAY: Content Preview popup
         self.render_preview_overlay(buf, area, theme, fg, muted, success, primary);
     }
 
-    // ── Box 1: Embed Content ───────────────────────────────────────────
+    // Box 1: Embed Content
 
-    #[allow(clippy::too_many_arguments)]
     fn render_box1(
         &mut self,
         buf: &mut Buffer,
@@ -244,11 +241,11 @@ impl RagView {
         let cx = layout.cx;
         let mut cy = *y + 2;
 
-        // ── URL/path input ────────────────────────────────────────────
+        // URL/path input
         let input_w = inner_w.saturating_sub(4);
         self.url_input.render(buf, cx, cy, input_w, _theme);
 
-        // ── DB indicator inside the input box (line 2, below placeholder) ──
+        // DB indicator inside the input box (line 2, below placeholder)
         let input_bg = rgba_color(_theme.background_element);
         if let Some(db_name) = &self.selected_db_for_embed {
             draw_text_line(
@@ -272,7 +269,7 @@ impl RagView {
 
         cy += layout.input_h;
 
-        // ── Preview / status ──────────────────────────────────────────
+        // Preview / status
         match self.mode {
             RagMode::Fetching | RagMode::Embedding => {
                 let ch = self.spinner.current_char();
@@ -324,14 +321,14 @@ impl RagView {
             }
         }
 
-        // ── DB picker (replaces button line when open) ────────────────
+        // DB picker (replaces button line when open)
         if self.show_db_picker && !self.show_create_db {
             self.render_db_picker(
                 buf, cx, cy, input_w, _theme, fg, muted, success, primary, title_bg, title_fg,
             );
         }
 
-        // ── Create New Database form (replaces button line when open) ──
+        // Create New Database form (replaces button line when open)
         if self.show_create_db {
             self.render_create_db_form(
                 buf, cx, cy, input_w, _theme, fg, muted, warning, primary, title_fg, panel_bg,
@@ -341,9 +338,8 @@ impl RagView {
         *y = *y + layout.box1_h + 1;
     }
 
-    // ── Create DB form ─────────────────────────────────────────────────
+    // Create DB form
 
-    #[allow(clippy::too_many_arguments)]
     fn render_create_db_form(
         &mut self,
         buf: &mut Buffer,
@@ -373,7 +369,7 @@ impl RagView {
         let pad = cx + 2;
         let pad_w = input_w.saturating_sub(4);
 
-        // ── Model selector ─────────────────────────────────────────────
+        // Model selector
         if self.models_expanded {
             draw_text_line(buf, "Model", pad, form_y, pad_w, Style::default().fg(muted));
             form_y += 1;
@@ -426,7 +422,7 @@ impl RagView {
             form_y += 1;
         }
 
-        // ── Name & Description ─────────────────────────────────────────
+        //  Name & Description
         let now = SystemTime::now();
         let name_focused = self.create_db_focus == CreateDbFocus::Name;
         let desc_focused = self.create_db_focus == CreateDbFocus::Description;
@@ -512,9 +508,8 @@ impl RagView {
         }
     }
 
-    // ── Box 2: Available Databases ─────────────────────────────────────
+    // Box 2: Available Databases
 
-    #[allow(clippy::too_many_arguments)]
     fn render_box2(
         &mut self,
         buf: &mut Buffer,
@@ -556,7 +551,7 @@ impl RagView {
 
         cy += 1; // gap
 
-        // ── Warning ───────────────────────────────────────────────────
+        //  Warning
         draw_text_line(
             buf,
             "\u{26A0}  Many active DBs degrade LLM quality. Enable only relevant.",
@@ -576,14 +571,14 @@ impl RagView {
         );
         cy += 1;
 
-        // ── SearchBar filter ──────────────────────────────────────────
+        // SearchBar filter
         if layout.filter_h > 0 {
             self.db_filter
                 .render(buf, cx, cy, inner_w.saturating_sub(4), _theme);
             cy += 1;
         }
 
-        // ── DB list ───────────────────────────────────────────────────
+        // DB list
         let filtered = self.filtered_dbs();
         let max_visible = layout.list_h as usize;
 
@@ -660,7 +655,7 @@ impl RagView {
             }
         }
 
-        // ── Description popup (simple overlay with just the description text) ──
+        // Description popup (simple overlay with just the description text)
         self.render_desc_popup(buf, area, _theme, fg);
     }
 
@@ -723,9 +718,8 @@ impl RagView {
         }
     }
 
-    // ── Preview overlay ────────────────────────────────────────────────
+    // Preview overlay
 
-    #[allow(clippy::too_many_arguments)]
     fn render_preview_overlay(
         &self,
         buf: &mut Buffer,
@@ -802,7 +796,7 @@ impl RagView {
         }
     }
 
-    // ── DB Picker (inline form, identical to create DB form) ─────────
+    // DB Picker (inline form, identical to create DB form)
 
     fn render_db_picker(
         &self,
@@ -893,7 +887,3 @@ impl RagView {
         }
     }
 }
-
-// ── Free helpers ────────────────────────────────────────────────────────
-
-// All constants are declared at the top of this file.

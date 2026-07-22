@@ -546,7 +546,6 @@ impl App {
             )
     }
 
-    #[allow(clippy::too_many_lines)]
     fn handle_apikey_dialog_key(&mut self, key: KeyCode) -> bool {
         if !self.is_apikey_input_visible() {
             return false;
@@ -684,7 +683,6 @@ impl App {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn handle_model_dialog_key(&mut self, key: KeyCode) -> bool {
         if !self.is_model_dialog_visible() {
             return false;
@@ -1335,7 +1333,6 @@ impl App {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render(&mut self, frame: &mut Frame<'_>, delta_time: f64) {
         // Sync live_requested — keeps the render loop running smoothly.
         // Session: during streaming, sticky scroll needs continuous re-rendering.
@@ -1598,7 +1595,6 @@ impl App {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn handle_events(&mut self) -> io::Result<bool> {
         self.toast_state.tick(50);
 
@@ -2557,7 +2553,6 @@ impl App {
         Ok(false)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn poll_events(&mut self) {
         use crate::types::{
             Message, MessageRole, Part, ReasoningPart, SessionStatus, TextPart, ToolPart,

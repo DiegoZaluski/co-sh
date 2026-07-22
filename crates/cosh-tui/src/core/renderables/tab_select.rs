@@ -267,7 +267,6 @@ impl Renderable for TabSelectRenderable {
         &self.children
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         if area.width == 0 || area.height == 0 || self.options.is_empty() {
             return;

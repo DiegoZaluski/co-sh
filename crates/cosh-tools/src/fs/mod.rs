@@ -74,7 +74,6 @@ impl Fs {
     /// Create a new `Fs` with no root path set.
     ///
     /// All paths are denied until [`cwd`](Self::cwd) is called.
-    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn new() -> Self {
         Self {

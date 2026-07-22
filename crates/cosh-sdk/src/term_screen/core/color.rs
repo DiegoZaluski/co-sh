@@ -175,12 +175,9 @@ impl ColorPalette {
 
         let cursor_bg = RgbColor::new_8bpc(0x52, 0xad, 0x70).into();
         let cursor_border = RgbColor::new_8bpc(0x52, 0xad, 0x70).into();
-        #[allow(clippy::similar_names)]
         let cursor_fg = colors[AnsiColor::Black as usize];
 
-        #[allow(clippy::similar_names)]
         let selection_fg = SrgbaTuple(0., 0., 0., 0.);
-        #[allow(clippy::similar_names)]
         let selection_bg = SrgbaTuple(0.5, 0.4, 0.6, 0.5);
 
         let scrollbar_thumb = RgbColor::new_8bpc(0x22, 0x22, 0x22).into();

@@ -10,7 +10,6 @@ use crate::extract_action::jsonish::{
     value::{CompletionState, Fixes},
 };
 
-#[allow(clippy::too_many_lines)]
 pub(super) fn parse_func(
     str: &str,
     mut options: ParseOptions,

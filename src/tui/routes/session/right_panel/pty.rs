@@ -25,7 +25,6 @@ pub fn pty_entry_height(session: &PtySession) -> u16 {
 ///
 /// `max_h` controls how many rows are available — the virtual scroll
 /// system clips to the viewport, so we render as many lines as fit.
-#[allow(clippy::too_many_arguments)]
 pub fn render_one_pty(
     buf: &mut Buffer,
     x: u16,

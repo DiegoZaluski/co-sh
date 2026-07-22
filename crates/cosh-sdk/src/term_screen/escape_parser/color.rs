@@ -80,7 +80,6 @@ impl RgbColor {
     /// Construct a color from discrete red, green, blue values
     /// in the range 0.0-1.0 in the sRGB colorspace.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn new_f32(red: f32, green: f32, blue: f32) -> Self {
         let red = (red * 255.) as u8;
         let green = (green * 255.) as u8;
@@ -91,7 +90,6 @@ impl RgbColor {
     /// Returns red, green, blue as 8bpc values.
     /// Will convert from 10bpc if that is the internal storage.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub const fn to_tuple_rgb8(self) -> (u8, u8, u8) {
         (
             (self.bits >> 16) as u8,
@@ -234,7 +232,6 @@ impl RgbColor {
 }
 
 impl From<SrgbaTuple> for RgbColor {
-    #[allow(clippy::cast_possible_truncation)]
     fn from(srgb: SrgbaTuple) -> Self {
         let SrgbaTuple(r, g, b, _) = srgb;
         Self::new_f32(r as f32, g as f32, b as f32)

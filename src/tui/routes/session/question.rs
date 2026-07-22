@@ -195,7 +195,6 @@ impl QuestionDialog {
     }
 
     /// Handle key events. Returns true if the key was consumed.
-    #[allow(clippy::too_many_lines)]
     pub fn handle_key(&mut self, key: crossterm::event::KeyCode) -> bool {
         if !self.visible {
             return false;
@@ -408,7 +407,6 @@ impl QuestionDialog {
 
     /// Handle a mouse click on the question dialog.
     /// `area` is the area passed to `render()`.
-    #[allow(clippy::too_many_lines)]
     pub fn handle_mouse(&mut self, mouse: &MouseEvent, area: Rect) -> bool {
         if !self.visible {
             return false;
@@ -601,7 +599,6 @@ impl QuestionDialog {
     }
 
     /// Render the question prompt inline inside the given area.
-    #[allow(clippy::too_many_lines)]
     pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
         if !self.visible {
             return;

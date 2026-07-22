@@ -345,7 +345,6 @@ fn extract_schema(desc: &serde_json::Value) -> ToolSchema {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn write_single_tool(out: &mut String, desc: &serde_json::Value) {
     let name = desc["name"].as_str().unwrap_or_default();
     let description = desc["description"].as_str().unwrap_or_default();
@@ -461,7 +460,6 @@ impl Tools for CoshTools {
         v
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn dispatch(&self, name: &str, args: serde_json::Value) -> Result<String, String> {
         match name {
             "bash_run" => {

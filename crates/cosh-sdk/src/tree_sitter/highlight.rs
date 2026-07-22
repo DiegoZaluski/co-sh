@@ -36,7 +36,6 @@ fn lang_from_name(name: &str) -> Option<Language> {
     })
 }
 
-#[allow(clippy::too_many_lines)]
 fn query_for_language(lang: &str) -> Option<&'static str> {
     Some(match lang {
         "rust" | "rs" => {

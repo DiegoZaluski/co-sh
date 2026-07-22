@@ -86,7 +86,6 @@ impl Default for Plan {
 
 impl Plan {
     /// Creates an empty plan.
-    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn new() -> Self {
         Self {

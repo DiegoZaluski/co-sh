@@ -670,7 +670,6 @@ impl Surface {
     ///
     /// The returned list of `Change`s can be passed to the `add_changes` method
     /// to make the region within self match the region within other.
-    #[allow(clippy::too_many_arguments)]
     pub fn diff_region(
         &self,
         x: usize,

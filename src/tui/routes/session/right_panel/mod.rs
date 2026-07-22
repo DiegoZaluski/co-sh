@@ -251,7 +251,6 @@ fn bash_buffer_lines(state: &RightPanelState) -> Vec<String> {
 }
 
 /// Render all bash PTYs as a single continuous text buffer with line-based scroll.
-#[allow(clippy::too_many_arguments)]
 fn render_bash_section(
     buf: &mut Buffer,
     x: u16,
@@ -318,7 +317,6 @@ fn render_bash_section(
 /// again replaces its previous entry (handled in `app.rs` via `retain`).
 /// Lines with "→ cosh:" prefix are the main agent's input (normal style);
 /// all other output lines use muted style.
-#[allow(clippy::too_many_arguments)]
 fn render_subagent_section(
     buf: &mut Buffer,
     x: u16,
@@ -401,7 +399,6 @@ fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: St
 }
 
 /// Draw a scrollbar within a section (not the full panel).
-#[allow(clippy::too_many_arguments)]
 fn draw_section_scrollbar(
     buf: &mut Buffer,
     sb_x: u16,

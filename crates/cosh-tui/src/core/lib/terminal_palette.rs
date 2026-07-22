@@ -243,7 +243,6 @@ fn get_fallback_ansi256_palette() -> &'static [RGBA; 256] {
     static PALETTE: LazyLock<[RGBA; 256]> = LazyLock::new(|| {
         let mut palette = [RGBA::from_ints(0, 0, 0, 255); 256];
         for i in 0..256u16 {
-            #[allow(clippy::cast_possible_truncation)]
             let (r, g, b) = ansi256_index_to_rgb(i as u8);
             palette[i as usize] = RGBA::from_ints(r, g, b, 255);
         }
@@ -252,7 +251,6 @@ fn get_fallback_ansi256_palette() -> &'static [RGBA; 256] {
     &PALETTE
 }
 
-#[allow(clippy::similar_names)]
 #[must_use]
 pub fn normalize_terminal_palette(colors: Option<&TerminalColors>) -> NormalizedTerminalPalette {
     let fallback_palette = get_fallback_ansi256_palette();

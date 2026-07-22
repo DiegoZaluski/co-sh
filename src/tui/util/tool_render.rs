@@ -416,7 +416,6 @@ pub(crate) fn extract_diff_from_json(output: &str) -> Option<String> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_shell(
     buf: &mut Buffer,
     x: u16,
@@ -534,7 +533,6 @@ pub fn render_shell(
 }
 
 /// Draw a code block with line numbers (matching opencode's `<line_number>` wrapper).
-#[allow(clippy::too_many_arguments)]
 fn draw_highlighted_code_with_ln(
     buf: &mut Buffer,
     x: u16,
@@ -648,7 +646,6 @@ fn draw_highlighted_code_with_ln(
     lines_drawn
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_write(
     buf: &mut Buffer,
     x: u16,
@@ -727,7 +724,6 @@ pub fn render_write(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_edit(
     buf: &mut Buffer,
     x: u16,
@@ -822,7 +818,6 @@ pub fn render_edit(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_glob(
     buf: &mut Buffer,
     x: u16,
@@ -854,7 +849,6 @@ pub fn render_glob(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_read(
     buf: &mut Buffer,
     x: u16,
@@ -898,7 +892,6 @@ pub fn render_read(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_grep(
     buf: &mut Buffer,
     x: u16,
@@ -930,7 +923,6 @@ pub fn render_grep(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_webfetch(
     buf: &mut Buffer,
     x: u16,
@@ -957,7 +949,6 @@ pub fn render_webfetch(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_websearch(
     buf: &mut Buffer,
     x: u16,
@@ -986,7 +977,6 @@ pub fn render_websearch(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_task(
     buf: &mut Buffer,
     x: u16,
@@ -1035,7 +1025,6 @@ pub fn render_task(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_question_tool(
     buf: &mut Buffer,
     x: u16,
@@ -1142,7 +1131,6 @@ pub fn format_todo_output(output: &str, tool_name: &str) -> Vec<String> {
     lines
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_todo(
     buf: &mut Buffer,
     x: u16,
@@ -1227,7 +1215,6 @@ pub fn render_todo(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_generic(
     buf: &mut Buffer,
     x: u16,
@@ -1258,7 +1245,6 @@ pub fn render_generic(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_tool(
     buf: &mut Buffer,
     x: u16,

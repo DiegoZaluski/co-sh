@@ -384,7 +384,6 @@ impl DiffRenderable {
     }
 
     /// Render one line within a split panel.
-    #[allow(clippy::too_many_arguments)]
     fn render_split_line(
         &self,
         buf: &mut Buffer,

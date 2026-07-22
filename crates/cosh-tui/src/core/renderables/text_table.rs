@@ -183,7 +183,6 @@ impl Renderable for TextTableRenderable {
         &self.children
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
         let col_widths = self.max_col_widths();
         if col_widths.is_empty() || self.row_count() == 0 {
