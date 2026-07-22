@@ -435,8 +435,7 @@ impl RagView {
     pub(crate) fn create_db_mini_box_height(&self) -> u16 {
         if self.models_expanded {
             // 4 = header(1) + name(1) + description(1) + bottom_padding(1)
-            let max_vis = 8u16;
-            4 + max_vis + 1
+            4 + MAX_VISIBLE_MODELS_IN_FORM as u16 + 1
         } else {
             // 5 = model_line(1) + gap(1) + name(1) + description(1) + bottom_padding(1)
             5
@@ -610,15 +609,13 @@ impl RagView {
             return;
         }
 
-        // Compute a centered overlay with scrollable content
-        let overlay_w = (area.width * 70 / 100)
-            .max(30)
-            .min(area.width.saturating_sub(8));
-        let overlay_h = (area.height * 50 / 100)
-            .max(5)
-            .min(area.height.saturating_sub(8));
-        let overlay_x = area.x + (area.width - overlay_w) / 2;
-        let overlay_y = area.y + (area.height - overlay_h) / 2;
+        let Some(overlay) = self.desc_popup_rect(area) else {
+            return;
+        };
+        let overlay_x = overlay.x;
+        let overlay_y = overlay.y;
+        let overlay_w = overlay.width;
+        let overlay_h = overlay.height;
 
         // Fill background with main background color so it contrasts with panel_bg
         let bg_color = rgba_color(_theme.background);
@@ -675,14 +672,13 @@ impl RagView {
             return;
         }
 
-        let overlay_w = (area.width * 85 / 100)
-            .max(40)
-            .min(area.width.saturating_sub(4));
-        let overlay_h = (area.height * 80 / 100)
-            .max(10)
-            .min(area.height.saturating_sub(4));
-        let overlay_x = area.x + (area.width - overlay_w) / 2;
-        let overlay_y = area.y + (area.height - overlay_h) / 2;
+        let Some(overlay) = self.preview_overlay_rect(area) else {
+            return;
+        };
+        let overlay_x = overlay.x;
+        let overlay_y = overlay.y;
+        let overlay_w = overlay.width;
+        let overlay_h = overlay.height;
 
         // Background fill
         let bg_color = rgba_color(theme.background_element);

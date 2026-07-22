@@ -183,6 +183,13 @@ impl RagView {
     /// Handle keys when the Create DB form is focused.
     /// Tab switches focus between Name and Description fields.
     /// All text input goes to the currently focused field.
+    fn focused_input(&mut self) -> (&mut String, &mut usize) {
+        match self.create_db_focus {
+            CreateDbFocus::Name => (&mut self.db_name_input, &mut self.db_name_cursor_pos),
+            CreateDbFocus::Description => (&mut self.db_description_input, &mut self.db_description_cursor_pos),
+        }
+    }
+
     fn handle_create_db_key(
         &mut self,
         key: ratatui::crossterm::event::KeyCode,
@@ -202,7 +209,7 @@ impl RagView {
                         _ => (self.selected_model_index + 1) % total,
                     };
                     // Keep selected model visible in scroll
-                    let max_vis = 8usize;
+                    let max_vis = super::render::MAX_VISIBLE_MODELS_IN_FORM;
                     if self.selected_model_index >= self.model_scroll_offset + max_vis {
                         self.model_scroll_offset = self
                             .selected_model_index
@@ -280,128 +287,61 @@ impl RagView {
             }
             ratatui::crossterm::event::KeyCode::Char(ch) => {
                 self.note_cursor_activity();
-                match self.create_db_focus {
-                    CreateDbFocus::Name => {
-                        self.db_name_input.insert(self.db_name_cursor_pos, ch);
-                        self.db_name_cursor_pos += ch.len_utf8();
-                    }
-                    CreateDbFocus::Description => {
-                        self.db_description_input
-                            .insert(self.db_description_cursor_pos, ch);
-                        self.db_description_cursor_pos += ch.len_utf8();
-                    }
-                }
+                let (input, pos) = self.focused_input();
+                input.insert(*pos, ch);
+                *pos += ch.len_utf8();
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Backspace => {
                 self.note_cursor_activity();
-                match self.create_db_focus {
-                    CreateDbFocus::Name => {
-                        if self.db_name_cursor_pos > 0 {
-                            let char_start = self
-                                .db_name_input
-                                .floor_char_boundary(self.db_name_cursor_pos - 1);
-                            self.db_name_input.remove(char_start);
-                            self.db_name_cursor_pos = char_start;
-                        }
-                    }
-                    CreateDbFocus::Description => {
-                        if self.db_description_cursor_pos > 0 {
-                            let char_start = self
-                                .db_description_input
-                                .floor_char_boundary(self.db_description_cursor_pos - 1);
-                            self.db_description_input.remove(char_start);
-                            self.db_description_cursor_pos = char_start;
-                        }
-                    }
+                let (input, pos) = self.focused_input();
+                if *pos > 0 {
+                    let char_start = input.floor_char_boundary(*pos - 1);
+                    input.remove(char_start);
+                    *pos = char_start;
                 }
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Delete => {
                 self.note_cursor_activity();
-                match self.create_db_focus {
-                    CreateDbFocus::Name => {
-                        if self.db_name_cursor_pos < self.db_name_input.len() {
-                            let next = self
-                                .db_name_input
-                                .floor_char_boundary(self.db_name_cursor_pos + 1)
-                                .min(self.db_name_input.len());
-                            self.db_name_input.drain(self.db_name_cursor_pos..next);
-                        }
-                    }
-                    CreateDbFocus::Description => {
-                        if self.db_description_cursor_pos < self.db_description_input.len() {
-                            let next = self
-                                .db_description_input
-                                .floor_char_boundary(self.db_description_cursor_pos + 1)
-                                .min(self.db_description_input.len());
-                            self.db_description_input
-                                .drain(self.db_description_cursor_pos..next);
-                        }
-                    }
+                let (input, pos) = self.focused_input();
+                if *pos < input.len() {
+                    let next = input
+                        .floor_char_boundary(*pos + 1)
+                        .min(input.len());
+                    input.drain(*pos..next);
                 }
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Left => {
                 self.note_cursor_activity();
-                match self.create_db_focus {
-                    CreateDbFocus::Name => {
-                        if self.db_name_cursor_pos > 0 {
-                            self.db_name_cursor_pos = self
-                                .db_name_input
-                                .floor_char_boundary(self.db_name_cursor_pos - 1);
-                        }
-                    }
-                    CreateDbFocus::Description => {
-                        if self.db_description_cursor_pos > 0 {
-                            self.db_description_cursor_pos = self
-                                .db_description_input
-                                .floor_char_boundary(self.db_description_cursor_pos - 1);
-                        }
-                    }
+                let (input, pos) = self.focused_input();
+                if *pos > 0 {
+                    *pos = input.floor_char_boundary(*pos - 1);
                 }
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Right => {
                 self.note_cursor_activity();
-                match self.create_db_focus {
-                    CreateDbFocus::Name => {
-                        if self.db_name_cursor_pos < self.db_name_input.len() {
-                            let next = self
-                                .db_name_input
-                                .floor_char_boundary(self.db_name_cursor_pos + 1)
-                                .min(self.db_name_input.len());
-                            self.db_name_cursor_pos = next;
-                        }
-                    }
-                    CreateDbFocus::Description => {
-                        if self.db_description_cursor_pos < self.db_description_input.len() {
-                            let next = self
-                                .db_description_input
-                                .floor_char_boundary(self.db_description_cursor_pos + 1)
-                                .min(self.db_description_input.len());
-                            self.db_description_cursor_pos = next;
-                        }
-                    }
+                let (input, pos) = self.focused_input();
+                if *pos < input.len() {
+                    let next = input
+                        .floor_char_boundary(*pos + 1)
+                        .min(input.len());
+                    *pos = next;
                 }
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Home => {
                 self.note_cursor_activity();
-                match self.create_db_focus {
-                    CreateDbFocus::Name => self.db_name_cursor_pos = 0,
-                    CreateDbFocus::Description => self.db_description_cursor_pos = 0,
-                }
+                let (_, pos) = self.focused_input();
+                *pos = 0;
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::End => {
                 self.note_cursor_activity();
-                match self.create_db_focus {
-                    CreateDbFocus::Name => self.db_name_cursor_pos = self.db_name_input.len(),
-                    CreateDbFocus::Description => {
-                        self.db_description_cursor_pos = self.db_description_input.len()
-                    }
-                }
+                let (input, pos) = self.focused_input();
+                *pos = input.len();
                 Some(RagAction::Consumed)
             }
             _ => Some(RagAction::Consumed),
@@ -702,11 +642,11 @@ impl RagView {
 
         // Compute y positions for Name and Description lines
         let model_line_count = if self.models_expanded {
-            let max_vis = 8usize;
+            let max_vis = super::render::MAX_VISIBLE_MODELS_IN_FORM;
             let total = self.available_models.len();
-            1 + max_vis.min(total) as u16 // "Model" label + model items
+            1 + max_vis.min(total) as u16
         } else {
-            1 // single collapsed model line
+            1
         };
 
         let name_y = form_y + model_line_count;
@@ -816,7 +756,7 @@ impl RagView {
     }
 
     /// Compute the bounding rect of the description popup.
-    fn desc_popup_rect(&self, area: Rect) -> Option<Rect> {
+    pub(crate) fn desc_popup_rect(&self, area: Rect) -> Option<Rect> {
         let idx = self.show_desc_for_db?;
         let filtered = self.filtered_dbs();
         if idx >= filtered.len() {
