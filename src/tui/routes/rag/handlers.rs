@@ -143,17 +143,6 @@ impl RagView {
                 }
                 Some(RagAction::Consumed)
             }
-            ratatui::crossterm::event::KeyCode::Char(' ') => {
-                if !self.registry.dbs.is_empty() && self.selected_db_index < self.registry.dbs.len()
-                {
-                    let name = &self.registry.dbs[self.selected_db_index].name;
-                    if !self.active_dbs.remove(name) {
-                        self.active_dbs.insert(name.clone());
-                    }
-                    super::registry::RagRegistry::save_active(&self.active_dbs);
-                }
-                Some(RagAction::Consumed)
-            }
             ratatui::crossterm::event::KeyCode::Home => {
                 self.url_input.cursor_home();
                 Some(RagAction::Consumed)
@@ -420,6 +409,21 @@ impl RagView {
 
     pub fn handle_paste(&mut self, text: &str) {
         self.url_input.handle_paste(text);
+    }
+
+    // Ctrl+Backspace: delete the word before the cursor in the URL input.
+    pub fn handle_ctrl_backspace(&mut self) {
+        self.url_input.delete_word_before_cursor();
+    }
+
+    // Ctrl+Left: jump to the start of the previous word.
+    pub fn handle_ctrl_left(&mut self) {
+        self.url_input.cursor_word_left();
+    }
+
+    // Ctrl+Right: jump to the start of the next word.
+    pub fn handle_ctrl_right(&mut self) {
+        self.url_input.cursor_word_right();
     }
 
     // Preview overlay geometry (shared with mouse handling)

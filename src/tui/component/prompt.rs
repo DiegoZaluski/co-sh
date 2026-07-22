@@ -294,127 +294,35 @@ impl PromptView {
         if self.cursor_pos == 0 {
             return;
         }
-
-        let pos = self.cursor_pos.min(self.input.len());
-        let mut i = pos;
-
-        // 1. Skip any whitespace immediately before the cursor.
-        while i > 0 {
-            let prev = self.input.floor_char_boundary(i - 1);
-            if prev >= i {
-                break;
-            }
-            let ch = self.input[prev..i].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                i = prev;
-            } else {
-                break;
-            }
-        }
-
-        // 2. Skip the word (non-whitespace) characters.
-        while i > 0 {
-            let prev = self.input.floor_char_boundary(i - 1);
-            if prev >= i {
-                break;
-            }
-            let ch = self.input[prev..i].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                i = prev;
-            } else {
-                break;
-            }
-        }
-
-        if i < self.cursor_pos {
+        let start = crate::util::word_ops::find_word_start(&self.input, self.cursor_pos);
+        if start < self.cursor_pos {
             self.note_activity();
-            self.input.drain(i..self.cursor_pos);
-            self.cursor_pos = i;
+            self.input.drain(start..self.cursor_pos);
+            self.cursor_pos = start;
         }
     }
 
-    /// Move cursor to the beginning of the previous word.
-    /// Behaves like Ctrl+Left in most terminals/editors.
     pub fn cursor_word_left(&mut self) {
         if self.cursor_pos == 0 || self.input.is_empty() {
             return;
         }
-
-        let pos = self.cursor_pos.min(self.input.len());
-        let mut i = pos;
-
-        // 1. Skip any whitespace immediately before the cursor.
-        while i > 0 {
-            let prev = self.input.floor_char_boundary(i - 1);
-            if prev >= i {
-                break;
-            }
-            let ch = self.input[prev..i].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                i = prev;
-            } else {
-                break;
-            }
+        let new_pos = crate::util::word_ops::find_word_start(&self.input, self.cursor_pos);
+        if new_pos < self.cursor_pos {
+            self.note_activity();
+            self.cursor_pos = new_pos;
         }
-
-        // 2. Skip the word (non-whitespace) characters.
-        while i > 0 {
-            let prev = self.input.floor_char_boundary(i - 1);
-            if prev >= i {
-                break;
-            }
-            let ch = self.input[prev..i].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                i = prev;
-            } else {
-                break;
-            }
-        }
-
-        self.note_activity();
-        self.cursor_pos = i;
     }
 
-    /// Move cursor to the beginning of the next word.
-    /// Behaves like Ctrl+Right in most terminals/editors.
     pub fn cursor_word_right(&mut self) {
         let len = self.input.len();
         if self.cursor_pos >= len || self.input.is_empty() {
             return;
         }
-
-        let mut i = self.cursor_pos;
-
-        // 1. Skip the current word (non-whitespace) characters.
-        while i < len {
-            let next = self.input.floor_char_boundary(i + 1).min(len);
-            if next <= i {
-                break;
-            }
-            let ch = self.input[i..next].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                i = next;
-            } else {
-                break;
-            }
+        let new_pos = crate::util::word_ops::find_word_end(&self.input, self.cursor_pos);
+        if new_pos > self.cursor_pos {
+            self.note_activity();
+            self.cursor_pos = new_pos;
         }
-
-        // 2. Skip whitespace to reach the start of the next word.
-        while i < len {
-            let next = self.input.floor_char_boundary(i + 1).min(len);
-            if next <= i {
-                break;
-            }
-            let ch = self.input[i..next].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                i = next;
-            } else {
-                break;
-            }
-        }
-
-        self.note_activity();
-        self.cursor_pos = i;
     }
 
     pub fn cursor_up(&mut self, text_w: usize) {

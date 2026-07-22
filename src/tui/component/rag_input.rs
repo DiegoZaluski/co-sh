@@ -6,8 +6,8 @@ use ratatui::style::{Color, Style};
 use crate::component::cursor::{Cursor, CursorState};
 use crate::theme::Theme;
 
-use cosh_tui::core::lib::unicode_util;
 use cosh_tui::core::lib::rgba::RGBA;
+use cosh_tui::core::lib::unicode_util;
 
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
@@ -76,10 +76,7 @@ impl RagInput {
     /// control characters (including `\n`) — the RAG input is single-line.
     pub fn handle_paste(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        let cleaned: String = normalized
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect();
+        let cleaned: String = normalized.chars().filter(|c| !c.is_control()).collect();
         self.text.insert_str(self.cursor_pos, &cleaned);
         self.cursor_pos += cleaned.len();
         self.cursor.note_activity();
@@ -113,6 +110,41 @@ impl RagInput {
         self.cursor.note_activity();
     }
 
+    pub fn delete_word_before_cursor(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let start = crate::util::word_ops::find_word_start(&self.text, self.cursor_pos);
+        if start < self.cursor_pos {
+            self.cursor.note_activity();
+            self.text.drain(start..self.cursor_pos);
+            self.cursor_pos = start;
+        }
+    }
+
+    pub fn cursor_word_left(&mut self) {
+        if self.cursor_pos == 0 || self.text.is_empty() {
+            return;
+        }
+        let new_pos = crate::util::word_ops::find_word_start(&self.text, self.cursor_pos);
+        if new_pos < self.cursor_pos {
+            self.cursor.note_activity();
+            self.cursor_pos = new_pos;
+        }
+    }
+
+    pub fn cursor_word_right(&mut self) {
+        let len = self.text.len();
+        if self.cursor_pos >= len || self.text.is_empty() {
+            return;
+        }
+        let new_pos = crate::util::word_ops::find_word_end(&self.text, self.cursor_pos);
+        if new_pos > self.cursor_pos {
+            self.cursor.note_activity();
+            self.cursor_pos = new_pos;
+        }
+    }
+
     pub fn as_str(&self) -> &str {
         &self.text
     }
@@ -140,7 +172,15 @@ impl RagInput {
     /// Render the input box, drawing at most `max_height` rows.
     /// `width` is the full box width including borders.
     /// `max_height` caps the rendered height (e.g. when the layout has limited space).
-    pub fn render(&self, buf: &mut Buffer, x: u16, y: u16, width: u16, max_height: u16, theme: &Theme) {
+    pub fn render(
+        &self,
+        buf: &mut Buffer,
+        x: u16,
+        y: u16,
+        width: u16,
+        max_height: u16,
+        theme: &Theme,
+    ) {
         if width < 4 {
             return;
         }
@@ -256,7 +296,9 @@ impl RagInput {
                         match state {
                             CursorState::On => {
                                 cell.set_char('\u{2588}');
-                                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg));
+                                cell.set_style(
+                                    Style::default().fg(rgba_color(theme.primary)).bg(bg),
+                                );
                             }
                             CursorState::Off | CursorState::Blur => {
                                 cell.set_char('\u{2592}');

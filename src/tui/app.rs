@@ -1787,6 +1787,31 @@ impl App {
                         }
                     }
 
+                    // RAG mode: handle Ctrl+Backspace, Ctrl+Left, Ctrl+Right
+                    // before passing key.code (which loses modifier info).
+                    if self.is_rag_mode() && !self.dialog.visible() {
+                        match key.code {
+                            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                self.rag_view.handle_ctrl_backspace();
+                                return Ok(false);
+                            }
+                            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                self.rag_view.handle_ctrl_left();
+                                return Ok(false);
+                            }
+                            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                self.rag_view.handle_ctrl_right();
+                                return Ok(false);
+                            }
+                            // Ctrl+W = delete word before cursor (universal terminal shortcut)
+                            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                self.rag_view.handle_ctrl_backspace();
+                                return Ok(false);
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // RAG mode: handle via RagView
                     if self.handle_rag_key_event(key.code) {
                         return Ok(false);
