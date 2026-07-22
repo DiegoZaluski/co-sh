@@ -217,7 +217,7 @@ impl RagView {
         inner_w: u16,
         layout: RagLayout,
         y: &mut u16,
-        _theme: &Theme,
+        theme: &Theme,
         fg: Color,
         muted: Color,
         warning: Color,
@@ -243,34 +243,51 @@ impl RagView {
 
         // URL/path input
         let input_w = inner_w.saturating_sub(4);
-        self.url_input.render(buf, cx, cy, input_w, _theme);
+        self.url_input.render(buf, cx, cy, input_w, layout.input_h, theme);
 
-        // DB indicator inside the input box (line 2, below placeholder)
-        let input_bg = rgba_color(_theme.background_element);
-        if let Some(db_name) = &self.selected_db_for_embed {
-            draw_text_line(
-                buf,
-                &format!("DB {db_name}"),
-                cx + 2,
-                cy + 2,
-                input_w.saturating_sub(4),
-                Style::default().fg(fg).bg(input_bg),
-            );
+        // DB indicator on the first line of the input box (line 0), which
+        // is always reserved (text starts at line 1). Shown regardless of
+        // how much text is in the input.
+        let input_bg = rgba_color(theme.background_element);
+        let db_label = match &self.selected_db_for_embed {
+            Some(name) => format!("DB {name}"),
+            None => "No DB selected".to_string(),
+        };
+        let db_color = if self.selected_db_for_embed.is_some() {
+            fg
         } else {
-            draw_text_line(
-                buf,
-                "No DB selected",
-                cx + 2,
-                cy + 2,
-                input_w.saturating_sub(4),
-                Style::default().fg(warning).bg(input_bg),
-            );
-        }
+            warning
+        };
+        draw_text_line(
+            buf,
+            &db_label,
+            cx + 2,
+            cy,
+            input_w.saturating_sub(4),
+            Style::default().fg(db_color).bg(input_bg),
+        );
 
         cy += layout.input_h;
 
-        // Preview / status
+        // Status line — content depends on mode.
         match self.mode {
+            RagMode::Idle => {
+                // Action buttons (only when form/picker not open)
+                if !self.show_create_db && !self.show_db_picker {
+                    let right_side_start = cx + input_w.saturating_sub(2);
+                    let mut btn_x = right_side_start;
+
+                    let create_btn = " +Create DB ";
+                    btn_x = btn_x.saturating_sub(create_btn.len() as u16);
+                    section_title(buf, btn_x, cy, create_btn, title_bg, title_fg);
+
+                    if !self.registry.dbs.is_empty() {
+                        let sel_btn = " Select DB ";
+                        btn_x = btn_x.saturating_sub(sel_btn.len() as u16);
+                        section_title(buf, btn_x, cy, sel_btn, success, title_fg);
+                    }
+                }
+            }
             RagMode::Fetching | RagMode::Embedding => {
                 let ch = self.spinner.current_char();
                 if let Some(cell) = buf.cell_mut((cx, cy)) {
@@ -284,9 +301,9 @@ impl RagView {
                 draw_text_line(
                     buf,
                     label,
-                    cx + 2,
+                    cx + 1,
                     cy,
-                    input_w.saturating_sub(2),
+                    input_w.saturating_sub(1),
                     Style::default().fg(muted),
                 );
             }
@@ -300,38 +317,19 @@ impl RagView {
                     Style::default().fg(muted),
                 );
             }
-            RagMode::Idle => {}
-        }
-
-        // ── Action buttons (right side, only when form/picker not open) ──
-        if !self.show_create_db && !self.show_db_picker {
-            let right_side_start = cx + input_w.saturating_sub(2);
-            let mut btn_x = right_side_start;
-
-            // "+Create DB" button (rightmost) — primary bg
-            let create_btn = " +Create DB ";
-            btn_x = btn_x.saturating_sub(create_btn.len() as u16);
-            section_title(buf, btn_x, cy, create_btn, title_bg, title_fg);
-
-            // "Select DB" button (second from right) — success bg for visual distinction
-            if !self.registry.dbs.is_empty() {
-                let sel_btn = " Select DB ";
-                btn_x = btn_x.saturating_sub(sel_btn.len() as u16);
-                section_title(buf, btn_x, cy, sel_btn, success, title_fg);
-            }
         }
 
         // DB picker (replaces button line when open)
         if self.show_db_picker && !self.show_create_db {
             self.render_db_picker(
-                buf, cx, cy, input_w, _theme, fg, muted, success, primary, title_bg, title_fg,
+                buf, cx, cy, input_w, theme, fg, muted, success, primary, title_bg, title_fg,
             );
         }
 
         // Create New Database form (replaces button line when open)
         if self.show_create_db {
             self.render_create_db_form(
-                buf, cx, cy, input_w, _theme, fg, muted, warning, primary, title_fg, panel_bg,
+                buf, cx, cy, input_w, theme, fg, muted, warning, primary, title_fg, panel_bg,
             );
         }
 
@@ -516,7 +514,7 @@ impl RagView {
         area: Rect,
         layout: RagLayout,
         y: &mut u16,
-        _theme: &Theme,
+        theme: &Theme,
         fg: Color,
         muted: Color,
         warning: Color,
@@ -574,7 +572,7 @@ impl RagView {
         // SearchBar filter
         if layout.filter_h > 0 {
             self.db_filter
-                .render(buf, cx, cy, inner_w.saturating_sub(4), _theme);
+                .render(buf, cx, cy, inner_w.saturating_sub(4), theme);
             cy += 1;
         }
 
@@ -656,10 +654,10 @@ impl RagView {
         }
 
         // Description popup (simple overlay with just the description text)
-        self.render_desc_popup(buf, area, _theme, fg);
+        self.render_desc_popup(buf, area, theme, fg);
     }
 
-    fn render_desc_popup(&self, buf: &mut Buffer, area: Rect, _theme: &Theme, fg: Color) {
+    fn render_desc_popup(&self, buf: &mut Buffer, area: Rect, theme: &Theme, fg: Color) {
         let Some(idx) = self.show_desc_for_db else {
             return;
         };
@@ -681,7 +679,7 @@ impl RagView {
         let overlay_h = overlay.height;
 
         // Fill background with main background color so it contrasts with panel_bg
-        let bg_color = rgba_color(_theme.background);
+        let bg_color = rgba_color(theme.background);
         fill_rect(
             buf,
             overlay_x,

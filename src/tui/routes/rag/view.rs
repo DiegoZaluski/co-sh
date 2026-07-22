@@ -18,7 +18,7 @@ use crate::component::rag_input::RagInput;
 use crate::component::search_bar::SearchBar;
 use crate::component::spinner::SpinnerState;
 
-// ── Layout constants ────────────────────────────────────────────────────
+// Layout constants
 
 /// Percentage of available height used for Box 1 (Embed Content).
 const BOX1_HEIGHT_PCT: u16 = 30;
@@ -42,7 +42,7 @@ const BOX1_BOTTOM_MARGIN: u16 = 8;
 /// Terminal rows reserved for the model count calculation in the expanded selector.
 const MODEL_COUNT_HEADROOM: u16 = 10;
 
-// ── RagLayout ────────────────────────────────────────────────────────────
+// RagLayout
 
 /// Pre-computed layout geometry for the RAG view.
 ///
@@ -89,7 +89,8 @@ impl RagView {
         let gap: u16 = 1;
         let bottom_gap: u16 = 0;
 
-        let input_h = self.url_input.height(); // 3
+        let inner_w = area.width.saturating_sub(4);
+        let mut input_h = self.url_input.height(area.width);
         let db_model_count = if self.show_create_db && self.models_expanded {
             self.available_models.len().min(max_visible_models(avail_h))
         } else {
@@ -112,6 +113,17 @@ impl RagView {
                 .max(BOX1_MIN_BASE + create_db_lines)
                 .min(avail_h.saturating_sub(BOX1_BOTTOM_MARGIN))
         };
+        // Clamp input_h to what box1 can actually hold.
+        // Without form: box1 = title(1) + gap(1) + input(input_h) + status(1) + bottom_gap(1) = 4 + input_h
+        // With form:    box1 = title(1) + gap(1) + input(input_h) + form(form_h) = 2 + input_h + form_h
+        let max_input_h = if self.show_create_db || self.show_db_picker {
+            let form_h = self.create_db_mini_box_height();
+            box1_h.saturating_sub(2 + form_h)
+        } else {
+            box1_h.saturating_sub(4)
+        };
+        input_h = input_h.min(max_input_h).max(3);
+
         let box2_y = area.y + box1_h + gap;
         let box2_available = avail_h.saturating_sub(box1_h + gap + bottom_gap);
         let box2_h = box2_available.max(5);
@@ -127,7 +139,6 @@ impl RagView {
         let list_h = box2_h.saturating_sub(1 + header_gap + warning_h + filter_h + pad_bottom);
         let list_start_y = box2_y + 1 + header_gap + warning_h + filter_h;
 
-        let inner_w = area.width.saturating_sub(4);
         let inner_x = area.x + 2;
         let cx = inner_x + 2;
 
@@ -151,7 +162,7 @@ impl RagView {
     }
 }
 
-// ── RagView ─────────────────────────────────────────────────────────────
+// RagView
 
 pub struct RagView {
     pub mode: RagMode,
@@ -238,7 +249,7 @@ impl RagView {
         }
     }
 
-    // ── State transitions ─────────────────────────────────────────────
+    // State transitions
 
     pub fn start_fetch(&mut self, _source: &str) {
         self.mode = RagMode::Fetching;
@@ -339,7 +350,7 @@ impl RagView {
         &self.active_dbs
     }
 
-    // ── DB helpers ─────────────────────────────────────────────────────
+    // DB helpers
 
     pub fn toggle_db(&mut self, registry_idx: usize) {
         self.selected_db_index = registry_idx;
@@ -409,7 +420,7 @@ impl RagView {
         matches!(self.mode, RagMode::Fetching | RagMode::Embedding)
     }
 
-    // ── DB picker helpers ────────────────────────────────────────────────
+    // DB picker helpers
 
     pub fn toggle_db_picker(&mut self) {
         self.show_db_picker = !self.show_db_picker;
@@ -452,7 +463,7 @@ impl RagView {
         }
     }
 
-    // ── Internal helpers ───────────────────────────────────────────────
+    // Internal helpers
 
     pub(crate) fn max_preview_scroll(&self) -> usize {
         self.content_preview
@@ -502,7 +513,7 @@ impl Default for RagView {
     }
 }
 
-// ── Free helpers ────────────────────────────────────────────────────────
+// Free helpers
 
 /// Max number of models to show in the expanded selector (depends on terminal height).
 pub(crate) fn max_visible_models(avail_h: u16) -> usize {

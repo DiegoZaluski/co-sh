@@ -15,7 +15,7 @@ use super::render::{
 };
 use super::view::RagView;
 
-// ── Keyboard handling ──────────────────────────────────────────────────
+// Keyboard handling
 
 impl RagView {
     pub fn handle_key(&mut self, key: ratatui::crossterm::event::KeyCode) -> Option<RagAction> {
@@ -422,7 +422,7 @@ impl RagView {
         self.url_input.handle_paste(text);
     }
 
-    // ── Preview overlay geometry (shared with mouse handling) ──────────
+    // Preview overlay geometry (shared with mouse handling)
 
     /// Compute the preview overlay rectangle for the given area.
     pub(crate) fn preview_overlay_rect(&self, area: Rect) -> Option<Rect> {
@@ -441,8 +441,7 @@ impl RagView {
     }
 }
 
-// ── Mouse handling ─────────────────────────────────────────────────────
-
+// Mouse handling
 impl RagView {
     /// Public entry point. Returns `Some(index)` for a DB row click,
     /// `None` otherwise.
@@ -473,7 +472,7 @@ impl RagView {
             return None;
         }
         let inner_x = area.x + 2;
-        let input_h = self.url_input.height();
+        let input_h = self.url_input.height(area.width);
 
         // The picker renders at cy, with fixed height matching create form
         let picker_y = area.y + 2 + input_h;
@@ -505,7 +504,7 @@ impl RagView {
             return false;
         }
         let inner_x = area.x + 2;
-        let input_h = self.url_input.height();
+        let input_h = self.url_input.height(area.width);
         let picker_y = area.y + 2 + input_h;
         let picker_h = PICKER_BOX_HEIGHT;
         let mx = mouse.x;
@@ -556,7 +555,7 @@ impl RagView {
         if inner_w < MIN_CONTENT_WIDTH {
             return false;
         }
-        let input_h = self.url_input.height();
+        let input_h = self.url_input.height(area.width);
         let input_w = inner_w.saturating_sub(4);
         let cx = area.x + 4;
         let mx = mouse.x;
@@ -579,7 +578,7 @@ impl RagView {
         if !self.show_create_db || self.models_expanded {
             return false;
         }
-        let model_y = area.y + 2 + self.url_input.height();
+        let model_y = area.y + 2 + self.url_input.height(area.width);
         let inner_w = area.width.saturating_sub(4);
         if inner_w < MIN_CONTENT_WIDTH {
             return false;
@@ -598,7 +597,7 @@ impl RagView {
         if inner_w < MIN_CONTENT_WIDTH {
             return false;
         }
-        let input_h = self.url_input.height();
+        let input_h = self.url_input.height(area.width);
         let input_w = inner_w.saturating_sub(4);
         let cx = area.x + 4;
         let mx = mouse.x;
@@ -631,7 +630,7 @@ impl RagView {
             return false;
         }
         let inner_x = area.x + 2;
-        let input_h = self.url_input.height();
+        let input_h = self.url_input.height(area.width);
         let form_y = area.y + 2 + input_h;
         let mx = mouse.x;
         let my = mouse.y;
@@ -791,7 +790,7 @@ impl RagView {
             return false;
         }
         let inner_x = area.x + 2;
-        let input_h = self.url_input.height();
+        let input_h = self.url_input.height(area.width);
         let form_y = area.y + 2 + input_h;
         let form_h = self.create_db_mini_box_height();
         let mx = mouse.x;

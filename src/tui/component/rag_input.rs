@@ -1,24 +1,26 @@
-//! Input component for the RAG feature (URLs, file paths).
-//!
-//! Styled like the session prompt but single-line — left vertical border
-//! `┃` (`\u{2503}`), `background_element` fill, blinking cursor, paste
-//! support.  The border colour comes from `theme.primary` (matching the
-//! session prompt's agent colour).
-
 use std::time::SystemTime;
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::style::{Color, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
 use crate::theme::Theme;
 
-fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
+use cosh_tui::core::lib::unicode_util;
+use cosh_tui::core::lib::rgba::RGBA;
+
+fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
 }
 
 const PLACEHOLDER: &str = "Enter URL or file path, then press Enter";
+
+/// Maximum number of visible lines the input box can grow to.
+const MAX_INPUT_HEIGHT: u16 = 15;
+
+/// Minimum rows for the input box (placeholder or single short text).
+const MIN_INPUT_HEIGHT: u16 = 3;
 
 pub struct RagInput {
     pub text: String,
@@ -70,14 +72,13 @@ impl RagInput {
         self.cursor.note_activity();
     }
 
-    /// Paste text into the input.  Normalises line endings and strips
-    /// control characters (saves the cursor position first, then
-    /// re-establishes it at the end of the inserted text).
+    /// Paste text into the input. Normalises line endings and strips all
+    /// control characters (including `\n`) — the RAG input is single-line.
     pub fn handle_paste(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         let cleaned: String = normalized
             .chars()
-            .filter(|c| !c.is_control() || *c == '\n')
+            .filter(|c| !c.is_control())
             .collect();
         self.text.insert_str(self.cursor_pos, &cleaned);
         self.cursor_pos += cleaned.len();
@@ -119,15 +120,27 @@ impl RagInput {
         self.text.is_empty()
     }
 
-    /// Always 3 — three-line input (centered text on middle line).
-    pub const fn height(&self) -> u16 {
-        3
+    /// Number of rows needed to display the input text at the given box width.
+    /// Box width includes borders — internal text width is box_width - 4.
+    /// Uses grapheme-aware display width so CJK/emoji don't cause overflow.
+    /// Always keeps one empty row at the top for the DB indicator.
+    /// Returns at least 3, capped at MAX_INPUT_HEIGHT.
+    pub fn height(&self, box_width: u16) -> u16 {
+        let text_w = (box_width.saturating_sub(4) as usize).max(1);
+        if self.text.is_empty() {
+            return MIN_INPUT_HEIGHT;
+        }
+        let total_w = unicode_util::str_display_width(&self.text);
+        let text_lines = (total_w + text_w - 1) / text_w;
+        // +1 for the offset (text starts at line 1, line 0 reserved)
+        let lines = text_lines + 1;
+        (lines as u16).max(MIN_INPUT_HEIGHT).min(MAX_INPUT_HEIGHT)
     }
 
-    /// Render the input as three lines with `┃` borders on both sides
-    /// and `background_element` fill. Text and cursor live on line 1
-    /// (the middle row) so they appear vertically centered.
-    pub fn render(&self, buf: &mut Buffer, x: u16, y: u16, width: u16, theme: &Theme) {
+    /// Render the input box, drawing at most `max_height` rows.
+    /// `width` is the full box width including borders.
+    /// `max_height` caps the rendered height (e.g. when the layout has limited space).
+    pub fn render(&self, buf: &mut Buffer, x: u16, y: u16, width: u16, max_height: u16, theme: &Theme) {
         if width < 4 {
             return;
         }
@@ -138,23 +151,21 @@ impl RagInput {
         let border_color = rgba_color(theme.primary);
         let now = SystemTime::now();
         let right_x = x + width.saturating_sub(1);
+        let desired_rows = self.height(width);
+        let total_rows = desired_rows.min(max_height);
+        let text_w = (width.saturating_sub(4) as usize).max(1);
+        let text_x = x + 2;
 
-        for row in 0..3 {
+        for row in 0..total_rows {
             let ry = y + row;
-
-            // ── Left border ───────────────────────────────────────────
             if let Some(cell) = buf.cell_mut((x, ry)) {
                 cell.set_char('\u{2503}');
                 cell.set_style(Style::default().fg(border_color).bg(bg));
             }
-
-            // ── Right border ──────────────────────────────────────────
             if let Some(cell) = buf.cell_mut((right_x, ry)) {
                 cell.set_char('\u{2503}');
                 cell.set_style(Style::default().fg(border_color).bg(bg));
             }
-
-            // ── Background fill ───────────────────────────────────────
             for dx in 1..right_x.saturating_sub(x) {
                 if let Some(cell) = buf.cell_mut((x + dx, ry)) {
                     cell.set_char(' ');
@@ -163,39 +174,19 @@ impl RagInput {
             }
         }
 
-        // ── Text / placeholder (centered vertically on line 1) ────────
-        let text_y = y + 1; // middle row: line 0 empty, line 1 text, line 2 empty
-        let text_x = x + 2;
-        let text_w = width.saturating_sub(4) as usize;
-
-        let is_placeholder = self.text.is_empty();
-        let display_text = if is_placeholder {
-            PLACEHOLDER
-        } else {
-            &self.text
-        };
-        let text_color = if is_placeholder { muted } else { fg };
-
-        let truncated: String = display_text.chars().take(text_w).collect();
-        for (i, ch) in truncated.chars().enumerate() {
-            let cx = text_x + i as u16;
-            if let Some(cell) = buf.cell_mut((cx, text_y)) {
-                cell.set_char(ch);
-                cell.set_style(Style::default().fg(text_color).bg(bg));
+        if self.text.is_empty() {
+            let placeholder_line: String = PLACEHOLDER.chars().take(text_w).collect();
+            let text_y = y + 1;
+            for (i, ch) in placeholder_line.chars().enumerate() {
+                let cx = text_x + i as u16;
+                if let Some(cell) = buf.cell_mut((cx, text_y)) {
+                    cell.set_char(ch);
+                    cell.set_style(Style::default().fg(muted).bg(bg));
+                }
             }
-        }
-
-        // ── Cursor (line 1 only, centered) ─────────────────────────────
-        if self.is_focused {
-            let cursor_col = if !self.text.is_empty() {
-                self.text[..self.cursor_pos].chars().count()
-            } else {
-                0
-            };
-            let cursor_x = text_x + cursor_col as u16;
-            if cursor_x < right_x {
+            if self.is_focused {
                 let state = self.cursor.current_state(now);
-                if let Some(cell) = buf.cell_mut((cursor_x, text_y)) {
+                if let Some(cell) = buf.cell_mut((text_x, text_y)) {
                     match state {
                         CursorState::On => {
                             cell.set_char('\u{2588}');
@@ -204,6 +195,73 @@ impl RagInput {
                         CursorState::Off | CursorState::Blur => {
                             cell.set_char('\u{2592}');
                             cell.set_style(Style::default().fg(muted).bg(bg));
+                        }
+                    }
+                }
+            }
+        } else {
+            // Text starts at line 1 (y+1), leaving line 0 reserved for the
+            // DB indicator. Uses grapheme-aware iteration so that CJK, emoji,
+            // and zero-width graphemes are handled safely without triggering
+            // ratatui's set_char width assertion.
+            // The loop stops early if `total_rows` is capped by the layout.
+            let mut col = 0u16;
+            let mut line = 1u16;
+            for (grapheme, gw) in unicode_util::graphemes_with_width(&self.text) {
+                if col + gw > text_w as u16 {
+                    line += 1;
+                    col = 0;
+                }
+                if line >= total_rows {
+                    break;
+                }
+                let ry = y + line;
+                let cx = text_x + col;
+                if let Some(cell) = buf.cell_mut((cx, ry)) {
+                    cell.set_symbol(grapheme);
+                    cell.set_style(Style::default().fg(fg).bg(bg));
+                }
+                if gw > 1 {
+                    for dx in 1..gw {
+                        if let Some(cell) = buf.cell_mut((cx + dx, ry)) {
+                            cell.set_diff_option(CellDiffOption::Skip);
+                        }
+                    }
+                }
+                col += gw;
+            }
+
+            // Cursor at line 1+offset, matching text position.
+            if self.is_focused {
+                let cursor_byte = self.cursor_pos.min(self.text.len());
+                let prefix = &self.text[..cursor_byte];
+                let mut cursor_col = 0u16;
+                let mut cursor_line = 1u16;
+                let mut acc_col = 0u16;
+                let mut acc_line = 1u16;
+                for (_, gw) in unicode_util::graphemes_with_width(prefix) {
+                    if acc_col + gw > text_w as u16 {
+                        acc_line += 1;
+                        acc_col = 0;
+                    }
+                    cursor_col = acc_col;
+                    cursor_line = acc_line;
+                    acc_col += gw;
+                }
+                let cursor_y = y + cursor_line;
+                let cursor_x = text_x + cursor_col;
+                if cursor_line < total_rows && cursor_x < right_x {
+                    let state = self.cursor.current_state(now);
+                    if let Some(cell) = buf.cell_mut((cursor_x, cursor_y)) {
+                        match state {
+                            CursorState::On => {
+                                cell.set_char('\u{2588}');
+                                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg));
+                            }
+                            CursorState::Off | CursorState::Blur => {
+                                cell.set_char('\u{2592}');
+                                cell.set_style(Style::default().fg(muted).bg(bg));
+                            }
                         }
                     }
                 }
