@@ -113,6 +113,12 @@ pub struct App {
     /// When set, the current Confirm dialog is asking about deleting a RAG database.
     #[cfg(feature = "embed")]
     pending_delete_db_name: Option<String>,
+    /// Handle for the async URL fetch task, aborted on Esc.
+    #[cfg(feature = "embed")]
+    rag_fetch_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Handle for the async embed task, aborted on Esc.
+    #[cfg(feature = "embed")]
+    rag_embed_handle: Option<tokio::task::JoinHandle<()>>,
 
     // ── Mouse drag / selection tracking ───────────────────────────────────────────
     /// Position where the mouse was pressed down (for detecting drag selections).
@@ -191,6 +197,10 @@ impl App {
             pending_delete_session_id: None,
             #[cfg(feature = "embed")]
             pending_delete_db_name: None,
+            #[cfg(feature = "embed")]
+            rag_fetch_handle: None,
+            #[cfg(feature = "embed")]
+            rag_embed_handle: None,
             should_quit: false,
             tokio_handle: Handle::current(),
             event_tx,
@@ -993,6 +1003,16 @@ impl App {
             use crate::routes::rag::RagAction;
             match self.rag_view.handle_key(key) {
                 Some(RagAction::Back) => {
+                    // Abort any in-flight async operations so the app doesn't
+                    // accumulate stale background tasks after leaving RAG mode.
+                    if let Some(h) = self.rag_fetch_handle.take() {
+                        h.abort();
+                    }
+                    if let Some(h) = self.rag_embed_handle.take() {
+                        h.abort();
+                    }
+                    self.rag_view.fetch_rx = None;
+                    self.rag_view.embed_rx = None;
                     self.show_rag = false;
                 }
                 Some(RagAction::ClosePreview) => {}
@@ -1001,12 +1021,13 @@ impl App {
                     if input.starts_with("http://") || input.starts_with("https://") {
                         let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
                         let url = input.clone();
-                        self.tokio_handle.spawn(async move {
+                        let handle = self.tokio_handle.spawn(async move {
                             use cosh_tools::web::{WebFetch, fetch as web_fetch_fn};
                             let fetch_input = WebFetch { url };
                             let result = web_fetch_fn(&fetch_input).await;
                             let _ = tx.send(result);
                         });
+                        self.rag_fetch_handle = Some(handle);
                         self.rag_view.set_fetch_rx(rx);
                     } else {
                         match std::fs::read_to_string(&input) {
@@ -1071,12 +1092,13 @@ impl App {
                         let embedder_config = db.embedder.clone();
                         let embed_content = content.clone();
                         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
-                        self.tokio_handle.spawn(async move {
+                        let handle = self.tokio_handle.spawn(async move {
                             let result =
                                 embed_document(&uri, &table_name, &embedder_config, &embed_content)
                                     .await;
                             let _ = tx.send(result);
                         });
+                        self.rag_embed_handle = Some(handle);
                         self.rag_view.set_embed_rx(rx);
                     } else {
                         use crate::ui::toast::{ToastOptions, ToastVariant};
