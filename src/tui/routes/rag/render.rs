@@ -243,7 +243,8 @@ impl RagView {
 
         // URL/path input
         let input_w = inner_w.saturating_sub(4);
-        self.url_input.render(buf, cx, cy, input_w, layout.input_h, theme);
+        self.url_input
+            .render(buf, cx, cy, input_w, layout.input_h, theme);
 
         // DB indicator on the first line of the input box (line 0), which
         // is always reserved (text starts at line 1). Shown regardless of

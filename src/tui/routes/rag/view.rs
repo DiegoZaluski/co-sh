@@ -90,7 +90,7 @@ impl RagView {
         let bottom_gap: u16 = 0;
 
         let inner_w = area.width.saturating_sub(4);
-        let mut input_h = self.url_input.height(area.width);
+        let mut input_h = self.url_input.height(inner_w.saturating_sub(4));
         let db_model_count = if self.show_create_db && self.models_expanded {
             self.available_models.len().min(max_visible_models(avail_h))
         } else {

@@ -275,8 +275,6 @@ impl RagInput {
             if self.is_focused {
                 let cursor_byte = self.cursor_pos.min(self.text.len());
                 let prefix = &self.text[..cursor_byte];
-                let mut cursor_col = 0u16;
-                let mut cursor_line = 1u16;
                 let mut acc_col = 0u16;
                 let mut acc_line = 1u16;
                 for (_, gw) in unicode_util::graphemes_with_width(prefix) {
@@ -284,10 +282,10 @@ impl RagInput {
                         acc_line += 1;
                         acc_col = 0;
                     }
-                    cursor_col = acc_col;
-                    cursor_line = acc_line;
                     acc_col += gw;
                 }
+                let cursor_col = acc_col;
+                let cursor_line = acc_line;
                 let cursor_y = y + cursor_line;
                 let cursor_x = text_x + cursor_col;
                 if cursor_line < total_rows && cursor_x < right_x {

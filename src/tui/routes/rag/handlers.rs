@@ -476,7 +476,7 @@ impl RagView {
             return None;
         }
         let inner_x = area.x + 2;
-        let input_h = self.url_input.height(area.width);
+        let input_h = self.url_input.height(area.width.saturating_sub(8));
 
         // The picker renders at cy, with fixed height matching create form
         let picker_y = area.y + 2 + input_h;
@@ -508,7 +508,7 @@ impl RagView {
             return false;
         }
         let inner_x = area.x + 2;
-        let input_h = self.url_input.height(area.width);
+        let input_h = self.url_input.height(area.width.saturating_sub(8));
         let picker_y = area.y + 2 + input_h;
         let picker_h = PICKER_BOX_HEIGHT;
         let mx = mouse.x;
@@ -559,7 +559,7 @@ impl RagView {
         if inner_w < MIN_CONTENT_WIDTH {
             return false;
         }
-        let input_h = self.url_input.height(area.width);
+        let input_h = self.url_input.height(area.width.saturating_sub(8));
         let input_w = inner_w.saturating_sub(4);
         let cx = area.x + 4;
         let mx = mouse.x;
@@ -582,7 +582,7 @@ impl RagView {
         if !self.show_create_db || self.models_expanded {
             return false;
         }
-        let model_y = area.y + 2 + self.url_input.height(area.width);
+        let model_y = area.y + 2 + self.url_input.height(area.width.saturating_sub(8));
         let inner_w = area.width.saturating_sub(4);
         if inner_w < MIN_CONTENT_WIDTH {
             return false;
@@ -601,7 +601,7 @@ impl RagView {
         if inner_w < MIN_CONTENT_WIDTH {
             return false;
         }
-        let input_h = self.url_input.height(area.width);
+        let input_h = self.url_input.height(area.width.saturating_sub(8));
         let input_w = inner_w.saturating_sub(4);
         let cx = area.x + 4;
         let mx = mouse.x;
@@ -634,7 +634,7 @@ impl RagView {
             return false;
         }
         let inner_x = area.x + 2;
-        let input_h = self.url_input.height(area.width);
+        let input_h = self.url_input.height(area.width.saturating_sub(8));
         let form_y = area.y + 2 + input_h;
         let mx = mouse.x;
         let my = mouse.y;
@@ -794,7 +794,7 @@ impl RagView {
             return false;
         }
         let inner_x = area.x + 2;
-        let input_h = self.url_input.height(area.width);
+        let input_h = self.url_input.height(area.width.saturating_sub(8));
         let form_y = area.y + 2 + input_h;
         let form_h = self.create_db_mini_box_height();
         let mx = mouse.x;
