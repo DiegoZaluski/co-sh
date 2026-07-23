@@ -47,6 +47,10 @@ optional = true
 name = "tui"
 path = "src/tui/main.rs"
 
+[[bin]]
+name = "highlight-demo"
+path = "src/bin/highlight_demo.rs"
+
 # ---
 [dependencies]
 serde_json = "1.0"
