@@ -50,8 +50,9 @@ impl Log for FileLogger {
 
 /// Initialize the debug file logger.
 ///
-/// Writes to `{tmpdir}/cosh_debug.log` in append mode (creates the file if it
-/// does not exist).
+/// Writes to `{tmpdir}/{scope}.log` in append mode (creates the file if it
+/// does not exist), where `scope` identifies the caller (e.g. `"tui_main"`,
+/// `"tui_rag_app"`).
 ///
 /// - **Debug builds**: sets the max log level to `Debug` — all `debug!()`,
 ///   `info!()`, `warn!()`, and `error!()` calls are captured.
@@ -62,8 +63,8 @@ impl Log for FileLogger {
 ///
 /// Panics if the log file cannot be opened (e.g. permission denied) or if
 /// a logger has already been registered.
-pub fn init() {
-    let log_path = std::env::temp_dir().join("cosh_debug.log");
+pub fn init(scope: &str) {
+    let log_path = std::env::temp_dir().join(format!("{scope}.log"));
     let file = OpenOptions::new()
         .create(true)
         .append(true)

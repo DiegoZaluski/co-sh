@@ -120,7 +120,7 @@ pub struct App {
     #[cfg(feature = "embed")]
     rag_embed_handle: Option<tokio::task::JoinHandle<()>>,
 
-    // ── Mouse drag / selection tracking ───────────────────────────────────────────
+    // Mouse drag / selection tracking
     /// Position where the mouse was pressed down (for detecting drag selections).
     mouse_down_pos: Option<(u16, u16)>,
     /// Whether a drag-selection is in progress.
@@ -130,7 +130,7 @@ pub struct App {
     /// to end, bottom line from start to `end_x`, middle lines fully highlighted).
     drag_selection: Option<(u16, u16, u16, u16)>,
 
-    // ── Auto-scroll on selection drag ─────────────────────────────────────────────
+    // Auto-scroll on selection drag
     /// When true, the render loop keeps running even without input events.
     live_requested: bool,
     /// Timestamp of the previous frame (for delta_time calculation).
@@ -846,8 +846,7 @@ impl App {
         grouped.values().flatten().copied().collect()
     }
 
-    // ── RAG helper methods (cfg-gated at method level, always compiles) ───
-
+    // RAG helper methods (cfg-gated at method level, always compiles)
     #[cfg(feature = "embed")]
     fn is_rag_mode(&self) -> bool {
         matches!(self.mode(), AppMode::Rag)
@@ -1007,9 +1006,11 @@ impl App {
                     // accumulate stale background tasks after leaving RAG mode.
                     if let Some(h) = self.rag_fetch_handle.take() {
                         h.abort();
+                        log::debug!("[tui_rag_app] Aborted fetch task on Esc");
                     }
                     if let Some(h) = self.rag_embed_handle.take() {
                         h.abort();
+                        log::debug!("[tui_rag_app] Aborted embed task on Esc");
                     }
                     self.rag_view.fetch_rx = None;
                     self.rag_view.embed_rx = None;
@@ -1021,6 +1022,7 @@ impl App {
                     if input.starts_with("http://") || input.starts_with("https://") {
                         let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
                         let url = input.clone();
+                        let url_for_log = url.clone();
                         let handle = self.tokio_handle.spawn(async move {
                             use cosh_tools::web::{WebFetch, fetch as web_fetch_fn};
                             let fetch_input = WebFetch { url };
@@ -1028,6 +1030,7 @@ impl App {
                             let _ = tx.send(result);
                         });
                         self.rag_fetch_handle = Some(handle);
+                        log::debug!("[tui_rag_app] Spawned fetch task for URL: {url_for_log}");
                         self.rag_view.set_fetch_rx(rx);
                     } else {
                         match std::fs::read_to_string(&input) {
@@ -1099,6 +1102,7 @@ impl App {
                             let _ = tx.send(result);
                         });
                         self.rag_embed_handle = Some(handle);
+                        log::debug!("[tui_rag_app] Spawned embed task for DB: {db_name}");
                         self.rag_view.set_embed_rx(rx);
                     } else {
                         use crate::ui::toast::{ToastOptions, ToastVariant};
@@ -1290,7 +1294,7 @@ impl App {
         let frame_interval = Duration::from_micros(33_333); // ~30 fps
 
         while !self.should_quit {
-            // ── ESC sovereign: pre-render event check ─────────────────────────────
+            // ESC sovereign: pre-render event check
             // During streaming, terminal.draw() can take hundreds of milliseconds.
             // Do a quick non-blocking poll for pending events BEFORE spending time
             // on rendering. If events are available, handle them via the full
@@ -1308,7 +1312,7 @@ impl App {
                 }
             }
 
-            // ── Frame-rate limiting during streaming ───────────────────────────
+            // Frame-rate limiting during streaming
             // Skip rendering if not enough time has elapsed. This reduces CPU usage
             // and prevents jitter from rendering too frequently (which would compete
             // with the agent's token production). Events are still polled.
@@ -1811,6 +1815,7 @@ impl App {
 
                     // RAG mode: handle Ctrl+Backspace, Ctrl+Left, Ctrl+Right
                     // before passing key.code (which loses modifier info).
+                    #[cfg(feature = "embed")]
                     if self.is_rag_mode() && !self.dialog.visible() {
                         match key.code {
                             KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2087,7 +2092,7 @@ impl App {
 
                             let mut disabled_tools = self.internal_tools_view.disabled.clone();
 
-                            // ── RAG recall context ───────────────────────────────────────────
+                            // RAG recall context
                             // 1) Description suffix (what the model sees in the tool doc)
                             #[cfg(feature = "embed")]
                             let recall_suffix = self.recall_suffix();
@@ -2994,7 +2999,7 @@ impl App {
             }
         };
 
-        // ── Selection / drag tracking ─────────────────────────────────────────
+        // Selection / drag tracking
         // We must handle Down and Drag events for the prompt area INSIDE this match
         // because they return early below and never reach the component dispatch section.
         match (event_type, button) {
@@ -3175,7 +3180,7 @@ impl App {
             self.session_view.stop_auto_scroll();
         }
 
-        // ── Mouse wheel scrolling ───────────────────────────────────────────
+        // Mouse wheel scrolling
         // Debounce: ignore scroll events that arrive within 50ms of the last one.
         // Different terminal emulators emit different numbers of events per physical
         // scroll tick (e.g. tmux/kitty emit 2-3, gnome-terminal emits 1). Without
@@ -3779,7 +3784,7 @@ fn save_provider_api_key(provider: &str, env_var: &str, api_key: &str) {
     }
 }
 
-// ── Embedding helpers (feature-gated) ───────────────────────────────────
+// Embedding helpers (feature-gated)
 
 #[cfg(feature = "embed")]
 async fn embed_document(

@@ -12,6 +12,10 @@ mod types;
 mod ui;
 mod util;
 
+#[cfg(test)]
+#[path = "test/rag_abort.rs"]
+mod test;
+
 use app::App;
 use dotenvy::dotenv;
 
@@ -20,8 +24,8 @@ async fn main() {
     dotenv().ok();
 
     // Initialize debug file logger (no-op in release builds).
-    // Logs are written to /tmp/cosh_debug.log.
-    cosh::util::logger::init();
+    // Logs are written to /tmp/tui_main.log.
+    cosh::util::logger::init("tui_main");
 
     crate::util::selection::init_clipboard();
     let cwd = std::env::current_dir()

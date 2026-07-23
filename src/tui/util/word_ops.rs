@@ -48,9 +48,18 @@ pub fn find_word_end(text: &str, cursor_pos: usize) -> usize {
     let pos = cursor_pos.min(len);
     let mut i = pos;
 
+    // Advance by one UTF-8 character from byte offset `i`.
+    let char_advance = |s: &str, offset: usize| {
+        if offset >= s.len() {
+            return s.len();
+        }
+        let c = s[offset..].chars().next().unwrap_or(' ');
+        offset + c.len_utf8()
+    };
+
     // Skip the current word (non-whitespace) forward.
     while i < len {
-        let next = text.floor_char_boundary(i + 1).min(len);
+        let next = char_advance(text, i);
         if next <= i {
             break;
         }
@@ -64,7 +73,7 @@ pub fn find_word_end(text: &str, cursor_pos: usize) -> usize {
 
     // Skip whitespace to reach the start of the next word.
     while i < len {
-        let next = text.floor_char_boundary(i + 1).min(len);
+        let next = char_advance(text, i);
         if next <= i {
             break;
         }
@@ -91,9 +100,12 @@ mod tests {
     #[test]
     fn word_start_simple() {
         let text = "hello world";
-        assert_eq!(find_word_start(text, 6), 6); // at space, skip space
-        assert_eq!(find_word_start(text, 7), 6); // at 'w', go to 'w'
-        assert_eq!(find_word_start(text, 10), 6); // at 'l' in 'world', go to 'w'
+        // cursor at space — word before starts at 'h' (pos 0)
+        assert_eq!(find_word_start(text, 6), 0);
+        // cursor at 'w' — same word starts at 'w' (pos 6)
+        assert_eq!(find_word_start(text, 7), 6);
+        // cursor at 'l' in 'world' — word start is 'w' (pos 6)
+        assert_eq!(find_word_start(text, 10), 6);
     }
 
     #[test]
@@ -103,7 +115,8 @@ mod tests {
 
     #[test]
     fn word_start_skips_whitespace() {
-        assert_eq!(find_word_start("hello   ", 8), 5); // end of spaces, go to 5 (end of hello)
+        // cursor at end of trailing spaces — word before starts at 'h' (pos 0)
+        assert_eq!(find_word_start("hello   ", 8), 0);
     }
 
     #[test]
