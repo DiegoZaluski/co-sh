@@ -291,7 +291,7 @@ fn process_sse_response(
                             .and_then(|c| c.delta.tool_calls.as_ref())
                         {
                             for tc in tcs {
-                                let idx = tc.index.unwrap_or(0_i32) as usize;
+                                let idx = tc.index.unwrap_or(0).unsigned_abs() as usize;
                                 if idx >= pending_tool_calls.len() {
                                     pending_tool_calls.resize_with(idx + 1, Default::default);
                                 }

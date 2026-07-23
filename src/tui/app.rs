@@ -1544,10 +1544,11 @@ impl App {
                 }
                 AppMode::Session => {
                     // Blur prompt when question dialog is visible, focus otherwise (like OpenCode)
+                    // Blur prompt when question dialog is visible, otherwise
+                    // leave current focus state as-is (user controls it via
+                    // clicking inside/outside the prompt).
                     if self.question_dialog.visible {
                         self.prompt_view.blur();
-                    } else {
-                        self.prompt_view.focus();
                     }
                     self.prompt_view.cursor.terminal_focused = self.terminal_focused;
                     self.session_view.drag_selection = self.drag_selection;
@@ -1762,6 +1763,7 @@ impl App {
                                         let title = format_session_timestamp(now_ms);
                                         self.state.add_empty_session(id.clone(), title, now_ms);
                                         self.state.current_session_id = Some(id);
+                                        self.prompt_view.focus();
                                     }
                                     HomeAction::ToggleSidebar => {
                                         self.sidebar.open = !self.sidebar.open;
@@ -1926,6 +1928,7 @@ impl App {
                                     if !self.prompt_view.input.is_empty() {
                                         self.prompt_view.input.pop();
                                         self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                        self.prompt_view.reset_history_index();
                                         self.slash_menu.update(&self.prompt_view.input);
                                     }
                                 }
@@ -2300,11 +2303,21 @@ impl App {
                         }
                         Some(crate::keymap::Action::HistoryUp) => {
                             self.prompt_view.note_activity();
-                            self.prompt_view.history_up();
+                            let user_msgs = self
+                                .state
+                                .current_session()
+                                .map(PromptView::user_message_texts)
+                                .unwrap_or_default();
+                            self.prompt_view.history_up(&user_msgs);
                         }
                         Some(crate::keymap::Action::HistoryDown) => {
                             self.prompt_view.note_activity();
-                            self.prompt_view.history_down();
+                            let user_msgs = self
+                                .state
+                                .current_session()
+                                .map(PromptView::user_message_texts)
+                                .unwrap_or_default();
+                            self.prompt_view.history_down(&user_msgs);
                         }
                         Some(crate::keymap::Action::ToggleCommandPalette) => {
                             self.command_palette.toggle();
@@ -2397,43 +2410,61 @@ impl App {
                             if matches!(self.mode(), AppMode::Session) {
                                 match key.code {
                                     KeyCode::Up => {
-                                        if self.prompt_view.input.is_empty() {
-                                            if Self::is_in_right_panel(
-                                                self.last_mouse_x,
-                                                self.terminal_size(),
-                                            ) {
-                                                self.state.right_panel.scroll_up(3);
+                                        if self.prompt_view.is_focused {
+                                            if self.prompt_view.input.is_empty()
+                                                || self.prompt_view.history_index != -1
+                                            {
+                                                let user_msgs = self
+                                                    .state
+                                                    .current_session()
+                                                    .map(PromptView::user_message_texts)
+                                                    .unwrap_or_default();
+                                                self.prompt_view.history_up(&user_msgs);
                                             } else {
-                                                let vh = self.session_view.visible_height.max(1);
-                                                let delta = -(vh as f64 / 5.0);
-                                                self.session_view.scroll_by_raw(delta);
-                                                self.session_view.reset_scroll_accumulator();
+                                                self.prompt_view.note_activity();
+                                                self.prompt_view.cursor_up(
+                                                    self.prompt_view.input_text_width.get().max(1),
+                                                );
                                             }
+                                        } else if Self::is_in_right_panel(
+                                            self.last_mouse_x,
+                                            self.terminal_size(),
+                                        ) {
+                                            self.state.right_panel.scroll_up(3);
                                         } else {
-                                            self.prompt_view.note_activity();
-                                            self.prompt_view.cursor_up(
-                                                self.prompt_view.input_text_width.get().max(1),
-                                            );
+                                            let vh = self.session_view.visible_height.max(1);
+                                            let delta = -(vh as f64 / 5.0);
+                                            self.session_view.scroll_by_raw(delta);
+                                            self.session_view.reset_scroll_accumulator();
                                         }
                                     }
                                     KeyCode::Down => {
-                                        if self.prompt_view.input.is_empty() {
-                                            if Self::is_in_right_panel(
-                                                self.last_mouse_x,
-                                                self.terminal_size(),
-                                            ) {
-                                                self.state.right_panel.scroll_down(3);
+                                        if self.prompt_view.is_focused {
+                                            if self.prompt_view.input.is_empty()
+                                                || self.prompt_view.history_index != -1
+                                            {
+                                                let user_msgs = self
+                                                    .state
+                                                    .current_session()
+                                                    .map(PromptView::user_message_texts)
+                                                    .unwrap_or_default();
+                                                self.prompt_view.history_down(&user_msgs);
                                             } else {
-                                                let vh = self.session_view.visible_height.max(1);
-                                                let delta = vh as f64 / 5.0;
-                                                self.session_view.scroll_by_raw(delta);
-                                                self.session_view.reset_scroll_accumulator();
+                                                self.prompt_view.note_activity();
+                                                self.prompt_view.cursor_down(
+                                                    self.prompt_view.input_text_width.get().max(1),
+                                                );
                                             }
+                                        } else if Self::is_in_right_panel(
+                                            self.last_mouse_x,
+                                            self.terminal_size(),
+                                        ) {
+                                            self.state.right_panel.scroll_down(3);
                                         } else {
-                                            self.prompt_view.note_activity();
-                                            self.prompt_view.cursor_down(
-                                                self.prompt_view.input_text_width.get().max(1),
-                                            );
+                                            let vh = self.session_view.visible_height.max(1);
+                                            let delta = vh as f64 / 5.0;
+                                            self.session_view.scroll_by_raw(delta);
+                                            self.session_view.reset_scroll_accumulator();
                                         }
                                     }
                                     KeyCode::Left => {
@@ -2456,13 +2487,12 @@ impl App {
                                             self.prompt_view.note_activity();
                                             let len = self.prompt_view.input.len();
                                             if self.prompt_view.cursor_pos < len {
-                                                self.prompt_view.cursor_pos = self
-                                                    .prompt_view
-                                                    .input
-                                                    .floor_char_boundary(
-                                                        self.prompt_view.cursor_pos + 1,
-                                                    )
-                                                    .min(len);
+                                                let c = self.prompt_view.input
+                                                    [self.prompt_view.cursor_pos..]
+                                                    .chars()
+                                                    .next()
+                                                    .unwrap();
+                                                self.prompt_view.cursor_pos += c.len_utf8();
                                             }
                                         }
                                     }
@@ -2557,6 +2587,9 @@ impl App {
                                         // Use len_utf8() so cursor stays on a valid UTF-8 boundary
                                         // for multi-byte chars (e.g. á, é, emoji).
                                         self.prompt_view.cursor_pos = pos + ch.len_utf8();
+
+                                        // Typing modifies input, exit history browsing
+                                        self.prompt_view.reset_history_index();
 
                                         // Check if "/" menu should open
                                         self.slash_menu.update(&self.prompt_view.input);
@@ -3033,6 +3066,10 @@ impl App {
                         self.prompt_view.sel_end = Some(pos);
                     }
                     return Ok(true);
+                }
+                // Click outside prompt area → blur for scroll mode
+                if matches!(self.mode(), AppMode::Session) {
+                    self.prompt_view.blur();
                 }
 
                 // Store anchor and focus in content space so the visual highlight
@@ -3571,6 +3608,7 @@ impl App {
                         let title = format_session_timestamp(now_ms);
                         self.state.add_empty_session(id.clone(), title, now_ms);
                         self.state.current_session_id = Some(id);
+                        self.prompt_view.focus();
                     }
                     crate::routes::home::HomeAction::ToggleSidebar => {
                         self.sidebar.open = !self.sidebar.open;
@@ -3678,6 +3716,8 @@ impl App {
                 self.prompt_view.focus();
                 return Ok(true);
             }
+            // Click outside prompt → blur for scroll mode
+            self.prompt_view.blur();
         }
 
         Ok(true)

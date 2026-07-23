@@ -1024,6 +1024,7 @@ fn blend_color(base: RGBA, overlay: RGBA, factor: f64) -> RGBA {
     let (br, bg, bb, _) = base.to_ints();
     let (or_, og, ob, _) = overlay.to_ints();
     let t = factor.clamp(0.0, 1.0);
+    #[allow(clippy::cast_sign_loss, clippy::suboptimal_flops)]
     RGBA::from_ints(
         (f64::from(br) * (1.0 - t) + f64::from(or_) * t) as u8,
         (f64::from(bg) * (1.0 - t) + f64::from(og) * t) as u8,
@@ -1075,10 +1076,9 @@ impl MarkdownRenderable {
         let total_w: u16 = col_widths.iter().map(|w| w + 2 * padding).sum::<u16>() + border_gaps;
         let available = max_x.saturating_sub(area_x);
         if total_w > available {
-            // Scale columns proportionally (floor division, never round up)
-            let scale = f64::from(available) / f64::from(total_w);
+            // Scale columns proportionally (integer floor division)
             for w in &mut col_widths {
-                *w = (f64::from(*w) * scale) as u16;
+                *w = ((*w as u32 * available as u32) / total_w as u32) as u16;
             }
             // Ensure minimum width of 1 for every column
             for w in &mut col_widths {
@@ -1209,11 +1209,12 @@ impl MarkdownRenderable {
             }
             let cell_style = if is_header { header_style } else { text_style };
 
-            let (actual_border_style, actual_cell_style) = if !is_header && row_idx % 2 == 0 {
-                (border_style.bg(alt_bg_color), cell_style.bg(alt_bg_color))
-            } else {
-                (border_style, cell_style)
-            };
+            let (actual_border_style, actual_cell_style) =
+                if !is_header && row_idx.is_multiple_of(2) {
+                    (border_style.bg(alt_bg_color), cell_style.bg(alt_bg_color))
+                } else {
+                    (border_style, cell_style)
+                };
 
             for ci in 0..col_count {
                 let sx = col_starts[ci];
@@ -1257,9 +1258,9 @@ impl MarkdownRenderable {
         let precompute_wrapped = |cells: &[String]| -> (Vec<Vec<String>>, usize) {
             let mut wrapped: Vec<Vec<String>> = Vec::with_capacity(col_count);
             let mut max_lines = 1usize;
-            for ci in 0..col_count {
+            for (ci, &cw) in col_widths.iter().enumerate() {
                 let content = cells.get(ci).map_or("", |s| s.as_str());
-                let lines = word_wrap_cell(content, col_widths[ci]);
+                let lines = word_wrap_cell(content, cw);
                 max_lines = max_lines.max(lines.len());
                 wrapped.push(lines);
             }

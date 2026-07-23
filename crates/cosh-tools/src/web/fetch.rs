@@ -63,7 +63,7 @@ async fn fetch_url(url: &str) -> Result<String, String> {
             let null_cstr = c"NUL";
             #[cfg(unix)]
             let null_cstr = c"/dev/null";
-            let null_fd = unsafe { libc::open(null_cstr.as_ptr(), libc::O_WRONLY) };
+            let null_fd: i32 = unsafe { libc::open(null_cstr.as_ptr(), libc::O_WRONLY) };
             if null_fd < 0 {
                 // Fallback: no suppression
                 rs_trafilatura::extract(&html)

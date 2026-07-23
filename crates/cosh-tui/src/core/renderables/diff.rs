@@ -63,7 +63,7 @@ pub struct DiffRenderable {
     show_line_numbers: bool,
 }
 
-fn rgba_color(c: RGBA) -> Color {
+const fn rgba_color(c: RGBA) -> Color {
     let (r, g, b, a) = c.to_ints();
     if a == 0 {
         Color::Reset
@@ -301,12 +301,12 @@ impl DiffRenderable {
             .unwrap_or(0);
 
         let left_ln_w = if self.show_line_numbers && left_max_n > 0 {
-            f64::from(left_max_n).log10().floor() as u16 + 1
+            left_max_n.ilog10() as u16 + 1
         } else {
             1
         };
         let right_ln_w = if self.show_line_numbers && right_max_n > 0 {
-            f64::from(right_max_n).log10().floor() as u16 + 1
+            right_max_n.ilog10() as u16 + 1
         } else {
             1
         };
@@ -516,7 +516,7 @@ impl DiffRenderable {
         if mx == 0 {
             return 1;
         }
-        f64::from(mx).log10().floor() as u16 + 1
+        mx.ilog10() as u16 + 1
     }
 
     fn content_part(content: &str, lt: DiffLineType) -> &str {

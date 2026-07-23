@@ -108,9 +108,9 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                                         + border_gaps;
                                 let available = max_w;
                                 if total_w > available {
-                                    let scale = f64::from(available) / f64::from(total_w);
                                     for w in &mut col_widths {
-                                        *w = (f64::from(*w) * scale) as u16;
+                                        *w = ((*w as u32 * available as u32) / total_w as u32)
+                                            as u16;
                                     }
                                     for w in &mut col_widths {
                                         *w = (*w).max(1);
@@ -146,7 +146,7 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                                             total += 1;
                                         } else {
                                             // Character-level: ceil(lw / col_w)
-                                            total += ((lw + col_w - 1) / col_w) as usize;
+                                            total += lw.div_ceil(col_w) as usize;
                                         }
                                     }
                                     total.max(1)

@@ -463,7 +463,7 @@ pub async fn chat_stream_with_messages(
                                     let block = &v["content_block"];
                                     let block_type = block["type"].as_str().unwrap_or("");
                                     if block_type == "tool_use" {
-                                        let idx = v["index"].as_i64().unwrap_or(0) as usize;
+                                        let idx = v["index"].as_u64().unwrap_or(0) as usize;
                                         let id = block["id"].as_str().unwrap_or("").to_string();
                                         let name = block["name"].as_str().unwrap_or("").to_string();
                                         if idx >= pending_tool_uses.len() {

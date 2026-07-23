@@ -12,7 +12,7 @@ use ratatui::style::{Color, Style};
 use crate::component::cursor::{Cursor, CursorState};
 use crate::state::AppState;
 use crate::theme::Theme;
-use crate::types::AgentColors;
+use crate::types::{AgentColors, MessageRole, Part, Session};
 
 const BASE_H: u16 = 2;
 const AGENT_H: u16 = 1;
@@ -72,7 +72,6 @@ pub struct PromptView {
     pub input: String,
     pub cursor_pos: usize,
     pub input_text_width: Cell<usize>,
-    pub history: Vec<String>,
     pub history_index: i32,
     pub is_focused: bool,
     pub cursor: Cursor,
@@ -89,7 +88,6 @@ impl PromptView {
             input: String::new(),
             cursor_pos: 0,
             input_text_width: Cell::new(0),
-            history: Vec::new(),
             history_index: -1,
             is_focused: true,
             cursor: Cursor::new(),
@@ -112,7 +110,6 @@ impl PromptView {
         if !raw.is_empty() {
             // Expand any paste placeholders back to the original text before sending
             let msg = self.expand_pasted_text(&raw);
-            self.history.push(raw);
             self.input.clear();
             self.cursor_pos = 0;
             self.history_index = -1;
@@ -127,31 +124,66 @@ impl PromptView {
         }
     }
 
-    pub fn history_up(&mut self) {
-        if self.history.is_empty() {
+    /// Navigate up through user messages from the current session.
+    /// `user_msgs` should be the text of all user messages in the session,
+    /// oldest first (index 0 = first message).
+    pub fn history_up(&mut self, user_msgs: &[String]) {
+        if user_msgs.is_empty() {
             return;
         }
         if self.history_index == -1 {
-            self.history_index = i32::try_from(self.history.len()).unwrap_or(i32::MAX) - 1;
+            self.history_index = i32::try_from(user_msgs.len()).unwrap_or(i32::MAX) - 1;
         } else if self.history_index > 0 {
             self.history_index -= 1;
         }
-        self.input = self.history[usize::try_from(self.history_index).unwrap_or(0)].clone();
-        self.cursor_pos = self.input.len();
+        self.input = user_msgs[usize::try_from(self.history_index).unwrap_or(0)].clone();
+        self.cursor_pos = 0;
     }
 
-    pub fn history_down(&mut self) {
+    /// Navigate down through user messages from the current session.
+    pub fn history_down(&mut self, user_msgs: &[String]) {
         if self.history_index == -1 {
             return;
         }
         self.history_index += 1;
-        if self.history_index >= i32::try_from(self.history.len()).unwrap_or(i32::MAX) {
+        if self.history_index >= i32::try_from(user_msgs.len()).unwrap_or(i32::MAX) {
             self.history_index = -1;
             self.input.clear();
         } else {
-            self.input = self.history[usize::try_from(self.history_index).unwrap_or(0)].clone();
+            self.input = user_msgs[usize::try_from(self.history_index).unwrap_or(0)].clone();
         }
-        self.cursor_pos = self.input.len();
+        self.cursor_pos = 0;
+    }
+
+    /// Reset history index so the next Ctrl+Down goes to the most recent
+    /// history item instead of continuing from a previous browse position.
+    /// Should be called whenever the user modifies the input directly
+    /// (typing, backspace, delete, paste) after browsing history.
+    pub fn reset_history_index(&mut self) {
+        self.history_index = -1;
+    }
+
+    /// Extract the text content of all user messages from a session,
+    /// in chronological order (oldest first). Used for history navigation.
+    pub fn user_message_texts(session: &Session) -> Vec<String> {
+        session
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .map(|m| {
+                m.parts
+                    .iter()
+                    .filter_map(|p| {
+                        if let Part::Text(t) = p {
+                            Some(t.text.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect()
     }
 
     pub fn note_activity(&mut self) {
@@ -185,6 +217,7 @@ impl PromptView {
     /// delete the entire placeholder at once (matching opencode's atomic-virtual-text behaviour).
     /// Otherwise, delete a single character before the cursor.
     pub fn backspace(&mut self) {
+        self.reset_history_index();
         self.note_activity();
         if self.cursor_pos == 0 {
             return;
@@ -209,6 +242,7 @@ impl PromptView {
     /// placeholder, delete the entire placeholder at once. Otherwise delete one character
     /// at the cursor position.
     pub fn delete(&mut self) {
+        self.reset_history_index();
         self.note_activity();
         let len = self.input.len();
         if self.cursor_pos >= len {
@@ -250,6 +284,7 @@ impl PromptView {
     /// text for later expansion. Otherwise, insert the text directly at the cursor.
     /// Matches the behaviour of opencode's `pasteInputText` + `pasteText`.
     pub fn handle_paste(&mut self, text: &str) {
+        self.reset_history_index();
         // Normalize line endings (CRLF -> LF, CR -> LF), matching opencode
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         let trimmed = normalized.trim().to_string();
@@ -296,6 +331,7 @@ impl PromptView {
         }
         let start = crate::util::word_ops::find_word_start(&self.input, self.cursor_pos);
         if start < self.cursor_pos {
+            self.reset_history_index();
             self.note_activity();
             self.input.drain(start..self.cursor_pos);
             self.cursor_pos = start;
@@ -332,27 +368,67 @@ impl PromptView {
         let lines: Vec<&str> = self.input.split('\n').collect();
         let cols = text_w.max(1);
 
+        // char_pos counts actual Unicode characters from start of input to cursor_pos
         let char_pos = self.input[..self.cursor_pos].chars().count();
-        let mut acc = 0usize;
+        let mut acc = 0usize; // accumulated character count (includes newlines)
         let mut byte_off = 0usize;
         for (li, line) in lines.iter().enumerate() {
             let line_chars = line.chars().count();
-            let visual_lines = line_chars.div_ceil(cols).max(1);
-            let visual_chars = visual_lines * cols;
-            if char_pos < acc + visual_chars {
-                let offset = char_pos - acc;
+            // Check if cursor falls on this logical line (chars + 1 for '\n' after it)
+            if char_pos < acc + line_chars + 1 {
+                let offset = char_pos.saturating_sub(acc);
+                if offset >= line_chars {
+                    // Cursor at end of this logical line.  Only treat it as a
+                    // 'newline position' when there is actually a \n after this
+                    // line (i.e. this is not the last logical line).  When it IS
+                    // the last line the cursor is simply at the end of the text
+                    // and we must fall through to visual-line navigation so
+                    // wrapped lines work correctly.
+                    if li + 1 < lines.len() {
+                        // Cursor is at the newline between lines → go to
+                        // previous logical line preserving visual column.
+                        if li == 0 {
+                            return;
+                        }
+                        let visual_col = offset % cols;
+                        let prev_line = lines[li - 1];
+                        let prev_chars = prev_line.chars().count();
+                        let target_col = visual_col.min(cols.saturating_sub(1));
+                        let target_char_idx = target_col.min(prev_chars.saturating_sub(1));
+                        let prev_byte_start = byte_off - prev_line.len() - 1;
+                        let target_byte = prev_line
+                            .char_indices()
+                            .nth(target_char_idx)
+                            .map_or(prev_line.len(), |(i, _)| i);
+                        self.cursor_pos = prev_byte_start + target_byte;
+                        return;
+                    }
+                    // Last line, cursor at end → fall through to visual
+                    // navigation within this same logical line.
+                }
                 let visual_line = offset / cols;
                 if visual_line == 0 {
                     if li == 0 {
-                        return; // already top
+                        return; // already at top of text
                     }
-                    // move to end of previous logical line
-                    let prev = byte_off.saturating_sub(1); // position of '\n'
-                    self.cursor_pos = prev;
+                    // Move to previous logical line, preserving visual column.
+                    // If the previous line is shorter, clamp to its end.
+                    let visual_col = offset % cols;
+                    let prev_line = lines[li - 1];
+                    let prev_chars = prev_line.chars().count();
+                    let target_col = visual_col.min(cols.saturating_sub(1));
+                    let target_char_idx = target_col.min(prev_chars.saturating_sub(1));
+                    let prev_byte_start = byte_off - prev_line.len() - 1;
+                    let target_byte = prev_line
+                        .char_indices()
+                        .nth(target_char_idx)
+                        .map_or(prev_line.len(), |(i, _)| i);
+                    self.cursor_pos = prev_byte_start + target_byte;
                     return;
                 }
+                // Move up one visual line within the same logical line
                 let visual_col = offset % cols;
-                let target = (visual_line - 1) * cols + visual_col.min(cols - 1);
+                let target = (visual_line - 1) * cols + visual_col.min(cols.saturating_sub(1));
                 let target_byte = line
                     .char_indices()
                     .nth(target)
@@ -360,7 +436,7 @@ impl PromptView {
                 self.cursor_pos = byte_off + target_byte;
                 return;
             }
-            acc += visual_chars;
+            acc += line_chars + 1; // +1 for the '\n'
             byte_off += line.len() + 1; // +1 for '\n'
         }
     }
@@ -378,15 +454,23 @@ impl PromptView {
         for (li, line) in lines.iter().enumerate() {
             let line_chars = line.chars().count();
             let visual_lines = line_chars.div_ceil(cols).max(1);
-            let visual_chars = visual_lines * cols;
-            if char_pos < acc + visual_chars {
-                let offset = char_pos - acc;
+            if char_pos < acc + line_chars + 1 {
+                let offset = char_pos.saturating_sub(acc);
+                if offset >= line_chars {
+                    // Cursor is at the newline → move to start of next line
+                    if li + 1 >= lines.len() {
+                        return; // already at bottom
+                    }
+                    let next_start = byte_off + line.len() + 1;
+                    self.cursor_pos = next_start;
+                    return;
+                }
                 let visual_line = offset / cols;
                 let visual_col = offset % cols;
                 if visual_line + 1 >= visual_lines {
-                    // move to next logical line
+                    // Last visual line of this logical line → move to next logical line
                     if li + 1 >= lines.len() {
-                        return;
+                        return; // already at bottom
                     }
                     let next = lines[li + 1];
                     let next_chars = next.chars().count();
@@ -400,8 +484,8 @@ impl PromptView {
                             .map_or(0, |(i, _)| i);
                     return;
                 }
-                // move down one visual line within same logical line
-                let target = (visual_line + 1) * cols + visual_col.min(cols - 1);
+                // Move down one visual line within the same logical line
+                let target = (visual_line + 1) * cols + visual_col.min(cols.saturating_sub(1));
                 let target_byte = line
                     .char_indices()
                     .nth(target)
@@ -409,8 +493,8 @@ impl PromptView {
                 self.cursor_pos = byte_off + target_byte;
                 return;
             }
-            acc += visual_chars;
-            byte_off += line.len() + 1;
+            acc += line_chars + 1; // +1 for the '\n'
+            byte_off += line.len() + 1; // +1 for '\n'
         }
     }
 
@@ -494,10 +578,13 @@ impl PromptView {
         let col = col.min(line.chars().count());
 
         // Compute byte offset of the visual line in the original input.
-        let mut byte_off = 0usize;
-        for line in display_lines.iter().take(visual_line) {
-            byte_off += line.len();
-        }
+        // Uses pointer arithmetic: wrapped_lines returns sub-slices of
+        // self.input, so line.as_ptr() - input_start gives the exact byte
+        // offset including \n separators between logical lines.
+        // This is the same approach used in the render method for selection
+        // highlighting (see render() ~line 680).
+        let input_start = self.input.as_ptr() as usize;
+        let byte_off = line.as_ptr() as usize - input_start;
         // Add the column within the visual line.
         if let Some((off, _)) = line.char_indices().nth(col) {
             Some(byte_off + off)
@@ -745,11 +832,13 @@ impl PromptView {
 
             for (li, line) in display_lines.iter().enumerate() {
                 let n = line.chars().count();
-                if cursor_char < acc + n
-                    || (cursor_char == acc + n && li + 1 >= display_lines.len())
-                {
+                // Match cursor on this display line if its character position falls
+                // within [acc, acc + n] (inclusive on both ends). The inclusive upper
+                // bound handles the case where the cursor is at the newline after this
+                // logical line — visually, that's the end of this display line.
+                if cursor_char <= acc + n {
                     cursor_line_idx = li;
-                    cursor_col_idx = cursor_char - acc;
+                    cursor_col_idx = cursor_char.saturating_sub(acc);
                     break;
                 }
                 acc += n;
