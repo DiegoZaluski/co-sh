@@ -19,16 +19,16 @@
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
+use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::ExecutableCommand;
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Stylize;
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Terminal;
 
 // Include the spinner module from the TUI component directory.
 #[path = "../tui/component/spinner_highlight.rs"]
@@ -37,7 +37,7 @@ mod spinner_highlight;
 use cosh_tui::core::lib::rgba::RGBA;
 use spinner_highlight::HighlightSpinner;
 
-// ── Demo presets ────────────────────────────────────────────────────────────
+// Demo presets
 
 struct DemoPreset {
     label: &'static str,
@@ -52,37 +52,39 @@ const PRESETS: &[DemoPreset] = &[
         label: "↻ Warm beam (default)",
         text: "✦ Loading your workspace …",
         highlight: RGBA::from_ints(255, 107, 48, 255), // warm orange
-        base: RGBA::from_ints(128, 128, 128, 255),      // muted grey
+        base: RGBA::from_ints(128, 128, 128, 255),     // muted grey
         tweak: |_| {},
     },
     DemoPreset {
         label: "↻ Cool cyan glow",
         text: "⟡ Connecting to server …",
         highlight: RGBA::from_ints(86, 182, 194, 255), // cyan
-        base: RGBA::from_ints(100, 120, 130, 255),      // slate
+        base: RGBA::from_ints(100, 120, 130, 255),     // slate
         tweak: |_| {},
     },
     DemoPreset {
         label: "↻ Vibrant magenta",
         text: "✦ Processing data streams …",
         highlight: RGBA::from_ints(192, 97, 203, 255), // magenta
-        base: RGBA::from_ints(130, 110, 140, 255),      // mauve
+        base: RGBA::from_ints(130, 110, 140, 255),     // mauve
         tweak: |_| {},
     },
     DemoPreset {
         label: "↻ Tight fast beam",
         text: "⚡ Compiling modules …",
         highlight: RGBA::from_ints(76, 255, 120, 255), // bright green
-        base: RGBA::from_ints(90, 110, 90, 255),         // forest
+        base: RGBA::from_ints(90, 110, 90, 255),       // forest
         tweak: |s: &mut HighlightSpinner| {
-            s.with_speed(0.018).with_primary_sigma(0.04).with_glow_sigma(0.12);
+            s.with_speed(0.018)
+                .with_primary_sigma(0.04)
+                .with_glow_sigma(0.12);
         },
     },
     DemoPreset {
         label: "↻ Wide atmospheric glow",
         text: "⟡ Warming up caches …",
         highlight: RGBA::from_ints(255, 200, 100, 255), // warm gold
-        base: RGBA::from_ints(120, 110, 90, 255),        // taupe
+        base: RGBA::from_ints(120, 110, 90, 255),       // taupe
         tweak: |s: &mut HighlightSpinner| {
             s.with_speed(0.005)
                 .with_primary_sigma(0.15)
@@ -90,19 +92,36 @@ const PRESETS: &[DemoPreset] = &[
                 .with_trail_scale(3.5);
         },
     },
+    DemoPreset {
+        label: "↻ Cycling messages ✨",
+        text: "⏳ Step 1 of 4 …",
+        highlight: RGBA::from_ints(255, 200, 100, 255), // warm gold
+        base: RGBA::from_ints(120, 110, 90, 255),       // taupe
+        tweak: |s: &mut HighlightSpinner| {
+            s.with_speed(0.010).with_messages(
+                &[
+                    "⏳ Step 1 of 4 — gathering data …",
+                    "⏳ Step 2 of 4 — analyzing results …",
+                    "⏳ Step 3 of 4 — rendering output …",
+                    "⏳ Step 4 of 4 — finalizing …",
+                ],
+                Some(&[360, 360, 360, 360]),
+            );
+        },
+    },
 ];
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 const fn rgba_color(rgba: RGBA) -> ratatui::style::Color {
     let (r, g, b, _) = rgba.to_ints();
     ratatui::style::Color::Rgb(r, g, b)
 }
 
-// ── Main ────────────────────────────────────────────────────────────────────
+// Main
 
 fn main() -> io::Result<()> {
-    // ── Terminal setup ──────────────────────────────────────────────────
+    // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
@@ -110,7 +129,7 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     let _ = terminal.clear();
 
-    // ── Spinners ────────────────────────────────────────────────────────
+    // Spinners
     // Create one spinner per preset.
     let mut spinners: Vec<HighlightSpinner> = PRESETS
         .iter()
@@ -126,7 +145,7 @@ fn main() -> io::Result<()> {
     const SWITCH_INTERVAL: Duration = Duration::from_secs(5);
     let mut quit = false;
 
-    // ── Main loop ───────────────────────────────────────────────────────
+    // Main loop
     let tick_rate = Duration::from_millis(16); // ≈60 fps
 
     while !quit {
@@ -138,7 +157,8 @@ fn main() -> io::Result<()> {
             // Reset the spinner for the new preset.
             spinners[preset_idx].reset();
             spinners[preset_idx].set_text(PRESETS[preset_idx].text);
-            spinners[preset_idx].set_colors(PRESETS[preset_idx].highlight, PRESETS[preset_idx].base);
+            spinners[preset_idx]
+                .set_colors(PRESETS[preset_idx].highlight, PRESETS[preset_idx].base);
             (PRESETS[preset_idx].tweak)(&mut spinners[preset_idx]);
         }
 
@@ -147,7 +167,7 @@ fn main() -> io::Result<()> {
             spinner.advance();
         }
 
-        // ── Render ──────────────────────────────────────────────────────
+        // Render
         terminal.draw(|frame| {
             let area = frame.area();
             let layout = layout_demo(area);
@@ -164,8 +184,7 @@ fn main() -> io::Result<()> {
             let spinner = &spinners[preset_idx];
 
             // Card border showing the preset label.
-            let label_style = ratatui::style::Style::default()
-                .fg(rgba_color(preset.highlight));
+            let label_style = ratatui::style::Style::default().fg(rgba_color(preset.highlight));
             let card = Block::default()
                 .borders(Borders::ALL)
                 .border_style(label_style)
@@ -190,11 +209,22 @@ fn main() -> io::Result<()> {
                 .fg(ratatui::style::Color::DarkGray);
             frame.render_widget(footer, layout.footer);
 
-            // Colour legend — show the active RGB values.
+            // Colour legend — show the active RGB values + message index.
             let (hr, hg, hb, _) = preset.highlight.to_ints();
             let (br, bg, bb, _) = preset.base.to_ints();
+            let msg_count = spinner.messages_count();
+            let msg_info = if msg_count > 1 {
+                format!(
+                    "  ·  msg {}/{} ({}f)",
+                    spinner.current_index() + 1,
+                    msg_count,
+                    spinner.current_duration(),
+                )
+            } else {
+                String::new()
+            };
             let legend_text = format!(
-                "Highlight  rgb({:>3},{:>3},{:>3})   ·   Base  rgb({:>3},{:>3},{:>3})",
+                "Highlight  rgb({:>3},{:>3},{:>3})   ·   Base  rgb({:>3},{:>3},{:>3}){msg_info}",
                 hr, hg, hb, br, bg, bb,
             );
             let legend = Paragraph::new(legend_text)
@@ -203,7 +233,7 @@ fn main() -> io::Result<()> {
             frame.render_widget(legend, layout.legend);
         })?;
 
-        // ── Input handling ──────────────────────────────────────────────
+        // Input handling
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -228,7 +258,7 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // ── Cleanup ─────────────────────────────────────────────────────────
+    // Cleanup
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
     let _ = stdout.execute(LeaveAlternateScreen);
@@ -237,7 +267,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-// ─── Layout helper ──────────────────────────────────────────────────────────
+// Layout helper
 
 use ratatui::layout::{Constraint, Direction, Layout, Margin};
 
@@ -252,11 +282,11 @@ fn layout_demo(area: Rect) -> DemoLayout {
     let vert = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // title
-            Constraint::Length(7),  // card
-            Constraint::Length(1),  // legend
-            Constraint::Length(1),  // footer
-            Constraint::Min(0),     // bottom padding
+            Constraint::Length(3), // title
+            Constraint::Length(7), // card
+            Constraint::Length(1), // legend
+            Constraint::Length(1), // footer
+            Constraint::Min(0),    // bottom padding
         ])
         .split(area);
 

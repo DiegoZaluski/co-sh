@@ -34,7 +34,7 @@ use cosh_tui::core::lib::rgba::RGBA;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Style};
 
-// ── Colour helpers ─────────────────────────────────────────────────────────
+// Colour helpers
 
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
@@ -64,7 +64,7 @@ fn gaussian(x: f32, sigma: f32) -> f32 {
     (-(x * x) / (2.0 * sigma * sigma)).exp()
 }
 
-// ── HighlightSpinner ───────────────────────────────────────────────────────
+//  HighlightSpinner
 
 /// An animated text-highlight spinner that sweeps a luminous beam across the
 /// characters.
@@ -91,7 +91,7 @@ pub struct HighlightSpinner {
     chars: Vec<char>,
     char_count: usize,
 
-    // ── Animation state ─────────────────────────────────────────────────
+    // Animation state
     /// Normalised beam position (`-0.3 … 1.3`). Values < 0 or > 1 mean the
     /// beam is partly off-screen, creating a natural entry/exit.
     beam_pos: f32,
@@ -99,11 +99,11 @@ pub struct HighlightSpinner {
     /// Fraction of the text width the beam travels per frame.
     speed: f32,
 
-    // ── Colour ──────────────────────────────────────────────────────────
+    // Colour
     highlight_color: RGBA,
     base_color: RGBA,
 
-    // ── Beam shape ──────────────────────────────────────────────────────
+    // Beam shape
     /// Gaussian sigma for the leading edge of the primary beam.
     primary_sigma: f32,
     /// Gaussian sigma for the wide atmospheric glow.
@@ -115,6 +115,16 @@ pub struct HighlightSpinner {
     shimmer_amp: f32,
     /// Frequency of the shimmer oscillation (radians per frame).
     shimmer_freq: f32,
+
+    // Multi-message cycling
+    /// All messages to cycle through.
+    messages: Vec<String>,
+    /// How many frames to display each message (one per message).
+    durations: Vec<u32>,
+    /// Index of the currently displayed message.
+    current_idx: usize,
+    /// Frames elapsed since the last message switch.
+    msg_frame_count: u32,
 }
 
 #[allow(dead_code)]
@@ -143,10 +153,15 @@ impl HighlightSpinner {
             trail_scale: 2.0,
             shimmer_amp: 0.06,
             shimmer_freq: 0.12,
+            // Single message by default (no auto-cycling).
+            messages: vec![text.to_string()],
+            durations: vec![u32::MAX],
+            current_idx: 0,
+            msg_frame_count: 0,
         }
     }
 
-    // ── Builder setters ─────────────────────────────────────────────────
+    // Builder setters
 
     /// Customise the beam travel speed (fraction of text width per frame).
     ///
@@ -189,12 +204,66 @@ impl HighlightSpinner {
         self
     }
 
+    // Multi-message cycling
+
+    /// Replace the current message with a cycling set of messages.
+    ///
+    /// When multiple messages are provided, the spinner automatically
+    /// advances to the next one after `durations` frames have elapsed.
+    /// The cycle loops back to the first message after the last.
+    ///
+    /// * `texts` — the messages to cycle through (must not be empty).
+    /// * `durations` — optional per-message display durations in **frames**.
+    ///   If `None`, every message gets 400 frames (≈ 6.6 s at 60 fps).
+    ///   Pass an array shorter than `texts` and the remaining messages
+    ///   use the last given value.
+    pub fn with_messages(&mut self, texts: &[&str], durations: Option<&[u32]>) -> &mut Self {
+        if texts.is_empty() {
+            return self;
+        }
+        self.messages = texts.iter().map(|s| s.to_string()).collect();
+
+        // Build durations array, padding with the last value or a default.
+        self.durations = match durations {
+            Some(d) => {
+                let mut v = d.to_vec();
+                let last = v.last().copied().unwrap_or(400);
+                while v.len() < self.messages.len() {
+                    v.push(last);
+                }
+                v
+            }
+            None => vec![400; self.messages.len()],
+        };
+
+        self.current_idx = 0;
+        self.msg_frame_count = 0;
+        self.apply_current_message();
+        self
+    }
+
+    /// Manually advance to the next message in the cycle (wraps around).
+    ///
+    /// Does nothing if there is only one message.
+    pub fn advance_message(&mut self) {
+        if self.messages.len() <= 1 {
+            return;
+        }
+        self.current_idx = (self.current_idx + 1) % self.messages.len();
+        self.msg_frame_count = 0;
+        self.apply_current_message();
+    }
+
     /// Change the text mid-animation (resets beam position).
+    ///
+    /// This also replaces the message list with a single entry so
+    /// auto-cycling stops. Call [`with_messages`] again to re-enable it.
     pub fn set_text(&mut self, text: &str) {
-        self.text = text.to_string();
-        self.chars = text.chars().collect();
-        self.char_count = self.chars.len();
-        self.beam_pos = -0.3;
+        self.messages = vec![text.to_string()];
+        self.durations = vec![u32::MAX];
+        self.current_idx = 0;
+        self.msg_frame_count = 0;
+        self.apply_current_message();
     }
 
     /// Change the colours mid-animation.
@@ -203,17 +272,40 @@ impl HighlightSpinner {
         self.base_color = base;
     }
 
-    // ── Animation ───────────────────────────────────────────────────────
+    // Internal helpers
+
+    /// Apply the current message's text to the rendering state.
+    fn apply_current_message(&mut self) {
+        let text = &self.messages[self.current_idx];
+        self.text.clone_from(text);
+        self.chars = text.chars().collect();
+        self.char_count = self.chars.len();
+        self.beam_pos = -0.3;
+    }
+
+    // Animation
 
     /// Advance the animation by one frame.
     ///
     /// Moves the beam `speed` units to the right and wraps back to
     /// off-screen-left when it passes beyond `1.3`.
+    ///
+    /// If multiple messages are configured, automatically advances to the
+    /// next message when the current one's display duration expires.
     pub fn advance(&mut self) {
         self.frame = self.frame.wrapping_add(1);
         self.beam_pos += self.speed;
         if self.beam_pos > 1.3 {
             self.beam_pos = -0.3;
+        }
+
+        // Multi-message cycling: check if it's time to advance.
+        if self.messages.len() > 1 {
+            self.msg_frame_count += 1;
+            let current_duration = self.durations[self.current_idx];
+            if self.msg_frame_count >= current_duration {
+                self.advance_message();
+            }
         }
     }
 
@@ -223,16 +315,31 @@ impl HighlightSpinner {
         self.frame = 0;
     }
 
-    // ── Queries ─────────────────────────────────────────────────────────
+    // Queries
 
     /// Total width in terminal cells (equal to the character count).
     pub fn width(&self) -> usize {
         self.char_count
     }
 
-    /// The current text string.
+    /// The current text string (the currently active message).
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Total number of messages in the cycle.
+    pub fn messages_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Index of the currently displayed message.
+    pub const fn current_index(&self) -> usize {
+        self.current_idx
+    }
+
+    /// Duration (in frames) of the currently displayed message.
+    pub fn current_duration(&self) -> u32 {
+        self.durations[self.current_idx]
     }
 
     /// Whether the beam is currently visible over any characters.
@@ -240,7 +347,7 @@ impl HighlightSpinner {
         self.beam_pos > -0.3 && self.beam_pos < 1.3
     }
 
-    // ── Rendering ───────────────────────────────────────────────────────
+    // Rendering
 
     /// Render the spinner into the buffer at position `(x, y)`.
     ///
@@ -252,9 +359,7 @@ impl HighlightSpinner {
         }
 
         let char_count_f = self.char_count as f32;
-        let shimmer = 1.0
-            + self.shimmer_amp
-                * ((self.frame as f32) * self.shimmer_freq).sin();
+        let shimmer = 1.0 + self.shimmer_amp * ((self.frame as f32) * self.shimmer_freq).sin();
 
         for (i, &ch) in self.chars.iter().enumerate() {
             // Normalised character position in [0.0, 1.0].
