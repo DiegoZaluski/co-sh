@@ -1,6 +1,7 @@
 use std::time::SystemTime;
 
 use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
@@ -102,6 +103,59 @@ impl RagInput {
             self.cursor_pos = self.text.floor_char_boundary(self.cursor_pos + 1).min(len);
             self.cursor.note_activity();
         }
+    }
+
+    /// Map a screen-space mouse coordinate to a byte offset in `self.text`.
+    /// `area` is the input box's position and size (the same `x`, `y`, `width`
+    /// passed to `render()`). Returns `None` if the position is outside the
+    /// text area or the input is empty.
+    ///
+    /// Uses the same grapheme-aware wrapping logic as `render()`, so the
+    /// click-to-position behaviour matches the visual layout exactly.
+    pub fn char_pos_at_mouse(&self, mouse_x: u16, mouse_y: u16, area: Rect) -> Option<usize> {
+        if self.text.is_empty() {
+            return None;
+        }
+        let text_w = (area.width.saturating_sub(4) as usize).max(1);
+        let text_x = area.x + 2;
+        let text_start = area.y + 1; // text starts at line 1 (line 0 = DB indicator)
+
+        if mouse_y < text_start || mouse_x < text_x {
+            return None;
+        }
+
+        let target_visual_line = (mouse_y - text_start) as usize;
+        let target_col = (mouse_x - text_x) as usize;
+
+        let mut current_line = 0usize;
+        let mut col = 0u16;
+        let mut byte_pos = 0usize;
+
+        for (grapheme, gw) in unicode_util::graphemes_with_width(&self.text) {
+            if col + gw > text_w as u16 {
+                if current_line == target_visual_line {
+                    // Past the last grapheme on the target line → return end of that line
+                    return Some(byte_pos);
+                }
+                current_line += 1;
+                col = 0;
+            }
+
+            if current_line > target_visual_line {
+                // Beyond the target line → snap to end of text
+                return Some(self.text.len());
+            }
+
+            if current_line == target_visual_line && (target_col as u16) < col + gw {
+                return Some(byte_pos);
+            }
+
+            byte_pos += grapheme.len();
+            col += gw;
+        }
+
+        // After all graphemes: click was on or past the last visual line
+        Some(self.text.len())
     }
 
     pub fn clear(&mut self) {

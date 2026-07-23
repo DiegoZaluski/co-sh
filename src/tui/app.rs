@@ -1263,6 +1263,29 @@ impl App {
             self.rag_view.close_form();
             return true;
         }
+        // Click on the URL input box → position cursor at the click location
+        {
+            let inner_w = tools_area.width.saturating_sub(4);
+            let input_w = inner_w.saturating_sub(4);
+            let input_h = self.rag_view.url_input.height(input_w);
+            let input_x = tools_area.x + 4; // = layout.cx
+            let input_y = tools_area.y + 2;
+            let mx = mouse.x;
+            let my = mouse.y;
+            if my >= input_y && my < input_y + input_h && mx >= input_x && mx < input_x + input_w {
+                self.rag_view.url_input.focus();
+                if let Some(pos) = self.rag_view.url_input.char_pos_at_mouse(
+                    mx,
+                    my,
+                    Rect::new(input_x, input_y, input_w, input_h),
+                ) {
+                    self.rag_view.url_input.cursor_pos = pos;
+                    self.rag_view.url_input.cursor.note_activity();
+                }
+                return true;
+            }
+        }
+
         false
     }
 
