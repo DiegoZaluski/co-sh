@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton as CrosstermMouseButton,
@@ -22,6 +23,7 @@ use cosh::harness::HarnessEvent;
 
 use crate::component::agent_spinner::AgentSpinner;
 use crate::component::prompt::PromptView;
+use crate::component::spinner_highlight::HighlightSpinner;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
 use crate::routes::add_provider::AddProviderView;
@@ -1387,10 +1389,20 @@ impl App {
         // Session: during streaming, sticky scroll needs continuous re-rendering.
         // RAG: when the spinner is active (fetching/embedding), enable live mode
         //      so event::poll uses 8ms instead of 50ms, keeping animation smooth.
+        // Tool spinners: keep live mode while any tool spinner is active/finishing
+        // so the beam sweep animation advances every frame, even when the session
+        // is idle (no streaming).
+        let has_active_spinner = self
+            .session_view
+            .tool_state
+            .tool_spinners
+            .iter()
+            .any(|(_, s)| !s.is_idle());
         let mut live = self.session_view.is_auto_scrolling
             || (self.state.status == crate::types::SessionStatus::Working
                 && self.session_view.is_sticky_bottom);
         live = live || self.rag_spinner_active();
+        live = live || has_active_spinner;
         self.live_requested = live;
         let area = frame.area();
 
@@ -2740,6 +2752,10 @@ impl App {
                         }
                         self.state.right_panel.scroll_to_bottom();
                     }
+
+                    // Save a clone of input before it moves into the ToolPart
+                    let input_clone = input.clone();
+
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
@@ -2762,6 +2778,47 @@ impl App {
                             agent: None,
                             model: None,
                         }),
+                    }
+                    // Session borrow dropped; create spinner for the new tool call.
+                    // This ensures the beam is visible even if ToolResult arrives
+                    // before the next render (fast tools like read).
+                    {
+                        let display = crate::routes::session::tool_render::tool_display(&tool);
+                        let part_idx = self
+                            .state
+                            .current_session()
+                            .and_then(|s| s.messages.last())
+                            .map(|m| m.parts.len().saturating_sub(1))
+                            .unwrap_or(0);
+                        let tool_id = format!("{}_{}", display, part_idx);
+                        let text = {
+                            let temp_part = ToolPart {
+                                tool: tool.clone(),
+                                input: input_clone,
+                                output: None,
+                                status: ToolStatus::Running,
+                                tool_call_id: None,
+                                is_start: false,
+                                is_streaming: false,
+                            };
+                            crate::routes::session::tool_render::tool_inline_text(&temp_part)
+                        };
+                        let highlight = crate::routes::session::tool_render::tool_color(display)
+                            .map(|c| {
+                                let (r, g, b) = match c {
+                                    Color::Rgb(r, g, b) => (r, g, b),
+                                    _ => (128, 128, 128),
+                                };
+                                RGBA::from_ints(r, g, b, 255)
+                            })
+                            .unwrap_or(RGBA::from_ints(128, 128, 128, 255));
+                        let base = self.theme.text;
+                        let mut spinner = HighlightSpinner::new(&text, highlight, base);
+                        spinner.set_beam_pos(0.0);
+                        self.session_view
+                            .tool_state
+                            .tool_spinners
+                            .insert(tool_id, spinner);
                     }
                 }
 

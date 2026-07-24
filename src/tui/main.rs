@@ -15,7 +15,6 @@ mod util;
 #[cfg(test)]
 #[path = "test/rag_abort.rs"]
 mod test;
-mod tool_colors;
 
 use app::App;
 use dotenvy::dotenv;

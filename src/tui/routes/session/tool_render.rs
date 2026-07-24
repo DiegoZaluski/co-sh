@@ -14,12 +14,30 @@ use cosh_tui::core::renderables::diff::{DiffRenderable, DiffViewMode};
 
 use crate::component::spinner_highlight::HighlightSpinner;
 use crate::theme::Theme;
-use crate::tool_colors::tool_color;
 use crate::types::{ToolPart, ToolStatus};
 
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
+}
+
+/// Return the highlight colour for a tool display name.
+///
+/// Tools without a dedicated colour (bash, write, edit, question, todo,
+/// task) return `None` so the caller can fall back to a default.
+pub(crate) fn tool_color(display: &str) -> Option<Color> {
+    let (r, g, b) = match display {
+        "glob" => (74, 158, 255),
+        "read" => (76, 175, 80),
+        "grep" => (171, 71, 188),
+        "webfetch" => (38, 198, 218),
+        "websearch" => (26, 188, 156),
+        "skill" => (233, 30, 99),
+        "recall_search" => (255, 167, 38),
+        "generic" => (158, 158, 158),
+        _ => return None,
+    };
+    Some(Color::Rgb(r, g, b))
 }
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
@@ -165,7 +183,8 @@ impl ToolRenderState {
                 *spinner = s;
             }
             // Tool completed without ever being seen as Running — no spinner.
-            // Creating one here would leak frozen beams onto historical tools.
+            // New tools get their spinner created directly in the ToolCall event
+            // handler (app.rs), not here. Historical tools should never show one.
             (false, None) => {}
             // Tool is no longer running — signal the spinner to finish its
             // sweep at a visible speed. Covers both Completed and Failed.

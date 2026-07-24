@@ -1,4 +1,5 @@
 pub mod footer;
+pub mod tool_render;
 
 pub mod permission;
 pub mod question;
@@ -23,13 +24,13 @@ use cosh_tui::core::renderables::markdown::estimate_height;
 
 use std::hash::Hasher;
 
+use self::tool_render::ToolRenderState;
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::types::{
     AgentColors, FilePart, Message, MessageRole, Part, ReasoningPart, SessionStatus, ToolStatus,
 };
-use crate::util::tool_render::{self, ToolRenderState};
 use std::time::Instant;
 
 const fn left_border_chars() -> BorderCharacters {
@@ -1601,7 +1602,7 @@ impl SessionView {
                             }
                             crate::types::Part::Tool(t) => {
                                 // Skip hidden TODO tools entirely (no text regions, no spacing)
-                                if crate::util::tool_render::tool_display(&t.tool) == "todo"
+                                if self::tool_render::tool_display(&t.tool) == "todo"
                                     && !matches!(t.status, crate::types::ToolStatus::Failed(_))
                                     && (matches!(t.status, crate::types::ToolStatus::Running)
                                         || t.output.as_deref().unwrap_or("").trim().is_empty())
@@ -1615,14 +1616,14 @@ impl SessionView {
                                     continue;
                                 }
                                 if !config.show_generic_tool_output
-                                    && crate::util::tool_render::tool_display(&t.tool) == "generic"
+                                    && self::tool_render::tool_display(&t.tool) == "generic"
                                 {
                                     part_y += part_h;
                                     continue;
                                 }
                                 // Add inline tool label (only when visible)
                                 if p_top >= vp_top {
-                                    let label = crate::util::tool_render::tool_inline_text(t);
+                                    let label = self::tool_render::tool_inline_text(t);
                                     self.text_regions.push(TextRegion {
                                         y1: content_offset,
                                         y2: content_offset + 1,
