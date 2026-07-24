@@ -164,7 +164,7 @@ fn main() -> io::Result<()> {
 
         // Advance all spinners (even inactive ones so they stay in sync).
         for spinner in &mut spinners {
-            spinner.advance();
+            spinner.advance(0.033);
         }
 
         // Render

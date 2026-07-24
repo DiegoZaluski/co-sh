@@ -1,4 +1,4 @@
-use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use std::collections::HashMap;
@@ -8,13 +8,13 @@ use std::path::Path;
 use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
-use cosh_tui::core::lib::unicode_util;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::diff::{DiffRenderable, DiffViewMode};
 
-use crate::component::spinner::SpinnerState;
+use crate::component::spinner_highlight::HighlightSpinner;
 use crate::theme::Theme;
+use crate::tool_colors::tool_color;
 use crate::types::{ToolPart, ToolStatus};
 
 fn rgba_color(rgba: RGBA) -> Color {
@@ -71,85 +71,27 @@ fn code_highlight_style(cat: Option<HighlightCategory>, default_fg: Color) -> St
     Style::default().fg(fg)
 }
 
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn render_inline_tool(
     buf: &mut Buffer,
     x: u16,
     y: u16,
     max_w: u16,
-    icon: &str,
     text: &str,
     fg: RGBA,
-    _error_fg: Option<RGBA>,
-    _failed: bool,
-    _denied: bool,
-    spinner: Option<&SpinnerState>,
-    _expandable: bool,
-    _expanded: bool,
+    spinner: Option<&HighlightSpinner>,
 ) {
-    let base_style = Style::default().fg(rgba_color(fg));
-    let icon_style = Style::default().fg(rgba_color(fg));
-
     if let Some(spinner) = spinner {
-        draw_text_line(
-            buf,
-            &spinner.current_char().to_string(),
-            x,
-            y,
-            1,
-            icon_style,
-        );
-        draw_text_line(buf, " ", x + 1, y, 1, icon_style);
-        let label_x = x + 2;
-        draw_text_line(buf, text, label_x, y, max_w.saturating_sub(2), base_style);
-    } else if icon.chars().count() <= 2 {
-        // Draw icon with proper display-width handling.
-        // Icons like ← → ⚙ ⚠ ☰ are single chars but 2+ columns wide.
-        // The old `icon.len() <= 2` check used byte length which failed for
-        // multi-byte Unicode, causing the text label to never be drawn.
-        let icon_display_w = unicode_util::str_display_width(icon) as u16;
-        let mut cx = x;
-        for (grapheme, w) in unicode_util::graphemes_with_width(icon) {
-            if cx >= x + max_w {
-                break;
-            }
-            if let Some(cell) = buf.cell_mut((cx, y)) {
-                if grapheme.len() == 1 {
-                    cell.set_char(grapheme.chars().next().unwrap());
-                } else {
-                    cell.set_symbol(grapheme);
-                }
-                cell.set_style(icon_style);
-            }
-            if w > 1 {
-                for dx in 1..w {
-                    if let Some(cell) = buf.cell_mut((cx + dx, y)) {
-                        cell.set_diff_option(CellDiffOption::Skip);
-                    }
-                }
-            }
-            cx += w;
-        }
-        // Pad icon area to at least 2 columns for visual separation from label
-        let icon_total = icon_display_w.max(2);
-        let label_x = x.saturating_add(icon_total);
-        draw_text_line(
-            buf,
-            text,
-            label_x,
-            y,
-            max_w.saturating_sub(icon_total),
-            base_style,
-        );
+        spinner.render(buf, x, y);
+    } else {
+        draw_text_line(buf, text, x, y, max_w, Style::default().fg(rgba_color(fg)));
     }
-    // Icons with chars().count() > 2 don't exist in the codebase;
-    // they would fall through with no rendering, which is acceptable.
 }
 
 pub struct ToolRenderState {
     pub expanded: HashMap<String, bool>,
     pub error_expanded: HashMap<String, bool>,
-    pub spinner: SpinnerState,
+    /// Per-tool-call highlight spinners, keyed by tool call ID.
+    pub tool_spinners: HashMap<String, HighlightSpinner>,
 }
 
 impl ToolRenderState {
@@ -157,7 +99,7 @@ impl ToolRenderState {
         Self {
             expanded: HashMap::new(),
             error_expanded: HashMap::new(),
-            spinner: SpinnerState::new(),
+            tool_spinners: HashMap::new(),
         }
     }
 
@@ -175,8 +117,73 @@ impl ToolRenderState {
         *entry = !*entry;
     }
 
-    pub const fn advance_spinner(&mut self) {
-        self.spinner.advance();
+    /// Helper: convert a ratatui `Color::Rgb` to `RGBA`.
+    fn rgba_from_color(color: Color) -> RGBA {
+        if let Color::Rgb(r, g, b) = color {
+            RGBA::from_ints(r, g, b, 255)
+        } else {
+            RGBA::from_ints(128, 128, 128, 255)
+        }
+    }
+
+    /// Manage the lifecycle of a tool spinner.
+    ///
+    /// Call this on every frame for each tool part to ensure the
+    /// spinner is created when the tool starts running, signalled
+    /// to finish when it completes, and eventually cleaned up.
+    pub fn manage_tool_spinner(
+        &mut self,
+        tool_id: &str,
+        part: &ToolPart,
+        theme: &Theme,
+        is_running: bool,
+    ) {
+        let display = tool_display(&part.tool);
+
+        match (is_running, self.tool_spinners.get_mut(tool_id)) {
+            // Tool is running but no spinner yet — create one.
+            // Beam starts ON the text (pos 0.0) so it's immediately visible.
+            (true, None) => {
+                let text = tool_inline_text(part);
+                let highlight = tool_color(display)
+                    .map(Self::rgba_from_color)
+                    .unwrap_or(RGBA::from_ints(128, 128, 128, 255));
+                let base = theme.text;
+                let mut spinner = HighlightSpinner::new(&text, highlight, base);
+                spinner.set_beam_pos(0.0);
+                self.tool_spinners.insert(tool_id.to_string(), spinner);
+            }
+            // Tool is running but spinner is idle — replace with fresh active.
+            (true, Some(spinner)) if spinner.is_idle() => {
+                let text = tool_inline_text(part);
+                let highlight = tool_color(display)
+                    .map(Self::rgba_from_color)
+                    .unwrap_or(RGBA::from_ints(128, 128, 128, 255));
+                let base = theme.text;
+                let mut s = HighlightSpinner::new(&text, highlight, base);
+                s.set_beam_pos(0.0);
+                *spinner = s;
+            }
+            // Tool completed without ever being seen as Running — no spinner.
+            // Creating one here would leak frozen beams onto historical tools.
+            (false, None) => {}
+            // Tool is no longer running — signal the spinner to finish its
+            // sweep at a visible speed. Covers both Completed and Failed.
+            (false, Some(spinner)) if spinner.is_active() => {
+                spinner.with_speed(0.05);
+                spinner.finish();
+            }
+            _ => {}
+        }
+    }
+
+    /// Advance all active / finishing spinners, scaled by `delta_secs`.
+    pub fn advance_tool_spinners(&mut self, delta_secs: f64) {
+        for spinner in self.tool_spinners.values_mut() {
+            if !spinner.is_idle() {
+                spinner.advance(delta_secs);
+            }
+        }
     }
 }
 
@@ -202,11 +209,9 @@ const TOOL_DISPLAYS: &[&str] = &[
 ];
 
 pub fn tool_display(tool: &str) -> &str {
-    // Direct match for opencode-style short names
     if TOOL_DISPLAYS.contains(&tool) {
         return tool;
     }
-    // Map cosh-style tool names to their display equivalents
     match tool {
         "bash_run" => "bash",
         "fs_read" => "read",
@@ -224,15 +229,13 @@ pub fn tool_display(tool: &str) -> &str {
     }
 }
 
-/// Generate the visible inline text for a tool part (icon + label).
-/// Returns the text that would be shown by `render_inline_tool`.
+/// Generate the visible inline text for a tool part.
 pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
-    let icon = tool_icon(part);
-    let label = match tool_display(&part.tool) {
+    match tool_display(&part.tool) {
         "bash" => {
             let cmd = input_value(&part.input, "command").unwrap_or_default();
             if cmd.is_empty() || matches!(part.status, ToolStatus::Running) {
-                "Writing command...".to_string()
+                "Writing command".to_string()
             } else {
                 cmd
             }
@@ -255,7 +258,7 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
             }
         }
         "read" => {
-            let fp = input_value(&part.input, "filePath").unwrap_or_default();
+            let fp = input_filepath(&part.input).unwrap_or_default();
             format!("Read {fp}")
         }
         "grep" => {
@@ -280,7 +283,7 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
         "task" => {
             let desc = input_value(&part.input, "description").unwrap_or_default();
             if desc.is_empty() {
-                "Delegating...".to_string()
+                "Delegating".to_string()
             } else {
                 desc
             }
@@ -310,29 +313,6 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
                 format!("Writing {}...", part.tool)
             }
         }
-    };
-    format!("{icon} {label}")
-}
-
-/// Return the icon character for a tool.
-fn tool_icon(part: &ToolPart) -> &'static str {
-    match tool_display(&part.tool) {
-        "bash" => "$",
-        "write" | "edit" => "\u{2190}",
-        "glob" | "grep" => "\u{2731}",
-        "read" => "\u{2192}",
-        "webfetch" => "%",
-        "websearch" => "\u{25c8}",
-        "task" => {
-            if matches!(part.status, ToolStatus::Completed) {
-                "\u{2713}"
-            } else {
-                "\u{2502}"
-            }
-        }
-        "question" => "\u{2192}",
-        "todo" => "\u{2630}",
-        _ => "\u{2699}",
     }
 }
 
@@ -368,7 +348,6 @@ pub(crate) fn input_filepath(input: &serde_json::Value) -> Option<String> {
 
 /// Extract content from tool input, supporting both opencode-style
 /// ({"content": "..."}) and cosh-style ({"targets": [{"text": "...", ...}]}).
-/// Also handles fs_edit data ({"targets": [{"ops": "...", ...}]}) when use_ops is true.
 fn input_content(input: &serde_json::Value) -> Option<String> {
     if let Some(c) = input_value(input, "content") {
         return Some(c);
@@ -423,8 +402,9 @@ pub fn render_shell(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    state: &ToolRenderState,
+    state: &mut ToolRenderState,
     theme: &Theme,
+    part_idx: u16,
 ) {
     let command = input_value(&part.input, "command").unwrap_or_default();
     let output = part.output.as_deref().unwrap_or("").trim().to_string();
@@ -432,8 +412,11 @@ pub fn render_shell(
     let is_running = matches!(part.status, ToolStatus::Running);
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
+    let tool_id = format!("bash_{}", part_idx);
+    state.manage_tool_spinner(&tool_id, part, theme, is_running);
+    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
+
     if output.is_empty() {
-        let icon = "$";
         let pending = "Writing command...";
         let label = if is_completed { &command } else { pending };
         let fg = if is_completed {
@@ -444,25 +427,7 @@ pub fn render_shell(
             theme.text_muted
         };
         *line_h = 1;
-        render_inline_tool(
-            buf,
-            x,
-            y,
-            max_w,
-            icon,
-            label,
-            fg,
-            None,
-            false,
-            false,
-            if is_running {
-                Some(&state.spinner)
-            } else {
-                None
-            },
-            false,
-            false,
-        );
+        render_inline_tool(buf, x, y, max_w, label, fg, spinner);
     } else {
         let expanded = state.is_expanded(id);
         let collapsed = crate::util::scroll::collapse_tool_output(&output, 10, 800);
@@ -551,7 +516,6 @@ fn draw_highlighted_code_with_ln(
     let ln_width = ((ln_count as f64).log10().floor() as u16 + 1).max(2);
 
     let Some(lang) = lang else {
-        // Fallback to plain text with line numbers
         let mut lines_drawn = 0u16;
         for (i, line) in content.lines().enumerate() {
             if lines_drawn >= max_lines {
@@ -598,7 +562,6 @@ fn draw_highlighted_code_with_ln(
 
         let mut x_pos = x;
 
-        // Draw line number (right-aligned)
         let ln_text = format!("{:>w$}", i + 1, w = ln_width as usize);
         for ch in ln_text.chars() {
             if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
@@ -608,7 +571,6 @@ fn draw_highlighted_code_with_ln(
             x_pos += 1;
         }
 
-        // Space after line number
         if x_pos < x + max_w {
             if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
                 cell.set_char(' ');
@@ -617,7 +579,6 @@ fn draw_highlighted_code_with_ln(
             x_pos += 1;
         }
 
-        // Draw highlighted content
         for (ci, ch) in line.char_indices() {
             if x_pos >= x + max_w {
                 break;
@@ -632,7 +593,6 @@ fn draw_highlighted_code_with_ln(
             x_pos += 1;
         }
 
-        // Fill remaining with default style
         while x_pos < x + max_w {
             if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
                 cell.set_style(Style::default().fg(default_fg));
@@ -653,7 +613,7 @@ pub fn render_write(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    _state: &ToolRenderState,
+    _state: &mut ToolRenderState,
     theme: &Theme,
 ) {
     let filepath = input_filepath(&part.input).unwrap_or_default();
@@ -710,7 +670,6 @@ pub fn render_write(
             max_lines,
         );
     } else {
-        let icon = "\u{2190}";
         let label = format!("Write {filepath}");
         let fg = if is_completed {
             theme.text_muted
@@ -718,9 +677,7 @@ pub fn render_write(
             theme.text
         };
         *line_h = 1;
-        render_inline_tool(
-            buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
-        );
+        render_inline_tool(buf, x, y, max_w, &label, fg, None);
     }
 }
 
@@ -731,7 +688,7 @@ pub fn render_edit(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    _state: &ToolRenderState,
+    _state: &mut ToolRenderState,
     theme: &Theme,
 ) {
     let filepath = input_filepath(&part.input).unwrap_or_default();
@@ -804,7 +761,6 @@ pub fn render_edit(
         }
         diff.render_self(buf, diff_area);
     } else {
-        let icon = "\u{2190}";
         let label = format!("Edit {filepath}");
         let fg = if is_completed {
             theme.text_muted
@@ -812,9 +768,7 @@ pub fn render_edit(
             theme.text
         };
         *line_h = 1;
-        render_inline_tool(
-            buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
-        );
+        render_inline_tool(buf, x, y, max_w, &label, fg, None);
     }
 }
 
@@ -825,28 +779,30 @@ pub fn render_glob(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    _state: &ToolRenderState,
+    state: &mut ToolRenderState,
     theme: &Theme,
+    part_idx: u16,
 ) {
     let pattern = input_value(&part.input, "pattern").unwrap_or_default();
     let path = input_value(&part.input, "path");
     let is_completed = matches!(part.status, ToolStatus::Completed);
+    let is_running = matches!(part.status, ToolStatus::Running);
 
     let mut label = format!("Glob \"{pattern}\"");
     if let Some(p) = path {
         let _ = write!(label, " in {p}");
     }
 
-    let icon = "\u{2731}";
     let fg = if is_completed {
         theme.text_muted
     } else {
         theme.text
     };
+    let tool_id = format!("glob_{}", part_idx);
+    state.manage_tool_spinner(&tool_id, part, theme, is_running);
+    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
     *line_h = 1;
-    render_inline_tool(
-        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
-    );
+    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
 }
 
 pub fn render_read(
@@ -856,14 +812,14 @@ pub fn render_read(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    state: &ToolRenderState,
+    state: &mut ToolRenderState,
     theme: &Theme,
+    part_idx: u16,
 ) {
     let filepath = input_filepath(&part.input).unwrap_or_default();
     let is_running = matches!(part.status, ToolStatus::Running);
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
-    let icon = "\u{2192}";
     let label = format!("Read {filepath}");
     let fg = if is_completed {
         theme.text_muted
@@ -871,25 +827,10 @@ pub fn render_read(
         theme.text
     };
     *line_h = 1;
-    render_inline_tool(
-        buf,
-        x,
-        y,
-        max_w,
-        icon,
-        &label,
-        fg,
-        None,
-        false,
-        false,
-        if is_running {
-            Some(&state.spinner)
-        } else {
-            None
-        },
-        false,
-        false,
-    );
+    let tool_id = format!("read_{}", part_idx);
+    state.manage_tool_spinner(&tool_id, part, theme, is_running);
+    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
+    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
 }
 
 pub fn render_grep(
@@ -899,28 +840,30 @@ pub fn render_grep(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    _state: &ToolRenderState,
+    state: &mut ToolRenderState,
     theme: &Theme,
+    part_idx: u16,
 ) {
     let pattern = input_value(&part.input, "pattern").unwrap_or_default();
     let path = input_value(&part.input, "path");
     let is_completed = matches!(part.status, ToolStatus::Completed);
+    let is_running = matches!(part.status, ToolStatus::Running);
 
     let mut label = format!("Grep \"{pattern}\"");
     if let Some(p) = path {
         let _ = write!(label, " in {p}");
     }
 
-    let icon = "\u{2731}";
     let fg = if is_completed {
         theme.text_muted
     } else {
         theme.text
     };
+    let tool_id = format!("grep_{}", part_idx);
+    state.manage_tool_spinner(&tool_id, part, theme, is_running);
+    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
     *line_h = 1;
-    render_inline_tool(
-        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
-    );
+    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
 }
 
 pub fn render_webfetch(
@@ -930,23 +873,25 @@ pub fn render_webfetch(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    _state: &ToolRenderState,
+    state: &mut ToolRenderState,
     theme: &Theme,
+    part_idx: u16,
 ) {
     let url = input_value(&part.input, "url").unwrap_or_default();
     let is_completed = matches!(part.status, ToolStatus::Completed);
+    let is_running = matches!(part.status, ToolStatus::Running);
 
     let label = format!("WebFetch {url}");
-    let icon = "%";
     let fg = if is_completed {
         theme.text_muted
     } else {
         theme.text
     };
+    let tool_id = format!("webfetch_{}", part_idx);
+    state.manage_tool_spinner(&tool_id, part, theme, is_running);
+    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
     *line_h = 1;
-    render_inline_tool(
-        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
-    );
+    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
 }
 
 pub fn render_websearch(
@@ -956,25 +901,27 @@ pub fn render_websearch(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    _state: &ToolRenderState,
+    state: &mut ToolRenderState,
     theme: &Theme,
+    part_idx: u16,
 ) {
     let query = input_value(&part.input, "query").unwrap_or_default();
     let provider = input_value(&part.input, "provider");
     let is_completed = matches!(part.status, ToolStatus::Completed);
+    let is_running = matches!(part.status, ToolStatus::Running);
 
     let provider_label = web_search_provider_label(provider.as_deref());
     let label = format!("{provider_label} \"{query}\"");
-    let icon = "\u{25c8}";
     let fg = if is_completed {
         theme.text_muted
     } else {
         theme.text
     };
+    let tool_id = format!("websearch_{}", part_idx);
+    state.manage_tool_spinner(&tool_id, part, theme, is_running);
+    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
     *line_h = 1;
-    render_inline_tool(
-        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
-    );
+    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
 }
 
 pub fn render_task(
@@ -984,8 +931,9 @@ pub fn render_task(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    state: &ToolRenderState,
+    state: &mut ToolRenderState,
     theme: &Theme,
+    part_idx: u16,
 ) {
     let description = input_value(&part.input, "description").unwrap_or_default();
     let is_completed = matches!(part.status, ToolStatus::Completed);
@@ -997,32 +945,16 @@ pub fn render_task(
         description
     };
 
-    let icon = if is_completed { "\u{2713}" } else { "\u{2502}" };
     let fg = if is_completed {
         theme.text_muted
     } else {
         theme.text
     };
+    let tool_id = format!("task_{}", part_idx);
+    state.manage_tool_spinner(&tool_id, part, theme, is_running);
+    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
     *line_h = 1;
-    render_inline_tool(
-        buf,
-        x,
-        y,
-        max_w,
-        icon,
-        &content,
-        fg,
-        None,
-        false,
-        false,
-        if is_running && !is_completed {
-            Some(&state.spinner)
-        } else {
-            None
-        },
-        false,
-        false,
-    );
+    render_inline_tool(buf, x, y, max_w, &content, fg, spinner);
 }
 
 pub fn render_question_tool(
@@ -1032,22 +964,19 @@ pub fn render_question_tool(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    _state: &ToolRenderState,
+    _state: &mut ToolRenderState,
     theme: &Theme,
 ) {
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
     let label = "Asking questions...".to_string();
-    let icon = "\u{2192}";
     let fg = if is_completed {
         theme.text_muted
     } else {
         theme.text
     };
     *line_h = 1;
-    render_inline_tool(
-        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
-    );
+    render_inline_tool(buf, x, y, max_w, &label, fg, None);
 }
 
 /// Parse the tool output JSON and return formatted display lines for TODO items.
@@ -1075,8 +1004,6 @@ pub fn format_todo_output(output: &str, tool_name: &str) -> Vec<String> {
             .and_then(|g| g.as_array());
 
         if let Some(groups) = groups {
-            // Flatten all items from all groups into a single flat list
-            // (matching OpenCode's todo-item style: no group headers, no IDs)
             for group in groups {
                 if let Some(items) = group.get("items").and_then(|i| i.as_array()) {
                     for item in items {
@@ -1085,7 +1012,6 @@ pub fn format_todo_output(output: &str, tool_name: &str) -> Vec<String> {
                             .and_then(|d| d.as_str())
                             .unwrap_or("");
                         let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("?");
-                        // OpenCode-style bracket status markers
                         let symbol = match status {
                             "Completed" => "\u{2713}",
                             "InProgress" => "\u{25CF}",
@@ -1106,7 +1032,6 @@ pub fn format_todo_output(output: &str, tool_name: &str) -> Vec<String> {
             }
         }
 
-        // Check if we had any items (via groups) or nags
         let has_items = groups.is_some_and(|g| {
             g.iter().any(|gr| {
                 gr.get("items")
@@ -1138,15 +1063,13 @@ pub fn render_todo(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    _state: &ToolRenderState,
+    _state: &mut ToolRenderState,
     theme: &Theme,
 ) {
     let tool_name: &str = &part.tool;
     let output = part.output.as_deref().unwrap_or("").trim();
     let is_running = matches!(part.status, ToolStatus::Running);
 
-    // Hide tool call for running/completed-but-empty — only show the final block.
-    // In case of failure, show the label inline so the user knows something went wrong.
     if is_running || output.is_empty() {
         let is_failed = matches!(part.status, ToolStatus::Failed(_));
         if is_failed {
@@ -1158,28 +1081,23 @@ pub fn render_todo(
             *line_h = 1;
             draw_text_line(buf, &label, x, y, max_w, style);
         } else {
-            // Take 1 line of space but draw nothing — the blank line is invisible
-            // against the terminal background.
             *line_h = 1;
         }
         return;
     }
 
-    // Format the todo lines (same for both height estimation and rendering)
     let formatted = format_todo_output(output, tool_name);
     if formatted.is_empty() {
         *line_h = 1;
         return;
     }
     let total_lines = formatted.len() as u16;
-    // OpenCode-style BlockTool: left border + background + 1 padding top + 1 padding bottom
     let box_h = total_lines.saturating_add(2);
     *line_h = box_h;
 
     let area_w = max_w.saturating_add(3);
     let area = Rect::new(x, y, area_w, box_h);
 
-    // Lightweight left-border + background fill (avoids BoxRenderable overhead).
     let bg_style = Style::default().bg(rgba_color(theme.background_panel));
     let border_style = Style::default()
         .fg(rgba_color(theme.background))
@@ -1197,15 +1115,13 @@ pub fn render_todo(
         }
     }
 
-    // Title line (muted) at y + 1 (padding top)
     let title_style = Style::default().fg(rgba_color(theme.text_muted));
-    let content_x = x + 3; // border + 2 padding
+    let content_x = x + 3;
     let content_w = max_w.saturating_sub(3);
     draw_text_line(buf, &formatted[0], content_x, y + 1, content_w, title_style);
 
-    // Item lines starting at y + 2 (after title)
     let item_style = Style::default().fg(rgba_color(theme.text));
-    let content_bottom = area.bottom().saturating_sub(1); // -1 for padding bottom
+    let content_bottom = area.bottom().saturating_sub(1);
     for (i, line) in formatted.iter().enumerate().skip(1) {
         let ly = y + 1 + i as u16;
         if ly >= content_bottom {
@@ -1222,27 +1138,29 @@ pub fn render_generic(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    _state: &ToolRenderState,
+    state: &mut ToolRenderState,
     theme: &Theme,
+    part_idx: u16,
 ) {
     let tool_name = &part.tool;
     let is_completed = matches!(part.status, ToolStatus::Completed);
+    let is_running = matches!(part.status, ToolStatus::Running);
 
     let label = if is_completed {
         tool_name.clone()
     } else {
         format!("Writing {tool_name}...")
     };
-    let icon = "\u{2699}";
     let fg = if is_completed {
         theme.text_muted
     } else {
         theme.text
     };
+    let tool_id = format!("generic_{}", part_idx);
+    state.manage_tool_spinner(&tool_id, part, theme, is_running);
+    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
     *line_h = 1;
-    render_inline_tool(
-        buf, x, y, max_w, icon, &label, fg, None, false, false, None, false, false,
-    );
+    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
 }
 
 pub fn dispatch_tool(
@@ -1252,22 +1170,23 @@ pub fn dispatch_tool(
     line_h: &mut u16,
     max_w: u16,
     part: &ToolPart,
-    state: &ToolRenderState,
+    state: &mut ToolRenderState,
     theme: &Theme,
+    part_idx: u16,
 ) {
     let display = tool_display(&part.tool);
     match display {
-        "bash" => render_shell(buf, x, y, line_h, max_w, part, state, theme),
-        "glob" => render_glob(buf, x, y, line_h, max_w, part, state, theme),
-        "read" => render_read(buf, x, y, line_h, max_w, part, state, theme),
-        "grep" => render_grep(buf, x, y, line_h, max_w, part, state, theme),
-        "webfetch" => render_webfetch(buf, x, y, line_h, max_w, part, state, theme),
-        "websearch" => render_websearch(buf, x, y, line_h, max_w, part, state, theme),
+        "bash" => render_shell(buf, x, y, line_h, max_w, part, state, theme, part_idx),
+        "glob" => render_glob(buf, x, y, line_h, max_w, part, state, theme, part_idx),
+        "read" => render_read(buf, x, y, line_h, max_w, part, state, theme, part_idx),
+        "grep" => render_grep(buf, x, y, line_h, max_w, part, state, theme, part_idx),
+        "webfetch" => render_webfetch(buf, x, y, line_h, max_w, part, state, theme, part_idx),
+        "websearch" => render_websearch(buf, x, y, line_h, max_w, part, state, theme, part_idx),
         "write" => render_write(buf, x, y, line_h, max_w, part, state, theme),
         "edit" => render_edit(buf, x, y, line_h, max_w, part, state, theme),
-        "task" => render_task(buf, x, y, line_h, max_w, part, state, theme),
+        "task" => render_task(buf, x, y, line_h, max_w, part, state, theme, part_idx),
         "question" => render_question_tool(buf, x, y, line_h, max_w, part, state, theme),
         "todo" => render_todo(buf, x, y, line_h, max_w, part, state, theme),
-        _ => render_generic(buf, x, y, line_h, max_w, part, state, theme),
+        _ => render_generic(buf, x, y, line_h, max_w, part, state, theme, part_idx),
     }
 }

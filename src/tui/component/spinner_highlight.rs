@@ -64,6 +64,19 @@ fn gaussian(x: f32, sigma: f32) -> f32 {
     (-(x * x) / (2.0 * sigma * sigma)).exp()
 }
 
+//  SpinnerPhase
+
+/// Lifecycle phase of a [`HighlightSpinner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpinnerPhase {
+    /// Beam is actively sweeping (tool is running).
+    Active,
+    /// Beam is completing its current sweep, then will stop.
+    Finishing,
+    /// Spinner is stopped — all characters render with base colour only.
+    Idle,
+}
+
 //  HighlightSpinner
 
 /// An animated text-highlight spinner that sweeps a luminous beam across the
@@ -116,6 +129,10 @@ pub struct HighlightSpinner {
     /// Frequency of the shimmer oscillation (radians per frame).
     shimmer_freq: f32,
 
+    // Lifecycle
+    /// Current phase of the spinner.
+    phase: SpinnerPhase,
+
     // Multi-message cycling
     /// All messages to cycle through.
     messages: Vec<String>,
@@ -142,7 +159,6 @@ impl HighlightSpinner {
             text: text.to_string(),
             char_count,
             chars,
-            // Start off-screen to the left so the beam enters naturally.
             beam_pos: -0.3,
             frame: 0,
             speed: 0.008,
@@ -153,7 +169,7 @@ impl HighlightSpinner {
             trail_scale: 2.0,
             shimmer_amp: 0.06,
             shimmer_freq: 0.12,
-            // Single message by default (no auto-cycling).
+            phase: SpinnerPhase::Active,
             messages: vec![text.to_string()],
             durations: vec![u32::MAX],
             current_idx: 0,
@@ -272,6 +288,26 @@ impl HighlightSpinner {
         self.base_color = base;
     }
 
+    // Lifecycle control
+
+    /// Signal the spinner to finish its current beam sweep and then
+    /// stop at the base colour. Idempotent — safe to call multiple times.
+    pub fn finish(&mut self) {
+        if self.phase == SpinnerPhase::Active {
+            self.phase = SpinnerPhase::Finishing;
+        }
+    }
+
+    /// Whether the spinner is in the `Active` phase (beam sweeping).
+    pub const fn is_active(&self) -> bool {
+        matches!(self.phase, SpinnerPhase::Active)
+    }
+
+    /// Whether the spinner is in the `Idle` phase (stopped, no beam).
+    pub const fn is_idle(&self) -> bool {
+        matches!(self.phase, SpinnerPhase::Idle)
+    }
+
     // Internal helpers
 
     /// Apply the current message's text to the rendering state.
@@ -285,28 +321,54 @@ impl HighlightSpinner {
 
     // Animation
 
-    /// Advance the animation by one frame.
+    /// Advance the animation by one frame, scaled by `delta_secs`.
     ///
-    /// Moves the beam `speed` units to the right and wraps back to
-    /// off-screen-left when it passes beyond `1.3`.
+    /// The beam moves at `speed * delta_secs * 30.0` so its visual
+    /// speed stays consistent regardless of the actual frame rate.
+    /// At the default 30 fps (`delta_secs ≈ 0.033`) the factor is ~1.0×.
+    ///
+    /// * `Active` — beam moves and wraps around.
+    /// * `Finishing` — beam continues until it exits past `1.3`,
+    ///   then transitions to `Idle`.
+    /// * `Idle` — no-op (spinner is stopped).
     ///
     /// If multiple messages are configured, automatically advances to the
     /// next message when the current one's display duration expires.
-    pub fn advance(&mut self) {
-        self.frame = self.frame.wrapping_add(1);
-        self.beam_pos += self.speed;
-        if self.beam_pos > 1.3 {
-            self.beam_pos = -0.3;
-        }
+    pub fn advance(&mut self, delta_secs: f64) {
+        let step = self.speed * (delta_secs as f32 * 30.0);
+        match self.phase {
+            SpinnerPhase::Idle => {}
+            SpinnerPhase::Finishing => {
+                self.frame = self.frame.wrapping_add(1);
+                self.beam_pos += step;
+                if self.beam_pos > 1.3 {
+                    self.phase = SpinnerPhase::Idle;
+                    self.beam_pos = 2.0;
+                }
+            }
+            SpinnerPhase::Active => {
+                self.frame = self.frame.wrapping_add(1);
+                self.beam_pos += step;
+                if self.beam_pos > 1.3 {
+                    self.beam_pos = -0.3;
+                }
 
-        // Multi-message cycling: check if it's time to advance.
-        if self.messages.len() > 1 {
-            self.msg_frame_count += 1;
-            let current_duration = self.durations[self.current_idx];
-            if self.msg_frame_count >= current_duration {
-                self.advance_message();
+                // Multi-message cycling: check if it's time to advance.
+                if self.messages.len() > 1 {
+                    self.msg_frame_count += 1;
+                    let current_duration = self.durations[self.current_idx];
+                    if self.msg_frame_count >= current_duration {
+                        self.advance_message();
+                    }
+                }
             }
         }
+    }
+
+    /// Set the beam position directly (useful to start already on the text).
+    /// `0.0` = first character, `1.0` = last character.
+    pub fn set_beam_pos(&mut self, pos: f32) {
+        self.beam_pos = pos;
     }
 
     /// Reset the animation to its initial state.
@@ -347,51 +409,64 @@ impl HighlightSpinner {
         self.beam_pos > -0.3 && self.beam_pos < 1.3
     }
 
+    /// The current beam position.
+    pub fn beam_pos(&self) -> f32 {
+        self.beam_pos
+    }
+
+    /// The current phase.
+    pub fn phase(&self) -> SpinnerPhase {
+        self.phase
+    }
+
     // Rendering
 
     /// Render the spinner into the buffer at position `(x, y)`.
     ///
-    /// Each character is drawn with an individually interpolated colour
-    /// based on its distance from the moving beam centre.
+    /// * `Active` / `Finishing` — draws each character with a colour
+    ///   interpolated between `base_color` and `highlight_color` based
+    ///   on the beam position.
+    /// * `Idle` — draws all characters with `base_color` only (no beam).
     pub fn render(&self, buf: &mut Buffer, x: u16, y: u16) {
         if self.char_count == 0 {
             return;
         }
 
+        // Idle: all characters at base colour, no beam calculation.
+        if self.phase == SpinnerPhase::Idle {
+            for (i, &ch) in self.chars.iter().enumerate() {
+                let cell_x = x + i as u16;
+                if let Some(cell) = buf.cell_mut((cell_x, y)) {
+                    cell.set_char(ch);
+                    cell.set_style(Style::default().fg(rgba_color(self.base_color)));
+                }
+            }
+            return;
+        }
+
+        // Active / Finishing: beam rendering.
         let char_count_f = self.char_count as f32;
         let shimmer = 1.0 + self.shimmer_amp * ((self.frame as f32) * self.shimmer_freq).sin();
 
         for (i, &ch) in self.chars.iter().enumerate() {
-            // Normalised character position in [0.0, 1.0].
             let char_norm = if self.char_count > 1 {
                 i as f32 / (char_count_f - 1.0)
             } else {
                 0.5
             };
 
-            // Signed distance: negative = character is behind the beam
-            // (trailing side), positive = ahead (leading side).
             let dist = char_norm - self.beam_pos;
             let abs_dist = dist.abs();
 
-            // Asymmetric beam: the trailing edge is wider so the beam
-            // appears to be sweeping in one direction.
             let effective_sigma = if dist < 0.0 {
                 self.primary_sigma * self.trail_scale
             } else {
                 self.primary_sigma
             };
 
-            // Primary beam contribution.
             let primary = gaussian(abs_dist, effective_sigma);
-
-            // Wide atmospheric glow (always symmetric).
             let glow = gaussian(abs_dist, self.glow_sigma) * 0.25;
-
-            // Combine and clamp.
             let intensity = (primary + glow).clamp(0.0, 1.0) * shimmer;
-
-            // Interpolate colour.
             let color = lerp_color(self.base_color, self.highlight_color, intensity);
 
             let cell_x = x + i as u16;

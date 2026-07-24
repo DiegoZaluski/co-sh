@@ -157,10 +157,8 @@ impl ThemeRegistry {
     }
 }
 
-// ═══════════════════════════════════════════════
 // Theme definitions — ported from opencode TUI
-// ═══════════════════════════════════════════════
-
+//
 // Helper to build full Theme
 #[allow(clippy::too_many_arguments, clippy::similar_names)]
 fn full_theme(

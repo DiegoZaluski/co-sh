@@ -582,7 +582,7 @@ impl SessionView {
         parts: &[Part],
         role: &MessageRole,
         theme: &Theme,
-        tool_state: &ToolRenderState,
+        tool_state: &mut ToolRenderState,
         config: &TuiConfig,
         opt_heights: Option<&[u16]>,
         streaming: bool,
@@ -712,6 +712,7 @@ impl SessionView {
                         tool,
                         tool_state,
                         theme,
+                        pi as u16,
                     );
                     let available = bottom.saturating_sub(y);
                     line_h = line_h.min(available);
@@ -917,7 +918,7 @@ impl SessionView {
         msg: &Message,
         theme: &Theme,
         agent_color: RGBA,
-        tool_state: &ToolRenderState,
+        tool_state: &mut ToolRenderState,
         config: &TuiConfig,
         is_queued: bool,
         is_compacted: bool,
@@ -986,7 +987,7 @@ impl SessionView {
         area: Rect,
         msg: &Message,
         theme: &Theme,
-        tool_state: &ToolRenderState,
+        tool_state: &mut ToolRenderState,
         config: &TuiConfig,
         is_queued: bool,
         is_compacted: bool,
@@ -1909,8 +1910,16 @@ impl SessionView {
                 if is_top_clipped && is_assistant_non_error {
                     // ── Top-clipped assistant (non-error) ──
                     let is_streaming_msg = idx == session.messages.len() - 1 && streaming;
+                    // Bypass cache when any tool has an active spinner so the
+                    // beam animation advances every frame.
+                    let has_active_spinner = self
+                        .tool_state
+                        .tool_spinners
+                        .iter()
+                        .any(|(_, s)| !s.is_idle());
                     let token = msg_content_token(msg, config_tok, max_w);
                     let cache_hit = !is_streaming_msg
+                        && !has_active_spinner
                         && token == self.msg_cache_tokens[idx]
                         && self.msg_cache_w[idx] == inner_area.width
                         && self.msg_cache_h[idx] > 0
@@ -1954,7 +1963,7 @@ impl SessionView {
                             full_area,
                             msg,
                             theme,
-                            &self.tool_state,
+                            &mut self.tool_state,
                             config,
                             false,
                             false,
@@ -2070,7 +2079,7 @@ impl SessionView {
                                     msg,
                                     theme,
                                     agent_color,
-                                    &self.tool_state,
+                                    &mut self.tool_state,
                                     config,
                                     false,
                                     false,
@@ -2084,7 +2093,7 @@ impl SessionView {
                                     full_area,
                                     msg,
                                     theme,
-                                    &self.tool_state,
+                                    &mut self.tool_state,
                                     config,
                                     false,
                                     false,
@@ -2162,7 +2171,7 @@ impl SessionView {
                                 msg_area,
                                 msg,
                                 theme,
-                                &self.tool_state,
+                                &mut self.tool_state,
                                 config,
                                 false,
                                 false,
@@ -2224,7 +2233,7 @@ impl SessionView {
                                     msg,
                                     theme,
                                     agent_color,
-                                    &self.tool_state,
+                                    &mut self.tool_state,
                                     config,
                                     false,
                                     false,
@@ -2268,7 +2277,7 @@ impl SessionView {
                                         msg_area,
                                         msg,
                                         theme,
-                                        &self.tool_state,
+                                        &mut self.tool_state,
                                         config,
                                         false,
                                         false,
@@ -2297,7 +2306,7 @@ impl SessionView {
                                         full_area,
                                         msg,
                                         theme,
-                                        &self.tool_state,
+                                        &mut self.tool_state,
                                         config,
                                         false,
                                         false,

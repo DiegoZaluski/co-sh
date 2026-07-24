@@ -1575,7 +1575,9 @@ impl App {
                     }
                     self.prompt_view.cursor.terminal_focused = self.terminal_focused;
                     self.session_view.drag_selection = self.drag_selection;
-                    self.session_view.tool_state.advance_spinner();
+                    self.session_view
+                        .tool_state
+                        .advance_tool_spinners(delta_time);
 
                     // Advance the agent spinner when working
                     if self.state.status == crate::types::SessionStatus::Working
