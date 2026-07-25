@@ -348,4 +348,32 @@ impl Fs {
     pub async fn rollback(&self, path: &str, hash: &str) -> Result<RollbackResult, String> {
         rollback(&FsRollback, self.metadata(), path, hash).await
     }
+
+    /// Get the project root path.
+    #[must_use]
+    pub const fn root(&self) -> &PathBuf {
+        &self.root
+    }
+
+    /// Get the write allowlist (read-only reference).
+    #[must_use]
+    pub fn allowlist_ref(&self) -> Option<&[PathBuf]> {
+        self.allowlist.as_deref()
+    }
+
+    /// Get the write blocklist (read-only reference).
+    #[must_use]
+    pub fn blocklist_ref(&self) -> Option<&[PathBuf]> {
+        self.blocklist.as_deref()
+    }
+
+    /// Add a path to the write allowlist.
+    ///
+    /// If the allowlist is `None`, it is created. Duplicate paths are ignored.
+    pub fn add_allowlist_path(&mut self, path: PathBuf) {
+        let list = self.allowlist.get_or_insert_with(Vec::new);
+        if !list.contains(&path) {
+            list.push(path);
+        }
+    }
 }

@@ -9,11 +9,12 @@ async fn test_agent_loop_simple_conversation() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
     let stop_signal = Arc::new(AtomicBool::new(false));
 
     // Run in a task so we can collect events
     let handle = tokio::spawn(async move {
-        h.run_agent_loop("hi", tx, answer_rx, stop_signal).await;
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal).await;
     });
 
     // Collect events with timeout
@@ -64,10 +65,11 @@ async fn test_agent_loop_with_tool_call() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
     let stop_signal = Arc::new(AtomicBool::new(false));
 
     let handle = tokio::spawn(async move {
-        h.run_agent_loop("use tool", tx, answer_rx, stop_signal)
+        h.run_agent_loop("use tool", tx, answer_rx, perm_rx, stop_signal)
             .await;
     });
 

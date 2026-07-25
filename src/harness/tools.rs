@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fmt::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::events::HarnessEvent;
@@ -97,7 +98,7 @@ impl CoshTools {
         Self {
             bash: Bash::new().cwd(cwd),
             fs: Fs::new().cwd(cwd),
-            find: Find::new(),
+            find: Find::new().cwd(cwd),
             web: Web::new(),
             vision: Vision::new(),
             plan: Mutex::new(Plan::new()),
@@ -115,6 +116,29 @@ impl CoshTools {
     /// Set the event sender for streaming tool output.
     pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    /// Get the Fs root path for permission checks.
+    #[must_use]
+    pub fn fs_root(&self) -> &Path {
+        self.fs.root()
+    }
+
+    /// Get the Fs allowlist for permission checks.
+    #[must_use]
+    pub fn fs_allowlist(&self) -> Option<&[PathBuf]> {
+        self.fs.allowlist_ref()
+    }
+
+    /// Get the Fs blocklist for permission checks.
+    #[must_use]
+    pub fn fs_blocklist(&self) -> Option<&[PathBuf]> {
+        self.fs.blocklist_ref()
+    }
+
+    /// Add a path to the Fs write allowlist (persists for the session).
+    pub fn add_fs_allowlist_path(&mut self, path: PathBuf) {
+        self.fs.add_allowlist_path(path);
     }
 
     /// Set the list of RAG databases for the `recall_search` dispatch.

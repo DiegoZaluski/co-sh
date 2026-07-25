@@ -96,6 +96,8 @@ pub struct App {
     event_rx: mpsc::UnboundedReceiver<HarnessEvent>,
     /// Sender for question answers back to the harness.
     answer_tx: mpsc::UnboundedSender<Result<Vec<cosh_tools::question::types::AnswerItem>, String>>,
+    /// Sender for permission responses back to the harness.
+    perm_tx: mpsc::UnboundedSender<cosh::harness::PermissionAction>,
     llm_config: LlmConfig,
     stop_signal: Arc<AtomicBool>,
     terminal_focused: bool,
@@ -155,6 +157,7 @@ impl App {
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
+        let (perm_tx, _perm_rx) = mpsc::unbounded_channel();
 
         let theme_registry = ThemeRegistry::new();
         let prefs_cache = crate::util::cache::StaleCache::new("preferences.json");
@@ -208,6 +211,7 @@ impl App {
             event_tx,
             event_rx,
             answer_tx,
+            perm_tx,
             llm_config: LlmConfig::from_env(),
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
@@ -1486,8 +1490,9 @@ impl App {
             let footer_y = main_area.bottom().saturating_sub(1);
             let is_session = matches!(self.mode(), AppMode::Session);
 
-            // When question dialog is visible, hide prompt and spinner (like OpenCode)
-            let hide_prompt_and_spinner = is_session && self.question_dialog.visible;
+            // When question or permission dialog is visible, hide prompt and spinner (like OpenCode)
+            let hide_prompt_and_spinner = is_session
+                && (self.question_dialog.visible || self.permission_dialog.visible);
 
             let prompt_h = if is_session && !hide_prompt_and_spinner {
                 self.prompt_view
@@ -1499,6 +1504,13 @@ impl App {
             // Question dialog inline (between messages and prompt), only during session
             let question_h = if is_session && self.question_dialog.visible {
                 self.question_dialog
+                    .required_height(main_area.width.saturating_sub(4))
+            } else {
+                0
+            };
+            // Permission dialog (same position as question, mutually exclusive)
+            let permission_h = if is_session && self.permission_dialog.visible {
+                self.permission_dialog
                     .required_height(main_area.width.saturating_sub(4))
             } else {
                 0
@@ -1517,8 +1529,10 @@ impl App {
 
             // Question dialog inline (between messages and spinner), only during session
             let question_area_y = spinner_area_y.saturating_sub(question_h);
+            let permission_area_y = spinner_area_y.saturating_sub(permission_h);
             let prompt_padding: u16 = 1;
-            let session_bottom = question_area_y.saturating_sub(prompt_padding);
+            // session bottom is below whichever dialog is visible (mutually exclusive, never both)
+            let session_bottom = question_area_y.min(permission_area_y).saturating_sub(prompt_padding);
 
             let prompt_area = Rect::new(
                 main_area.x + 2,
@@ -1537,6 +1551,12 @@ impl App {
                 question_area_y,
                 main_area.width.saturating_sub(4),
                 question_h,
+            );
+            let permission_area = Rect::new(
+                main_area.x + 2,
+                permission_area_y,
+                main_area.width.saturating_sub(4),
+                permission_h,
             );
             let session_area = Rect::new(
                 main_area.x,
@@ -1578,11 +1598,8 @@ impl App {
                     self.render_rag_view(buf, session_area);
                 }
                 AppMode::Session => {
-                    // Blur prompt when question dialog is visible, focus otherwise (like OpenCode)
-                    // Blur prompt when question dialog is visible, otherwise
-                    // leave current focus state as-is (user controls it via
-                    // clicking inside/outside the prompt).
-                    if self.question_dialog.visible {
+                    // Blur prompt when question/permission dialog is visible (like OpenCode)
+                    if self.question_dialog.visible || self.permission_dialog.visible {
                         self.prompt_view.blur();
                     }
                     self.prompt_view.cursor.terminal_focused = self.terminal_focused;
@@ -1608,12 +1625,14 @@ impl App {
                         &self.config,
                         delta_time,
                     );
-                    // Question dialog rendered inline between messages and prompt (like OpenCode)
+                    // Question/permission dialog rendered inline between messages and prompt
                     if self.question_dialog.visible {
                         self.question_dialog.render(buf, question_area, &self.theme);
+                    } else if self.permission_dialog.visible {
+                        self.permission_dialog.render(buf, permission_area, &self.theme);
                     }
-                    // Hide spinner and prompt when question dialog is visible (like OpenCode)
-                    if !self.question_dialog.visible {
+                    // Hide spinner and prompt when dialog is visible (like OpenCode)
+                    if !self.question_dialog.visible && !self.permission_dialog.visible {
                         // Agent spinner rendered above the prompt when the loop is active
                         if let Some(spinner) = &self.agent_spinner
                             && self.state.status == crate::types::SessionStatus::Working
@@ -1643,7 +1662,7 @@ impl App {
                 &self.state,
                 &self.theme,
                 show_home,
-                self.question_dialog.visible,
+                self.question_dialog.visible || self.permission_dialog.visible,
             );
             let now = std::time::SystemTime::now();
             self.toast_state.render(buf, area, &self.theme);
@@ -1653,7 +1672,7 @@ impl App {
                 d.cursor.terminal_focused = self.terminal_focused;
             }
             self.dialog.render(buf, area, &self.theme, now);
-            self.permission_dialog.render(buf, area, &self.theme);
+
             self.command_palette.render(buf, area, &self.theme);
             self.slash_menu.render(buf, prompt_area, &self.theme);
         }
@@ -1762,6 +1781,40 @@ impl App {
                                 {
                                     *scroll = scroll.saturating_add(1);
                                 }
+                                return Ok(false);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Check permission dialog for keyboard navigation
+                    if self.permission_dialog.visible {
+                        match key.code {
+                            KeyCode::Up => {
+                                self.permission_dialog.selected =
+                                    (self.permission_dialog.selected + 2) % 3;
+                                return Ok(false);
+                            }
+                            KeyCode::Down => {
+                                self.permission_dialog.selected =
+                                    (self.permission_dialog.selected + 1) % 3;
+                                return Ok(false);
+                            }
+                            KeyCode::Enter => {
+                                let action = match self.permission_dialog.selected {
+                                    0 => cosh::harness::PermissionAction::Allow,
+                                    1 => cosh::harness::PermissionAction::AllowOnce,
+                                    _ => cosh::harness::PermissionAction::Deny,
+                                };
+                                self.permission_dialog.visible = false;
+                                let _ = self.perm_tx.send(action);
+                                return Ok(false);
+                            }
+                            KeyCode::Esc => {
+                                self.permission_dialog.visible = false;
+                                let _ = self
+                                    .perm_tx
+                                    .send(cosh::harness::PermissionAction::Deny);
                                 return Ok(false);
                             }
                             _ => {}
@@ -2130,6 +2183,10 @@ impl App {
                             let (answer_tx, answer_rx) = mpsc::unbounded_channel();
                             self.answer_tx = answer_tx;
 
+                            // Create a fresh permission channel for this agent loop invocation
+                            let (perm_tx, perm_rx) = mpsc::unbounded_channel();
+                            self.perm_tx = perm_tx;
+
                             let mut disabled_tools = self.internal_tools_view.disabled.clone();
 
                             // RAG recall context
@@ -2231,6 +2288,7 @@ impl App {
                                                 &input,
                                                 event_tx,
                                                 answer_rx,
+                                                perm_rx,
                                                 stop_signal,
                                             )
                                             .await;
@@ -2258,10 +2316,7 @@ impl App {
                                 let _ = self
                                     .answer_tx
                                     .send(Err("User dismissed the question dialog".into()));
-                                self.prompt_view.focus();
-                            } else if self.permission_dialog.visible {
-                                self.permission_dialog.visible = false;
-                            } else if self.dialog.visible() {
+                                self.prompt_view.focus();                                } else if self.dialog.visible() {
                                 self.pending_delete_session_id = None;
                                 self.clear_rag_pending_state();
                                 self.dialog.pop();
@@ -2277,10 +2332,7 @@ impl App {
                                 let _ = self
                                     .answer_tx
                                     .send(Err("User dismissed the question dialog".into()));
-                                self.prompt_view.focus();
-                            } else if self.permission_dialog.visible {
-                                self.permission_dialog.visible = false;
-                            } else if self.dialog.visible() {
+                                self.prompt_view.focus();                                } else if self.dialog.visible() {
                                 self.pending_delete_session_id = None;
                                 self.clear_rag_pending_state();
                                 self.dialog.pop();
@@ -2335,7 +2387,8 @@ impl App {
                             use cosh::harness::Mode;
                             self.state.mode = match self.state.mode {
                                 Mode::Build => Mode::Ask,
-                                Mode::Ask => Mode::Build,
+                                Mode::Ask => Mode::Yolo,
+                                Mode::Yolo => Mode::Build,
                             };
                         }
                         Some(crate::keymap::Action::HistoryUp) => {
@@ -3055,6 +3108,24 @@ impl App {
                     self.question_dialog.show_questions(questions);
                     // Blur the prompt when questions appear (like OpenCode hides the prompt)
                     self.prompt_view.blur();
+                }
+
+                HarnessEvent::PermissionRequest {
+                    tool,
+                    description,
+                    args,
+                } => {
+                    // Show the permission dialog with details from the harness
+                    self.permission_dialog.request = Some(
+                        crate::routes::session::permission::PermissionRequest {
+                            tool,
+                            description,
+                            args,
+                        },
+                    );
+                    self.permission_dialog.visible = true;
+                    // Default to "Deny" (index 2) for safety
+                    self.permission_dialog.selected = 2;
                 }
             }
         }

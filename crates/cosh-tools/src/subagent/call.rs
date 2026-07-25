@@ -171,13 +171,13 @@ pub fn call(
 ) -> Result<(String, i32), String> {
     validate_agent(agent)?;
 
-    // ── Resolve agent config ──────────────────────
+    // Resolve agent config
     let (_, binary, static_args) = AGENTS
         .iter()
         .find(|(name, _, _)| *name == agent)
         .ok_or_else(|| format!("unknown agent '{agent}'"))?;
 
-    // ── Spawn process ─────────────────────────────
+    // Spawn process
     let mut cmd = std::process::Command::new(binary);
     cmd.args(*static_args);
     cmd.arg(input);
@@ -197,7 +197,7 @@ pub fn call(
         }
     })?;
 
-    // ── Shared state ──────────────────────────────
+    // Shared state
     let output: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let output_clone = output.clone();
 
@@ -208,7 +208,7 @@ pub fn call(
     // for sending the final exit-code message after the reader finishes.
     let chunk_tx_reader = chunk_tx.clone();
 
-    // ── Reader thread ─────────────────────────────
+    // Reader thread
     //
     // Reads stdout/stderr of the child process line by line. Each chunk is
     // appended to the shared output buffer and sent through chunk_tx for
@@ -258,7 +258,7 @@ pub fn call(
         reader_done_clone.store(true, Ordering::Release);
     });
 
-    // ── Wait for completion with timeout ──────────
+    // Wait for completion with timeout
     let start = Instant::now();
     while start.elapsed() < CALL_TIMEOUT {
         if reader_done.load(Ordering::Acquire) {
@@ -278,7 +278,7 @@ pub fn call(
         std::thread::sleep(POLL_INTERVAL);
     }
 
-    // ── Timeout ───────────────────────────────────
+    // Timeout
     let _ = child.kill();
     let result = output.lock().unwrap().clone();
     let result = strip_ansi(&result);

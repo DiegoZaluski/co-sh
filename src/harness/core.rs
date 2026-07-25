@@ -11,6 +11,7 @@ use rmcp::model::{CallToolRequestParams, Tool};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use std::collections::{HashSet, VecDeque};
+use std::path::Path;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +21,7 @@ use tokio::time::Duration;
 pub enum Mode {
     Build,
     Ask,
+    Yolo,
 }
 
 pub struct ServerSession {
@@ -151,6 +153,12 @@ pub struct Harness {
     /// same mistake blindly.
     correction_memory: CorrectionMemory,
 
+    /// Cache of permanently-allowed subagents (Allow chosen by user).
+    /// Each entry is the agent name (e.g. "opencode", "claude").
+    /// Once allowed, the subagent tool skips the permission dialog for
+    /// the rest of the process lifetime.
+    agent_permissions: HashSet<String>,
+
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
     #[cfg(test)]
@@ -181,6 +189,7 @@ impl Harness {
             tool_extraction_failure_count: 0,
             last_failed_raw: String::new(),
             correction_memory: CorrectionMemory::new(5),
+            agent_permissions: HashSet::new(),
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
@@ -329,7 +338,7 @@ impl Harness {
         let mut out = String::new();
 
         let instructions = match self.mode {
-            Mode::Build => INSTRUCTIONS_BUILD,
+            Mode::Build | Mode::Yolo => INSTRUCTIONS_BUILD,
             Mode::Ask => INSTRUCTIONS_ASK,
         };
         let _ = write!(out, "{instructions}");
@@ -353,7 +362,9 @@ impl Harness {
         if let Some(ref cosh) = self.cosh_tools {
             let _ = write!(out, "## System Tools\n\n");
             match self.mode {
-                Mode::Build => cosh.write_tool_descriptions_enabled(&mut out, &self.disabled_tools),
+                Mode::Build | Mode::Yolo => {
+                    cosh.write_tool_descriptions_enabled(&mut out, &self.disabled_tools)
+                }
                 Mode::Ask => cosh.write_tool_descriptions_filtered(&mut out, &self.disabled_tools),
             }
         }
@@ -389,7 +400,7 @@ impl Harness {
         }
         if let Some(ref cosh) = self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build => cosh.schemas_enabled(&self.disabled_tools),
+                Mode::Build | Mode::Yolo => cosh.schemas_enabled(&self.disabled_tools),
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             log::debug!(
@@ -921,6 +932,9 @@ impl Harness {
     ///
     /// The `stop_signal` is an external flag (usually an `Arc<AtomicBool>`)
     /// that allows the caller to interrupt the loop from another thread.
+    ///
+    /// `perm_rx` receives permission responses from the TUI when the user
+    /// approves or denies a tool call that needs permission.
     pub async fn run_agent_loop(
         &mut self,
         input: &str,
@@ -928,9 +942,11 @@ impl Harness {
         mut answer_rx: tokio::sync::mpsc::UnboundedReceiver<
             Result<Vec<cosh_tools::question::types::AnswerItem>, String>,
         >,
+        mut perm_rx: tokio::sync::mpsc::UnboundedReceiver<super::permission::PermissionAction>,
         stop_signal: Arc<AtomicBool>,
     ) {
         use super::events::HarnessEvent;
+        use super::permission::{PermissionCheck, check_tool_permission};
         use cosh_tools::question::types::{QuestionInput, QuestionOutput};
 
         let mut current_input = input.to_string();
@@ -1130,6 +1146,123 @@ impl Harness {
                 } else {
                     // Normal dispatch for all other tools
                     log::debug!("run_agent_loop dispatch_next start");
+
+                    // ── Permission check ────────────────────────────────────
+                    // Before dispatching, check if the tool needs user approval.
+                    // This only applies to cosh tools (fs_read, bash_run, etc.)
+                    // — MCP server tools are passed through unchecked.
+                    let perm_check = check_tool_permission(
+                        info.as_ref().map_or("?", |(_, n, _)| n.as_str()),
+                        info.as_ref().map_or(&serde_json::Value::Null, |(_, _, a)| a),
+                        self.mode,
+                        self.cosh_tools.as_ref().map_or(Path::new(""), |c| c.fs_root()),
+                        self.cosh_tools.as_ref().and_then(|c| c.fs_allowlist()),
+                        self.cosh_tools.as_ref().and_then(|c| c.fs_blocklist()),
+                    );
+
+                    match perm_check {
+                        PermissionCheck::Denied(reason) => {
+                            // Blocked by blocklist or mode — skip dispatch entirely
+                            log::debug!("run_agent_loop PERM_DENIED tool={:?} reason={reason}", info.as_ref().map(|(_, n, _)| n));
+                            self.tool_issuer.pop_front();
+                            self.tool_failure_count += 1;
+                            self.correction_memory.push(&reason);
+                            let _ = tx.send(HarnessEvent::ToolError { error: reason });
+                            if self.tool_failure_count >= MAX_TOOL_RETRIES {
+                                let msg = format!(
+                                    "{MAX_TOOL_RETRIES} consecutive tool call failures. Agent loop interrupted."
+                                );
+                                let _ = tx.send(HarnessEvent::Error(msg));
+                                self.stop = true;
+                                break;
+                            }
+                            continue;
+                        }
+                        PermissionCheck::NeedsApproval(req) => {
+                            // ── Cached agent permission ──────────────────────────
+                            // For subagent_call, skip the dialog entirely if the
+                            // agent was previously allowed with a permanent Allow.
+                            let is_cached_subagent = req.tool == "subagent_call"
+                                && req.args.strip_prefix("agent: ")
+                                    .is_some_and(|agent| self.agent_permissions.contains(agent));
+
+                            if is_cached_subagent {
+                                log::debug!(
+                                    "run_agent_loop PERM_CACHED subagent={}",
+                                    req.args.strip_prefix("agent: ").unwrap_or("?")
+                                );
+                                // Skip dialog, proceed to dispatch
+                            } else {
+                                // Send permission request to TUI, wait for user response
+                                log::debug!("run_agent_loop PERM_NEEDS_APPROVAL tool={}", req.tool);
+                                let _ = tx.send(HarnessEvent::PermissionRequest {
+                                    tool: req.tool.clone(),
+                                    description: req.description.clone(),
+                                    args: req.args.clone(),
+                                });
+
+                                // Wait for the TUI to send back the permission action
+                                let perm_action = tokio::select! {
+                                    action = perm_rx.recv() => action,
+                                    _ = async {
+                                        loop {
+                                            if stop_signal.load(Ordering::Relaxed) {
+                                                break;
+                                            }
+                                            tokio::time::sleep(Duration::from_millis(50)).await;
+                                        }
+                                    } => None,
+                                };
+
+                                match perm_action {
+                                    Some(action) => {
+                                        match action {
+                                            super::permission::PermissionAction::Allow => {
+                                                // Cache subagent permission or persist fs path
+                                                if req.tool == "subagent_call" {
+                                                    if let Some(agent_name) = req.args.strip_prefix("agent: ") {
+                                                        self.agent_permissions.insert(agent_name.to_string());
+                                                        log::debug!("run_agent_loop PERM_ALLOW agent={agent_name} (cached)");
+                                                    }
+                                                } else if let (Some(path_str), Some(ref mut cosh)) =
+                                                    (extract_path_from_args(&info), self.cosh_tools.as_mut())
+                                                {
+                                                    let path = std::path::PathBuf::from(&path_str);
+                                                    cosh.add_fs_allowlist_path(path);
+                                                }
+                                                // Proceed with dispatch
+                                            }
+                                            super::permission::PermissionAction::AllowOnce => {
+                                                // Dispatch without caching
+                                            }
+                                            super::permission::PermissionAction::Deny => {
+                                                self.tool_issuer.pop_front();
+                                                let msg = format!(
+                                                    "Tool `{}` denied by user",
+                                                    info.as_ref().map_or("?", |(_, n, _)| n)
+                                                );
+                                                self.correction_memory.push(&msg);
+                                                let _ = tx.send(HarnessEvent::ToolError { error: msg });
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        // Channel closed or stop requested
+                                        log::debug!("run_agent_loop PERM_CHANNEL_CLOSED");
+                                        self.tool_issuer.pop_front();
+                                        let _ = tx.send(HarnessEvent::ToolError {
+                                            error: "Internal error: permission channel closed".to_string(),
+                                        });
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        PermissionCheck::Allowed => {
+                            // Proceed with normal dispatch
+                        }
+                    }
 
                     /// Outcome of a tool dispatch, possibly interrupted by stop.
                     #[derive(Debug)]
@@ -1340,6 +1473,7 @@ impl Harness {
             tool_extraction_failure_count: 0,
             last_failed_raw: String::new(),
             correction_memory: CorrectionMemory::new(5),
+            agent_permissions: HashSet::new(),
             mock_chat_response: None,
             mock_stream_response: None,
             test_tools: Vec::new(),
@@ -1380,4 +1514,26 @@ impl Harness {
     pub(crate) fn push_tool_call(&mut self, tc: ToolCallData) {
         self.tool_issuer.push_back(tc);
     }
+}
+
+/// Extract the first path from a tool call's arguments for allowlist persistence.
+///
+/// Supports both `targets[].path` (fs_read/write/edit) and single `path` fields.
+fn extract_path_from_args(info: &Option<(String, String, serde_json::Value)>) -> Option<String> {
+    let args = info.as_ref()?.2.clone();
+    // Try single `path` field first
+    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+        return Some(p.to_string());
+    }
+    // Try `targets[0].path`
+    if let Some(p) = args
+        .get("targets")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|t| t.get("path"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(p.to_string());
+    }
+    None
 }

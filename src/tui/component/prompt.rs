@@ -631,11 +631,13 @@ impl PromptView {
         let agent_name = match state.mode {
             cosh::harness::Mode::Build => "build",
             cosh::harness::Mode::Ask => "ask",
+            cosh::harness::Mode::Yolo => "yolo",
         };
 
         let agent_color = match state.mode {
             cosh::harness::Mode::Build => agent_colors.get("build", unique_agents),
             cosh::harness::Mode::Ask => theme.info,
+            cosh::harness::Mode::Yolo => theme.warning,
         };
 
         let mut border_box = BoxRenderable::new();

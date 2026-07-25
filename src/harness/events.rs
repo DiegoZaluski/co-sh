@@ -47,4 +47,12 @@ pub enum HarnessEvent {
     /// The agent wants to ask the user questions. The TUI should show a dialog
     /// and send answers back via the answer channel.
     QuestionRequest { questions: Vec<QuestionItem> },
+    /// The harness needs user permission before dispatching a tool.
+    /// The TUI should show the permission dialog and send the response
+    /// back via the permission channel.
+    PermissionRequest {
+        tool: String,
+        description: String,
+        args: String,
+    },
 }

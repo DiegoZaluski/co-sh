@@ -2,6 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
+use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
@@ -9,9 +10,36 @@ use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::Theme;
 
+const OPTIONS: [&str; 3] = ["Allow", "Allow Once", "Deny"];
+
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
+}
+
+const fn left_border_chars() -> BorderCharacters {
+    BorderCharacters {
+        top_left: ' ',
+        top_right: ' ',
+        bottom_left: ' ',
+        bottom_right: ' ',
+        horizontal: ' ',
+        vertical: '\u{2503}',
+        top_t: ' ',
+        bottom_t: ' ',
+        left_t: '\u{2503}',
+        right_t: ' ',
+        cross: ' ',
+    }
+}
+
+/// Estimate how many lines a text wraps to at a given width.
+fn wrap_lines(text: &str, width: u16) -> u16 {
+    if width < 10 {
+        text.chars().count().max(1) as u16
+    } else {
+        text.chars().count().div_ceil(width as usize).max(1) as u16
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,6 +70,21 @@ impl PermissionDialog {
         }
     }
 
+    /// Calculate the required height for the dialog.
+    /// Grows upward (y adjusts in app.rs) so content never disappears off the bottom.
+    pub fn required_height(&self, max_width: u16) -> u16 {
+        if !self.visible {
+            return 0;
+        }
+        let inner_w = max_width.saturating_sub(5); // pad(3) + 2
+        let desc_lines = self
+            .request
+            .as_ref()
+            .map_or(1, |r| wrap_lines(&r.description, inner_w));
+        // 1 top padding + desc_lines + 1 args + 3 options + 1 bottom padding
+        1 + desc_lines + 1 + 3 + 1
+    }
+
     /// Handle a mouse click on the permission dialog.
     /// Returns the action if the user clicked an option, or None if outside/not visible.
     pub fn handle_mouse(
@@ -54,34 +97,35 @@ impl PermissionDialog {
             return None;
         }
 
-        let dialog_w = 50.min(area.width.saturating_sub(4));
-        let dialog_h = 10.min(area.height.saturating_sub(4));
-        let dialog_x = area.x + (area.width - dialog_w) / 2;
-        let dialog_y = area.y + (area.height - dialog_h) / 2;
-
         let x = mouse.x;
         let y_click = mouse.y;
 
         // Check if click is within dialog area
-        if x < dialog_x
-            || x >= dialog_x + dialog_w
-            || y_click < dialog_y
-            || y_click >= dialog_y + dialog_h
+        if x < area.x
+            || x >= area.x + area.width
+            || y_click < area.y
+            || y_click >= area.y + area.height
         {
             return None;
         }
 
-        let options = ["Allow", "Deny", "Allow Once"];
-        for (i, _opt) in options.iter().enumerate() {
-            let oy = dialog_y + 5 + i as u16;
+        // Options start after: 1 top padding + desc_lines + 1 args row
+        let inner_w = area.width.saturating_sub(5);
+        let desc_lines = self
+            .request
+            .as_ref()
+            .map_or(1, |r| wrap_lines(&r.description, inner_w));
+        let first_option_y = area.y + 1 + desc_lines + 1;
+
+        for (i, _opt) in OPTIONS.iter().enumerate() {
+            let oy = first_option_y + i as u16;
             if y_click == oy {
                 self.selected = i;
-                let action = match i {
+                return Some(match i {
                     0 => PermissionAction::Allow,
-                    1 => PermissionAction::Deny,
-                    _ => PermissionAction::AllowOnce,
-                };
-                return Some(action);
+                    1 => PermissionAction::AllowOnce,
+                    _ => PermissionAction::Deny,
+                });
             }
         }
 
@@ -93,81 +137,89 @@ impl PermissionDialog {
             return;
         }
 
-        let dialog_w = 50.min(area.width.saturating_sub(4));
-        let dialog_h = 10.min(area.height.saturating_sub(4));
-        let dialog_x = area.x + (area.width - dialog_w) / 2;
-        let dialog_y = area.y + (area.height - dialog_h) / 2;
-        let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+        let theme_text_muted = rgba_color(theme.text_muted);
+        let theme_warning = rgba_color(theme.warning);
+        let theme_success = rgba_color(theme.success);
+        let theme_error = rgba_color(theme.error);
+        let theme_bg_element = rgba_color(theme.background_element);
 
-        let mut border = BoxRenderable::new();
-        border.set_background_color(Some(theme.background_element.into()));
-        border.set_border_color(Some(theme.border_active.into()));
-        border.render_self(buf, dialog_area);
+        // Left-border bar with panel background (matches question dialog style)
+        let mut border_box = BoxRenderable::new();
+        border_box.set_background_color(Some(theme.background_panel.into()));
+        border_box.set_border_color(Some(theme.accent.into()));
+        border_box.set_border_sides(BorderSidesConfig {
+            left: true,
+            top: false,
+            right: false,
+            bottom: false,
+        });
+        border_box.set_custom_border_chars(left_border_chars());
+        border_box.render_self(buf, area);
 
         if let Some(request) = &self.request {
-            let title_style = Style::default().fg(rgba_color(theme.text));
-            draw_text_line(
-                buf,
-                &request.tool,
-                dialog_x + 2,
-                dialog_y + 1,
-                dialog_w.saturating_sub(4),
-                title_style,
-            );
+            let pad = 3u16;
+            let inner_x = area.x + pad;
+            let inner_w = area.width.saturating_sub(pad + 2);
+            let chars_per_line = inner_w as usize;
+            let mut y_pos = area.y + 1;
 
-            let desc_style = Style::default().fg(rgba_color(theme.text_muted));
-            draw_text_line(
-                buf,
-                &request.description,
-                dialog_x + 2,
-                dialog_y + 2,
-                dialog_w.saturating_sub(4),
-                desc_style,
-            );
+            // Description (may wrap across multiple lines)
+            let desc_lines = wrap_lines(&request.description, inner_w) as usize;
+            for li in 0..desc_lines {
+                let line: String = request
+                    .description
+                    .chars()
+                    .skip(li * chars_per_line)
+                    .take(chars_per_line)
+                    .collect();
+                draw_text_line(
+                    buf,
+                    &line,
+                    inner_x,
+                    y_pos,
+                    inner_w,
+                    Style::default().fg(theme_text_muted),
+                );
+                y_pos += 1;
+            }
 
-            let args_style = Style::default().fg(rgba_color(theme.warning));
+            // Row: Args (path, command, etc.)
             draw_text_line(
                 buf,
                 &request.args,
-                dialog_x + 2,
-                dialog_y + 3,
-                dialog_w.saturating_sub(4),
-                args_style,
+                inner_x,
+                y_pos,
+                inner_w,
+                Style::default().fg(theme_warning),
             );
+            y_pos += 1;
 
-            let options = ["Allow", "Deny", "Allow Once"];
-            for (i, opt) in options.iter().enumerate() {
-                let oy = dialog_y + 5 + i as u16;
-                let prefix = if i == self.selected {
-                    "\u{25b8} "
-                } else {
-                    "  "
-                };
+            // Rows: Options (Allow, Allow Once, Deny)
+            let option_colors = [theme_success, theme_warning, theme_error];
+            for (i, opt) in OPTIONS.iter().enumerate() {
+                let is_selected = i == self.selected;
+
+                // Active row highlight (matches question dialog style)
+                if is_selected {
+                    for cx in area.x + 1..area.x + area.width {
+                        if let Some(cell) = buf.cell_mut((cx, y_pos)) {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(theme_bg_element));
+                        }
+                    }
+                }
+
+                let prefix = if is_selected { "\u{1F7B4} " } else { "  " };
                 let text = format!("{prefix}{opt}");
-                let style = if i == self.selected {
-                    Style::default().fg(rgba_color(theme.primary))
+                let color = option_colors[i];
+                let style = if is_selected {
+                    Style::default().fg(color)
                 } else {
-                    Style::default().fg(rgba_color(theme.text_muted))
+                    Style::default().fg(theme_text_muted)
                 };
-                draw_text_line(
-                    buf,
-                    &text,
-                    dialog_x + 3,
-                    oy,
-                    dialog_w.saturating_sub(6),
-                    style,
-                );
+                draw_text_line(buf, &text, inner_x, y_pos, inner_w, style);
+                y_pos += 1;
             }
-
-            let hint = "\u{2191}\u{2195} navigate  Enter confirm  Esc cancel";
-            draw_text_line(
-                buf,
-                hint,
-                dialog_x + 2,
-                dialog_y + dialog_h - 1,
-                dialog_w.saturating_sub(2),
-                Style::default().fg(rgba_color(theme.text_muted)),
-            );
         }
     }
 }
