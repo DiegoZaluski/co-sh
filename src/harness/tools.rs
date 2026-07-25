@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::events::HarnessEvent;
@@ -113,32 +112,35 @@ impl CoshTools {
         }
     }
 
-    /// Set the event sender for streaming tool output.
-    pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>) {
-        self.event_tx = Some(tx);
-    }
-
-    /// Get the Fs root path for permission checks.
+    /// Get the project root directory (used for path validation).
     #[must_use]
-    pub fn fs_root(&self) -> &Path {
+    pub fn project_root(&self) -> &std::path::PathBuf {
         self.fs.root()
     }
 
-    /// Get the Fs allowlist for permission checks.
-    #[must_use]
-    pub fn fs_allowlist(&self) -> Option<&[PathBuf]> {
-        self.fs.allowlist_ref()
-    }
-
-    /// Get the Fs blocklist for permission checks.
-    #[must_use]
-    pub fn fs_blocklist(&self) -> Option<&[PathBuf]> {
-        self.fs.blocklist_ref()
-    }
-
-    /// Add a path to the Fs write allowlist (persists for the session).
-    pub fn add_fs_allowlist_path(&mut self, path: PathBuf) {
+    /// Add a path to the file-system write allowlist.
+    pub fn add_fs_allowlist_path(&mut self, path: std::path::PathBuf) {
         self.fs.add_allowlist_path(path);
+    }
+
+    /// Add a path to the find tools allowlist.
+    pub fn add_find_allowlist_path(&mut self, path: std::path::PathBuf) {
+        self.find.add_allowlist_path(path);
+    }
+
+    /// Remove a path from the file-system write allowlist (for AllowOnce cleanup).
+    pub fn remove_fs_allowlist_path(&mut self, path: &std::path::Path) {
+        self.fs.remove_allowlist_path(path);
+    }
+
+    /// Remove a path from the find tools allowlist (for AllowOnce cleanup).
+    pub fn remove_find_allowlist_path(&mut self, path: &std::path::Path) {
+        self.find.remove_allowlist_path(path);
+    }
+
+    /// Set the event sender for streaming tool output.
+    pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>) {
+        self.event_tx = Some(tx);
     }
 
     /// Set the list of RAG databases for the `recall_search` dispatch.
@@ -243,7 +245,6 @@ impl CoshTools {
         v.push(extract_schema(&self.question.description_ask));
         #[cfg(feature = "embed")]
         v.push(extract_schema(&self.recall.description_search));
-        v.push(extract_schema(&self.subagent.description_call));
         v.push(extract_schema(&self.skills.description_list));
         v.push(extract_schema(&self.skills.description_read));
         v.push(extract_schema(&self.skills.description_read_asset));

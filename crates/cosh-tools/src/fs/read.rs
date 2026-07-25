@@ -43,9 +43,8 @@ pub async fn read(metadata: FsMetadata, tg: FsRead) -> Vec<ReadResult> {
 }
 
 async fn read_target(fs: DiskFilesystem, target: Target, metadata: &FsMetadata) -> Vec<ReadResult> {
-    use super::types::FsGuard;
     match metadata.fs_guard(&target.path) {
-        FsGuard::Allowed(validated_path) => {
+        Ok(validated_path) => {
             let path = validated_path.to_string_lossy().to_string();
             let target = Target {
                 path,
@@ -54,19 +53,12 @@ async fn read_target(fs: DiskFilesystem, target: Target, metadata: &FsMetadata) 
             };
             read_target_impl(fs, target).await
         }
-        FsGuard::Denied => vec![ReadResult {
+        Err(e) => vec![ReadResult {
             path: target.path.clone(),
             file_hash: String::new(),
             header: String::new(),
             content: String::new(),
-            warnings: Some(format!("read permission denied for `{}`", target.path)),
-        }],
-        FsGuard::Mismatch(msg) => vec![ReadResult {
-            path: target.path.clone(),
-            file_hash: String::new(),
-            header: String::new(),
-            content: String::new(),
-            warnings: Some(msg),
+            warnings: Some(e),
         }],
     }
 }

@@ -13,7 +13,6 @@
 //! Returns `Err` if the [`FsMetadata`] has inconsistent allowlist/blocklist entries.
 //! Individual file write failures are reported inline in the returned string
 //! rather than aborting the batch.
-use super::types;
 use super::types::{FsMetadata, FsWrite};
 
 use cosh_sdk::hashline::{
@@ -131,7 +130,7 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
         }
 
         match metadata.fs_guard(&target.path) {
-            types::FsGuard::Allowed(validated_path) => {
+            Ok(validated_path) => {
                 let path_str = validated_path.to_string_lossy();
                 if let Ok(current) = fs.read_text(&path_str).await {
                     let _ = rollback::record(&path_str, &current);
@@ -185,15 +184,16 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
 
                 result.push(res);
             }
-            types::FsGuard::Denied => {
+            Err(e) => {
                 let warning = format!(
                     "write permission denied for `{}`. \
-                     Files under `{:?}` are writable by default. \
-                     Use the allowlist to grant access to paths outside this directory.",
+                     Files under `{}` are writable by default. \
+                     Use the allowlist to grant access to paths outside this directory. \
+                     ({})",
                     target.path,
-                    metadata.root.display()
+                    metadata.root.display(),
+                    e,
                 );
-
                 let res = WriteResult {
                     file_hash: String::new(),
                     header: String::new(),
@@ -201,9 +201,6 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
                     warnings: Some(warning),
                 };
                 result.push(res);
-            }
-            types::FsGuard::Mismatch(message) => {
-                return Err(message);
             }
         }
     }

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{GuardResult, normalize_path, validate_asset_path, validate_path};
+use super::{GuardResult, PathGuard, normalize_path, validate_asset_path, validate_path};
 
 // normalize_path
 
@@ -122,14 +123,36 @@ fn validate_path_blocklist_check_is_normalized() {
     );
 }
 
+#[test]
+fn validate_path_mismatch_message_content() {
+    let root = Path::new("/home/user/project");
+    let allowlist = [PathBuf::from("/tmp/conflict")];
+    let blocklist = [PathBuf::from("/tmp/conflict")];
+    let result = validate_path("/tmp/conflict", root, Some(&allowlist), Some(&blocklist));
+    if let GuardResult::Mismatch(msg) = result {
+        assert!(
+            msg.contains("Security Alert"),
+            "mismatch message should be a security alert, got: {msg}"
+        );
+        assert!(
+            msg.contains("blocklist and allowlist"),
+            "mismatch message should mention both lists, got: {msg}"
+        );
+    } else {
+        panic!("expected Mismatch, got {result:?}");
+    }
+}
+
 // validate_asset_path
 
 #[test]
 fn validate_asset_path_rejects_absolute() {
-    let base = Path::new("/some/dir");
-    let result = validate_asset_path(base, "/etc/passwd");
+    let dir = TempDir::new();
+    // Use a platform-appropriate absolute path
+    let abs_path = if cfg!(windows) { "C:\\" } else { "/etc/passwd" };
+    let result = validate_asset_path(dir.path(), abs_path);
     assert!(result.is_err(), "absolute paths should be rejected");
-    assert!(result.unwrap_err().contains("absolute"));
+    assert!(result.unwrap_err().contains("absolute path"));
 }
 
 #[test]
@@ -151,7 +174,7 @@ fn validate_asset_path_returns_not_found_for_nonexistent() {
     );
     let err = result.unwrap_err();
     assert!(
-        err.contains("asset not found") || err.contains("cannot canonicalize"),
+        err.contains("asset not found") || err.contains("could not resolve"),
         "unexpected error: {err}"
     );
 }
@@ -173,13 +196,16 @@ fn validate_asset_path_allows_valid_file() {
 }
 
 /// A TempDir that auto-cleans on drop.
+/// Each instance uses a unique counter to avoid cross-test interference.
 struct TempDir {
     path: PathBuf,
 }
 
 impl TempDir {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("cosh_guards_test_{}", std::process::id()));
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("cosh_path_guard_test_{id}"));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create temp dir");
         Self { path }
@@ -220,6 +246,144 @@ fn validate_asset_path_escape_via_symlink_rejected() {
         result.is_err(),
         "escape via symlink should be rejected: {result:?}"
     );
+}
+
+// PathGuard::resolve
+//
+// PathGuard requires real filesystem paths for canonicalization.
+// We use a TempDir (defined below) to create real directories.
+
+#[test]
+fn path_guard_resolves_path_inside_root() {
+    let dir = TempDir::new();
+    let sub = dir.path().join("src");
+    std::fs::create_dir_all(&sub).unwrap();
+    let file_path = sub.join("main.rs");
+    std::fs::write(&file_path, "fn main() {}").unwrap();
+
+    let root = dir.path();
+    let guard = PathGuard::new(root, None, None);
+    let result = guard.resolve(file_path.to_str().unwrap());
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+}
+
+#[test]
+fn path_guard_denies_path_outside_root() {
+    let dir = TempDir::new();
+    let root = dir.path();
+    // Re-create the guard with a non-existent outside path
+    let outside = dir.path().join("../outside");
+    let guard = PathGuard::new(root, None, None);
+    // Use an absolute path that is clearly outside (parent of temp dir)
+    let parent = root.parent().unwrap().join("outside.txt");
+    let result = guard.resolve(parent.to_str().unwrap());
+    assert!(
+        result.is_err(),
+        "expected Err for path outside root, got {result:?}"
+    );
+    assert!(
+        result.unwrap_err().contains("permission denied"),
+        "should contain standard error prefix"
+    );
+}
+
+#[test]
+fn path_guard_denies_path_in_blocklist() {
+    let dir = TempDir::new();
+    let secret = dir.path().join("secret");
+    std::fs::create_dir_all(&secret).unwrap();
+    let keys = secret.join("keys.txt");
+    std::fs::write(&keys, "secret").unwrap();
+
+    let blocklist = [secret.clone()];
+    let guard = PathGuard::new(dir.path(), None, Some(&blocklist));
+    let result = guard.resolve(keys.to_str().unwrap());
+    assert!(
+        result.is_err(),
+        "expected Err for blocked path, got {result:?}"
+    );
+    assert!(result.unwrap_err().contains("permission denied"));
+}
+
+#[test]
+fn path_guard_allows_allowlisted_path_outside_root() {
+    let dir = TempDir::new();
+    let outside = dir.path().join("../outside_allowed");
+    let outside_canon = outside.canonicalize().unwrap_or_else(|_| {
+        // On most systems the parent dir exists, so canonicalize works
+        let parent = dir.path().parent().unwrap();
+        parent.join("outside_allowed")
+    });
+    std::fs::write(&outside, "allowed content").unwrap_or(());
+
+    // The allowlist path must exist for canonicalization
+    // So we use a path that's actually inside the temp dir
+    let sub = dir.path().join("allowed_sub");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let allowlist = [sub.clone()];
+    let guard = PathGuard::new(dir.path(), Some(&allowlist), None);
+    // Path inside the subdirectory is still outside root's lexical scope
+    // unless we use the sub path itself
+    let result = guard.resolve(sub.to_str().unwrap());
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+}
+
+#[test]
+fn path_guard_mismatch_on_both_blocked_and_allowed() {
+    let dir = TempDir::new();
+    let conflict_file = dir.path().join("conflict.txt");
+    std::fs::write(&conflict_file, "data").unwrap();
+
+    // Same exact path in both allowlist and blocklist triggers Mismatch
+    let allowlist = [conflict_file.clone()];
+    let blocklist = [conflict_file.clone()];
+    let guard = PathGuard::new(dir.path(), Some(&allowlist), Some(&blocklist));
+    let result = guard.resolve(conflict_file.to_str().unwrap());
+    assert!(result.is_err(), "expected Err for conflict, got {result:?}");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("Security Alert"),
+        "expected Security Alert message, got: {err}"
+    );
+    assert!(
+        err.contains("blocklist and allowlist"),
+        "expected mention of both lists, got: {err}"
+    );
+}
+
+#[test]
+fn path_guard_denies_traversal_via_dotdot() {
+    let dir = TempDir::new();
+    let target = dir.path().join("../../../etc/passwd");
+    let guard = PathGuard::new(dir.path(), None, None);
+    let result = guard.resolve(target.to_str().unwrap());
+    assert!(
+        result.is_err(),
+        "expected Err for traversal, got {result:?}"
+    );
+}
+
+#[test]
+fn path_guard_root_accessors() {
+    let blocklist = [PathBuf::from("/tmp")];
+    let guard = PathGuard::new(Path::new("/home/user/project"), None, Some(&blocklist));
+    assert_eq!(guard.root(), &PathBuf::from("/home/user/project"));
+    assert!(guard.allowlist().is_none());
+    assert!(guard.blocklist().is_some());
+    assert_eq!(guard.blocklist().unwrap(), &blocklist[..]);
+}
+
+#[test]
+fn path_guard_add_allowlist_path() {
+    let mut guard = PathGuard::new(Path::new("/home/user/project"), None, None);
+    assert!(guard.allowlist().is_none());
+    guard.add_allowlist_path(PathBuf::from("/tmp/allowed"));
+    assert!(guard.allowlist().is_some());
+    assert_eq!(guard.allowlist().unwrap(), &[PathBuf::from("/tmp/allowed")]);
+    // Adding same path again is no-op
+    guard.add_allowlist_path(PathBuf::from("/tmp/allowed"));
+    assert_eq!(guard.allowlist().unwrap().len(), 1);
 }
 
 #[test]

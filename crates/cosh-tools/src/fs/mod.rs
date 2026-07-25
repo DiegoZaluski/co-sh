@@ -376,4 +376,16 @@ impl Fs {
             list.push(path);
         }
     }
+
+    /// Remove a path from the write allowlist (for AllowOnce cleanup).
+    ///
+    /// If the path is not in the allowlist, this is a no-op.
+    pub fn remove_allowlist_path(&mut self, path: &std::path::Path) {
+        if let Some(list) = self.allowlist.as_mut() {
+            list.retain(|p| p.as_path() != path);
+        }
+        if let Some(list) = self.read_allowlist.as_mut() {
+            list.retain(|p| p.as_path() != path);
+        }
+    }
 }

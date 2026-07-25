@@ -1,6 +1,6 @@
 //! Demonstrates path-traversal behavior across fs tools.
 //!
-//! All fs tools use the shared guard from `util::guards` which:
+//! All fs tools use the shared guard from `util::path_guard` which:
 //! 1. Normalizes `..`/`.` components lexically
 //! 2. Compares against root, blocklist, and allowlist
 //! 3. Canonicalizes paths to catch symlink escapes

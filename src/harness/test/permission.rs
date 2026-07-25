@@ -1,33 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::super::*;
 use crate::harness::core::Mode;
-
-fn test_root() -> &'static Path {
-    Path::new("/home/user/project")
-}
-
-fn no_allowlist() -> Option<&'static [PathBuf]> {
-    None
-}
-
-fn no_blocklist() -> Option<&'static [PathBuf]> {
-    None
-}
 
 // Mode::Yolo
 
 #[test]
 fn yolo_mode_allows_everything() {
     let args = serde_json::json!({ "command": "rm -rf /" });
-    let result = check_tool_permission(
-        "bash_run",
-        &args,
-        Mode::Yolo,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
+    let result = check_tool_permission("bash_run", &args, Mode::Yolo, None);
     assert!(matches!(result, PermissionCheck::Allowed));
 }
 
@@ -36,35 +17,60 @@ fn yolo_mode_allows_fs_outside_root() {
     let args = serde_json::json!({
         "targets": [{ "path": "/etc/passwd" }]
     });
-    let result = check_tool_permission(
-        "fs_read",
-        &args,
-        Mode::Yolo,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
+    let result = check_tool_permission("fs_read", &args, Mode::Yolo, None);
     assert!(matches!(result, PermissionCheck::Allowed));
 }
 
 // Mode::Ask
 
 #[test]
-fn ask_mode_denies_write_tools() {
+fn ask_mode_denies_bash() {
     let args = serde_json::json!({ "command": "ls" });
-    let result = check_tool_permission(
-        "bash_run",
-        &args,
-        Mode::Ask,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
+    let result = check_tool_permission("bash_run", &args, Mode::Ask, None);
     assert!(matches!(result, PermissionCheck::Denied(_)));
 }
 
 #[test]
-fn ask_mode_allows_read_tools() {
+fn ask_mode_denies_fs_edit() {
+    let args = serde_json::json!({
+        "targets": [{ "path": "src/main.rs", "file_hash": "abcd", "ops": "replace 1..1:\n+fn main() {}" }]
+    });
+    let result = check_tool_permission("fs_edit", &args, Mode::Ask, None);
+    assert!(matches!(result, PermissionCheck::Denied(_)));
+}
+
+#[test]
+fn ask_mode_denies_fs_rollback() {
+    let args = serde_json::json!({ "path": "src/main.rs", "hash": "abcd" });
+    let result = check_tool_permission("fs_rollback", &args, Mode::Ask, None);
+    assert!(matches!(result, PermissionCheck::Denied(_)));
+}
+
+#[test]
+fn ask_mode_fs_read_outside_cwd_needs_approval() {
+    // fs_read targeting an absolute path outside root → NeedsApproval
+    let tmp_root = std::env::temp_dir().join("cosh_test_ask_fs_root");
+    let outside = std::env::temp_dir().join("cosh_test_ask_fs_outside.txt");
+    let _ = std::fs::create_dir_all(&tmp_root);
+    let _ = std::fs::write(&outside, b"test");
+
+    let args = serde_json::json!({
+        "targets": [{ "path": outside.to_str().unwrap() }]
+    });
+    let result = check_tool_permission("fs_read", &args, Mode::Ask, Some(tmp_root.as_path()));
+
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    let _ = std::fs::remove_file(&outside);
+
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "fs_read outside cwd should need approval even in Ask mode, got {result:?}"
+    );
+}
+
+#[test]
+fn ask_mode_fs_read_inside_cwd_is_allowed() {
+    // fs_read with relative path inside cwd → Allowed (PathGuard handles it)
     let args = serde_json::json!({
         "targets": [{ "path": "src/main.rs" }]
     });
@@ -72,98 +78,57 @@ fn ask_mode_allows_read_tools() {
         "fs_read",
         &args,
         Mode::Ask,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
+        Some(Path::new("/home/user/project")),
     );
+    assert!(
+        matches!(result, PermissionCheck::Allowed),
+        "fs_read inside cwd should be allowed in Ask mode, got {result:?}"
+    );
+}
+
+#[test]
+fn ask_mode_find_glob_outside_cwd_needs_approval() {
+    // find_glob with absolute path outside root → NeedsApproval
+    let tmp_root = std::env::temp_dir().join("cosh_test_ask_fg_root");
+    let outside = std::env::temp_dir().join("cosh_test_ask_fg_outside");
+    let _ = std::fs::create_dir_all(&tmp_root);
+    let _ = std::fs::create_dir_all(&outside);
+
+    let args = serde_json::json!({
+        "pattern": "*.rs",
+        "path": outside.to_str().unwrap()
+    });
+    let result = check_tool_permission("find_glob", &args, Mode::Ask, Some(tmp_root.as_path()));
+
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    let _ = std::fs::remove_dir_all(&outside);
+
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "find_glob outside cwd should need approval in Ask mode, got {result:?}"
+    );
+}
+
+#[test]
+fn ask_mode_skills_read_is_allowed() {
+    let args = serde_json::json!({ "name": "my-skill" });
+    let result = check_tool_permission("skills_read", &args, Mode::Ask, None);
     assert!(matches!(result, PermissionCheck::Allowed));
 }
 
-// Mode::Build
-
 #[test]
-fn build_allows_fs_inside_root() {
-    let args = serde_json::json!({
-        "targets": [{ "path": "src/main.rs" }]
-    });
-    let result = check_tool_permission(
-        "fs_read",
-        &args,
-        Mode::Build,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
+fn ask_mode_web_tools_are_allowed() {
+    let args = serde_json::json!({ "url": "https://example.com" });
+    let result = check_tool_permission("web_fetch", &args, Mode::Ask, None);
     assert!(matches!(result, PermissionCheck::Allowed));
 }
 
-#[test]
-fn build_needs_approval_for_fs_outside_root() {
-    let args = serde_json::json!({
-        "targets": [{ "path": "/etc/passwd" }]
-    });
-    let result = check_tool_permission(
-        "fs_read",
-        &args,
-        Mode::Build,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
-    assert!(matches!(result, PermissionCheck::NeedsApproval(_)));
-    if let PermissionCheck::NeedsApproval(req) = result {
-        assert_eq!(req.tool, "fs_read");
-        assert!(req.args.contains("/etc/passwd"));
-    }
-}
+// Mode::Build — tools that always need approval
 
 #[test]
-fn build_denies_blocked_path() {
-    let blocklist = [PathBuf::from("/etc")];
-    let args = serde_json::json!({
-        "targets": [{ "path": "/etc/shadow" }]
-    });
-    let result = check_tool_permission(
-        "fs_read",
-        &args,
-        Mode::Build,
-        test_root(),
-        no_allowlist(),
-        Some(&blocklist as &[PathBuf]),
-    );
-    assert!(matches!(result, PermissionCheck::Denied(_)));
-}
-
-#[test]
-fn build_allows_allowlisted_path_outside_root() {
-    let allowlist = [PathBuf::from("/tmp/allowed.txt")];
-    let args = serde_json::json!({
-        "targets": [{ "path": "/tmp/allowed.txt" }]
-    });
-    let result = check_tool_permission(
-        "fs_read",
-        &args,
-        Mode::Build,
-        test_root(),
-        Some(&allowlist as &[PathBuf]),
-        no_blocklist(),
-    );
-    assert!(matches!(result, PermissionCheck::Allowed));
-}
-
-// bash_run
-
-#[test]
-fn build_needs_approval_for_bash() {
+fn build_bash_needs_approval() {
     let args = serde_json::json!({ "command": "ls -la" });
-    let result = check_tool_permission(
-        "bash_run",
-        &args,
-        Mode::Build,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
+    let result = check_tool_permission("bash_run", &args, Mode::Build, None);
     assert!(matches!(result, PermissionCheck::NeedsApproval(_)));
     if let PermissionCheck::NeedsApproval(req) = result {
         assert_eq!(req.tool, "bash_run");
@@ -171,69 +136,180 @@ fn build_needs_approval_for_bash() {
     }
 }
 
-// web tools
+#[test]
+fn build_fs_edit_always_needs_approval() {
+    let args = serde_json::json!({
+        "targets": [{ "path": "src/main.rs", "file_hash": "abcd", "ops": "replace 1..1:\n+fn main() {}" }]
+    });
+    let result = check_tool_permission("fs_edit", &args, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "fs_edit should always need approval, got {result:?}"
+    );
+}
 
 #[test]
-fn build_needs_approval_for_web_fetch() {
+fn build_fs_write_always_needs_approval() {
+    let args = serde_json::json!({
+        "targets": [{ "path": "src/main.rs", "text": "fn main() {}" }]
+    });
+    let result = check_tool_permission("fs_write", &args, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "fs_write should always need approval, got {result:?}"
+    );
+}
+
+#[test]
+fn build_fs_rollback_always_needs_approval() {
+    let args = serde_json::json!({ "path": "src/main.rs", "hash": "abcd" });
+    let result = check_tool_permission("fs_rollback", &args, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "fs_rollback should always need approval, got {result:?}"
+    );
+}
+
+#[test]
+fn build_subagent_needs_approval() {
+    let args = serde_json::json!({ "agent": "claude" });
+    let result = check_tool_permission("subagent_call", &args, Mode::Build, None);
+    assert!(matches!(result, PermissionCheck::NeedsApproval(_)));
+}
+
+// Mode::Build — tools that need approval only outside cwd
+
+#[test]
+fn build_fs_read_outside_cwd_needs_approval() {
+    let tmp_root = std::env::temp_dir().join("cosh_test_perm_fs_root");
+    let outside_file = std::env::temp_dir().join("cosh_test_perm_fs_outside.txt");
+    let _ = std::fs::create_dir_all(&tmp_root);
+    let _ = std::fs::write(&outside_file, b"test");
+
+    let args = serde_json::json!({
+        "targets": [{ "path": outside_file.to_str().unwrap() }]
+    });
+    let result = check_tool_permission("fs_read", &args, Mode::Build, Some(tmp_root.as_path()));
+
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    let _ = std::fs::remove_file(&outside_file);
+
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "fs_read outside cwd should need approval, got {result:?}"
+    );
+}
+
+#[test]
+fn build_fs_read_inside_cwd_is_allowed() {
+    let args = serde_json::json!({
+        "targets": [{ "path": "src/main.rs" }]
+    });
+    let result = check_tool_permission(
+        "fs_read",
+        &args,
+        Mode::Build,
+        Some(Path::new("/home/user/project")),
+    );
+    assert!(
+        matches!(result, PermissionCheck::Allowed),
+        "fs_read inside cwd should be allowed, got {result:?}"
+    );
+}
+
+#[test]
+fn build_find_glob_outside_cwd_needs_approval() {
+    let tmp_root = std::env::temp_dir().join("cosh_test_perm_fg_root");
+    let outside_dir = std::env::temp_dir().join("cosh_test_perm_fg_outside");
+    let _ = std::fs::create_dir_all(&tmp_root);
+    let _ = std::fs::create_dir_all(&outside_dir);
+
+    let args = serde_json::json!({
+        "pattern": "*.rs",
+        "path": outside_dir.to_str().unwrap()
+    });
+    let result = check_tool_permission("find_glob", &args, Mode::Build, Some(tmp_root.as_path()));
+
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    let _ = std::fs::remove_dir_all(&outside_dir);
+
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "find_glob outside cwd should need approval, got {result:?}"
+    );
+}
+
+#[test]
+fn build_find_glob_inside_cwd_is_allowed() {
+    let args = serde_json::json!({
+        "pattern": "*.rs",
+        "path": "src"
+    });
+    let result = check_tool_permission(
+        "find_glob",
+        &args,
+        Mode::Build,
+        Some(Path::new("/home/user/project")),
+    );
+    assert!(
+        matches!(result, PermissionCheck::Allowed),
+        "find_glob inside cwd should be allowed, got {result:?}"
+    );
+}
+
+#[test]
+fn build_find_grep_outside_cwd_needs_approval() {
+    let tmp_root = std::env::temp_dir().join("cosh_test_perm_gr_root");
+    let outside_dir = std::env::temp_dir().join("cosh_test_perm_gr_outside");
+    let _ = std::fs::create_dir_all(&tmp_root);
+    let _ = std::fs::create_dir_all(&outside_dir);
+
+    let args = serde_json::json!({
+        "pattern": "fn main",
+        "path": outside_dir.to_str().unwrap()
+    });
+    let result = check_tool_permission("find_grep", &args, Mode::Build, Some(tmp_root.as_path()));
+
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    let _ = std::fs::remove_dir_all(&outside_dir);
+
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "find_grep outside cwd should need approval, got {result:?}"
+    );
+}
+
+#[test]
+fn build_find_grep_inside_cwd_is_allowed() {
+    let args = serde_json::json!({
+        "pattern": "fn main",
+        "path": "src"
+    });
+    let result = check_tool_permission(
+        "find_grep",
+        &args,
+        Mode::Build,
+        Some(Path::new("/home/user/project")),
+    );
+    assert!(
+        matches!(result, PermissionCheck::Allowed),
+        "find_grep inside cwd should be allowed, got {result:?}"
+    );
+}
+
+// web tools — freely available
+
+#[test]
+fn build_web_fetch_is_allowed() {
     let args = serde_json::json!({ "url": "https://example.com" });
-    let result = check_tool_permission(
-        "web_fetch",
-        &args,
-        Mode::Build,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
-    assert!(matches!(result, PermissionCheck::NeedsApproval(_)));
+    let result = check_tool_permission("web_fetch", &args, Mode::Build, None);
+    assert!(matches!(result, PermissionCheck::Allowed));
 }
 
 #[test]
-fn build_needs_approval_for_web_search() {
+fn build_web_search_is_allowed() {
     let args = serde_json::json!({ "query": "rust async" });
-    let result = check_tool_permission(
-        "web_search",
-        &args,
-        Mode::Build,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
-    assert!(matches!(result, PermissionCheck::NeedsApproval(_)));
-}
-
-// single-path tools
-
-#[test]
-fn build_needs_approval_for_plan_todo_write() {
-    let args = serde_json::json!({
-        "path": "/tmp/TODO.md",
-        "todos": []
-    });
-    let result = check_tool_permission(
-        "plan_todo_write",
-        &args,
-        Mode::Build,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
-    assert!(matches!(result, PermissionCheck::NeedsApproval(_)));
-}
-
-#[test]
-fn build_allows_plan_todo_write_inside_root() {
-    let args = serde_json::json!({
-        "path": "TODO.md",
-        "todos": []
-    });
-    let result = check_tool_permission(
-        "plan_todo_write",
-        &args,
-        Mode::Build,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
+    let result = check_tool_permission("web_search", &args, Mode::Build, None);
     assert!(matches!(result, PermissionCheck::Allowed));
 }
 
@@ -242,13 +318,6 @@ fn build_allows_plan_todo_write_inside_root() {
 #[test]
 fn unknown_tool_is_allowed() {
     let args = serde_json::json!({});
-    let result = check_tool_permission(
-        "some_custom_mcp_tool",
-        &args,
-        Mode::Build,
-        test_root(),
-        no_allowlist(),
-        no_blocklist(),
-    );
+    let result = check_tool_permission("some_custom_mcp_tool", &args, Mode::Build, None);
     assert!(matches!(result, PermissionCheck::Allowed));
 }

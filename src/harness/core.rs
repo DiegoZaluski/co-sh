@@ -11,7 +11,6 @@ use rmcp::model::{CallToolRequestParams, Tool};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use std::collections::{HashSet, VecDeque};
-use std::path::Path;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -159,6 +158,14 @@ pub struct Harness {
     /// the rest of the process lifetime.
     agent_permissions: HashSet<String>,
 
+    /// Paths permanently approved via Allow (life of the process).
+    /// The harness checks this BEFORE calling `check_tool_permission`:
+    /// if all paths from a tool call are already approved, the dialog
+    /// is skipped entirely. Paths approved via AllowOnce are NOT stored
+    /// here — they are only added transiently to the cosh-tools allowlist
+    /// and removed after dispatch.
+    approved_paths: HashSet<std::path::PathBuf>,
+
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
     #[cfg(test)]
@@ -190,6 +197,7 @@ impl Harness {
             last_failed_raw: String::new(),
             correction_memory: CorrectionMemory::new(5),
             agent_permissions: HashSet::new(),
+            approved_paths: HashSet::new(),
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
@@ -942,11 +950,11 @@ impl Harness {
         mut answer_rx: tokio::sync::mpsc::UnboundedReceiver<
             Result<Vec<cosh_tools::question::types::AnswerItem>, String>,
         >,
-        mut perm_rx: tokio::sync::mpsc::UnboundedReceiver<super::permission::PermissionAction>,
+        mut perm_rx: tokio::sync::mpsc::UnboundedReceiver<super::guardrails::PermissionAction>,
         stop_signal: Arc<AtomicBool>,
     ) {
         use super::events::HarnessEvent;
-        use super::permission::{PermissionCheck, check_tool_permission};
+        use super::guardrails::{PermissionCheck, check_tool_permission};
         use cosh_tools::question::types::{QuestionInput, QuestionOutput};
 
         let mut current_input = input.to_string();
@@ -1153,17 +1161,28 @@ impl Harness {
                     // — MCP server tools are passed through unchecked.
                     let perm_check = check_tool_permission(
                         info.as_ref().map_or("?", |(_, n, _)| n.as_str()),
-                        info.as_ref().map_or(&serde_json::Value::Null, |(_, _, a)| a),
+                        info.as_ref()
+                            .map_or(&serde_json::Value::Null, |(_, _, a)| a),
                         self.mode,
-                        self.cosh_tools.as_ref().map_or(Path::new(""), |c| c.fs_root()),
-                        self.cosh_tools.as_ref().and_then(|c| c.fs_allowlist()),
-                        self.cosh_tools.as_ref().and_then(|c| c.fs_blocklist()),
+                        self.cosh_tools
+                            .as_ref()
+                            .map(|ct| ct.project_root().as_path()),
                     );
+
+                    // Tracks whether the user chose AllowOnce, so we can remove
+                    // the approved paths from the allowlist after dispatch.
+                    // Initialised here (before the match) so it survives the
+                    // scoped match arms below.
+                    let mut allow_once_paths: Vec<std::path::PathBuf> = Vec::new();
+                    let mut allow_once_tool: String = String::new();
 
                     match perm_check {
                         PermissionCheck::Denied(reason) => {
-                            // Blocked by blocklist or mode — skip dispatch entirely
-                            log::debug!("run_agent_loop PERM_DENIED tool={:?} reason={reason}", info.as_ref().map(|(_, n, _)| n));
+                            // Blocked by mode restrictions (Ask mode) — skip dispatch entirely
+                            log::debug!(
+                                "run_agent_loop PERM_DENIED tool={:?} reason={reason}",
+                                info.as_ref().map(|(_, n, _)| n)
+                            );
                             self.tool_issuer.pop_front();
                             self.tool_failure_count += 1;
                             self.correction_memory.push(&reason);
@@ -1183,14 +1202,38 @@ impl Harness {
                             // For subagent_call, skip the dialog entirely if the
                             // agent was previously allowed with a permanent Allow.
                             let is_cached_subagent = req.tool == "subagent_call"
-                                && req.args.strip_prefix("agent: ")
+                                && req
+                                    .args
+                                    .strip_prefix("agent: ")
                                     .is_some_and(|agent| self.agent_permissions.contains(agent));
 
-                            if is_cached_subagent {
-                                log::debug!(
-                                    "run_agent_loop PERM_CACHED subagent={}",
-                                    req.args.strip_prefix("agent: ").unwrap_or("?")
-                                );
+                            // ── Pre-approved path check ───────────────────────────
+                            // If all tool paths were previously Allowed (permanent),
+                            // skip the permission dialog — the harness remembers.
+                            let paths = super::guardrails::extract_paths_from_args(
+                                &req.tool,
+                                info.as_ref().map_or(
+                                    &serde_json::Value::Null,
+                                    |(_, _, a)| a,
+                                ),
+                            );
+                            let all_pre_approved = !paths.is_empty() && paths.iter().all(|p| {
+                                self.approved_paths
+                                    .contains(std::path::Path::new(p))
+                            });
+
+                            if is_cached_subagent || all_pre_approved {
+                                if all_pre_approved {
+                                    log::debug!(
+                                        "run_agent_loop PERM_CACHED paths={:?}",
+                                        paths,
+                                    );
+                                } else {
+                                    log::debug!(
+                                        "run_agent_loop PERM_CACHED subagent={}",
+                                        req.args.strip_prefix("agent: ").unwrap_or("?")
+                                    );
+                                }
                                 // Skip dialog, proceed to dispatch
                             } else {
                                 // Send permission request to TUI, wait for user response
@@ -1217,32 +1260,108 @@ impl Harness {
                                 match perm_action {
                                     Some(action) => {
                                         match action {
-                                            super::permission::PermissionAction::Allow => {
-                                                // Cache subagent permission or persist fs path
+                                            super::guardrails::PermissionAction::Allow => {
+                                                // Cache subagent permission (persists across the session)
                                                 if req.tool == "subagent_call" {
-                                                    if let Some(agent_name) = req.args.strip_prefix("agent: ") {
-                                                        self.agent_permissions.insert(agent_name.to_string());
-                                                        log::debug!("run_agent_loop PERM_ALLOW agent={agent_name} (cached)");
+                                                    if let Some(agent_name) =
+                                                        req.args.strip_prefix("agent: ")
+                                                    {
+                                                        self.agent_permissions
+                                                            .insert(agent_name.to_string());
+                                                        log::debug!(
+                                                            "run_agent_loop PERM_ALLOW agent={agent_name} (cached)"
+                                                        );
                                                     }
-                                                } else if let (Some(path_str), Some(ref mut cosh)) =
-                                                    (extract_path_from_args(&info), self.cosh_tools.as_mut())
-                                                {
-                                                    let path = std::path::PathBuf::from(&path_str);
-                                                    cosh.add_fs_allowlist_path(path);
                                                 }
+                                                // Remember approved paths in the harness
+                                                // so future calls skip the permission dialog.
+                                                let approved = super::guardrails::extract_paths_from_args(
+                                                    &req.tool,
+                                                    info.as_ref().map_or(
+                                                        &serde_json::Value::Null,
+                                                        |(_, _, a)| a,
+                                                    ),
+                                                );
+                                                for p in &approved {
+                                                    self.approved_paths
+                                                        .insert(std::path::PathBuf::from(p));
+                                                }
+                                                // Add allowed paths to the tool's allowlist
+                                                // so PathGuard lets them through.
+                                                Self::add_paths_to_allowlist(
+                                                    &req.tool,
+                                                    info.as_ref().map_or(
+                                                        &serde_json::Value::Null,
+                                                        |(_, _, a)| a,
+                                                    ),
+                                                    &mut self.cosh_tools,
+                                                );
                                                 // Proceed with dispatch
                                             }
-                                            super::permission::PermissionAction::AllowOnce => {
-                                                // Dispatch without caching
-                                            }
-                                            super::permission::PermissionAction::Deny => {
-                                                self.tool_issuer.pop_front();
-                                                let msg = format!(
-                                                    "Tool `{}` denied by user",
-                                                    info.as_ref().map_or("?", |(_, n, _)| n)
+                                            super::guardrails::PermissionAction::AllowOnce => {
+                                                // Save paths and tool name so we can
+                                                // remove from allowlist after dispatch.
+                                                allow_once_paths = super::guardrails::extract_paths_from_args(
+                                                    &req.tool,
+                                                    info.as_ref().map_or(
+                                                        &serde_json::Value::Null,
+                                                        |(_, _, a)| a,
+                                                    ),
+                                                )
+                                                .into_iter()
+                                                .map(std::path::PathBuf::from)
+                                                .collect();
+                                                allow_once_tool = req.tool.clone();
+                                                // Add paths to allowlist so PathGuard
+                                                // lets them through during dispatch.
+                                                Self::add_paths_to_allowlist(
+                                                    &req.tool,
+                                                    info.as_ref().map_or(
+                                                        &serde_json::Value::Null,
+                                                        |(_, _, a)| a,
+                                                    ),
+                                                    &mut self.cosh_tools,
                                                 );
+                                            }
+                                            super::guardrails::PermissionAction::Deny => {
+                                                // Deny always pops and reports — the harness
+                                                // is the gatekeeper. Path tools that were
+                                                // previously Allowed retain their allowlist
+                                                // entry, but this Deny means the user does not
+                                                // want THIS call to proceed regardless.
+                                                self.tool_issuer.pop_front();
+                                                let tool_name = info
+                                                    .as_ref()
+                                                    .map_or("?", |(_, n, _)| n.as_str());
+                                                let agent_info =
+                                                    info.as_ref().and_then(|(_, _, a)| {
+                                                        a.get("agent").and_then(|v| v.as_str())
+                                                    });
+                                                let msg = match agent_info {
+                                                    Some(agent) => format!(
+                                                        "Tool `{tool_name}` (agent: {agent}) denied by user"
+                                                    ),
+                                                    None => {
+                                                        format!(
+                                                            "Tool `{tool_name}` denied by user"
+                                                        )
+                                                    }
+                                                };
+                                                // Record the denial in history so the model
+                                                // sees its own tool call + the "denied" result
+                                                // as a proper conversation turn.
+                                                if let Some((ref call_id, ref name, ref args)) = info {
+                                                    let tool_id = if call_id.is_empty() {
+                                                        format!("call_{:016x}", iteration)
+                                                    } else {
+                                                        call_id.clone()
+                                                    };
+                                                    self.push_tool_history(&tool_id, name, args, &msg);
+                                                }
                                                 self.correction_memory.push(&msg);
-                                                let _ = tx.send(HarnessEvent::ToolError { error: msg });
+                                                let _ = tx.send(HarnessEvent::ToolError {
+                                                    error: msg,
+                                                });
                                                 continue;
                                             }
                                         }
@@ -1252,7 +1371,8 @@ impl Harness {
                                         log::debug!("run_agent_loop PERM_CHANNEL_CLOSED");
                                         self.tool_issuer.pop_front();
                                         let _ = tx.send(HarnessEvent::ToolError {
-                                            error: "Internal error: permission channel closed".to_string(),
+                                            error: "Internal error: permission channel closed"
+                                                .to_string(),
                                         });
                                         continue;
                                     }
@@ -1298,6 +1418,25 @@ impl Harness {
                         // dispatch_fut dropped here → &mut self released
                     };
 
+                    // If this was AllowOnce, remove the approved paths from the
+                    // allowlist in BOTH success and error cases — we never want
+                    // AllowOnce paths to leak into future calls.
+                    if !allow_once_paths.is_empty() {
+                        if let Some(cosh) = self.cosh_tools.as_mut() {
+                            for p in &allow_once_paths {
+                                match allow_once_tool.as_str() {
+                                    "fs_read" | "fs_write" | "fs_edit" | "fs_rollback" => {
+                                        cosh.remove_fs_allowlist_path(p);
+                                    }
+                                    "find_glob" | "find_grep" => {
+                                        cosh.remove_find_allowlist_path(p);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+
                     match dispatch_out {
                         DispatchOut::Ok(output) => {
                             self.tool_failure_count = 0;
@@ -1315,6 +1454,16 @@ impl Harness {
                             let _ = tx.send(HarnessEvent::ToolResult { output });
                         }
                         DispatchOut::Err(e) => {
+                            // Record the error in history so the model sees
+                            // its tool call + the error as a proper turn.
+                            if let Some((ref call_id, ref name, ref args)) = info {
+                                let tool_id = if call_id.is_empty() {
+                                    format!("call_{:016x}", iteration)
+                                } else {
+                                    call_id.clone()
+                                };
+                                self.push_tool_history(&tool_id, name, args, &e);
+                            }
                             self.tool_failure_count += 1;
                             self.correction_memory.push(&format!(
                                 "Tool `{}` failed: {}",
@@ -1374,6 +1523,43 @@ impl Harness {
                 "Please continue with your response based on the information above.".to_string();
         }
         log::debug!("run_agent_loop EXIT");
+    }
+
+    /// Add paths from tool arguments to the appropriate allowlist so that
+    /// [`PathGuard`](cosh_tools::util::path_guard::PathGuard) lets them through.
+    ///
+    /// Reuses [`extract_paths_from_args`](super::guardrails::extract_paths_from_args)
+    /// to avoid duplicating argument-shape logic.
+    fn add_paths_to_allowlist(
+        tool_name: &str,
+        args: &serde_json::Value,
+        cosh_tools: &mut Option<super::tools::CoshTools>,
+    ) {
+        let paths: Vec<std::path::PathBuf> =
+            super::guardrails::extract_paths_from_args(tool_name, args)
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+
+        if paths.is_empty() {
+            return;
+        }
+
+        if let Some(cosh) = cosh_tools.as_mut() {
+            for p in &paths {
+                match tool_name {
+                    "fs_read" | "fs_write" | "fs_edit" | "fs_rollback" => {
+                        log::debug!("add_paths_to_allowlist fs allowed: {:?}", p);
+                        cosh.add_fs_allowlist_path(p.clone());
+                    }
+                    "find_glob" | "find_grep" => {
+                        log::debug!("add_paths_to_allowlist find allowed: {:?}", p);
+                        cosh.add_find_allowlist_path(p.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Dequeue and dispatch the next pending tool call through the
@@ -1474,6 +1660,7 @@ impl Harness {
             last_failed_raw: String::new(),
             correction_memory: CorrectionMemory::new(5),
             agent_permissions: HashSet::new(),
+            approved_paths: HashSet::new(),
             mock_chat_response: None,
             mock_stream_response: None,
             test_tools: Vec::new(),
@@ -1514,26 +1701,4 @@ impl Harness {
     pub(crate) fn push_tool_call(&mut self, tc: ToolCallData) {
         self.tool_issuer.push_back(tc);
     }
-}
-
-/// Extract the first path from a tool call's arguments for allowlist persistence.
-///
-/// Supports both `targets[].path` (fs_read/write/edit) and single `path` fields.
-fn extract_path_from_args(info: &Option<(String, String, serde_json::Value)>) -> Option<String> {
-    let args = info.as_ref()?.2.clone();
-    // Try single `path` field first
-    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-        return Some(p.to_string());
-    }
-    // Try `targets[0].path`
-    if let Some(p) = args
-        .get("targets")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|t| t.get("path"))
-        .and_then(|v| v.as_str())
-    {
-        return Some(p.to_string());
-    }
-    None
 }

@@ -50,19 +50,10 @@ pub async fn rollback(
     path: &str,
     hash: &str,
 ) -> Result<RollbackResult, String> {
-    use super::types;
     let _ = config;
-
-    let validated_path = match metadata.fs_guard(path) {
-        types::FsGuard::Allowed(path) => path,
-        types::FsGuard::Denied => {
-            return Err(format!(
-                "restore permission denied for `{path}`; \
-                 the path is outside the project root or in the blocklist",
-            ));
-        }
-        types::FsGuard::Mismatch(msg) => return Err(msg),
-    };
+    let validated_path = metadata
+        .fs_guard(path)
+        .map_err(|e| format!("restore permission denied for `{path}`; {e}",))?;
 
     let path_str = validated_path.to_string_lossy().to_string();
     let hash = hash.trim();

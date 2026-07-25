@@ -34,10 +34,10 @@ pub use types::{
     GrepOutput,
 };
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::ToolDescription;
-use crate::util::guards::{GuardResult, normalize_path, validate_path};
+use crate::util::path_guard::PathGuard;
 use types::{Glob as GlobConfig, Grep as GrepConfig};
 
 /// Shared-state wrapper for file-search tool operations.
@@ -60,12 +60,8 @@ pub struct Find {
     gitignore: Option<bool>,
     timeout_ms: Option<u32>,
 
-    /// Project root for path-validation guards.
-    root: PathBuf,
-    /// Explicit allowlist for paths outside root.
-    allowlist: Option<Vec<PathBuf>>,
-    /// Explicit blocklist (overrides allowlist when both match).
-    blocklist: Option<Vec<PathBuf>>,
+    /// Centralized path guard for path-validation.
+    guard: PathGuard,
 
     /// MCP Tool description for `glob`.
     pub description_glob: ToolDescription,
@@ -96,9 +92,7 @@ impl Find {
             context_after: None,
             hidden: None,
             gitignore: None,
-            root: PathBuf::new(),
-            allowlist: None,
-            blocklist: None,
+            guard: PathGuard::new(Path::new(""), None, None),
             timeout_ms: None,
             description_glob: serde_json::json!({
                 "name": "find_glob",
@@ -253,103 +247,54 @@ impl Find {
     /// Set the project root directory (used for path-validation guards).
     #[must_use]
     pub fn cwd(mut self, path: impl Into<PathBuf>) -> Self {
-        self.root = path.into();
+        self.guard = PathGuard::new(&path.into(), self.guard.allowlist(), self.guard.blocklist());
         self
     }
 
     /// Set the explicit path allowlist.
     #[must_use]
     pub fn allowlist(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
-        self.allowlist = Some(paths.into_iter().map(Into::into).collect());
+        let list: Vec<PathBuf> = paths.into_iter().map(Into::into).collect();
+        self.guard = PathGuard::new(self.guard.root(), Some(&list), self.guard.blocklist());
         self
     }
 
     /// Set the explicit path blocklist.
     #[must_use]
     pub fn blocklist(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
-        self.blocklist = Some(paths.into_iter().map(Into::into).collect());
+        let list: Vec<PathBuf> = paths.into_iter().map(Into::into).collect();
+        self.guard = PathGuard::new(self.guard.root(), self.guard.allowlist(), Some(&list));
         self
     }
 
     /// Add a path to the allowlist (for session-level persistence).
     pub fn add_allowlist_path(&mut self, path: PathBuf) {
-        let list = self.allowlist.get_or_insert_with(Vec::new);
-        if !list.contains(&path) {
-            list.push(path);
-        }
+        self.guard.add_allowlist_path(path);
     }
 
-    /// Validate `path` against root, allowlist, and blocklist guards.
-    /// Follows the same pattern as `FsMetadata::fs_guard`.
-    fn resolve_and_guard(&self, path: &str) -> Result<PathBuf, String> {
-        let allowlist = self.allowlist.as_deref();
-        let blocklist = self.blocklist.as_deref();
-
-        match validate_path(path, &self.root, allowlist, blocklist) {
-            GuardResult::Allowed(normalized) => {
-                let Ok(root_canon) = self.root.canonicalize() else {
-                    return Err("grep permission denied — path is outside project root".into());
-                };
-
-                let root_norm = normalize_path(&self.root, &self.root);
-                let in_root = normalized.starts_with(&root_norm);
-
-                let resolved = match normalized.canonicalize() {
-                    Ok(canon) => canon,
-                    Err(_) => match normalized.parent() {
-                        Some(parent) => match parent.canonicalize() {
-                            Ok(parent_canon) => {
-                                let file_name = normalized.file_name().unwrap_or_default();
-                                parent_canon.join(file_name)
-                            }
-                            Err(_) => {
-                                if in_root {
-                                    normalized
-                                } else {
-                                    return Err(
-                                        "grep permission denied — path is outside project root"
-                                            .into(),
-                                    );
-                                }
-                            }
-                        },
-                        None => {
-                            return Err(
-                                "grep permission denied — path is outside project root".into()
-                            );
-                        }
-                    },
-                };
-
-                if in_root && !resolved.starts_with(&root_canon) {
-                    return Err("grep permission denied — path is outside project root".into());
-                }
-
-                Ok(resolved)
-            }
-            GuardResult::Denied(reason) => {
-                Err(format!("grep permission denied — {reason}"))
-            }
-            GuardResult::Mismatch(msg) => Err(msg),
-        }
+    /// Remove a path from the allowlist (for AllowOnce cleanup).
+    ///
+    /// If the path is not in the allowlist, this is a no-op.
+    pub fn remove_allowlist_path(&mut self, path: &Path) {
+        self.guard.remove_allowlist_path(path);
     }
 
     /// Get the project root path.
     #[must_use]
     pub const fn find_root(&self) -> &PathBuf {
-        &self.root
+        self.guard.root()
     }
 
     /// Get the allowlist (read-only reference).
     #[must_use]
     pub fn allowlist_ref(&self) -> Option<&[PathBuf]> {
-        self.allowlist.as_deref()
+        self.guard.allowlist()
     }
 
     /// Get the blocklist (read-only reference).
     #[must_use]
     pub fn blocklist_ref(&self) -> Option<&[PathBuf]> {
-        self.blocklist.as_deref()
+        self.guard.blocklist()
     }
 
     // Operations
@@ -363,7 +308,7 @@ impl Find {
     /// Returns an error when the search path does not exist, the pattern
     /// is invalid, or the operation times out.
     pub fn glob(&self, pattern: &str, path: &str) -> Result<GlobOutput, String> {
-        let validated = self.resolve_and_guard(path)?;
+        let validated = self.guard.resolve(path)?;
         let path_str = validated.to_string_lossy().to_string();
         glob(
             &GlobConfig {
@@ -389,7 +334,7 @@ impl Find {
     /// Returns an error when the path cannot be resolved, the pattern is
     /// an invalid regex, or the operation times out.
     pub fn grep(&self, pattern: &str, path: &str) -> Result<GrepOutput, String> {
-        let validated = self.resolve_and_guard(path)?;
+        let validated = self.guard.resolve(path)?;
         let path_str = validated.to_string_lossy().to_string();
         grep(
             &GrepConfig {

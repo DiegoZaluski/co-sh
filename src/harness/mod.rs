@@ -6,7 +6,7 @@
 pub mod core;
 pub mod correction_memory;
 pub mod events;
-pub mod permission;
+pub mod guardrails;
 pub mod tools;
 
 #[cfg(test)]
@@ -14,5 +14,5 @@ mod test;
 
 pub use core::{Harness, Mode};
 pub use events::HarnessEvent;
-pub use permission::{PermissionAction, PermissionCheck, PermissionRequest, check_tool_permission};
+pub use guardrails::{PermissionAction, PermissionCheck, PermissionRequest, check_tool_permission};
 pub use tools::{CoshTools, Tools};

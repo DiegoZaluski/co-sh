@@ -44,17 +44,8 @@ pub async fn edit(metadata: FsMetadata, tg: FsEdit) -> Result<Vec<EditResult>, S
     Ok(results)
 }
 
-use super::types;
 async fn edit_target(target: EditTarget, metadata: &FsMetadata) -> Result<EditResult, String> {
-    let validated_path = match metadata.fs_guard(&target.path) {
-        types::FsGuard::Allowed(path) => path,
-        types::FsGuard::Denied => {
-            return Err(format!("write permissions denied for `{}`", target.path));
-        }
-        types::FsGuard::Mismatch(msg) => {
-            return Err(msg);
-        }
-    };
+    let validated_path = metadata.fs_guard(&target.path)?;
 
     let path_str = validated_path.to_string_lossy().to_string();
 

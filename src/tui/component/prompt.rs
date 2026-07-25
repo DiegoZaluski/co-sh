@@ -541,20 +541,20 @@ impl PromptView {
     /// Map a screen-space mouse coordinate (x, y) to a character index in `self.input`.
     /// Returns `None` if the position is outside the text area of the prompt.
     pub fn char_pos_at_mouse(&self, x: u16, y: u16, area: Rect) -> Option<usize> {
+        if self.input.is_empty() {
+            return None;
+        }
         let text_w = area.width.saturating_sub(5) as usize;
         if text_w == 0 {
             return None;
         }
         let text_start = area.y + 1; // first content line
         let x_off = area.x + 3; // left margin within border
-        let n = if self.input.is_empty() {
-            1
-        } else {
-            self.input
-                .split('\n')
-                .map(|line| line.chars().count().div_ceil(text_w).max(1))
-                .sum::<usize>() as u16
-        };
+        let n = self
+            .input
+            .split('\n')
+            .map(|line| line.chars().count().div_ceil(text_w).max(1))
+            .sum::<usize>() as u16;
         let bottom = text_start + n;
 
         if y < text_start || y >= bottom || x < x_off {
@@ -564,11 +564,7 @@ impl PromptView {
         let visual_line = (y - text_start) as usize;
         let col = (x - x_off) as usize;
 
-        let display_lines = if self.input.is_empty() {
-            vec![""]
-        } else {
-            Self::wrapped_lines(&self.input, text_w)
-        };
+        let display_lines = Self::wrapped_lines(&self.input, text_w);
 
         if visual_line >= display_lines.len() {
             return None;

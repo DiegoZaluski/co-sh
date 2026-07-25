@@ -14,7 +14,8 @@ async fn test_agent_loop_simple_conversation() {
 
     // Run in a task so we can collect events
     let handle = tokio::spawn(async move {
-        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal).await;
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
     });
 
     // Collect events with timeout

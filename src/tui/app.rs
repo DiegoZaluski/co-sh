@@ -1491,8 +1491,8 @@ impl App {
             let is_session = matches!(self.mode(), AppMode::Session);
 
             // When question or permission dialog is visible, hide prompt and spinner (like OpenCode)
-            let hide_prompt_and_spinner = is_session
-                && (self.question_dialog.visible || self.permission_dialog.visible);
+            let hide_prompt_and_spinner =
+                is_session && (self.question_dialog.visible || self.permission_dialog.visible);
 
             let prompt_h = if is_session && !hide_prompt_and_spinner {
                 self.prompt_view
@@ -1532,7 +1532,9 @@ impl App {
             let permission_area_y = spinner_area_y.saturating_sub(permission_h);
             let prompt_padding: u16 = 1;
             // session bottom is below whichever dialog is visible (mutually exclusive, never both)
-            let session_bottom = question_area_y.min(permission_area_y).saturating_sub(prompt_padding);
+            let session_bottom = question_area_y
+                .min(permission_area_y)
+                .saturating_sub(prompt_padding);
 
             let prompt_area = Rect::new(
                 main_area.x + 2,
@@ -1629,7 +1631,8 @@ impl App {
                     if self.question_dialog.visible {
                         self.question_dialog.render(buf, question_area, &self.theme);
                     } else if self.permission_dialog.visible {
-                        self.permission_dialog.render(buf, permission_area, &self.theme);
+                        self.permission_dialog
+                            .render(buf, permission_area, &self.theme);
                     }
                     // Hide spinner and prompt when dialog is visible (like OpenCode)
                     if !self.question_dialog.visible && !self.permission_dialog.visible {
@@ -1812,9 +1815,7 @@ impl App {
                             }
                             KeyCode::Esc => {
                                 self.permission_dialog.visible = false;
-                                let _ = self
-                                    .perm_tx
-                                    .send(cosh::harness::PermissionAction::Deny);
+                                let _ = self.perm_tx.send(cosh::harness::PermissionAction::Deny);
                                 return Ok(false);
                             }
                             _ => {}
@@ -2316,7 +2317,8 @@ impl App {
                                 let _ = self
                                     .answer_tx
                                     .send(Err("User dismissed the question dialog".into()));
-                                self.prompt_view.focus();                                } else if self.dialog.visible() {
+                                self.prompt_view.focus();
+                            } else if self.dialog.visible() {
                                 self.pending_delete_session_id = None;
                                 self.clear_rag_pending_state();
                                 self.dialog.pop();
@@ -2332,7 +2334,8 @@ impl App {
                                 let _ = self
                                     .answer_tx
                                     .send(Err("User dismissed the question dialog".into()));
-                                self.prompt_view.focus();                                } else if self.dialog.visible() {
+                                self.prompt_view.focus();
+                            } else if self.dialog.visible() {
                                 self.pending_delete_session_id = None;
                                 self.clear_rag_pending_state();
                                 self.dialog.pop();
@@ -3116,13 +3119,12 @@ impl App {
                     args,
                 } => {
                     // Show the permission dialog with details from the harness
-                    self.permission_dialog.request = Some(
-                        crate::routes::session::permission::PermissionRequest {
+                    self.permission_dialog.request =
+                        Some(crate::routes::session::permission::PermissionRequest {
                             tool,
                             description,
                             args,
-                        },
-                    );
+                        });
                     self.permission_dialog.visible = true;
                     // Default to "Deny" (index 2) for safety
                     self.permission_dialog.selected = 2;

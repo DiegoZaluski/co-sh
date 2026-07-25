@@ -10,7 +10,7 @@ use crate::skills::match_util::globs_match_any;
 use crate::skills::types::{
     SkillAction, SkillContent, SkillError, SkillInfo, SkillOutput, SkillSchema,
 };
-use crate::util::guards::validate_asset_path;
+use crate::util::path_guard::validate_asset_path;
 
 /// Execute a skill tool action.
 ///

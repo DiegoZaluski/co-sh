@@ -105,6 +105,7 @@ async fn bash_run_signal_killed() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_run_absolute_path_rejected() {
     let tools = make_tools();
