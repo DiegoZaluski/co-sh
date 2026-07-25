@@ -158,6 +158,46 @@ impl CoshTools {
         self.recall.rebuild_description(suffix);
     }
 
+    /// All tool descriptions filtered to Ask-mode-appropriate tools (read-only +
+    /// planning), skipping disabled ones.
+    ///
+    /// Matches the tool set exposed by [`write_tool_descriptions_filtered`]
+    /// and [`schemas_filtered`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `plan` mutex is poisoned.
+    pub fn tool_descriptions_filtered(
+        &self,
+        disabled_tools: &HashSet<String>,
+    ) -> Vec<serde_json::Value> {
+        let mut v = vec![
+            self.fs.description_read.clone(),
+            self.find.description_glob.clone(),
+            self.find.description_grep.clone(),
+            self.web.description_fetch.clone(),
+            self.web.description_search.clone(),
+        ];
+        {
+            let plan = self.plan.lock().unwrap();
+            v.push(plan.description_todo_read.clone());
+            v.push(plan.description_load_from_md.clone());
+        }
+        v.push(self.question.description_ask.clone());
+        #[cfg(feature = "embed")]
+        v.push(self.recall.description_search.clone());
+        v.push(self.skills.description_list.clone());
+        v.push(self.skills.description_read.clone());
+        v.push(self.skills.description_read_asset.clone());
+        v.push(self.skills.description_match_skills.clone());
+        v.into_iter()
+            .filter(|desc| {
+                let name = desc["name"].as_str().unwrap_or_default();
+                !disabled_tools.contains(name)
+            })
+            .collect()
+    }
+
     /// All tool descriptions, skipping disabled ones.
     pub fn write_tool_descriptions_enabled(
         &self,

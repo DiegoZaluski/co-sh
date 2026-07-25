@@ -788,13 +788,29 @@ impl Harness {
             ));
         }
 
-        // Cosh tools (bash_run, fs_read, etc.)
+        // Cosh tools — filtered by mode so the native API only exposes
+        // tools the model is allowed to call in the current mode.
         if let Some(ref cosh) = self.cosh_tools {
-            for desc in cosh.tool_descriptions() {
-                let name = desc["name"].as_str().unwrap_or_default();
-                if self.disabled_tools.contains(name) {
-                    continue;
+            let descriptions: Vec<serde_json::Value> = match self.mode {
+                Mode::Build | Mode::Yolo => {
+                    // All tools minus disabled
+                    cosh.tool_descriptions()
+                        .into_iter()
+                        .filter(|desc| {
+                            !self
+                                .disabled_tools
+                                .contains(desc["name"].as_str().unwrap_or_default())
+                        })
+                        .collect()
                 }
+                Mode::Ask => {
+                    // Only read-only / planning tools
+                    cosh.tool_descriptions_filtered(&self.disabled_tools)
+                }
+            };
+
+            for desc in descriptions {
+                let name = desc["name"].as_str().unwrap_or_default();
                 let description = desc["description"].as_str().unwrap_or_default();
                 if let Some(input_schema) = desc.get("inputSchema").cloned() {
                     defs.push(ToolDefinition::new(
@@ -1212,22 +1228,17 @@ impl Harness {
                             // skip the permission dialog — the harness remembers.
                             let paths = super::guardrails::extract_paths_from_args(
                                 &req.tool,
-                                info.as_ref().map_or(
-                                    &serde_json::Value::Null,
-                                    |(_, _, a)| a,
-                                ),
+                                info.as_ref()
+                                    .map_or(&serde_json::Value::Null, |(_, _, a)| a),
                             );
-                            let all_pre_approved = !paths.is_empty() && paths.iter().all(|p| {
-                                self.approved_paths
-                                    .contains(std::path::Path::new(p))
-                            });
+                            let all_pre_approved = !paths.is_empty()
+                                && paths
+                                    .iter()
+                                    .all(|p| self.approved_paths.contains(std::path::Path::new(p)));
 
                             if is_cached_subagent || all_pre_approved {
                                 if all_pre_approved {
-                                    log::debug!(
-                                        "run_agent_loop PERM_CACHED paths={:?}",
-                                        paths,
-                                    );
+                                    log::debug!("run_agent_loop PERM_CACHED paths={:?}", paths,);
                                 } else {
                                     log::debug!(
                                         "run_agent_loop PERM_CACHED subagent={}",
@@ -1275,13 +1286,14 @@ impl Harness {
                                                 }
                                                 // Remember approved paths in the harness
                                                 // so future calls skip the permission dialog.
-                                                let approved = super::guardrails::extract_paths_from_args(
-                                                    &req.tool,
-                                                    info.as_ref().map_or(
-                                                        &serde_json::Value::Null,
-                                                        |(_, _, a)| a,
-                                                    ),
-                                                );
+                                                let approved =
+                                                    super::guardrails::extract_paths_from_args(
+                                                        &req.tool,
+                                                        info.as_ref().map_or(
+                                                            &serde_json::Value::Null,
+                                                            |(_, _, a)| a,
+                                                        ),
+                                                    );
                                                 for p in &approved {
                                                     self.approved_paths
                                                         .insert(std::path::PathBuf::from(p));
@@ -1301,16 +1313,17 @@ impl Harness {
                                             super::guardrails::PermissionAction::AllowOnce => {
                                                 // Save paths and tool name so we can
                                                 // remove from allowlist after dispatch.
-                                                allow_once_paths = super::guardrails::extract_paths_from_args(
-                                                    &req.tool,
-                                                    info.as_ref().map_or(
-                                                        &serde_json::Value::Null,
-                                                        |(_, _, a)| a,
-                                                    ),
-                                                )
-                                                .into_iter()
-                                                .map(std::path::PathBuf::from)
-                                                .collect();
+                                                allow_once_paths =
+                                                    super::guardrails::extract_paths_from_args(
+                                                        &req.tool,
+                                                        info.as_ref().map_or(
+                                                            &serde_json::Value::Null,
+                                                            |(_, _, a)| a,
+                                                        ),
+                                                    )
+                                                    .into_iter()
+                                                    .map(std::path::PathBuf::from)
+                                                    .collect();
                                                 allow_once_tool = req.tool.clone();
                                                 // Add paths to allowlist so PathGuard
                                                 // lets them through during dispatch.
@@ -1342,26 +1355,27 @@ impl Harness {
                                                         "Tool `{tool_name}` (agent: {agent}) denied by user"
                                                     ),
                                                     None => {
-                                                        format!(
-                                                            "Tool `{tool_name}` denied by user"
-                                                        )
+                                                        format!("Tool `{tool_name}` denied by user")
                                                     }
                                                 };
                                                 // Record the denial in history so the model
                                                 // sees its own tool call + the "denied" result
                                                 // as a proper conversation turn.
-                                                if let Some((ref call_id, ref name, ref args)) = info {
+                                                if let Some((ref call_id, ref name, ref args)) =
+                                                    info
+                                                {
                                                     let tool_id = if call_id.is_empty() {
                                                         format!("call_{:016x}", iteration)
                                                     } else {
                                                         call_id.clone()
                                                     };
-                                                    self.push_tool_history(&tool_id, name, args, &msg);
+                                                    self.push_tool_history(
+                                                        &tool_id, name, args, &msg,
+                                                    );
                                                 }
                                                 self.correction_memory.push(&msg);
-                                                let _ = tx.send(HarnessEvent::ToolError {
-                                                    error: msg,
-                                                });
+                                                let _ =
+                                                    tx.send(HarnessEvent::ToolError { error: msg });
                                                 continue;
                                             }
                                         }
