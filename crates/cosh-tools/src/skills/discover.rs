@@ -31,6 +31,11 @@ fn cache_key_for_source(source: &SkillSource) -> String {
 /// Discover all skills from the schema's sources, applying ignore/include
 /// filters and dedup (first source wins).
 ///
+/// The internal `DISCOVERY_CACHE` mutex is held during the entire source
+/// iteration, including filesystem I/O. In the current single-threaded harness
+/// this is fine, but if concurrent access is needed in the future, the lock
+/// should be scoped per source rather than held across all sources.
+///
 /// # Errors
 /// Returns `SkillError::InvalidSource` when a directory source does not exist
 /// or cannot be read.

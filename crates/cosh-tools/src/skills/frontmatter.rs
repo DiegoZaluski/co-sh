@@ -12,6 +12,8 @@ use crate::skills::types::Frontmatter;
 /// the entire content is treated as body and default frontmatter is returned.
 #[must_use]
 pub fn parse_frontmatter(content: &str) -> (Frontmatter, String) {
+    // Normalize CRLF → LF so Windows-edited SKILL.md files parse correctly.
+    let content = content.replace("\r\n", "\n");
     let content = content.trim_start();
 
     if !content.starts_with("---") {

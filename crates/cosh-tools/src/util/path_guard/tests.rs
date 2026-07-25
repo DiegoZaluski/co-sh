@@ -224,13 +224,11 @@ impl Drop for TempDir {
 
 #[test]
 fn validate_asset_path_escape_via_symlink_rejected() {
-    // Create: base/asset -> ../outside (symlink)
+    // Create: base/evil -> ../outside (symlink)
     // The canonicalize + starts_with check should catch this.
     let dir = TempDir::new();
     let outside = dir.path().join("outside");
     std::fs::write(&outside, "escaped").unwrap();
-    let asset = dir.path().join("asset");
-    std::fs::write(&asset, "real").unwrap();
 
     // Symlink from base/evil -> ../outside
     let evil = dir.path().join("evil");
@@ -272,7 +270,6 @@ fn path_guard_denies_path_outside_root() {
     let dir = TempDir::new();
     let root = dir.path();
     // Re-create the guard with a non-existent outside path
-    let outside = dir.path().join("../outside");
     let guard = PathGuard::new(root, None, None);
     // Use an absolute path that is clearly outside (parent of temp dir)
     let parent = root.parent().unwrap().join("outside.txt");
@@ -308,25 +305,20 @@ fn path_guard_denies_path_in_blocklist() {
 #[test]
 fn path_guard_allows_allowlisted_path_outside_root() {
     let dir = TempDir::new();
-    let outside = dir.path().join("../outside_allowed");
-    let outside_canon = outside.canonicalize().unwrap_or_else(|_| {
-        // On most systems the parent dir exists, so canonicalize works
-        let parent = dir.path().parent().unwrap();
-        parent.join("outside_allowed")
-    });
-    std::fs::write(&outside, "allowed content").unwrap_or(());
+    // Create a file in the temp dir's parent (outside the project root)
+    // so that canonicalize() succeeds and validate_path can verify the
+    // allowlist exception.
+    let parent_dir = dir.path().parent().unwrap();
+    let outside_file = parent_dir.join("cosh_guard_outside_allowed.txt");
+    let _ = std::fs::write(&outside_file, "allowed content");
 
-    // The allowlist path must exist for canonicalization
-    // So we use a path that's actually inside the temp dir
-    let sub = dir.path().join("allowed_sub");
-    std::fs::create_dir_all(&sub).unwrap();
-
-    let allowlist = [sub.clone()];
+    let allowlist = [outside_file.clone()];
     let guard = PathGuard::new(dir.path(), Some(&allowlist), None);
-    // Path inside the subdirectory is still outside root's lexical scope
-    // unless we use the sub path itself
-    let result = guard.resolve(sub.to_str().unwrap());
-    assert!(result.is_ok(), "expected Ok, got {result:?}");
+    let result = guard.resolve(outside_file.to_str().unwrap());
+    assert!(result.is_ok(), "expected Ok for allowlisted outside path, got {result:?}");
+
+    // Manual cleanup — TempDir only removes its own path.
+    let _ = std::fs::remove_file(&outside_file);
 }
 
 #[test]
