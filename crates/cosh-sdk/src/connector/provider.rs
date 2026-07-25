@@ -278,6 +278,16 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             needs_extra_headers: false,
         },
     ),
+    (
+        "charm",
+        ProviderConfig {
+            name: "charm",
+            family: Family::OpenAICompatible,
+            base_url: "https://hyper.charm.land/v1",
+            default_model: "",
+            needs_extra_headers: false,
+        },
+    ),
 ];
 
 const API_KEY_ENVS: &[(&str, &str)] = &[
@@ -305,6 +315,7 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     ("gemini", "GEMINI_API_KEY"),
     ("claude", "ANTHROPIC_API_KEY"),
     ("zai", "ZAI_API_KEY"),
+    ("charm", "CHARM_API_KEY"),
 ];
 
 pub fn get_provider(name: &str) -> Option<&'static ProviderConfig> {
