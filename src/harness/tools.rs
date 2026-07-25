@@ -274,14 +274,11 @@ impl CoshTools {
             extract_schema(&self.web.description_fetch),
             extract_schema(&self.web.description_search),
         ];
-        // Each plan.lock() is its own statement to avoid deadlock
-        // on std::sync::Mutex (non-reentrant).
-        v.push(extract_schema(
-            &self.plan.lock().unwrap().description_todo_read,
-        ));
-        v.push(extract_schema(
-            &self.plan.lock().unwrap().description_load_from_md,
-        ));
+        {
+            let plan = self.plan.lock().unwrap();
+            v.push(extract_schema(&plan.description_todo_read));
+            v.push(extract_schema(&plan.description_load_from_md));
+        }
         v.push(extract_schema(&self.question.description_ask));
         #[cfg(feature = "embed")]
         v.push(extract_schema(&self.recall.description_search));
@@ -468,13 +465,14 @@ impl Tools for CoshTools {
             self.web.description_search.clone(),
             self.vision.description_terminal.clone(),
         ];
-        // Each plan.lock() is its own statement to avoid deadlock
-        // on std::sync::Mutex (non-reentrant).
-        v.push(self.plan.lock().unwrap().description_todo_write.clone());
-        v.push(self.plan.lock().unwrap().description_todo_edit.clone());
-        v.push(self.plan.lock().unwrap().description_todo_cross_off.clone());
-        v.push(self.plan.lock().unwrap().description_todo_read.clone());
-        v.push(self.plan.lock().unwrap().description_load_from_md.clone());
+        {
+            let plan = self.plan.lock().unwrap();
+            v.push(plan.description_todo_write.clone());
+            v.push(plan.description_todo_edit.clone());
+            v.push(plan.description_todo_cross_off.clone());
+            v.push(plan.description_todo_read.clone());
+            v.push(plan.description_load_from_md.clone());
+        }
         v.push(self.question.description_ask.clone());
         #[cfg(feature = "embed")]
         v.push(self.recall.description_search.clone());
@@ -499,21 +497,14 @@ impl Tools for CoshTools {
             extract_schema(&self.web.description_search),
             extract_schema(&self.vision.description_terminal),
         ];
-        v.push(extract_schema(
-            &self.plan.lock().unwrap().description_todo_write,
-        ));
-        v.push(extract_schema(
-            &self.plan.lock().unwrap().description_todo_edit,
-        ));
-        v.push(extract_schema(
-            &self.plan.lock().unwrap().description_todo_cross_off,
-        ));
-        v.push(extract_schema(
-            &self.plan.lock().unwrap().description_todo_read,
-        ));
-        v.push(extract_schema(
-            &self.plan.lock().unwrap().description_load_from_md,
-        ));
+        {
+            let plan = self.plan.lock().unwrap();
+            v.push(extract_schema(&plan.description_todo_write));
+            v.push(extract_schema(&plan.description_todo_edit));
+            v.push(extract_schema(&plan.description_todo_cross_off));
+            v.push(extract_schema(&plan.description_todo_read));
+            v.push(extract_schema(&plan.description_load_from_md));
+        }
         v.push(extract_schema(&self.question.description_ask));
         #[cfg(feature = "embed")]
         v.push(extract_schema(&self.recall.description_search));

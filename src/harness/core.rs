@@ -310,32 +310,10 @@ impl Harness {
         }
     }
 
-    /// Signal the agent loop to stop at the next safe opportunity.
-    pub const fn request_stop(&mut self) {
-        self.stop = true;
-    }
-
-    /// Check whether a stop has been requested.
-    #[must_use]
-    pub const fn is_stopped(&self) -> bool {
-        self.stop
-    }
-
-    /// Reset the stop flag so the harness can be reused for a new cycle.
-    pub const fn reset_stop(&mut self) {
-        self.stop = false;
-    }
-
     /// Check whether there are pending tool calls awaiting dispatch.
     #[must_use]
     pub fn has_pending_tools(&self) -> bool {
         !self.tool_issuer.is_empty()
-    }
-
-    /// How many tool calls are currently queued.
-    #[must_use]
-    pub fn pending_tool_count(&self) -> usize {
-        self.tool_issuer.len()
     }
 
     /// Builds the system header for the LLM.
@@ -943,7 +921,7 @@ impl Harness {
 
     /// Run the full agent loop: stream LLM response, dispatch tool calls,
     /// feed results back to the LLM, and repeat — until the model finishes
-    /// without requesting tools, [`request_stop`](Self::request_stop) is called,
+    /// without requesting tools, stop is called,
     /// or `stop_signal` is set to `true`.
     ///
     /// Events are sent through `tx` so the caller (typically the TUI) can
@@ -1077,7 +1055,7 @@ impl Harness {
 
             // Phase 2: dispatch all pending tool calls
             let had_tools = self.has_pending_tools();
-            log::debug!("run_agent_loop PHASE2 had_tools={had_tools}");
+            // log::debug!("run_agent_loop PHASE2 had_tools={had_tools}");
 
             while self.has_pending_tools() {
                 // Safety: stop the loop if we've exceeded the maximum
@@ -1085,7 +1063,7 @@ impl Harness {
                 // when the model fails to recognise that its request is
                 // complete.
                 if iteration >= MAX_ITERATIONS {
-                    log::debug!("run_agent_loop MAX_ITERATIONS={MAX_ITERATIONS} reached");
+                    // log::debug!("run_agent_loop MAX_ITERATIONS={MAX_ITERATIONS} reached");
                     let _ = tx.send(HarnessEvent::Done);
                     self.stop = true;
                     break;
@@ -1102,7 +1080,7 @@ impl Harness {
                     .map(|tc| (tc.id.clone(), tc.name.clone(), tc.arguments.clone()));
 
                 if let Some((ref _call_id, ref name, ref args)) = info {
-                    log::debug!("run_agent_loop DISPATCH tool={name}");
+                    // log::debug!("run_agent_loop DISPATCH tool={name}");
                     let _ = tx.send(HarnessEvent::ToolCall {
                         tool: name.clone(),
                         input: args.clone(),
@@ -1111,7 +1089,7 @@ impl Harness {
 
                 // Intercept `ask_questions` — send to TUI, wait for user answer
                 if info.as_ref().is_some_and(|(_, n, _)| n == "ask_questions") {
-                    log::debug!("run_agent_loop ASK_QUESTIONS intercepted");
+                    // log::debug!("run_agent_loop ASK_QUESTIONS intercepted");
 
                     // Clone info before consuming in .map() below
                     let info_clone = info.clone();
@@ -1131,7 +1109,7 @@ impl Harness {
                             log::debug!("run_agent_loop WAITING for answer_rx");
                             // Wait for the TUI to send back answers
                             let answer = answer_rx.recv().await;
-                            log::debug!("run_agent_loop GOT answer={:?}", answer.is_some());
+                            // log::debug!("run_agent_loop GOT answer={:?}", answer.is_some());
                             match answer {
                                 Some(Ok(answers)) => {
                                     let output = QuestionOutput {
@@ -1169,12 +1147,12 @@ impl Harness {
                     }
                 } else {
                     // Normal dispatch for all other tools
-                    log::debug!("run_agent_loop dispatch_next start");
+                    // log::debug!("run_agent_loop dispatch_next start");
 
-                    // ── Permission check ────────────────────────────────────
+                    // Permission check
                     // Before dispatching, check if the tool needs user approval.
                     // This only applies to cosh tools (fs_read, bash_run, etc.)
-                    // — MCP server tools are passed through unchecked.
+                    // MCP server tools are passed through unchecked.
                     let perm_check = check_tool_permission(
                         info.as_ref().map_or("?", |(_, n, _)| n.as_str()),
                         info.as_ref()
@@ -1214,7 +1192,7 @@ impl Harness {
                             continue;
                         }
                         PermissionCheck::NeedsApproval(req) => {
-                            // ── Cached agent permission ──────────────────────────
+                            // Cached agent permission
                             // For subagent_call, skip the dialog entirely if the
                             // agent was previously allowed with a permanent Allow.
                             let is_cached_subagent = req.tool == "subagent_call"
@@ -1223,7 +1201,7 @@ impl Harness {
                                     .strip_prefix("agent: ")
                                     .is_some_and(|agent| self.agent_permissions.contains(agent));
 
-                            // ── Pre-approved path check ───────────────────────────
+                            // Pre-approved path check
                             // If all tool paths were previously Allowed (permanent),
                             // skip the permission dialog — the harness remembers.
                             let paths = super::guardrails::extract_paths_from_args(
