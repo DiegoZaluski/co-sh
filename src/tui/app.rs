@@ -296,6 +296,14 @@ impl App {
                 cached_models.extend(models.iter().cloned());
             }
         }
+        // Deduplicate cached models as a safety net — the cache should
+        // already be unique after update_model_cache runs, but this
+        // protects against stale on-disk data from older versions.
+        {
+            let mut seen: std::collections::HashSet<(String, String)> =
+                std::collections::HashSet::new();
+            cached_models.retain(|m| seen.insert((m.provider.clone(), m.model.clone())));
+        }
 
         if !cached_models.is_empty() {
             self.dialog.replace(DialogType::ModelList {
@@ -356,6 +364,7 @@ impl App {
     fn update_model_cache(&mut self, models: &[cosh::ModelEntry]) {
         use cosh::ModelEntry;
         use std::collections::HashMap;
+        use std::collections::HashSet;
 
         // Group by provider
         let mut grouped: HashMap<&str, Vec<ModelEntry>> = HashMap::new();
@@ -366,15 +375,27 @@ impl App {
                 .push(entry.clone());
         }
 
+        // Deduplicate models per provider: some APIs may return the same
+        // model ID multiple times (Mistral, transient API glitches, etc.).
+        // Using a per-provider HashSet avoids O(n²) on each Vec.
+        for provider_models in grouped.values_mut() {
+            let mut seen: HashSet<String> = HashSet::new();
+            provider_models.retain(|m| seen.insert(m.model.clone()));
+        }
+
         // Update cache for each provider with results
         for (provider, provider_models) in grouped {
             self.model_cache
                 .finish_revalidation(provider.to_string(), provider_models);
         }
 
-        // Clear any remaining revalidation flags (providers that failed or
-        // returned no results) — preserves old cached data for those providers.
-        self.model_cache.clear_all_revalidation();
+        // Providers still in the revalidation set failed or returned nothing
+        // (expired API key, network error, etc.). Invalidate their cache so
+        // stale models don't appear as available options.
+        let failed: Vec<String> = self.model_cache.drain_revalidation();
+        for provider in &failed {
+            self.model_cache.invalidate(provider);
+        }
     }
 
     fn is_theme_dialog_visible(&self) -> bool {
