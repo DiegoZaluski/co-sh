@@ -65,10 +65,6 @@ pub struct MarkdownRenderable {
     bg: Option<RGBA>,
     /// Optional table border colour. Falls back to the palette's muted colour.
     table_border_color: Option<RGBA>,
-    /// When true, skip tree-sitter syntax highlighting and render code blocks
-    /// as plain text. Set during LLM streaming to avoid ~10ms `highlight()` calls
-    /// on every frame while code block text is still growing.
-    streaming: bool,
 }
 
 impl MarkdownRenderable {
@@ -87,7 +83,6 @@ impl MarkdownRenderable {
             fg: None,
             bg: None,
             table_border_color: None,
-            streaming: false,
         }
     }
 
@@ -109,12 +104,6 @@ impl MarkdownRenderable {
     /// When `None` (the default), the palette's muted colour is used.
     pub fn set_table_border_color(&mut self, value: Option<ColorInput>) {
         self.table_border_color = value.map(parse_color);
-    }
-
-    /// When streaming, skip tree-sitter syntax highlighting to avoid
-    /// re-highlighting every frame as code block text grows.
-    pub const fn set_streaming(&mut self, streaming: bool) {
-        self.streaming = streaming;
     }
 
     // ── Accessors ──────────────────────────────────────────────
@@ -844,7 +833,7 @@ impl MarkdownRenderable {
         // - ```lang (unknown/unsupported) → fall back to JavaScript (versatile default)
         //
         // Build byte-to-category map for syntax highlighting (cached)
-        let spans: Option<Vec<HighlightSpan>> = if self.streaming || lang.is_empty() {
+        let spans: Option<Vec<HighlightSpan>> = if lang.is_empty() {
             None
         } else {
             let key = highlight_cache_key(text, lang);

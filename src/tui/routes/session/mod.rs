@@ -639,7 +639,6 @@ impl SessionView {
                     md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(
                         255, 200, 0, 255,
                     ))));
-                    md.set_streaming(streaming);
                     md.render_self(buf, area);
                     // During streaming, skip the expensive scan_content_height
                     // for the last message since it will be re-rendered next frame.

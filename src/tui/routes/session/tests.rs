@@ -218,7 +218,6 @@ fn test_scan_content_height_works() {
     let mut md = MarkdownRenderable::new(Some(text.to_string()));
     md.set_fg(Some(ColorInput::RGBA(RGBA::from_ints(255, 255, 255, 255))));
     md.set_bg(Some(ColorInput::RGBA(RGBA::from_ints(0, 0, 0, 0))));
-    md.set_streaming(true);
 
     let area = Rect::new(0, 0, 80, 50);
     let mut buf = Buffer::empty(area);
