@@ -109,7 +109,7 @@ impl PromptView {
         let raw = self.input.clone();
         if !raw.is_empty() {
             // Expand any paste placeholders back to the original text before sending
-            let msg = self.expand_pasted_text(&raw);
+            let msg = self.expand_pasted_text(&raw).trim().to_string();
             self.input.clear();
             self.cursor_pos = 0;
             self.history_index = -1;
@@ -137,7 +137,7 @@ impl PromptView {
             self.history_index -= 1;
         }
         self.input = user_msgs[usize::try_from(self.history_index).unwrap_or(0)].clone();
-        self.cursor_pos = 0;
+        self.cursor_pos = self.input.len();
     }
 
     /// Navigate down through user messages from the current session.
@@ -152,7 +152,7 @@ impl PromptView {
         } else {
             self.input = user_msgs[usize::try_from(self.history_index).unwrap_or(0)].clone();
         }
-        self.cursor_pos = 0;
+        self.cursor_pos = self.input.len();
     }
 
     /// Reset history index so the next Ctrl+Down goes to the most recent
