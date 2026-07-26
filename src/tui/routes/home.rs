@@ -269,7 +269,7 @@ impl HomeView {
             draw_text_line(buf, &entry, menu_left, my, area.width, style);
         }
 
-        let key_hints = "\u{2191}\u{2193} navigate  enter select  q quit";
+        let key_hints = "show sessions ctrl+B ";
         let hint_x = cx.saturating_sub(key_hints.len() as u16 / 2);
         draw_text_line(
             buf,

@@ -58,23 +58,18 @@ impl FooterView {
         let success = Style::default().fg(rgba_color(theme.success));
         let warning = Style::default().fg(rgba_color(theme.warning));
 
-        if let Some(session) = state.current_session() {
+        if let Some(_) = state.current_session() {
             let dir = &state.working_directory;
             let dir_display = if dir.is_empty() { "~" } else { dir };
 
-            let left = format!(
-                " {}  {} msgs \u{2191}\u{2193}:scroll",
-                session.title,
-                session.messages.len()
-            );
-            draw_text_line(
-                buf,
-                &left,
-                area.x + 1,
-                area.y,
-                area.width.saturating_sub(2),
-                muted,
-            );
+            // draw_text_line(
+            //     buf,
+            //     &_.title, // session.title
+            //     area.x + 1,
+            //     area.y,
+            //     area.width.saturating_sub(2),
+            //     muted,
+            // );
 
             let mut rx = area.right().saturating_sub(2);
 
