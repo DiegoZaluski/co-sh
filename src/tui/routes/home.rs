@@ -26,15 +26,19 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
-fn dim_color(color: Color, brightness: f64) -> Color {
-    let (r, g, b) = match color {
+fn blend_color(fg: Color, bg: Color, amount: f64) -> Color {
+    let (r1, g1, b1) = match fg {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0, 0, 0),
+    };
+    let (r2, g2, b2) = match bg {
         Color::Rgb(r, g, b) => (r, g, b),
         _ => (0, 0, 0),
     };
     Color::Rgb(
-        (r as f64 * brightness) as u8,
-        (g as f64 * brightness) as u8,
-        (b as f64 * brightness) as u8,
+        (r1 as f64 * amount + r2 as f64 * (1.0 - amount)) as u8,
+        (g1 as f64 * amount + g2 as f64 * (1.0 - amount)) as u8,
+        (b1 as f64 * amount + b2 as f64 * (1.0 - amount)) as u8,
     )
 }
 
@@ -45,6 +49,7 @@ fn render_logo(
     logo_start_y: u16,
     frame: u64,
     primary: Color,
+    bg: Color,
 ) {
     let t = frame as f64 * 0.025;
     let center_x: f64 = 14.0;
@@ -71,7 +76,7 @@ fn render_logo(
 
             if let Some(cell) = buf.cell_mut((cx_pos, ly)) {
                 cell.set_char(ch);
-                cell.set_style(Style::default().fg(dim_color(primary, bri)));
+                cell.set_style(Style::default().fg(blend_color(primary, bg, bri)));
             }
         }
     }
@@ -80,12 +85,12 @@ fn render_logo(
 const LOGO_WIDTH: usize = 28;
 
 const LOGO: &[&str] = &[
-    "                           ",
-    " █████░██████░█████░██     ",
-    " ██   ░██  ██░██   ░██████ ",
-    " ██░░░░██░░██░   ██░██  ██ ",
-    " █████░██████░█████░██░░██ ",
-    "                           ",
+    "                            ",
+    " ▗████░░▗███▖░░█████░██     ",
+    " ██   ░█▛ ▅ ▜█░██▖  ░█████▖ ",
+    " ██░░░░█▙ ▀ ▟█░  ▝██░██  ██ ",
+    " ▝████░░▝███▘░░█████░██░░██ ",
+    "                            ",
 ];
 
 const TAGLINE: &str = "Terminal AI Agent";
@@ -229,8 +234,9 @@ impl HomeView {
         let muted = rgba_color(theme.text_muted);
         let text = rgba_color(theme.text);
 
+        let bg_color = rgba_color(theme.background);
         let logo_start_y = area.y + 2;
-        render_logo(buf, area, cx, logo_start_y, self.frame, primary);
+        render_logo(buf, area, cx, logo_start_y, self.frame, primary, bg_color);
 
         let tagline_y = logo_start_y + LOGO.len() as u16 + 1;
         let tagline_x = cx.saturating_sub(TAGLINE.len() as u16 / 2);
@@ -240,7 +246,7 @@ impl HomeView {
             tagline_x,
             tagline_y,
             area.width,
-            Style::default().fg(muted),
+            Style::default().fg(text),
         );
 
         // Always show menu
