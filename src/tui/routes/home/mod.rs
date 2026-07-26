@@ -3,6 +3,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use cosh_tui::core::lib::rgba::RGBA;
+pub mod footer;
+
 use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::Theme;

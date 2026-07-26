@@ -29,16 +29,11 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
 pub struct FooterView;
 
 impl FooterView {
-    pub fn render(buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
-        Self::render_with_mode(buf, area, state, theme, true, false);
-    }
-
     pub fn render_with_mode(
         buf: &mut Buffer,
         area: Rect,
         state: &AppState,
         theme: &Theme,
-        show_home_label: bool,
         hide_text: bool,
     ) {
         let bg_color = rgba_color(theme.background);
@@ -58,18 +53,9 @@ impl FooterView {
         let success = Style::default().fg(rgba_color(theme.success));
         let warning = Style::default().fg(rgba_color(theme.warning));
 
-        if let Some(_) = state.current_session() {
+        if state.current_session().is_some() {
             let dir = &state.working_directory;
             let dir_display = if dir.is_empty() { "~" } else { dir };
-
-            // draw_text_line(
-            //     buf,
-            //     &_.title, // session.title
-            //     area.x + 1,
-            //     area.y,
-            //     area.width.saturating_sub(2),
-            //     muted,
-            // );
 
             let mut rx = area.right().saturating_sub(2);
 
@@ -115,16 +101,6 @@ impl FooterView {
                 rx = rx.saturating_sub(s.len() as u16);
                 draw_text_line(buf, &s, rx, area.y, s.len() as u16, muted);
             }
-        } else if show_home_label {
-            let text = " \u{2302} Home";
-            draw_text_line(
-                buf,
-                text,
-                area.x + 1,
-                area.y,
-                area.width.saturating_sub(2),
-                muted,
-            );
         }
     }
 }

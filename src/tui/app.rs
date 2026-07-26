@@ -27,6 +27,7 @@ use crate::component::spinner_highlight::HighlightSpinner;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
 use crate::routes::add_provider::AddProviderView;
+use crate::routes::home::footer::HomeFooterView;
 use crate::routes::home::{HomeAction, HomeView};
 use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
@@ -1657,16 +1658,23 @@ impl App {
                 }
             }
 
-            let show_home = !self.is_rag_mode()
-                && !matches!(self.mode(), AppMode::InternalTools | AppMode::AddProvider);
-            FooterView::render_with_mode(
-                buf,
-                Rect::new(main_area.x, footer_y, main_area.width, 1),
-                &self.state,
-                &self.theme,
-                show_home,
-                self.question_dialog.visible || self.permission_dialog.visible,
-            );
+            let footer_area = Rect::new(main_area.x, footer_y, main_area.width, 1);
+            match self.mode() {
+                AppMode::Home => {
+                    HomeFooterView::render(buf, footer_area, &self.theme);
+                }
+                AppMode::Session => {
+                    let hide_text = self.question_dialog.visible || self.permission_dialog.visible;
+                    FooterView::render_with_mode(
+                        buf,
+                        footer_area,
+                        &self.state,
+                        &self.theme,
+                        hide_text,
+                    );
+                }
+                _ => {}
+            }
             let now = std::time::SystemTime::now();
             self.toast_state.render(buf, area, &self.theme);
             // Sync terminal_focused to the dialog cursor so ThemeList/ModelList/ApiKeyInput

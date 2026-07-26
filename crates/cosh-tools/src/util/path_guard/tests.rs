@@ -315,7 +315,10 @@ fn path_guard_allows_allowlisted_path_outside_root() {
     let allowlist = [outside_file.clone()];
     let guard = PathGuard::new(dir.path(), Some(&allowlist), None);
     let result = guard.resolve(outside_file.to_str().unwrap());
-    assert!(result.is_ok(), "expected Ok for allowlisted outside path, got {result:?}");
+    assert!(
+        result.is_ok(),
+        "expected Ok for allowlisted outside path, got {result:?}"
+    );
 
     // Manual cleanup — TempDir only removes its own path.
     let _ = std::fs::remove_file(&outside_file);

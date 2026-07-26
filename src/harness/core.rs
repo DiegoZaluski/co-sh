@@ -1251,16 +1251,15 @@ impl Harness {
                                         match action {
                                             super::guardrails::PermissionAction::Allow => {
                                                 // Cache subagent permission (persists across the session)
-                                                if req.tool == "subagent_call" {
-                                                    if let Some(agent_name) =
+                                                if req.tool == "subagent_call"
+                                                    && let Some(agent_name) =
                                                         req.args.strip_prefix("agent: ")
-                                                    {
-                                                        self.agent_permissions
-                                                            .insert(agent_name.to_string());
-                                                        log::debug!(
-                                                            "run_agent_loop PERM_ALLOW agent={agent_name} (cached)"
-                                                        );
-                                                    }
+                                                {
+                                                    self.agent_permissions
+                                                        .insert(agent_name.to_string());
+                                                    log::debug!(
+                                                        "run_agent_loop PERM_ALLOW agent={agent_name} (cached)"
+                                                    );
                                                 }
                                                 // Remember approved paths in the harness
                                                 // so future calls skip the permission dialog.
@@ -1413,18 +1412,18 @@ impl Harness {
                     // If this was AllowOnce, remove the approved paths from the
                     // allowlist in BOTH success and error cases — we never want
                     // AllowOnce paths to leak into future calls.
-                    if !allow_once_paths.is_empty() {
-                        if let Some(cosh) = self.cosh_tools.as_mut() {
-                            for p in &allow_once_paths {
-                                match allow_once_tool.as_str() {
-                                    "fs_read" | "fs_write" | "fs_edit" | "fs_rollback" => {
-                                        cosh.remove_fs_allowlist_path(p);
-                                    }
-                                    "find_glob" | "find_grep" => {
-                                        cosh.remove_find_allowlist_path(p);
-                                    }
-                                    _ => {}
+                    if !allow_once_paths.is_empty()
+                        && let Some(cosh) = self.cosh_tools.as_mut()
+                    {
+                        for p in &allow_once_paths {
+                            match allow_once_tool.as_str() {
+                                "fs_read" | "fs_write" | "fs_edit" | "fs_rollback" => {
+                                    cosh.remove_fs_allowlist_path(p);
                                 }
+                                "find_glob" | "find_grep" => {
+                                    cosh.remove_find_allowlist_path(p);
+                                }
+                                _ => {}
                             }
                         }
                     }

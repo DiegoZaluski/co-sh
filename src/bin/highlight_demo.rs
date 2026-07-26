@@ -234,26 +234,23 @@ fn main() -> io::Result<()> {
         })?;
 
         // Input handling
-        if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => quit = true,
-                        KeyCode::Enter => {
-                            // Manual preset advance.
-                            preset_idx = (preset_idx + 1) % PRESETS.len();
-                            last_switch = Instant::now();
-                            spinners[preset_idx].reset();
-                            spinners[preset_idx].set_text(PRESETS[preset_idx].text);
-                            spinners[preset_idx].set_colors(
-                                PRESETS[preset_idx].highlight,
-                                PRESETS[preset_idx].base,
-                            );
-                            (PRESETS[preset_idx].tweak)(&mut spinners[preset_idx]);
-                        }
-                        _ => {}
-                    }
+        if event::poll(tick_rate)?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => quit = true,
+                KeyCode::Enter => {
+                    // Manual preset advance.
+                    preset_idx = (preset_idx + 1) % PRESETS.len();
+                    last_switch = Instant::now();
+                    spinners[preset_idx].reset();
+                    spinners[preset_idx].set_text(PRESETS[preset_idx].text);
+                    spinners[preset_idx]
+                        .set_colors(PRESETS[preset_idx].highlight, PRESETS[preset_idx].base);
+                    (PRESETS[preset_idx].tweak)(&mut spinners[preset_idx]);
                 }
+                _ => {}
             }
         }
     }
