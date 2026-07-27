@@ -54,7 +54,7 @@ fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
     Color::Rgb(r, g, b)
 }
 
-const SIDEBAR_WIDTH: u16 = 24;
+const SIDEBAR_WIDTH: u16 = 22;
 const FOOTER_HEIGHT: u16 = 1;
 
 enum AppMode {
@@ -144,6 +144,9 @@ pub struct App {
     last_mouse_x: u16,
     /// Timestamp of last scroll wheel event (for debouncing rapid scrolls).
     last_scroll_time: Instant,
+    /// Whether the sidebar is focused to receive scroll events.
+    /// Set to true when the user clicks inside the sidebar; false on outside clicks.
+    sidebar_focused: bool,
 }
 
 impl App {
@@ -224,6 +227,7 @@ impl App {
             last_frame_time: std::time::Instant::now(),
             last_mouse_x: 0,
             last_scroll_time: Instant::now(),
+            sidebar_focused: false,
         }
     }
 
@@ -1726,6 +1730,12 @@ impl App {
                         return Ok(false);
                     }
 
+                    // Escape also unfocuses the sidebar.
+                    if key.code == KeyCode::Esc && self.sidebar_focused {
+                        self.sidebar_focused = false;
+                        return Ok(false);
+                    }
+
                     if key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
@@ -1858,6 +1868,23 @@ impl App {
                         self.prompt_view.input.insert(pos, '\n');
                         self.prompt_view.cursor_pos = pos + 1;
                         return Ok(false);
+                    }
+
+                    // Sidebar-focused arrow key scrolling (runs for ALL modes)
+                    // Must come before mode-specific handlers (Home, InternalTools,
+                    // Session) which also consume Up/Down before the action dispatch.
+                    if self.sidebar_focused && self.sidebar.open {
+                        match key.code {
+                            KeyCode::Up => {
+                                self.sidebar.select_prev(self.state.session_summaries.len());
+                                return Ok(false);
+                            }
+                            KeyCode::Down => {
+                                self.sidebar.select_next(self.state.session_summaries.len());
+                                return Ok(false);
+                            }
+                            _ => {}
+                        }
                     }
 
                     let action = self.keymap.lookup(key.code, key.modifiers).cloned();
@@ -2075,7 +2102,12 @@ impl App {
 
                     match action {
                         Some(crate::keymap::Action::ScrollUp) => {
-                            if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                            if self.sidebar_focused && self.sidebar.open {
+                                self.sidebar.select_prev(self.state.session_summaries.len());
+                            } else if Self::is_in_right_panel(
+                                self.last_mouse_x,
+                                self.terminal_size(),
+                            ) {
                                 self.state.right_panel.scroll_up(3);
                             } else {
                                 let vh = self.session_view.visible_height.max(1);
@@ -2085,7 +2117,12 @@ impl App {
                             }
                         }
                         Some(crate::keymap::Action::ScrollDown) => {
-                            if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                            if self.sidebar_focused && self.sidebar.open {
+                                self.sidebar.select_next(self.state.session_summaries.len());
+                            } else if Self::is_in_right_panel(
+                                self.last_mouse_x,
+                                self.terminal_size(),
+                            ) {
                                 self.state.right_panel.scroll_down(3);
                             } else {
                                 let vh = self.session_view.visible_height.max(1);
@@ -2095,7 +2132,13 @@ impl App {
                             }
                         }
                         Some(crate::keymap::Action::ScrollUpPage) => {
-                            if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                            if self.sidebar_focused && self.sidebar.open {
+                                self.sidebar
+                                    .select_first(self.state.session_summaries.len());
+                            } else if Self::is_in_right_panel(
+                                self.last_mouse_x,
+                                self.terminal_size(),
+                            ) {
                                 let vh = self.state.right_panel.visible_height.max(1);
                                 self.state.right_panel.scroll_up(vh / 2);
                             } else {
@@ -2106,7 +2149,12 @@ impl App {
                             }
                         }
                         Some(crate::keymap::Action::ScrollDownPage) => {
-                            if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                            if self.sidebar_focused && self.sidebar.open {
+                                self.sidebar.select_last(self.state.session_summaries.len());
+                            } else if Self::is_in_right_panel(
+                                self.last_mouse_x,
+                                self.terminal_size(),
+                            ) {
                                 let vh = self.state.right_panel.visible_height.max(1);
                                 self.state.right_panel.scroll_down(vh / 2);
                             } else {
@@ -3094,12 +3142,6 @@ impl App {
                         action: None,
                     };
                     self.agent_spinner = None;
-                    self.toast_state.show(ToastOptions {
-                        title: Some("Error".into()),
-                        message: msg.clone(),
-                        variant: ToastVariant::Error,
-                        duration_ms: 5000,
-                    });
 
                     // Push error as an assistant message so it appears inline in the chat
                     let error_text = format!("Error: {msg}");
@@ -3422,6 +3464,8 @@ impl App {
                             }
                             _ => {}
                         }
+                    } else if self.sidebar_focused && self.sidebar.open && x < SIDEBAR_WIDTH {
+                        self.sidebar.select_prev(self.state.session_summaries.len());
                     } else if matches!(self.mode(), AppMode::Session)
                         && Self::is_in_right_panel(x, self.terminal_size())
                     {
@@ -3451,6 +3495,8 @@ impl App {
                             }
                             _ => {}
                         }
+                    } else if self.sidebar_focused && self.sidebar.open && x < SIDEBAR_WIDTH {
+                        self.sidebar.select_next(self.state.session_summaries.len());
                     } else if matches!(self.mode(), AppMode::Session)
                         && Self::is_in_right_panel(x, self.terminal_size())
                     {
@@ -3699,6 +3745,12 @@ impl App {
         }
 
         // 6. Sidebar
+        // Focus management: clicking the sidebar focuses it for scroll;
+        // clicking anywhere else unfocuses it.
+        if matches!(event_type, MouseEventType::Down) || matches!(event_type, MouseEventType::Up) {
+            self.sidebar_focused = self.sidebar.open && x < SIDEBAR_WIDTH;
+        }
+
         if self.sidebar.open {
             let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
             match self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
@@ -3858,7 +3910,7 @@ impl App {
                 main_area.height.saturating_sub(3),
             );
             if let Some(clicked_idx) = self.add_provider_view.handle_mouse(&mouse, tools_area) {
-                self.add_provider_view.selected_index = clicked_idx;
+                self.add_provider_view.selection.selected_index = clicked_idx;
                 if let Some((provider, env_var)) = self.add_provider_view.selected_provider() {
                     self.dialog.show(DialogType::ApiKeyInput {
                         provider: provider.to_string(),

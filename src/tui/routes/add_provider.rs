@@ -7,6 +7,7 @@ use cosh_tui::core::types::MouseEvent;
 
 use crate::component::search_bar::SearchBar;
 use crate::theme::Theme;
+use crate::util::list_selection::ListSelection;
 
 fn all_providers() -> Vec<(&'static str, &'static str)> {
     let mut providers: Vec<(&'static str, &'static str)> = known_providers_with_env().collect();
@@ -15,16 +16,14 @@ fn all_providers() -> Vec<(&'static str, &'static str)> {
 }
 
 pub struct AddProviderView {
-    pub selected_index: usize,
-    pub scroll_offset: usize,
+    pub selection: ListSelection,
     pub search_bar: SearchBar,
 }
 
 impl AddProviderView {
     pub fn new() -> Self {
         Self {
-            selected_index: 0,
-            scroll_offset: 0,
+            selection: ListSelection::new(),
             search_bar: SearchBar::new(),
         }
     }
@@ -44,21 +43,8 @@ impl AddProviderView {
     }
 
     fn clamp_selection(&mut self, visible_count: usize) {
-        let filtered = self.filtered_providers();
-        if filtered.is_empty() {
-            self.selected_index = 0;
-            self.scroll_offset = 0;
-            return;
-        }
-        if self.selected_index >= filtered.len() {
-            self.selected_index = filtered.len().saturating_sub(1);
-        }
-        let vc = visible_count.min(filtered.len());
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        } else if vc > 0 && self.selected_index >= self.scroll_offset + vc {
-            self.scroll_offset = self.selected_index.saturating_sub(vc.saturating_sub(1));
-        }
+        self.selection.set_visible_count(visible_count);
+        self.selection.clamp(self.filtered_providers().len());
     }
 
     pub fn push_filter_char(&mut self, ch: char, visible_count: usize) {
@@ -72,48 +58,18 @@ impl AddProviderView {
     }
 
     pub fn select_next(&mut self, visible_count: usize) {
-        let total = self.filtered_providers().len();
-        if total == 0 {
-            return;
-        }
-        self.selected_index = (self.selected_index + 1) % total;
-        self.adjust_scroll(visible_count);
+        self.selection.set_visible_count(visible_count);
+        self.selection.select_next(self.filtered_providers().len());
     }
 
     pub fn select_prev(&mut self, visible_count: usize) {
-        let total = self.filtered_providers().len();
-        if total == 0 {
-            return;
-        }
-        self.selected_index = if self.selected_index == 0 {
-            total - 1
-        } else {
-            self.selected_index - 1
-        };
-        self.adjust_scroll(visible_count);
-    }
-
-    fn adjust_scroll(&mut self, visible_count: usize) {
-        let total = self.filtered_providers().len();
-        if total == 0 {
-            self.scroll_offset = 0;
-            return;
-        }
-        let vc = visible_count.min(total);
-        if vc == 0 {
-            return;
-        }
-        if self.selected_index >= self.scroll_offset + vc {
-            self.scroll_offset = self.selected_index.saturating_sub(vc.saturating_sub(1));
-        }
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        }
+        self.selection.set_visible_count(visible_count);
+        self.selection.select_prev(self.filtered_providers().len());
     }
 
     pub fn selected_provider(&self) -> Option<(&'static str, &'static str)> {
         let providers = self.filtered_providers();
-        providers.get(self.selected_index).copied()
+        providers.get(self.selection.selected_index).copied()
     }
 
     fn find_row_for_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
@@ -140,7 +96,7 @@ impl AddProviderView {
             return None;
         }
         for i in 0..count {
-            let idx = self.scroll_offset + i;
+            let idx = self.selection.scroll_offset + i;
             if idx >= providers.len() {
                 break;
             }
@@ -217,7 +173,7 @@ impl AddProviderView {
         }
 
         for i in 0..count {
-            let idx = self.scroll_offset + i;
+            let idx = self.selection.scroll_offset + i;
             if idx >= providers.len() {
                 break;
             }
@@ -227,7 +183,7 @@ impl AddProviderView {
                 break;
             }
 
-            let is_selected = idx == self.selected_index;
+            let is_selected = idx == self.selection.selected_index;
             let row_color = if is_selected { primary } else { fg };
 
             let is_configured = std::env::var(env_var).is_ok();
