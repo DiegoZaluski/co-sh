@@ -1,8 +1,8 @@
+use crate::logo::{LOGO, LOGO_WIDTH};
+use cosh_tui::core::lib::rgba::RGBA;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-
-use cosh_tui::core::lib::rgba::RGBA;
 pub mod footer;
 
 use cosh_tui::core::types::MouseEvent;
@@ -83,17 +83,6 @@ fn render_logo(
         }
     }
 }
-
-const LOGO_WIDTH: usize = 28;
-
-const LOGO: &[&str] = &[
-    "                            ",
-    " ▗████░░▗███▖░░█████░██     ",
-    " ██   ░█▛ ▅ ▜█░██▖  ░█████▖ ",
-    " ██░░░░█▙ ▀ ▟█░  ▝██░██  ██ ",
-    " ▝████░░▝███▘░░█████░██░░██ ",
-    "                            ",
-];
 
 const TAGLINE: &str = "Terminal AI Agent";
 

@@ -589,7 +589,7 @@ impl PromptView {
         }
     }
 
-    /// Render the prompt and draw a blinking cursor if focused.
+    /// Render the prompt and draw the cursor — blinking when focused, dimmed when blurred.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn render(
         &self,
@@ -789,9 +789,17 @@ impl PromptView {
         }
 
         let muted_style = Style::default().fg(rgba_color(theme.text_muted));
+        let footer_text = if state
+            .current_session()
+            .map_or(true, |s| s.messages.is_empty())
+        {
+            "tab change mode"
+        } else {
+            "esc interrupt"
+        };
         draw_text_line(
             buf,
-            "esc interrupt",
+            footer_text,
             area.x + 1,
             footer_y,
             area.width.saturating_sub(2),
@@ -812,8 +820,8 @@ impl PromptView {
             );
         }
 
-        // Draw cursor if focused
-        if self.is_focused {
+        // Draw cursor position — always visible, dimmed when unfocused
+        {
             let cursor_char = if display_placeholder || self.input.is_empty() {
                 0
             } else {
@@ -855,24 +863,27 @@ impl PromptView {
                 if cursor_x < input_area.right()
                     && let Some(cell) = buf.cell_mut((cursor_x, cursor_y))
                 {
-                    // Use the reusable cursor component
-                    match self.cursor.current_state(now) {
-                        CursorState::On => {
-                            // ON: transparent cursor (invert colors)
-                            cell.set_style(
-                                Style::default()
-                                    .fg(rgba_color(theme.background))
-                                    .bg(rgba_color(theme.text)),
-                            );
+                    let dimmed_style = Style::default()
+                        .fg(rgba_color(theme.text_muted))
+                        .bg(rgba_color(theme.background));
+                    if self.is_focused {
+                        match self.cursor.current_state(now) {
+                            CursorState::On => {
+                                // ON: transparent cursor (invert colors)
+                                cell.set_style(
+                                    Style::default()
+                                        .fg(rgba_color(theme.background))
+                                        .bg(rgba_color(theme.text)),
+                                );
+                            }
+                            CursorState::Off | CursorState::Blur => {
+                                // OFF/Blur: dimmed visible state
+                                cell.set_style(dimmed_style);
+                            }
                         }
-                        CursorState::Off | CursorState::Blur => {
-                            // OFF/Blur: dimmed visible state (not invisible)
-                            cell.set_style(
-                                Style::default()
-                                    .fg(rgba_color(theme.text_muted))
-                                    .bg(rgba_color(theme.background)),
-                            );
-                        }
+                    } else {
+                        // Unfocused: always show dimmed
+                        cell.set_style(dimmed_style);
                     }
                 }
             }

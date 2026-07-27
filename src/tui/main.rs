@@ -4,6 +4,7 @@ mod app;
 mod component;
 mod config;
 mod keymap;
+mod logo;
 mod routes;
 mod session_store;
 mod state;

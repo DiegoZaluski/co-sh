@@ -26,6 +26,7 @@ use crate::component::prompt::PromptView;
 use crate::component::spinner_highlight::HighlightSpinner;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
+use crate::logo::{LOGO_CHAT, LOGO_WIDTH};
 use crate::routes::add_provider::AddProviderView;
 use crate::routes::home::footer::HomeFooterView;
 use crate::routes::home::{HomeAction, HomeView};
@@ -56,6 +57,11 @@ fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
 
 const SIDEBAR_WIDTH: u16 = 22;
 const FOOTER_HEIGHT: u16 = 1;
+
+/// When the session is empty (no messages), the prompt is centered horizontally
+/// with a width of `RATIO * main_area` but at least `MIN_WIDTH` characters wide.
+const EMPTY_SESSION_PROMPT_MIN_WIDTH: u16 = 50;
+const EMPTY_SESSION_PROMPT_RATIO: f64 = 0.4;
 
 enum AppMode {
     Home,
@@ -826,18 +832,15 @@ impl App {
                 true
             }
             KeyCode::Backspace => {
-                let _is_empty = {
-                    let Some(d) = self.dialog.current_mut() else {
-                        return true;
-                    };
-                    let DialogType::ModelList { filter, .. } = &mut d.dialog_type else {
-                        return true;
-                    };
-                    filter.pop();
-                    d.selected = 0;
-                    d.cursor.note_activity();
-                    filter.is_empty()
+                let Some(d) = self.dialog.current_mut() else {
+                    return true;
                 };
+                let DialogType::ModelList { filter, .. } = &mut d.dialog_type else {
+                    return true;
+                };
+                filter.pop();
+                d.selected = 0;
+                d.cursor.note_activity();
                 true
             }
             KeyCode::Char(ch) => {
@@ -1520,9 +1523,28 @@ impl App {
             let hide_prompt_and_spinner =
                 is_session && (self.question_dialog.visible || self.permission_dialog.visible);
 
+            // Detect empty session — no messages yet (like OpenCode initial state)
+            let is_empty_session = is_session
+                && !hide_prompt_and_spinner
+                && self
+                    .state
+                    .current_session()
+                    .map_or(true, |s| s.messages.is_empty());
+
+            let full_w = main_area.width.saturating_sub(4);
+            let (prompt_area_x, prompt_area_w) = if is_empty_session {
+                let narrow = std::cmp::max(
+                    EMPTY_SESSION_PROMPT_MIN_WIDTH,
+                    (main_area.width as f64 * EMPTY_SESSION_PROMPT_RATIO) as u16,
+                )
+                .min(full_w);
+                (main_area.x + (main_area.width - narrow) / 2, narrow)
+            } else {
+                (main_area.x + 2, full_w)
+            };
+
             let prompt_h = if is_session && !hide_prompt_and_spinner {
-                self.prompt_view
-                    .required_height(main_area.width.saturating_sub(4))
+                self.prompt_view.required_height(prompt_area_w)
             } else {
                 0
             };
@@ -1542,7 +1564,23 @@ impl App {
                 0
             };
 
-            let prompt_area_y = footer_y.saturating_sub(prompt_h);
+            // Logo block: logo (6 rows) + gap before prompt (1)
+            let logo_block_h = if is_empty_session {
+                LOGO_CHAT.len() as u16 + 1
+            } else {
+                0
+            };
+
+            let (prompt_area_y, logo_start_y) = if is_empty_session && prompt_h > 0 {
+                let header_y = area.y + 1;
+                let total_block_h = logo_block_h + prompt_h;
+                let available = footer_y.saturating_sub(header_y);
+                let top_spacer = available.saturating_sub(total_block_h) / 2;
+                let start_y = header_y + top_spacer;
+                (start_y + logo_block_h, start_y)
+            } else {
+                (footer_y.saturating_sub(prompt_h), 0)
+            };
 
             // Spinner line (1 row when the agent loop is active, hidden when questions are visible)
             let spinner_h = u16::from(
@@ -1562,12 +1600,7 @@ impl App {
                 .min(permission_area_y)
                 .saturating_sub(prompt_padding);
 
-            let prompt_area = Rect::new(
-                main_area.x + 2,
-                prompt_area_y,
-                main_area.width.saturating_sub(4),
-                prompt_h,
-            );
+            let prompt_area = Rect::new(prompt_area_x, prompt_area_y, prompt_area_w, prompt_h);
             let spinner_area = Rect::new(
                 main_area.x + 2,
                 spinner_area_y,
@@ -1629,6 +1662,26 @@ impl App {
                     // Blur prompt when question/permission dialog is visible (like OpenCode)
                     if self.question_dialog.visible || self.permission_dialog.visible {
                         self.prompt_view.blur();
+                    }
+
+                    // Render static logo above the prompt on empty session
+                    if is_empty_session && logo_start_y > 0 {
+                        let cx = main_area.x + main_area.width / 2;
+                        let lx = cx.saturating_sub(LOGO_WIDTH as u16 / 2);
+                        let logo_style = Style::default().fg(rgba_color(self.theme.primary));
+                        for (row, line) in LOGO_CHAT.iter().enumerate() {
+                            let ly = logo_start_y + row as u16;
+                            for (col, ch) in line.chars().enumerate() {
+                                let cx_pos = lx + col as u16;
+                                if cx_pos >= area.right() || ch == ' ' {
+                                    continue;
+                                }
+                                if let Some(cell) = buf.cell_mut((cx_pos, ly)) {
+                                    cell.set_char(ch);
+                                    cell.set_style(logo_style);
+                                }
+                            }
+                        }
                     }
                     self.prompt_view.cursor.terminal_focused = self.terminal_focused;
                     self.session_view.drag_selection = self.drag_selection;
@@ -3286,6 +3339,7 @@ impl App {
                     && y < prompt_area.bottom()
                 {
                     self.prompt_view.focus();
+                    self.prompt_view.note_activity();
                     if let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, prompt_area) {
                         self.prompt_view.cursor_pos = pos;
                         self.prompt_view.sel_start = Some(pos);
@@ -3925,66 +3979,93 @@ impl App {
 
         // 9. Prompt area - click/drag to focus and select text
         if matches!(self.mode(), AppMode::Session) {
-            let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
-            let prompt_h = self
-                .prompt_view
-                .required_height(main_area.width.saturating_sub(4));
-            let footer_y = main_area.bottom().saturating_sub(1);
-            let prompt_area_y = footer_y.saturating_sub(prompt_h);
-            let prompt_area = Rect::new(
-                main_area.x + 2,
-                prompt_area_y,
-                main_area.width.saturating_sub(4),
-                prompt_h,
-            );
-            if x >= prompt_area.x
-                && x < prompt_area.right()
-                && y >= prompt_area.y
-                && y < prompt_area.bottom()
-            {
-                self.prompt_view.focus();
-                return Ok(true);
+            if let Some(prompt_area) = self.compute_prompt_area() {
+                if x >= prompt_area.x
+                    && x < prompt_area.right()
+                    && y >= prompt_area.y
+                    && y < prompt_area.bottom()
+                {
+                    self.prompt_view.focus();
+                    self.prompt_view.note_activity();
+                    return Ok(true);
+                }
+                // Click outside prompt → blur for scroll mode
+                self.prompt_view.blur();
             }
-            // Click outside prompt → blur for scroll mode
-            self.prompt_view.blur();
         }
 
         Ok(true)
     }
 
     /// Compute the prompt area rectangle (same calculation as in `render()`).
+    /// Must match the render logic exactly so mouse clicks land on the
+    /// visual prompt position, including the empty-session centered layout.
     fn compute_prompt_area(&self) -> Option<Rect> {
         if !matches!(self.mode(), AppMode::Session) {
             return None;
         }
-        // When question dialog is visible, prompt is hidden — return None so clicks go to question dialog
-        if self.question_dialog.visible {
+        // When question or permission dialog is visible, prompt is hidden
+        if self.question_dialog.visible || self.permission_dialog.visible {
             return None;
         }
         let area = self.terminal_size();
         let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+
+        let right_panel_w = if matches!(self.mode(), AppMode::Session)
+            && (should_show_right_panel(area.width, &self.state.right_panel))
+        {
+            RIGHT_PANEL_WIDTH
+        } else {
+            0
+        };
+
         let main_area = Rect::new(
             area.x + sidebar_w,
             area.y,
-            area.width.saturating_sub(sidebar_w),
+            area.width.saturating_sub(sidebar_w + right_panel_w),
             area.height,
         );
-        let prompt_h = self
-            .prompt_view
-            .required_height(main_area.width.saturating_sub(4));
         let footer_y = main_area.bottom().saturating_sub(1);
-        let prompt_area_y = footer_y.saturating_sub(prompt_h);
+
+        let is_empty_session = self
+            .state
+            .current_session()
+            .map_or(true, |s| s.messages.is_empty());
+
+        let full_w = main_area.width.saturating_sub(4);
+        let (prompt_area_x, prompt_area_w) = if is_empty_session {
+            let narrow = std::cmp::max(
+                EMPTY_SESSION_PROMPT_MIN_WIDTH,
+                (main_area.width as f64 * EMPTY_SESSION_PROMPT_RATIO) as u16,
+            )
+            .min(full_w);
+            (main_area.x + (main_area.width - narrow) / 2, narrow)
+        } else {
+            (main_area.x + 2, full_w)
+        };
+
+        let prompt_h = self.prompt_view.required_height(prompt_area_w);
+
+        let logo_block_h = if is_empty_session {
+            LOGO_CHAT.len() as u16 + 1
+        } else {
+            0
+        };
+
+        let prompt_area_y = if is_empty_session && prompt_h > 0 {
+            let header_y = area.y + 1;
+            let total_block_h = logo_block_h + prompt_h;
+            let available = footer_y.saturating_sub(header_y);
+            let top_spacer = available.saturating_sub(total_block_h) / 2;
+            header_y + top_spacer + logo_block_h
+        } else {
+            footer_y.saturating_sub(prompt_h)
+        };
+
         Some(Rect::new(
-            main_area.x + 2,
+            prompt_area_x,
             prompt_area_y,
-            main_area.width.saturating_sub(4),
+            prompt_area_w,
             prompt_h,
         ))
     }
