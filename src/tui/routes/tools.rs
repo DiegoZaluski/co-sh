@@ -9,6 +9,7 @@ use ratatui::style::{Color, Style};
 use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::Theme;
+use crate::util::list_selection::ListSelection;
 
 fn internal_tools() -> &'static [(&'static str, &'static str)] {
     &[
@@ -41,46 +42,32 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
 }
 
 pub struct InternalToolsView {
-    pub selected_index: usize,
+    pub selection: ListSelection,
     pub disabled: HashSet<String>,
     pub changed: bool,
-    scroll_offset: usize,
 }
 
 impl InternalToolsView {
     pub fn new() -> Self {
         Self {
-            selected_index: 0,
+            selection: ListSelection::new(),
             disabled: HashSet::new(),
             changed: false,
-            scroll_offset: 0,
         }
     }
 
     pub fn select_next(&mut self, visible_count: usize) {
-        let total = internal_tools().len();
-        self.selected_index = (self.selected_index + 1) % total;
-        if self.selected_index >= self.scroll_offset + visible_count {
-            self.scroll_offset = self
-                .selected_index
-                .saturating_sub(visible_count.saturating_sub(1));
-        }
+        self.selection.set_visible_count(visible_count);
+        self.selection.select_next(internal_tools().len());
     }
 
-    pub fn select_prev(&mut self, _visible_count: usize) {
-        let total = internal_tools().len();
-        self.selected_index = if self.selected_index == 0 {
-            total - 1
-        } else {
-            self.selected_index - 1
-        };
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        }
+    pub fn select_prev(&mut self, visible_count: usize) {
+        self.selection.set_visible_count(visible_count);
+        self.selection.select_prev(internal_tools().len());
     }
 
     pub fn toggle_current(&mut self) {
-        let (name, _) = internal_tools()[self.selected_index];
+        let (name, _) = internal_tools()[self.selection.selected_index];
         if !self.disabled.remove(name) {
             self.disabled.insert(name.to_string());
         }
@@ -102,7 +89,7 @@ impl InternalToolsView {
             return None;
         }
         for i in 0..visible_count {
-            let idx = self.scroll_offset + i;
+            let idx = self.selection.scroll_offset + i;
             if idx >= internal_tools().len() {
                 break;
             }
@@ -118,7 +105,7 @@ impl InternalToolsView {
         self.find_row_for_mouse(mouse, area)
     }
 
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme) {
         let fg = rgba_color(theme.text);
         let muted = rgba_color(theme.text_muted);
         let primary = rgba_color(theme.primary);
@@ -143,6 +130,10 @@ impl InternalToolsView {
             }
         }
 
+        // Clamp selection and scroll before rendering
+        self.selection.set_visible_count(count);
+        self.selection.clamp(internal_tools().len());
+
         // tools list aligned
         let list_start_y = start_y + 2;
         if max_w == 0 {
@@ -154,7 +145,7 @@ impl InternalToolsView {
         let name_x = row_x + 2; // symbol + 1 space
 
         for i in 0..count {
-            let idx = self.scroll_offset + i;
+            let idx = self.selection.scroll_offset + i;
             if idx >= internal_tools().len() {
                 break;
             }
@@ -167,7 +158,7 @@ impl InternalToolsView {
             let enabled = !self.disabled.contains(name);
             let symbol = if enabled { "✔" } else { "✗" };
             let sym_color = if enabled { Color::Green } else { Color::Red };
-            let is_selected = idx == self.selected_index;
+            let is_selected = idx == self.selection.selected_index;
             let row_color = if is_selected { primary } else { fg };
 
             // Symbol (✔ / ✗)

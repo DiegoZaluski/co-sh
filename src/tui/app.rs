@@ -3884,7 +3884,7 @@ impl App {
                 main_area.height.saturating_sub(4),
             );
             if let Some(clicked_idx) = self.internal_tools_view.handle_mouse(&mouse, tools_area) {
-                self.internal_tools_view.selected_index = clicked_idx;
+                self.internal_tools_view.selection.selected_index = clicked_idx;
                 self.internal_tools_view.toggle_current();
                 return Ok(true);
             }
