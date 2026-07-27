@@ -1456,11 +1456,6 @@ impl Harness {
                                 self.push_tool_history(&tool_id, name, args, &e);
                             }
                             self.tool_failure_count += 1;
-                            self.correction_memory.push(&format!(
-                                "Tool `{}` failed: {}",
-                                info.as_ref().map_or("?", |(_, n, _)| n),
-                                e,
-                            ));
                             log::debug!(
                                 "run_agent_loop dispatch_next ERR={e} \
                                  (failure #{}/{MAX_TOOL_RETRIES})",
