@@ -1936,6 +1936,16 @@ impl App {
                                 self.sidebar.select_next(self.state.session_summaries.len());
                                 return Ok(false);
                             }
+                            KeyCode::Enter => {
+                                match self.sidebar.handle_key(key.code, &self.state) {
+                                    SidebarAction::SwitchTo(session_id) => {
+                                        self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
+                                        self.state.switch_to_session(session_id, &self.session_store);
+                                        return Ok(false);
+                                    }
+                                    SidebarAction::RequestDelete(_) | SidebarAction::None => {}
+                                }
+                            }
                             _ => {}
                         }
                     }

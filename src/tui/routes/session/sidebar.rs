@@ -9,6 +9,7 @@ use ratatui::style::{Color, Style};
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::util::list_selection::ListSelection;
+use ratatui::crossterm::event::KeyCode;
 
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
@@ -126,6 +127,23 @@ impl SidebarView {
 
         // Otherwise, switch to this session
         SidebarAction::SwitchTo(summary.session_id.clone())
+    }
+
+    /// Handle a key press on the sidebar. Returns an action to perform.
+    pub fn handle_key(&mut self, key: KeyCode, state: &AppState) -> SidebarAction {
+        if !self.open {
+            return SidebarAction::None;
+        }
+        match key {
+            KeyCode::Enter => {
+                let idx = self.selection.selected_index;
+                let Some(summary) = state.session_summaries.get(idx) else {
+                    return SidebarAction::None;
+                };
+                SidebarAction::SwitchTo(summary.session_id.clone())
+            }
+            _ => SidebarAction::None,
+        }
     }
 
     pub fn render(&mut self, buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
