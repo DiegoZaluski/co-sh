@@ -89,8 +89,6 @@ const TAGLINE: &str = "Terminal AI Agent";
 #[cfg(feature = "embed")]
 pub const MENU_ITEMS: &[&str] = &[
     "Start a new session",
-    "Browse session haistory",
-    "Keyboard shortcuts",
     "RAG via file or URL",
     "Model Router",
     "Internal tools",
@@ -100,8 +98,6 @@ pub const MENU_ITEMS: &[&str] = &[
 #[cfg(not(feature = "embed"))]
 pub const MENU_ITEMS: &[&str] = &[
     "Start a new session",
-    "Browse session haistory",
-    "Keyboard shortcuts",
     "Model Router",
     "Internal tools",
     "ADD provider",
@@ -161,22 +157,20 @@ impl HomeView {
     pub const fn selected_action(&self) -> HomeAction {
         match self.selected_index {
             0 => HomeAction::NewSession,
-            1 => HomeAction::ToggleSidebar,
-            2 => HomeAction::OpenShortcuts,
             #[cfg(feature = "embed")]
-            3 => HomeAction::OpenRag,
+            1 => HomeAction::OpenRag,
             #[cfg(feature = "embed")]
-            4 => HomeAction::OpenModelRouter,
+            2 => HomeAction::OpenModelRouter,
             #[cfg(feature = "embed")]
-            5 => HomeAction::OpenInternalTools,
+            3 => HomeAction::OpenInternalTools,
             #[cfg(feature = "embed")]
-            6 => HomeAction::OpenAddProvider,
+            4 => HomeAction::OpenAddProvider,
             #[cfg(not(feature = "embed"))]
-            3 => HomeAction::OpenModelRouter,
+            1 => HomeAction::OpenModelRouter,
             #[cfg(not(feature = "embed"))]
-            4 => HomeAction::OpenInternalTools,
+            2 => HomeAction::OpenInternalTools,
             #[cfg(not(feature = "embed"))]
-            5 => HomeAction::OpenAddProvider,
+            3 => HomeAction::OpenAddProvider,
             _ => HomeAction::OpenAddProvider,
         }
     }
@@ -203,22 +197,20 @@ impl HomeView {
             if my == item_y && mx >= menu_left && mx < menu_left + max_entry_len as u16 {
                 return Some(match i {
                     0 => HomeAction::NewSession,
-                    1 => HomeAction::ToggleSidebar,
-                    2 => HomeAction::OpenShortcuts,
                     #[cfg(feature = "embed")]
-                    3 => HomeAction::OpenRag,
+                    1 => HomeAction::OpenRag,
                     #[cfg(feature = "embed")]
-                    4 => HomeAction::OpenModelRouter,
+                    2 => HomeAction::OpenModelRouter,
                     #[cfg(feature = "embed")]
-                    5 => HomeAction::OpenInternalTools,
+                    3 => HomeAction::OpenInternalTools,
                     #[cfg(feature = "embed")]
-                    6 => HomeAction::OpenAddProvider,
+                    4 => HomeAction::OpenAddProvider,
                     #[cfg(not(feature = "embed"))]
-                    3 => HomeAction::OpenModelRouter,
+                    1 => HomeAction::OpenModelRouter,
                     #[cfg(not(feature = "embed"))]
-                    4 => HomeAction::OpenInternalTools,
+                    2 => HomeAction::OpenInternalTools,
                     #[cfg(not(feature = "embed"))]
-                    5 => HomeAction::OpenAddProvider,
+                    3 => HomeAction::OpenAddProvider,
                     _ => HomeAction::OpenAddProvider,
                 });
             }
@@ -277,7 +269,7 @@ impl HomeView {
             draw_text_line(buf, &entry, menu_left, my, area.width, style);
         }
 
-        let key_hints = "show sessions ctrl+B ";
+        let key_hints = "show sessions ctrl+B | show keyboard shortcuts ctrl+K";
         let hint_x = cx.saturating_sub(key_hints.len() as u16 / 2);
         draw_text_line(
             buf,
