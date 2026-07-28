@@ -1703,20 +1703,7 @@ impl App {
                         session_area.width,
                         session_area.height.saturating_sub(1),
                     );
-                    // Get available models from the model cache for the render
-                    let all_models: Vec<cosh::ModelEntry> = {
-                        let mut models = Vec::new();
-                        for (provider, _) in cosh_sdk::connector::known_providers_with_env() {
-                            if std::env::var(
-                                cosh_sdk::connector::get_provider_env_var(provider).unwrap_or(""),
-                            )
-                            .is_ok()
-                                && let Some(cached) = self.model_cache.get(&provider.to_string()) {
-                                    models.extend(cached.iter().cloned());
-                                }
-                        }
-                        models
-                    };
+                    let all_models = self.collect_cached_models();
                     self.router_view.render(
                         buf,
                         router_area,

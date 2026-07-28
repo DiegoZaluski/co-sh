@@ -80,6 +80,7 @@ pub struct RouterView {
     pub fallbacks: Vec<FallbackEntry>,
     pub focus: FocusTarget,
     selected_fallback: usize,
+    fallback_scroll_offset: usize,
     num_buffer: String,
 }
 
@@ -91,6 +92,7 @@ impl RouterView {
             fallbacks: default_fallbacks(),
             focus: FocusTarget::Models,
             selected_fallback: 0,
+            fallback_scroll_offset: 0,
             num_buffer: String::new(),
         }
     }
@@ -114,6 +116,7 @@ impl RouterView {
         self.selected_fallback = self
             .selected_fallback
             .min(self.fallbacks.len().saturating_sub(1));
+        self.fallback_scroll_offset = 0;
     }
 
     pub fn push_filter_char(&mut self, ch: char) {
@@ -144,6 +147,10 @@ impl RouterView {
         }
         self.selected_fallback =
             (self.selected_fallback + 1).min(self.fallbacks.len().saturating_sub(1));
+        // Scroll to keep the selected item visible
+        if self.selected_fallback >= self.fallback_scroll_offset + VISIBLE_COUNT {
+            self.fallback_scroll_offset = self.selected_fallback.saturating_sub(VISIBLE_COUNT - 1);
+        }
     }
 
     pub fn select_prev_fallback(&mut self) {
@@ -151,6 +158,10 @@ impl RouterView {
             return;
         }
         self.selected_fallback = self.selected_fallback.saturating_sub(1);
+        // Scroll to keep the selected item visible
+        if self.selected_fallback < self.fallback_scroll_offset {
+            self.fallback_scroll_offset = self.selected_fallback;
+        }
     }
 
     pub fn remove_selected_fallback(&mut self) -> Option<usize> {
@@ -163,6 +174,12 @@ impl RouterView {
             self.selected_fallback = self
                 .selected_fallback
                 .min(self.fallbacks.len().saturating_sub(1));
+            // Clamp scroll offset after removal
+            if self.fallback_scroll_offset > 0
+                && self.fallback_scroll_offset >= self.fallbacks.len()
+            {
+                self.fallback_scroll_offset = self.fallbacks.len().saturating_sub(VISIBLE_COUNT);
+            }
             Some(idx)
         } else {
             None
@@ -237,12 +254,24 @@ impl RouterView {
             pos
         };
         self.selected_fallback = inserted;
+        // Ensure the newly added/repositioned fallback is visible
+        if self.selected_fallback >= self.fallback_scroll_offset + VISIBLE_COUNT {
+            self.fallback_scroll_offset = self.selected_fallback.saturating_sub(VISIBLE_COUNT - 1);
+        } else if self.selected_fallback < self.fallback_scroll_offset {
+            self.fallback_scroll_offset = self.selected_fallback;
+        }
         Some(inserted)
     }
 
     pub fn remove_fallback(&mut self, index: usize) {
         if self.fallbacks.len() > 1 && index < self.fallbacks.len() {
             self.fallbacks.remove(index);
+        }
+        // Clamp scroll offset after removal
+        if self.fallback_scroll_offset > 0
+            && self.fallback_scroll_offset >= self.fallbacks.len()
+        {
+            self.fallback_scroll_offset = self.fallbacks.len().saturating_sub(VISIBLE_COUNT);
         }
     }
 
@@ -287,10 +316,9 @@ impl RouterView {
             if !self.fallbacks.is_empty() {
                 let list_top = right_area.y + FALLBACK_LIST_TOP_OFFSET;
                 let max_visible = (work_h.saturating_sub(FALLBACK_LIST_TOP_OFFSET + 1)) as usize;
-                let scroll = self.fallbacks.len().saturating_sub(max_visible);
                 let row = mouse.y.saturating_sub(list_top) as usize;
                 if row < max_visible {
-                    let idx = scroll + row;
+                    let idx = self.fallback_scroll_offset + row;
                     if idx < self.fallbacks.len() {
                         self.selected_fallback = idx;
                         return true;
@@ -443,11 +471,7 @@ impl RouterView {
             );
         } else {
             let max_visible = (work_h.saturating_sub(FALLBACK_LIST_TOP_OFFSET + 1)) as usize;
-            let scroll = if self.fallbacks.len() > max_visible {
-                self.fallbacks.len() - max_visible
-            } else {
-                0
-            };
+            let scroll = self.fallback_scroll_offset;
 
             for (i, fb) in self
                 .fallbacks

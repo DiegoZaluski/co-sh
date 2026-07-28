@@ -76,6 +76,12 @@ const MAX_TOOL_RETRIES: usize = 3;
 /// the harness stops the loop as a safety net against runaway tool-calling.
 const MAX_ITERATIONS: u64 = 20;
 
+/// Internal marker returned by stream functions when the user presses Esc
+/// to stop the current generation. Compared by identity (constant), not by
+/// string value — prevents the fallback retry from misinterpreting a user
+/// cancellation as a connector error.
+const INTERRUPTED_MARKER: &str = "__cosh_interrupted__";
+
 pub struct PromptSystem {
     pub title: String,
     pub text: String,
@@ -562,7 +568,7 @@ impl Harness {
                 }
             } => {
                 log::debug!("stream_chat_with_messages STOPPED during connect");
-                return Err("Interrupted by user".to_string());
+                return Err(INTERRUPTED_MARKER.to_string());
             }
         };
 
@@ -702,7 +708,7 @@ impl Harness {
                 }
             } => {
                 log::debug!("stream_chat STOPPED during connect");
-                return Err("Interrupted by user".to_string());
+                return Err(INTERRUPTED_MARKER.to_string());
             }
         };
 
@@ -1047,8 +1053,8 @@ impl Harness {
             if let Err(e) = result {
                 log::debug!("run_agent_loop PHASE1_ERR={e}");
 
-                if e == "Interrupted by user" {
-                    let _ = tx.send(HarnessEvent::Error(e));
+                if e == INTERRUPTED_MARKER {
+                    let _ = tx.send(HarnessEvent::Stopped);
                     break;
                 }
 
