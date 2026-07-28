@@ -1491,8 +1491,16 @@ impl DialogState {
                                         }));
                                     }
 
-                                    // Model name
-                                    let (name_fg, name_bg) = if is_selected {
+                                    // Model name (with special styling for "auto")
+                                    let is_auto = entry.model == "auto";
+                                    let display_name = if is_auto {
+                                        "★ auto  (fallback chain)"
+                                    } else {
+                                        &entry.model
+                                    };
+                                    let (name_fg, name_bg) = if is_auto && !is_selected {
+                                        (rgba_color(theme.accent), bg_element)
+                                    } else if is_selected {
                                         let (pr, pg, pb, _) = theme.primary.to_ints();
                                         let lum = (0.299 * f32::from(pr)
                                             + 0.587 * f32::from(pg)
@@ -1511,7 +1519,7 @@ impl DialogState {
                                     };
                                     draw_text_line(
                                         buf,
-                                        &entry.model,
+                                        display_name,
                                         list_x + 2,
                                         current_y,
                                         list_w.saturating_sub(2),

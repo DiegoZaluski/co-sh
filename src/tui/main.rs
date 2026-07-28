@@ -3,6 +3,7 @@
 mod app;
 mod component;
 mod config;
+mod fallback;
 mod keymap;
 mod logo;
 mod routes;

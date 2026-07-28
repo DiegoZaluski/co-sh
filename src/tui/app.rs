@@ -24,12 +24,14 @@ use cosh::harness::HarnessEvent;
 use crate::component::agent_spinner::AgentSpinner;
 use crate::component::prompt::PromptView;
 use crate::component::spinner_highlight::HighlightSpinner;
+use crate::fallback;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::keymap::KeyMap;
 use crate::logo::{LOGO_CHAT, LOGO_WIDTH};
 use crate::routes::add_provider::AddProviderView;
 use crate::routes::home::footer::HomeFooterView;
 use crate::routes::home::{HomeAction, HomeView};
+use crate::routes::router::{FocusTarget, RouterView};
 use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
@@ -68,6 +70,7 @@ enum AppMode {
     Session,
     InternalTools,
     AddProvider,
+    Router,
     #[cfg(feature = "embed")]
     Rag,
 }
@@ -88,6 +91,8 @@ pub struct App {
     pub show_internal_tools: bool,
     pub add_provider_view: AddProviderView,
     pub show_add_provider: bool,
+    pub router_view: RouterView,
+    pub show_router: bool,
     #[cfg(feature = "embed")]
     pub rag_view: crate::routes::rag::RagView,
     #[cfg(feature = "embed")]
@@ -170,7 +175,10 @@ impl App {
         let (perm_tx, _perm_rx) = mpsc::unbounded_channel();
 
         let theme_registry = ThemeRegistry::new();
-        let prefs_cache = crate::util::cache::StaleCache::new("preferences.json");
+        let prefs_cache = crate::util::cache::StaleCache::new("cosh", "preferences.json");
+
+        // Load saved fallback chain from preferences cache
+        let saved_fallbacks = fallback::load_fallbacks(&prefs_cache);
 
         // Load saved theme from preferences cache, if available
         let saved_theme: Option<String> = prefs_cache.get(&"theme".to_string()).cloned();
@@ -190,6 +198,12 @@ impl App {
             show_internal_tools: false,
             add_provider_view: AddProviderView::new(),
             show_add_provider: false,
+            router_view: {
+                let mut rv = RouterView::new();
+                rv.set_fallbacks(saved_fallbacks);
+                rv
+            },
+            show_router: false,
             #[cfg(feature = "embed")]
             rag_view: crate::routes::rag::RagView::new(),
             #[cfg(feature = "embed")]
@@ -206,7 +220,7 @@ impl App {
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
             theme_dialog_original: None,
             model_dialog_original: None,
-            model_cache: crate::util::cache::StaleCache::new("model.json"),
+            model_cache: crate::util::cache::StaleCache::new("cosh/cache", "model.json"),
             prefs_cache,
             session_store,
             pending_delete_session_id: None,
@@ -315,17 +329,23 @@ impl App {
             cached_models.retain(|m| seen.insert((m.provider.clone(), m.model.clone())));
         }
 
+        let auto_entry = ModelEntry {
+            provider: String::new(),
+            model: "auto".to_string(),
+        };
+        let auto_current = if current == "auto" { current.clone() } else { String::new() };
         if !cached_models.is_empty() {
+            let mut models_with_auto = vec![auto_entry];
+            models_with_auto.extend(cached_models);
             self.dialog.replace(DialogType::ModelList {
-                models: cached_models,
-                current: current.clone(),
+                models: models_with_auto,
+                current: auto_current,
                 filter: String::new(),
             });
         } else {
-            // Show a loading state first
             self.dialog.replace(DialogType::ModelList {
-                models: vec![],
-                current: current.clone(),
+                models: vec![auto_entry],
+                current: auto_current,
                 filter: String::new(),
             });
         }
@@ -797,8 +817,6 @@ impl App {
                     && let DialogType::ModelList { models, filter, .. } = &d.dialog_type
                     && !models.is_empty()
                 {
-                    // Extract model info in a separate scope so the borrow on self.dialog
-                    // drops before we modify self.llm_config.
                     let selection = {
                         let flat_entries = Self::model_dialog_flat_entries(models, filter);
                         if !flat_entries.is_empty() {
@@ -810,8 +828,13 @@ impl App {
                         }
                     };
                     if let Some((model, provider)) = selection {
-                        self.llm_config.model = Some(model);
-                        self.llm_config.provider = provider;
+                        if model == "auto" {
+                            self.llm_config.model = Some("auto".to_string());
+                            self.llm_config.provider = String::new();
+                        } else {
+                            self.llm_config.model = Some(model);
+                            self.llm_config.provider = provider;
+                        }
                     }
                 }
                 self.model_dialog_original = None;
@@ -860,6 +883,22 @@ impl App {
             d.selected = 0;
             d.cursor.note_activity();
         }
+    }
+
+    fn collect_cached_models(&self) -> Vec<cosh::ModelEntry> {
+        let mut models = Vec::new();
+        for (provider, _) in cosh_sdk::connector::known_providers_with_env() {
+            if std::env::var(
+                cosh_sdk::connector::get_provider_env_var(provider).unwrap_or(""),
+            )
+            .is_ok()
+            {
+                if let Some(cached) = self.model_cache.get(&provider.to_string()) {
+                    models.extend(cached.iter().cloned());
+                }
+            }
+        }
+        models
     }
 
     /// Compute the flat list of models in the same grouped-by-provider order
@@ -1334,7 +1373,9 @@ impl App {
         if self.show_rag {
             return AppMode::Rag;
         }
-        if self.show_internal_tools {
+        if self.show_router {
+            AppMode::Router
+        } else if self.show_internal_tools {
             AppMode::InternalTools
         } else if self.show_add_provider {
             AppMode::AddProvider
@@ -1654,6 +1695,40 @@ impl App {
                     );
                     self.add_provider_view.render(buf, tools_area, &self.theme);
                 }
+                AppMode::Router => {
+                    self.prompt_view.blur();
+                    let router_area = Rect::new(
+                        session_area.x,
+                        session_area.y,
+                        session_area.width,
+                        session_area.height.saturating_sub(1),
+                    );
+                    // Get available models from the model cache for the render
+                    let all_models: Vec<cosh::ModelEntry> = {
+                        let mut models = Vec::new();
+                        for (provider, _) in cosh_sdk::connector::known_providers_with_env() {
+                            if std::env::var(
+                                cosh_sdk::connector::get_provider_env_var(provider).unwrap_or(""),
+                            )
+                            .is_ok()
+                            {
+                                if let Some(cached) =
+                                    self.model_cache.get(&provider.to_string())
+                                {
+                                    models.extend(cached.iter().cloned());
+                                }
+                            }
+                        }
+                        models
+                    };
+                    self.router_view.render(
+                        buf,
+                        router_area,
+                        &self.theme,
+                        &all_models,
+                        std::time::SystemTime::now(),
+                    );
+                }
                 #[cfg(feature = "embed")]
                 AppMode::Rag => {
                     self.render_rag_view(buf, session_area);
@@ -1940,7 +2015,8 @@ impl App {
                                 match self.sidebar.handle_key(key.code, &self.state) {
                                     SidebarAction::SwitchTo(session_id) => {
                                         self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
-                                        self.state.switch_to_session(session_id, &self.session_store);
+                                        self.state
+                                            .switch_to_session(session_id, &self.session_store);
                                         return Ok(false);
                                     }
                                     SidebarAction::RequestDelete(_) | SidebarAction::None => {}
@@ -1986,6 +2062,12 @@ impl App {
                                     }
                                     HomeAction::OpenAddProvider => {
                                         self.show_add_provider = true;
+                                    }
+                                    HomeAction::OpenModelRouter => {
+                                        // Refresh fallbacks from prefs cache and models from model cache
+                                        let saved = fallback::load_fallbacks(&self.prefs_cache);
+                                        self.router_view.set_fallbacks(saved);
+                                        self.show_router = true;
                                     }
                                     #[cfg(feature = "embed")]
                                     HomeAction::OpenRag => {
@@ -2045,6 +2127,79 @@ impl App {
                             // Ctrl+W = delete word before cursor (universal terminal shortcut)
                             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 self.rag_view.handle_ctrl_backspace();
+                                return Ok(false);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Router mode: navigation and add/remove fallbacks
+                    if matches!(self.mode(), AppMode::Router) && !self.dialog.visible() {
+                        let all_models = self.collect_cached_models();
+                        match key.code {
+                            KeyCode::Up => {
+                                if self.router_view.focus == FocusTarget::Fallbacks {
+                                    self.router_view.select_prev_fallback();
+                                } else {
+                                    self.router_view.select_prev(&all_models);
+                                }
+                                return Ok(false);
+                            }
+                            KeyCode::Down => {
+                                if self.router_view.focus == FocusTarget::Fallbacks {
+                                    self.router_view.select_next_fallback();
+                                } else {
+                                    self.router_view.select_next(&all_models);
+                                }
+                                return Ok(false);
+                            }
+                            KeyCode::Enter => {
+                                if self.router_view.focus == FocusTarget::Models {
+                                    self.router_view.add_selected_to_fallback(&all_models);
+                                    fallback::save_fallbacks(
+                                        &mut self.prefs_cache,
+                                        &self.router_view.fallbacks,
+                                    );
+                                }
+                                return Ok(false);
+                            }
+                            KeyCode::Backspace | KeyCode::Delete => {
+                                if self.router_view.focus == FocusTarget::Fallbacks {
+                                    if self.router_view.remove_selected_fallback().is_some() {
+                                        fallback::save_fallbacks(
+                                            &mut self.prefs_cache,
+                                            &self.router_view.fallbacks,
+                                        );
+                                    }
+                                } else if !self.router_view.search_bar.is_empty() {
+                                    self.router_view.pop_filter_char();
+                                } else if let Some(selected) = self.router_view.selected_model(&all_models) {
+                                    let idx = self.router_view.fallbacks.iter().position(|f| {
+                                        f.provider == selected.provider && f.model == selected.model
+                                    });
+                                    if let Some(i) = idx {
+                                        self.router_view.remove_fallback(i);
+                                        fallback::save_fallbacks(
+                                            &mut self.prefs_cache,
+                                            &self.router_view.fallbacks,
+                                        );
+                                    }
+                                }
+                                return Ok(false);
+                            }
+                            KeyCode::Esc => {
+                                self.router_view.clear_num_buffer();
+                                self.show_router = false;
+                                return Ok(false);
+                            }
+                            KeyCode::Char(ch) => {
+                                if self.router_view.focus == FocusTarget::Models {
+                                    if ch.is_ascii_digit() {
+                                        self.router_view.handle_number_input(ch);
+                                    } else {
+                                        self.router_view.push_filter_char(ch);
+                                    }
+                                }
                                 return Ok(false);
                             }
                             _ => {}
@@ -2315,6 +2470,7 @@ impl App {
                             let event_tx = self.event_tx.clone();
                             let provider = self.llm_config.provider.clone();
                             let model = self.llm_config.model.clone();
+                            let fallbacks = self.router_view.fallbacks.clone();
                             let stop_signal = self.stop_signal.clone();
                             let input = msg;
                             let cwd = self.state.working_directory.clone();
@@ -2399,20 +2555,52 @@ impl App {
                                         use cosh::harness::Harness;
                                         use cosh_sdk::connector::Connector;
 
-                                        let connector = match Connector::new(&provider) {
-                                            Ok(c) => c,
-                                            Err(e) => {
-                                                let _ = event_tx.send(HarnessEvent::Error(
-                                                    format!("connector: {e}"),
-                                                ));
-                                                return;
+                                        let connector = if model.as_deref() == Some("auto") {
+                                            // Try fallbacks in order
+                                            let mut last_err = String::new();
+                                            let mut found = None;
+                                            for fb in &fallbacks {
+                                                match Connector::new(&fb.provider) {
+                                                    Ok(c) => {
+                                                        let c = c.with_model(&fb.model);
+                                                        found = Some((c, fb.provider.clone(), fb.model.clone()));
+                                                        break;
+                                                    }
+                                                    Err(e) => {
+                                                        last_err = format!("connector for {}: {e}", fb.provider);
+                                                    }
+                                                }
                                             }
-                                        };
-
-                                        let connector = if let Some(ref m) = model {
-                                            connector.with_model(m)
+                                            match found {
+                                                Some((c, p, m)) => {
+                                                    // Update provider & model to the working fallback
+                                                    // Note: these are local copies in the spawn
+                                                    let _ = (&p, &m);
+                                                    c
+                                                }
+                                                None => {
+                                                    let _ = event_tx.send(HarnessEvent::Error(
+                                                        format!("auto: no fallback available ({last_err})"),
+                                                    ));
+                                                    return;
+                                                }
+                                            }
                                         } else {
-                                            connector
+                                            match Connector::new(&provider) {
+                                                Ok(c) => {
+                                                    if let Some(ref m) = model {
+                                                        c.with_model(m)
+                                                    } else {
+                                                        c
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    let _ = event_tx.send(HarnessEvent::Error(
+                                                        format!("connector: {e}"),
+                                                    ));
+                                                    return;
+                                                }
+                                            }
                                         };
 
                                         let mut harness =
@@ -3227,6 +3415,16 @@ impl App {
                     // Update cache with the freshly fetched models
                     self.update_model_cache(&models);
 
+                    // Prepend "auto" entry
+                    let auto_entry = cosh::ModelEntry {
+                        provider: String::new(),
+                        model: "auto".to_string(),
+                    };
+                    let mut models_with_auto = vec![auto_entry];
+                    models_with_auto.extend(models);
+
+                    let auto_current = if current == "auto" { current } else { String::new() };
+
                     // Update the dialog with the loaded models
                     if let Some(d) = self.dialog.current_mut()
                         && let DialogType::ModelList {
@@ -3235,8 +3433,8 @@ impl App {
                             ..
                         } = &mut d.dialog_type
                     {
-                        *dialog_models = models;
-                        *dialog_current = current;
+                        *dialog_models = models_with_auto;
+                        *dialog_current = auto_current;
                     }
                 }
 
@@ -3541,6 +3739,13 @@ impl App {
                     } else if matches!(self.mode(), AppMode::InternalTools) {
                         let list_area = 20;
                         self.internal_tools_view.select_prev(list_area);
+                    } else if matches!(self.mode(), AppMode::Router) {
+                        if self.router_view.focus == FocusTarget::Fallbacks {
+                            self.router_view.select_prev_fallback();
+                        } else {
+                            let all_models = self.collect_cached_models();
+                            self.router_view.select_prev(&all_models);
+                        }
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         let list_area = 20;
                         self.add_provider_view.select_prev(list_area);
@@ -3572,6 +3777,13 @@ impl App {
                     } else if matches!(self.mode(), AppMode::InternalTools) {
                         let list_area = 20;
                         self.internal_tools_view.select_next(list_area);
+                    } else if matches!(self.mode(), AppMode::Router) {
+                        if self.router_view.focus == FocusTarget::Fallbacks {
+                            self.router_view.select_next_fallback();
+                        } else {
+                            let all_models = self.collect_cached_models();
+                            self.router_view.select_next(&all_models);
+                        }
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         let list_area = 20;
                         self.add_provider_view.select_next(list_area);
@@ -3922,10 +4134,49 @@ impl App {
                     crate::routes::home::HomeAction::OpenAddProvider => {
                         self.show_add_provider = true;
                     }
+                    crate::routes::home::HomeAction::OpenModelRouter => {
+                        let saved = fallback::load_fallbacks(&self.prefs_cache);
+                        self.router_view.set_fallbacks(saved);
+                        self.show_router = true;
+                    }
                     #[cfg(feature = "embed")]
                     crate::routes::home::HomeAction::OpenRag => {
                         self.show_rag = true;
                     }
+                }
+                return Ok(true);
+            }
+        }
+
+        // 8c. Router view — mouse click on a model row adds it to fallback chain
+        if matches!(self.mode(), AppMode::Router) && !self.dialog.visible() {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            let tools_area = Rect::new(
+                main_area.x,
+                area.y + 1,
+                main_area.width,
+                main_area.height.saturating_sub(1),
+            );
+            let all_models = self.collect_cached_models();
+            if self.router_view.handle_mouse(&all_models, &mouse, tools_area) {
+                fallback::save_fallbacks(&mut self.prefs_cache, &self.router_view.fallbacks);
+                if self.router_view.focus == FocusTarget::Fallbacks
+                    && !self.router_view.fallbacks.is_empty()
+                {
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Backspace to remove".into()),
+                        message: "Select an item and press Backspace".into(),
+                        variant: ToastVariant::Info,
+                        duration_ms: 3000,
+                    });
                 }
                 return Ok(true);
             }

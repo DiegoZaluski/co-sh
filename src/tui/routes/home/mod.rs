@@ -92,6 +92,7 @@ pub const MENU_ITEMS: &[&str] = &[
     "Browse session haistory",
     "Keyboard shortcuts",
     "RAG via file or URL",
+    "Model Router",
     "Internal tools",
     "ADD provider",
 ];
@@ -101,6 +102,7 @@ pub const MENU_ITEMS: &[&str] = &[
     "Start a new session",
     "Browse session haistory",
     "Keyboard shortcuts",
+    "Model Router",
     "Internal tools",
     "ADD provider",
 ];
@@ -112,6 +114,7 @@ pub enum HomeAction {
     OpenShortcuts,
     #[cfg(feature = "embed")]
     OpenRag,
+    OpenModelRouter,
     OpenInternalTools,
     OpenAddProvider,
 }
@@ -163,13 +166,17 @@ impl HomeView {
             #[cfg(feature = "embed")]
             3 => HomeAction::OpenRag,
             #[cfg(feature = "embed")]
-            4 => HomeAction::OpenInternalTools,
+            4 => HomeAction::OpenModelRouter,
             #[cfg(feature = "embed")]
+            5 => HomeAction::OpenInternalTools,
+            #[cfg(feature = "embed")]
+            6 => HomeAction::OpenAddProvider,
+            #[cfg(not(feature = "embed"))]
+            3 => HomeAction::OpenModelRouter,
+            #[cfg(not(feature = "embed"))]
+            4 => HomeAction::OpenInternalTools,
+            #[cfg(not(feature = "embed"))]
             5 => HomeAction::OpenAddProvider,
-            #[cfg(not(feature = "embed"))]
-            3 => HomeAction::OpenInternalTools,
-            #[cfg(not(feature = "embed"))]
-            4 => HomeAction::OpenAddProvider,
             _ => HomeAction::OpenAddProvider,
         }
     }
@@ -201,13 +208,17 @@ impl HomeView {
                     #[cfg(feature = "embed")]
                     3 => HomeAction::OpenRag,
                     #[cfg(feature = "embed")]
-                    4 => HomeAction::OpenInternalTools,
+                    4 => HomeAction::OpenModelRouter,
                     #[cfg(feature = "embed")]
+                    5 => HomeAction::OpenInternalTools,
+                    #[cfg(feature = "embed")]
+                    6 => HomeAction::OpenAddProvider,
+                    #[cfg(not(feature = "embed"))]
+                    3 => HomeAction::OpenModelRouter,
+                    #[cfg(not(feature = "embed"))]
+                    4 => HomeAction::OpenInternalTools,
+                    #[cfg(not(feature = "embed"))]
                     5 => HomeAction::OpenAddProvider,
-                    #[cfg(not(feature = "embed"))]
-                    3 => HomeAction::OpenInternalTools,
-                    #[cfg(not(feature = "embed"))]
-                    4 => HomeAction::OpenAddProvider,
                     _ => HomeAction::OpenAddProvider,
                 });
             }

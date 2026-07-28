@@ -14,7 +14,11 @@ use serde::{Deserialize, Serialize};
 /// - Persists the in-memory data to disk as JSON on every update.
 ///
 /// The cache directory is resolved via [`ProjectDirs`] as:
-/// `{data_dir}/cache/{filename}` (e.g. `~/.local/share/cosh/cache/model.json`).
+/// `{data_dir}/{cache_subdir}/{filename}` (e.g. `~/.local/share/cosh/cache/model.json`).
+///
+/// Callers must provide a `cache_subdir` — they should NOT hardcode a vendor
+/// path here; instead use something like `"cosh/cache"` to keep the path
+/// under the OS data directory.
 ///
 /// # Type parameters
 /// - `K`: Cache key type (must be `Eq + Hash + Clone + Serialize + DeserializeOwned`).
@@ -22,7 +26,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// # Example (models use case)
 /// ```ignore
-/// let mut cache: StaleCache<String, Vec<ModelEntry>> = StaleCache::new("model.json");
+/// let mut cache: StaleCache<String, Vec<ModelEntry>> = StaleCache::new("cosh/cache", "model.json");
 ///
 /// if let Some(models) = cache.get("openai") {
 ///     // Use cached models immediately
@@ -57,18 +61,22 @@ where
     K: Eq + Hash + Clone + Serialize + DeserializeOwned,
     V: Clone + Serialize + DeserializeOwned,
 {
-    /// Create a new cache backed by the given `filename` inside the cache
-    /// directory (`{data_dir}/cache/`).
+    /// Create a new cache backed by the given `filename` inside
+    /// `{data_dir}/{cache_subdir}/`.
     ///
     /// Automatically loads any existing data from disk on construction.
     /// Creates the cache directory if it does not exist.
     ///
+    /// Callers must supply a `cache_subdir` (e.g. `"cosh/cache"`). No vendor
+    /// path is hardcoded here — each caller decides where under the OS data
+    /// directory to place cache files.
+    ///
     /// # Panics
     /// Panics if the `ProjectDirs` cannot be determined (e.g. no $HOME set).
-    pub fn new(filename: &str) -> Self {
+    pub fn new(cache_subdir: &str, filename: &str) -> Self {
         let proj_dirs = ProjectDirs::from("", "", "cosh")
             .expect("could not determine project directories (is $HOME set?)");
-        let cache_dir = proj_dirs.data_dir().join("cache");
+        let cache_dir = proj_dirs.data_dir().join(cache_subdir);
         std::fs::create_dir_all(&cache_dir).ok();
         let file_path = cache_dir.join(filename);
 
