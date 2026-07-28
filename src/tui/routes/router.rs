@@ -111,9 +111,9 @@ impl RouterView {
 
     pub fn set_fallbacks(&mut self, fallbacks: Vec<FallbackEntry>) {
         self.fallbacks = fallbacks;
-        self.selected_fallback = self.selected_fallback.min(
-            self.fallbacks.len().saturating_sub(1),
-        );
+        self.selected_fallback = self
+            .selected_fallback
+            .min(self.fallbacks.len().saturating_sub(1));
     }
 
     pub fn push_filter_char(&mut self, ch: char) {
@@ -142,8 +142,8 @@ impl RouterView {
         if self.fallbacks.is_empty() {
             return;
         }
-        self.selected_fallback = (self.selected_fallback + 1)
-            .min(self.fallbacks.len().saturating_sub(1));
+        self.selected_fallback =
+            (self.selected_fallback + 1).min(self.fallbacks.len().saturating_sub(1));
     }
 
     pub fn select_prev_fallback(&mut self) {
@@ -160,7 +160,8 @@ impl RouterView {
         let idx = self.selected_fallback;
         if idx < self.fallbacks.len() {
             self.fallbacks.remove(idx);
-            self.selected_fallback = self.selected_fallback
+            self.selected_fallback = self
+                .selected_fallback
                 .min(self.fallbacks.len().saturating_sub(1));
             Some(idx)
         } else {
@@ -187,9 +188,7 @@ impl RouterView {
 
     pub fn selected_model<'a>(&self, models: &'a [ModelEntry]) -> Option<&'a ModelEntry> {
         let filtered = self.filtered_models(models);
-        filtered
-            .get(self.selection.selected_index)
-            .copied()
+        filtered.get(self.selection.selected_index).copied()
     }
 
     pub fn clamp(&mut self, total: usize) {
@@ -223,12 +222,14 @@ impl RouterView {
                 return Some(pos);
             }
             self.fallbacks.remove(existing);
-            let pos = if existing < pos { pos.saturating_sub(1) } else { pos };
+            let pos = if existing < pos {
+                pos.saturating_sub(1)
+            } else {
+                pos
+            };
             let pos = pos.min(self.fallbacks.len());
-            self.fallbacks.insert(pos, FallbackEntry {
-                provider,
-                model,
-            });
+            self.fallbacks
+                .insert(pos, FallbackEntry { provider, model });
             pos
         } else {
             let new_entry = FallbackEntry { provider, model };
@@ -382,11 +383,7 @@ impl RouterView {
                 }
 
                 let is_selected = models_focused && idx == self.selection.selected_index;
-                let row_bg = if is_selected {
-                    primary
-                } else {
-                    bg_full
-                };
+                let row_bg = if is_selected { primary } else { bg_full };
                 for cx in list_x..list_x + list_w {
                     if let Some(cell) = buf.cell_mut((cx, y)) {
                         cell.set_char(' ');
@@ -465,11 +462,7 @@ impl RouterView {
                 }
 
                 let is_selected = fallbacks_focused && i == self.selected_fallback;
-                let entry_bg = if is_selected {
-                    primary
-                } else {
-                    panel_bg
-                };
+                let entry_bg = if is_selected { primary } else { panel_bg };
 
                 let entry_fg = if is_selected {
                     primary_contrast_fg(theme)

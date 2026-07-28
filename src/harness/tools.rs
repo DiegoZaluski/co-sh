@@ -743,15 +743,14 @@ impl Tools for CoshTools {
                             break result;
                         }
                         chunk = chunk_rx.recv() => {
-                            if let Some(c) = chunk {
-                                if let Some(ref tx) = event_tx_during {
+                            if let Some(c) = chunk
+                                && let Some(ref tx) = event_tx_during {
                                     let _ = tx.send(HarnessEvent::ToolOutput {
                                         tool: "subagent_call".to_string(),
                                         output: c,
                                         finished: false,
                                     });
                                 }
-                            }
                         }
                     }
                 };

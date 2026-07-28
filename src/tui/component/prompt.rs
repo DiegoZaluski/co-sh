@@ -791,7 +791,7 @@ impl PromptView {
         let muted_style = Style::default().fg(rgba_color(theme.text_muted));
         let footer_text = if state
             .current_session()
-            .map_or(true, |s| s.messages.is_empty())
+            .is_none_or(|s| s.messages.is_empty())
         {
             "tab change mode"
         } else {

@@ -24,8 +24,8 @@ use cosh::harness::HarnessEvent;
 use crate::component::agent_spinner::AgentSpinner;
 use crate::component::prompt::PromptView;
 use crate::component::spinner_highlight::HighlightSpinner;
-use crate::fallback;
 use crate::config::{LlmConfig, TuiConfig};
+use crate::fallback;
 use crate::keymap::KeyMap;
 use crate::logo::{LOGO_CHAT, LOGO_WIDTH};
 use crate::routes::add_provider::AddProviderView;
@@ -333,7 +333,11 @@ impl App {
             provider: String::new(),
             model: "auto".to_string(),
         };
-        let auto_current = if current == "auto" { current.clone() } else { String::new() };
+        let auto_current = if current == "auto" {
+            current.clone()
+        } else {
+            String::new()
+        };
         if !cached_models.is_empty() {
             let mut models_with_auto = vec![auto_entry];
             models_with_auto.extend(cached_models);
@@ -888,15 +892,11 @@ impl App {
     fn collect_cached_models(&self) -> Vec<cosh::ModelEntry> {
         let mut models = Vec::new();
         for (provider, _) in cosh_sdk::connector::known_providers_with_env() {
-            if std::env::var(
-                cosh_sdk::connector::get_provider_env_var(provider).unwrap_or(""),
-            )
-            .is_ok()
-            {
-                if let Some(cached) = self.model_cache.get(&provider.to_string()) {
+            if std::env::var(cosh_sdk::connector::get_provider_env_var(provider).unwrap_or(""))
+                .is_ok()
+                && let Some(cached) = self.model_cache.get(&provider.to_string()) {
                     models.extend(cached.iter().cloned());
                 }
-            }
         }
         models
     }
@@ -1570,7 +1570,7 @@ impl App {
                 && self
                     .state
                     .current_session()
-                    .map_or(true, |s| s.messages.is_empty());
+                    .is_none_or(|s| s.messages.is_empty());
 
             let full_w = main_area.width.saturating_sub(4);
             let (prompt_area_x, prompt_area_w) = if is_empty_session {
@@ -1711,13 +1711,9 @@ impl App {
                                 cosh_sdk::connector::get_provider_env_var(provider).unwrap_or(""),
                             )
                             .is_ok()
-                            {
-                                if let Some(cached) =
-                                    self.model_cache.get(&provider.to_string())
-                                {
+                                && let Some(cached) = self.model_cache.get(&provider.to_string()) {
                                     models.extend(cached.iter().cloned());
                                 }
-                            }
                         }
                         models
                     };
@@ -2173,7 +2169,9 @@ impl App {
                                     }
                                 } else if !self.router_view.search_bar.is_empty() {
                                     self.router_view.pop_filter_char();
-                                } else if let Some(selected) = self.router_view.selected_model(&all_models) {
+                                } else if let Some(selected) =
+                                    self.router_view.selected_model(&all_models)
+                                {
                                     let idx = self.router_view.fallbacks.iter().position(|f| {
                                         f.provider == selected.provider && f.model == selected.model
                                     });
@@ -2555,58 +2553,61 @@ impl App {
                                         use cosh::harness::Harness;
                                         use cosh_sdk::connector::Connector;
 
-                                        let connector = if model.as_deref() == Some("auto") {
-                                            // Try fallbacks in order
-                                            let mut last_err = String::new();
-                                            let mut found = None;
-                                            for fb in &fallbacks {
-                                                match Connector::new(&fb.provider) {
+                                            let connector;
+                                            let mut remaining: Vec<(String, String)> = Vec::new();
+                                            if model.as_deref() == Some("auto") {
+                                                let mut last_err = String::new();
+                                                let mut found = None;
+                                                for (i, fb) in fallbacks.iter().enumerate() {
+                                                    match Connector::new(&fb.provider) {
+                                                        Ok(c) => {
+                                                            let c = c.with_model(&fb.model);
+                                                            found = Some((c, i));
+                                                            break;
+                                                        }
+                                                        Err(e) => {
+                                                            last_err = format!("connector for {}: {e}", fb.provider);
+                                                        }
+                                                    }
+                                                }
+                                                match found {
+                                                    Some((c, idx)) => {
+                                                        remaining = fallbacks[idx + 1..]
+                                                            .iter()
+                                                            .map(|fb| (fb.provider.clone(), fb.model.clone()))
+                                                            .collect();
+                                                        connector = c;
+                                                    }
+                                                    None => {
+                                                        let _ = event_tx.send(HarnessEvent::Error(
+                                                            format!("auto: no fallback available ({last_err})"),
+                                                        ));
+                                                        return;
+                                                    }
+                                                }
+                                            } else {
+                                                match Connector::new(&provider) {
                                                     Ok(c) => {
-                                                        let c = c.with_model(&fb.model);
-                                                        found = Some((c, fb.provider.clone(), fb.model.clone()));
-                                                        break;
+                                                        connector = if let Some(ref m) = model {
+                                                            c.with_model(m)
+                                                        } else {
+                                                            c
+                                                        };
                                                     }
                                                     Err(e) => {
-                                                        last_err = format!("connector for {}: {e}", fb.provider);
+                                                        let _ = event_tx.send(HarnessEvent::Error(
+                                                            format!("connector: {e}"),
+                                                        ));
+                                                        return;
                                                     }
                                                 }
                                             }
-                                            match found {
-                                                Some((c, p, m)) => {
-                                                    // Update provider & model to the working fallback
-                                                    // Note: these are local copies in the spawn
-                                                    let _ = (&p, &m);
-                                                    c
-                                                }
-                                                None => {
-                                                    let _ = event_tx.send(HarnessEvent::Error(
-                                                        format!("auto: no fallback available ({last_err})"),
-                                                    ));
-                                                    return;
-                                                }
-                                            }
-                                        } else {
-                                            match Connector::new(&provider) {
-                                                Ok(c) => {
-                                                    if let Some(ref m) = model {
-                                                        c.with_model(m)
-                                                    } else {
-                                                        c
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    let _ = event_tx.send(HarnessEvent::Error(
-                                                        format!("connector: {e}"),
-                                                    ));
-                                                    return;
-                                                }
-                                            }
-                                        };
 
                                         let mut harness =
                                             Harness::new(connector, &cwd, disabled_tools)
                                                 .with_mode(mode)
-                                                .with_history(&history);
+                                                .with_history(&history)
+                                                .with_fallbacks(remaining);
                                         #[cfg(feature = "embed")]
                                         harness.set_recall_context(recall_suffix);
                                         #[cfg(feature = "embed")]
@@ -3423,7 +3424,11 @@ impl App {
                     let mut models_with_auto = vec![auto_entry];
                     models_with_auto.extend(models);
 
-                    let auto_current = if current == "auto" { current } else { String::new() };
+                    let auto_current = if current == "auto" {
+                        current
+                    } else {
+                        String::new()
+                    };
 
                     // Update the dialog with the loaded models
                     if let Some(d) = self.dialog.current_mut()
@@ -4165,7 +4170,10 @@ impl App {
                 main_area.height.saturating_sub(1),
             );
             let all_models = self.collect_cached_models();
-            if self.router_view.handle_mouse(&all_models, &mouse, tools_area) {
+            if self
+                .router_view
+                .handle_mouse(&all_models, &mouse, tools_area)
+            {
                 fallback::save_fallbacks(&mut self.prefs_cache, &self.router_view.fallbacks);
                 if self.router_view.focus == FocusTarget::Fallbacks
                     && !self.router_view.fallbacks.is_empty()
@@ -4239,8 +4247,8 @@ impl App {
         }
 
         // 9. Prompt area - click/drag to focus and select text
-        if matches!(self.mode(), AppMode::Session) {
-            if let Some(prompt_area) = self.compute_prompt_area() {
+        if matches!(self.mode(), AppMode::Session)
+            && let Some(prompt_area) = self.compute_prompt_area() {
                 if x >= prompt_area.x
                     && x < prompt_area.right()
                     && y >= prompt_area.y
@@ -4253,7 +4261,6 @@ impl App {
                 // Click outside prompt → blur for scroll mode
                 self.prompt_view.blur();
             }
-        }
 
         Ok(true)
     }
@@ -4291,7 +4298,7 @@ impl App {
         let is_empty_session = self
             .state
             .current_session()
-            .map_or(true, |s| s.messages.is_empty());
+            .is_none_or(|s| s.messages.is_empty());
 
         let full_w = main_area.width.saturating_sub(4);
         let (prompt_area_x, prompt_area_w) = if is_empty_session {

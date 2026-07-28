@@ -220,7 +220,7 @@ impl RagInput {
         let text_lines = total_w.div_ceil(text_w);
         // +1 for the offset (text starts at line 1, line 0 reserved)
         let lines = text_lines + 1;
-        (lines as u16).max(MIN_INPUT_HEIGHT).min(MAX_INPUT_HEIGHT)
+        (lines as u16).clamp(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT)
     }
 
     /// Render the input box, drawing at most `max_height` rows.

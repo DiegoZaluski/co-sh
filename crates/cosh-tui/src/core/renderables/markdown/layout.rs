@@ -109,7 +109,7 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                                 let available = max_w;
                                 if total_w > available {
                                     for w in &mut col_widths {
-                                        *w = ((*w as u32 * available as u32) / total_w as u32)
+                                        *w = ((u32::from(*w) * u32::from(available)) / u32::from(total_w))
                                             as u16;
                                     }
                                     for w in &mut col_widths {

@@ -1030,8 +1030,7 @@ impl SessionView {
                 .filter(|ch| !ch.is_control())
                 .collect();
             let lines = cosh_tui::core::lib::unicode_util::word_wrap(&error_text, max_w);
-            let mut line_y = area.y + 1;
-            for line in &lines {
+            for (line_y, line) in (area.y + 1..).zip(lines.iter()) {
                 if line_y >= area.bottom() {
                     break;
                 }
@@ -1057,7 +1056,6 @@ impl SessionView {
                     }
                     line_x += w;
                 }
-                line_y += 1;
             }
             return 0;
         }

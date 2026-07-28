@@ -166,6 +166,10 @@ pub struct Harness {
     /// and removed after dispatch.
     approved_paths: HashSet<std::path::PathBuf>,
 
+    /// Remaining fallback (provider, model) pairs to try if the current
+    /// connector's API call fails.
+    fallbacks: Vec<(String, String)>,
+
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
     #[cfg(test)]
@@ -198,6 +202,7 @@ impl Harness {
             correction_memory: CorrectionMemory::new(5),
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
+            fallbacks: Vec::new(),
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
@@ -223,6 +228,16 @@ impl Harness {
             });
             self.total_history_tokens += count;
         }
+        self
+    }
+
+    /// Provide fallback (provider, model) pairs for automatic retry when
+    /// the current connector's API call fails (e.g. MissingApiKey, HttpError).
+    /// The harness pops and tries each fallback in order; only when all are
+    /// exhausted is the error forwarded to the TUI.
+    #[must_use]
+    pub fn with_fallbacks(mut self, fallbacks: Vec<(String, String)>) -> Self {
+        self.fallbacks = fallbacks;
         self
     }
 
@@ -1031,6 +1046,33 @@ impl Harness {
 
             if let Err(e) = result {
                 log::debug!("run_agent_loop PHASE1_ERR={e}");
+
+                if e == "Interrupted by user" {
+                    let _ = tx.send(HarnessEvent::Error(e));
+                    break;
+                }
+
+                let mut switched = false;
+                while !self.fallbacks.is_empty() {
+                    let (provider, model) = self.fallbacks.remove(0);
+                    match Connector::new(&provider) {
+                        Ok(c) => {
+                            self.connector = c.with_model(&model);
+                            self.tool_issuer.clear();
+                            log::debug!("switched to fallback: {provider}/{model}");
+                            switched = true;
+                            break;
+                        }
+                        Err(err) => {
+                            log::debug!("fallback connector {provider} failed: {err}");
+                        }
+                    }
+                }
+
+                if switched {
+                    continue;
+                }
+
                 let _ = tx.send(HarnessEvent::Error(e));
                 break;
             }
@@ -1647,6 +1689,7 @@ impl Harness {
             correction_memory: CorrectionMemory::new(5),
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
+            fallbacks: Vec::new(),
             mock_chat_response: None,
             mock_stream_response: None,
             test_tools: Vec::new(),
