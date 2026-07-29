@@ -62,7 +62,9 @@ anyhow = "1"
 schemars = "1"
 crossterm = { version = "0.29", features = ["bracketed-paste"] }
 directories = "6.0.0"
-
+text-splitter = "0.32.0"
+nalgebra = "0.33"
+regex = "1"
 # ---
 [dependencies.ratatui]
 version = "0.30.2"

@@ -3,6 +3,7 @@
 //! Bridges LLM responses to tool execution through three tiers:
 //! internal harness tools, local cosh-tools, and external MCP servers.
 
+pub mod context_manager;
 pub mod core;
 pub mod correction_memory;
 pub mod events;
@@ -12,6 +13,7 @@ pub mod tools;
 #[cfg(test)]
 mod test;
 
+pub use context_manager::ContextManager;
 pub use core::{Harness, Mode};
 pub use events::HarnessEvent;
 pub use guardrails::{PermissionAction, PermissionCheck, PermissionRequest, check_tool_permission};
