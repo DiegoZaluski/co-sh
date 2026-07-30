@@ -43,7 +43,6 @@ fn centroid(vectors: &[Vec<f64>]) -> Vec<f64> {
     c
 }
 
-
 // MMR selection
 //
 // Selects sentences using Maximal Marginal Relevance.
@@ -119,15 +118,12 @@ pub fn mmr_select(
         candidate_indices.swap_remove(best_pos);
     }
 
-    
     // Reorder by original position (Task 6)
     selected.sort_unstable();
     selected
 }
 
-
 // Orchestrator: compress sentences using MMR
-
 
 /// Compresses a list of sentences using LSA + MMR.
 /// - `lambda`: MMR relevance/diversity balance (default 0.7)

@@ -13,7 +13,7 @@ pub mod tools;
 #[cfg(test)]
 mod test;
 
-pub use context_manager::{Context, ContextManager, ContextManagerState, Role};
+pub use context_manager::{Context, ContextDisplayInfo, ContextManager, ContextManagerState, Role};
 pub use core::{Harness, Mode};
 pub use events::HarnessEvent;
 pub use guardrails::{PermissionAction, PermissionCheck, PermissionRequest, check_tool_permission};

@@ -9,7 +9,6 @@ pub struct TfIdfMatrix {
     pub vocabulary: Vec<String>,
 }
 
-
 // Bigram extraction from a sentence
 
 fn extract_bigrams(sentence: &str) -> Vec<String> {
@@ -24,7 +23,6 @@ fn extract_bigrams(sentence: &str) -> Vec<String> {
         .collect()
 }
 
-
 // Sublinear TF: 1 + log10(tf) when tf > 0
 
 fn sublinear_tf(raw_tf: f64) -> f64 {
@@ -35,13 +33,11 @@ fn sublinear_tf(raw_tf: f64) -> f64 {
     }
 }
 
-
 // TF-IDF matrix builder
 //
 // Builds a TF-IDF matrix from sentences using word bigrams.
 // - sublinear_tf: applies 1 + log10(tf) normalization
 // - max_df: ignores terms appearing in more than this fraction of docs
-
 
 pub fn build_tfidf(sentences: &[String], max_df: f64) -> TfIdfMatrix {
     let num_docs = sentences.len();
@@ -53,7 +49,6 @@ pub fn build_tfidf(sentences: &[String], max_df: f64) -> TfIdfMatrix {
         };
     }
 
-    
     // Extract bigrams and count document frequency
 
     let mut doc_freq: HashMap<String, usize> = HashMap::new();

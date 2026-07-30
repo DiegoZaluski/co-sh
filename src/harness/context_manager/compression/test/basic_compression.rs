@@ -48,7 +48,8 @@ fn max_df_filter_does_not_crash() {
 
 #[test]
 fn lambda_zero_still_reduces_tokens() {
-    let text = "Python is great. Python is fast. Python is fun. JavaScript is also good. Rust is safe.";
+    let text =
+        "Python is great. Python is fast. Python is fun. JavaScript is also good. Rust is safe.";
     let tokens_before = text.split_whitespace().count();
     let result = init(text, false, 0.8, 0.0, 0.5);
     assert!(!result.is_empty(), "lambda=0 should still produce output");
@@ -61,7 +62,8 @@ fn lambda_zero_still_reduces_tokens() {
 
 #[test]
 fn lambda_one_still_reduces_tokens() {
-    let text = "Python is great. Python is fast. Python is fun. JavaScript is also good. Rust is safe.";
+    let text =
+        "Python is great. Python is fast. Python is fun. JavaScript is also good. Rust is safe.";
     let tokens_before = text.split_whitespace().count();
     let result = init(text, false, 0.8, 1.0, 0.5);
     assert!(!result.is_empty(), "lambda=1 should still produce output");

@@ -1,9 +1,9 @@
 use text_splitter::TextSplitter;
 
-use super::tfidf::build_tfidf;
-use super::mmr::compress;
 use super::hierarchical::compress_hierarchical;
 use super::lsa::compute_lsa;
+use super::mmr::compress;
+use super::tfidf::build_tfidf;
 
 /// Compress text by splitting into sentence-like chunks (via text-splitter),
 /// then running TF-IDF → LSA → MMR to select the most informative subset.

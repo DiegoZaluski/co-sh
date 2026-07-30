@@ -121,10 +121,9 @@ fn default_harness_tools() -> Vec<HarnessTool> {
         },
         HarnessTool {
             name: "expand_context".into(),
-            description:
-                "Expand a compressed context entry by hash and target level, making it \
+            description: "Expand a compressed context entry by hash and target level, making it \
                  visible in full for the rest of the agent loop."
-                    .into(),
+                .into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -948,8 +947,11 @@ impl Harness {
         let mut messages: Vec<ChatMessage> = Vec::new();
 
         // Skip leading tool messages — no preceding assistant.
-        let history: Vec<&HistoryEntry> =
-            self.history.iter().skip_while(|entry| entry.role == "tool").collect();
+        let history: Vec<&HistoryEntry> = self
+            .history
+            .iter()
+            .skip_while(|entry| entry.role == "tool")
+            .collect();
 
         if history.is_empty() {
             if !current_input.is_empty() {
@@ -963,10 +965,7 @@ impl Harness {
             if let Some(cm_context) = self.context_manager.format_context() {
                 messages.push(ChatMessage {
                     role: "system".to_string(),
-                    content: Some(format!(
-                        "## Compressed Prior Context\n{}",
-                        cm_context
-                    )),
+                    content: Some(format!("## Compressed Prior Context\n{}", cm_context)),
                     tool_calls: None,
                     tool_call_id: None,
                 });
@@ -1064,12 +1063,13 @@ impl Harness {
         });
         self.total_history_tokens += result_tokens;
 
-        self.context_manager.add_buffer_context(super::context_manager::Role::assistant(&format!(
-            "{}: {} → {}",
-            name,
-            serde_json::to_string(args).unwrap_or_default(),
-            result
-        )));
+        self.context_manager
+            .add_buffer_context(super::context_manager::Role::assistant(&format!(
+                "{}: {} → {}",
+                name,
+                serde_json::to_string(args).unwrap_or_default(),
+                result
+            )));
     }
 
     /// Run the full agent loop: stream LLM response, dispatch tool calls,
@@ -1134,13 +1134,21 @@ impl Harness {
             tool_call_id: None,
         });
         self.total_history_tokens = input_tokens;
-        self.context_manager.add_buffer_context(super::context_manager::Role::user(input));
+        self.context_manager
+            .add_buffer_context(super::context_manager::Role::user(input));
+
+        // Send initial context info so the TUI budget bar shows immediately
+        // even before the first LLM call completes.
+        let _ = tx.send(HarnessEvent::ContextInfo {
+            info: self.context_manager.display_info(),
+        });
 
         macro_rules! check_stop {
             () => {
                 if self.stop || stop_signal.load(Ordering::Relaxed) {
                     log::debug!("run_agent_loop STOPPED");
-                    let cs = bincode::serialize(&self.context_manager.save_state()).unwrap_or_default();
+                    let cs =
+                        bincode::serialize(&self.context_manager.save_state()).unwrap_or_default();
                     let _ = tx.send(HarnessEvent::Stopped { context_state: cs });
                     true
                 } else {
@@ -1189,7 +1197,10 @@ impl Harness {
                 log::debug!("run_agent_loop PHASE1_ERR={e}");
 
                 if e == INTERRUPTED_MARKER {
-                    let _ = tx.send(HarnessEvent::Stopped { context_state: bincode::serialize(&self.context_manager.save_state()).unwrap_or_default() });
+                    let _ = tx.send(HarnessEvent::Stopped {
+                        context_state: bincode::serialize(&self.context_manager.save_state())
+                            .unwrap_or_default(),
+                    });
                     break;
                 }
 
@@ -1221,7 +1232,9 @@ impl Harness {
             // Feed the assistant's response into the context manager.
             if !assistant_response.is_empty() {
                 self.context_manager
-                    .add_buffer_context(super::context_manager::Role::assistant(&assistant_response));
+                    .add_buffer_context(super::context_manager::Role::assistant(
+                        &assistant_response,
+                    ));
             }
 
             // Record extraction failures in the correction memory so the model
@@ -1253,7 +1266,10 @@ impl Harness {
                 // complete.
                 if iteration >= MAX_ITERATIONS {
                     // log::debug!("run_agent_loop MAX_ITERATIONS={MAX_ITERATIONS} reached");
-                    let _ = tx.send(HarnessEvent::Done { context_state: bincode::serialize(&self.context_manager.save_state()).unwrap_or_default() });
+                    let _ = tx.send(HarnessEvent::Done {
+                        context_state: bincode::serialize(&self.context_manager.save_state())
+                            .unwrap_or_default(),
+                    });
                     self.stop = true;
                     break;
                 }
@@ -1664,7 +1680,12 @@ impl Harness {
                         DispatchOut::Stopped => {
                             log::debug!("run_agent_loop dispatch_next STOPPED by user");
                             self.stop = true;
-                            let _ = tx.send(HarnessEvent::Stopped { context_state: bincode::serialize(&self.context_manager.save_state()).unwrap_or_default() });
+                            let _ = tx.send(HarnessEvent::Stopped {
+                                context_state: bincode::serialize(
+                                    &self.context_manager.save_state(),
+                                )
+                                .unwrap_or_default(),
+                            });
                             return; // Exit run_agent_loop entirely
                         }
                     }
@@ -1685,7 +1706,10 @@ impl Harness {
                 }
                 // No tools and no extraction failures — conversation is complete
                 log::debug!("run_agent_loop DONE (no tools)");
-                let _ = tx.send(HarnessEvent::Done { context_state: bincode::serialize(&self.context_manager.save_state()).unwrap_or_default() });
+                let _ = tx.send(HarnessEvent::Done {
+                    context_state: bincode::serialize(&self.context_manager.save_state())
+                        .unwrap_or_default(),
+                });
                 break;
             }
 
@@ -1698,10 +1722,23 @@ impl Harness {
                 "Please continue with your response based on the information above.".to_string();
 
             self.context_manager.run().await;
+            let _ = tx.send(HarnessEvent::ContextInfo {
+                info: self.context_manager.display_info(),
+            });
         }
         log::debug!("run_agent_loop EXIT");
 
+        // Send final context info before collapsing — the TUI shows this
+        // as the last known state until the next agent loop starts.
+        let _ = tx.send(HarnessEvent::ContextInfo {
+            info: self.context_manager.display_info(),
+        });
+
         self.context_manager.collapse_context();
+        // Send one more after collapse so the bar reflects the reset state.
+        let _ = tx.send(HarnessEvent::ContextInfo {
+            info: self.context_manager.display_info(),
+        });
     }
 
     /// Add paths from tool arguments to the appropriate allowlist so that

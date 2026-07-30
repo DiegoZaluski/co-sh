@@ -61,4 +61,10 @@ pub enum HarnessEvent {
         description: String,
         args: String,
     },
+    /// Context manager budget info for the TUI header bar.
+    /// Sent after each [`ContextManager::run`] cycle during the agent loop.
+    ContextInfo {
+        /// Current context budget usage info.
+        info: super::context_manager::ContextDisplayInfo,
+    },
 }

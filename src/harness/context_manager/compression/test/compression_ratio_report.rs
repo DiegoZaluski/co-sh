@@ -1,5 +1,5 @@
-use crate::util::token_counter::estimate_tokens;
 use super::super::init;
+use crate::util::token_counter::estimate_tokens;
 
 pub fn compression_report(text: &str, use_hierarchical: bool) -> (usize, usize) {
     let tokens_before = estimate_tokens(text);
@@ -11,8 +11,13 @@ pub fn compression_report(text: &str, use_hierarchical: bool) -> (usize, usize) 
 
     let result = init(text, use_hierarchical, 0.8, 0.7, 0.4);
     let tokens_after = estimate_tokens(&result);
-    let reduction = (tokens_before.saturating_sub(tokens_after) as f64 / tokens_before as f64) * 100.0;
-    let mode = if use_hierarchical { "hierarchical" } else { "flat" };
+    let reduction =
+        (tokens_before.saturating_sub(tokens_after) as f64 / tokens_before as f64) * 100.0;
+    let mode = if use_hierarchical {
+        "hierarchical"
+    } else {
+        "flat"
+    };
 
     println!("\n>>> Compression Report ({mode}) <<<");
     println!("  Input tokens:  {tokens_before}");

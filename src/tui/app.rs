@@ -57,6 +57,22 @@ fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
     Color::Rgb(r, g, b)
 }
 
+/// When true, show dev-only stats (◉ seeds, ⟡ expanded) next to the budget bar.
+/// Set to false for end-user builds.
+const SHOW_DEV_STATS: bool = true;
+
+/// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
+fn render_budget_bar(pct: u8) -> String {
+    const FILLED: char = '▓';
+    const EMPTY: char = '░';
+    const BAR_LEN: usize = 10;
+    let filled = (pct as usize * BAR_LEN) / 100;
+    let empty = BAR_LEN.saturating_sub(filled);
+    std::iter::repeat_n(FILLED, filled)
+        .chain(std::iter::repeat_n(EMPTY, empty))
+        .collect()
+}
+
 const SIDEBAR_WIDTH: u16 = 22;
 const FOOTER_HEIGHT: u16 = 1;
 
@@ -114,6 +130,8 @@ pub struct App {
     stop_signal: Arc<AtomicBool>,
     terminal_focused: bool,
     agent_spinner: Option<AgentSpinner>,
+    /// Latest context manager info for the budget bar (None if no data yet).
+    context_info: Option<cosh::harness::ContextDisplayInfo>,
     /// Stores the theme name that was active when the theme dialog opened (for cancel/restore)
     theme_dialog_original: Option<String>,
     /// Stores the model that was active when the model dialog opened (for cancel/restore)
@@ -240,6 +258,7 @@ impl App {
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
             agent_spinner: None,
+            context_info: None,
             mouse_down_pos: None,
             mouse_drag_active: false,
             drag_selection: None,
@@ -1532,6 +1551,61 @@ impl App {
                 area.width.saturating_sub(sidebar_w + right_panel_w),
                 area.height,
             );
+
+            // Budget bar — only after the user has sent at least one message.
+            // When SHOW_DEV_STATS is true, also show (◉ seeds, ⟡ expanded) for dev use.
+            let has_content = self
+                .state
+                .current_session()
+                .is_some_and(|s| !s.messages.is_empty());
+            if matches!(self.mode(), AppMode::Session) && has_content {
+                let pct = self.context_info.as_ref().map_or(0, |info| info.budget_pct);
+
+                let budget_str = format!("{}{:>3}%", render_budget_bar(pct), pct);
+
+                let (display_str, stats_width, _budget_offset) = if SHOW_DEV_STATS {
+                    let seeds = self.context_info.as_ref().map_or(0, |info| info.seed_count);
+                    let expanded = self.context_info.as_ref().map_or(0, |info| info.expanded);
+                    let stats_str = format!("◉ {} ⟡ {}", seeds, expanded);
+                    let full = format!("{}  {}", stats_str, budget_str);
+                    let sw = stats_str.chars().count() as u16;
+                    (full, sw, sw + 2)
+                } else {
+                    (budget_str.clone(), 0u16, 0u16)
+                };
+
+                let display_w = display_str.chars().count() as u16;
+                let right_x = main_area.right().saturating_sub(display_w + 1);
+
+                // Render dev stats when enabled
+                if SHOW_DEV_STATS {
+                    let seeds = self.context_info.as_ref().map_or(0, |info| info.seed_count);
+                    let expanded = self.context_info.as_ref().map_or(0, |info| info.expanded);
+                    let stats_str = format!("◉ {} ⟡ {}", seeds, expanded);
+                    for (i, ch) in stats_str.chars().enumerate() {
+                        if let Some(cell) = buf.cell_mut((right_x + i as u16, area.y)) {
+                            cell.set_char(ch);
+                            cell.set_style(Style::default().fg(rgba_color(self.theme.text_muted)));
+                        }
+                    }
+                }
+
+                // Render budget bar (with conditional color)
+                let offset = if SHOW_DEV_STATS { stats_width + 2 } else { 0 };
+                let budget_style = if pct >= 90 {
+                    Style::default().fg(rgba_color(self.theme.error))
+                } else if pct >= 70 {
+                    Style::default().fg(rgba_color(self.theme.warning))
+                } else {
+                    Style::default().fg(rgba_color(self.theme.text_muted))
+                };
+                for (i, ch) in budget_str.chars().enumerate() {
+                    if let Some(cell) = buf.cell_mut((right_x + offset + i as u16, area.y)) {
+                        cell.set_char(ch);
+                        cell.set_style(budget_style);
+                    }
+                }
+            }
 
             // Right panel (independent of sidebar state)
             if right_panel_w > 0 {
@@ -3392,6 +3466,9 @@ impl App {
                         self.session_store.save_ctx(&id, &context_state);
                         self.state.ensure_session_summary(&id);
                     }
+                }
+                HarnessEvent::ContextInfo { info } => {
+                    self.context_info = Some(info);
                 }
 
                 HarnessEvent::Error(msg) => {

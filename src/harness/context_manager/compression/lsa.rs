@@ -14,7 +14,6 @@ pub struct LsaResult {
     pub topic_vectors: Vec<Vec<f64>>,
 }
 
-
 // LSA computation — Truncated SVD + TF-IDF relevance scoring
 
 /// Runs LSA: truncated SVD on the TF-IDF matrix.
@@ -44,7 +43,6 @@ pub fn compute_lsa(tfidf: &TfIdfMatrix) -> LsaResult {
         };
     }
 
-    
     // Convert Vec<Vec<f64>> to DMatrix<f64> (row-major)
     let flat: Vec<f64> = tfidf
         .matrix
@@ -54,14 +52,12 @@ pub fn compute_lsa(tfidf: &TfIdfMatrix) -> LsaResult {
         .collect();
     let matrix = DMatrix::from_row_slice(n_sentences, n_terms, &flat);
 
-    
     // Compute full SVD
     let svd = SVD::new(matrix, true, true);
 
     let u = svd.u.expect("U matrix should be computed");
     let singular_values = svd.singular_values;
 
-    
     // Truncate to n_topics
     let max_rank = singular_values.len();
     let target = std::cmp::max(3, n_sentences / 3);
@@ -93,7 +89,6 @@ pub fn compute_lsa(tfidf: &TfIdfMatrix) -> LsaResult {
         .map(|row| (0..n_topics).map(|col| topic_matrix[(row, col)]).collect())
         .collect();
 
-
     // Score: L2 norm of each TF-IDF row (information density in
     // original bigram space, before SVD truncation).
     //
@@ -108,7 +103,6 @@ pub fn compute_lsa(tfidf: &TfIdfMatrix) -> LsaResult {
             sum_sq.sqrt()
         })
         .collect();
-
 
     // Score floor — 2% of max ensures no sentence is completely
     // ignored, but low-information headers still get low scores.

@@ -17,7 +17,6 @@ fn sample_context(hash_id: u64, lv: u64, text: &str) -> Context {
     }
 }
 
-
 // Verifies that Context struct fields are accessible and store values correctly.
 #[test]
 fn context_struct_fields() {
@@ -70,7 +69,10 @@ fn new_context_manager_is_empty() {
     assert!(!cm.warning, "warning should start false");
     assert_eq!(cm.ctxt.hash_id, 0, "ctxt hash_id should be 0");
     assert_eq!(cm.ctxt.lv, 0, "ctxt lv should be 0");
-    assert!(cm.ctxt.assistant.is_empty(), "ctxt assistant should be empty");
+    assert!(
+        cm.ctxt.assistant.is_empty(),
+        "ctxt assistant should be empty"
+    );
     assert!(cm.ctxt.user.is_empty(), "ctxt user should be empty");
     assert_eq!(cm.ctxt.tokens, 0, "ctxt tokens should be 0");
 }
@@ -130,18 +132,46 @@ fn build_context_hash_is_linear() {
     cm.build_context("x".to_string(), None, 3, 1, Some(1)); // ex=1, lv=3 → hash = (1<<24)|3
     cm.build_context("x".to_string(), None, 1, 1, Some(2)); // ex=2, lv=1 → hash = (2<<24)|1
 
-    assert_eq!(cm.queue[0].hash_id, (1 << 24) | 1, "ex=1 lv=1 → hash=(1<<24)|1");
-    assert_eq!(cm.queue[1].hash_id, (1 << 24) | 2, "ex=1 lv=2 → hash=(1<<24)|2");
-    assert_eq!(cm.queue[2].hash_id, (1 << 24) | 3, "ex=1 lv=3 → hash=(1<<24)|3");
-    assert_eq!(cm.queue[3].hash_id, (2 << 24) | 1, "ex=2 lv=1 → hash=(2<<24)|1");
+    assert_eq!(
+        cm.queue[0].hash_id,
+        (1 << 24) | 1,
+        "ex=1 lv=1 → hash=(1<<24)|1"
+    );
+    assert_eq!(
+        cm.queue[1].hash_id,
+        (1 << 24) | 2,
+        "ex=1 lv=2 → hash=(1<<24)|2"
+    );
+    assert_eq!(
+        cm.queue[2].hash_id,
+        (1 << 24) | 3,
+        "ex=1 lv=3 → hash=(1<<24)|3"
+    );
+    assert_eq!(
+        cm.queue[3].hash_id,
+        (2 << 24) | 1,
+        "ex=2 lv=1 → hash=(2<<24)|1"
+    );
 
     // Model navigation arithmetic:
     // From (hash=(1<<24)|2, lv=2), target LV1: ((1<<24)|2) - 2 + 1 = (1<<24)|1 ✅
-    assert_eq!(((1 << 24) | 2) - 2 + 1, (1 << 24) | 1, "model can navigate: hash - lv + 1 = LV1 hash");
+    assert_eq!(
+        ((1 << 24) | 2) - 2 + 1,
+        (1 << 24) | 1,
+        "model can navigate: hash - lv + 1 = LV1 hash"
+    );
     // From (hash=(1<<24)|3, lv=3), target LV1: ((1<<24)|3) - 3 + 1 = (1<<24)|1 ✅
-    assert_eq!(((1 << 24) | 3) - 3 + 1, (1 << 24) | 1, "model can navigate: hash - lv + 1 = LV1 hash");
+    assert_eq!(
+        ((1 << 24) | 3) - 3 + 1,
+        (1 << 24) | 1,
+        "model can navigate: hash - lv + 1 = LV1 hash"
+    );
     // Target LV1 for ex=2: ((2<<24)|1) - 1 + 1 = (2<<24)|1 (lv=1, stays same)
-    assert_eq!(((2 << 24) | 1) - 1 + 1, (2 << 24) | 1, "LV1 hash minus lv=1 plus 1 is itself");
+    assert_eq!(
+        ((2 << 24) | 1) - 1 + 1,
+        (2 << 24) | 1,
+        "LV1 hash minus lv=1 plus 1 is itself"
+    );
 }
 
 // Verifies that build_context() can be called multiple times in sequence.
@@ -261,8 +291,14 @@ fn format_context_preserves_exhibition_order() {
     assert!(p2 < p3, "exhibition slot 2 must appear before slot 3");
 
     // Compressed slots should hold the new content, not the old
-    assert!(!output.contains("alpha"), "slot 1 should be 'ALPHA', not 'alpha'");
-    assert!(!output.contains("gamma"), "slot 3 should be 'GAMMA', not 'gamma'");
+    assert!(
+        !output.contains("alpha"),
+        "slot 1 should be 'ALPHA', not 'alpha'"
+    );
+    assert!(
+        !output.contains("gamma"),
+        "slot 3 should be 'GAMMA', not 'gamma'"
+    );
 }
 
 // --- Expansion tests ---
@@ -304,7 +340,10 @@ fn collapse_context_clears_list() {
 
     cm.collapse_context();
 
-    assert!(cm.expand.is_empty(), "expand list should be empty after collapse");
+    assert!(
+        cm.expand.is_empty(),
+        "expand list should be empty after collapse"
+    );
 }
 
 // Verifies that format_context does NOT contain "[EXPANDED]" when
@@ -318,7 +357,10 @@ fn format_context_without_expand_no_expanded() {
 
     let output = cm.format_context().unwrap();
 
-    assert!(!output.contains("[EXPANDED]"), "no [EXPANDED] without expand call");
+    assert!(
+        !output.contains("[EXPANDED]"),
+        "no [EXPANDED] without expand call"
+    );
     assert!(output.contains("first"));
     assert!(output.contains("second"));
 }
@@ -329,7 +371,13 @@ fn format_context_without_expand_no_expanded() {
 fn format_context_with_expand_includes_parent_content() {
     let mut cm = ContextManager::new(test_connector(), 3);
 
-    cm.build_context("detailed original content".to_string(), None, 1, 100, Some(1));
+    cm.build_context(
+        "detailed original content".to_string(),
+        None,
+        1,
+        100,
+        Some(1),
+    );
     cm.build_context("compressed".to_string(), None, 2, 50, Some(1));
     let lv2_hash = cm.queue.back().unwrap().hash_id; // = (1<<24)|2
 
@@ -408,9 +456,15 @@ fn format_context_empty_exhibitions_returns_some_empty() {
 
     let output = cm.format_context();
 
-    assert!(output.is_some(), "format_context should return Some even empty");
+    assert!(
+        output.is_some(),
+        "format_context should return Some even empty"
+    );
     let text = output.unwrap();
-    assert!(text.is_empty() || text.trim().is_empty(), "empty exhibitions should produce empty output");
+    assert!(
+        text.is_empty() || text.trim().is_empty(),
+        "empty exhibitions should produce empty output"
+    );
 }
 
 // Verifies that expanding a hash for a non-existent exhibition slot
@@ -476,7 +530,10 @@ fn compress_fresh_up_to_single_chunk() {
     );
 
     // Buffer must be empty now
-    assert!(cm.buffer_chunks.is_empty(), "buffer should be empty after compression");
+    assert!(
+        cm.buffer_chunks.is_empty(),
+        "buffer should be empty after compression"
+    );
 
     // A Context entry must have been created (LV=1)
     assert_eq!(cm.queue.len(), 1, "queue should have one entry");
@@ -492,10 +549,10 @@ fn compress_fresh_up_to_single_chunk() {
 fn compress_fresh_up_to_partial_compression_reindexes() {
     let mut cm = ContextManager::new(test_connector(), 3);
 
-    cm.add_buffer_context(Role::assistant("first chunk"));   // checkpoints=1
-    cm.add_buffer_context(Role::assistant("second chunk"));  // checkpoints=2
-    cm.add_buffer_context(Role::assistant("third chunk"));   // checkpoints=3
-    cm.add_buffer_context(Role::assistant("fourth chunk"));  // checkpoints=4
+    cm.add_buffer_context(Role::assistant("first chunk")); // checkpoints=1
+    cm.add_buffer_context(Role::assistant("second chunk")); // checkpoints=2
+    cm.add_buffer_context(Role::assistant("third chunk")); // checkpoints=3
+    cm.add_buffer_context(Role::assistant("fourth chunk")); // checkpoints=4
 
     assert_eq!(cm.buffer_chunks.len(), 4);
 
@@ -513,14 +570,26 @@ fn compress_fresh_up_to_partial_compression_reindexes() {
     assert_eq!(cm.buffer_chunks.len(), 2, "two chunks should remain");
 
     // Remaining chunks must be re-indexed: new checkpoint 1 = old chunk 3
-    assert_eq!(cm.buffer_chunks[0].checkpoints, 1, "first remaining should be checkpoint 1");
+    assert_eq!(
+        cm.buffer_chunks[0].checkpoints, 1,
+        "first remaining should be checkpoint 1"
+    );
     assert_eq!(cm.buffer_chunks[0].role.text(), "third chunk");
-    assert_eq!(cm.buffer_chunks[1].checkpoints, 2, "second remaining should be checkpoint 2");
+    assert_eq!(
+        cm.buffer_chunks[1].checkpoints, 2,
+        "second remaining should be checkpoint 2"
+    );
     assert_eq!(cm.buffer_chunks[1].role.text(), "fourth chunk");
 
     // fresh must reflect remaining chunks
-    assert_eq!(cm.fresh.checkpoints, 2, "fresh checkpoints should be max remaining");
-    assert_eq!(cm.checkpoint_counter, 2, "global counter should match fresh");
+    assert_eq!(
+        cm.fresh.checkpoints, 2,
+        "fresh checkpoints should be max remaining"
+    );
+    assert_eq!(
+        cm.checkpoint_counter, 2,
+        "global counter should match fresh"
+    );
 
     // A single Context entry must exist (the compressed batch)
     assert_eq!(cm.queue.len(), 1, "queue should have one compressed entry");
@@ -540,7 +609,10 @@ fn compress_fresh_up_to_all_chunks_empties_buffer() {
     let result = cm.compress_fresh_up_to(3);
 
     assert!(result.is_ok());
-    assert!(cm.buffer_chunks.is_empty(), "buffer should be fully drained");
+    assert!(
+        cm.buffer_chunks.is_empty(),
+        "buffer should be fully drained"
+    );
     assert_eq!(cm.checkpoint_counter, 0, "counter should reset to 0");
     assert_eq!(cm.queue.len(), 1, "one compressed context entry created");
 }
@@ -551,12 +623,15 @@ fn compress_fresh_up_to_all_chunks_empties_buffer() {
 fn compress_fresh_up_to_checkpoint_beyond_last_compresses_all() {
     let mut cm = ContextManager::new(test_connector(), 3);
 
-    cm.add_buffer_context(Role::user("chunk one"));   // checkpoints=1
-    cm.add_buffer_context(Role::user("chunk two"));   // checkpoints=2
+    cm.add_buffer_context(Role::user("chunk one")); // checkpoints=1
+    cm.add_buffer_context(Role::user("chunk two")); // checkpoints=2
 
     let result = cm.compress_fresh_up_to(99);
 
-    assert!(result.is_ok(), "should compress everything when checkpoint is past the end");
+    assert!(
+        result.is_ok(),
+        "should compress everything when checkpoint is past the end"
+    );
     assert!(cm.buffer_chunks.is_empty(), "all chunks should be consumed");
     assert_eq!(cm.queue.len(), 1, "one context entry created");
 }
@@ -584,7 +659,11 @@ fn compress_fresh_up_to_progressive_compression() {
 
     // Second call: compress up to 1
     let _ = cm.compress_fresh_up_to(1);
-    assert_eq!(cm.buffer_chunks.len(), 2, "two chunks should remain after second compression");
+    assert_eq!(
+        cm.buffer_chunks.len(),
+        2,
+        "two chunks should remain after second compression"
+    );
     assert_eq!(cm.queue.len(), 2, "second context entry created");
 
     // Remaining chunks should be re-indexed from 1
@@ -600,8 +679,8 @@ fn compress_fresh_up_to_progressive_compression() {
 fn format_context_after_compress_fresh_up_to() {
     let mut cm = ContextManager::new(test_connector(), 3);
 
-    cm.add_buffer_context(Role::user("FIRST_CHUNK_SEGMENT"));   // checkpoints=1
-    cm.add_buffer_context(Role::user("SECOND_CHUNK_SEGMENT"));  // checkpoints=2
+    cm.add_buffer_context(Role::user("FIRST_CHUNK_SEGMENT")); // checkpoints=1
+    cm.add_buffer_context(Role::user("SECOND_CHUNK_SEGMENT")); // checkpoints=2
 
     let _ = cm.compress_fresh_up_to(1);
 
@@ -678,7 +757,11 @@ fn with_max_retries_changes_value() {
     assert_eq!(cm.max_retries(), 5, "should reflect the new value");
 
     cm.with_max_retries(0);
-    assert_eq!(cm.max_retries(), 0, "zero is a valid retry count (no retries)");
+    assert_eq!(
+        cm.max_retries(),
+        0,
+        "zero is a valid retry count (no retries)"
+    );
 
     cm.with_max_retries(100);
     assert_eq!(cm.max_retries(), 100, "large values should work too");
@@ -707,12 +790,27 @@ fn expand_directly_to_mid_level() {
 
     let output = cm.format_context().unwrap();
 
-    assert!(output.contains("level 3 summary"), "should expand to level 3");
+    assert!(
+        output.contains("level 3 summary"),
+        "should expand to level 3"
+    );
     assert!(!output.contains("level 5 seed"), "should NOT show level 5");
-    assert!(!output.contains("level 1 original"), "should NOT show level 1");
-    assert!(!output.contains("level 4 summary"), "should NOT show level 4");
-    assert!(!output.contains("level 2 summary"), "should NOT show level 2");
-    assert!(output.contains("[EXPANDED]"), "should show [EXPANDED] marker");
+    assert!(
+        !output.contains("level 1 original"),
+        "should NOT show level 1"
+    );
+    assert!(
+        !output.contains("level 4 summary"),
+        "should NOT show level 4"
+    );
+    assert!(
+        !output.contains("level 2 summary"),
+        "should NOT show level 2"
+    );
+    assert!(
+        output.contains("[EXPANDED]"),
+        "should show [EXPANDED] marker"
+    );
 }
 
 // Verifies that expand_to(hash, target_lv) resolves correctly — simulates
@@ -736,28 +834,58 @@ fn expand_to_resolves_target_level() {
     cm.expand_to(visible_hash, 1).unwrap();
 
     let output = cm.format_context().unwrap();
-    assert!(output.contains("original content"), "expand_to LV1 should show original");
-    assert!(!output.contains("compressed lv2"), "should NOT show intermediate level");
-    assert!(!output.contains("compressed lv3"), "should NOT show current level");
-    assert!(output.contains("[EXPANDED]"), "should show [EXPANDED] marker");
+    assert!(
+        output.contains("original content"),
+        "expand_to LV1 should show original"
+    );
+    assert!(
+        !output.contains("compressed lv2"),
+        "should NOT show intermediate level"
+    );
+    assert!(
+        !output.contains("compressed lv3"),
+        "should NOT show current level"
+    );
+    assert!(
+        output.contains("[EXPANDED]"),
+        "should show [EXPANDED] marker"
+    );
 
     // Clear and expand to LV2
     cm.collapse_context();
     cm.expand_to(visible_hash, 2).unwrap();
 
     let output = cm.format_context().unwrap();
-    assert!(output.contains("compressed lv2"), "expand_to LV2 should show lv2 content");
-    assert!(!output.contains("original content"), "should NOT show original");
-    assert!(!output.contains("compressed lv3"), "should NOT show current level");
-    assert!(output.contains("[EXPANDED]"), "should show [EXPANDED] marker");
+    assert!(
+        output.contains("compressed lv2"),
+        "expand_to LV2 should show lv2 content"
+    );
+    assert!(
+        !output.contains("original content"),
+        "should NOT show original"
+    );
+    assert!(
+        !output.contains("compressed lv3"),
+        "should NOT show current level"
+    );
+    assert!(
+        output.contains("[EXPANDED]"),
+        "should show [EXPANDED] marker"
+    );
 
     // Expand to current level (LV3) — no-op, no [EXPANDED]
     cm.collapse_context();
     cm.expand_to(visible_hash, 3).unwrap();
 
     let output = cm.format_context().unwrap();
-    assert!(!output.contains("[EXPANDED]"), "target_lv == current lv should not show [EXPANDED]");
-    assert!(output.contains("compressed lv3"), "should show current level content");
+    assert!(
+        !output.contains("[EXPANDED]"),
+        "target_lv == current lv should not show [EXPANDED]"
+    );
+    assert!(
+        output.contains("compressed lv3"),
+        "should show current level content"
+    );
 }
 
 // Verifies that expand_to works across different exhibition slots.
@@ -774,8 +902,18 @@ fn expand_to_works_across_slots() {
     cm.build_context("slot2 mid".to_string(), None, 2, 60, Some(2));
     cm.build_context("slot2 seed".to_string(), None, 3, 20, Some(2));
 
-    let h1: Vec<u64> = cm.queue.iter().filter(|c| c.exhibition == 1).map(|c| c.hash_id).collect();
-    let h2: Vec<u64> = cm.queue.iter().filter(|c| c.exhibition == 2).map(|c| c.hash_id).collect();
+    let h1: Vec<u64> = cm
+        .queue
+        .iter()
+        .filter(|c| c.exhibition == 1)
+        .map(|c| c.hash_id)
+        .collect();
+    let h2: Vec<u64> = cm
+        .queue
+        .iter()
+        .filter(|c| c.exhibition == 2)
+        .map(|c| c.hash_id)
+        .collect();
 
     cm.layers.insert(h1[1], vec![cm.queue[0].clone()]);
     cm.layers.insert(h2[2], vec![cm.queue[3].clone()]);
@@ -788,9 +926,18 @@ fn expand_to_works_across_slots() {
 
     let output = cm.format_context().unwrap();
 
-    assert!(output.contains("slot1 original"), "slot1 should show original");
-    assert!(output.contains("slot2 original"), "slot2 should show original");
-    assert!(!output.contains("slot1 compressed"), "slot1 should NOT show compressed");
+    assert!(
+        output.contains("slot1 original"),
+        "slot1 should show original"
+    );
+    assert!(
+        output.contains("slot2 original"),
+        "slot2 should show original"
+    );
+    assert!(
+        !output.contains("slot1 compressed"),
+        "slot1 should NOT show compressed"
+    );
     assert!(!output.contains("slot2 mid"), "slot2 should NOT show mid");
     assert!(!output.contains("slot2 seed"), "slot2 should NOT show seed");
 }

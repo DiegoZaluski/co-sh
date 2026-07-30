@@ -222,8 +222,7 @@ impl SessionStore {
 
     /// Build path for the companion `.ctx` file.
     fn ctx_file_path(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir
-            .join(format!("session-{session_id}.ctx"))
+        self.sessions_dir.join(format!("session-{session_id}.ctx"))
     }
 
     /// Save bincode-encoded context manager state alongside the JSONL session.

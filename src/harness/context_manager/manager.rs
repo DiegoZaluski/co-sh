@@ -128,6 +128,29 @@ pub struct ContextManagerState {
     pub next_slot_id: u64,
 }
 
+/// Snapshot of context manager state for TUI display.
+/// Cheap to compute — reads fields and estimates token counts without
+/// building the full formatted string.
+#[derive(Default, Clone, Debug)]
+pub struct ContextDisplayInfo {
+    /// Number of fresh buffer chunks (not yet compressed).
+    pub fresh_chunks: usize,
+    /// Number of compressed queue entries (in rotation).
+    pub queue_entries: usize,
+    /// Number of seed entries (permanently fixed).
+    pub seed_count: usize,
+    /// Number of non-empty exhibition slots.
+    pub exhibitions: usize,
+    /// Number of currently expanded entries.
+    pub expanded: usize,
+    /// Total estimated tokens of all content (buffer + queue + seeds).
+    pub total_tokens: usize,
+    /// Maximum token budget before compression triggers.
+    pub max_budget: usize,
+    /// Percentage of budget used (0-100).
+    pub budget_pct: u8,
+}
+
 /// Orchestrates compression, expansion, and display of conversation context
 /// through a circular queue. The inner [`Context`] entries are compressed
 /// progressively and can be expanded on demand by the model via [`expand_slot`].
@@ -153,6 +176,39 @@ pub struct ContextManager {
     max_retries: u32,
 }
 
+// DISPLAY
+impl ContextManager {
+    /// Cheap snapshot of current context state for TUI display.
+    /// Does NOT call format_context() — only reads fields and estimates
+    /// raw token counts.
+    pub fn display_info(&self) -> ContextDisplayInfo {
+        let fresh_tokens: usize = self
+            .buffer_chunks
+            .iter()
+            .map(|fc| estimate_tokens(fc.role.text()))
+            .sum();
+        let compressed_tokens: usize = self.queue.iter().map(|e| e.tokens).sum();
+        let seed_tokens: usize = self.fixed_contexts.iter().map(|e| e.tokens).sum();
+        let total = fresh_tokens + compressed_tokens + seed_tokens;
+        let exhibitions = self.exhibitions.iter().filter(|e| e.hash_id != 0).count();
+        ContextDisplayInfo {
+            fresh_chunks: self.buffer_chunks.len(),
+            queue_entries: self.queue.len(),
+            seed_count: self.fixed_contexts.len(),
+            exhibitions,
+            expanded: self.expand.len(),
+            total_tokens: total,
+            max_budget: MAX_CONTEXT_TOKENS,
+            budget_pct: if MAX_CONTEXT_TOKENS > 0 {
+                ((total as f64 / MAX_CONTEXT_TOKENS as f64) * 100.0).min(100.0) as u8
+            } else {
+                0
+            },
+        }
+    }
+}
+
+// ORCHESTRATION AND OPERATIONS
 impl ContextManager {
     pub fn new(connector: Connector, max_retries: u32) -> Self {
         Self {
