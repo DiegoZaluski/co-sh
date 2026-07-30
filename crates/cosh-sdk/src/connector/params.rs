@@ -182,7 +182,7 @@ impl ToolDefinition {
 ///
 /// Users configure these through [`Connector`](crate::connector::Connector)
 /// builder methods rather than constructing this struct directly.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Parameters {
     pub(crate) model: Option<String>,
     pub(crate) max_tokens: Option<u32>,

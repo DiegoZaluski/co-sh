@@ -268,9 +268,7 @@ impl RouterView {
             self.fallbacks.remove(index);
         }
         // Clamp scroll offset after removal
-        if self.fallback_scroll_offset > 0
-            && self.fallback_scroll_offset >= self.fallbacks.len()
-        {
+        if self.fallback_scroll_offset > 0 && self.fallback_scroll_offset >= self.fallbacks.len() {
             self.fallback_scroll_offset = self.fallbacks.len().saturating_sub(VISIBLE_COUNT);
         }
     }

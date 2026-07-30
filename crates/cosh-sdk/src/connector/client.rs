@@ -23,7 +23,7 @@ use super::openai_compatible;
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[must_use]
 pub struct Connector {
     provider: Option<&'static ProviderConfig>, // None before new() succeeds

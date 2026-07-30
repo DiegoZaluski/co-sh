@@ -206,15 +206,44 @@ impl SessionStore {
         })
     }
 
-    /// Delete a session file from disk.
+    /// Delete a session file and its companion `.ctx` file from disk.
     pub fn delete_session(&self, session_id: &str) {
         let file_path = self.file_path(session_id);
         std::fs::remove_file(&file_path).ok();
+        self.delete_ctx(session_id);
     }
 
     /// Check whether a session with the given ID exists on disk.
     pub fn has_session(&self, session_id: &str) -> bool {
         self.file_path(session_id).exists()
+    }
+
+    // ── Companion .ctx file (bincode-encoded ContextManagerState) ──────────
+
+    /// Build path for the companion `.ctx` file.
+    fn ctx_file_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir
+            .join(format!("session-{session_id}.ctx"))
+    }
+
+    /// Save bincode-encoded context manager state alongside the JSONL session.
+    pub fn save_ctx(&self, session_id: &str, state: &[u8]) {
+        let path = self.ctx_file_path(session_id);
+        if let Err(e) = std::fs::write(&path, state) {
+            log::warn!("failed to save context state for session {session_id}: {e}");
+        }
+    }
+
+    /// Load bincode-encoded context manager state for a session.
+    /// Returns `None` if no companion file exists or it cannot be read.
+    pub fn load_ctx(&self, session_id: &str) -> Option<Vec<u8>> {
+        let path = self.ctx_file_path(session_id);
+        std::fs::read(&path).ok()
+    }
+
+    /// Delete the companion `.ctx` file for a session.
+    pub fn delete_ctx(&self, session_id: &str) {
+        std::fs::remove_file(self.ctx_file_path(session_id)).ok();
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
@@ -324,6 +353,9 @@ impl SessionStore {
         let to_remove = files.len() - MAX_SESSIONS_ON_DISK;
         for (path, _) in files.iter().take(to_remove) {
             std::fs::remove_file(path).ok();
+            // Remove companion .ctx file too
+            let ctx_path = path.with_extension("ctx");
+            std::fs::remove_file(&ctx_path).ok();
         }
     }
 }

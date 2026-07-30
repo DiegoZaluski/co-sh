@@ -28,7 +28,7 @@ async fn test_agent_loop_simple_conversation() {
             Ok(Some(event)) => {
                 let is_done = matches!(
                     event,
-                    HarnessEvent::Done | HarnessEvent::Stopped | HarnessEvent::Error(_)
+                    HarnessEvent::Done { .. } | HarnessEvent::Stopped { .. } | HarnessEvent::Error(_)
                 );
                 events.push(event);
                 if is_done {
@@ -48,7 +48,7 @@ async fn test_agent_loop_simple_conversation() {
             .iter()
             .any(|e| matches!(e, HarnessEvent::Token { .. }))
     );
-    assert!(events.iter().any(|e| matches!(e, HarnessEvent::Done)));
+    assert!(events.iter().any(|e| matches!(e, HarnessEvent::Done { .. })));
 }
 
 #[tokio::test]
@@ -83,7 +83,7 @@ async fn test_agent_loop_with_tool_call() {
             Ok(Some(event)) => {
                 let is_done = matches!(
                     event,
-                    HarnessEvent::Done | HarnessEvent::Stopped | HarnessEvent::Error(_)
+                    HarnessEvent::Done { .. } | HarnessEvent::Stopped { .. } | HarnessEvent::Error(_)
                 );
                 events.push(event);
                 if is_done {
@@ -117,7 +117,7 @@ async fn test_agent_loop_with_tool_call() {
     assert!(
         matches!(
             last,
-            HarnessEvent::Done | HarnessEvent::Stopped | HarnessEvent::Error(_)
+            HarnessEvent::Done { .. } | HarnessEvent::Stopped { .. } | HarnessEvent::Error(_)
         ),
         "expected terminal event, got {last:?}"
     );

@@ -6,7 +6,7 @@
 //!
 use crate::util::token_counter::estimate_tokens;
 use cosh_sdk::connector::Connector;
-use std::cell::{Cell, RefCell};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
 use super::compression::init as deterministic_compress;
@@ -28,9 +28,6 @@ const TOLERANCE_PERCENT: u64 = 10;
 /// Unified compression prompt.
 const PROMPT_COMPRESSION: &str = "";
 
-/// Default retry limit for compression attempts.
-const DEFAULT_MAX_RETRIES: u32 = 3;
-
 /// TF-IDF maximum document frequency filter: terms appearing in more than
 /// this fraction of chunks are treated as stop-words and ignored
 /// during deterministic compression (Layer 1).
@@ -48,7 +45,8 @@ const MMR_RATIO: f64 = 0.4;
 const EMPTY_SLOT: Context = Context {
     hash_id: 0,
     lv: 0,
-    ctxt: String::new(),
+    user: String::new(),
+    assistant: String::new(),
     tokens: 0,
     exhibition: 0,
 };
@@ -56,20 +54,78 @@ const EMPTY_SLOT: Context = Context {
 /// A single entry in the compressed/exhibition context identified by a
 /// bit-packed id: high 40 bits = exhibition slot, low 24 bits = level.
 /// The model navigates levels with: `target = hash - lv + target_lv`.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Context {
     pub hash_id: u64,
     pub lv: u64,
-    pub ctxt: String,
+    pub user: String,
+    pub assistant: String,
     pub tokens: usize,
     pub exhibition: u64,
 }
 
+/// Indicates the role of a FreshContext chunk: who sent the message.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Role {
+    pub assistant: Option<String>,
+    pub user: Option<String>,
+}
+
+impl Role {
+    /// Build a user Role.
+    pub fn user(text: &str) -> Self {
+        Self {
+            assistant: None,
+            user: Some(text.to_string()),
+        }
+    }
+
+    /// Build an assistant Role.
+    pub fn assistant(text: &str) -> Self {
+        Self {
+            assistant: Some(text.to_string()),
+            user: None,
+        }
+    }
+
+    /// Extract the text content regardless of which role holds it.
+    pub fn text(&self) -> &str {
+        self.assistant
+            .as_deref()
+            .or(self.user.as_deref())
+            .unwrap_or_default()
+    }
+
+    /// Return the role label ("user" or "assistant").
+    pub fn label(&self) -> &'static str {
+        if self.assistant.is_some() {
+            "assistant"
+        } else if self.user.is_some() {
+            "user"
+        } else {
+            ""
+        }
+    }
+}
+
 /// A chunk of fresh (not yet compressed) conversation context.
-/// Each chunk carries its own checkpoint id for future agent reference.
+/// Each chunk carries its own checkpoint id and role for future agent reference.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FreshContext {
     pub checkpoints: u32,
-    pub ctxt: String,
+    pub role: Role,
+}
+
+/// Serializable snapshot of [`ContextManager`] state for bincode persistence.
+/// Every field is the minimum needed to reconstruct the full manager —
+/// exhibitions and layers are rebuilt on load.
+#[derive(Serialize, Deserialize)]
+pub struct ContextManagerState {
+    pub queue: VecDeque<Context>,
+    pub fixed_contexts: Vec<Context>,
+    pub buffer_chunks: Vec<FreshContext>,
+    pub checkpoint_counter: u32,
+    pub next_slot_id: u64,
 }
 
 /// Orchestrates compression, expansion, and display of conversation context
@@ -86,10 +142,9 @@ pub struct ContextManager {
     pub next_slot_id: u64,
     pub exhibitions: Vec<Context>,
 
-    // Cache for format_context output - interior mutability so the
-    // method can remain &self while lazily updating on changes.
-    rendered: RefCell<Option<String>>,
-    dirty: Cell<bool>,
+    // Cache for format_context output.
+    rendered: Option<String>,
+    dirty: bool,
     pub fresh: FreshContext,
     pub buffer_chunks: Vec<FreshContext>,
     pub checkpoint_counter: u32,
@@ -99,12 +154,13 @@ pub struct ContextManager {
 }
 
 impl ContextManager {
-    pub fn new(connector: Connector) -> Self {
+    pub fn new(connector: Connector, max_retries: u32) -> Self {
         Self {
             ctxt: Context {
                 hash_id: 0,
                 lv: 0,
-                ctxt: String::new(),
+                user: String::new(),
+                assistant: String::new(),
                 tokens: 0,
                 exhibition: 0,
             },
@@ -116,15 +172,18 @@ impl ContextManager {
             expand: Vec::new(),
             next_slot_id: 0,
             exhibitions: Vec::new(),
-            rendered: RefCell::new(None),
-            dirty: Cell::new(true),
+            rendered: None,
+            dirty: true,
             fresh: FreshContext {
                 checkpoints: 0,
-                ctxt: String::new(),
+                role: Role {
+                    assistant: None,
+                    user: None,
+                },
             },
             buffer_chunks: Vec::new(),
             checkpoint_counter: 0,
-            max_retries: DEFAULT_MAX_RETRIES,
+            max_retries,
         }
     }
 
@@ -154,19 +213,24 @@ impl ContextManager {
         self
     }
 
-    pub fn add_buffer_context(&mut self, ctxt: &str) {
-        // Accumulate into the single text field for token accounting.
-        self.fresh.ctxt.push_str(ctxt);
-
+    /// Add a fresh context chunk with an explicit role.
+    /// Retains the individual chunk so `format_context` can display each
+    /// checkpoint separately.
+    pub fn add_buffer_context(&mut self, role: Role) {
         let breakpoint = self.checkpoint_counter + 1;
-        self.fresh.checkpoints = breakpoint;
         self.checkpoint_counter = breakpoint;
+
+        // Keep `fresh` updated with the latest checkpoint/role for quick reference.
+        self.fresh = FreshContext {
+            checkpoints: breakpoint,
+            role: role.clone(),
+        };
 
         // Retain the individual chunk so format_context can display
         // each checkpoint separately, oldest first.
         self.buffer_chunks.push(FreshContext {
             checkpoints: breakpoint,
-            ctxt: ctxt.to_string(),
+            role,
         });
 
         self.invalidate_cache();
@@ -175,16 +239,7 @@ impl ContextManager {
     /// Mark the rendered cache as stale so the next call to
     /// [`format_context`](Self::format_context) rebuilds.
     fn invalidate_cache(&mut self) {
-        self.dirty.set(true);
-    }
-
-    /// Restore a previously saved queue and fixed contexts from a prior
-    /// session state.
-    pub fn restore(&mut self, queue: VecDeque<Context>, fixed_contexts: Vec<Context>) -> &Self {
-        self.queue = queue;
-        self.fixed_contexts = fixed_contexts;
-        self.invalidate_cache();
-        self
+        self.dirty = true;
     }
 
     /// Create a new context entry, push it to the queue, and record it
@@ -196,9 +251,12 @@ impl ContextManager {
     ///
     /// `prev_hash` is accepted for compatibility but not used — the
     /// parent-child relationship is maintained in the `layers` map.
-    pub fn build_context(
+    ///
+    /// The compressed text is placed in `assistant`; `user` remains empty
+    /// since compressed content is an assistant-style summary.
+    pub(crate) fn build_context(
         &mut self,
-        ctxt: String,
+        text: String,
         prev_hash: Option<u64>,
         lv: u64,
         tokens: usize,
@@ -215,7 +273,8 @@ impl ContextManager {
         let entry = Context {
             hash_id,
             lv,
-            ctxt,
+            user: String::new(),
+            assistant: text,
             tokens,
             exhibition,
         };
@@ -233,8 +292,9 @@ impl ContextManager {
     /// Push a pre-built [`Context`] entry directly to the back of the queue.
     /// Unlike [`build_context`](Self::build_context), this does not compute
     /// hashes or manage exhibition slots — it inserts the entry as-is.
-    pub fn enqueue(&mut self, ctxt: Context) -> &Self {
-        self.queue.push_back(ctxt);
+    #[allow(dead_code)]
+    pub(crate) fn enqueue(&mut self, entry: Context) -> &Self {
+        self.queue.push_back(entry);
         self.invalidate_cache();
         self
     }
@@ -244,7 +304,7 @@ impl ContextManager {
     ///
     /// When an entry reaches seed size (≤ [`SEED_MAX_TOKENS`]) it leaves
     /// the queue and becomes fixed — never compressed again.
-    pub async fn compress_oldest(&mut self, raw_content: Option<&str>) -> &Self {
+    async fn compress_oldest(&mut self, raw_content: Option<&str>) -> &Self {
         if let Some(raw) = raw_content {
             let tokens = estimate_tokens(raw);
             self.build_context(raw.to_string(), None, 1, tokens, None);
@@ -283,7 +343,8 @@ impl ContextManager {
             let seed = Context {
                 hash_id,
                 lv: entry.lv + 1,
-                ctxt: summary,
+                user: String::new(),
+                assistant: summary,
                 tokens,
                 exhibition: entry.exhibition,
             };
@@ -293,7 +354,7 @@ impl ContextManager {
             }
             self.exhibitions[idx] = seed.clone();
             self.fixed_contexts.push(seed);
-            self.layers.insert(hash_id as u64, vec![entry]);
+            self.layers.insert(hash_id, vec![entry]);
             self.invalidate_cache();
             return self;
         }
@@ -308,7 +369,7 @@ impl ContextManager {
         );
 
         if let Some(child) = self.queue.back() {
-            self.layers.insert(child.hash_id as u64, vec![entry]);
+            self.layers.insert(child.hash_id, vec![entry]);
         }
         self
     }
@@ -316,13 +377,18 @@ impl ContextManager {
     /// Compress an entry with guard verification and retry loop.
     async fn compress_if_needed(&self, entry: &Context) -> Option<String> {
         let tolerance = MAX_CONTEXT_TOKENS * (TOLERANCE_PERCENT as usize) / 100;
-        let mut current = entry.clone();
+        let mut current_text = if !entry.assistant.is_empty() {
+            entry.assistant.clone()
+        } else {
+            entry.user.clone()
+        };
+        let mut current_tokens = entry.tokens;
 
         for _ in 0..self.max_retries {
-            let reduction_needed = current.tokens.saturating_sub(MAX_CONTEXT_TOKENS);
+            let reduction_needed = current_tokens.saturating_sub(MAX_CONTEXT_TOKENS);
 
             let summary = self
-                .compress_via_llm(&current, MAX_CONTEXT_TOKENS, reduction_needed)
+                .compress_via_llm(&current_text, MAX_CONTEXT_TOKENS, reduction_needed)
                 .await
                 .map_err(|e| log::error!("[context_manager] compression failed: {e}"))
                 .ok()?;
@@ -336,8 +402,8 @@ impl ContextManager {
                 return Some(self.deterministic_compression(&summary));
             }
 
-            current.ctxt = summary;
-            current.tokens = result_tokens;
+            current_text = summary;
+            current_tokens = result_tokens;
         }
         None
     }
@@ -345,7 +411,7 @@ impl ContextManager {
     /// Compress a context entry via the LLM with an informative prompt.
     async fn compress_via_llm(
         &self,
-        ctxt: &Context,
+        text: &str,
         max_tokens: usize,
         reduction_needed: usize,
     ) -> Result<String, String> {
@@ -357,33 +423,38 @@ impl ContextManager {
              \n\
              {base}\n",
             max_tokens = max_tokens,
-            current = ctxt.tokens,
+            current = estimate_tokens(text),
             reduction = reduction_needed,
             base = PROMPT_COMPRESSION,
         );
         let output = self
             .connector
-            .chat_with_system(&ctxt.ctxt, &prompt)
+            .chat_with_system(text, &prompt)
             .await
             .map_err(|e| e.to_string())?;
 
         Ok(output.message().to_string())
     }
 
+    /// Helper: get the text from a FreshContext regardless of its role.
+    fn fresh_text(fc: &FreshContext) -> &str {
+        fc.role.text()
+    }
+
     /// Compress fresh buffer chunks from checkpoint 1 up to the given `checkpoint`.
     ///
     /// The model triggers this by passing the checkpoint number visible in the
-    /// formatted context — e.g. `[BUFFER] (checkpoint 4)`. After compression the
+    /// formatted context — e.g. `(checkpoint 4)`. After compression the
     /// remaining chunks are **re-indexed** so the new checkpoint 1 is the first
     /// chunk that was *not* compressed, keeping the visual numbering contiguous.
     ///
-    /// Returns the combined raw text of the consumed chunks (before compression)
-    /// so the caller can inspect what was folded in, or `None` when there is
-    /// nothing to compress (empty buffer, zero checkpoint, or all checkpoints
-    /// are already past the target).
-    pub fn compress_fresh_up_to(&mut self, checkpoint: u32) -> Option<String> {
-        if checkpoint == 0 || self.buffer_chunks.is_empty() {
-            return None;
+    /// Returns confirmation message on success, or an error string on failure.
+    pub fn compress_fresh_up_to(&mut self, checkpoint: u32) -> Result<String, String> {
+        if checkpoint == 0 {
+            return Err("Checkpoint must be greater than 0.".to_string());
+        }
+        if self.buffer_chunks.is_empty() {
+            return Err("No fresh context to compress.".to_string());
         }
 
         // Find the first chunk whose checkpoint exceeds the target.
@@ -395,13 +466,15 @@ impl ContextManager {
             .unwrap_or(self.buffer_chunks.len());
 
         if idx == 0 {
-            return None; // no chunk has a checkpoint ≤ target
+            return Err(format!(
+                "No fresh context chunks with checkpoint ≤ {checkpoint}."
+            ));
         }
 
-        // Concatenate the raw text of all consumed chunks.
+        // Concatenate the raw text of all consumed chunks (regardless of role).
         let combined: String = self.buffer_chunks[..idx]
             .iter()
-            .map(|c| c.ctxt.as_str())
+            .map(Self::fresh_text)
             .collect();
 
         // Run deterministic compression (Layer 1) on the combined text.
@@ -419,29 +492,43 @@ impl ContextManager {
             chunk.checkpoints = (i + 1) as u32;
         }
 
-        // Rebuild the aggregated fresh context from what is left.
-        self.fresh.ctxt = self.buffer_chunks.iter().map(|c| c.ctxt.as_str()).collect();
-        self.fresh.checkpoints = self
-            .buffer_chunks
-            .last()
-            .map(|c| c.checkpoints)
-            .unwrap_or(0);
+        // Rebuild `fresh` from what is left.
+        if let Some(last) = self.buffer_chunks.last() {
+            self.fresh = FreshContext {
+                checkpoints: last.checkpoints,
+                role: last.role.clone(),
+            };
+        } else {
+            self.fresh = FreshContext {
+                checkpoints: 0,
+                role: Role {
+                    assistant: None,
+                    user: None,
+                },
+            };
+        }
         self.checkpoint_counter = self.fresh.checkpoints;
 
         self.invalidate_cache();
-        Some(combined)
+
+        let chunk_count = idx;
+        let compressed_tokens = estimate_tokens(&combined);
+        Ok(format!(
+            "Compressed {chunk_count} fresh chunk(s) ({compressed_tokens} tokens) up to checkpoint {checkpoint}."
+        ))
     }
 
     /// Deterministic compression (Layer1) via TF-IDF → LSA → MMR.
     /// Splits text into sentence-like chunks using text-splitter, ranks them
     /// by relevance + diversity, and returns the most informative subset.
-    pub fn deterministic_compression(&self, ctxt: &str) -> String {
+    fn deterministic_compression(&self, ctxt: &str) -> String {
         deterministic_compress(ctxt, false, TFIDF_MAX_DF, MMR_LAMBDA, MMR_RATIO)
     }
 
     /// Mark a hash for expansion so the next [`format_context`] call
     /// shows the parent content in place of the compressed version.
-    pub fn expand_slot(&mut self, hash_id: u64) -> &Self {
+    #[allow(dead_code)]
+    pub(crate) fn expand_slot(&mut self, hash_id: u64) -> &Self {
         self.expand.push(hash_id);
         self.invalidate_cache();
         self
@@ -453,18 +540,33 @@ impl ContextManager {
     ///
     /// `hash` is any visible hash for this exhibition slot; `target_lv` is
     /// the level to expand to (e.g. `1` for the original content).
-    pub fn expand_to(&mut self, hash: u64, target_lv: u64) -> &Self {
+    ///
+    /// Returns `Ok(self)` on success, or `Err(message)` with a model-facing
+    /// explanation when the entry or level does not exist.
+    pub fn expand_to(&mut self, hash: u64, target_lv: u64) -> Result<&Self, String> {
+        let exhibition_id = (hash >> 24) as usize;
+        if exhibition_id >= self.exhibitions.len() {
+            return Err(format!(
+                "Context entry #{hash} not found. Use a valid hash from the context view."
+            ));
+        }
+        let entry = &self.exhibitions[exhibition_id];
+        if entry.hash_id == 0 {
+            return Err(format!(
+                "Context entry #{hash} not found. Use a valid hash from the context view."
+            ));
+        }
+        if target_lv > entry.lv {
+            return Err(format!(
+                "Level {target_lv} does not exist for entry #{hash}. \
+                 The highest level available is {}. Use a level ≤ {} to expand.",
+                entry.lv, entry.lv
+            ));
+        }
         let target_hash = (hash & !0xFFFFFF) | target_lv;
         self.expand.push(target_hash);
         self.invalidate_cache();
-        self
-    }
-
-    /// Clear all expansion marks.
-    pub fn clear_expand(&mut self) -> &Self {
-        self.expand.clear();
-        self.invalidate_cache();
-        self
+        Ok(self)
     }
 
     /// Return to the natural compressed view. Clears every expansion mark
@@ -479,14 +581,69 @@ impl ContextManager {
         self
     }
 
+    /// Produce a serializable snapshot of the current state.
+    pub fn save_state(&self) -> ContextManagerState {
+        ContextManagerState {
+            queue: self.queue.clone(),
+            fixed_contexts: self.fixed_contexts.clone(),
+            buffer_chunks: self.buffer_chunks.clone(),
+            checkpoint_counter: self.checkpoint_counter,
+            next_slot_id: self.next_slot_id,
+        }
+    }
+
+    /// Rebuild exhibitions and layers after loading from state.
+    fn rebuild_internals(&mut self) {
+        self.exhibitions.clear();
+        for entry in self.queue.iter().chain(self.fixed_contexts.iter()) {
+            let idx = entry.exhibition as usize;
+            if self.exhibitions.len() <= idx {
+                self.exhibitions.resize(idx + 1, EMPTY_SLOT);
+            }
+            self.exhibitions[idx] = entry.clone();
+        }
+
+        self.layers.clear();
+        let mut by_exhibition: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (i, e) in self.queue.iter().enumerate() {
+            by_exhibition.entry(e.exhibition).or_default().push(i);
+        }
+        for indices in by_exhibition.values() {
+            let mut pairs: Vec<(u64, usize)> =
+                indices.iter().map(|&i| (self.queue[i].lv, i)).collect();
+            pairs.sort_by_key(|(lv, _)| *lv);
+            for w in pairs.windows(2) {
+                let (_, parent_idx) = w[0];
+                let (_, child_idx) = w[1];
+                let child = &self.queue[child_idx];
+                let parent = self.queue[parent_idx].clone();
+                self.layers.insert(child.hash_id, vec![parent]);
+            }
+        }
+    }
+
+    /// Restore the full manager state from a previously saved snapshot.
+    /// Rebuilds exhibitions and layers automatically.
+    pub fn restore_state(&mut self, state: &ContextManagerState) {
+        self.queue = state.queue.clone();
+        self.fixed_contexts = state.fixed_contexts.clone();
+        self.buffer_chunks = state.buffer_chunks.clone();
+        self.checkpoint_counter = state.checkpoint_counter;
+        self.next_slot_id = state.next_slot_id;
+        self.rebuild_internals();
+        self.invalidate_cache();
+    }
+
     /// Build the formatted context display.
     ///
     /// The output is cached and only rebuilt when state changes.
-    pub fn format_context(&self) -> Option<String> {
-        if !self.dirty.get() {
-            if let Some(cached) = self.rendered.borrow().as_ref() {
-                return Some(cached.clone());
-            }
+    /// Shows buffer chunks with their role (user/assistant) and exhibitions
+    /// with their compressed content.
+    pub fn format_context(&mut self) -> Option<String> {
+        if !self.dirty
+            && let Some(cached) = &self.rendered
+        {
+            return Some(cached.clone());
         }
 
         // 1. Resolve each expand target: extract exhibition slot and walk
@@ -499,7 +656,7 @@ impl ContextManager {
                 continue;
             }
             let exh = &self.exhibitions[idx];
-            if exh.hash_id == 0 && exh.ctxt.is_empty() {
+            if exh.hash_id == 0 && exh.assistant.is_empty() && exh.user.is_empty() {
                 continue;
             }
 
@@ -510,52 +667,76 @@ impl ContextManager {
 
             let mut walk_hash = exh.hash_id;
             let mut walk_lv = exh.lv;
-            let mut walk_ctxt = exh.ctxt.clone();
+            let mut walk_text = if !exh.assistant.is_empty() {
+                exh.assistant.clone()
+            } else {
+                exh.user.clone()
+            };
 
             while walk_lv > target_lv {
-                match self.layers.get(&(walk_hash as u64)).and_then(|v| v.first()) {
+                match self.layers.get(&walk_hash).and_then(|v| v.first()) {
                     Some(parent) => {
                         walk_hash = parent.hash_id;
                         walk_lv = parent.lv;
-                        walk_ctxt = parent.ctxt.clone();
+                        walk_text = if !parent.assistant.is_empty() {
+                            parent.assistant.clone()
+                        } else {
+                            parent.user.clone()
+                        };
                     }
                     None => break,
                 }
             }
-            expanded_slots.insert(idx, (walk_ctxt, walk_lv, target));
+            expanded_slots.insert(idx, (walk_text, walk_lv, target));
         }
 
-        // 2. Prepend buffer context (fresh, not yet summarized).
-        //    Oldest buffer entry first → newest last, all before
-        //    exhibitions so the most-recent raw content appears first.
+        // 2. Buffer context (fresh, not yet summarized).
+        //    Oldest buffer entry first → newest last.
         let mut result = String::new();
-        for entry in &self.buffer_chunks {
-            result.push_str(&format!(
-                "[BUFFER] (checkpoint {})\n{}\n\n",
-                entry.checkpoints, entry.ctxt
-            ));
-        }
-
-        // 3. Render exhibitions in order, replacing compressed entries
-        //    with expanded versions where applicable.
-        for (i, exh) in self.exhibitions.iter().enumerate() {
-            if exh.hash_id == 0 && exh.ctxt.is_empty() {
-                continue;
-            }
-            if let Some((ctxt, lv, hash)) = expanded_slots.remove(&i) {
-                result.push_str(&format!("({hash}, {lv}) [EXPANDED]\n{ctxt}\n\n"));
-            } else {
+        if !self.buffer_chunks.is_empty() {
+            result.push_str("## Full\n\n");
+            for entry in &self.buffer_chunks {
+                let role_label = entry.role.label();
+                let text = entry.role.text();
                 result.push_str(&format!(
-                    "({hash}, {lv})\n{content}\n\n",
-                    hash = exh.hash_id,
-                    lv = exh.lv,
-                    content = exh.ctxt,
+                    "(checkpoint {}) {}:\n{}\n\n",
+                    entry.checkpoints, role_label, text
                 ));
             }
         }
 
-        self.rendered.replace(Some(result.clone()));
-        self.dirty.set(false);
+        // 3. Render exhibitions in order, replacing compressed entries
+        //    with expanded versions where applicable.
+        let has_exhibitions = self
+            .exhibitions
+            .iter()
+            .any(|exh| exh.hash_id != 0 || !exh.assistant.is_empty() || !exh.user.is_empty());
+        if has_exhibitions {
+            result.push_str("## SUMMARY\n\n");
+            for (i, exh) in self.exhibitions.iter().enumerate() {
+                if exh.hash_id == 0 && exh.assistant.is_empty() && exh.user.is_empty() {
+                    continue;
+                }
+                if let Some((text, lv, hash)) = expanded_slots.remove(&i) {
+                    result.push_str(&format!("({hash}, {lv}) [EXPANDED]\n{text}\n\n"));
+                } else {
+                    // Show content directly without role prefix
+                    let text = if !exh.assistant.is_empty() {
+                        &exh.assistant
+                    } else {
+                        &exh.user
+                    };
+                    result.push_str(&format!(
+                        "({hash}, {lv})\n{text}\n\n",
+                        hash = exh.hash_id,
+                        lv = exh.lv,
+                    ));
+                }
+            }
+        }
+
+        self.rendered = Some(result.clone());
+        self.dirty = false;
         Some(result)
     }
 }

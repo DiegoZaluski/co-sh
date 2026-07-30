@@ -894,9 +894,10 @@ impl App {
         for (provider, _) in cosh_sdk::connector::known_providers_with_env() {
             if std::env::var(cosh_sdk::connector::get_provider_env_var(provider).unwrap_or(""))
                 .is_ok()
-                && let Some(cached) = self.model_cache.get(&provider.to_string()) {
-                    models.extend(cached.iter().cloned());
-                }
+                && let Some(cached) = self.model_cache.get(&provider.to_string())
+            {
+                models.extend(cached.iter().cloned());
+            }
         }
         models
     }
@@ -2522,6 +2523,14 @@ impl App {
                                         .collect()
                                 })
                                 .unwrap_or_default();
+
+                            // Load companion context state (.ctx file) for session resumption
+                            let ctx_bytes: Option<Vec<u8>> = self
+                                .state
+                                .current_session_id
+                                .as_ref()
+                                .and_then(|id| self.session_store.load_ctx(id));
+
                             std::thread::spawn(move || {
                                 use std::panic::AssertUnwindSafe;
                                 use tokio::runtime::Builder;
@@ -2595,6 +2604,14 @@ impl App {
                                                 .with_mode(mode)
                                                 .with_history(&history)
                                                 .with_fallbacks(remaining);
+
+                                        // Restore compressed context state from .ctx companion file
+                                        if let Some(ref ctx_bytes) = ctx_bytes {
+                                            use cosh::harness::ContextManagerState;
+                                            if let Ok(state) = bincode::deserialize::<ContextManagerState>(ctx_bytes) {
+                                                harness.context_manager.restore_state(&state);
+                                            }
+                                        }
                                         #[cfg(feature = "embed")]
                                         harness.set_recall_context(recall_suffix);
                                         #[cfg(feature = "embed")]
@@ -3341,7 +3358,7 @@ impl App {
                     }
                 }
 
-                HarnessEvent::Done => {
+                HarnessEvent::Done { context_state } => {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
 
@@ -3351,11 +3368,12 @@ impl App {
                         && is_valid_session(session)
                     {
                         self.session_store.save_session(session);
+                        self.session_store.save_ctx(&id, &context_state);
                         self.state.ensure_session_summary(&id);
                     }
                 }
 
-                HarnessEvent::Stopped => {
+                HarnessEvent::Stopped { context_state } => {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
                     self.toast_state.show(ToastOptions {
@@ -3371,6 +3389,7 @@ impl App {
                         && is_valid_session(session)
                     {
                         self.session_store.save_session(session);
+                        self.session_store.save_ctx(&id, &context_state);
                         self.state.ensure_session_summary(&id);
                     }
                 }
@@ -4235,19 +4254,20 @@ impl App {
 
         // 9. Prompt area - click/drag to focus and select text
         if matches!(self.mode(), AppMode::Session)
-            && let Some(prompt_area) = self.compute_prompt_area() {
-                if x >= prompt_area.x
-                    && x < prompt_area.right()
-                    && y >= prompt_area.y
-                    && y < prompt_area.bottom()
-                {
-                    self.prompt_view.focus();
-                    self.prompt_view.note_activity();
-                    return Ok(true);
-                }
-                // Click outside prompt → blur for scroll mode
-                self.prompt_view.blur();
+            && let Some(prompt_area) = self.compute_prompt_area()
+        {
+            if x >= prompt_area.x
+                && x < prompt_area.right()
+                && y >= prompt_area.y
+                && y < prompt_area.bottom()
+            {
+                self.prompt_view.focus();
+                self.prompt_view.note_activity();
+                return Ok(true);
             }
+            // Click outside prompt → blur for scroll mode
+            self.prompt_view.blur();
+        }
 
         Ok(true)
     }

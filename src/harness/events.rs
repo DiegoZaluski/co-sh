@@ -25,9 +25,15 @@ pub enum HarnessEvent {
     /// A reasoning block from the LLM.
     Reasoning { text: String },
     /// The agent loop finished normally (no more tool calls).
-    Done,
+    Done {
+        /// Bincode-serialized ContextManagerState for persistence.
+        context_state: Vec<u8>,
+    },
     /// The agent loop was interrupted by a stop request.
-    Stopped,
+    Stopped {
+        /// Bincode-serialized ContextManagerState for persistence.
+        context_state: Vec<u8>,
+    },
     /// Intermediate output from a running tool (e.g. bash streaming).
     ToolOutput {
         /// The tool name that produced this output.

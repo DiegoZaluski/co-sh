@@ -1,3 +1,4 @@
+use super::context_manager::ContextManager;
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
 use cosh_sdk::connector::{
@@ -66,11 +67,16 @@ pub const INSTRUCTIONS_ASK: &str = concat!(
     "The available tools and their specifications are listed below.\n"
 );
 
-/// Default token budget for the context window.
-const MAX_TOKENS: usize = 10_000;
-
 /// Maximum consecutive tool-call failures before aborting the agent loop.
 const MAX_TOOL_RETRIES: usize = 3;
+
+/// Maximum total conversation history (raw entries) before the context
+/// window condenses old turns with the ContextManager compressed summary.
+const HISTORY_BUDGET: usize = 50_000;
+
+/// Maximum number of complete user/assistant turns to keep raw in
+/// the messages array when the history exceeds the budget.
+const MAX_COMPLETE_TURNS: usize = 3;
 
 /// Maximum total agent-loop iterations (tool calls + responses) before
 /// the harness stops the loop as a safety net against runaway tool-calling.
@@ -101,18 +107,57 @@ struct HistoryEntry {
     content: String,
     tool_calls: Option<Vec<ToolCallMsg>>,
     tool_call_id: Option<String>,
-    token_count: usize,
 }
 
 fn default_harness_tools() -> Vec<HarnessTool> {
-    vec![HarnessTool {
-        name: "stop_agent_loop".into(),
-        description: "Stop running the agent loop".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {}
-        }),
-    }]
+    vec![
+        HarnessTool {
+            name: "stop_agent_loop".into(),
+            description: "Stop running the agent loop".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        HarnessTool {
+            name: "expand_context".into(),
+            description:
+                "Expand a compressed context entry by hash and target level, making it \
+                 visible in full for the rest of the agent loop."
+                    .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "hash": {
+                        "type": "integer",
+                        "description": "context entry hash identifier"
+                    },
+                    "lv": {
+                        "type": "integer",
+                        "description": "target compression level"
+                    }
+                },
+                "required": ["hash", "lv"]
+            }),
+        },
+        HarnessTool {
+            name: "force_compress".into(),
+            description:
+                "Force compression of all fresh context chunks from the beginning up to the \
+                 given checkpoint index."
+                    .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "checkpoint": {
+                        "type": "integer",
+                        "description": "compress fresh chunks from checkpoint 1 up to this value"
+                    }
+                },
+                "required": ["checkpoint"]
+            }),
+        },
+    ]
 }
 
 #[allow(clippy::struct_field_names)]
@@ -137,6 +182,11 @@ pub struct Harness {
     history: Vec<HistoryEntry>,
     /// Total estimated tokens across all history entries, for budget management.
     total_history_tokens: usize,
+
+    /// Layered context manager with circular queue compression.
+    /// Replaces the old evict-and-drop strategy — nothing is lost,
+    /// only compressed, and always navigable.
+    pub context_manager: ContextManager,
 
     /// Tools explicitly disabled by the user via the Internal Tools screen.
     /// These are excluded from both the prompt header and the extractor.
@@ -187,6 +237,7 @@ pub struct Harness {
 impl Harness {
     #[must_use]
     pub fn new(connector: Connector, cwd: &str, disabled_tools: HashSet<String>) -> Self {
+        let cm_connector = connector.clone();
         Self {
             connector,
             sessions: Vec::new(),
@@ -201,6 +252,7 @@ impl Harness {
             tool_issuer: VecDeque::new(),
             history: Vec::new(),
             total_history_tokens: 0,
+            context_manager: ContextManager::new(cm_connector, MAX_TOOL_RETRIES as u32),
             disabled_tools,
             tool_failure_count: 0,
             tool_extraction_failure_count: 0,
@@ -224,15 +276,20 @@ impl Harness {
     pub fn with_history(mut self, turns: &[(String, String)]) -> Self {
         for (role, text) in turns {
             let count = crate::util::token_counter::estimate_tokens(text);
+            self.total_history_tokens += count;
             let role_str = role.as_str();
             self.history.push(HistoryEntry {
                 role: role_str.to_string(),
                 content: text.clone(),
                 tool_calls: None,
                 tool_call_id: None,
-                token_count: count,
             });
-            self.total_history_tokens += count;
+            let cm_role = if role_str == "user" {
+                super::context_manager::Role::user(text)
+            } else {
+                super::context_manager::Role::assistant(text)
+            };
+            self.context_manager.add_buffer_context(cm_role);
         }
         self
     }
@@ -435,14 +492,33 @@ impl Harness {
     }
 
     /// Handle a harness tool call immediately, returning `true` if consumed.
-    pub(crate) fn handle_harness_tool(&mut self, tc: &ToolCallData) -> bool {
-        let Some(tool) = self.harness_tools.iter().find(|t| t.name == tc.name) else {
-            return false;
-        };
-        if tool.name == "stop_agent_loop" {
-            self.stop = true;
+    pub(crate) fn handle_harness_tool(&mut self, tc: &ToolCallData) -> Option<String> {
+        let _tool = self.harness_tools.iter().find(|t| t.name == tc.name)?;
+        match tc.name.as_str() {
+            "stop_agent_loop" => {
+                self.stop = true;
+                Some(String::new())
+            }
+            "expand_context" => {
+                let hash = tc.arguments["hash"].as_u64().unwrap_or(0);
+                let lv = tc.arguments["lv"].as_u64().unwrap_or(0);
+                match self.context_manager.expand_to(hash, lv) {
+                    Ok(_) => Some(format!(
+                        "Expanded context entry #{hash} to level {lv}. \
+                         The entry is now fully visible in the context."
+                    )),
+                    Err(msg) => Some(msg),
+                }
+            }
+            "force_compress" => {
+                let checkpoint = tc.arguments["checkpoint"].as_u64().unwrap_or(0) as u32;
+                match self.context_manager.compress_fresh_up_to(checkpoint) {
+                    Ok(summary) => Some(summary),
+                    Err(msg) => Some(msg),
+                }
+            }
+            _ => Some(String::new()),
         }
-        true
     }
 
     /// Process extracted items into a text response, routing tool calls.
@@ -452,10 +528,15 @@ impl Harness {
         for item in result.items {
             match item {
                 Item::Text(t) => output.push_str(&t),
-                Item::ToolCall(tc) if !self.handle_harness_tool(&tc) => {
-                    self.tool_issuer.push_back(tc);
-                }
-                Item::ToolCall(_) => {}
+                Item::ToolCall(tc) => match self.handle_harness_tool(&tc) {
+                    None => {
+                        self.tool_issuer.push_back(tc);
+                    }
+                    Some(result) if !result.is_empty() => {
+                        self.push_tool_history(&tc.id, &tc.name, &tc.arguments, &result);
+                    }
+                    _ => {}
+                },
             }
         }
         let extraction_failures = extractor.take_tool_failures();
@@ -465,15 +546,22 @@ impl Harness {
 
     /// Build the system context for the LLM.
     ///
-    /// Returns only the header context (instructions + tool definitions)
-    /// and correction memory. Conversation history is NOT included here —
-    /// it is sent as separate messages with proper roles (user, assistant
-    /// with tool_calls, tool with tool_call_id) via
-    /// [`stream_chat_with_messages`](Self::stream_chat_with_messages).
+    /// Returns the header context (instructions + tool definitions),
+    /// correction memory, and the current ContextManager formatted context
+    /// so the model sees buffer chunks, exhibitions, and available hashes.
+    /// Conversation history is sent as separate messages with proper roles
+    /// via [`stream_chat_with_messages`](Self::stream_chat_with_messages).
     fn build_chat_context(&mut self) -> String {
         let mut out = self.header_context.clone();
         let correction = self.correction_memory.format();
         out.push_str(&correction);
+        // Append the current ContextManager formatted context so the model
+        // sees buffer chunks, compressed exhibitions, hashes, and checkpoints.
+        if let Some(cm_context) = self.context_manager.format_context()
+            && !cm_context.trim().is_empty()
+        {
+            out.push_str(&format!("\n## Compressed Context\n{}\n", cm_context));
+        }
         out
     }
 
@@ -642,12 +730,16 @@ impl Harness {
             StreamAction::Text(text) => {
                 on_token(&text);
             }
-            StreamAction::ToolCall(tc) if !self.handle_harness_tool(&tc) => {
-                self.tool_issuer.push_back(tc);
-            }
-            StreamAction::ToolCall(_) | StreamAction::Pending => {
-                // harness tool consumed
-            }
+            StreamAction::ToolCall(tc) => match self.handle_harness_tool(&tc) {
+                None => {
+                    self.tool_issuer.push_back(tc);
+                }
+                Some(result) if !result.is_empty() => {
+                    self.push_tool_history(&tc.id, &tc.name, &tc.arguments, &result);
+                }
+                _ => {}
+            },
+            StreamAction::Pending => {}
         }
     }
 
@@ -841,44 +933,68 @@ impl Harness {
         self.connector.set_tools(defs);
     }
 
-    /// Build the conversation messages array for the current iteration.
+    /// Build the conversation messages array to send to the LLM.
     ///
-    /// The array includes all history entries with their proper roles
-    /// (user, assistant with tool_calls, tool with tool_call_id) plus
-    /// the current user input as the final message.
+    /// When the raw history stays within [`HISTORY_BUDGET`], every entry is
+    /// sent as-is.  When it exceeds the budget, the oldest turns are replaced
+    /// with a system message containing the ContextManager's compressed
+    /// summary — nothing is dropped silently, the CM preserves everything
+    /// in layered form.
     ///
-    /// Leading `tool` messages (which can be left behind after history
-    /// eviction) are skipped because some providers (notably Mistral)
+    /// Leading `tool` messages (which can appear after restart without a
+    /// preceding assistant) are skipped because some providers (Mistral)
     /// reject `tool` right after `system`.
-    fn build_conversation_messages(&self, current_input: &str) -> Vec<ChatMessage> {
+    fn build_conversation_messages(&mut self, current_input: &str) -> Vec<ChatMessage> {
         let mut messages: Vec<ChatMessage> = Vec::new();
 
-        // Skip leading tool messages — they have no preceding assistant
-        // message, and some providers (Mistral) reject the sequence
-        // system → tool → ... with HTTP 400.
-        let history = self.history.iter().skip_while(|entry| entry.role == "tool");
+        // Skip leading tool messages — no preceding assistant.
+        let history: Vec<&HistoryEntry> =
+            self.history.iter().skip_while(|entry| entry.role == "tool").collect();
 
-        for entry in history {
-            match entry.role.as_str() {
-                "assistant" if entry.tool_calls.is_some() => {
-                    messages.push(assistant_tool_call_message(
-                        entry.tool_calls.clone().unwrap(),
-                    ));
+        if history.is_empty() {
+            if !current_input.is_empty() {
+                messages.push(user_message(current_input));
+            }
+            return messages;
+        }
+
+        // ── Budget check ────────────────────────────────────────────
+        if self.total_history_tokens > HISTORY_BUDGET {
+            if let Some(cm_context) = self.context_manager.format_context() {
+                messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: Some(format!(
+                        "## Compressed Prior Context\n{}",
+                        cm_context
+                    )),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+
+            // Keep only the last MAX_COMPLETE_TURNS user turns to
+            // preserve tool_call → tool chain integrity.
+            let cutoff = {
+                let mut idx = history.len();
+                let mut seen = 0usize;
+                for (i, entry) in history.iter().enumerate().rev() {
+                    if entry.role == "user" {
+                        seen += 1;
+                        if seen > MAX_COMPLETE_TURNS {
+                            break;
+                        }
+                        idx = i;
+                    }
                 }
-                "tool" => {
-                    messages.push(tool_result_message(
-                        &entry.tool_call_id.clone().unwrap_or_default(),
-                        &entry.content,
-                    ));
-                }
-                _ => {
-                    messages.push(ChatMessage {
-                        role: entry.role.clone(),
-                        content: Some(entry.content.clone()),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
-                }
+                idx
+            };
+
+            for entry in &history[cutoff..] {
+                Self::push_message_entry(&mut messages, entry);
+            }
+        } else {
+            for entry in &history {
+                Self::push_message_entry(&mut messages, entry);
             }
         }
 
@@ -887,6 +1003,31 @@ impl Harness {
         }
 
         messages
+    }
+
+    /// Push a single history entry as a typed ChatMessage into the vector.
+    fn push_message_entry(messages: &mut Vec<ChatMessage>, entry: &HistoryEntry) {
+        match entry.role.as_str() {
+            "assistant" if entry.tool_calls.is_some() => {
+                messages.push(assistant_tool_call_message(
+                    entry.tool_calls.clone().unwrap(),
+                ));
+            }
+            "tool" => {
+                messages.push(tool_result_message(
+                    &entry.tool_call_id.clone().unwrap_or_default(),
+                    &entry.content,
+                ));
+            }
+            _ => {
+                messages.push(ChatMessage {
+                    role: entry.role.clone(),
+                    content: Some(entry.content.clone()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+        }
     }
 
     /// Add a tool call + its result to the history.
@@ -912,7 +1053,6 @@ impl Harness {
             content: String::new(),
             tool_calls: Some(vec![tc_msg]),
             tool_call_id: None,
-            token_count: assistant_tokens,
         });
         self.total_history_tokens += assistant_tokens;
 
@@ -921,23 +1061,15 @@ impl Harness {
             content: result.to_string(),
             tool_calls: None,
             tool_call_id: Some(id.to_string()),
-            token_count: result_tokens,
         });
         self.total_history_tokens += result_tokens;
 
-        self.evict_history_if_needed();
-    }
-
-    /// Evict the oldest history entries when the total token budget is exceeded.
-    fn evict_history_if_needed(&mut self) {
-        while self.total_history_tokens >= MAX_TOKENS && self.history.len() > 1 {
-            if let Some(evicted) = self.history.first() {
-                self.total_history_tokens = self
-                    .total_history_tokens
-                    .saturating_sub(evicted.token_count);
-            }
-            self.history.remove(0);
-        }
+        self.context_manager.add_buffer_context(super::context_manager::Role::assistant(&format!(
+            "{}: {} → {}",
+            name,
+            serde_json::to_string(args).unwrap_or_default(),
+            result
+        )));
     }
 
     /// Run the full agent loop: stream LLM response, dispatch tool calls,
@@ -1000,15 +1132,16 @@ impl Harness {
             content: input.to_string(),
             tool_calls: None,
             tool_call_id: None,
-            token_count: input_tokens,
         });
         self.total_history_tokens = input_tokens;
+        self.context_manager.add_buffer_context(super::context_manager::Role::user(input));
 
         macro_rules! check_stop {
             () => {
                 if self.stop || stop_signal.load(Ordering::Relaxed) {
                     log::debug!("run_agent_loop STOPPED");
-                    let _ = tx.send(HarnessEvent::Stopped);
+                    let cs = bincode::serialize(&self.context_manager.save_state()).unwrap_or_default();
+                    let _ = tx.send(HarnessEvent::Stopped { context_state: cs });
                     true
                 } else {
                     false
@@ -1033,8 +1166,10 @@ impl Harness {
             log::debug!("run_agent_loop PHASE1_START iteration={iteration}");
             let messages = self.build_conversation_messages(&current_input);
             let system_context = self.build_chat_context();
+            let mut assistant_response = String::new();
             let result = self
                 .stream_chat_with_messages(&system_context, &messages, |token| {
+                    assistant_response.push_str(token);
                     let _ = tx.send(HarnessEvent::Token {
                         text: token.to_string(),
                     });
@@ -1054,7 +1189,7 @@ impl Harness {
                 log::debug!("run_agent_loop PHASE1_ERR={e}");
 
                 if e == INTERRUPTED_MARKER {
-                    let _ = tx.send(HarnessEvent::Stopped);
+                    let _ = tx.send(HarnessEvent::Stopped { context_state: bincode::serialize(&self.context_manager.save_state()).unwrap_or_default() });
                     break;
                 }
 
@@ -1081,6 +1216,12 @@ impl Harness {
 
                 let _ = tx.send(HarnessEvent::Error(e));
                 break;
+            }
+
+            // Feed the assistant's response into the context manager.
+            if !assistant_response.is_empty() {
+                self.context_manager
+                    .add_buffer_context(super::context_manager::Role::assistant(&assistant_response));
             }
 
             // Record extraction failures in the correction memory so the model
@@ -1112,7 +1253,7 @@ impl Harness {
                 // complete.
                 if iteration >= MAX_ITERATIONS {
                     // log::debug!("run_agent_loop MAX_ITERATIONS={MAX_ITERATIONS} reached");
-                    let _ = tx.send(HarnessEvent::Done);
+                    let _ = tx.send(HarnessEvent::Done { context_state: bincode::serialize(&self.context_manager.save_state()).unwrap_or_default() });
                     self.stop = true;
                     break;
                 }
@@ -1523,7 +1664,7 @@ impl Harness {
                         DispatchOut::Stopped => {
                             log::debug!("run_agent_loop dispatch_next STOPPED by user");
                             self.stop = true;
-                            let _ = tx.send(HarnessEvent::Stopped);
+                            let _ = tx.send(HarnessEvent::Stopped { context_state: bincode::serialize(&self.context_manager.save_state()).unwrap_or_default() });
                             return; // Exit run_agent_loop entirely
                         }
                     }
@@ -1544,7 +1685,7 @@ impl Harness {
                 }
                 // No tools and no extraction failures — conversation is complete
                 log::debug!("run_agent_loop DONE (no tools)");
-                let _ = tx.send(HarnessEvent::Done);
+                let _ = tx.send(HarnessEvent::Done { context_state: bincode::serialize(&self.context_manager.save_state()).unwrap_or_default() });
                 break;
             }
 
@@ -1555,8 +1696,12 @@ impl Harness {
             // next iteration.
             current_input =
                 "Please continue with your response based on the information above.".to_string();
+
+            self.context_manager.run().await;
         }
         log::debug!("run_agent_loop EXIT");
+
+        self.context_manager.collapse_context();
     }
 
     /// Add paths from tool arguments to the appropriate allowlist so that
@@ -1674,8 +1819,9 @@ impl Harness {
 impl Harness {
     /// Create a harness for testing without a real connector.
     pub(crate) fn new_test() -> Self {
+        let cm_connector = Connector::new("openai").unwrap();
         Self {
-            connector: Connector::new("openai").unwrap(),
+            connector: cm_connector.clone(),
             sessions: Vec::new(),
             protocol: None,
             header_context: String::new(),
@@ -1688,6 +1834,7 @@ impl Harness {
             tool_issuer: VecDeque::new(),
             history: Vec::new(),
             total_history_tokens: 0,
+            context_manager: ContextManager::new(cm_connector, MAX_TOOL_RETRIES as u32),
             disabled_tools: HashSet::new(),
             tool_failure_count: 0,
             tool_extraction_failure_count: 0,
