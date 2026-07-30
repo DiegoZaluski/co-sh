@@ -2531,6 +2531,25 @@ impl App {
                             let provider = self.llm_config.provider.clone();
                             let model = self.llm_config.model.clone();
                             let fallbacks = self.router_view.fallbacks.clone();
+                            // Auto-rotate: move the first working fallback to the front so the
+                            // next message tries the provider that actually worked before wasting
+                            // time on failing ones. Rotation is in-memory only (not persisted).
+                            let fallbacks = if model.as_deref() == Some("auto") {
+                                let working = fallbacks.iter().position(|fb| {
+                                    cosh_sdk::connector::Connector::new(&fb.provider).is_ok()
+                                });
+                                match working {
+                                    Some(0) | None => fallbacks,
+                                    Some(idx) => {
+                                        let mut rotated = fallbacks;
+                                        rotated.rotate_left(idx);
+                                        self.router_view.fallbacks = rotated.clone();
+                                        rotated
+                                    }
+                                }
+                            } else {
+                                fallbacks
+                            };
                             let stop_signal = self.stop_signal.clone();
                             let input = msg;
                             let cwd = self.state.working_directory.clone();
