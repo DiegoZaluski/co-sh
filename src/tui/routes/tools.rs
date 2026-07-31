@@ -1,5 +1,3 @@
-// TODO: Stub for adding tool-option persistence logic.
-// Currently, options reset on program restart.
 use std::collections::HashSet;
 
 use ratatui::buffer::Buffer;
@@ -10,6 +8,25 @@ use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::Theme;
 use crate::util::list_selection::ListSelection;
+
+const DISABLED_TOOLS_KEY: &str = "disabled_tools";
+
+pub fn load_disabled_tools(
+    cache: &crate::util::cache::StaleCache<String, String>,
+) -> HashSet<String> {
+    match cache.get(&DISABLED_TOOLS_KEY.to_string()) {
+        Some(raw) => serde_json::from_str(raw).unwrap_or_default(),
+        None => HashSet::new(),
+    }
+}
+
+pub fn save_disabled_tools(
+    cache: &mut crate::util::cache::StaleCache<String, String>,
+    disabled: &HashSet<String>,
+) {
+    let raw = serde_json::to_string(disabled).unwrap_or_default();
+    cache.finish_revalidation(DISABLED_TOOLS_KEY.to_string(), raw);
+}
 
 fn internal_tools() -> &'static [(&'static str, &'static str)] {
     &[

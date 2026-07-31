@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 /// The cache directory is resolved via [`ProjectDirs`] as:
 /// `{data_dir}/{cache_subdir}/{filename}` (e.g. `~/.local/share/cosh/cache/model.json`).
 ///
-/// Callers must provide a `cache_subdir` — they should NOT hardcode a vendor
-/// path here; instead use something like `"cosh/cache"` to keep the path
-/// under the OS data directory.
+/// Callers must provide a `cache_subdir` relative to the data dir (e.g. `"cache"`).
+/// The data dir already includes the app name (`cosh`), so callers should NOT
+/// prefix paths with `"cosh/"`.
 ///
 /// # Type parameters
 /// - `K`: Cache key type (must be `Eq + Hash + Clone + Serialize + DeserializeOwned`).
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// # Example (models use case)
 /// ```ignore
-/// let mut cache: StaleCache<String, Vec<ModelEntry>> = StaleCache::new("cosh/cache", "model.json");
+/// let mut cache: StaleCache<String, Vec<ModelEntry>> = StaleCache::new("cache", "model.json");
 ///
 /// if let Some(models) = cache.get("openai") {
 ///     // Use cached models immediately
@@ -67,7 +67,7 @@ where
     /// Automatically loads any existing data from disk on construction.
     /// Creates the cache directory if it does not exist.
     ///
-    /// Callers must supply a `cache_subdir` (e.g. `"cosh/cache"`). No vendor
+    /// Callers must supply a `cache_subdir` (e.g. `"cache"`). No vendor
     /// path is hardcoded here — each caller decides where under the OS data
     /// directory to place cache files.
     ///

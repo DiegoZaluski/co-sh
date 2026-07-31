@@ -193,10 +193,13 @@ impl App {
         let (perm_tx, _perm_rx) = mpsc::unbounded_channel();
 
         let theme_registry = ThemeRegistry::new();
-        let prefs_cache = crate::util::cache::StaleCache::new("cosh", "preferences.json");
+        let prefs_cache = crate::util::cache::StaleCache::new("", "preferences.json");
 
         // Load saved fallback chain from preferences cache
         let saved_fallbacks = fallback::load_fallbacks(&prefs_cache);
+
+        // Load saved disabled tools from preferences cache
+        let saved_disabled_tools = crate::routes::tools::load_disabled_tools(&prefs_cache);
 
         // Load saved theme from preferences cache, if available
         let saved_theme: Option<String> = prefs_cache.get(&"theme".to_string()).cloned();
@@ -212,7 +215,11 @@ impl App {
             theme,
             session_view: SessionView::new(),
             home_view: HomeView::new(),
-            internal_tools_view: InternalToolsView::new(),
+            internal_tools_view: {
+                let mut v = InternalToolsView::new();
+                v.disabled = saved_disabled_tools;
+                v
+            },
             show_internal_tools: false,
             add_provider_view: AddProviderView::new(),
             show_add_provider: false,
@@ -238,7 +245,7 @@ impl App {
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
             theme_dialog_original: None,
             model_dialog_original: None,
-            model_cache: crate::util::cache::StaleCache::new("cosh/cache", "model.json"),
+            model_cache: crate::util::cache::StaleCache::new("cache", "model.json"),
             prefs_cache,
             session_store,
             pending_delete_session_id: None,
@@ -2155,6 +2162,10 @@ impl App {
                             }
                             KeyCode::Enter | KeyCode::Char(' ') => {
                                 self.internal_tools_view.toggle_current();
+                                crate::routes::tools::save_disabled_tools(
+                                    &mut self.prefs_cache,
+                                    &self.internal_tools_view.disabled,
+                                );
                                 return Ok(false);
                             }
                             KeyCode::Esc => {
@@ -4313,6 +4324,10 @@ impl App {
             if let Some(clicked_idx) = self.internal_tools_view.handle_mouse(&mouse, tools_area) {
                 self.internal_tools_view.selection.selected_index = clicked_idx;
                 self.internal_tools_view.toggle_current();
+                crate::routes::tools::save_disabled_tools(
+                    &mut self.prefs_cache,
+                    &self.internal_tools_view.disabled,
+                );
                 return Ok(true);
             }
         } // 8ba. Rag view — mouse click on DB list row or Create DB button
