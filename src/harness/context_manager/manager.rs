@@ -8,6 +8,7 @@ use crate::util::token_counter::estimate_tokens;
 use cosh_sdk::connector::Connector;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use text_splitter::TextSplitter;
 
 use super::compression::init as deterministic_compress;
 
@@ -40,6 +41,16 @@ const MMR_LAMBDA: f64 = 0.7;
 /// Compression ratio for deterministic compression (Layer 1): keep roughly
 /// this fraction of the input chunks after MMR selection.
 const MMR_RATIO: f64 = 0.4;
+
+/// Maximum token budget for the text sent to the synchronous LLM compression
+/// call. Entries above this are pre-compressed deterministically first, so a
+/// huge entry can never stall the agent loop with a giant round-trip.
+const MAX_LLM_COMPRESSION_INPUT: usize = 4_000;
+
+/// Maximum number of sentence-chunks processed per deterministic compression
+/// pass. Larger inputs are split into batches to bound the O(n²) SVD/MMR
+/// cost while preserving every chunk (nothing is lost, only compressed).
+const DETERMINISTIC_MAX_CHUNKS: usize = 200;
 
 /// Default empty slot used when resizing exhibitions.
 const EMPTY_SLOT: Context = Context {
@@ -245,17 +256,36 @@ impl ContextManager {
 
     /// Run one iteration of the context manager:
     /// 1. Format and display the current context.
-    /// 2. If total tokens exceed the budget, compress the oldest queue entry
-    ///    (pop_front → compress → push_back — circular queue rotation).
+    /// 2. If total tokens exceed the budget, first drain the fresh buffer
+    ///    (deterministic compression — no LLM round-trip), then rotate the
+    ///    oldest queue entry (pop_front → compress → push_back).
     /// 3. Return the formatted context string.
+    ///
+    /// The buffer drain is what moves the TUI budget bar: in normal sessions
+    /// the raw fresh chunks dominate the cost, so they are compressed into
+    /// the queue as soon as the budget is exceeded.
     pub async fn run(&mut self) -> Option<String> {
         let context = self.format_context()?;
 
         if estimate_tokens(&context) >= MAX_CONTEXT_TOKENS {
+            // Drain the over-budget fresh buffer deterministically first.
+            if !self.buffer_chunks.is_empty() {
+                let last_checkpoint = self
+                    .buffer_chunks
+                    .last()
+                    .map(|c| c.checkpoints)
+                    .unwrap_or(0);
+                if let Err(e) = self.compress_fresh_up_to(last_checkpoint) {
+                    log::debug!("run(): buffer drain failed: {e}");
+                }
+            }
+            // Still over budget? Rotate the oldest queue entry.
             self.compress_oldest(None).await;
         }
 
-        Some(context)
+        // Re-render so the returned context reflects the post-drain state
+        // (the cache was invalidated by the compression above).
+        self.format_context()
     }
 
     /// Return the current maximum retry limit for compression attempts.
@@ -360,7 +390,7 @@ impl ContextManager {
     ///
     /// When an entry reaches seed size (≤ [`SEED_MAX_TOKENS`]) it leaves
     /// the queue and becomes fixed — never compressed again.
-    async fn compress_oldest(&mut self, raw_content: Option<&str>) -> &Self {
+    pub(crate) async fn compress_oldest(&mut self, raw_content: Option<&str>) -> &Self {
         if let Some(raw) = raw_content {
             let tokens = estimate_tokens(raw);
             self.build_context(raw.to_string(), None, 1, tokens, None);
@@ -386,6 +416,10 @@ impl ContextManager {
                     "[context_manager] compress_if_needed failed (hash={})",
                     entry.hash_id
                 );
+                // Never lose context: restore the entry so the next tick can
+                // retry compression instead of silently dropping it.
+                self.queue.push_front(entry);
+                self.invalidate_cache();
                 return self;
             }
         };
@@ -431,6 +465,10 @@ impl ContextManager {
     }
 
     /// Compress an entry with guard verification and retry loop.
+    ///
+    /// The LLM path is best-effort: when the call fails or the retries are
+    /// exhausted without an under-budget result, the entry is still compressed
+    /// with the deterministic pipeline — it is never dropped.
     async fn compress_if_needed(&self, entry: &Context) -> Option<String> {
         let tolerance = MAX_CONTEXT_TOKENS * (TOLERANCE_PERCENT as usize) / 100;
         let mut current_text = if !entry.assistant.is_empty() {
@@ -440,14 +478,29 @@ impl ContextManager {
         };
         let mut current_tokens = entry.tokens;
 
+        // Bound the synchronous LLM call: pre-compress deterministically
+        // anything above the call budget so a huge entry cannot stall the
+        // agent loop with a giant round-trip.
+        if current_tokens > MAX_LLM_COMPRESSION_INPUT {
+            current_text = self.deterministic_compression(&current_text);
+            current_tokens = estimate_tokens(&current_text);
+        }
+
         for _ in 0..self.max_retries {
             let reduction_needed = current_tokens.saturating_sub(MAX_CONTEXT_TOKENS);
 
-            let summary = self
+            let summary = match self
                 .compress_via_llm(&current_text, MAX_CONTEXT_TOKENS, reduction_needed)
                 .await
-                .map_err(|e| log::error!("[context_manager] compression failed: {e}"))
-                .ok()?;
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("[context_manager] compression failed: {e}");
+                    // LLM unavailable (MissingApiKey, timeout, ...) — fall back
+                    // to the deterministic pipeline. Nothing is dropped.
+                    return Some(self.deterministic_compression(&current_text));
+                }
+            };
 
             let result_tokens = estimate_tokens(&summary);
 
@@ -461,7 +514,9 @@ impl ContextManager {
             current_text = summary;
             current_tokens = result_tokens;
         }
-        None
+        // Retries exhausted without an under-budget result — the deterministic
+        // fallback keeps the entry compressed and never loses it.
+        Some(self.deterministic_compression(&current_text))
     }
 
     /// Compress a context entry via the LLM with an informative prompt.
@@ -577,8 +632,24 @@ impl ContextManager {
     /// Deterministic compression (Layer1) via TF-IDF → LSA → MMR.
     /// Splits text into sentence-like chunks using text-splitter, ranks them
     /// by relevance + diversity, and returns the most informative subset.
+    ///
+    /// Very large inputs are processed in bounded batches so the O(n²)
+    /// SVD/MMR cost cannot stall the agent loop; every chunk still passes
+    /// through the pipeline (nothing is lost).
     fn deterministic_compression(&self, ctxt: &str) -> String {
-        deterministic_compress(ctxt, false, TFIDF_MAX_DF, MMR_LAMBDA, MMR_RATIO)
+        if estimate_tokens(ctxt) <= MAX_CONTEXT_TOKENS {
+            return deterministic_compress(ctxt, false, TFIDF_MAX_DF, MMR_LAMBDA, MMR_RATIO);
+        }
+
+        let splitter = TextSplitter::new(200);
+        let chunks: Vec<&str> = splitter.chunks(ctxt).collect();
+        chunks
+            .chunks(DETERMINISTIC_MAX_CHUNKS)
+            .map(|batch| {
+                let text = batch.concat();
+                deterministic_compress(&text, false, TFIDF_MAX_DF, MMR_LAMBDA, MMR_RATIO)
+            })
+            .collect()
     }
 
     /// Mark a hash for expansion so the next [`format_context`] call

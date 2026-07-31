@@ -20,7 +20,6 @@ use crate::core::rgba::{ColorInput, parse_color};
 use super::context::{MarkdownContext, MarkdownElement};
 use super::styles::{MarkdownPalette, rgba_to_ratatui as rgba_to_color};
 
-// ── Constants ────────────────────────────────────────────────────
 /// Unicode bullet character for unordered list items.
 const LIST_BULLET: &str = "• ";
 /// Horizontal padding (left/right) inside code blocks.

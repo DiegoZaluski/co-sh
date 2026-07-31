@@ -960,17 +960,8 @@ impl Harness {
             return messages;
         }
 
-        // ── Budget check ────────────────────────────────────────────
+        // Budget check
         if self.total_history_tokens > HISTORY_BUDGET {
-            if let Some(cm_context) = self.context_manager.format_context() {
-                messages.push(ChatMessage {
-                    role: "system".to_string(),
-                    content: Some(format!("## Compressed Prior Context\n{}", cm_context)),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            }
-
             // Keep only the last MAX_COMPLETE_TURNS user turns to
             // preserve tool_call → tool chain integrity.
             let cutoff = {
@@ -987,6 +978,35 @@ impl Harness {
                 }
                 idx
             };
+
+            // Only the compressed/exhibition portion goes into the system
+            // message — never the full raw buffer. Fresh turns are delivered
+            // via the messages array below; duplicating them here would make
+            // the payload grow unboundedly (raw buffer verbatim).
+            if let Some(cm_context) = self.context_manager.format_compressed_context() {
+                messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: Some(format!("## Compressed Prior Context\n{}", cm_context)),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            } else if cutoff > 0 {
+                // Nothing compressed yet, but turns before the retained window
+                // are being dropped — signal the truncation so it is never
+                // silent. (`cutoff > 0` is the drop test: the cutoff index is
+                // only non-zero when history entries precede the window.)
+                messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: Some(
+                        "## Compressed Prior Context\n\
+                         Older turns beyond the retained window are managed by the \
+                         context manager and are not repeated here."
+                            .to_string(),
+                    ),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
 
             for entry in &history[cutoff..] {
                 Self::push_message_entry(&mut messages, entry);

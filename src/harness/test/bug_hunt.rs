@@ -249,6 +249,37 @@ fn bug07_full_conversation_sent_twice_system_and_messages() {
     );
 }
 
+// ── BUG-08 ──────────────────────────────────────────────────────────
+// When total_history_tokens exceeds HISTORY_BUDGET, build_conversation_messages
+// pushes `format_context()` — which renders the ENTIRE raw buffer verbatim
+// ("## Full" section) — as the "## Compressed Prior Context" system message.
+// The "compression" is cosmetic: the model receives the full raw conversation
+// on every iteration, so request payloads grow unboundedly (matches the
+// observed minutes-long stalls in read/write/grep sessions).
+#[test]
+fn bug08_over_budget_system_message_ships_full_raw_buffer() {
+    let marker = "UNIQUE_RAW_BUFFER_MARKER_XYZ";
+    // ~55k tokens — above HISTORY_BUDGET (50_000)
+    let big = format!("{marker} ") + &"word ".repeat(55_000);
+
+    let mut h = Harness::new_test().with_history(&[("user".into(), big.clone())]);
+
+    let msgs = h.build_messages_for_test("hi");
+    let system_text: String = msgs
+        .iter()
+        .filter(|m| m.role == "system")
+        .filter_map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Correct behavior: the over-budget system message must contain a
+    // COMPRESSED summary — never the raw buffer verbatim.
+    assert!(
+        !system_text.contains(marker),
+        "BUG-08: 'Compressed Prior Context' system message contains the FULL raw buffer ({marker}) — the payload grows unboundedly every iteration"
+    );
+}
+
 // ── BUG-06 ──────────────────────────────────────────────────────────
 // init_native_tools() runs once at loop start. When a connector error triggers
 // a fallback switch, `self.connector = c.with_model(...)` replaces the
