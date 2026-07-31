@@ -554,11 +554,11 @@ impl Harness {
         let mut out = self.header_context.clone();
         let correction = self.correction_memory.format();
         out.push_str(&correction);
-        // Append the current ContextManager formatted context so the model
-        // sees buffer chunks, compressed exhibitions, hashes, and checkpoints.
-        if let Some(cm_context) = self.context_manager.format_context()
-            && !cm_context.trim().is_empty()
-        {
+        // Append only the compressed/exhibition portion of the ContextManager
+        // (hashes + summaries the model needs for expand_context). Raw turns
+        // are delivered via the messages array — the full buffer must not be
+        // duplicated into the system prompt.
+        if let Some(cm_context) = self.context_manager.format_compressed_context() {
             out.push_str(&format!("\n## Compressed Context\n{}\n", cm_context));
         }
         out
@@ -997,7 +997,12 @@ impl Harness {
             }
         }
 
-        if !current_input.is_empty() {
+        // Do not re-append the input when it is already the last user turn in
+        // history — it was emitted above as a proper user message.
+        let input_is_duplicate = history
+            .last()
+            .is_some_and(|e| e.role == "user" && e.content == current_input);
+        if !current_input.is_empty() && !input_is_duplicate {
             messages.push(user_message(current_input));
         }
 
@@ -1127,15 +1132,24 @@ impl Harness {
         // Add the initial user input to structured history so the model
         // sees it as a proper `role: "user"` message in the conversation.
         let input_tokens = crate::util::token_counter::estimate_tokens(input);
-        self.history.push(HistoryEntry {
-            role: "user".to_string(),
-            content: input.to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-        self.total_history_tokens = input_tokens;
-        self.context_manager
-            .add_buffer_context(super::context_manager::Role::user(input));
+        // Skip pushing the input when it is already the trailing user turn
+        // (e.g. it was loaded via with_history) — otherwise the same message
+        // is duplicated in the first request.
+        let input_is_duplicate = self
+            .history
+            .last()
+            .is_some_and(|e| e.role == "user" && e.content == input);
+        if !input_is_duplicate {
+            self.history.push(HistoryEntry {
+                role: "user".to_string(),
+                content: input.to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+            self.total_history_tokens += input_tokens;
+            self.context_manager
+                .add_buffer_context(super::context_manager::Role::user(input));
+        }
 
         // Send initial context info so the TUI budget bar shows immediately
         // even before the first LLM call completes.
@@ -1210,6 +1224,10 @@ impl Harness {
                     match Connector::new(&provider) {
                         Ok(c) => {
                             self.connector = c.with_model(&model);
+                            // Re-register native tool definitions on the new
+                            // connector — otherwise the fallback provider
+                            // receives zero tools.
+                            self.init_native_tools();
                             self.tool_issuer.clear();
                             log::debug!("switched to fallback: {provider}/{model}");
                             switched = true;
@@ -1229,8 +1247,19 @@ impl Harness {
                 break;
             }
 
-            // Feed the assistant's response into the context manager.
+            // Record the assistant's text response in the structured history
+            // so it is delivered via the messages array on the next iteration
+            // (the CM buffer alone must not be the only carrier — BUG-07).
             if !assistant_response.is_empty() {
+                let response_tokens =
+                    crate::util::token_counter::estimate_tokens(&assistant_response);
+                self.history.push(HistoryEntry {
+                    role: "assistant".to_string(),
+                    content: assistant_response.clone(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+                self.total_history_tokens += response_tokens;
                 self.context_manager
                     .add_buffer_context(super::context_manager::Role::assistant(
                         &assistant_response,
@@ -1251,7 +1280,12 @@ impl Harness {
                 self.correction_memory.push(&msg);
             }
 
-            if check_stop!() {
+            // Honor stop only once pending tool calls have been dispatched —
+            // never drop queued work because stop was requested mid-stream.
+            // Note: `check_stop!()` sends a `Stopped` event as a side effect,
+            // so it must only be evaluated when there is nothing left to
+            // dispatch (short-circuit ordering).
+            if !self.has_pending_tools() && check_stop!() {
                 break;
             }
 
@@ -1274,7 +1308,11 @@ impl Harness {
                     break;
                 }
 
-                if check_stop!() {
+                // A model-requested stop (`self.stop` via stop_agent_loop) must
+                // NOT interrupt dispatch of already-queued tool calls — the
+                // queue is drained first, then stop is honored after phase 2.
+                // Only an external stop_signal (user Esc) interrupts here.
+                if stop_signal.load(Ordering::Relaxed) {
                     break;
                 }
 
@@ -1312,8 +1350,19 @@ impl Harness {
                             });
 
                             log::debug!("run_agent_loop WAITING for answer_rx");
-                            // Wait for the TUI to send back answers
-                            let answer = answer_rx.recv().await;
+                            // Wait for the TUI to send back answers, but stay
+                            // interruptible by the user's stop signal.
+                            let answer = tokio::select! {
+                                a = answer_rx.recv() => a,
+                                _ = async {
+                                    loop {
+                                        if stop_signal.load(Ordering::Relaxed) {
+                                            break;
+                                        }
+                                        tokio::time::sleep(Duration::from_millis(50)).await;
+                                    }
+                                } => None,
+                            };
                             // log::debug!("run_agent_loop GOT answer={:?}", answer.is_some());
                             match answer {
                                 Some(Ok(answers)) => {
@@ -1338,6 +1387,16 @@ impl Harness {
                                     let _ = tx.send(HarnessEvent::ToolError { error: e });
                                 }
                                 None => {
+                                    // `None` here means either the channel was
+                                    // dropped or the stop signal fired. When the
+                                    // user stopped, break out quietly — the outer
+                                    // `check_stop!()` sends the Stopped event.
+                                    if stop_signal.load(Ordering::Relaxed) {
+                                        log::debug!(
+                                            "run_agent_loop answer_rx interrupted by stop"
+                                        );
+                                        break;
+                                    }
                                     log::debug!("run_agent_loop answer_rx CLOSED");
                                     let _ = tx.send(HarnessEvent::ToolError {
                                         error: "Internal error: question channel closed"
@@ -1700,6 +1759,17 @@ impl Harness {
                 if extraction_failures > 0 {
                     // Model tried but all tool calls failed validation.
                     // Give it another chance with the correction prompt.
+                    if iteration >= MAX_ITERATIONS {
+                        // Safety net — emit a terminal event so the TUI does
+                        // not stay in a "running" state.
+                        let _ = tx.send(HarnessEvent::Done {
+                            context_state: bincode::serialize(
+                                &self.context_manager.save_state(),
+                            )
+                            .unwrap_or_default(),
+                        });
+                        break;
+                    }
                     log::debug!("run_agent_loop RETRY (extraction failures)");
                     current_input.clear();
                     continue;

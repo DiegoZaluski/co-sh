@@ -704,47 +704,7 @@ impl ContextManager {
 
         // 1. Resolve each expand target: extract exhibition slot and walk
         //    the layers chain until we reach the requested level.
-        let mut expanded_slots: HashMap<usize, (String, u64, u64)> = HashMap::new();
-
-        for &target in &self.expand {
-            let idx = (target >> 24) as usize;
-            if idx >= self.exhibitions.len() {
-                continue;
-            }
-            let exh = &self.exhibitions[idx];
-            if exh.hash_id == 0 && exh.assistant.is_empty() && exh.user.is_empty() {
-                continue;
-            }
-
-            let target_lv = target & 0xFFFFFF;
-            if target_lv >= exh.lv {
-                continue;
-            }
-
-            let mut walk_hash = exh.hash_id;
-            let mut walk_lv = exh.lv;
-            let mut walk_text = if !exh.assistant.is_empty() {
-                exh.assistant.clone()
-            } else {
-                exh.user.clone()
-            };
-
-            while walk_lv > target_lv {
-                match self.layers.get(&walk_hash).and_then(|v| v.first()) {
-                    Some(parent) => {
-                        walk_hash = parent.hash_id;
-                        walk_lv = parent.lv;
-                        walk_text = if !parent.assistant.is_empty() {
-                            parent.assistant.clone()
-                        } else {
-                            parent.user.clone()
-                        };
-                    }
-                    None => break,
-                }
-            }
-            expanded_slots.insert(idx, (walk_text, walk_lv, target));
-        }
+        let mut expanded_slots = self.resolve_expanded_slots();
 
         // 2. Buffer context (fresh, not yet summarized).
         //    Oldest buffer entry first → newest last.
@@ -793,6 +753,98 @@ impl ContextManager {
 
         self.rendered = Some(result.clone());
         self.dirty = false;
+        Some(result)
+    }
+
+    /// Resolve each expand target: extract the exhibition slot and walk the
+    /// layers chain until the requested level is reached.
+    fn resolve_expanded_slots(&self) -> HashMap<usize, (String, u64, u64)> {
+        let mut expanded_slots: HashMap<usize, (String, u64, u64)> = HashMap::new();
+
+        for &target in &self.expand {
+            let idx = (target >> 24) as usize;
+            if idx >= self.exhibitions.len() {
+                continue;
+            }
+            let exh = &self.exhibitions[idx];
+            if exh.hash_id == 0 && exh.assistant.is_empty() && exh.user.is_empty() {
+                continue;
+            }
+
+            let target_lv = target & 0xFFFFFF;
+            if target_lv >= exh.lv {
+                continue;
+            }
+
+            let mut walk_hash = exh.hash_id;
+            let mut walk_lv = exh.lv;
+            let mut walk_text = if !exh.assistant.is_empty() {
+                exh.assistant.clone()
+            } else {
+                exh.user.clone()
+            };
+
+            while walk_lv > target_lv {
+                match self.layers.get(&walk_hash).and_then(|v| v.first()) {
+                    Some(parent) => {
+                        walk_hash = parent.hash_id;
+                        walk_lv = parent.lv;
+                        walk_text = if !parent.assistant.is_empty() {
+                            parent.assistant.clone()
+                        } else {
+                            parent.user.clone()
+                        };
+                    }
+                    None => break,
+                }
+            }
+            expanded_slots.insert(idx, (walk_text, walk_lv, target));
+        }
+
+        expanded_slots
+    }
+
+    /// Render only the compressed/exhibition portion of the context — the
+    /// hashes and summaries the model needs for `expand_context` and
+    /// `force_compress`.
+    ///
+    /// The raw buffer is deliberately excluded: fresh turns are delivered via
+    /// the messages array, so including them here would duplicate every turn
+    /// in the system prompt.
+    ///
+    /// Returns `None` when there is nothing compressed to show.
+    pub fn format_compressed_context(&mut self) -> Option<String> {
+        let mut expanded_slots = self.resolve_expanded_slots();
+
+        let has_exhibitions = self
+            .exhibitions
+            .iter()
+            .any(|exh| exh.hash_id != 0 || !exh.assistant.is_empty() || !exh.user.is_empty());
+        if !has_exhibitions {
+            return None;
+        }
+
+        let mut result = String::new();
+        result.push_str("## SUMMARY\n\n");
+        for (i, exh) in self.exhibitions.iter().enumerate() {
+            if exh.hash_id == 0 && exh.assistant.is_empty() && exh.user.is_empty() {
+                continue;
+            }
+            if let Some((text, lv, hash)) = expanded_slots.remove(&i) {
+                result.push_str(&format!("({hash}, {lv}) [EXPANDED]\n{text}\n\n"));
+            } else {
+                let text = if !exh.assistant.is_empty() {
+                    &exh.assistant
+                } else {
+                    &exh.user
+                };
+                result.push_str(&format!(
+                    "({hash}, {lv})\n{text}\n\n",
+                    hash = exh.hash_id,
+                    lv = exh.lv,
+                ));
+            }
+        }
         Some(result)
     }
 }
