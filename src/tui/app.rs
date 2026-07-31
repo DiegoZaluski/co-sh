@@ -2813,12 +2813,14 @@ impl App {
                             self.config.show_timestamps = !self.config.show_timestamps;
                         }
                         Some(crate::keymap::Action::ToggleMode) => {
-                            use cosh::harness::Mode;
-                            self.state.mode = match self.state.mode {
-                                Mode::Build => Mode::Ask,
-                                Mode::Ask => Mode::Yolo,
-                                Mode::Yolo => Mode::Build,
-                            };
+                            if matches!(self.mode(), AppMode::Session) {
+                                use cosh::harness::Mode;
+                                self.state.mode = match self.state.mode {
+                                    Mode::Build => Mode::Ask,
+                                    Mode::Ask => Mode::Yolo,
+                                    Mode::Yolo => Mode::Build,
+                                };
+                            }
                         }
                         Some(crate::keymap::Action::HistoryUp) => {
                             self.prompt_view.note_activity();
