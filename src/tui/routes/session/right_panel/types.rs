@@ -110,6 +110,11 @@ impl RightPanelState {
     }
 
     /// Scroll the first section with overflow (prefers bash > subagent > todo) up by `delta` lines.
+    ///
+    /// Uses saturating arithmetic: the stored offsets may hold the `i32::MAX`
+    /// sentinel set by [`scroll_to_bottom`](Self::scroll_to_bottom) until the
+    /// render path clamps them (which only happens when content overflows).
+    /// A raw `+ delta` would overflow and panic in debug builds.
     pub fn scroll_up(&mut self, delta: i32) {
         self.user_scrolled_away = true;
         if self
@@ -117,19 +122,24 @@ impl RightPanelState {
             .iter()
             .any(|p| !p.command.starts_with("subagent:"))
         {
-            self.bash_scroll_y = (self.bash_scroll_y - delta).max(0);
+            self.bash_scroll_y = self.bash_scroll_y.saturating_sub(delta).max(0);
         } else if self
             .pty_sessions
             .iter()
             .any(|p| p.command.starts_with("subagent:"))
         {
-            self.subagent_scroll_y = (self.subagent_scroll_y - delta).max(0);
+            self.subagent_scroll_y = self.subagent_scroll_y.saturating_sub(delta).max(0);
         } else if !self.todos.is_empty() {
-            self.todo_scroll_y = (self.todo_scroll_y - delta).max(0);
+            self.todo_scroll_y = self.todo_scroll_y.saturating_sub(delta).max(0);
         }
     }
 
     /// Scroll the first section with overflow (prefers bash > subagent > todo) down by `delta` lines.
+    ///
+    /// Uses saturating arithmetic: the stored offsets may hold the `i32::MAX`
+    /// sentinel set by [`scroll_to_bottom`](Self::scroll_to_bottom) until the
+    /// render path clamps them (which only happens when content overflows).
+    /// A raw `+ delta` would overflow and panic in debug builds.
     pub fn scroll_down(&mut self, delta: i32) {
         self.user_scrolled_away = true;
         if self
@@ -137,15 +147,15 @@ impl RightPanelState {
             .iter()
             .any(|p| !p.command.starts_with("subagent:"))
         {
-            self.bash_scroll_y = (self.bash_scroll_y + delta).max(0);
+            self.bash_scroll_y = self.bash_scroll_y.saturating_add(delta).max(0);
         } else if self
             .pty_sessions
             .iter()
             .any(|p| p.command.starts_with("subagent:"))
         {
-            self.subagent_scroll_y = (self.subagent_scroll_y + delta).max(0);
+            self.subagent_scroll_y = self.subagent_scroll_y.saturating_add(delta).max(0);
         } else if !self.todos.is_empty() {
-            self.todo_scroll_y = (self.todo_scroll_y + delta).max(0);
+            self.todo_scroll_y = self.todo_scroll_y.saturating_add(delta).max(0);
         }
     }
 
@@ -312,5 +322,60 @@ mod tests {
         state.fail_last_pty("error!".to_string());
         assert_eq!(state.pty_sessions[0].status, PtyStatus::Failed);
         assert_eq!(state.pty_sessions[0].output, "error!");
+    }
+
+    /// Reproducer: `scroll_to_bottom()` stores `i32::MAX` as the scroll
+    /// offset sentinel. When the panel content fits the viewport, the render
+    /// path never clamps that value (the clamp only runs when `has_scroll`
+    /// is true). A later `scroll_down()` then evaluates `i32::MAX + delta`,
+    /// which overflows and panics in debug builds. This happens right after
+    /// the terminal is resized large enough for the right panel to appear
+    /// and the user scrolls inside it.
+    #[test]
+    fn scroll_down_after_scroll_to_bottom_does_not_overflow() {
+        let mut state = RightPanelState::new();
+        state.start_pty("echo hi".to_string(), None);
+        state.scroll_to_bottom();
+
+        // Reproduce the post-resize scroll: offset is still i32::MAX because
+        // the content fits the viewport, so no render clamp has run.
+        // Scrolling down while pinned to the bottom must be a no-op
+        // (saturating), never an overflow panic.
+        state.scroll_down(3);
+        assert_eq!(state.bash_scroll_y, i32::MAX);
+
+        state.scroll_down(20);
+        assert_eq!(state.bash_scroll_y, i32::MAX);
+
+        // And scrolling up from the bottom sentinel must work normally.
+        state.scroll_up(5);
+        assert_eq!(state.bash_scroll_y, i32::MAX - 5);
+    }
+
+    /// Same overflow applies to the subagent and todo sections — the
+    /// `i32::MAX` sentinel from `scroll_to_bottom()` survives the render
+    /// when content fits, so scrolling must saturate on those branches too.
+    #[test]
+    fn scroll_down_after_scroll_to_bottom_saturates_all_sections() {
+        // Subagent branch: only subagent PTYs present.
+        let mut sub = RightPanelState::new();
+        sub.start_pty("subagent: opencode".to_string(), None);
+        sub.scroll_to_bottom();
+        sub.scroll_down(3);
+        assert_eq!(sub.subagent_scroll_y, i32::MAX);
+        sub.scroll_up(5);
+        assert_eq!(sub.subagent_scroll_y, i32::MAX - 5);
+
+        // Todo branch: only todos present, no PTYs.
+        let mut todos = RightPanelState::new();
+        todos.set_todos(vec![TodoItem {
+            status: "pending".to_string(),
+            content: "do the thing".to_string(),
+        }]);
+        todos.scroll_to_bottom();
+        todos.scroll_down(3);
+        assert_eq!(todos.todo_scroll_y, i32::MAX);
+        todos.scroll_up(5);
+        assert_eq!(todos.todo_scroll_y, i32::MAX - 5);
     }
 }

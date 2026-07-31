@@ -684,3 +684,43 @@ fn test_scroll_does_not_jump_on_repeated_streaming() {
         prev_scroll = view.scroll_y;
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Regression: drag-selection clamp panic on zero-height viewport
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Regression test for the `min > max. min = 1, max = 0` panic.
+///
+/// When a drag selection is active (`drag_selection` is `Some`) and the
+/// session viewport momentarily has zero height (e.g. the terminal is resized
+/// larger until the right panel appears, which can briefly report a 0-height
+/// session area before the next draw), the selection highlight renderer runs:
+///
+/// ```ignore
+/// (…).clamp(vp_top, vp_top + i32::from(inner_area.height) - 1)
+/// ```
+///
+/// With `inner_area.height == 0` the upper bound is `vp_top - 1`, which is
+/// smaller than the lower bound `vp_top` → `Ord::clamp` panics. The render
+/// must tolerate a zero-height viewport and simply skip the highlight.
+#[test]
+fn drag_selection_render_tolerates_zero_height_viewport() {
+    let msg = build_streaming_message(100);
+    let state = test_state(msg);
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    // Session area with y = 1 and height = 0: this is the exact geometry that
+    // produces `min = 1, max = 0` in the selection-highlight clamp.
+    let area = Rect::new(0, 1, 80, 0);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
+
+    // Simulate an in-flight drag selection.
+    view.drag_selection = Some((10, 1, 50, 1));
+    view.selection_anchor_content_y = 0;
+    view.selection_focus_content_y = 3;
+
+    // Must not panic. The highlight is simply not drawn for a 0-height viewport.
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+}

@@ -2413,17 +2413,23 @@ impl SessionView {
         self.total_height = self.cached_total_height;
         self.last_content_height = self.cached_total_height;
 
-        if let Some((anchor_x, _anchor_screen_y, focus_x, _focus_screen_y)) = self.drag_selection {
+        if let Some((anchor_x, _anchor_screen_y, focus_x, _focus_screen_y)) = self.drag_selection
+            && inner_area.height > 0
+        {
             // Convert content-space anchor and focus to current screen position.
             // Both are stored in content space so the visual highlight follows
             // content during auto-scroll.
+            //
+            // A zero-height viewport (e.g. the session area briefly collapsing
+            // to 0 rows during a terminal resize) has no visible rows to
+            // highlight, and the clamp bound `vp_top + height - 1` would fall
+            // below `vp_top` — panicking with `min > max`. Skip it entirely.
             let vp_top = i32::from(inner_area.y);
+            let vp_bottom = vp_top + i32::from(inner_area.height) - 1;
             let anchor_screen_y = (self.selection_anchor_content_y - self.scroll_y + vp_top)
-                .clamp(vp_top, vp_top + i32::from(inner_area.height) - 1)
-                as u16;
+                .clamp(vp_top, vp_bottom) as u16;
             let focus_screen_y = (self.selection_focus_content_y - self.scroll_y + vp_top)
-                .clamp(vp_top, vp_top + i32::from(inner_area.height) - 1)
-                as u16;
+                .clamp(vp_top, vp_bottom) as u16;
 
             let start_y = anchor_screen_y.min(focus_screen_y);
             let end_y = anchor_screen_y.max(focus_screen_y);
