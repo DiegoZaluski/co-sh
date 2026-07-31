@@ -91,7 +91,9 @@ pub fn graphemes_with_width(text: &str) -> impl Iterator<Item = (&str, u16)> + '
     })
 }
 
-/// Word-wrap text to fit within `max_width` display columns, keeping words intact.
+/// Word-wrap text to fit within `max_width` display columns, keeping words
+/// intact where possible. Words longer than `max_width` are broken at
+/// character level so no line exceeds the width.
 #[must_use]
 pub fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -170,8 +172,25 @@ fn flush_word(
         current.clear();
         *current_w = 0;
     }
-    current.push_str(word);
-    *current_w += *word_w;
+    // A word that fits on a fresh line is flushed whole.
+    if *word_w <= max_width {
+        current.push_str(word);
+        *current_w += *word_w;
+        word.clear();
+        *word_w = 0;
+        return;
+    }
+    // The word alone is wider than the whole line: break it at character
+    // level so no single line exceeds `max_width` columns.
+    for (g, gw) in Graphemes::new(word).map(|g| (g, grapheme_display_width(g))) {
+        if *current_w + gw > max_width && !current.is_empty() {
+            lines.push(current.clone());
+            current.clear();
+            *current_w = 0;
+        }
+        current.push_str(g);
+        *current_w += gw;
+    }
     word.clear();
     *word_w = 0;
 }

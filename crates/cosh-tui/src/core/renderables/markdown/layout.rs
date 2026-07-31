@@ -359,13 +359,15 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
 
 /// Word-aware width tracking for layout estimation. Accumulates non-space
 /// graphemes as a "word" and only advances past the word if it fits on the
-/// current line; otherwise wraps to the next line first.
+/// current line; otherwise wraps to the next line first. Words longer than
+/// the full line width are broken at character level across multiple lines,
+/// mirroring `MarkdownRenderable::render_text`.
 fn layout_word_wrap(text: &str, max_w: u16, x: &mut u16, y: &mut u16, area_x: u16) {
     let mut word_w = 0u16;
 
     for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(text) {
         if grapheme == "\n" {
-            *x += word_w;
+            flush_layout_word(word_w, x, y, max_w);
             word_w = 0;
             *y += 1;
             *x = area_x;
@@ -373,11 +375,7 @@ fn layout_word_wrap(text: &str, max_w: u16, x: &mut u16, y: &mut u16, area_x: u1
         }
 
         if grapheme == " " {
-            if *x + word_w > max_w && *x > area_x {
-                *y += 1;
-                *x = area_x;
-            }
-            *x += word_w;
+            flush_layout_word(word_w, x, y, max_w);
             word_w = 0;
             if *x < max_w {
                 *x += 1;
@@ -389,11 +387,35 @@ fn layout_word_wrap(text: &str, max_w: u16, x: &mut u16, y: &mut u16, area_x: u1
     }
 
     // Flush last word
-    if word_w > 0 {
-        if *x + word_w > max_w && *x > area_x {
-            *y += 1;
-            *x = area_x;
-        }
-        *x += word_w;
+    flush_layout_word(word_w, x, y, max_w);
+}
+
+/// Flush an accumulated word of `word_w` columns starting at `*x`, advancing
+/// `y` by the number of extra lines the word spans.
+///
+/// A word that doesn't fit on the current line wraps whole to the next line
+/// when it is shorter than the full line width; a word longer than the whole
+/// line is broken at character level (mirrors `flush_render_word`).
+fn flush_layout_word(word_w: u16, x: &mut u16, y: &mut u16, max_w: u16) {
+    if word_w == 0 {
+        return;
     }
+    if *x + word_w <= max_w {
+        *x += word_w;
+        return;
+    }
+    if word_w <= max_w {
+        // Whole word fits on a fresh line: wrap it there intact.
+        *y += 1;
+        *x = word_w;
+        return;
+    }
+    // The word alone is wider than the whole line: break at character level.
+    let end = u32::from(*x) + u32::from(word_w);
+    let lines = end.div_ceil(u32::from(max_w)) as u16;
+    *y = y.saturating_add(lines.saturating_sub(1));
+    // If the last chunk exactly fills the line, mirror the renderer by
+    // leaving the cursor at the right edge (so the next word wraps).
+    let rem = end % u32::from(max_w);
+    *x = if rem == 0 { max_w } else { rem as u16 };
 }

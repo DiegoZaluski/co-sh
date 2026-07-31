@@ -15,6 +15,7 @@
 //! rather than aborting the batch.
 use super::types::{FsMetadata, FsWrite};
 
+use crate::util::path_guard::{validate_path, GuardResult};
 use cosh_sdk::hashline::{
     format,
     fs::{DiskFilesystem, Filesystem},
@@ -106,6 +107,17 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
     let fs = DiskFilesystem::new();
     for target in &tg.targets {
         let (clean_text, stripped) = strip_write_content(&target.text);
+
+        // An inconsistent configuration — a path in both the allowlist and
+        // the blocklist — is a hard error, not a per-file warning.
+        if let GuardResult::Mismatch(msg) = validate_path(
+            &target.path,
+            &metadata.root,
+            metadata.allowlist.as_deref(),
+            metadata.blocklist.as_deref(),
+        ) {
+            return Err(format!("permission denied: `{}` — {msg}", target.path));
+        }
 
         if clean_text.trim().is_empty() {
             let warning = if stripped {

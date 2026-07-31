@@ -277,6 +277,23 @@ pub(crate) fn spawn_bash<'a>(
         let mut stream_stderr = child.stderr.take().expect("stderr pipe should be configured");
         let mut stdout_done = false;
         let mut stderr_done = false;
+
+        // Zero timeout: the command must not run at all. Kill it immediately
+        // without reading any output, so the result is deterministic — the
+        // child never gets a chance to write before the 0ms timer fires.
+        if timeout_ms == Some(0) {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            yield Ok(SpawnOutput {
+                stdout: vec![],
+                stderr: vec![],
+                exit_code: None,
+                signal: Some(-1_i32),
+                truncated: false,
+            });
+            return;
+        }
+
         let deadline = timeout_ms.map(|ms| tokio::time::Instant::now() + Duration::from_millis(ms));
 
         loop {
@@ -426,6 +443,19 @@ pub(crate) fn spawn_bash_pty(
     let kill_flag = Arc::new(AtomicBool::new(false));
 
     Box::pin(stream! {
+        // Zero timeout: the command must not run at all. Yield the timeout
+        // item immediately without spawning the process (deterministic).
+        if timeout_ms == Some(0) {
+            yield Ok(SpawnOutput {
+                stdout: vec![],
+                stderr: vec![],
+                exit_code: None,
+                signal: Some(-1_i32),
+                truncated: false,
+            });
+            return;
+        }
+
         let (tx, mut rx) = mpsc::unbounded_channel();
         let kill = kill_flag.clone();
 

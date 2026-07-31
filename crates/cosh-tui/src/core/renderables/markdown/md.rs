@@ -217,7 +217,8 @@ impl MarkdownRenderable {
     }
 
     /// Flush the accumulated word to the buffer, wrapping to the next line if
-    /// it doesn't fit on the current line.
+    /// it doesn't fit on the current line. Words wider than the whole line
+    /// are broken at character level so they still wrap correctly.
     #[allow(clippy::too_many_arguments)]
     fn flush_render_word(
         word: &mut String,
@@ -234,16 +235,30 @@ impl MarkdownRenderable {
         if *word_w == 0 {
             return;
         }
-        if *x + *word_w > max_x && *x > area_x.saturating_add(bq_indent) {
+        let min_x = area_x.saturating_add(bq_indent);
+        let avail = max_x.saturating_sub(min_x);
+        // Whole-word wrap: if the word doesn't fit on the current line but
+        // fits on a fresh line, move it there intact.
+        if *x + *word_w > max_x && *x > min_x && *word_w <= avail {
             *y += 1;
-            *x = area_x.saturating_add(bq_indent);
+            *x = min_x;
         }
         if *y >= max_y {
             word.clear();
             *word_w = 0;
             return;
         }
+        // Write grapheme by grapheme. Words wider than the whole line are
+        // broken at character level by wrapping whenever the cursor reaches
+        // the right edge (mirrors `flush_layout_word` in layout.rs).
         for (g, gw) in crate::core::lib::unicode_util::graphemes_with_width(word) {
+            if *x + gw > max_x && *x > min_x {
+                *y += 1;
+                *x = min_x;
+            }
+            if *y >= max_y {
+                break;
+            }
             if let Some(cell) = buf.cell_mut((*x, *y)) {
                 if g.len() == 1 {
                     if let Some(c) = g.chars().next() {
@@ -286,9 +301,13 @@ impl MarkdownRenderable {
         if *word_w == 0 {
             return;
         }
-        if *x + *word_w > max_x && *x > area_x + code_pad {
+        let min_x = area_x.saturating_add(code_pad);
+        let avail = max_x.saturating_sub(min_x);
+        // Whole-word wrap: if the word doesn't fit on the current line but
+        // fits on a fresh line, move it there intact.
+        if *x + *word_w > max_x && *x > min_x && *word_w <= avail {
             *y += 1;
-            *x = area_x + code_pad;
+            *x = min_x;
             if *y < max_y {
                 Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
             }
@@ -299,6 +318,17 @@ impl MarkdownRenderable {
             return;
         }
         for (grapheme, w, style) in word_parts.drain(..) {
+            // Words wider than the whole line: break at character level.
+            if *x + w > max_x && *x > min_x {
+                *y += 1;
+                *x = min_x;
+                if *y < max_y {
+                    Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
+                }
+            }
+            if *y >= max_y {
+                break;
+            }
             if let Some(cell) = buf.cell_mut((*x, *y)) {
                 if grapheme.len() == 1 {
                     if let Some(c) = grapheme.chars().next() {
