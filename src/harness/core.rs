@@ -228,7 +228,7 @@ pub struct Harness {
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
     #[cfg(test)]
-    pub(crate) mock_stream_response: Option<Result<Vec<String>, String>>,
+    pub(crate) mock_stream_queue: VecDeque<Result<Vec<String>, String>>,
     #[cfg(test)]
     pub(crate) test_tools: Vec<ToolSchema>,
 }
@@ -263,7 +263,7 @@ impl Harness {
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
-            mock_stream_response: None,
+            mock_stream_queue: VecDeque::new(),
             #[cfg(test)]
             test_tools: Vec::new(),
         }
@@ -613,7 +613,7 @@ impl Harness {
         mut on_token: impl FnMut(&str),
     ) -> Result<String, String> {
         #[cfg(test)]
-        if let Some(response) = self.mock_stream_response.take() {
+        if let Some(response) = self.mock_stream_queue.pop_front() {
             match response {
                 Ok(tokens) => {
                     let mut extractor = self.build_extractor();
@@ -756,7 +756,7 @@ impl Harness {
         mut on_token: impl FnMut(&str),
     ) -> Result<String, String> {
         #[cfg(test)]
-        if let Some(response) = self.mock_stream_response.take() {
+        if let Some(response) = self.mock_stream_queue.pop_front() {
             match response {
                 Ok(tokens) => {
                     let mut extractor = self.build_extractor();
@@ -1881,7 +1881,7 @@ impl Harness {
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
             mock_chat_response: None,
-            mock_stream_response: None,
+            mock_stream_queue: VecDeque::new(),
             test_tools: Vec::new(),
         }
     }
@@ -1905,12 +1905,56 @@ impl Harness {
     /// Set mock tokens for `stream_chat()`. `Ok(tokens)` simulates successful
     /// streaming; `Err(msg)` simulates a stream start failure.
     pub(crate) fn with_mock_stream(mut self, response: Result<Vec<&str>, &str>) -> Self {
-        self.mock_stream_response = Some(
+        self.mock_stream_queue.push_back(
             response
                 .map(|v| v.into_iter().map(|s| s.to_string()).collect())
                 .map_err(|s| s.to_string()),
         );
         self
+    }
+
+    /// Queue multiple sequential mock stream responses.
+    ///
+    /// Each agent-loop iteration pops the next response. When the queue runs
+    /// empty the loop falls through to the real connector (which fails fast
+    /// without an API key), letting tests observe how many iterations ran.
+    pub(crate) fn with_mock_streams(mut self, responses: Vec<Result<Vec<&str>, &str>>) -> Self {
+        for response in responses {
+            self.mock_stream_queue.push_back(
+                response
+                    .map(|v| v.into_iter().map(|s| s.to_string()).collect())
+                    .map_err(|s| s.to_string()),
+            );
+        }
+        self
+    }
+
+    /// Build the exact messages array that would be sent to the LLM on the
+    /// next stream call. Mirrors what `run_agent_loop` sends each iteration.
+    pub(crate) fn build_messages_for_test(&mut self, input: &str) -> Vec<ChatMessage> {
+        self.build_conversation_messages(input)
+    }
+
+    /// Build the system context (instructions + correction memory + CM
+    /// buffer) exactly as `run_agent_loop` does for each iteration.
+    pub(crate) fn build_chat_context_for_test(&mut self) -> String {
+        self.build_chat_context()
+    }
+
+    /// Current `total_history_tokens` accounting (test accessor).
+    pub(crate) fn total_history_tokens(&self) -> usize {
+        self.total_history_tokens
+    }
+
+    /// Whether the currently-active connector has native tool definitions
+    /// registered. Used to prove that fallback switches drop them.
+    pub(crate) fn connector_has_tools(&self) -> bool {
+        self.connector.has_tools()
+    }
+
+    /// Provider name of the currently-active connector (test accessor).
+    pub(crate) fn connector_provider(&self) -> Option<&'static str> {
+        self.connector.provider_name()
     }
 
     pub(crate) fn push_session(&mut self, session: ServerSession) {

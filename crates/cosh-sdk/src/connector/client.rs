@@ -336,6 +336,14 @@ impl Connector {
         self.params.model.as_deref()
     }
 
+    /// Whether native tool definitions are currently registered on this
+    /// connector (`set_tools`/`with_tools` was called and the list is
+    /// non-empty).
+    #[must_use]
+    pub fn has_tools(&self) -> bool {
+        self.params.tools.as_ref().is_some_and(|t| !t.is_empty())
+    }
+
     /// Fetch the list of available models from the provider.
     ///
     /// Returns a [`LsOutput`] with structured model names ([`models`](LsOutput::models))
