@@ -112,7 +112,7 @@ fn test_code_block_syntax_highlighting() {
 
     // Verify that the code block renders characters
     let has_fn = (0..10)
-        .any(|row| (0..60).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "f")));
+        .any(|row| (0..60).any(|col| buf.cell((col, row)).is_some_and(|c| c.symbol() == "f")));
     assert!(
         has_fn,
         "'fn' should be rendered somewhere in the code block"
@@ -391,7 +391,7 @@ fn test_code_block_no_lang_fallback() {
 
     // Code block should render characters
     let has_fn = (0..10)
-        .any(|row| (0..60).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "f")));
+        .any(|row| (0..60).any(|col| buf.cell((col, row)).is_some_and(|c| c.symbol() == "f")));
     assert!(has_fn, "Code block without lang should still render");
 }
 
@@ -544,7 +544,7 @@ fn test_code_block_with_empty_lines() {
 
     // Content should render despite empty lines
     let has_middle = (0..10)
-        .any(|row| (0..40).any(|col| buf.cell((col, row)).map_or(false, |c| c.symbol() == "m")));
+        .any(|row| (0..40).any(|col| buf.cell((col, row)).is_some_and(|c| c.symbol() == "m")));
     assert!(
         has_middle,
         "Code block with empty lines should render 'middle'"

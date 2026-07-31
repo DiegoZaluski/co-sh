@@ -27,7 +27,7 @@ async fn edit_replaces_single_line_in_file() {
         FsEdit {
             targets: vec![EditTarget {
                 path: path.to_string(),
-                file_hash: file_hash,
+                file_hash,
                 ops: "replace 2..2:\n+REPLACED".to_string(),
             }],
         },
@@ -54,7 +54,7 @@ async fn edit_replaces_multi_line_range() {
         FsEdit {
             targets: vec![EditTarget {
                 path: path.to_string(),
-                file_hash: file_hash,
+                file_hash,
                 ops: "replace 2..4:\n+X\n+Y".to_string(),
             }],
         },
@@ -80,7 +80,7 @@ async fn edit_inserts_before_and_after_anchor() {
         FsEdit {
             targets: vec![EditTarget {
                 path: path.to_string(),
-                file_hash: file_hash,
+                file_hash,
                 ops: ops.to_string(),
             }],
         },
@@ -106,7 +106,7 @@ async fn edit_inserts_at_head_and_tail() {
         FsEdit {
             targets: vec![EditTarget {
                 path: path.to_string(),
-                file_hash: file_hash,
+                file_hash,
                 ops: ops.to_string(),
             }],
         },
@@ -130,7 +130,7 @@ async fn edit_deletes_range_of_lines() {
         FsEdit {
             targets: vec![EditTarget {
                 path: path.to_string(),
-                file_hash: file_hash,
+                file_hash,
                 ops: "delete 2..3".to_string(),
             }],
         },
@@ -154,7 +154,7 @@ async fn edit_replaces_syntactic_block_in_rust_file() {
         FsEdit {
             targets: vec![EditTarget {
                 path: path.to_string(),
-                file_hash: file_hash,
+                file_hash,
                 ops: "replace block 1:\n+fn main() {\n+    println!(\"hello\");\n+}".to_string(),
             }],
         },

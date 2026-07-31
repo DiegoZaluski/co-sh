@@ -53,7 +53,7 @@ impl VisionServer {
             plain: params.plain,
         };
         let result = cosh_tools::vision::terminal(&input)
-            .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("{e}"), None))?;
+            .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 }

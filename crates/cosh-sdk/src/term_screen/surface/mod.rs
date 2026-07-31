@@ -3,7 +3,10 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     clippy::cast_possible_truncation,
-    clippy::doc_markdown
+    clippy::doc_markdown,
+    // Public screen-diffing API mirrors upstream termwiz, which takes the
+    // region as six plain coordinates rather than a struct.
+    clippy::too_many_arguments
 )]
 use self::line::CellRef;
 use crate::term_screen::cell::color::ColorAttribute;

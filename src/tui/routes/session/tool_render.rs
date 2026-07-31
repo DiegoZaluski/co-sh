@@ -212,6 +212,20 @@ impl Default for ToolRenderState {
     }
 }
 
+/// Shared context for rendering a tool part into the buffer.
+///
+/// Bundles the buffer region, layout limits, and render state so the
+/// per-tool render functions don't need long positional argument lists.
+pub struct ToolRenderCtx<'a> {
+    pub buf: &'a mut Buffer,
+    pub x: u16,
+    pub y: u16,
+    pub line_h: &'a mut u16,
+    pub max_w: u16,
+    pub state: &'a mut ToolRenderState,
+    pub theme: &'a Theme,
+}
+
 const TOOL_DISPLAYS: &[&str] = &[
     "bash",
     "glob",
@@ -414,17 +428,7 @@ pub(crate) fn extract_diff_from_json(output: &str) -> Option<String> {
     }
 }
 
-pub fn render_shell(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    state: &mut ToolRenderState,
-    theme: &Theme,
-    part_idx: u16,
-) {
+pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let command = input_value(&part.input, "command").unwrap_or_default();
     let output = part.output.as_deref().unwrap_or("").trim().to_string();
     let id = part.tool_call_id.as_deref().unwrap_or("shell");
@@ -432,23 +436,27 @@ pub fn render_shell(
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
     let tool_id = format!("bash_{}", part_idx);
-    state.manage_tool_spinner(&tool_id, part, theme, is_running);
-    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
+    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    let spinner = ctx
+        .state
+        .tool_spinners
+        .get(&tool_id)
+        .filter(|s| !s.is_idle());
 
     if output.is_empty() {
         let pending = "Writing command...";
         let label = if is_completed { &command } else { pending };
         let fg = if is_completed {
-            theme.text_muted
+            ctx.theme.text_muted
         } else if is_running {
-            theme.text
+            ctx.theme.text
         } else {
-            theme.text_muted
+            ctx.theme.text_muted
         };
-        *line_h = 1;
-        render_inline_tool(buf, x, y, max_w, label, fg, spinner);
+        *ctx.line_h = 1;
+        render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, label, fg, spinner);
     } else {
-        let expanded = state.is_expanded(id);
+        let expanded = ctx.state.is_expanded(id);
         let collapsed = crate::util::scroll::collapse_tool_output(&output, 10, 800);
         let display = if expanded || !collapsed.overflow {
             &output
@@ -458,12 +466,12 @@ pub fn render_shell(
 
         let title = format!("$ {command}");
         let lines = display.lines().count() as u16 + u16::from(collapsed.overflow);
-        let area = Rect::new(x, y, max_w.saturating_add(3), lines + 2);
-        *line_h = area.height;
+        let area = Rect::new(ctx.x, ctx.y, ctx.max_w.saturating_add(3), lines + 2);
+        *ctx.line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(theme.background_panel.into()));
-        border_box.set_border_color(Some(theme.background.into()));
+        border_box.set_background_color(Some(ctx.theme.background_panel.into()));
+        border_box.set_border_color(Some(ctx.theme.background.into()));
         border_box.set_border_sides(BorderSidesConfig {
             left: true,
             top: false,
@@ -483,37 +491,60 @@ pub fn render_shell(
             right_t: ' ',
             cross: ' ',
         });
-        border_box.render_self(buf, area);
+        border_box.render_self(ctx.buf, area);
 
-        let x_off = x + 3;
-        let title_style = Style::default().fg(rgba_color(theme.text_muted));
-        draw_text_line(buf, &title, x_off, y, max_w.saturating_sub(3), title_style);
+        let x_off = ctx.x + 3;
+        let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
+        draw_text_line(
+            ctx.buf,
+            &title,
+            x_off,
+            ctx.y,
+            ctx.max_w.saturating_sub(3),
+            title_style,
+        );
 
-        let content_style = Style::default().fg(rgba_color(theme.text));
+        let content_style = Style::default().fg(rgba_color(ctx.theme.text));
         for (i, line) in display.lines().enumerate() {
-            let ly = y + 1 + i as u16;
+            let ly = ctx.y + 1 + i as u16;
             if ly >= area.bottom() {
                 break;
             }
-            draw_text_line(buf, line, x_off, ly, max_w.saturating_sub(3), content_style);
+            draw_text_line(
+                ctx.buf,
+                line,
+                x_off,
+                ly,
+                ctx.max_w.saturating_sub(3),
+                content_style,
+            );
         }
         if collapsed.overflow {
-            let hint_y = y + 1 + display.lines().count() as u16;
+            let hint_y = ctx.y + 1 + display.lines().count() as u16;
             let hint = if expanded {
                 "Click to collapse"
             } else {
                 "Click to expand"
             };
             draw_text_line(
-                buf,
+                ctx.buf,
                 hint,
                 x_off,
                 hint_y,
-                max_w.saturating_sub(3),
-                Style::default().fg(rgba_color(theme.text_muted)),
+                ctx.max_w.saturating_sub(3),
+                Style::default().fg(rgba_color(ctx.theme.text_muted)),
             );
         }
     }
+}
+
+/// Parameters for drawing a syntax-highlighted code block with line numbers.
+struct CodeBlockSpec<'a> {
+    content: &'a str,
+    lang: Option<&'a str>,
+    default_fg: Color,
+    ln_fg: Color,
+    max_lines: u16,
 }
 
 /// Draw a code block with line numbers (matching opencode's `<line_number>` wrapper).
@@ -522,12 +553,15 @@ fn draw_highlighted_code_with_ln(
     x: u16,
     y: u16,
     max_w: u16,
-    content: &str,
-    lang: Option<&str>,
-    default_fg: Color,
-    ln_fg: Color,
-    max_lines: u16,
+    spec: CodeBlockSpec<'_>,
 ) -> u16 {
+    let CodeBlockSpec {
+        content,
+        lang,
+        default_fg,
+        ln_fg,
+        max_lines,
+    } = spec;
     let ln_count = content.lines().count().min(max_lines as usize);
     if ln_count == 0 {
         return 0;
@@ -625,16 +659,7 @@ fn draw_highlighted_code_with_ln(
     lines_drawn
 }
 
-pub fn render_write(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    _state: &mut ToolRenderState,
-    theme: &Theme,
-) {
+pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let filepath = input_filepath(&part.input).unwrap_or_default();
     let content = input_content(&part.input).unwrap_or_default();
     let is_completed = matches!(part.status, ToolStatus::Completed);
@@ -642,12 +667,12 @@ pub fn render_write(
     if is_completed && !content.is_empty() {
         let max_lines = 20u16;
         let display_lines = content.lines().count().min(max_lines as usize) as u16;
-        let area = Rect::new(x, y, max_w.saturating_add(3), display_lines + 2);
-        *line_h = area.height;
+        let area = Rect::new(ctx.x, ctx.y, ctx.max_w.saturating_add(3), display_lines + 2);
+        *ctx.line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(theme.background_panel.into()));
-        border_box.set_border_color(Some(theme.background.into()));
+        border_box.set_background_color(Some(ctx.theme.background_panel.into()));
+        border_box.set_border_color(Some(ctx.theme.background.into()));
         border_box.set_border_sides(BorderSidesConfig {
             left: true,
             top: false,
@@ -667,49 +692,49 @@ pub fn render_write(
             right_t: ' ',
             cross: ' ',
         });
-        border_box.render_self(buf, area);
+        border_box.render_self(ctx.buf, area);
 
         let title = format!("# Wrote {filepath}");
-        let title_style = Style::default().fg(rgba_color(theme.text_muted));
-        draw_text_line(buf, &title, x + 3, y, max_w.saturating_sub(3), title_style);
+        let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
+        draw_text_line(
+            ctx.buf,
+            &title,
+            ctx.x + 3,
+            ctx.y,
+            ctx.max_w.saturating_sub(3),
+            title_style,
+        );
 
-        let max_w_inner = max_w.saturating_sub(3);
-        let default_fg = rgba_color(theme.text);
-        let ln_fg = rgba_color(theme.text_muted);
+        let max_w_inner = ctx.max_w.saturating_sub(3);
+        let default_fg = rgba_color(ctx.theme.text);
+        let ln_fg = rgba_color(ctx.theme.text_muted);
         let lang = lang_name_from_path(&filepath);
         draw_highlighted_code_with_ln(
-            buf,
-            x + 3,
-            y + 1,
+            ctx.buf,
+            ctx.x + 3,
+            ctx.y + 1,
             max_w_inner,
-            &content,
-            lang,
-            default_fg,
-            ln_fg,
-            max_lines,
+            CodeBlockSpec {
+                content: &content,
+                lang,
+                default_fg,
+                ln_fg,
+                max_lines,
+            },
         );
     } else {
         let label = format!("Write {filepath}");
         let fg = if is_completed {
-            theme.text_muted
+            ctx.theme.text_muted
         } else {
-            theme.text
+            ctx.theme.text
         };
-        *line_h = 1;
-        render_inline_tool(buf, x, y, max_w, &label, fg, None);
+        *ctx.line_h = 1;
+        render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, None);
     }
 }
 
-pub fn render_edit(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    _state: &mut ToolRenderState,
-    theme: &Theme,
-) {
+pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let filepath = input_filepath(&part.input).unwrap_or_default();
     let raw_output = part.output.as_deref().unwrap_or("").to_string();
     let is_completed = matches!(part.status, ToolStatus::Completed);
@@ -725,12 +750,17 @@ pub fn render_edit(
 
     if let Some(ref diff_content) = diff_content {
         let diff_lines = diff_content.lines().count() as u16;
-        let area = Rect::new(x, y, max_w.saturating_add(3), diff_lines.min(30) + 3);
-        *line_h = area.height;
+        let area = Rect::new(
+            ctx.x,
+            ctx.y,
+            ctx.max_w.saturating_add(3),
+            diff_lines.min(30) + 3,
+        );
+        *ctx.line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(theme.background_panel.into()));
-        border_box.set_border_color(Some(theme.background.into()));
+        border_box.set_background_color(Some(ctx.theme.background_panel.into()));
+        border_box.set_border_color(Some(ctx.theme.background.into()));
         border_box.set_border_sides(BorderSidesConfig {
             left: true,
             top: false,
@@ -750,58 +780,53 @@ pub fn render_edit(
             right_t: ' ',
             cross: ' ',
         });
-        border_box.render_self(buf, area);
+        border_box.render_self(ctx.buf, area);
 
         let title = filepath.clone();
-        let title_style = Style::default().fg(rgba_color(theme.text_muted));
+        let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
         draw_text_line(
-            buf,
+            ctx.buf,
             &title,
-            x + 3,
-            y + 1,
-            max_w.saturating_sub(3),
+            ctx.x + 3,
+            ctx.y + 1,
+            ctx.max_w.saturating_sub(3),
             title_style,
         );
 
-        let diff_area = Rect::new(x + 3, y + 2, max_w.saturating_sub(3), diff_lines.min(30));
+        let diff_area = Rect::new(
+            ctx.x + 3,
+            ctx.y + 2,
+            ctx.max_w.saturating_sub(3),
+            diff_lines.min(30),
+        );
         let mut diff = DiffRenderable::new(Some(diff_content.clone()));
         diff.set_show_line_numbers(true);
-        diff.set_added_bg(theme.diff_added_bg);
-        diff.set_removed_bg(theme.diff_removed_bg);
-        diff.set_context_bg(theme.diff_context_bg);
-        diff.set_added_sign_color(theme.diff_highlight_added);
-        diff.set_removed_sign_color(theme.diff_highlight_removed);
-        diff.set_hunk_header_fg(theme.diff_hunk_header);
-        diff.set_line_number_fg(theme.diff_line_number);
-        diff.set_added_line_number_bg(theme.diff_added_line_number_bg);
-        diff.set_removed_line_number_bg(theme.diff_removed_line_number_bg);
-        if max_w >= 100 {
+        diff.set_added_bg(ctx.theme.diff_added_bg);
+        diff.set_removed_bg(ctx.theme.diff_removed_bg);
+        diff.set_context_bg(ctx.theme.diff_context_bg);
+        diff.set_added_sign_color(ctx.theme.diff_highlight_added);
+        diff.set_removed_sign_color(ctx.theme.diff_highlight_removed);
+        diff.set_hunk_header_fg(ctx.theme.diff_hunk_header);
+        diff.set_line_number_fg(ctx.theme.diff_line_number);
+        diff.set_added_line_number_bg(ctx.theme.diff_added_line_number_bg);
+        diff.set_removed_line_number_bg(ctx.theme.diff_removed_line_number_bg);
+        if ctx.max_w >= 100 {
             diff.set_view_mode(DiffViewMode::Split);
         }
-        diff.render_self(buf, diff_area);
+        diff.render_self(ctx.buf, diff_area);
     } else {
         let label = format!("Edit {filepath}");
         let fg = if is_completed {
-            theme.text_muted
+            ctx.theme.text_muted
         } else {
-            theme.text
+            ctx.theme.text
         };
-        *line_h = 1;
-        render_inline_tool(buf, x, y, max_w, &label, fg, None);
+        *ctx.line_h = 1;
+        render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, None);
     }
 }
 
-pub fn render_glob(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    state: &mut ToolRenderState,
-    theme: &Theme,
-    part_idx: u16,
-) {
+pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let pattern = input_value(&part.input, "pattern").unwrap_or_default();
     let path = input_value(&part.input, "path");
     let is_completed = matches!(part.status, ToolStatus::Completed);
@@ -813,56 +838,44 @@ pub fn render_glob(
     }
 
     let fg = if is_completed {
-        theme.text_muted
+        ctx.theme.text_muted
     } else {
-        theme.text
+        ctx.theme.text
     };
     let tool_id = format!("glob_{}", part_idx);
-    state.manage_tool_spinner(&tool_id, part, theme, is_running);
-    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
-    *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
+    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    let spinner = ctx
+        .state
+        .tool_spinners
+        .get(&tool_id)
+        .filter(|s| !s.is_idle());
+    *ctx.line_h = 1;
+    render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, spinner);
 }
 
-pub fn render_read(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    state: &mut ToolRenderState,
-    theme: &Theme,
-    part_idx: u16,
-) {
+pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let filepath = input_filepath(&part.input).unwrap_or_default();
     let is_running = matches!(part.status, ToolStatus::Running);
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
     let label = format!("Read {filepath}");
     let fg = if is_completed {
-        theme.text_muted
+        ctx.theme.text_muted
     } else {
-        theme.text
+        ctx.theme.text
     };
-    *line_h = 1;
+    *ctx.line_h = 1;
     let tool_id = format!("read_{}", part_idx);
-    state.manage_tool_spinner(&tool_id, part, theme, is_running);
-    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
-    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
+    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    let spinner = ctx
+        .state
+        .tool_spinners
+        .get(&tool_id)
+        .filter(|s| !s.is_idle());
+    render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, spinner);
 }
 
-pub fn render_grep(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    state: &mut ToolRenderState,
-    theme: &Theme,
-    part_idx: u16,
-) {
+pub fn render_grep(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let pattern = input_value(&part.input, "pattern").unwrap_or_default();
     let path = input_value(&part.input, "path");
     let is_completed = matches!(part.status, ToolStatus::Completed);
@@ -874,56 +887,44 @@ pub fn render_grep(
     }
 
     let fg = if is_completed {
-        theme.text_muted
+        ctx.theme.text_muted
     } else {
-        theme.text
+        ctx.theme.text
     };
     let tool_id = format!("grep_{}", part_idx);
-    state.manage_tool_spinner(&tool_id, part, theme, is_running);
-    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
-    *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
+    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    let spinner = ctx
+        .state
+        .tool_spinners
+        .get(&tool_id)
+        .filter(|s| !s.is_idle());
+    *ctx.line_h = 1;
+    render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, spinner);
 }
 
-pub fn render_webfetch(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    state: &mut ToolRenderState,
-    theme: &Theme,
-    part_idx: u16,
-) {
+pub fn render_webfetch(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let url = input_value(&part.input, "url").unwrap_or_default();
     let is_completed = matches!(part.status, ToolStatus::Completed);
     let is_running = matches!(part.status, ToolStatus::Running);
 
     let label = format!("WebFetch {url}");
     let fg = if is_completed {
-        theme.text_muted
+        ctx.theme.text_muted
     } else {
-        theme.text
+        ctx.theme.text
     };
     let tool_id = format!("webfetch_{}", part_idx);
-    state.manage_tool_spinner(&tool_id, part, theme, is_running);
-    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
-    *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
+    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    let spinner = ctx
+        .state
+        .tool_spinners
+        .get(&tool_id)
+        .filter(|s| !s.is_idle());
+    *ctx.line_h = 1;
+    render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, spinner);
 }
 
-pub fn render_websearch(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    state: &mut ToolRenderState,
-    theme: &Theme,
-    part_idx: u16,
-) {
+pub fn render_websearch(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let query = input_value(&part.input, "query").unwrap_or_default();
     let provider = input_value(&part.input, "provider");
     let is_completed = matches!(part.status, ToolStatus::Completed);
@@ -932,28 +933,22 @@ pub fn render_websearch(
     let provider_label = web_search_provider_label(provider.as_deref());
     let label = format!("{provider_label} \"{query}\"");
     let fg = if is_completed {
-        theme.text_muted
+        ctx.theme.text_muted
     } else {
-        theme.text
+        ctx.theme.text
     };
     let tool_id = format!("websearch_{}", part_idx);
-    state.manage_tool_spinner(&tool_id, part, theme, is_running);
-    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
-    *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
+    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    let spinner = ctx
+        .state
+        .tool_spinners
+        .get(&tool_id)
+        .filter(|s| !s.is_idle());
+    *ctx.line_h = 1;
+    render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, spinner);
 }
 
-pub fn render_task(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    state: &mut ToolRenderState,
-    theme: &Theme,
-    part_idx: u16,
-) {
+pub fn render_task(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let description = input_value(&part.input, "description").unwrap_or_default();
     let is_completed = matches!(part.status, ToolStatus::Completed);
     let is_running = matches!(part.status, ToolStatus::Running);
@@ -965,37 +960,32 @@ pub fn render_task(
     };
 
     let fg = if is_completed {
-        theme.text_muted
+        ctx.theme.text_muted
     } else {
-        theme.text
+        ctx.theme.text
     };
     let tool_id = format!("task_{}", part_idx);
-    state.manage_tool_spinner(&tool_id, part, theme, is_running);
-    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
-    *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, &content, fg, spinner);
+    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    let spinner = ctx
+        .state
+        .tool_spinners
+        .get(&tool_id)
+        .filter(|s| !s.is_idle());
+    *ctx.line_h = 1;
+    render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &content, fg, spinner);
 }
 
-pub fn render_question_tool(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    _state: &mut ToolRenderState,
-    theme: &Theme,
-) {
+pub fn render_question_tool(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
     let label = "Asking questions...".to_string();
     let fg = if is_completed {
-        theme.text_muted
+        ctx.theme.text_muted
     } else {
-        theme.text
+        ctx.theme.text
     };
-    *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, &label, fg, None);
+    *ctx.line_h = 1;
+    render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, None);
 }
 
 /// Parse the tool output JSON and return formatted display lines for TODO items.
@@ -1075,16 +1065,7 @@ pub fn format_todo_output(output: &str, tool_name: &str) -> Vec<String> {
     lines
 }
 
-pub fn render_todo(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    _state: &mut ToolRenderState,
-    theme: &Theme,
-) {
+pub fn render_todo(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let tool_name: &str = &part.tool;
     let output = part.output.as_deref().unwrap_or("").trim();
     let is_running = matches!(part.status, ToolStatus::Running);
@@ -1096,71 +1077,68 @@ pub fn render_todo(
                 "plan_todo_write" => "\u{270F} TODO Write".to_string(),
                 _ => tool_name.to_string(),
             };
-            let style = Style::default().fg(rgba_color(theme.text_muted));
-            *line_h = 1;
-            draw_text_line(buf, &label, x, y, max_w, style);
+            let style = Style::default().fg(rgba_color(ctx.theme.text_muted));
+            *ctx.line_h = 1;
+            draw_text_line(ctx.buf, &label, ctx.x, ctx.y, ctx.max_w, style);
         } else {
-            *line_h = 1;
+            *ctx.line_h = 1;
         }
         return;
     }
 
     let formatted = format_todo_output(output, tool_name);
     if formatted.is_empty() {
-        *line_h = 1;
+        *ctx.line_h = 1;
         return;
     }
     let total_lines = formatted.len() as u16;
     let box_h = total_lines.saturating_add(2);
-    *line_h = box_h;
+    *ctx.line_h = box_h;
 
-    let area_w = max_w.saturating_add(3);
-    let area = Rect::new(x, y, area_w, box_h);
+    let area_w = ctx.max_w.saturating_add(3);
+    let area = Rect::new(ctx.x, ctx.y, area_w, box_h);
 
-    let bg_style = Style::default().bg(rgba_color(theme.background_panel));
+    let bg_style = Style::default().bg(rgba_color(ctx.theme.background_panel));
     let border_style = Style::default()
-        .fg(rgba_color(theme.background))
-        .bg(rgba_color(theme.background_panel));
-    for ly in y..y + box_h {
-        if let Some(cell) = buf.cell_mut((x, ly)) {
+        .fg(rgba_color(ctx.theme.background))
+        .bg(rgba_color(ctx.theme.background_panel));
+    for ly in ctx.y..ctx.y + box_h {
+        if let Some(cell) = ctx.buf.cell_mut((ctx.x, ly)) {
             cell.set_char('\u{2503}');
             cell.set_style(border_style);
         }
-        for lx in x + 1..x + area_w {
-            if let Some(cell) = buf.cell_mut((lx, ly)) {
+        for lx in ctx.x + 1..ctx.x + area_w {
+            if let Some(cell) = ctx.buf.cell_mut((lx, ly)) {
                 cell.set_char(' ');
                 cell.set_style(bg_style);
             }
         }
     }
 
-    let title_style = Style::default().fg(rgba_color(theme.text_muted));
-    let content_x = x + 3;
-    let content_w = max_w.saturating_sub(3);
-    draw_text_line(buf, &formatted[0], content_x, y + 1, content_w, title_style);
+    let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
+    let content_x = ctx.x + 3;
+    let content_w = ctx.max_w.saturating_sub(3);
+    draw_text_line(
+        ctx.buf,
+        &formatted[0],
+        content_x,
+        ctx.y + 1,
+        content_w,
+        title_style,
+    );
 
-    let item_style = Style::default().fg(rgba_color(theme.text));
+    let item_style = Style::default().fg(rgba_color(ctx.theme.text));
     let content_bottom = area.bottom().saturating_sub(1);
     for (i, line) in formatted.iter().enumerate().skip(1) {
-        let ly = y + 1 + i as u16;
+        let ly = ctx.y + 1 + i as u16;
         if ly >= content_bottom {
             break;
         }
-        draw_text_line(buf, line, content_x, ly, content_w, item_style);
+        draw_text_line(ctx.buf, line, content_x, ly, content_w, item_style);
     }
 }
 
-pub fn render_generic(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    state: &mut ToolRenderState,
-    theme: &Theme,
-    part_idx: u16,
-) {
+pub fn render_generic(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let tool_name = &part.tool;
     let is_completed = matches!(part.status, ToolStatus::Completed);
     let is_running = matches!(part.status, ToolStatus::Running);
@@ -1171,41 +1149,35 @@ pub fn render_generic(
         format!("Writing {tool_name}...")
     };
     let fg = if is_completed {
-        theme.text_muted
+        ctx.theme.text_muted
     } else {
-        theme.text
+        ctx.theme.text
     };
     let tool_id = format!("generic_{}", part_idx);
-    state.manage_tool_spinner(&tool_id, part, theme, is_running);
-    let spinner = state.tool_spinners.get(&tool_id).filter(|s| !s.is_idle());
-    *line_h = 1;
-    render_inline_tool(buf, x, y, max_w, &label, fg, spinner);
+    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    let spinner = ctx
+        .state
+        .tool_spinners
+        .get(&tool_id)
+        .filter(|s| !s.is_idle());
+    *ctx.line_h = 1;
+    render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, spinner);
 }
 
-pub fn dispatch_tool(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    line_h: &mut u16,
-    max_w: u16,
-    part: &ToolPart,
-    state: &mut ToolRenderState,
-    theme: &Theme,
-    part_idx: u16,
-) {
+pub fn dispatch_tool(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let display = tool_display(&part.tool);
     match display {
-        "bash" => render_shell(buf, x, y, line_h, max_w, part, state, theme, part_idx),
-        "glob" => render_glob(buf, x, y, line_h, max_w, part, state, theme, part_idx),
-        "read" => render_read(buf, x, y, line_h, max_w, part, state, theme, part_idx),
-        "grep" => render_grep(buf, x, y, line_h, max_w, part, state, theme, part_idx),
-        "webfetch" => render_webfetch(buf, x, y, line_h, max_w, part, state, theme, part_idx),
-        "websearch" => render_websearch(buf, x, y, line_h, max_w, part, state, theme, part_idx),
-        "write" => render_write(buf, x, y, line_h, max_w, part, state, theme),
-        "edit" => render_edit(buf, x, y, line_h, max_w, part, state, theme),
-        "task" => render_task(buf, x, y, line_h, max_w, part, state, theme, part_idx),
-        "question" => render_question_tool(buf, x, y, line_h, max_w, part, state, theme),
-        "todo" => render_todo(buf, x, y, line_h, max_w, part, state, theme),
-        _ => render_generic(buf, x, y, line_h, max_w, part, state, theme, part_idx),
+        "bash" => render_shell(ctx, part, part_idx),
+        "glob" => render_glob(ctx, part, part_idx),
+        "read" => render_read(ctx, part, part_idx),
+        "grep" => render_grep(ctx, part, part_idx),
+        "webfetch" => render_webfetch(ctx, part, part_idx),
+        "websearch" => render_websearch(ctx, part, part_idx),
+        "write" => render_write(ctx, part),
+        "edit" => render_edit(ctx, part),
+        "task" => render_task(ctx, part, part_idx),
+        "question" => render_question_tool(ctx, part),
+        "todo" => render_todo(ctx, part),
+        _ => render_generic(ctx, part, part_idx),
     }
 }

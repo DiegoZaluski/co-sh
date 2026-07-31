@@ -368,6 +368,9 @@ impl Renderable for TextRenderable {
     }
 }
 
+/// Low-level word-flush primitive for text rendering; the many positional
+/// cursor/style params are inherent to the hot render loop.
+#[allow(clippy::too_many_arguments)]
 fn flush_text_word(
     word: &mut String,
     word_w: &mut u16,

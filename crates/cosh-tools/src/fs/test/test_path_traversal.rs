@@ -111,8 +111,7 @@ async fn read_absolute_path_outside_root_is_denied() {
 async fn read_traversal_relative_path_escapes_denied() {
     let cwd = std::env::current_dir().expect("cwd is accessible");
     let up_count = cwd.components().count();
-    let parents: String = std::iter::repeat("..")
-        .take(up_count)
+    let parents: String = std::iter::repeat_n("..", up_count)
         .collect::<Vec<_>>()
         .join("/");
     let traversal = format!("{parents}/etc/hostname");
@@ -227,11 +226,11 @@ async fn write_gap_symlink_escape() {
     let outside_file = format!("{outside_dir}/evil.txt");
 
     let _ = std::fs::remove_dir_all(outside_dir);
-    let _ = std::fs::remove_file(&symlink_path);
+    let _ = std::fs::remove_file(symlink_path);
 
     std::fs::create_dir_all(outside_dir).unwrap();
-    let _ = std::fs::remove_file(&symlink_path);
-    std::os::unix::fs::symlink(outside_dir, &symlink_path).unwrap();
+    let _ = std::fs::remove_file(symlink_path);
+    std::os::unix::fs::symlink(outside_dir, symlink_path).unwrap();
 
     let metadata = FsMetadata {
         root: PathBuf::from(PROJECT_ROOT),
@@ -271,7 +270,7 @@ async fn write_gap_symlink_escape() {
     );
 
     let _ = std::fs::remove_dir_all(outside_dir);
-    let _ = std::fs::remove_file(&symlink_path);
+    let _ = std::fs::remove_file(symlink_path);
 }
 
 // Canonicalize in fs_guard now catches symlink escapes for edit too.
@@ -284,11 +283,11 @@ async fn edit_gap_symlink_escape() {
     let outside_file = format!("{outside_dir}/target.txt");
 
     let _ = std::fs::remove_dir_all(outside_dir);
-    let _ = std::fs::remove_file(&symlink_path);
+    let _ = std::fs::remove_file(symlink_path);
 
     std::fs::create_dir_all(outside_dir).unwrap();
     std::fs::write(&outside_file, "original\n").unwrap();
-    std::os::unix::fs::symlink(outside_dir, &symlink_path).unwrap();
+    std::os::unix::fs::symlink(outside_dir, symlink_path).unwrap();
 
     let hash = compute_file_hash("original\n");
 
@@ -324,7 +323,7 @@ async fn edit_gap_symlink_escape() {
     );
 
     let _ = std::fs::remove_dir_all(outside_dir);
-    let _ = std::fs::remove_file(&symlink_path);
+    let _ = std::fs::remove_file(symlink_path);
 }
 
 // Edit — guard now correctly rejects traversal

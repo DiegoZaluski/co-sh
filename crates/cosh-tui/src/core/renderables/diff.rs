@@ -40,6 +40,18 @@ struct SplitLine {
     right: Option<LineInfo>,
 }
 
+/// Geometry of one panel in the split view.
+struct PanelLayout {
+    /// Left edge of the panel.
+    x: u16,
+    /// Panel width in columns.
+    w: u16,
+    /// Line-number column width.
+    ln_w: u16,
+    /// Rightmost column of the whole diff area.
+    max_x: u16,
+}
+
 pub struct DiffRenderable {
     id: String,
     num: u64,
@@ -311,17 +323,6 @@ impl DiffRenderable {
             1
         };
 
-        let left_gutter_w = if self.show_line_numbers {
-            left_ln_w + 2
-        } else {
-            2
-        };
-        let right_gutter_w = if self.show_line_numbers {
-            right_ln_w + 2
-        } else {
-            2
-        };
-
         // Panel widths: left gets floor, right gets ceil, 1 separator column
         let avail_w = area.width;
         if avail_w < 3 {
@@ -334,9 +335,6 @@ impl DiffRenderable {
         let sep_x = left_x + left_panel_w;
         let right_x = sep_x + 1;
 
-        let left_content_w = left_panel_w.saturating_sub(left_gutter_w);
-        let right_content_w = right_panel_w.saturating_sub(right_gutter_w);
-
         let mut y = area.y;
         for sl in &split_lines {
             if y >= max_y {
@@ -346,13 +344,13 @@ impl DiffRenderable {
             // Left side
             self.render_split_line(
                 buf,
-                left_x,
                 y,
-                left_panel_w,
-                left_gutter_w,
-                left_ln_w,
-                left_content_w,
-                max_x,
+                &PanelLayout {
+                    x: left_x,
+                    w: left_panel_w,
+                    ln_w: left_ln_w,
+                    max_x,
+                },
                 true,
                 sl.left.as_ref(),
             );
@@ -368,13 +366,13 @@ impl DiffRenderable {
             // Right side
             self.render_split_line(
                 buf,
-                right_x,
                 y,
-                right_panel_w,
-                right_gutter_w,
-                right_ln_w,
-                right_content_w,
-                max_x,
+                &PanelLayout {
+                    x: right_x,
+                    w: right_panel_w,
+                    ln_w: right_ln_w,
+                    max_x,
+                },
                 false,
                 sl.right.as_ref(),
             );
@@ -387,17 +385,12 @@ impl DiffRenderable {
     fn render_split_line(
         &self,
         buf: &mut Buffer,
-        panel_x: u16,
         y: u16,
-        panel_w: u16,
-        _gutter_w: u16,
-        ln_w: u16,
-        _content_w: u16,
-        max_x: u16,
+        layout: &PanelLayout,
         is_left: bool,
         line: Option<&LineInfo>,
     ) {
-        let max_x_panel = (panel_x + panel_w).min(max_x);
+        let max_x_panel = (layout.x + layout.w).min(layout.max_x);
 
         let (default_bg, sign_ch, line_num) = line.map_or_else(
             || {
@@ -435,13 +428,13 @@ impl DiffRenderable {
             .bg(default_bg)
             .fg(rgba_color(self.line_number_fg));
 
-        let mut x = panel_x;
+        let mut x = layout.x;
 
         // Line number
         if self.show_line_numbers {
             let ln_str = line_num.map_or_else(
-                || " ".repeat(ln_w as usize),
-                |n| format!("{:>w$}", n, w = ln_w as usize),
+                || " ".repeat(layout.ln_w as usize),
+                |n| format!("{:>w$}", n, w = layout.ln_w as usize),
             );
             for ch in ln_str.chars() {
                 if x >= max_x_panel {

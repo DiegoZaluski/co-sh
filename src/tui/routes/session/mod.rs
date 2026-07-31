@@ -496,6 +496,7 @@ impl SessionView {
         draw_text_line(buf, &label, x, y, max_w, style);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_reasoning(
         buf: &mut Buffer,
         x: u16,
@@ -574,6 +575,7 @@ impl SessionView {
         last_row.map(|r| r - y + 1).unwrap_or(0)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_parts(
         buf: &mut Buffer,
         x: u16,
@@ -704,14 +706,16 @@ impl SessionView {
 
                     let mut line_h = 0u16;
                     tool_render::dispatch_tool(
-                        buf,
-                        x,
-                        y,
-                        &mut line_h,
-                        max_w,
+                        &mut tool_render::ToolRenderCtx {
+                            buf: &mut *buf,
+                            x,
+                            y,
+                            line_h: &mut line_h,
+                            max_w,
+                            state: &mut *tool_state,
+                            theme,
+                        },
                         tool,
-                        tool_state,
-                        theme,
                         pi as u16,
                     );
                     let available = bottom.saturating_sub(y);
@@ -912,6 +916,7 @@ impl SessionView {
         draw_text_line(buf, &format!(" [{ts_str}]"), x, y, 12, ts_style);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_user_message(
         buf: &mut Buffer,
         area: Rect,

@@ -68,7 +68,7 @@ data: [DONE]\n\n"
     let mut stream = c.stream_chat("hi").await.unwrap();
     handle.join().unwrap();
 
-    while let Some(_) = stream.next().await {}
+    while stream.next().await.is_some() {}
     let raw = stream.raw().await.unwrap();
     assert_eq!(raw, last_frame);
 }
@@ -86,7 +86,7 @@ data: [DONE]\n\n";
         .stream_chat_with_system("user text", "system text")
         .await
         .unwrap();
-    while let Some(_) = stream.next().await {}
+    while stream.next().await.is_some() {}
     handle.join().unwrap();
 
     let body = captured.lock().unwrap().take().unwrap();

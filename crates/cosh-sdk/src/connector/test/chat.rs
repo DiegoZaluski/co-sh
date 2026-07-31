@@ -18,7 +18,7 @@ async fn unknown_provider() {
 /// Ensures a missing API key returns a descriptive error for `chat()`.
 #[tokio::test]
 async fn missing_api_key() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::remove("OPENAI_API_KEY");
     let err = Connector::new("openai")
         .unwrap()
@@ -265,7 +265,7 @@ async fn openrouter_extra_headers() {
 /// no key is explicitly set.
 #[tokio::test]
 async fn api_key_env_fallback() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::set("OPENAI_API_KEY", "sk-from-env");
     let (port, _body, _raw, handle) =
         mock_server(r#"{"choices":[{"message":{"content":"ok"}}]}"#, 200);

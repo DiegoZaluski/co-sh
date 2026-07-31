@@ -5,7 +5,7 @@ use super::common::{ENV_LOCK, EnvGuard, claude_connector, connector, mock_server
 
 #[tokio::test]
 async fn missing_api_key() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::remove("OPENAI_API_KEY");
     let err = Connector::new("openai")
         .unwrap()

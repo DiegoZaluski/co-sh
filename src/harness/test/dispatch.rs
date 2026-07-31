@@ -29,20 +29,17 @@ impl ServerHandler for IntegrityChecker {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + MaybeSendFuture + '_
-    {
+    ) -> Result<CallToolResult, McpError> {
         let expected = self.expected_args.clone();
-        async move {
-            let received = serde_json::to_value(&request.arguments).unwrap_or_default();
-            if received == expected {
-                Ok(CallToolResult::success(vec![Content::text("ok")]))
-            } else {
-                Err(McpError::internal_error("argument mismatch", None))
-            }
+        let received = serde_json::to_value(&request.arguments).unwrap_or_default();
+        if received == expected {
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        } else {
+            Err(McpError::internal_error("argument mismatch", None))
         }
     }
 
@@ -77,13 +74,12 @@ impl ServerHandler for CrashOnCall {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         _request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + MaybeSendFuture + '_
-    {
-        async move { Err(McpError::internal_error("server crashed", None)) }
+    ) -> Result<CallToolResult, McpError> {
+        Err(McpError::internal_error("server crashed", None))
     }
 
     fn list_tools(
@@ -148,13 +144,12 @@ async fn ok_session(
             ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
         }
 
-        fn call_tool(
+        async fn call_tool(
             &self,
             _request: CallToolRequestParams,
             _context: RequestContext<RoleServer>,
-        ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + MaybeSendFuture + '_
-        {
-            async move { Ok(CallToolResult::success(vec![Content::text("ok")])) }
+        ) -> Result<CallToolResult, McpError> {
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
         }
 
         fn list_tools(

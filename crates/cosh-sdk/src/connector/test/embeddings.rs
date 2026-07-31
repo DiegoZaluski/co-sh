@@ -16,7 +16,7 @@ async fn unknown_provider() {
 /// Ensures a missing API key returns a descriptive error for `embed()`.
 #[tokio::test]
 async fn missing_api_key() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::remove("OPENAI_API_KEY");
     let err = Connector::new("openai")
         .unwrap()

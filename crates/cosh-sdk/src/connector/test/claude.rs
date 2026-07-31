@@ -162,7 +162,7 @@ data: {{\"type\":\"message_stop\"}}\n\n"
     let mut stream = c.stream_chat("hi").await.unwrap();
     handle.join().unwrap();
 
-    while let Some(_) = stream.next().await {}
+    while stream.next().await.is_some() {}
     let raw = stream.raw().await.unwrap();
     assert_eq!(raw, last_frame);
 }
@@ -218,7 +218,7 @@ async fn network_error() {
 
 #[tokio::test]
 async fn missing_api_key() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::remove("ANTHROPIC_API_KEY");
     let err = Connector::new("claude")
         .unwrap()
@@ -235,7 +235,7 @@ async fn missing_api_key() {
 
 #[tokio::test]
 async fn api_key_env_fallback() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-from-env");
     let body = r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#;
     let (port, _body, _raw, handle) = mock_server(body, 200);

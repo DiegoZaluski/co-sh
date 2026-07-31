@@ -134,13 +134,10 @@ async fn test_spawn_bash_invalid_env_var_error_kind() {
     );
     let mut got = false;
     while let Some(result) = stream.next().await {
-        match result {
-            Err(err) => {
-                assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-                got = true;
-                break;
-            }
-            Ok(_) => {}
+        if let Err(err) = result {
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+            got = true;
+            break;
         }
     }
     assert!(got);

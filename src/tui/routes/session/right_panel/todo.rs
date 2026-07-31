@@ -18,6 +18,7 @@ const BOTTOM_PAD: u16 = 1;
 const LEFT_PAD: u16 = 1;
 
 /// Render the TODO section. Returns the number of lines used.
+#[allow(clippy::too_many_arguments)]
 pub fn render_todo_section(
     buf: &mut Buffer,
     x: u16,

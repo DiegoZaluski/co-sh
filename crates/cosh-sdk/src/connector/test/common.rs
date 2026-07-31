@@ -39,20 +39,22 @@ impl Drop for EnvGuard {
     }
 }
 
-pub static ENV_LOCK: Mutex<()> = Mutex::new(());
+/// Serializes tests that mutate process-wide environment variables.
+/// Uses an async-aware mutex because the guard is held across awaits.
+pub static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Starts a mock HTTP server that returns the given response.
+/// Handle to a running mock server.
 ///
-/// Returns `(port, captured_request_body, captured_raw_http, thread_handle)`.
-pub fn mock_server(
-    response: &str,
-    status_code: u16,
-) -> (
+/// `(port, captured_request_body, captured_raw_http, thread_handle)`.
+pub type MockServerHandle = (
     u16,
     Arc<Mutex<Option<String>>>,
     Arc<Mutex<Option<String>>>,
     std::thread::JoinHandle<()>,
-) {
+);
+
+/// Starts a mock HTTP server that returns the given response.
+pub fn mock_server(response: &str, status_code: u16) -> MockServerHandle {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let body = response.to_owned();
