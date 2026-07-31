@@ -15,7 +15,7 @@
 //! rather than aborting the batch.
 use super::types::{FsMetadata, FsWrite};
 
-use crate::util::path_guard::{validate_path, GuardResult};
+use crate::util::path_guard::{GuardResult, validate_path};
 use cosh_sdk::hashline::{
     format,
     fs::{DiskFilesystem, Filesystem},

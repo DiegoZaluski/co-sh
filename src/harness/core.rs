@@ -1392,9 +1392,7 @@ impl Harness {
                                     // user stopped, break out quietly — the outer
                                     // `check_stop!()` sends the Stopped event.
                                     if stop_signal.load(Ordering::Relaxed) {
-                                        log::debug!(
-                                            "run_agent_loop answer_rx interrupted by stop"
-                                        );
+                                        log::debug!("run_agent_loop answer_rx interrupted by stop");
                                         break;
                                     }
                                     log::debug!("run_agent_loop answer_rx CLOSED");
@@ -1763,10 +1761,8 @@ impl Harness {
                         // Safety net — emit a terminal event so the TUI does
                         // not stay in a "running" state.
                         let _ = tx.send(HarnessEvent::Done {
-                            context_state: bincode::serialize(
-                                &self.context_manager.save_state(),
-                            )
-                            .unwrap_or_default(),
+                            context_state: bincode::serialize(&self.context_manager.save_state())
+                                .unwrap_or_default(),
                         });
                         break;
                     }

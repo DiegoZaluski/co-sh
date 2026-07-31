@@ -436,7 +436,8 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
     let tool_id = format!("bash_{}", part_idx);
-    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    ctx.state
+        .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
         .state
         .tool_spinners
@@ -843,7 +844,8 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         ctx.theme.text
     };
     let tool_id = format!("glob_{}", part_idx);
-    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    ctx.state
+        .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
         .state
         .tool_spinners
@@ -866,7 +868,8 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     };
     *ctx.line_h = 1;
     let tool_id = format!("read_{}", part_idx);
-    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    ctx.state
+        .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
         .state
         .tool_spinners
@@ -892,7 +895,8 @@ pub fn render_grep(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         ctx.theme.text
     };
     let tool_id = format!("grep_{}", part_idx);
-    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    ctx.state
+        .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
         .state
         .tool_spinners
@@ -914,7 +918,8 @@ pub fn render_webfetch(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) 
         ctx.theme.text
     };
     let tool_id = format!("webfetch_{}", part_idx);
-    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    ctx.state
+        .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
         .state
         .tool_spinners
@@ -938,7 +943,8 @@ pub fn render_websearch(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16)
         ctx.theme.text
     };
     let tool_id = format!("websearch_{}", part_idx);
-    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    ctx.state
+        .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
         .state
         .tool_spinners
@@ -965,7 +971,8 @@ pub fn render_task(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         ctx.theme.text
     };
     let tool_id = format!("task_{}", part_idx);
-    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    ctx.state
+        .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
         .state
         .tool_spinners
@@ -1154,7 +1161,8 @@ pub fn render_generic(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         ctx.theme.text
     };
     let tool_id = format!("generic_{}", part_idx);
-    ctx.state.manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
+    ctx.state
+        .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
         .state
         .tool_spinners

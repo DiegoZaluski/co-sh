@@ -23,10 +23,7 @@ use tokio::sync::mpsc;
 /// Run the agent loop to completion (it must terminate) and return the harness
 /// plus all events that were emitted. Events are drained from the unbounded
 /// channel after the loop returns.
-async fn run_loop_and_collect(
-    mut h: Harness,
-    input: &str,
-) -> (Harness, Vec<HarnessEvent>) {
+async fn run_loop_and_collect(mut h: Harness, input: &str) -> (Harness, Vec<HarnessEvent>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (_answer_tx, answer_rx) = mpsc::unbounded_channel();
     let (_perm_tx, perm_rx) = mpsc::unbounded_channel();
@@ -187,7 +184,8 @@ async fn bug05_question_answer_wait_ignores_stop_signal() {
 
     let stop_for_task = stop_signal.clone();
     let mut handle = tokio::spawn(async move {
-        h.run_agent_loop("ask me", tx, answer_rx, perm_rx, stop_for_task).await;
+        h.run_agent_loop("ask me", tx, answer_rx, perm_rx, stop_for_task)
+            .await;
     });
 
     // Wait for the loop to emit the QuestionRequest (i.e. it is now blocked
