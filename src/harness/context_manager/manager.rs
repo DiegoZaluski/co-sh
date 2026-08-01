@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use text_splitter::TextSplitter;
 
-use super::compression::init as deterministic_compress;
+use super::compression::init::{CHUNK_CAPACITY, init as deterministic_compress};
 
 /// Maximum token budget for the total conversation context.
 const MAX_CONTEXT_TOKENS: usize = 10_000;
@@ -169,9 +169,12 @@ pub struct ContextDisplayInfo {
 
 /// Orchestrates compression, expansion, and display of conversation context
 /// through a circular queue. The inner [`Context`] entries are compressed
-/// progressively and can be expanded on demand by the model via [`expand_slot`].
+/// progressively and can be expanded on demand by the model via
+/// [`expand_to`](Self::expand_to) (wired to the `expand_context` tool).
 pub struct ContextManager {
     pub ctxt: Context,
+    /// Set by [`run`](Self::run) when the context remains over budget after
+    /// the per-tick drain/rotation, so the UI can surface the residual load.
     pub warning: bool,
     pub queue: VecDeque<Context>,
     pub fixed_contexts: Vec<Context>,
@@ -262,13 +265,17 @@ impl ContextManager {
     /// Run one iteration of the context manager:
     /// 1. Format and display the current context.
     /// 2. If total tokens exceed the budget, first drain the fresh buffer
-    ///    (deterministic compression — no LLM round-trip), then rotate the
-    ///    oldest queue entry (pop_front → compress → push_back).
+    ///    (deterministic compression — no LLM round-trip); if that still
+    ///    leaves the context over budget, rotate the oldest queue entry
+    ///    (pop_front → compress → push_back).
     /// 3. Return the formatted context string.
     ///
     /// The buffer drain is what moves the TUI budget bar: in normal sessions
     /// the raw fresh chunks dominate the cost, so they are compressed into
     /// the queue as soon as the budget is exceeded.
+    ///
+    /// Sets [`warning`](Self::warning) when the context is still over budget
+    /// after the tick — one rotation per tick may not be enough.
     pub async fn run(&mut self) -> Option<String> {
         let context = self.format_context()?;
 
@@ -284,13 +291,30 @@ impl ContextManager {
                     log::debug!("run(): buffer drain failed: {e}");
                 }
             }
-            // Still over budget? Rotate the oldest queue entry.
-            self.compress_oldest(None).await;
+            // Only rotate the oldest queue entry if the drain was not enough
+            // to bring the context back under budget.
+            if let Some(post_drain) = self.format_context()
+                && estimate_tokens(&post_drain) >= MAX_CONTEXT_TOKENS
+            {
+                self.compress_oldest().await;
+            }
         }
 
         // Re-render so the returned context reflects the post-drain state
-        // (the cache was invalidated by the compression above).
-        self.format_context()
+        // (the cache was invalidated by the compression above). Flag any
+        // residual over-budget state so the UI can surface it — a single
+        // rotation per tick may not suffice to fall under the budget.
+        let rendered = self.format_context()?;
+        if estimate_tokens(&rendered) >= MAX_CONTEXT_TOKENS {
+            log::warn!(
+                "[context_manager] context still over budget after run() ({} >= {MAX_CONTEXT_TOKENS} tokens)",
+                estimate_tokens(&rendered)
+            );
+            self.warning = true;
+        } else {
+            self.warning = false;
+        }
+        Some(rendered)
     }
 
     /// Return the current maximum retry limit for compression attempts.
@@ -358,7 +382,7 @@ impl ContextManager {
             self.next_slot_id
         });
 
-        let hash_id = (exhibition << 24) | lv;
+        let hash_id = (exhibition << 24) | (lv & 0xFFFFFF);
         let _ = prev_hash;
 
         let entry = Context {
@@ -395,13 +419,7 @@ impl ContextManager {
     ///
     /// When an entry reaches seed size (≤ [`SEED_MAX_TOKENS`]) it leaves
     /// the queue and becomes fixed — never compressed again.
-    pub(crate) async fn compress_oldest(&mut self, raw_content: Option<&str>) -> &Self {
-        if let Some(raw) = raw_content {
-            let tokens = estimate_tokens(raw);
-            self.build_context(raw.to_string(), None, 1, tokens, None);
-            return self;
-        }
-
+    pub(crate) async fn compress_oldest(&mut self) -> &Self {
         let entry = match self.queue.pop_front() {
             Some(e) => e,
             None => return self,
@@ -414,27 +432,14 @@ impl ContextManager {
             return self;
         }
 
-        let summary = match self.compress_if_needed(&entry).await {
-            Some(s) => s,
-            None => {
-                log::error!(
-                    "[context_manager] compress_if_needed failed (hash={})",
-                    entry.hash_id
-                );
-                // Never lose context: restore the entry so the next tick can
-                // retry compression instead of silently dropping it.
-                self.queue.push_front(entry);
-                self.invalidate_cache();
-                return self;
-            }
-        };
+        let summary = self.compress_if_needed(&entry).await;
 
         let tokens = estimate_tokens(&summary);
 
         // Compressed to seed size — build the exhibition entry and move it
         // to fixed. It leaves the circular queue permanently.
         if tokens <= SEED_MAX_TOKENS {
-            let hash_id = (entry.exhibition << 24) | (entry.lv + 1);
+            let hash_id = (entry.exhibition << 24) | ((entry.lv + 1) & 0xFFFFFF);
             let seed = Context {
                 hash_id,
                 lv: entry.lv + 1,
@@ -471,10 +476,11 @@ impl ContextManager {
 
     /// Compress an entry with guard verification and retry loop.
     ///
-    /// The LLM path is best-effort: when the call fails or the retries are
-    /// exhausted without an under-budget result, the entry is still compressed
-    /// with the deterministic pipeline — it is never dropped.
-    async fn compress_if_needed(&self, entry: &Context) -> Option<String> {
+    /// Always returns a compressed result — the LLM path is best-effort: when
+    /// the call fails or the retries are exhausted without an under-budget
+    /// result, the entry is compressed with the deterministic pipeline. It is
+    /// never dropped.
+    async fn compress_if_needed(&self, entry: &Context) -> String {
         let tolerance = MAX_CONTEXT_TOKENS * (TOLERANCE_PERCENT as usize) / 100;
         let mut current_text = if !entry.assistant.is_empty() {
             entry.assistant.clone()
@@ -492,7 +498,11 @@ impl ContextManager {
         }
 
         for _ in 0..self.max_retries {
-            let reduction_needed = current_tokens.saturating_sub(MAX_CONTEXT_TOKENS);
+            // Target per-entry convergence toward seed size, not the total
+            // context budget. Using MAX_CONTEXT_TOKENS (10k) here saturates
+            // to 0 for every entry under 10k tokens, giving the LLM no real
+            // reduction pressure and never converging entries to seed.
+            let reduction_needed = current_tokens.saturating_sub(SEED_MAX_TOKENS);
 
             let summary = match self
                 .compress_via_llm(&current_text, MAX_CONTEXT_TOKENS, reduction_needed)
@@ -503,17 +513,17 @@ impl ContextManager {
                     log::error!("[context_manager] compression failed: {e}");
                     // LLM unavailable (MissingApiKey, timeout, ...) — fall back
                     // to the deterministic pipeline. Nothing is dropped.
-                    return Some(self.deterministic_compression(&current_text));
+                    return self.deterministic_compression(&current_text);
                 }
             };
 
             let result_tokens = estimate_tokens(&summary);
 
             if result_tokens <= MAX_CONTEXT_TOKENS {
-                return Some(summary);
+                return summary;
             }
             if result_tokens <= MAX_CONTEXT_TOKENS + tolerance {
-                return Some(self.deterministic_compression(&summary));
+                return self.deterministic_compression(&summary);
             }
 
             current_text = summary;
@@ -521,7 +531,7 @@ impl ContextManager {
         }
         // Retries exhausted without an under-budget result — the deterministic
         // fallback keeps the entry compressed and never loses it.
-        Some(self.deterministic_compression(&current_text))
+        self.deterministic_compression(&current_text)
     }
 
     /// Compress a context entry via the LLM with an informative prompt.
@@ -628,9 +638,8 @@ impl ContextManager {
         self.invalidate_cache();
 
         let chunk_count = idx;
-        let compressed_tokens = estimate_tokens(&combined);
         Ok(format!(
-            "Compressed {chunk_count} fresh chunk(s) ({compressed_tokens} tokens) up to checkpoint {checkpoint}."
+            "Compressed {chunk_count} fresh chunk(s) ({tokens} tokens) up to checkpoint {checkpoint}."
         ))
     }
 
@@ -646,15 +655,21 @@ impl ContextManager {
             return deterministic_compress(ctxt, false, TFIDF_MAX_DF, MMR_LAMBDA, MMR_RATIO);
         }
 
-        let splitter = TextSplitter::new(200);
+        let splitter = TextSplitter::new(CHUNK_CAPACITY);
         let chunks: Vec<&str> = splitter.chunks(ctxt).collect();
         chunks
             .chunks(DETERMINISTIC_MAX_CHUNKS)
             .map(|batch| {
-                let text = batch.concat();
+                // TextSplitter strips boundary whitespace, so rejoin with a
+                // single space to avoid gluing the last word of one chunk to
+                // the first word of the next.
+                let text = batch.join(" ");
                 deterministic_compress(&text, false, TFIDF_MAX_DF, MMR_LAMBDA, MMR_RATIO)
             })
-            .collect()
+            // Each batch is independently compressed; separate them too so a
+            // batch boundary cannot glue two compressed outputs together.
+            .collect::<Vec<String>>()
+            .join(" ")
     }
 
     /// Mark a hash for expansion so the next [`format_context`] call
@@ -695,7 +710,7 @@ impl ContextManager {
                 entry.lv, entry.lv
             ));
         }
-        let target_hash = (hash & !0xFFFFFF) | target_lv;
+        let target_hash = (hash & !0xFFFFFF) | (target_lv & 0xFFFFFF);
         self.expand.push(target_hash);
         self.invalidate_cache();
         Ok(self)
@@ -738,24 +753,6 @@ impl ContextManager {
             }
             self.exhibitions[idx] = entry.clone();
         }
-
-        self.layers.clear();
-        let mut by_exhibition: HashMap<u64, Vec<usize>> = HashMap::new();
-        for (i, e) in self.queue.iter().enumerate() {
-            by_exhibition.entry(e.exhibition).or_default().push(i);
-        }
-        for indices in by_exhibition.values() {
-            let mut pairs: Vec<(u64, usize)> =
-                indices.iter().map(|&i| (self.queue[i].lv, i)).collect();
-            pairs.sort_by_key(|(lv, _)| *lv);
-            for w in pairs.windows(2) {
-                let (_, parent_idx) = w[0];
-                let (_, child_idx) = w[1];
-                let child = &self.queue[child_idx];
-                let parent = self.queue[parent_idx].clone();
-                self.layers.insert(child.hash_id, vec![parent]);
-            }
-        }
     }
 
     /// Restore the full manager state from a previously saved snapshot.
@@ -766,6 +763,9 @@ impl ContextManager {
         self.buffer_chunks = state.buffer_chunks.clone();
         self.checkpoint_counter = state.checkpoint_counter;
         self.next_slot_id = state.next_slot_id;
+        // Drop stale expansion marks so they cannot point at slots that do
+        // not exist in the restored state.
+        self.expand.clear();
         self.rebuild_internals();
         self.layers = state.layers.clone();
         self.invalidate_cache();
@@ -865,7 +865,15 @@ impl ContextManager {
                 exh.user.clone()
             };
 
-            while walk_lv > target_lv {
+            // Each step in a healthy chain lowers the level by at least one,
+            // so `exh.lv - target_lv` bounds the walk. Cap it explicitly so a
+            // corrupted `layers` map (e.g. a persisted cycle) cannot loop
+            // forever.
+            let max_steps = exh.lv.saturating_sub(target_lv);
+            for _ in 0..max_steps {
+                if walk_lv <= target_lv {
+                    break;
+                }
                 match self.layers.get(&walk_hash).and_then(|v| v.first()) {
                     Some(parent) => {
                         walk_hash = parent.hash_id;
