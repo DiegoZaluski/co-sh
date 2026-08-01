@@ -1,7 +1,7 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-use super::mmr::{MmrOutput, mmr_select};
+use super::mmr::{MmrOutput, fallback_indices, mmr_select};
 
 fn heading_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -41,14 +41,19 @@ pub fn compress_hierarchical(
         }
     }
 
-    // Run MMR on content only
-    let content_scores: Vec<f64> = content_indices.iter().map(|&i| scores[i]).collect();
-    let content_vectors: Vec<Vec<f64>> = content_indices
-        .iter()
-        .map(|&i| topic_vectors[i].clone())
-        .collect();
-
-    let content_selected = mmr_select(&content_scores, &content_vectors, lambda, compression_ratio);
+    // Run MMR on content only. If the scoring pipeline degenerated (e.g. every
+    // bigram filtered by max_df), `scores` is empty and indexing it would panic:
+    // fall back to a deterministic subset instead.
+    let content_selected = if scores.is_empty() {
+        fallback_indices(content_indices.len(), compression_ratio)
+    } else {
+        let content_scores: Vec<f64> = content_indices.iter().map(|&i| scores[i]).collect();
+        let content_vectors: Vec<Vec<f64>> = content_indices
+            .iter()
+            .map(|&i| topic_vectors[i].clone())
+            .collect();
+        mmr_select(&content_scores, &content_vectors, lambda, compression_ratio)
+    };
 
     // Map local MMR indices back to global sentence indices
     let mut selected: Vec<usize> = heading_indices;

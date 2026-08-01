@@ -51,6 +51,19 @@ fn centroid(vectors: &[Vec<f64>]) -> Vec<f64> {
 //
 // Returns indices of selected sentences in original reading order.
 
+// Deterministic fallback when the scoring pipeline degenerates (e.g. every
+// bigram is filtered by max_df, leaving no vocabulary to rank). Picks `target`
+// evenly-spaced sentences so repetitive content is compressed, never dropped.
+pub(super) fn fallback_indices(n: usize, compression_ratio: f64) -> Vec<usize> {
+    if n == 0 {
+        return vec![];
+    }
+    let min_sentences = std::cmp::min(n, 4);
+    let target = ((n as f64) * compression_ratio).ceil() as usize;
+    let target = std::cmp::max(min_sentences, std::cmp::min(target, n));
+    (0..target).map(|i| (i * n) / target).collect()
+}
+
 pub fn mmr_select(
     scores: &[f64],
     topic_vectors: &[Vec<f64>],
@@ -137,7 +150,11 @@ pub fn compress(
 ) -> MmrOutput {
     let tokens_before: usize = sentences.iter().map(|s| count_tokens(s)).sum();
 
-    let indices = mmr_select(scores, topic_vectors, lambda, compression_ratio);
+    let indices = if scores.is_empty() {
+        fallback_indices(sentences.len(), compression_ratio)
+    } else {
+        mmr_select(scores, topic_vectors, lambda, compression_ratio)
+    };
 
     let selected: Vec<String> = indices.iter().map(|&i| sentences[i].clone()).collect();
     let tokens_after: usize = selected.iter().map(|s| count_tokens(s)).sum();
