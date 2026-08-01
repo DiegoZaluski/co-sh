@@ -2,7 +2,7 @@
 
 use crate::harness::context_manager::{Context, ContextManager, ContextManagerState};
 use cosh_sdk::connector::Connector;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 fn test_connector() -> Connector {
     Connector::new("ollama").expect("ollama provider should be known")
@@ -199,6 +199,7 @@ fn restore_empty_state() {
     cm.restore_state(&ContextManagerState {
         queue: VecDeque::new(),
         fixed_contexts: Vec::new(),
+        layers: HashMap::new(),
         buffer_chunks: Vec::new(),
         checkpoint_counter: 0,
         next_slot_id: 0,
@@ -206,4 +207,34 @@ fn restore_empty_state() {
 
     assert!(cm.queue.is_empty());
     assert!(cm.fixed_contexts.is_empty());
+}
+
+// Verifies that the `layers` parent-content map survives a save/restore
+// roundtrip. Compressed parents are popped from the queue before being stored
+// in `layers`, so they cannot be reconstructed from queue relationships after
+// restore — the map must be persisted as-is.
+#[test]
+fn restore_preserves_layers() {
+    let mut cm = ContextManager::new(test_connector(), 3);
+
+    let parent = sample_context((1 << 24) | 1, 1, "original content");
+    let child = sample_context((1 << 24) | 2, 2, "summary");
+    cm.queue.push_back(child.clone());
+    cm.layers.insert(child.hash_id, vec![parent.clone()]);
+
+    let state = cm.save_state();
+    let mut restored = ContextManager::new(test_connector(), 3);
+    restored.restore_state(&state);
+
+    assert_eq!(
+        restored.layers.len(),
+        1,
+        "layers should be preserved across save/restore"
+    );
+    let parents = restored
+        .layers
+        .get(&child.hash_id)
+        .expect("child hash should map to its parent");
+    assert_eq!(parents[0].assistant, "original content");
+    assert_eq!(parents[0].hash_id, parent.hash_id);
 }
