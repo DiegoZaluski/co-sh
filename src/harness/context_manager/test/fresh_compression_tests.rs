@@ -227,3 +227,34 @@ fn format_context_after_compress_fresh_up_to() {
         );
     }
 }
+
+// Correct behavior: the confirmation message must report the COMPRESSED
+// output size, not the raw input size. The input here is ~16k tokens while
+// the deterministic output is a fraction of that — the message must match
+// the entry actually pushed to the queue.
+#[test]
+fn compress_fresh_up_to_reports_output_tokens() {
+    let mut cm = ContextManager::new(test_connector(), 3);
+
+    for _ in 0..4 {
+        cm.add_buffer_context(Role::assistant(&"word ".repeat(4000)));
+    }
+
+    let msg = cm.compress_fresh_up_to(4).unwrap();
+    let actual = cm.queue.back().map(|e| e.tokens).unwrap_or(0);
+    let reported = msg
+        .split('(')
+        .nth(2)
+        .and_then(|s| s.split(' ').next())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    assert!(
+        actual > 0,
+        "precondition: compression should produce a non-empty queue entry"
+    );
+    assert_eq!(
+        reported, actual,
+        "BUG: message reported {reported} tokens but the compressed entry has {actual} tokens"
+    );
+}
