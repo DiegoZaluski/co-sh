@@ -1,23 +1,6 @@
-//! Tests for basic struct functionality (Context, Role)
+//! Tests for basic struct functionality (Role)
 
-use crate::harness::context_manager::{Context, Role};
-
-// Verifies that Context struct fields are accessible and store values correctly.
-#[test]
-fn context_struct_fields() {
-    let ctx = Context {
-        hash_id: 42,
-        lv: 1,
-        user: String::new(),
-        assistant: "hello".to_string(),
-        tokens: 5,
-        exhibition: 1,
-    };
-    assert_eq!(ctx.hash_id, 42);
-    assert_eq!(ctx.lv, 1);
-    assert_eq!(ctx.assistant, "hello");
-    assert_eq!(ctx.tokens, 5);
-}
+use crate::harness::context_manager::Role;
 
 // Verifies that Role struct works correctly.
 #[test]

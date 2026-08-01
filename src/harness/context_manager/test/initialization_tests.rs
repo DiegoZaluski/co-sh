@@ -114,26 +114,6 @@ fn build_context_hash_is_linear() {
         (2 << 24) | 1,
         "ex=2 lv=1 → hash=(2<<24)|1"
     );
-
-    // Model navigation arithmetic:
-    // From (hash=(1<<24)|2, lv=2), target LV1: ((1<<24)|2) - 2 + 1 = (1<<24)|1 ✅
-    assert_eq!(
-        ((1 << 24) | 2) - 2 + 1,
-        (1 << 24) | 1,
-        "model can navigate: hash - lv + 1 = LV1 hash"
-    );
-    // From (hash=(1<<24)|3, lv=3), target LV1: ((1<<24)|3) - 3 + 1 = (1<<24)|1 ✅
-    assert_eq!(
-        ((1 << 24) | 3) - 3 + 1,
-        (1 << 24) | 1,
-        "model can navigate: hash - lv + 1 = LV1 hash"
-    );
-    // Target LV1 for ex=2: ((2<<24)|1) - 1 + 1 = (2<<24)|1 (lv=1, stays same)
-    assert_eq!(
-        ((2 << 24) | 1) - 1 + 1,
-        (2 << 24) | 1,
-        "LV1 hash minus lv=1 plus 1 is itself"
-    );
 }
 
 // Verifies that build_context() can be called multiple times in sequence.

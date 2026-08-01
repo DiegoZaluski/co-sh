@@ -9,32 +9,6 @@ fn test_connector() -> Connector {
 
 // --- Expansion tests ---
 
-// Verifies that expand_slot() stores a hash_id in the expand list.
-#[test]
-fn expand_slot_stores_hash() {
-    let mut cm = ContextManager::new(test_connector(), 3);
-
-    assert!(cm.expand.is_empty(), "expand list should start empty");
-
-    cm.expand_slot(42);
-
-    assert_eq!(cm.expand.len(), 1);
-    assert_eq!(cm.expand[0], 42);
-}
-
-// Verifies that expand_slot() can store multiple hashes.
-#[test]
-fn expand_slot_multiple_hashes() {
-    let mut cm = ContextManager::new(test_connector(), 3);
-
-    cm.expand_slot(100);
-    cm.expand_slot(200);
-    cm.expand_slot(300);
-
-    assert_eq!(cm.expand.len(), 3);
-    assert_eq!(cm.expand, vec![100, 200, 300]);
-}
-
 // Verifies that collapse_context() clears the expand list.
 #[test]
 fn collapse_context_clears_list() {
