@@ -152,8 +152,20 @@ fn msg_change_token(msg: &Message) -> u64 {
     hash_parts(msg)
 }
 
-fn msg_content_token(msg: &Message, config_token: u64, max_w: u16) -> u64 {
+fn msg_content_token(
+    msg: &Message,
+    config_token: u64,
+    max_w: u16,
+    tool_state: &ToolRenderState,
+) -> u64 {
     let mut h = hash_parts(msg);
+    // Expansion toggles must invalidate the per-message render cache. The
+    // `version` counter is incremented on every expand/collapse toggle, so
+    // hashing it (O(1)) is sufficient — `ensure_height_caches_fresh` already
+    // forces a full cache rebuild (clearing `msg_cache_tokens`) whenever the
+    // version changes, so the per-part expansion state never needs to be
+    // hashed individually.
+    h = h.wrapping_mul(31).wrapping_add(tool_state.version);
     h = h.wrapping_mul(31).wrapping_add(config_token);
     h = h.wrapping_mul(31).wrapping_add(max_w as u64);
     h
@@ -238,6 +250,9 @@ pub struct SessionView {
     /// ID of the session for which caches were last built.
     /// Forces a full rebuild when switching sessions with the same message count.
     last_session_id: Option<String>,
+    /// Expansion version of `tool_state` when the height caches were last built.
+    /// A change forces a full rebuild so expanded/collapsed heights stay in sync.
+    last_tool_state_version: u64,
 
     // ── text_regions dirty flag (skip rebuild when nothing changed) ────────────
     text_regions_gen: u64,
@@ -253,10 +268,22 @@ pub struct SessionView {
     msg_cache_text_regions: Vec<Option<Vec<TextRegion>>>,
 }
 
-fn text_regions_generation(session: &crate::types::Session, config: &TuiConfig, max_w: u16) -> u64 {
+#[derive(Clone, Copy, Default)]
+struct HeightCacheUpdate {
+    full_rebuild: bool,
+    tool_state_changed: bool,
+}
+
+fn text_regions_generation(
+    session: &crate::types::Session,
+    config: &TuiConfig,
+    max_w: u16,
+    tool_state_version: u64,
+) -> u64 {
     let mut g: u64 = session.messages.len() as u64;
     g = g.wrapping_mul(31).wrapping_add(max_w as u64);
     g = g.wrapping_mul(31).wrapping_add(config_token(config));
+    g = g.wrapping_mul(31).wrapping_add(tool_state_version);
     if let Some(last) = session.messages.last() {
         g = g.wrapping_mul(31).wrapping_add(msg_change_token(last));
     }
@@ -321,6 +348,7 @@ impl SessionView {
             msg_cache_h: Vec::new(),
             msg_cache_text_regions: Vec::new(),
             last_session_id: None,
+            last_tool_state_version: 0,
         }
     }
 
@@ -613,7 +641,9 @@ impl SessionView {
                     let est_h = opt_heights
                         .and_then(|ph| ph.get(pi))
                         .copied()
-                        .unwrap_or_else(|| Self::estimate_part_height(part, max_w, config, role));
+                        .unwrap_or_else(|| {
+                            Self::estimate_part_height(part, max_w, config, role, tool_state)
+                        });
                     let render_h = if streaming {
                         // During streaming, use the exact estimated height without padding.
                         // estimate_height uses the same pulldown_cmark layout algorithm as
@@ -662,7 +692,9 @@ impl SessionView {
                     let h = opt_heights
                         .and_then(|ph| ph.get(pi))
                         .copied()
-                        .unwrap_or_else(|| Self::estimate_part_height(part, max_w, config, role))
+                        .unwrap_or_else(|| {
+                            Self::estimate_part_height(part, max_w, config, role, tool_state)
+                        })
                         .min(bottom - y)
                         .max(1);
                     let text_style = Style::default()
@@ -806,6 +838,7 @@ impl SessionView {
         max_w: u16,
         config: &TuiConfig,
         role: &MessageRole,
+        tool_state: &ToolRenderState,
     ) -> u16 {
         match part {
             Part::Text(t) if !t.synthetic && *role == MessageRole::Assistant => {
@@ -868,9 +901,17 @@ impl SessionView {
                         // + 2 for external margins (top + bottom)
                         diff_lines + 5
                     } else {
+                        // bash (and write) block. When the tool is expanded, the full
+                        // output is rendered, so the height must match render_shell.
+                        let id = t.tool_call_id.as_deref().unwrap_or("shell");
                         let collapsed = crate::util::scroll::collapse_tool_output(output, 10, 800);
-                        let lines = collapsed.output.lines().count().max(1) as u16
-                            + u16::from(collapsed.overflow);
+                        let display = if tool_state.is_expanded(id) {
+                            output
+                        } else {
+                            &collapsed.output
+                        };
+                        let lines =
+                            display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
                         lines + 4
                     }
                 } else {
@@ -1120,7 +1161,6 @@ impl SessionView {
         );
         let max_w = inner_area.width.saturating_sub(6).max(2);
         let x_off = i32::from(inner_area.x + 3);
-        let max_w_i32 = i32::from(max_w);
 
         let vp_top = i32::from(inner_area.y);
         let vp_bottom = i32::from(inner_area.bottom());
@@ -1170,18 +1210,11 @@ impl SessionView {
                                 let collapsed =
                                     crate::util::scroll::collapse_tool_output(&output, 10, 800);
                                 if collapsed.overflow {
-                                    let expanded = self.tool_state.is_expanded(id);
-                                    let display =
-                                        if expanded { &output } else { &collapsed.output };
-                                    let hint_y = part_y + 1 + display.lines().count() as i32;
-
-                                    if click_y == hint_y
-                                        && click_x >= x_off
-                                        && click_x < x_off + max_w_i32
-                                    {
-                                        self.tool_state.toggle_expanded(id);
-                                        return true;
-                                    }
+                                    // Toggle on any click inside the bash block. The part's
+                                    // row range already matches the rendered block because the
+                                    // height caches are rebuilt with the expansion state.
+                                    self.tool_state.toggle_expanded(id);
+                                    return true;
                                 }
                             }
                         }
@@ -1215,6 +1248,7 @@ impl SessionView {
         max_w: u16,
         config: &TuiConfig,
         part_heights: Option<&[u16]>,
+        tool_state: &ToolRenderState,
     ) -> i32 {
         let border_h: i32 = match msg.role {
             MessageRole::User => 1,
@@ -1243,7 +1277,11 @@ impl SessionView {
         } else {
             msg.parts
                 .iter()
-                .map(|p| i32::from(Self::estimate_part_height(p, max_w, config, &msg.role)))
+                .map(|p| {
+                    i32::from(Self::estimate_part_height(
+                        p, max_w, config, &msg.role, tool_state,
+                    ))
+                })
                 .sum()
         };
         let padding_bottom: i32 = match msg.role {
@@ -1269,17 +1307,19 @@ impl SessionView {
     /// (new messages appended), extends the cache incrementally without touching
     /// existing entries. Otherwise, incrementally updates only the last message
     /// if its content changed (streaming — tool status, output, reasoning, text).
-    /// Returns `true` if a full rebuild occurred (callers may need to clear
-    /// additional caches on rebuild).
+    /// Returns cache update details so callers can clear render caches and
+    /// distinguish remote content growth from local expand/collapse layout.
     fn ensure_height_caches_fresh(
         &mut self,
         session: &crate::types::Session,
         max_w: u16,
         config: &TuiConfig,
-    ) -> bool {
+    ) -> HeightCacheUpdate {
         let config_tok = config_token(config);
         let session_changed = self.last_session_id.as_deref() != Some(session.id.as_str());
+        let tool_state_changed = self.last_tool_state_version != self.tool_state.version;
         let cache_stale = session_changed
+            || tool_state_changed
             || self.msg_height_cache.len() != session.messages.len()
             || self.cache_max_w != max_w
             || self.cache_config_token != config_tok;
@@ -1290,7 +1330,7 @@ impl SessionView {
             let count_grew =
                 !config_or_width_changed && session.messages.len() > self.msg_height_cache.len();
 
-            if config_or_width_changed || !count_grew || session_changed {
+            if config_or_width_changed || tool_state_changed || !count_grew || session_changed {
                 // Full rebuild: config/width changed, or count decreased
                 let _start = Instant::now();
                 self.msg_height_cache.clear();
@@ -1299,9 +1339,17 @@ impl SessionView {
                     let part_hs: Vec<u16> = m
                         .parts
                         .iter()
-                        .map(|p| Self::estimate_part_height(p, max_w, config, &m.role))
+                        .map(|p| {
+                            Self::estimate_part_height(p, max_w, config, &m.role, &self.tool_state)
+                        })
                         .collect();
-                    let msg_h = Self::render_message_height(m, max_w, config, Some(&part_hs));
+                    let msg_h = Self::render_message_height(
+                        m,
+                        max_w,
+                        config,
+                        Some(&part_hs),
+                        &self.tool_state,
+                    );
                     self.part_heights_cache.push(part_hs);
                     self.msg_height_cache.push(msg_h);
                 }
@@ -1310,20 +1358,20 @@ impl SessionView {
                 self.last_msg_change_token =
                     session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.last_session_id = Some(session.id.clone());
+                self.last_tool_state_version = self.tool_state.version;
                 self.cached_total_height = self.recompute_total_height(session);
-                // When the terminal width or config changed, the previous
-                // actual_total_height was computed for a DIFFERENT layout
-                // (different text wrapping, different content height) and is
-                // NOT comparable to the new cached height. Using .max() would
-                // preserve the old, larger value, inflating max_scroll. This
-                // allows scroll_y to point beyond the actual content, pushing
-                // all messages above the viewport — blank screen.
+                // When the session, expansion state, terminal width, or config
+                // changed, the previous actual_total_height was computed for a
+                // DIFFERENT layout and is NOT comparable to the new cached
+                // height. Using .max() would preserve the old, larger value,
+                // inflating max_scroll. This allows scroll_y to point beyond
+                // the actual content, pushing all messages above the viewport.
                 //
                 // Only preserve the previous actual_total_height via .max()
-                // when the width is unchanged — during streaming, the rendered
+                // when the layout is unchanged: during streaming, the rendered
                 // height may slightly exceed the cache estimate, and .max()
                 // prevents a scroll gap below the streaming message.
-                if config_or_width_changed {
+                if config_or_width_changed || tool_state_changed || session_changed {
                     self.actual_total_height = self.cached_total_height;
                 } else {
                     self.actual_total_height =
@@ -1344,7 +1392,10 @@ impl SessionView {
                     _start.elapsed().as_micros(),
                     session.messages.len()
                 );
-                true
+                HeightCacheUpdate {
+                    full_rebuild: true,
+                    tool_state_changed,
+                }
             } else {
                 // Extend cache with new messages only (same width/config)
                 let prev_len = self.msg_height_cache.len();
@@ -1352,9 +1403,17 @@ impl SessionView {
                     let part_hs: Vec<u16> = m
                         .parts
                         .iter()
-                        .map(|p| Self::estimate_part_height(p, max_w, config, &m.role))
+                        .map(|p| {
+                            Self::estimate_part_height(p, max_w, config, &m.role, &self.tool_state)
+                        })
                         .collect();
-                    let msg_h = Self::render_message_height(m, max_w, config, Some(&part_hs));
+                    let msg_h = Self::render_message_height(
+                        m,
+                        max_w,
+                        config,
+                        Some(&part_hs),
+                        &self.tool_state,
+                    );
                     self.part_heights_cache.push(part_hs);
                     self.msg_height_cache.push(msg_h);
                 }
@@ -1363,6 +1422,7 @@ impl SessionView {
                 self.last_msg_change_token =
                     session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.last_session_id = Some(session.id.clone());
+                self.last_tool_state_version = self.tool_state.version;
                 // Incremental: add new messages' heights plus a gap for each.
                 // All new messages have idx > 0 (prev_len >= 1), so gap = 1 per message.
                 let new_count = self.msg_height_cache.len() - prev_len;
@@ -1375,7 +1435,10 @@ impl SessionView {
                     prev_len,
                     session.messages.len()
                 );
-                false
+                HeightCacheUpdate {
+                    full_rebuild: false,
+                    tool_state_changed,
+                }
             }
         } else {
             // Incremental update: refresh only the last message when its
@@ -1387,9 +1450,23 @@ impl SessionView {
                 let part_hs: Vec<u16> = last_msg
                     .parts
                     .iter()
-                    .map(|p| Self::estimate_part_height(p, max_w, config, &last_msg.role))
+                    .map(|p| {
+                        Self::estimate_part_height(
+                            p,
+                            max_w,
+                            config,
+                            &last_msg.role,
+                            &self.tool_state,
+                        )
+                    })
                     .collect();
-                let msg_h = Self::render_message_height(last_msg, max_w, config, Some(&part_hs));
+                let msg_h = Self::render_message_height(
+                    last_msg,
+                    max_w,
+                    config,
+                    Some(&part_hs),
+                    &self.tool_state,
+                );
                 let old_last_h = self.msg_height_cache[last_idx];
                 if last_idx < self.part_heights_cache.len() {
                     self.part_heights_cache[last_idx] = part_hs;
@@ -1397,6 +1474,7 @@ impl SessionView {
                 }
                 self.last_msg_change_token = current_token;
                 self.last_session_id = Some(session.id.clone());
+                self.last_tool_state_version = self.tool_state.version;
                 // Incremental: update cached total by the height difference.
                 // Message count is unchanged, so no gap adjustment needed.
                 self.cached_total_height += msg_h - old_last_h;
@@ -1406,7 +1484,7 @@ impl SessionView {
             } else {
                 log::debug!("[PERF] msg_height_cache: hit (cached)");
             }
-            false
+            HeightCacheUpdate::default()
         }
     }
 
@@ -1454,7 +1532,13 @@ impl SessionView {
                         .and_then(|ph| ph.get(pi))
                         .copied()
                         .unwrap_or_else(|| {
-                            Self::estimate_part_height(part, max_w, config, &msg.role)
+                            Self::estimate_part_height(
+                                part,
+                                max_w,
+                                config,
+                                &msg.role,
+                                &self.tool_state,
+                            )
                         });
                     let part_h = i32::from(raw_h);
                     let p_top = part_y;
@@ -1645,10 +1729,18 @@ impl SessionView {
                                             ) {
                                             trimmed.to_string()
                                         } else {
-                                            crate::util::scroll::collapse_tool_output(
-                                                trimmed, 10, 800,
-                                            )
-                                            .output
+                                            let id = t.tool_call_id.as_deref().unwrap_or("shell");
+                                            let collapsed =
+                                                crate::util::scroll::collapse_tool_output(
+                                                    trimmed, 10, 800,
+                                                );
+                                            if self.tool_state.is_expanded(id)
+                                                || !collapsed.overflow
+                                            {
+                                                trimmed.to_string()
+                                            } else {
+                                                collapsed.output
+                                            }
                                         };
                                         let first_output_screen = (p_top.max(vp_top) + 1) as u16;
                                         let screen_end = p_bottom.min(vp_bottom) as u16;
@@ -1824,11 +1916,11 @@ impl SessionView {
         let _frame_start = Instant::now();
 
         let config_tok = config_token(config);
-        let cache_rebuilt = self.ensure_height_caches_fresh(session, max_w, config);
+        let height_update = self.ensure_height_caches_fresh(session, max_w, config);
 
         // Ensure render cache vectors match message count
         let n_msgs = session.messages.len();
-        if cache_rebuilt {
+        if height_update.full_rebuild {
             self.msg_cache_tokens.clear();
             self.msg_cache_cells.clear();
             self.msg_cache_w.clear();
@@ -1857,11 +1949,18 @@ impl SessionView {
         // Mirrors OpenCode's `recalculateBarProps()` which calls `applyStickyStart`
         // when content size changes and user hasn't manually scrolled.
         if total_height != self.last_content_height {
-            self.recalculate_bar_props(total_height, visible_height);
+            if height_update.tool_state_changed {
+                // Expand/collapse is a local viewport interaction. Do not apply
+                // sticky-to-bottom here; that behavior is reserved for real
+                // content growth such as streamed tokens or appended messages.
+                self.sync_manual_scroll_state();
+            } else {
+                self.recalculate_bar_props(total_height, visible_height);
+            }
             self.last_content_height = total_height;
         }
 
-        let regions_gen = text_regions_generation(session, config, max_w);
+        let regions_gen = text_regions_generation(session, config, max_w, self.tool_state.version);
         if regions_gen != self.text_regions_gen {
             let _regions_start = Instant::now();
             self.build_text_regions(session, inner_area, max_w, config, theme);
@@ -1920,7 +2019,7 @@ impl SessionView {
                         .tool_spinners
                         .iter()
                         .any(|(_, s)| !s.is_idle());
-                    let token = msg_content_token(msg, config_tok, max_w);
+                    let token = msg_content_token(msg, config_tok, max_w, &self.tool_state);
                     let cache_hit = !is_streaming_msg
                         && !has_active_spinner
                         && token == self.msg_cache_tokens[idx]
@@ -2128,7 +2227,7 @@ impl SessionView {
 
                     if visible_h > 0 {
                         let is_streaming_msg = idx == session.messages.len() - 1 && streaming;
-                        let token = msg_content_token(msg, config_tok, max_w);
+                        let token = msg_content_token(msg, config_tok, max_w, &self.tool_state);
                         let cache_hit = !is_streaming_msg
                             && token == self.msg_cache_tokens[idx]
                             && self.msg_cache_w[idx] == inner_area.width
@@ -2247,7 +2346,8 @@ impl SessionView {
                             MessageRole::Assistant => {
                                 let is_streaming_msg =
                                     idx == session.messages.len() - 1 && streaming;
-                                let token = msg_content_token(msg, config_tok, max_w);
+                                let token =
+                                    msg_content_token(msg, config_tok, max_w, &self.tool_state);
                                 let cache_hit = !is_streaming_msg
                                     && token == self.msg_cache_tokens[idx]
                                     && self.msg_cache_w[idx] == inner_area.width

@@ -110,6 +110,9 @@ pub struct ToolRenderState {
     pub error_expanded: HashMap<String, bool>,
     /// Per-tool-call highlight spinners, keyed by tool call ID.
     pub tool_spinners: HashMap<String, HighlightSpinner>,
+    /// Incremented on every expand/collapse toggle. Consumers use this to
+    /// invalidate layout and render caches that depend on expansion state.
+    pub version: u64,
 }
 
 impl ToolRenderState {
@@ -118,12 +121,14 @@ impl ToolRenderState {
             expanded: HashMap::new(),
             error_expanded: HashMap::new(),
             tool_spinners: HashMap::new(),
+            version: 0,
         }
     }
 
     pub fn toggle_expanded(&mut self, id: &str) {
         let entry = self.expanded.entry(id.to_string()).or_insert(false);
         *entry = !*entry;
+        self.version = self.version.wrapping_add(1);
     }
 
     pub fn is_expanded(&self, id: &str) -> bool {
@@ -133,6 +138,7 @@ impl ToolRenderState {
     pub fn toggle_error(&mut self, id: &str) {
         let entry = self.error_expanded.entry(id.to_string()).or_insert(false);
         *entry = !*entry;
+        self.version = self.version.wrapping_add(1);
     }
 
     /// Helper: convert a ratatui `Color::Rgb` to `RGBA`.

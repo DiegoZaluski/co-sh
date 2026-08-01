@@ -8,8 +8,8 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
@@ -723,4 +723,169 @@ fn drag_selection_render_tolerates_zero_height_viewport() {
 
     // Must not panic. The highlight is simply not drawn for a 0-height viewport.
     view.render(&mut buf, area, &state, &theme, &config, 0.016);
+}
+
+/// Extract the text currently in the buffer (one line per row).
+fn buffer_text(buf: &Buffer) -> String {
+    let mut out = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            if let Some(cell) = buf.cell((x, y)) {
+                out.push(cell.symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn test_bash_output_expand_toggles_and_grows_height() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let msg = Message {
+        id: "msg-bash".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            Part::Text(TextPart {
+                text: "Let me check that.".into(),
+                synthetic: false,
+            }),
+            Part::Tool(ToolPart {
+                tool: "bash_run".into(),
+                input: serde_json::json!({ "command": "echo hello" }),
+                output: Some(output),
+                status: ToolStatus::Completed,
+                tool_call_id: Some("bash-1".into()),
+                is_start: true,
+                is_streaming: false,
+            }),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 60));
+
+    // First render: the bash block is collapsed to a preview.
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let collapsed_msg_h = view.msg_height_cache[0];
+    let collapsed_part_h = view.part_heights_cache[0][1];
+    assert!(!view.tool_state.is_expanded("bash-1"));
+    assert!(!buffer_text(&buf).contains("line 19"));
+
+    // Click inside the bash block (second part, so it starts after the text part).
+    let text_h = view.part_heights_cache[0][0];
+    let bash_top = area.y + text_h;
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        bash_top + 2,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(handled);
+    assert!(view.tool_state.is_expanded("bash-1"));
+
+    // Second render: the message height must grow to fit the full output and
+    // the previously truncated lines must now be visible.
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    assert!(view.msg_height_cache[0] > collapsed_msg_h);
+    assert!(view.part_heights_cache[0][1] > collapsed_part_h);
+    assert!(buffer_text(&buf).contains("line 19"));
+
+    let selected = view.get_text_in_region(
+        area.x,
+        area.y,
+        area.x + area.width.saturating_sub(1),
+        area.y + area.height.saturating_sub(1),
+    );
+    assert!(selected.contains("line 19"));
+}
+
+#[test]
+fn test_bash_output_collapse_shrinks_without_scroll_gap() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output: String = (0..120).map(|i| format!("line {i}\n")).collect();
+    let msg = Message {
+        id: "msg-bash".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            Part::Text(TextPart {
+                text: "Let me check that.".into(),
+                synthetic: false,
+            }),
+            Part::Tool(ToolPart {
+                tool: "bash_run".into(),
+                input: serde_json::json!({ "command": "echo hello" }),
+                output: Some(output),
+                status: ToolStatus::Completed,
+                tool_call_id: Some("bash-1".into()),
+                is_start: true,
+                is_streaming: false,
+            }),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 12);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let collapsed_scroll_y = view.scroll_y;
+    let text_h = view.part_heights_cache[0][0];
+    let bash_top = area.y + text_h;
+    let expand_click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        bash_top + 2,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&expand_click, area, &state, &config));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert!(view.tool_state.is_expanded("bash-1"));
+    assert_eq!(view.scroll_y, collapsed_scroll_y);
+    assert!(view.has_manual_scroll);
+
+    view.scroll_to_bottom();
+    let expanded_scroll_y = view.scroll_y;
+    assert!(expanded_scroll_y > 0);
+
+    let collapse_click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 5,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&collapse_click, area, &state, &config));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert!(!view.tool_state.is_expanded("bash-1"));
+    assert!(view.scroll_y < expanded_scroll_y);
+    assert!(view.scroll_y <= (view.actual_total_height - view.visible_height).max(0));
+    assert!(!buffer_text(&buf).contains("line 119"));
 }
