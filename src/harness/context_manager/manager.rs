@@ -129,11 +129,16 @@ pub struct FreshContext {
 
 /// Serializable snapshot of [`ContextManager`] state for bincode persistence.
 /// Every field is the minimum needed to reconstruct the full manager —
-/// exhibitions and layers are rebuilt on load.
+/// exhibitions are rebuilt on load; `layers` holds compressed parents that no
+/// longer exist in the queue, so it is persisted as-is.
 #[derive(Serialize, Deserialize)]
 pub struct ContextManagerState {
     pub queue: VecDeque<Context>,
     pub fixed_contexts: Vec<Context>,
+    /// Parent-content chain keyed by child hash. Not derivable from the queue
+    /// after compression (parents are popped before being stored here), so it
+    /// is persisted directly rather than rebuilt.
+    pub layers: HashMap<u64, Vec<Context>>,
     pub buffer_chunks: Vec<FreshContext>,
     pub checkpoint_counter: u32,
     pub next_slot_id: u64,
@@ -713,13 +718,17 @@ impl ContextManager {
         ContextManagerState {
             queue: self.queue.clone(),
             fixed_contexts: self.fixed_contexts.clone(),
+            layers: self.layers.clone(),
             buffer_chunks: self.buffer_chunks.clone(),
             checkpoint_counter: self.checkpoint_counter,
             next_slot_id: self.next_slot_id,
         }
     }
 
-    /// Rebuild exhibitions and layers after loading from state.
+    /// Rebuild exhibitions after loading from state. The `layers` map is
+    /// restored directly from the snapshot — compressed parents are popped
+    /// from the queue before being stored in `layers`, so they cannot be
+    /// reconstructed from queue relationships.
     fn rebuild_internals(&mut self) {
         self.exhibitions.clear();
         for entry in self.queue.iter().chain(self.fixed_contexts.iter()) {
@@ -750,7 +759,7 @@ impl ContextManager {
     }
 
     /// Restore the full manager state from a previously saved snapshot.
-    /// Rebuilds exhibitions and layers automatically.
+    /// Rebuilds exhibitions and restores the layers map.
     pub fn restore_state(&mut self, state: &ContextManagerState) {
         self.queue = state.queue.clone();
         self.fixed_contexts = state.fixed_contexts.clone();
@@ -758,6 +767,7 @@ impl ContextManager {
         self.checkpoint_counter = state.checkpoint_counter;
         self.next_slot_id = state.next_slot_id;
         self.rebuild_internals();
+        self.layers = state.layers.clone();
         self.invalidate_cache();
     }
 
