@@ -14,27 +14,31 @@ fn test_connector() -> Connector {
 }
 
 /// Test a realistic edge case where batching could cause growth:
-/// 
+///
 /// Scenario: Technical content with highly unique vocabulary per batch.
-/// - Each batch contains distinct terminology (e.g., different API endpoints, 
+/// - Each batch contains distinct terminology (e.g., different API endpoints,
 ///   different error codes, different variable names)
 /// - TF-IDF won't filter these as "stop words" since they're batch-local unique
 /// - MMR selects 40% of each batch independently
 /// - When batches are concatenated, the total may retain >40% of original content
-/// - In worst case, if batches have completely disjoint vocabularies, 
+/// - In worst case, if batches have completely disjoint vocabularies,
 ///   the concatenated result could approach 100% of original (no compression)
-#[test]
-fn batching_with_disjoint_vocabulary_can_exceed_expected_compression() {
+///
+/// The compression is exercised through `run()` — the same per-iteration
+/// context tick the agent loop calls — which drains the over-budget fresh
+/// buffer through the batched deterministic pipeline.
+#[tokio::test]
+async fn batching_with_disjoint_vocabulary_can_exceed_expected_compression() {
     let mut cm = ContextManager::new(test_connector(), 3);
-    
+
     // Create content where each batch has completely different vocabulary
     // Simulating different sections of a technical document:
     // Batch 1: Database terms (SQL, tables, indexes)
-    // Batch 2: API terms (endpoints, HTTP, JSON)  
+    // Batch 2: API terms (endpoints, HTTP, JSON)
     // Batch 3: Frontend terms (React, components, state)
-    
+
     let mut text = String::new();
-    
+
     // Batch 1: Database terminology (400+ unique terms)
     let db_terms = [
         "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "TABLE",
@@ -52,12 +56,12 @@ fn batching_with_disjoint_vocabulary_can_exceed_expected_compression() {
         "SPATIAL", "INDEX", "FULLTEXT", "HASH", "BTREE", "RTREE", "CLUSTERED",
         "NONCLUSTERED", "PARTITION", "RANGE", "LIST", "HASH", "KEY", "SUBPARTITION",
     ];
-    
+
     for i in 0..300 {
         let term = db_terms[i % db_terms.len()];
         text.push_str(&format!("{} operation on table_{} with index_{} ", term, i, i % 20));
     }
-    
+
     // Batch 2: API/HTTP terminology (400+ unique terms)
     let api_terms = [
         "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT",
@@ -74,13 +78,13 @@ fn batching_with_disjoint_vocabulary_can_exceed_expected_compression() {
         "Request", "Response", "Endpoint", "Route", "Middleware", "Controller", "Service",
         "Repository", "DTO", "DAO", "VO", "POJO", "Model", "View", "ViewModel", "Binding",
     ];
-    
+
     for i in 0..300 {
         let term = api_terms[i % api_terms.len()];
-        text.push_str(&format!("{} request to /api/v{}/resource_{} with {} ", term, i % 5, i, 
+        text.push_str(&format!("{} request to /api/v{}/resource_{} with {} ", term, i % 5, i,
             if i % 2 == 0 { "JSON" } else { "XML" }));
     }
-    
+
     // Batch 3: Frontend/JavaScript terminology (400+ unique terms)
     let js_terms = [
         "const", "let", "var", "function", "arrow", "async", "await", "Promise", "callback",
@@ -94,18 +98,18 @@ fn batching_with_disjoint_vocabulary_can_exceed_expected_compression() {
         "React", "Vue", "Angular", "Svelte", "Component", "Props", "State", "Hook", "Effect",
         "Context", "Reducer", "Action", "Dispatch", "Selector", "Memo", "Callback", "Ref",
     ];
-    
+
     for i in 0..300 {
         let term = js_terms[i % js_terms.len()];
         text.push_str(&format!("{} in component_{} with hook_{} and state_{} ", term, i, i % 15, i % 10));
     }
-    
+
     let input_tokens = crate::util::token_counter::estimate_tokens(&text);
-    
+
     // Ensure we're above the batching threshold (200 chunks * ~200 chars = ~40k chars)
-    assert!(input_tokens > 10_000, 
+    assert!(input_tokens > 10_000,
         "Input must be large enough to trigger batching (got {} tokens)", input_tokens);
-    
+
     // Split into fresh chunks to simulate real usage
     let chunk_size = text.len() / 5;
     for i in 0..5 {
@@ -113,17 +117,15 @@ fn batching_with_disjoint_vocabulary_can_exceed_expected_compression() {
         let end = if i == 4 { text.len() } else { (i + 1) * chunk_size };
         cm.add_buffer_context(Role::assistant(&text[start..end]));
     }
-    
+
     let before_tokens = cm.display_info().total_tokens;
-    
-    // Compress all fresh chunks
-    let last_checkpoint = cm.buffer_chunks.last().map(|c| c.checkpoints).unwrap_or(0);
-    let result = cm.compress_fresh_up_to(last_checkpoint);
-    
-    assert!(result.is_ok(), "Compression should succeed: {:?}", result);
-    
+
+    // The agent loop calls run() after every tool dispatch; an over-budget
+    // fresh buffer is drained through the batched deterministic pipeline.
+    cm.run().await;
+
     let after_tokens = cm.display_info().total_tokens;
-    
+
     // CRITICAL ASSERTION: The compressed result should NEVER be larger than the input
     // This is the core invariant of compression
     assert!(
@@ -133,7 +135,7 @@ fn batching_with_disjoint_vocabulary_can_exceed_expected_compression() {
          larger than the original input.",
         before_tokens, after_tokens
     );
-    
+
     // Additional sanity check: we should achieve meaningful compression
     // With 40% MMR ratio, we expect at least some reduction
     let compression_ratio = after_tokens as f64 / before_tokens as f64;
@@ -142,12 +144,11 @@ fn batching_with_disjoint_vocabulary_can_exceed_expected_compression() {
         "Compression ratio {} is too high (should be < 0.9). Batching may be ineffective.",
         compression_ratio
     );
-    
-    println!("Batching test: {} tokens → {} tokens (ratio: {:.2})", 
+
+    println!("Batching test: {} tokens → {} tokens (ratio: {:.2})",
              before_tokens, after_tokens, compression_ratio);
-    
-    // Verify this actually triggered batching by checking the compressed result
-    // If batching was triggered, we should have a compressed entry in the queue
+
+    // The drain must produce exactly one compressed queue entry
     assert_eq!(cm.queue.len(), 1, "Should have one compressed entry");
     assert!(cm.queue[0].tokens < before_tokens, "Compressed entry should be smaller than input");
 }

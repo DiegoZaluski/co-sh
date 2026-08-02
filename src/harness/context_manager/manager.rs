@@ -1,8 +1,6 @@
 //! Layered context management system that progressively compresses conversation
-//! history into a circular queue instead of discarding it. Models can seamlessly
-//! navigate between compressed and expanded context through tools.
-//!
-//! Nothing is lost—only compressed, and always navigable.
+//! history into a circular queue instead of discarding it. Older turns are
+//! always preserved — compressed into layered summaries rather than dropped.
 //!
 use crate::util::token_counter::estimate_tokens;
 use cosh_sdk::connector::Connector;
@@ -64,7 +62,6 @@ const EMPTY_SLOT: Context = Context {
 
 /// A single entry in the compressed/exhibition context identified by a
 /// bit-packed id: high 40 bits = exhibition slot, low 24 bits = level.
-/// The model navigates levels with: `target = hash - lv + target_lv`.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Context {
     pub hash_id: u64,
@@ -169,8 +166,7 @@ pub struct ContextDisplayInfo {
 
 /// Orchestrates compression, expansion, and display of conversation context
 /// through a circular queue. The inner [`Context`] entries are compressed
-/// progressively and can be expanded on demand by the model via
-/// [`expand_to`](Self::expand_to) (wired to the `expand_context` tool).
+/// progressively as the conversation grows.
 pub struct ContextManager {
     pub ctxt: Context,
     /// Set by [`run`](Self::run) when the context remains over budget after
@@ -281,15 +277,10 @@ impl ContextManager {
 
         if estimate_tokens(&context) >= MAX_CONTEXT_TOKENS {
             // Drain the over-budget fresh buffer deterministically first.
-            if !self.buffer_chunks.is_empty() {
-                let last_checkpoint = self
-                    .buffer_chunks
-                    .last()
-                    .map(|c| c.checkpoints)
-                    .unwrap_or(0);
-                if let Err(e) = self.compress_fresh_up_to(last_checkpoint) {
-                    log::debug!("run(): buffer drain failed: {e}");
-                }
+            if !self.buffer_chunks.is_empty()
+                && let Err(e) = self.drain_buffer()
+            {
+                log::debug!("run(): buffer drain failed: {e}");
             }
             // Only rotate the oldest queue entry if the drain was not enough
             // to bring the context back under budget.
@@ -360,9 +351,7 @@ impl ContextManager {
     /// Create a new context entry, push it to the queue, and record it
     /// under its exhibition slot.
     ///
-    /// Identifier is bit-packed (high bits = exhibition, low bits = level)
-    /// so the model can navigate between layers with simple arithmetic:
-    /// `target_hash = (current_hash - current_lv) + target_lv`.
+    /// Identifier is bit-packed (high bits = exhibition, low bits = level).
     ///
     /// `prev_hash` is accepted for compatibility but not used — the
     /// parent-child relationship is maintained in the `layers` map.
@@ -567,41 +556,19 @@ impl ContextManager {
         fc.role.text()
     }
 
-    /// Compress fresh buffer chunks from checkpoint 1 up to the given `checkpoint`.
+    /// Drain the entire fresh buffer into a single compressed queue entry.
     ///
-    /// The model triggers this by passing the checkpoint number visible in the
-    /// formatted context — e.g. `(checkpoint 4)`. After compression the
-    /// remaining chunks are **re-indexed** so the new checkpoint 1 is the first
-    /// chunk that was *not* compressed, keeping the visual numbering contiguous.
-    ///
-    /// Returns confirmation message on success, or an error string on failure.
-    pub fn compress_fresh_up_to(&mut self, checkpoint: u32) -> Result<String, String> {
-        if checkpoint == 0 {
-            return Err("Checkpoint must be greater than 0.".to_string());
-        }
+    /// Deterministic compression only — no LLM round-trip. Called by
+    /// [`run`](Self::run) when the raw buffer exceeds the budget. The whole
+    /// buffer is consumed in one pass (no checkpoint granularity is needed
+    /// for the automatic drain) and the checkpoint numbering resets.
+    fn drain_buffer(&mut self) -> Result<(), String> {
         if self.buffer_chunks.is_empty() {
             return Err("No fresh context to compress.".to_string());
         }
 
-        // Find the first chunk whose checkpoint exceeds the target.
-        // All chunks before it (0..idx) get compressed together.
-        let idx = self
-            .buffer_chunks
-            .iter()
-            .position(|c| c.checkpoints > checkpoint)
-            .unwrap_or(self.buffer_chunks.len());
-
-        if idx == 0 {
-            return Err(format!(
-                "No fresh context chunks with checkpoint ≤ {checkpoint}."
-            ));
-        }
-
-        // Concatenate the raw text of all consumed chunks (regardless of role).
-        let combined: String = self.buffer_chunks[..idx]
-            .iter()
-            .map(Self::fresh_text)
-            .collect();
+        // Concatenate the raw text of all chunks (regardless of role).
+        let combined: String = self.buffer_chunks.iter().map(Self::fresh_text).collect();
 
         // Run deterministic compression (Layer 1) on the combined text.
         let compressed = self.deterministic_compression(&combined);
@@ -610,37 +577,19 @@ impl ContextManager {
         // Build a Context entry (LV = 1) — pushes to queue + exhibitions.
         self.build_context(compressed, None, 1, tokens, None);
 
-        // Remove the consumed chunks from the buffer.
-        self.buffer_chunks.drain(..idx);
-
-        // Re-index remaining chunks so they start fresh from 1.
-        for (i, chunk) in self.buffer_chunks.iter_mut().enumerate() {
-            chunk.checkpoints = (i + 1) as u32;
-        }
-
-        // Rebuild `fresh` from what is left.
-        if let Some(last) = self.buffer_chunks.last() {
-            self.fresh = FreshContext {
-                checkpoints: last.checkpoints,
-                role: last.role.clone(),
-            };
-        } else {
-            self.fresh = FreshContext {
-                checkpoints: 0,
-                role: Role {
-                    assistant: None,
-                    user: None,
-                },
-            };
-        }
-        self.checkpoint_counter = self.fresh.checkpoints;
+        // Remove all consumed chunks and reset the checkpoint numbering.
+        self.buffer_chunks.clear();
+        self.fresh = FreshContext {
+            checkpoints: 0,
+            role: Role {
+                assistant: None,
+                user: None,
+            },
+        };
+        self.checkpoint_counter = 0;
 
         self.invalidate_cache();
-
-        let chunk_count = idx;
-        Ok(format!(
-            "Compressed {chunk_count} fresh chunk(s) ({tokens} tokens) up to checkpoint {checkpoint}."
-        ))
+        Ok(())
     }
 
     /// Deterministic compression (Layer1) via TF-IDF → LSA → MMR.
@@ -679,41 +628,6 @@ impl ContextManager {
         self.expand.push(hash_id);
         self.invalidate_cache();
         self
-    }
-
-    /// Expand a specific level by passing the visible hash and the desired
-    /// level. Resolves the target hash internally — the model never needs
-    /// to do arithmetic.
-    ///
-    /// `hash` is any visible hash for this exhibition slot; `target_lv` is
-    /// the level to expand to (e.g. `1` for the original content).
-    ///
-    /// Returns `Ok(self)` on success, or `Err(message)` with a model-facing
-    /// explanation when the entry or level does not exist.
-    pub fn expand_to(&mut self, hash: u64, target_lv: u64) -> Result<&Self, String> {
-        let exhibition_id = (hash >> 24) as usize;
-        if exhibition_id >= self.exhibitions.len() {
-            return Err(format!(
-                "Context entry #{hash} not found. Use a valid hash from the context view."
-            ));
-        }
-        let entry = &self.exhibitions[exhibition_id];
-        if entry.hash_id == 0 {
-            return Err(format!(
-                "Context entry #{hash} not found. Use a valid hash from the context view."
-            ));
-        }
-        if target_lv > entry.lv {
-            return Err(format!(
-                "Level {target_lv} does not exist for entry #{hash}. \
-                 The highest level available is {}. Use a level ≤ {} to expand.",
-                entry.lv, entry.lv
-            ));
-        }
-        let target_hash = (hash & !0xFFFFFF) | (target_lv & 0xFFFFFF);
-        self.expand.push(target_hash);
-        self.invalidate_cache();
-        Ok(self)
     }
 
     /// Return to the natural compressed view. Clears every expansion mark
@@ -894,8 +808,7 @@ impl ContextManager {
     }
 
     /// Render only the compressed/exhibition portion of the context — the
-    /// hashes and summaries the model needs for `expand_context` and
-    /// `force_compress`.
+    /// summaries of older turns.
     ///
     /// The raw buffer is deliberately excluded: fresh turns are delivered via
     /// the messages array, so including them here would duplicate every turn

@@ -3,7 +3,6 @@ mod batching_growth_test;
 mod bug_regression_tests;
 mod expansion_tests;
 mod formatting_tests;
-mod fresh_compression_tests;
 mod initialization_tests;
 mod retry_tests;
 mod struct_tests;

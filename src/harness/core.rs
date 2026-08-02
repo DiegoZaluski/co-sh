@@ -110,53 +110,14 @@ struct HistoryEntry {
 }
 
 fn default_harness_tools() -> Vec<HarnessTool> {
-    vec![
-        HarnessTool {
-            name: "stop_agent_loop".into(),
-            description: "Stop running the agent loop".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        },
-        HarnessTool {
-            name: "expand_context".into(),
-            description: "Expand a compressed context entry by hash and target level, making it \
-                 visible in full for the rest of the agent loop."
-                .into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "hash": {
-                        "type": "integer",
-                        "description": "context entry hash identifier"
-                    },
-                    "lv": {
-                        "type": "integer",
-                        "description": "target compression level"
-                    }
-                },
-                "required": ["hash", "lv"]
-            }),
-        },
-        HarnessTool {
-            name: "force_compress".into(),
-            description:
-                "Force compression of all fresh context chunks from the beginning up to the \
-                 given checkpoint index."
-                    .into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "checkpoint": {
-                        "type": "integer",
-                        "description": "compress fresh chunks from checkpoint 1 up to this value"
-                    }
-                },
-                "required": ["checkpoint"]
-            }),
-        },
-    ]
+    vec![HarnessTool {
+        name: "stop_agent_loop".into(),
+        description: "Stop running the agent loop".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+    }]
 }
 
 #[allow(clippy::struct_field_names)]
@@ -184,7 +145,7 @@ pub struct Harness {
 
     /// Layered context manager with circular queue compression.
     /// Replaces the old evict-and-drop strategy — nothing is lost,
-    /// only compressed, and always navigable.
+    /// only compressed into layered summaries.
     pub context_manager: ContextManager,
 
     /// Tools explicitly disabled by the user via the Internal Tools screen.
@@ -490,31 +451,15 @@ impl Harness {
         extractor
     }
 
-    /// Handle a harness tool call immediately, returning `true` if consumed.
+    /// Handle a harness tool call immediately, returning `Some` when the call
+    /// was consumed by the harness, or `None` when it must be dispatched
+    /// externally.
     pub(crate) fn handle_harness_tool(&mut self, tc: &ToolCallData) -> Option<String> {
         let _tool = self.harness_tools.iter().find(|t| t.name == tc.name)?;
         match tc.name.as_str() {
             "stop_agent_loop" => {
                 self.stop = true;
                 Some(String::new())
-            }
-            "expand_context" => {
-                let hash = tc.arguments["hash"].as_u64().unwrap_or(0);
-                let lv = tc.arguments["lv"].as_u64().unwrap_or(0);
-                match self.context_manager.expand_to(hash, lv) {
-                    Ok(_) => Some(format!(
-                        "Expanded context entry #{hash} to level {lv}. \
-                         The entry is now fully visible in the context."
-                    )),
-                    Err(msg) => Some(msg),
-                }
-            }
-            "force_compress" => {
-                let checkpoint = tc.arguments["checkpoint"].as_u64().unwrap_or(0) as u32;
-                match self.context_manager.compress_fresh_up_to(checkpoint) {
-                    Ok(summary) => Some(summary),
-                    Err(msg) => Some(msg),
-                }
             }
             _ => Some(String::new()),
         }
@@ -555,9 +500,9 @@ impl Harness {
         let correction = self.correction_memory.format();
         out.push_str(&correction);
         // Append only the compressed/exhibition portion of the ContextManager
-        // (hashes + summaries the model needs for expand_context). Raw turns
-        // are delivered via the messages array — the full buffer must not be
-        // duplicated into the system prompt.
+        // (compressed summaries of older turns). Raw turns are delivered via
+        // the messages array — the full buffer must not be duplicated into
+        // the system prompt.
         if let Some(cm_context) = self.context_manager.format_compressed_context() {
             out.push_str(&format!("\n## Compressed Context\n{}\n", cm_context));
         }

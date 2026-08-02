@@ -32,38 +32,3 @@ fn handle_harness_tool_consumes_stop_agent_loop() {
     assert!(h.stop);
 }
 
-#[test]
-fn handle_harness_tool_expand_context() {
-    let mut h = make_harness();
-    let tc = ToolCallData {
-        id: String::new(),
-        name: "expand_context".into(),
-        arguments: json!({"hash": 42, "lv": 2}),
-    };
-
-    let result = h.handle_harness_tool(&tc);
-    assert!(result.is_some());
-    let msg = result.unwrap();
-    assert!(
-        msg.contains("not found"),
-        "should report entry not found: {msg}"
-    );
-}
-
-#[test]
-fn handle_harness_tool_force_compress() {
-    let mut h = make_harness();
-    let tc = ToolCallData {
-        id: String::new(),
-        name: "force_compress".into(),
-        arguments: json!({"checkpoint": 5}),
-    };
-
-    let result = h.handle_harness_tool(&tc);
-    assert!(result.is_some());
-    let msg = result.unwrap();
-    assert!(
-        msg.contains("No fresh context"),
-        "should report nothing to compress: {msg}"
-    );
-}
