@@ -407,7 +407,7 @@ impl SessionView {
     /// Scroll to bottom. Mirrors OpenCode's `toBottom()`:
     ///   `scroll.scrollTo(scroll.scrollHeight)`
     pub fn scroll_to_bottom(&mut self) {
-        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
+        let max_scroll = (self.cached_total_height - self.visible_height).max(0);
         self.scroll_y = max_scroll;
         self.scroll_accumulator_y = 0.0;
         self.has_manual_scroll = false;
@@ -423,7 +423,7 @@ impl SessionView {
             return;
         }
 
-        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
+        let max_scroll = (self.cached_total_height - self.visible_height).max(0);
         let has_scrollable_content = max_scroll > 1;
 
         self.has_manual_scroll = has_scrollable_content && !self.is_at_sticky_position();
@@ -433,7 +433,7 @@ impl SessionView {
 
     /// Update sticky state flags. Mirrors OpenCode's `updateStickyState()`.
     fn update_sticky_state(&mut self) {
-        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
+        let max_scroll = (self.cached_total_height - self.visible_height).max(0);
 
         if self.scroll_y <= 0 {
             self.is_sticky_bottom = false;
@@ -447,7 +447,7 @@ impl SessionView {
     /// Check if at sticky position. Mirrors OpenCode's `isAtStickyPosition()`.
     /// For "bottom": `scrollTop >= maxScrollTop` (accepts >=, not strict equality).
     fn is_at_sticky_position(&self) -> bool {
-        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
+        let max_scroll = (self.cached_total_height - self.visible_height).max(0);
 
         // stickyStart = "bottom"
         if max_scroll <= 0 {
@@ -459,7 +459,7 @@ impl SessionView {
     /// Check if at sticky re-engage point. Mirrors OpenCode's `isAtStickyReengagePoint()`.
     /// For "bottom": `maxScrollTop > 0 && scrollTop >= maxScrollTop - 1`
     pub fn is_at_bottom(&self) -> bool {
-        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
+        let max_scroll = (self.cached_total_height - self.visible_height).max(0);
         if max_scroll <= 0 {
             return true;
         }
@@ -472,9 +472,10 @@ impl SessionView {
         let was_applying = self.is_applying_sticky_scroll;
         self.is_applying_sticky_scroll = true;
 
-        // Scroll to the actual bottom, not the estimated bottom,
-        // to prevent creating a gap below the content.
-        let max_scroll = (self.actual_total_height - self.visible_height).max(0);
+        // Scroll to the cached bottom, not the actual scanned bottom,
+        // to prevent scroll jumping during streaming. The cached height
+        // is the stable source of truth for layout calculations.
+        let max_scroll = (self.cached_total_height - self.visible_height).max(0);
         self.scroll_y = max_scroll;
         self.is_sticky_bottom = true;
 
@@ -487,17 +488,20 @@ impl SessionView {
     /// 2. If `!hasManualScroll` → `applyStickyStart(stickyStart)`
     /// 3. If `hasManualScroll && isAtStickyReengagePoint()` → re-engage
     /// 4. Updates `last_content_height`
-    fn recalculate_bar_props(&mut self, _total_height: i32, visible_height: i32) {
+    fn recalculate_bar_props(&mut self, total_height: i32, visible_height: i32) {
         let was_applying = self.is_applying_sticky_scroll;
         self.is_applying_sticky_scroll = true;
 
-        // Use actual_total_height for max_scroll so we snap to the real
-        // bottom, not an inflated estimated bottom that would create a gap.
-        let new_max_scroll = (self.actual_total_height - visible_height).max(0);
+        // Use cached_total_height for max_scroll during streaming to prevent
+        // scroll jumping. The cached height is the stable source of truth for
+        // layout calculations, while actual_total_height is only used for
+        // scrollbar sizing and may fluctuate slightly during rendering.
+        let new_max_scroll = (total_height - visible_height).max(0);
 
         if !self.has_manual_scroll {
             // No manual scroll → apply sticky start
-            self.apply_sticky_start();
+            self.scroll_y = new_max_scroll;
+            self.is_sticky_bottom = true;
         } else if self.is_at_bottom() && new_max_scroll > 0 {
             // User scrolled back to bottom during streaming → re-engage sticky
             self.has_manual_scroll = false;
