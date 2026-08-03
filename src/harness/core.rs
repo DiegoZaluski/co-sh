@@ -69,7 +69,10 @@ const MAX_TOOL_RETRIES: usize = 3;
 
 /// Maximum total agent-loop iterations (tool calls + responses) before
 /// the harness stops the loop as a safety net against runaway tool-calling.
-const MAX_ITERATIONS: u64 = 20;
+///
+/// 20 was too low for real multi-step work (editing files, running tests,
+/// searching) — the loop force-stopped mid-task with a misleading `Done`.
+pub(crate) const MAX_ITERATIONS: u64 = 100;
 
 /// Internal marker returned by stream functions when the user presses Esc
 /// to stop the current generation. Compared by identity (constant), not by
@@ -140,6 +143,12 @@ pub struct Harness {
     /// Raw JSON of the last failed tool call attempt, for correction feedback.
     last_failed_raw: String,
 
+    /// `finish_reason` of the most recently completed stream (e.g. `"stop"`,
+    /// `"length"`). `"length"` means the provider cut the response at
+    /// `max_tokens` — the loop must continue instead of treating the
+    /// truncated turn as a finished one.
+    last_finish_reason: Option<String>,
+
     /// Bounded, deduplicated memory of tool correction errors.
     /// Persists across agent loop iterations so the model never repeats the
     /// same mistake blindly.
@@ -167,6 +176,10 @@ pub struct Harness {
     pub(crate) mock_chat_response: Option<Result<String, String>>,
     #[cfg(test)]
     pub(crate) mock_stream_queue: VecDeque<Result<Vec<String>, String>>,
+    /// Per-stream mock `finish_reason` values, consumed one per stream so a
+    /// test can simulate a single truncated response followed by a normal one.
+    #[cfg(test)]
+    pub(crate) mock_finish_reasons: VecDeque<Option<String>>,
     #[cfg(test)]
     pub(crate) test_tools: Vec<ToolSchema>,
 }
@@ -192,6 +205,7 @@ impl Harness {
             tool_failure_count: 0,
             tool_extraction_failure_count: 0,
             last_failed_raw: String::new(),
+            last_finish_reason: None,
             correction_memory: CorrectionMemory::new(5),
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
@@ -200,6 +214,8 @@ impl Harness {
             mock_chat_response: None,
             #[cfg(test)]
             mock_stream_queue: VecDeque::new(),
+            #[cfg(test)]
+            mock_finish_reasons: VecDeque::new(),
             #[cfg(test)]
             test_tools: Vec::new(),
         }
@@ -516,6 +532,9 @@ impl Harness {
         messages: &[ChatMessage],
         mut on_token: impl FnMut(&str),
     ) -> Result<String, String> {
+        // Reset the truncation signal for this stream before anything else.
+        self.last_finish_reason = None;
+
         #[cfg(test)]
         if let Some(response) = self.mock_stream_queue.pop_front() {
             match response {
@@ -524,6 +543,9 @@ impl Harness {
                     for token in &tokens {
                         self.process_stream_chunk(token, &mut extractor, &mut on_token);
                     }
+                    // Tests can simulate a provider-side truncation by queueing
+                    // a finish_reason per stream (consumed one at a time).
+                    self.last_finish_reason = self.mock_finish_reasons.pop_front().flatten();
                     return Ok("done".into());
                 }
                 Err(msg) => {
@@ -597,11 +619,15 @@ impl Harness {
             let token = chunk.token();
             let fr = chunk.finish_reason();
             token_count += 1;
-            if token_count <= 5
-                || token_count.is_multiple_of(100)
-                || !token.is_empty()
-                || fr.is_some()
-            {
+            // Capture the stream's terminal finish_reason so run_agent_loop can
+            // detect max-token truncation ("length") and continue the loop
+            // instead of treating the cut-off turn as finished.
+            if let Some(f) = fr {
+                self.last_finish_reason = Some(f.to_owned());
+            }
+            // Log only the first few tokens and every 100th — logging every
+            // token costs a mutex + file write per token in debug builds.
+            if token_count <= 5 || token_count.is_multiple_of(100) || fr.is_some() {
                 log::debug!(
                     "stream_chat_with_messages token#{} len={} fr={:?} first_50={:?}",
                     token_count,
@@ -659,6 +685,9 @@ impl Harness {
         input: &str,
         mut on_token: impl FnMut(&str),
     ) -> Result<String, String> {
+        // Reset the truncation signal for this stream before anything else.
+        self.last_finish_reason = None;
+
         #[cfg(test)]
         if let Some(response) = self.mock_stream_queue.pop_front() {
             match response {
@@ -667,6 +696,9 @@ impl Harness {
                     for token in &tokens {
                         self.process_stream_chunk(token, &mut extractor, &mut on_token);
                     }
+                    // Tests can simulate a provider-side truncation by queueing
+                    // a finish_reason per stream (consumed one at a time).
+                    self.last_finish_reason = self.mock_finish_reasons.pop_front().flatten();
                     return Ok("done".into());
                 }
                 Err(msg) => {
@@ -741,11 +773,15 @@ impl Harness {
             let token = chunk.token();
             let fr = chunk.finish_reason();
             token_count += 1;
-            if token_count <= 5
-                || token_count.is_multiple_of(100)
-                || !token.is_empty()
-                || fr.is_some()
-            {
+            // Capture the stream's terminal finish_reason so run_agent_loop can
+            // detect max-token truncation ("length") and continue the loop
+            // instead of treating the cut-off turn as finished.
+            if let Some(f) = fr {
+                self.last_finish_reason = Some(f.to_owned());
+            }
+            // Log only the first few tokens and every 100th — logging every
+            // token costs a mutex + file write per token in debug builds.
+            if token_count <= 5 || token_count.is_multiple_of(100) || fr.is_some() {
                 log::debug!(
                     "stream_chat token#{} len={} fr={:?} first_50={:?}",
                     token_count,
@@ -1065,6 +1101,13 @@ impl Harness {
             // Phase 2: dispatch all pending tool calls
             // log::debug!("run_agent_loop PHASE2 had_tools={had_tools}");
 
+            // A terminal event (Done/Error) may already have been emitted by
+            // the MAX_ITERATIONS / MAX_TOOL_RETRIES guards inside the dispatch
+            // loop. Track it so the `check_stop!()` below does NOT emit a
+            // second terminal event (the TUI would receive Done+Stopped or
+            // Error+Stopped).
+            let mut terminal_sent = false;
+
             while self.has_pending_tools() {
                 // Safety: stop the loop if we've exceeded the maximum
                 // number of iterations. This prevents runaway tool-calling
@@ -1077,7 +1120,7 @@ impl Harness {
                         context_state: bincode::serialize(&self.context_manager.save_state())
                             .unwrap_or_default(),
                     });
-                    self.stop = true;
+                    terminal_sent = true;
                     break;
                 }
 
@@ -1221,7 +1264,7 @@ impl Harness {
                                     "{MAX_TOOL_RETRIES} consecutive tool call failures. Agent loop interrupted."
                                 );
                                 let _ = tx.send(HarnessEvent::Error(msg));
-                                self.stop = true;
+                                terminal_sent = true;
                                 break;
                             }
                             continue;
@@ -1503,7 +1546,7 @@ impl Harness {
                                      failures. Agent loop interrupted."
                                 );
                                 let _ = tx.send(HarnessEvent::Error(msg));
-                                self.stop = true;
+                                terminal_sent = true;
                                 break;
                             }
                         }
@@ -1521,6 +1564,12 @@ impl Harness {
                         }
                     }
                 }
+            }
+
+            if terminal_sent {
+                // A terminal event was already emitted by the dispatch guards;
+                // skip check_stop!() so it cannot send a second one.
+                break;
             }
 
             if check_stop!() {
@@ -1543,6 +1592,29 @@ impl Harness {
                     }
                     log::debug!("run_agent_loop RETRY (extraction failures)");
                     current_input.clear();
+                    continue;
+                }
+                // The provider cut the response at max_tokens (finish_reason
+                // "length") with no tool calls: the turn is truncated, not
+                // finished. Continue the loop so the model can complete the
+                // answer instead of emitting a silent `Done` mid-sentence.
+                // Bounded by MAX_ITERATIONS above.
+                if self.last_finish_reason.as_deref() == Some("length") {
+                    if iteration >= MAX_ITERATIONS {
+                        // Safety net — emit a terminal event so the TUI does
+                        // not stay in a "running" state.
+                        self.context_manager.close_loop();
+                        let _ = tx.send(HarnessEvent::Done {
+                            context_state: bincode::serialize(&self.context_manager.save_state())
+                                .unwrap_or_default(),
+                        });
+                        break;
+                    }
+                    log::debug!("run_agent_loop TRUNCATED (length) — continuing");
+                    current_input =
+                        "Your previous response was cut off by the output token limit. \
+                         Please continue exactly where you left off."
+                            .to_string();
                     continue;
                 }
                 // No tools and no extraction failures — conversation is complete.
@@ -1711,12 +1783,14 @@ impl Harness {
             tool_failure_count: 0,
             tool_extraction_failure_count: 0,
             last_failed_raw: String::new(),
+            last_finish_reason: None,
             correction_memory: CorrectionMemory::new(5),
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
             mock_chat_response: None,
             mock_stream_queue: VecDeque::new(),
+            mock_finish_reasons: VecDeque::new(),
             test_tools: Vec::new(),
         }
     }
@@ -1761,6 +1835,15 @@ impl Harness {
                     .map_err(|s| s.to_string()),
             );
         }
+        self
+    }
+
+    /// Queue a mock `finish_reason` for the NEXT stream (consumed one per
+    /// stream). Call once per stream to simulate truncation on just the first
+    /// response and a normal completion on the following one.
+    #[cfg(test)]
+    pub(crate) fn with_mock_finish_reason(mut self, reason: Option<&str>) -> Self {
+        self.mock_finish_reasons.push_back(reason.map(String::from));
         self
     }
 

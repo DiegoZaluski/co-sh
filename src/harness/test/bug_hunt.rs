@@ -15,7 +15,7 @@
 //! - BUG-06: fallback connector switch loses native tool definitions
 //! - BUG-07: full conversation is sent twice per request (system + messages)
 
-use super::super::core::Harness;
+use super::super::core::{Harness, MAX_ITERATIONS};
 use super::super::events::HarnessEvent;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -103,11 +103,14 @@ async fn bug02_history_turns_survive_the_loop_in_the_context_manager() {
 // The MAX_ITERATIONS guard only lives inside `while self.has_pending_tools()`.
 // The extraction-failure retry path (`!had_tools && extraction_failures > 0`)
 // loops unconditionally, so a model emitting invalid tool JSON spins forever
-// (each iteration = one more LLM call).
+// (each iteration = one more LLM call). The retry must be bounded by
+// MAX_ITERATIONS.
 #[tokio::test]
 async fn bug03_extraction_failure_retry_has_no_iteration_cap() {
     let invalid = r#"{"name": "no_such_tool", "arguments": {}}"#;
-    let responses: Vec<Result<Vec<&str>, &str>> = (0..25).map(|_| Ok(vec![invalid])).collect();
+    // Queue enough invalid responses to cross the cap.
+    let responses: Vec<Result<Vec<&str>, &str>> =
+        (0..MAX_ITERATIONS + 5).map(|_| Ok(vec![invalid])).collect();
 
     let h = Harness::new_test().with_mock_streams(responses);
 
@@ -120,8 +123,8 @@ async fn bug03_extraction_failure_retry_has_no_iteration_cap() {
         .count();
 
     assert!(
-        failure_tokens <= 20,
-        "BUG-03: retry loop must stop at MAX_ITERATIONS (20), but ran {failure_tokens} iterations"
+        failure_tokens <= MAX_ITERATIONS as usize,
+        "BUG-03: retry loop must stop at MAX_ITERATIONS ({MAX_ITERATIONS}), but ran {failure_tokens} iterations"
     );
 }
 
@@ -308,5 +311,124 @@ async fn bug06_fallback_switch_loses_native_tools() {
     assert!(
         h.connector_has_tools(),
         "BUG-06: fallback connector has NO native tool definitions (init_native_tools not re-run after switch)"
+    );
+}
+
+// ── BUG-09 ──────────────────────────────────────────────────────────
+// When the dispatch guards fire (MAX_ITERATIONS or MAX_TOOL_RETRIES), a
+// terminal event (Done/Error) is emitted INSIDE the dispatch loop. The
+// `check_stop!()` right after the loop used to emit a SECOND terminal event
+// (Stopped) because it set self.stop — the TUI received Done+Stopped (or
+// Error+Stopped), showing a spurious "Interrupted" toast after a normal
+// completion and double-saving the session.
+#[tokio::test]
+async fn bug09_dispatch_guard_emits_single_terminal_event() {
+    // MAX_TOOL_RETRIES path: a tool call that always fails dispatch (no server
+    // found in new_test) hits the 3-strikes guard.
+    let h = Harness::new_test()
+        .with_test_tool(
+            "always_fails",
+            serde_json::json!({"type": "object", "properties": {}}),
+        )
+        .with_mock_streams(vec![
+            Ok(vec![r#"{"name": "always_fails", "arguments": {}}"#]),
+            Ok(vec![r#"{"name": "always_fails", "arguments": {}}"#]),
+            Ok(vec![r#"{"name": "always_fails", "arguments": {}}"#]),
+        ]);
+
+    let (_h, events) = run_loop_and_collect(h, "do the thing").await;
+
+    let errors = events
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::Error(_)))
+        .count();
+    let stopped = events
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::Stopped { .. }))
+        .count();
+
+    assert_eq!(
+        errors, 1,
+        "BUG-09: exactly one Error from the retry guard, got {errors}"
+    );
+    assert_eq!(
+        stopped, 0,
+        "BUG-09: retry guard must NOT emit a second terminal Stopped event"
+    );
+}
+
+// ── BUG-10 ──────────────────────────────────────────────────────────
+// The provider can cut the stream at max_tokens with finish_reason = "length"
+// (e.g. Claude's default 4096 output tokens). The harness used to treat this
+// as a normal completion (Done) even though the answer is truncated mid-word —
+// the loop silently ended mid-work. Correct behaviour: continue the loop with
+// a continuation prompt so the model can finish the response.
+#[tokio::test]
+async fn bug10_length_truncation_continues_loop_instead_of_done() {
+    let h = Harness::new_test()
+        .with_mock_finish_reason(Some("length"))
+        .with_mock_streams(vec![
+            Ok(vec!["partial answer that got cut off"]),
+            Ok(vec!["completed answer"]),
+        ]);
+
+    let (_h, events) = run_loop_and_collect(h, "write a long thing").await;
+
+    // The loop must have continued past the truncated first stream (two
+    // streams consumed) instead of emitting Done after the first one.
+    let done = events
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::Done { .. }))
+        .count();
+    let tokens = events
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::Token { .. }))
+        .count();
+
+    assert_eq!(
+        done, 1,
+        "BUG-10: truncation must not emit Done before the continuation stream"
+    );
+    assert!(
+        tokens >= 2,
+        "BUG-10: continuation stream must have been consumed (got {tokens} tokens)"
+    );
+}
+
+// ── BUG-11 ──────────────────────────────────────────────────────────
+// Same as BUG-09 but for the MAX_ITERATIONS guard inside the dispatch loop:
+// reaching the iteration cap with pending tools must emit exactly one Done —
+// no spurious Stopped after it.
+//
+// A tool that always fails dispatch triggers MAX_TOOL_RETRIES (3) first, so
+// this exercises the MAX_ITERATIONS safety net through the extraction-failure
+// retry path instead: the model keeps emitting invalid tool JSON, the loop
+// retries bounded by MAX_ITERATIONS, and the cap emits a single Done.
+#[tokio::test]
+async fn bug11_max_iterations_emits_single_done() {
+    let invalid = r#"{"name": "no_such_tool", "arguments": {}}"#;
+    let responses: Vec<Result<Vec<&str>, &str>> =
+        (0..MAX_ITERATIONS + 2).map(|_| Ok(vec![invalid])).collect();
+
+    let h = Harness::new_test().with_mock_streams(responses);
+
+    let (_h, events) = run_loop_and_collect(h, "do the thing").await;
+
+    let done = events
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::Done { .. }))
+        .count();
+    let stopped = events
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::Stopped { .. }))
+        .count();
+
+    assert_eq!(
+        done, 1,
+        "BUG-11: MAX_ITERATIONS guard emits exactly one Done"
+    );
+    assert_eq!(
+        stopped, 0,
+        "BUG-11: MAX_ITERATIONS guard must NOT emit a second Stopped event"
     );
 }
