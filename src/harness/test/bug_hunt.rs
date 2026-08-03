@@ -7,7 +7,8 @@
 //!
 //! Bugs covered:
 //! - BUG-01: user input is duplicated in the first LLM request
-//! - BUG-02: `total_history_tokens` reset defeats the HISTORY_BUDGET compression
+//! - BUG-02: loaded history turns were wiped/undercounted by the transcript
+//!   budget (fixed structurally: the ContextManager is the single owner)
 //! - BUG-03: extraction-failure retry loop has no MAX_ITERATIONS guard
 //! - BUG-04: `stop_agent_loop` silently drops pending tool calls
 //! - BUG-05: `ask_questions` answer wait is not interruptible by stop_signal
@@ -40,9 +41,11 @@ async fn run_loop_and_collect(mut h: Harness, input: &str) -> (Harness, Vec<Harn
 }
 
 // ── BUG-01 ──────────────────────────────────────────────────────────
-// run_agent_loop pushes the input into `history` AND `build_conversation_messages`
-// appends `current_input` again — the user message is sent twice (or three
-// times, since the TUI already includes it in the `with_history` turns).
+// The user input used to be pushed into `history` AND appended again as
+// `current_input`, so the message was sent twice (or three times, since the
+// TUI already includes it in the `with_history` turns). The context manager
+// now owns the input once; `build_messages` appends the steering input only
+// when it differs from the trailing user turn.
 #[test]
 fn bug01_user_input_is_duplicated_in_first_request() {
     let mut h = Harness::new_test().with_history(&[("user".into(), "hello there".into())]);
@@ -62,34 +65,37 @@ fn bug01_user_input_is_duplicated_in_first_request() {
     );
 }
 
-// ── BUG-02 ──────────────────────────────────────────────────────────
-// run_agent_loop does `self.total_history_tokens = input_tokens` (assignment,
-// not `+=`), wiping the count accumulated by with_history(). The
-// HISTORY_BUDGET (50k) check in build_conversation_messages therefore never
-// fires for loaded turns → the full raw history is resent forever.
+// ── BUG-02 (structurally fixed) ─────────────────────────────────────────
+// The old bug: run_agent_loop assigned `total_history_tokens` instead of
+// accumulating it, wiping the count built by with_history() so the transcript
+// budget never fired for loaded turns. The transcript counter is gone
+// entirely — the ContextManager is the single owner of the conversation, so
+// loaded turns cannot be "wiped": they live in the CM and are delivered via
+// the messages array on every iteration.
 #[tokio::test]
-async fn bug02_history_token_counter_wiped_by_loop_start() {
-    // ~60k tokens — far above HISTORY_BUDGET (50_000)
-    let big = "word ".repeat(60_000);
-
+async fn bug02_history_turns_survive_the_loop_in_the_context_manager() {
+    let marker = "LOADED_TURN_MARKER_XYZ";
     let h = Harness::new_test()
-        .with_history(&[("user".into(), big.clone())])
+        .with_history(&[("user".into(), marker.into())])
         .with_mock_stream(Ok(vec!["final answer"]));
 
-    // Before the loop, with_history() has accounted for the loaded turns.
+    let (mut h, _events) = run_loop_and_collect(h, "hi").await;
+
+    // The loaded turn is still owned by the CM (single owner) after the loop
+    // and is delivered in the messages payload — nothing was wiped.
     assert!(
-        h.total_history_tokens() >= 50_000,
-        "precondition: loaded history must be counted by with_history()"
+        h.context_manager.display_info().total_tokens > 0,
+        "loaded history must remain in the context manager after the loop"
     );
-
-    let (h, _events) = run_loop_and_collect(h, "hi").await;
-
-    // Correct behavior: after the loop the counter must still reflect the
-    // loaded history (~60k) plus the new input — the loop must NOT wipe it.
+    let msgs = h.build_messages_for_test("");
+    let joined: String = msgs
+        .iter()
+        .filter_map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        h.total_history_tokens() >= 50_000,
-        "BUG-02: run_agent_loop reset total_history_tokens to {} — loaded history (>=50k) no longer counted, HISTORY_BUDGET never fires",
-        h.total_history_tokens()
+        joined.contains(marker),
+        "loaded history must still be delivered via the messages array"
     );
 }
 
@@ -219,12 +225,12 @@ async fn bug05_question_answer_wait_ignores_stop_signal() {
     );
 }
 
-// ── BUG-07 ──────────────────────────────────────────────────────────
-// build_chat_context() appends the ENTIRE ContextManager buffer (rendered raw
-// as "## Full" by format_context) to the system prompt — while
-// build_conversation_messages() sends the same turns again as messages. Every
-// conversation turn is therefore sent TWICE per request (system + messages),
-// doubling token usage and shrinking the effective context window.
+// ── BUG-07 (structurally fixed) ────────────────────────────────────────
+// The old bug: build_chat_context() appended the ENTIRE ContextManager buffer
+// to the system prompt while the messages array sent the same turns again —
+// every turn travelled twice per request. The system prompt is now
+// conversation-free: the whole conversation lives in the context manager and
+// is delivered exactly once, via the messages array.
 #[test]
 fn bug07_full_conversation_sent_twice_system_and_messages() {
     let marker = "UNIQUE_HISTORY_MARKER_XYZ";
@@ -249,13 +255,12 @@ fn bug07_full_conversation_sent_twice_system_and_messages() {
     );
 }
 
-// ── BUG-08 ──────────────────────────────────────────────────────────
-// When total_history_tokens exceeds HISTORY_BUDGET, build_conversation_messages
-// pushes `format_context()` — which renders the ENTIRE raw buffer verbatim
-// ("## Full" section) — as the "## Compressed Prior Context" system message.
-// The "compression" is cosmetic: the model receives the full raw conversation
-// on every iteration, so request payloads grow unboundedly (matches the
-// observed minutes-long stalls in read/write/grep sessions).
+// ── BUG-08 (structurally fixed) ────────────────────────────────────────
+// The old bug: the over-budget path pushed the FULL raw buffer as a
+// "## Compressed Prior Context" system message, so payloads grew unboundedly.
+// The transcript budget is gone; the ContextManager is the single owner and
+// compacts with its 80/40 phases. The messages array never contains a
+// raw-buffer/truncation system message.
 #[test]
 fn bug08_over_budget_system_message_ships_full_raw_buffer() {
     let marker = "UNIQUE_RAW_BUFFER_MARKER_XYZ";

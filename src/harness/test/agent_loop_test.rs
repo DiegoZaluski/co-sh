@@ -1,5 +1,6 @@
 use super::super::core::Harness;
 use super::super::events::HarnessEvent;
+use crate::harness::context_manager::ContextItem;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -129,4 +130,97 @@ async fn test_agent_loop_with_tool_call() {
         ),
         "expected terminal event, got {last:?}"
     );
+}
+
+// ── Proof: a full multi-iteration tool loop owns the whole conversation ──
+//
+// Runs run_agent_loop end-to-end (iteration 1: text + tool call; iteration 2:
+// final answer) and asserts the ContextManager owns the exact item sequence
+// [user, assistant(text, non-compressible), tool_call, tool_result,
+// loop_closure] and that build_messages renders the native roles in order
+// with the user input appearing exactly once — proving no reordering, no
+// content loss, and no double-send across the real agent-loop flow.
+#[tokio::test]
+async fn full_tool_loop_builds_correct_item_sequence_and_messages() {
+    let mut h = Harness::new_test()
+        .with_test_tool(
+            "test_tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "type": "string" } },
+                "required": ["x"]
+            }),
+        )
+        .with_mock_streams(vec![
+            Ok(vec![
+                "Let me call a tool ",
+                r#"{"name": "test_tool", "arguments": {"x": "test"}}"#,
+            ]),
+            Ok(vec!["Done!"]),
+        ]);
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    // Run directly (like bug_hunt::run_loop_and_collect) so `h` is still
+    // owned by this test after the loop terminates.
+    h.run_agent_loop("use tool", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+
+    // The CM owns the whole conversation with the exact expected sequence.
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    assert_eq!(
+        items.len(),
+        5,
+        "unexpected item sequence: {:?}",
+        items
+            .iter()
+            .map(|i| format!("{:?}", std::mem::discriminant(i)))
+            .collect::<Vec<_>>()
+    );
+    assert!(matches!(
+        &items[0],
+        ContextItem::User {
+            protected: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &items[1],
+        ContextItem::Assistant {
+            compressible: false,
+            ..
+        }
+    ));
+    assert!(matches!(&items[2], ContextItem::ToolCall { .. }));
+    assert!(matches!(&items[3], ContextItem::ToolResult { .. }));
+    assert!(matches!(
+        &items[4],
+        ContextItem::LoopClosure { content, .. } if content == "Done!"
+    ));
+
+    // The rendered payload: native roles in order, input exactly once.
+    let msgs = h.build_messages_for_test("");
+    let roles: Vec<&str> = msgs.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(
+        roles,
+        vec!["user", "assistant", "assistant", "tool", "assistant"]
+    );
+    assert_eq!(msgs[0].content.as_deref(), Some("use tool"));
+    assert_eq!(msgs[1].content.as_deref(), Some("Let me call a tool "));
+    let tc = msgs[2].tool_calls.as_ref().expect("tool_call message");
+    assert_eq!(tc[0].function.name, "test_tool");
+    assert_eq!(
+        msgs[3].tool_call_id.as_deref(),
+        Some(tc[0].id.as_str()),
+        "tool result must reference the matching call id"
+    );
+    assert_eq!(msgs[4].content.as_deref(), Some("Done!"));
+    let user_count = msgs
+        .iter()
+        .filter(|m| m.role == "user" && m.content.as_deref() == Some("use tool"))
+        .count();
+    assert_eq!(user_count, 1, "the user input must be sent exactly once");
 }

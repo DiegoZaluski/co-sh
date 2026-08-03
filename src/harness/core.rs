@@ -1,10 +1,7 @@
-use super::context_manager::ContextManager;
+use super::context_manager::{ContextManager, MAX_CONTEXT_TOKENS};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
-use cosh_sdk::connector::{
-    ChatMessage, Connector, ToolCallFunctionMsg, ToolCallMsg, ToolDefinition,
-    assistant_tool_call_message, tool_result_message, user_message,
-};
+use cosh_sdk::connector::{ChatMessage, Connector, ToolDefinition};
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use cosh_tools::TOOL_FORMAT;
 use rmcp::ServiceExt;
@@ -70,14 +67,6 @@ pub const INSTRUCTIONS_ASK: &str = concat!(
 /// Maximum consecutive tool-call failures before aborting the agent loop.
 const MAX_TOOL_RETRIES: usize = 3;
 
-/// Maximum total conversation history (raw entries) before the context
-/// window condenses old turns with the ContextManager compressed summary.
-const HISTORY_BUDGET: usize = 50_000;
-
-/// Maximum number of complete user/assistant turns to keep raw in
-/// the messages array when the history exceeds the budget.
-const MAX_COMPLETE_TURNS: usize = 3;
-
 /// Maximum total agent-loop iterations (tool calls + responses) before
 /// the harness stops the loop as a safety net against runaway tool-calling.
 const MAX_ITERATIONS: u64 = 20;
@@ -97,16 +86,6 @@ pub struct HarnessTool {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
-}
-
-/// A single turn in the structured conversation history with native
-/// tool-call roles (`user`, `assistant`, `tool`).
-#[derive(Debug, Clone)]
-struct HistoryEntry {
-    role: String,
-    content: String,
-    tool_calls: Option<Vec<ToolCallMsg>>,
-    tool_call_id: Option<String>,
 }
 
 fn default_harness_tools() -> Vec<HarnessTool> {
@@ -135,17 +114,15 @@ pub struct Harness {
     /// To stop the agent loop.
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
-    /// Structured conversation history with native tool-call roles.
-    /// This replaces the text-based history approach — each entry has
-    /// a proper role (user, assistant, tool) so the model sees the
-    /// native tool-call format it was trained on.
-    history: Vec<HistoryEntry>,
-    /// Total estimated tokens across all history entries, for budget management.
-    total_history_tokens: usize,
 
-    /// Layered context manager with circular queue compression.
-    /// Replaces the old evict-and-drop strategy — nothing is lost,
-    /// only compressed into layered summaries.
+    /// Monotonic counter for synthetic tool_call ids (inline JSON calls that
+    /// the extractor emits without an id).
+    tool_call_synthetic: u64,
+
+    /// Single owner of the whole conversation (user prompts, assistant
+    /// outputs, tool calls and results) before it reaches the LLM. Fresh
+    /// content is compressed asynchronously; the budget bar reflects this
+    /// manager's single token budget.
     pub context_manager: ContextManager,
 
     /// Tools explicitly disabled by the user via the Internal Tools screen.
@@ -197,7 +174,6 @@ pub struct Harness {
 impl Harness {
     #[must_use]
     pub fn new(connector: Connector, cwd: &str, disabled_tools: HashSet<String>) -> Self {
-        let cm_connector = connector.clone();
         Self {
             connector,
             sessions: Vec::new(),
@@ -210,9 +186,8 @@ impl Harness {
             stop_signal: None,
             stop: false,
             tool_issuer: VecDeque::new(),
-            history: Vec::new(),
-            total_history_tokens: 0,
-            context_manager: ContextManager::new(cm_connector, MAX_TOOL_RETRIES as u32),
+            tool_call_synthetic: 0,
+            context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
             disabled_tools,
             tool_failure_count: 0,
             tool_extraction_failure_count: 0,
@@ -230,26 +205,17 @@ impl Harness {
         }
     }
 
-    /// Load previous conversation turns into the history so the
-    /// assistant sees context when it starts.
+    /// Load previous conversation turns into the context manager (the single
+    /// owner of the conversation) so the assistant sees context when it starts.
     #[must_use]
     pub fn with_history(mut self, turns: &[(String, String)]) -> Self {
         for (role, text) in turns {
-            let count = crate::util::token_counter::estimate_tokens(text);
-            self.total_history_tokens += count;
-            let role_str = role.as_str();
-            self.history.push(HistoryEntry {
-                role: role_str.to_string(),
-                content: text.clone(),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-            let cm_role = if role_str == "user" {
-                super::context_manager::Role::user(text)
+            if role == "user" {
+                self.context_manager.add_user(text);
             } else {
-                super::context_manager::Role::assistant(text)
-            };
-            self.context_manager.add_buffer_context(cm_role);
+                // Loaded assistant turns are prose and compressible.
+                self.context_manager.add_assistant(text, true);
+            }
         }
         self
     }
@@ -490,22 +456,15 @@ impl Harness {
 
     /// Build the system context for the LLM.
     ///
-    /// Returns the header context (instructions + tool definitions),
-    /// correction memory, and the current ContextManager formatted context
-    /// so the model sees buffer chunks, exhibitions, and available hashes.
-    /// Conversation history is sent as separate messages with proper roles
-    /// via [`stream_chat_with_messages`](Self::stream_chat_with_messages).
+    /// Returns the header context (instructions + tool definitions) plus the
+    /// correction memory. The conversation itself lives entirely in the
+    /// [`ContextManager`] and is delivered as structured messages via
+    /// [`stream_chat_with_messages`](Self::stream_chat_with_messages) — never
+    /// duplicated into the system prompt.
     fn build_chat_context(&mut self) -> String {
         let mut out = self.header_context.clone();
         let correction = self.correction_memory.format();
         out.push_str(&correction);
-        // Append only the compressed/exhibition portion of the ContextManager
-        // (compressed summaries of older turns). Raw turns are delivered via
-        // the messages array — the full buffer must not be duplicated into
-        // the system prompt.
-        if let Some(cm_context) = self.context_manager.format_compressed_context() {
-            out.push_str(&format!("\n## Compressed Context\n{}\n", cm_context));
-        }
         out
     }
 
@@ -877,169 +836,31 @@ impl Harness {
         self.connector.set_tools(defs);
     }
 
-    /// Build the conversation messages array to send to the LLM.
-    ///
-    /// When the raw history stays within [`HISTORY_BUDGET`], every entry is
-    /// sent as-is.  When it exceeds the budget, the oldest turns are replaced
-    /// with a system message containing the ContextManager's compressed
-    /// summary — nothing is dropped silently, the CM preserves everything
-    /// in layered form.
-    ///
-    /// Leading `tool` messages (which can appear after restart without a
-    /// preceding assistant) are skipped because some providers (Mistral)
-    /// reject `tool` right after `system`.
-    fn build_conversation_messages(&mut self, current_input: &str) -> Vec<ChatMessage> {
-        let mut messages: Vec<ChatMessage> = Vec::new();
-
-        // Skip leading tool messages — no preceding assistant.
-        let history: Vec<&HistoryEntry> = self
-            .history
-            .iter()
-            .skip_while(|entry| entry.role == "tool")
-            .collect();
-
-        if history.is_empty() {
-            if !current_input.is_empty() {
-                messages.push(user_message(current_input));
-            }
-            return messages;
-        }
-
-        // Budget check
-        if self.total_history_tokens > HISTORY_BUDGET {
-            // Keep only the last MAX_COMPLETE_TURNS user turns to
-            // preserve tool_call → tool chain integrity.
-            let cutoff = {
-                let mut idx = history.len();
-                let mut seen = 0usize;
-                for (i, entry) in history.iter().enumerate().rev() {
-                    if entry.role == "user" {
-                        seen += 1;
-                        if seen > MAX_COMPLETE_TURNS {
-                            break;
-                        }
-                        idx = i;
-                    }
-                }
-                idx
-            };
-
-            // Only the compressed/exhibition portion goes into the system
-            // message — never the full raw buffer. Fresh turns are delivered
-            // via the messages array below; duplicating them here would make
-            // the payload grow unboundedly (raw buffer verbatim).
-            if let Some(cm_context) = self.context_manager.format_compressed_context() {
-                messages.push(ChatMessage {
-                    role: "system".to_string(),
-                    content: Some(format!("## Compressed Prior Context\n{}", cm_context)),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            } else if cutoff > 0 {
-                // Nothing compressed yet, but turns before the retained window
-                // are being dropped — signal the truncation so it is never
-                // silent. (`cutoff > 0` is the drop test: the cutoff index is
-                // only non-zero when history entries precede the window.)
-                messages.push(ChatMessage {
-                    role: "system".to_string(),
-                    content: Some(
-                        "## Compressed Prior Context\n\
-                         Older turns beyond the retained window are managed by the \
-                         context manager and are not repeated here."
-                            .to_string(),
-                    ),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            }
-
-            for entry in &history[cutoff..] {
-                Self::push_message_entry(&mut messages, entry);
-            }
-        } else {
-            for entry in &history {
-                Self::push_message_entry(&mut messages, entry);
-            }
-        }
-
-        // Do not re-append the input when it is already the last user turn in
-        // history — it was emitted above as a proper user message.
-        let input_is_duplicate = history
-            .last()
-            .is_some_and(|e| e.role == "user" && e.content == current_input);
-        if !current_input.is_empty() && !input_is_duplicate {
-            messages.push(user_message(current_input));
-        }
-
-        messages
-    }
-
-    /// Push a single history entry as a typed ChatMessage into the vector.
-    fn push_message_entry(messages: &mut Vec<ChatMessage>, entry: &HistoryEntry) {
-        match entry.role.as_str() {
-            "assistant" if entry.tool_calls.is_some() => {
-                messages.push(assistant_tool_call_message(
-                    entry.tool_calls.clone().unwrap(),
-                ));
-            }
-            "tool" => {
-                messages.push(tool_result_message(
-                    &entry.tool_call_id.clone().unwrap_or_default(),
-                    &entry.content,
-                ));
-            }
-            _ => {
-                messages.push(ChatMessage {
-                    role: entry.role.clone(),
-                    content: Some(entry.content.clone()),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            }
-        }
-    }
-
-    /// Add a tool call + its result to the history.
+    /// Add a tool call + its result to the context manager (structural
+    /// layer — never prose-compressed). The native `tool_call → tool` chain is
+    /// preserved 1:1: the call item renders as an `assistant` message with
+    /// `tool_calls`, the result as a `tool` message with the matching id.
     fn push_tool_history(&mut self, id: &str, name: &str, args: &serde_json::Value, result: &str) {
         let args_str = serde_json::to_string(args).unwrap_or_default();
-
-        // Estimate tokens for the pair (before moving args_str)
-        let assistant_tokens =
-            crate::util::token_counter::estimate_tokens(&format!("{name} {args_str}"));
-
-        let tc_msg = ToolCallMsg {
-            id: id.to_string(),
-            kind: "function".to_string(),
-            function: ToolCallFunctionMsg {
-                name: name.to_string(),
-                arguments: args_str,
-            },
+        // Providers require a non-empty tool_call_id; synthesize one when the
+        // extractor did not attach an id (inline JSON calls).
+        let tool_id = if id.is_empty() {
+            format!("call_{:016x}", self.context_manager_pending_id())
+        } else {
+            id.to_string()
         };
-        let result_tokens = crate::util::token_counter::estimate_tokens(result);
-
-        self.history.push(HistoryEntry {
-            role: "assistant".to_string(),
-            content: String::new(),
-            tool_calls: Some(vec![tc_msg]),
-            tool_call_id: None,
-        });
-        self.total_history_tokens += assistant_tokens;
-
-        self.history.push(HistoryEntry {
-            role: "tool".to_string(),
-            content: result.to_string(),
-            tool_calls: None,
-            tool_call_id: Some(id.to_string()),
-        });
-        self.total_history_tokens += result_tokens;
-
         self.context_manager
-            .add_buffer_context(super::context_manager::Role::assistant(&format!(
-                "{}: {} → {}",
-                name,
-                serde_json::to_string(args).unwrap_or_default(),
-                result
-            )));
+            .add_tool_call(&tool_id, name, &args_str);
+        self.context_manager.add_tool_result(&tool_id, result);
+    }
+
+    /// Monotonic id generator for synthetic tool_call ids (inline JSON calls
+    /// without an extractor id).
+    fn context_manager_pending_id(&mut self) -> u64 {
+        // Reuse the context manager's monotonic counter through a tiny wrapper:
+        // every tool without an id gets a fresh, globally-unique number.
+        self.tool_call_synthetic += 1;
+        self.tool_call_synthetic
     }
 
     /// Run the full agent loop: stream LLM response, dispatch tool calls,
@@ -1074,7 +895,10 @@ impl Harness {
         use super::guardrails::{PermissionCheck, check_tool_permission};
         use cosh_tools::question::types::{QuestionInput, QuestionOutput};
 
-        let mut current_input = input.to_string();
+        // The input lives in the context manager; `current_input` only carries
+        // the harness's per-iteration steering message (empty for the first
+        // iteration so the user prompt is not sent twice).
+        let mut current_input = String::new();
         let mut iteration = 0u64;
 
         // Store the stop signal so stream_chat can check it mid-stream.
@@ -1094,27 +918,17 @@ impl Harness {
         // uses the native tool-calling mechanism instead of inline JSON.
         self.init_native_tools();
 
-        // Add the initial user input to structured history so the model
-        // sees it as a proper `role: "user"` message in the conversation.
-        let input_tokens = crate::util::token_counter::estimate_tokens(input);
-        // Skip pushing the input when it is already the trailing user turn
-        // (e.g. it was loaded via with_history) — otherwise the same message
-        // is duplicated in the first request.
-        let input_is_duplicate = self
-            .history
-            .last()
-            .is_some_and(|e| e.role == "user" && e.content == input);
-        if !input_is_duplicate {
-            self.history.push(HistoryEntry {
-                role: "user".to_string(),
-                content: input.to_string(),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-            self.total_history_tokens += input_tokens;
-            self.context_manager
-                .add_buffer_context(super::context_manager::Role::user(input));
+        // Add the initial user input to the context manager (the single owner
+        // of the conversation) so the model sees it as a proper `user` message.
+        // Skip when it is already the trailing protected user turn (e.g. it was
+        // loaded via with_history) — otherwise the same message is duplicated.
+        if !self.context_manager.last_user_equals(input) {
+            self.context_manager.add_user(input);
         }
+
+        // Drain any finished compressions and apply the 80% compaction before
+        // the first LLM request, so the initial context is already within budget.
+        self.context_manager.run();
 
         // Send initial context info so the TUI budget bar shows immediately
         // even before the first LLM call completes.
@@ -1126,6 +940,7 @@ impl Harness {
             () => {
                 if self.stop || stop_signal.load(Ordering::Relaxed) {
                     log::debug!("run_agent_loop STOPPED");
+                    self.context_manager.close_loop();
                     let cs =
                         bincode::serialize(&self.context_manager.save_state()).unwrap_or_default();
                     let _ = tx.send(HarnessEvent::Stopped { context_state: cs });
@@ -1151,7 +966,7 @@ impl Harness {
 
             // Phase 1: stream the LLM response using native tool-call format
             log::debug!("run_agent_loop PHASE1_START iteration={iteration}");
-            let messages = self.build_conversation_messages(&current_input);
+            let messages = self.context_manager.build_messages(&current_input);
             let system_context = self.build_chat_context();
             let mut assistant_response = String::new();
             let result = self
@@ -1176,6 +991,7 @@ impl Harness {
                 log::debug!("run_agent_loop PHASE1_ERR={e}");
 
                 if e == INTERRUPTED_MARKER {
+                    self.context_manager.close_loop();
                     let _ = tx.send(HarnessEvent::Stopped {
                         context_state: bincode::serialize(&self.context_manager.save_state())
                             .unwrap_or_default(),
@@ -1212,23 +1028,15 @@ impl Harness {
                 break;
             }
 
-            // Record the assistant's text response in the structured history
-            // so it is delivered via the messages array on the next iteration
-            // (the CM buffer alone must not be the only carrier — BUG-07).
+            // Record the assistant's text response in the context manager so it
+            // is delivered via the messages array on the next iteration. Tool
+            // calls are recorded separately as structural items during dispatch
+            // (never prose-compressed); an output that carried a tool call stays
+            // structural too — only pure text is compressible.
+            let had_tools = self.has_pending_tools();
             if !assistant_response.is_empty() {
-                let response_tokens =
-                    crate::util::token_counter::estimate_tokens(&assistant_response);
-                self.history.push(HistoryEntry {
-                    role: "assistant".to_string(),
-                    content: assistant_response.clone(),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-                self.total_history_tokens += response_tokens;
                 self.context_manager
-                    .add_buffer_context(super::context_manager::Role::assistant(
-                        &assistant_response,
-                    ));
+                    .add_assistant(&assistant_response, !had_tools);
             }
 
             // Record extraction failures in the correction memory so the model
@@ -1255,7 +1063,6 @@ impl Harness {
             }
 
             // Phase 2: dispatch all pending tool calls
-            let had_tools = self.has_pending_tools();
             // log::debug!("run_agent_loop PHASE2 had_tools={had_tools}");
 
             while self.has_pending_tools() {
@@ -1265,6 +1072,7 @@ impl Harness {
                 // complete.
                 if iteration >= MAX_ITERATIONS {
                     // log::debug!("run_agent_loop MAX_ITERATIONS={MAX_ITERATIONS} reached");
+                    self.context_manager.close_loop();
                     let _ = tx.send(HarnessEvent::Done {
                         context_state: bincode::serialize(&self.context_manager.save_state())
                             .unwrap_or_default(),
@@ -1702,6 +1510,7 @@ impl Harness {
                         DispatchOut::Stopped => {
                             log::debug!("run_agent_loop dispatch_next STOPPED by user");
                             self.stop = true;
+                            self.context_manager.close_loop();
                             let _ = tx.send(HarnessEvent::Stopped {
                                 context_state: bincode::serialize(
                                     &self.context_manager.save_state(),
@@ -1725,6 +1534,7 @@ impl Harness {
                     if iteration >= MAX_ITERATIONS {
                         // Safety net — emit a terminal event so the TUI does
                         // not stay in a "running" state.
+                        self.context_manager.close_loop();
                         let _ = tx.send(HarnessEvent::Done {
                             context_state: bincode::serialize(&self.context_manager.save_state())
                                 .unwrap_or_default(),
@@ -1735,8 +1545,10 @@ impl Harness {
                     current_input.clear();
                     continue;
                 }
-                // No tools and no extraction failures — conversation is complete
+                // No tools and no extraction failures — conversation is complete.
+                // The final text response becomes the loop's LoopClosure.
                 log::debug!("run_agent_loop DONE (no tools)");
+                self.context_manager.close_loop();
                 let _ = tx.send(HarnessEvent::Done {
                     context_state: bincode::serialize(&self.context_manager.save_state())
                         .unwrap_or_default(),
@@ -1745,28 +1557,21 @@ impl Harness {
             }
 
             log::debug!("run_agent_loop RESTARTING with tool results");
-            // The tool results have already been recorded in `self.history`
-            // via `push_tool_history` during dispatch, so we don't need to
-            // summarise them here. Just set the continuation prompt for the
-            // next iteration.
+            // The tool results have already been recorded in the context
+            // manager via `push_tool_history` during dispatch. Just set the
+            // continuation prompt for the next iteration.
             current_input =
                 "Please continue with your response based on the information above.".to_string();
 
-            self.context_manager.run().await;
+            self.context_manager.run();
             let _ = tx.send(HarnessEvent::ContextInfo {
                 info: self.context_manager.display_info(),
             });
         }
         log::debug!("run_agent_loop EXIT");
 
-        // Send final context info before collapsing — the TUI shows this
-        // as the last known state until the next agent loop starts.
-        let _ = tx.send(HarnessEvent::ContextInfo {
-            info: self.context_manager.display_info(),
-        });
-
-        self.context_manager.collapse_context();
-        // Send one more after collapse so the bar reflects the reset state.
+        // Send final context info — the TUI shows this as the last known
+        // state until the next agent loop starts.
         let _ = tx.send(HarnessEvent::ContextInfo {
             info: self.context_manager.display_info(),
         });
@@ -1887,9 +1692,9 @@ impl Harness {
 impl Harness {
     /// Create a harness for testing without a real connector.
     pub(crate) fn new_test() -> Self {
-        let cm_connector = Connector::new("openai").unwrap();
+        let connector = Connector::new("openai").unwrap();
         Self {
-            connector: cm_connector.clone(),
+            connector,
             sessions: Vec::new(),
             protocol: None,
             header_context: String::new(),
@@ -1900,9 +1705,8 @@ impl Harness {
             stop_signal: None,
             stop: false,
             tool_issuer: VecDeque::new(),
-            history: Vec::new(),
-            total_history_tokens: 0,
-            context_manager: ContextManager::new(cm_connector, MAX_TOOL_RETRIES as u32),
+            tool_call_synthetic: 0,
+            context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
             disabled_tools: HashSet::new(),
             tool_failure_count: 0,
             tool_extraction_failure_count: 0,
@@ -1963,18 +1767,13 @@ impl Harness {
     /// Build the exact messages array that would be sent to the LLM on the
     /// next stream call. Mirrors what `run_agent_loop` sends each iteration.
     pub(crate) fn build_messages_for_test(&mut self, input: &str) -> Vec<ChatMessage> {
-        self.build_conversation_messages(input)
+        self.context_manager.build_messages(input)
     }
 
-    /// Build the system context (instructions + correction memory + CM
-    /// buffer) exactly as `run_agent_loop` does for each iteration.
+    /// Build the system context (instructions + correction memory) exactly as
+    /// `run_agent_loop` does for each iteration.
     pub(crate) fn build_chat_context_for_test(&mut self) -> String {
         self.build_chat_context()
-    }
-
-    /// Current `total_history_tokens` accounting (test accessor).
-    pub(crate) fn total_history_tokens(&self) -> usize {
-        self.total_history_tokens
     }
 
     /// Whether the currently-active connector has native tool definitions

@@ -31,4 +31,3 @@ fn handle_harness_tool_consumes_stop_agent_loop() {
     assert_eq!(result, Some(String::new()));
     assert!(h.stop);
 }
-
