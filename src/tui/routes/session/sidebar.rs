@@ -21,6 +21,13 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
         return;
     };
     for (i, ch) in text.chars().enumerate() {
+        // Skip control characters (session titles derive from user message
+        // text, which can contain `\n`/`\t`): writing them into cells makes
+        // ratatui's buffer diff panic ("control character passed to
+        // cell_width without filtering").
+        if ch.is_control() {
+            continue;
+        }
         let Some(cx) = x.checked_add(i as u16) else {
             break;
         };

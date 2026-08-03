@@ -59,6 +59,12 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
         return;
     };
     for (i, ch) in text.chars().enumerate() {
+        // Skip control characters: writing them into buffer cells makes
+        // ratatui's buffer diff panic ("control character passed to
+        // cell_width without filtering").
+        if ch.is_control() {
+            continue;
+        }
         let Some(cx) = x.checked_add(i as u16) else {
             break;
         };
@@ -548,8 +554,12 @@ impl SessionView {
         if expanded && !part.text.is_empty() {
             let md_h = part.text.lines().count().min(10) as u16 + 1;
             let md_area = Rect::new(x + 2, y + 1, max_w.saturating_sub(2), md_h);
+            // Sanitize before the markdown renderer so control chars can't
+            // reach buffer cells (ratatui cell_width panic). `\n` is kept —
+            // the markdown renderer handles line breaks itself.
+            let content = sanitize_text(&part.text);
             let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(Some(
-                part.text.clone(),
+                content,
             ));
             md.set_fg(Some(ColorInput::RGBA(theme.text_muted)));
             md.set_bg(Some(ColorInput::RGBA(theme.background)));

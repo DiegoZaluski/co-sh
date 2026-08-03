@@ -152,11 +152,17 @@ impl HighlightSpinner {
     /// * `highlight_color` — the colour at the centre of the glow beam.
     /// * `base_color` — the colour of characters far from the beam.
     pub fn new(text: &str, highlight_color: RGBA, base_color: RGBA) -> Self {
-        let chars: Vec<char> = text.chars().collect();
+        // Filter control characters (e.g. `\n` in multiline tool commands):
+        // writing them into buffer cells makes ratatui's buffer diff panic
+        // ("control character passed to cell_width without filtering").
+        // The filtered string is stored so `text()` stays consistent with
+        // `width()`/`chars`.
+        let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
+        let chars: Vec<char> = filtered.chars().collect();
         let char_count = chars.len();
 
         Self {
-            text: text.to_string(),
+            text: filtered.clone(),
             char_count,
             chars,
             beam_pos: -0.3,
@@ -170,7 +176,7 @@ impl HighlightSpinner {
             shimmer_amp: 0.06,
             shimmer_freq: 0.12,
             phase: SpinnerPhase::Active,
-            messages: vec![text.to_string()],
+            messages: vec![filtered],
             durations: vec![u32::MAX],
             current_idx: 0,
             msg_frame_count: 0,
@@ -313,8 +319,11 @@ impl HighlightSpinner {
     /// Apply the current message's text to the rendering state.
     fn apply_current_message(&mut self) {
         let text = &self.messages[self.current_idx];
-        self.text.clone_from(text);
-        self.chars = text.chars().collect();
+        // Keep control characters out of the rendered char list and the
+        // stored text (see `new`).
+        let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
+        self.text.clone_from(&filtered);
+        self.chars = filtered.chars().collect();
         self.char_count = self.chars.len();
         self.beam_pos = -0.3;
     }

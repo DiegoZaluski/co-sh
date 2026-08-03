@@ -43,6 +43,13 @@ pub(crate) fn tool_color(display: &str) -> Option<Color> {
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;
     for (i, ch) in text.chars().enumerate() {
+        // Skip control characters (e.g. \r progress spinners, \t, ESC/ANSI
+        // bytes from raw tool output). Writing them into buffer cells makes
+        // ratatui's buffer diff panic:
+        //   "control character passed to cell_width without filtering"
+        if ch.is_control() {
+            continue;
+        }
         let cx = x + i as u16;
         if cx >= right {
             break;
@@ -640,6 +647,10 @@ fn draw_highlighted_code_with_ln(
         }
 
         for (ci, ch) in line.char_indices() {
+            // Skip control characters (same reason as draw_text_line).
+            if ch.is_control() {
+                continue;
+            }
             if x_pos >= x + max_w {
                 break;
             }

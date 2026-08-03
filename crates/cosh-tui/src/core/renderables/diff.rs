@@ -478,7 +478,10 @@ impl DiffRenderable {
         // Content (truncated to panel width, no wrapping)
         if let Some(li) = line {
             let content = Self::content_part(&li.content, li.line_type);
-            for ch in content.chars() {
+            // Skip control characters (e.g. \t in diffs): writing them into
+            // buffer cells makes ratatui's buffer diff panic
+            // ("control character passed to cell_width without filtering").
+            for ch in content.chars().filter(|c| !c.is_control()) {
                 if x >= max_x_panel {
                     break;
                 }
@@ -747,6 +750,10 @@ impl DiffRenderable {
 
                 // Render content
                 for (grapheme, w) in unicode_util::graphemes_with_width(wl) {
+                    // Skip control characters (e.g. \t in diffs) — see above.
+                    if grapheme.chars().any(char::is_control) {
+                        continue;
+                    }
                     if x + w > max_x {
                         break;
                     }

@@ -889,3 +889,66 @@ fn test_bash_output_collapse_shrinks_without_scroll_gap() {
     assert!(view.scroll_y <= (view.actual_total_height - view.visible_height).max(0));
     assert!(!buffer_text(&buf).contains("line 119"));
 }
+
+/// Regression test for ratatui panics on control characters in buffer cells.
+///
+/// Raw bash output commonly contains `\r` (progress spinners), `\t`, and
+/// ANSI/ESC bytes, and commands can be multiline (`\n`). These used to be
+/// written straight into buffer cells via `Cell::set_char`, which makes
+/// ratatui's buffer diff panic with:
+///   "control character passed to cell_width without filtering"
+/// when the terminal is resized large enough (or scrolled) to show those rows.
+/// Every render path must strip control characters before writing cells.
+#[test]
+fn test_bash_output_with_control_chars_does_not_pollute_cells() {
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output = "Build 10%\rBuild 55%\rBuild 100%\ndone\tok\n\u{1b}[32mgreen\u{1b}[0m\n";
+    let msg = Message {
+        id: "msg-bash-ctrl".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "bash_run".into(),
+            // Multiline command: `\n` used to end up in the `$ cmd` title cell.
+            input: serde_json::json!({ "command": "echo a\necho b" }),
+            output: Some(output.into()),
+            status: ToolStatus::Completed,
+            tool_call_id: Some("bash-ctrl".into()),
+            is_start: true,
+            is_streaming: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    // Large viewport: the rows containing the control-char lines are visible
+    // (the exact geometry that used to trigger the panic).
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    for y in 0..area.height {
+        for x in 0..area.width {
+            if let Some(cell) = buf.cell((x, y)) {
+                let symbol = cell.symbol();
+                assert!(
+                    !symbol.chars().any(char::is_control),
+                    "cell ({x},{y}) contains control char {symbol:?}"
+                );
+            }
+        }
+    }
+
+    // Sanity check: the visible output text is still there (only control
+    // characters were stripped).
+    let text = buffer_text(&buf);
+    assert!(text.contains("Build"), "bash output should still be rendered");
+    assert!(text.contains("done"), "bash output should still be rendered");
+}
