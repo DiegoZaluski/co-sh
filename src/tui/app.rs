@@ -57,10 +57,6 @@ fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// When true, show dev-only stats (◉ seeds, ⟡ expanded) next to the budget bar.
-/// Set to false for end-user builds.
-const SHOW_DEV_STATS: bool = true;
-
 /// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
 fn render_budget_bar(pct: u8) -> String {
     const FILLED: char = '▓';
@@ -1559,46 +1555,37 @@ impl App {
                 area.height,
             );
 
-            // Budget bar — only after the user has sent at least one message.
-            // When SHOW_DEV_STATS is true, also show (◉ seeds, ⟡ expanded) for dev use.
+            // Context info bar — only after the user has sent at least one
+            // message. Shows the live token count to the left of the budget bar.
             let has_content = self
                 .state
                 .current_session()
                 .is_some_and(|s| !s.messages.is_empty());
             if matches!(self.mode(), AppMode::Session) && has_content {
                 let pct = self.context_info.as_ref().map_or(0, |info| info.budget_pct);
+                let tokens = self
+                    .context_info
+                    .as_ref()
+                    .map_or(0, |info| info.total_tokens);
 
+                let token_str = format!("{tokens} tok");
                 let budget_str = format!("{}{:>3}%", render_budget_bar(pct), pct);
+                let gap: u16 = 2;
 
-                let (display_str, stats_width, _budget_offset) = if SHOW_DEV_STATS {
-                    let seeds = self.context_info.as_ref().map_or(0, |info| info.seed_count);
-                    let expanded = self.context_info.as_ref().map_or(0, |info| info.expanded);
-                    let stats_str = format!("◉ {} ⟡ {}", seeds, expanded);
-                    let full = format!("{}  {}", stats_str, budget_str);
-                    let sw = stats_str.chars().count() as u16;
-                    (full, sw, sw + 2)
-                } else {
-                    (budget_str.clone(), 0u16, 0u16)
-                };
-
-                let display_w = display_str.chars().count() as u16;
+                let display_w =
+                    (token_str.chars().count() + gap as usize + budget_str.chars().count()) as u16;
                 let right_x = main_area.right().saturating_sub(display_w + 1);
 
-                // Render dev stats when enabled
-                if SHOW_DEV_STATS {
-                    let seeds = self.context_info.as_ref().map_or(0, |info| info.seed_count);
-                    let expanded = self.context_info.as_ref().map_or(0, |info| info.expanded);
-                    let stats_str = format!("◉ {} ⟡ {}", seeds, expanded);
-                    for (i, ch) in stats_str.chars().enumerate() {
-                        if let Some(cell) = buf.cell_mut((right_x + i as u16, area.y)) {
-                            cell.set_char(ch);
-                            cell.set_style(Style::default().fg(rgba_color(self.theme.text_muted)));
-                        }
+                // Token counter — to the left of the budget bar.
+                for (i, ch) in token_str.chars().enumerate() {
+                    if let Some(cell) = buf.cell_mut((right_x + i as u16, area.y)) {
+                        cell.set_char(ch);
+                        cell.set_style(Style::default().fg(rgba_color(self.theme.text_muted)));
                     }
                 }
 
-                // Render budget bar (with conditional color)
-                let offset = if SHOW_DEV_STATS { stats_width + 2 } else { 0 };
+                // Budget bar (with conditional color)
+                let offset = token_str.chars().count() as u16 + gap;
                 let budget_style = if pct >= 90 {
                     Style::default().fg(rgba_color(self.theme.error))
                 } else if pct >= 70 {
