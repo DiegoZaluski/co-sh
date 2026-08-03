@@ -336,6 +336,17 @@ impl Connector {
         self.params.model.as_deref()
     }
 
+    /// The effective model name: the explicit override if one was set via
+    /// [`with_model`](Self::with_model), otherwise the provider's registered
+    /// default model.
+    #[must_use]
+    pub fn effective_model(&self) -> Option<&str> {
+        self.params
+            .model
+            .as_deref()
+            .or_else(|| self.provider.map(|p| p.default_model))
+    }
+
     /// Whether native tool definitions are currently registered on this
     /// connector (`set_tools`/`with_tools` was called and the list is
     /// non-empty).

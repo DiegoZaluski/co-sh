@@ -22,7 +22,7 @@
 use crate::harness::context_manager::{ContextManager, MAX_CONTEXT_TOKENS};
 use crate::harness::core::{Harness, Mode};
 use crate::harness::guardrails::{PermissionCheck, check_tool_permission};
-use crate::util::token_counter::estimate_tokens;
+use crate::util::estimate_tokens;
 use cosh_sdk::connector::Connector;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -177,7 +177,13 @@ async fn default_budget_holds_entire_conversation_until_80_percent() {
             "fs_read",
             r#"{"targets":[{"path":"a.rs"}]}"#,
         );
-        small.add_tool_result(&format!("c{i}"), &"x".repeat(600));
+        // A realistic multi-word payload: ~500 estimated tokens per round
+        // (a bare `"x".repeat(600)` collapses to a handful of BPE tokens).
+        small.add_tool_result(
+            &format!("c{i}"),
+            &"the quick brown fox jumps over the lazy dog near the riverbank and the mountain trail. "
+                .repeat(30),
+        );
     }
     let small_before = small.display_info();
     assert!(

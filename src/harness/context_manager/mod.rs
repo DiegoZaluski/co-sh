@@ -69,7 +69,7 @@ pub mod compression;
 #[cfg(test)]
 mod test;
 
-use crate::util::token_counter::estimate_tokens;
+use crate::util::TokenEncoding;
 use cosh_sdk::connector::{
     ChatMessage, ToolCallFunctionMsg, ToolCallMsg, assistant_tool_call_message,
     tool_result_message, user_message,
@@ -179,8 +179,10 @@ impl ContextItem {
         }
     }
 
-    /// Estimated token cost of what this item currently renders.
-    fn tokens(&self) -> usize {
+    /// Estimated token cost of what this item currently renders, measured with
+    /// the encoding for the active model (`enc` is resolved once by the
+    /// manager via [`ContextManager::set_model`], not per item).
+    fn tokens(&self, enc: TokenEncoding) -> usize {
         match self {
             ContextItem::User {
                 original,
@@ -191,12 +193,12 @@ impl ContextItem {
                 original,
                 compressed,
                 ..
-            } => estimate_tokens(compressed.as_deref().unwrap_or(original)),
+            } => enc.estimate(compressed.as_deref().unwrap_or(original)),
             ContextItem::ToolCall {
                 name, arguments, ..
-            } => estimate_tokens(name) + estimate_tokens(arguments),
-            ContextItem::ToolResult { content, .. } => estimate_tokens(content),
-            ContextItem::LoopClosure { content, .. } => estimate_tokens(content),
+            } => enc.estimate(name) + enc.estimate(arguments),
+            ContextItem::ToolResult { content, .. } => enc.estimate(content),
+            ContextItem::LoopClosure { content, .. } => enc.estimate(content),
         }
     }
 
@@ -379,6 +381,10 @@ pub struct ContextManager {
     user_prompts: VecDeque<u64>,
     /// Token budget before the 80% compaction trigger.
     max_tokens: usize,
+    /// tiktoken encoding matching the active model (set by the harness via
+    /// [`Self::set_model`]). Defaults to [`TokenEncoding::Cl100k`] — the
+    /// generic cross-provider estimate.
+    encoding: TokenEncoding,
 }
 
 /// Build a plain assistant text message (no tool calls).
@@ -404,7 +410,16 @@ impl ContextManager {
             next_id: 1,
             user_prompts: VecDeque::new(),
             max_tokens,
+            encoding: TokenEncoding::Cl100k,
         }
+    }
+
+    /// Set the active model so token counts are estimated with the closest
+    /// tiktoken encoding (`None` → the default [`TokenEncoding::Cl100k`]). The
+    /// harness calls this whenever the connector/model changes (loop start,
+    /// fallback switch).
+    pub fn set_model(&mut self, model: Option<&str>) {
+        self.encoding = TokenEncoding::for_model(model);
     }
 
     // Ingestion
@@ -725,7 +740,7 @@ impl ContextManager {
             .items
             .iter()
             .filter(|it| it.is_loop())
-            .map(ContextItem::tokens)
+            .map(|it| it.tokens(self.encoding))
             .sum();
         if loop_tokens < target {
             return;
@@ -936,7 +951,7 @@ impl ContextManager {
     }
 
     fn total_tokens(&self) -> usize {
-        self.items.iter().map(ContextItem::tokens).sum()
+        self.items.iter().map(|it| it.tokens(self.encoding)).sum()
     }
 
     /// Remove the item at `idx`, returning its token cost. For tool items the
@@ -953,7 +968,7 @@ impl ContextManager {
         };
 
         let Some(cid) = call_id else {
-            let tokens = self.items[idx].tokens();
+            let tokens = self.items[idx].tokens(self.encoding);
             self.items.remove(idx);
             return tokens;
         };
@@ -971,14 +986,15 @@ impl ContextManager {
             // valid; both token costs are summed.
             Some(p) => {
                 let (lo, hi) = (idx.min(p), idx.max(p));
-                let total = self.items[lo].tokens() + self.items[hi].tokens();
+                let total =
+                    self.items[lo].tokens(self.encoding) + self.items[hi].tokens(self.encoding);
                 self.items.remove(hi);
                 self.items.remove(lo);
                 total
             }
             // No partner (orphan) — remove just this item.
             None => {
-                let tokens = self.items[idx].tokens();
+                let tokens = self.items[idx].tokens(self.encoding);
                 self.items.remove(idx);
                 tokens
             }

@@ -949,6 +949,12 @@ fn test_bash_output_with_control_chars_does_not_pollute_cells() {
     // Sanity check: the visible output text is still there (only control
     // characters were stripped).
     let text = buffer_text(&buf);
-    assert!(text.contains("Build"), "bash output should still be rendered");
-    assert!(text.contains("done"), "bash output should still be rendered");
+    assert!(
+        text.contains("Build"),
+        "bash output should still be rendered"
+    );
+    assert!(
+        text.contains("done"),
+        "bash output should still be rendered"
+    );
 }

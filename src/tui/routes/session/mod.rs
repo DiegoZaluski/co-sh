@@ -558,9 +558,8 @@ impl SessionView {
             // reach buffer cells (ratatui cell_width panic). `\n` is kept —
             // the markdown renderer handles line breaks itself.
             let content = sanitize_text(&part.text);
-            let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(Some(
-                content,
-            ));
+            let mut md =
+                cosh_tui::core::renderables::markdown::MarkdownRenderable::new(Some(content));
             md.set_fg(Some(ColorInput::RGBA(theme.text_muted)));
             md.set_bg(Some(ColorInput::RGBA(theme.background)));
             md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));

@@ -7,6 +7,7 @@
 //! integration with the harness payload.
 
 use super::*;
+use crate::util::estimate_tokens;
 
 fn cm(max_tokens: usize) -> ContextManager {
     ContextManager::new(max_tokens)
@@ -63,7 +64,10 @@ fn assistant_text_compresses_in_place_at_the_same_position() {
             ..
         }
     ));
-    assert_eq!(cm.items[1].tokens(), estimate_tokens(&text));
+    assert_eq!(
+        cm.items[1].tokens(TokenEncoding::Cl100k),
+        estimate_tokens(&text)
+    );
 
     // The loop advancing (any subsequent poll) flushes the pending job; the
     // worker compresses it and the copy is swapped in place.
@@ -210,7 +214,7 @@ fn assistant_output_with_tool_call_is_never_compressed() {
     cm.add_tool_result("c1", "contents");
     wait_for_compression(&mut cm);
     assert!(
-        cm.items[0].tokens() == estimate_tokens("Let me check the file first"),
+        cm.items[0].tokens(TokenEncoding::Cl100k) == estimate_tokens("Let me check the file first"),
         "non-compressible assistant output must stay raw"
     );
     assert_eq!(
@@ -999,8 +1003,11 @@ fn anchor_survives_draft_eviction_and_stays_verbatim() {
     );
     assert_eq!(
         cm.total_tokens(),
-        500,
-        "100 (anchor) + 50 + 50 + 300 (newest draft) after the eviction"
+        estimate_tokens(&"F ".repeat(100))
+            + estimate_tokens(&"S ".repeat(50))
+            + estimate_tokens(&"T ".repeat(50))
+            + estimate_tokens(&"dc ".repeat(300)),
+        "anchor (100) + 50 + 50 + 300 (newest draft) after the eviction"
     );
 
     // A fourth prompt un-protects a NORMAL prompt (not the anchor) — it IS
@@ -1284,7 +1291,7 @@ fn close_loop_never_submits_the_final_output() {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     assert_eq!(
-        cm.items[1].tokens(),
+        cm.items[1].tokens(TokenEncoding::Cl100k),
         estimate_tokens(&text),
         "the final output stays raw forever — it was never compressed"
     );
@@ -1556,7 +1563,7 @@ fn dead_pipeline_degrades_by_drop_and_never_stalls() {
     }
     assert_eq!(
         cm.total_tokens(),
-        50 + 4 * 250,
+        estimate_tokens(&"U ".repeat(50)) + 4 * estimate_tokens(&"A ".repeat(250)),
         "precondition: raw full cost"
     );
     assert!(cm.total_tokens() >= 800, "precondition: over the trigger");
@@ -1721,10 +1728,11 @@ fn delayed_compression_inflates_raw_costs_and_forces_drops() {
             compressible: true,
         });
     }
+    let expected_working = estimate_tokens(&"U ".repeat(50)) + 3 * estimate_tokens("short ");
     assert_eq!(
         ok.total_tokens(),
-        50 + 3,
-        "compressed drafts cost ~1 token each"
+        expected_working,
+        "compressed drafts cost their summary tokens"
     );
     ok.run();
     assert_eq!(
@@ -1732,7 +1740,7 @@ fn delayed_compression_inflates_raw_costs_and_forces_drops() {
         4,
         "working pipeline: the context stays under the trigger, nothing is removed"
     );
-    assert_eq!(ok.total_tokens(), 53);
+    assert_eq!(ok.total_tokens(), expected_working);
 
     // Pipeline DELAYED: identical content, but the drafts are still raw —
     // full cost → the trigger fires and the oldest draft is dropped whole
@@ -1750,7 +1758,7 @@ fn delayed_compression_inflates_raw_costs_and_forces_drops() {
     }
     assert_eq!(
         delayed.total_tokens(),
-        50 + 3 * 300,
+        estimate_tokens(&"U ".repeat(50)) + 3 * estimate_tokens(&"A ".repeat(300)),
         "raw drafts cost their full size while the pipeline is delayed"
     );
     delayed.run();
@@ -1853,7 +1861,9 @@ fn evict_drafts_prefers_already_compressed_drafts_over_in_flight_raw() {
     }
     assert_eq!(
         cm.total_tokens(),
-        50 + 250 + 250 + 250 + 250,
+        estimate_tokens(&"U ".repeat(50))
+            + 2 * estimate_tokens(&"A ".repeat(250))
+            + 2 * estimate_tokens(&"C ".repeat(250)),
         "precondition: raw drafts at full cost, compressed at summary cost"
     );
     assert!(cm.total_tokens() >= 800, "precondition: over the trigger");

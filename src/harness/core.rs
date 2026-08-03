@@ -954,6 +954,11 @@ impl Harness {
         // uses the native tool-calling mechanism instead of inline JSON.
         self.init_native_tools();
 
+        // Route token estimation to the encoding closest to the active model
+        // (override or the provider's default) before any budget is computed.
+        self.context_manager
+            .set_model(self.connector.effective_model());
+
         // Add the initial user input to the context manager (the single owner
         // of the conversation) so the model sees it as a proper `user` message.
         // Skip when it is already the trailing protected user turn (e.g. it was
@@ -1045,6 +1050,10 @@ impl Harness {
                             // connector — otherwise the fallback provider
                             // receives zero tools.
                             self.init_native_tools();
+                            // The fallback provider may use a different model
+                            // family — re-route the token encoding.
+                            self.context_manager
+                                .set_model(self.connector.effective_model());
                             self.tool_issuer.clear();
                             log::debug!("switched to fallback: {provider}/{model}");
                             switched = true;

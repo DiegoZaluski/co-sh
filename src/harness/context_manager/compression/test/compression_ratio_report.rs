@@ -1,5 +1,5 @@
 use super::super::init;
-use crate::util::token_counter::estimate_tokens;
+use crate::util::estimate_tokens;
 
 pub fn compression_report(text: &str, use_hierarchical: bool) -> (usize, usize) {
     let tokens_before = estimate_tokens(text);
