@@ -1,6 +1,32 @@
 use super::error::ConnectorError;
 use super::provider::ProviderConfig;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// Per-chunk read timeout for SSE streams. Generous (120s) so a slow local
+/// model or a reasoning pause between tokens does not abort the agent loop
+/// mid-generation; only a truly dead connection trips it.
+pub(crate) const SSE_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Shared [`reqwest::Client`] reused across every provider request.
+///
+/// Creating a fresh client per request discards the connection pool, so every
+/// LLM call pays a full DNS + TCP + TLS handshake — the dominant source of the
+/// slow intervals between agent-loop calls. One long-lived client keeps
+/// keep-alive connections alive between calls (and between sessions).
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        // Only a CONNECT timeout lives on the client: an SSE stream's body is
+        // read incrementally by the caller, so a total request timeout here
+        // would kill long generations. Per-chunk SSE timeouts govern the body.
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(4)
+            .connect_timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 pub struct SseBuffer {
     buf: Vec<u8>,
@@ -32,7 +58,12 @@ pub async fn send_request(
     headers: &[(&str, &str)],
 ) -> Result<String, ConnectorError> {
     let response = send_request_stream(config, url, body, headers).await?;
-    Ok(response.text().await?)
+    // Non-streaming call: the whole body must arrive within the request
+    // timeout (the stream path governs the body via per-chunk timeouts).
+    let text = tokio::time::timeout(Duration::from_mins(1), response.text())
+        .await
+        .map_err(|_| ConnectorError::Network("request timed out after 60s".to_string()))??;
+    Ok(text)
 }
 
 pub async fn send_get_request(
@@ -40,11 +71,7 @@ pub async fn send_get_request(
     url: &str,
     headers: &[(&str, &str)],
 ) -> Result<String, ConnectorError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_mins(1))
-        .build()
-        .map_err(|e| ConnectorError::Network(e.to_string()))?;
-    let mut request_builder = client.get(url);
+    let mut request_builder = shared_client().get(url).timeout(Duration::from_mins(1));
 
     for &(key, value) in headers {
         request_builder = request_builder.header(key, value);
@@ -81,8 +108,9 @@ pub async fn send_request_stream(
     body: &(impl serde::Serialize + Sync),
     headers: &[(&str, &str)],
 ) -> Result<reqwest::Response, ConnectorError> {
-    let client = reqwest::Client::new();
-    let mut request_builder = client.post(url).header("Content-Type", "application/json");
+    let mut request_builder = shared_client()
+        .post(url)
+        .header("Content-Type", "application/json");
 
     for &(key, value) in headers {
         request_builder = request_builder.header(key, value);

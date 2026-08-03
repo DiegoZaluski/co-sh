@@ -1,4 +1,6 @@
-use super::super::common::{SseBuffer, send_get_request, send_request, send_request_stream};
+use super::super::common::{
+    SSE_CHUNK_TIMEOUT, SseBuffer, send_get_request, send_request, send_request_stream,
+};
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 use super::super::params::{Parameters, ToolDefinition};
@@ -9,7 +11,6 @@ use super::super::params::ChatMessage as ApiChatMessage;
 
 use async_stream::stream;
 use std::pin::Pin;
-use std::time::Duration;
 use tokio_stream::Stream;
 
 // Request types
@@ -441,7 +442,7 @@ pub async fn chat_stream_with_messages(
             let mut last_raw: Option<String>;
 
             loop {
-                let chunk = match tokio::time::timeout(Duration::from_secs(30), response.chunk()).await {
+                let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, response.chunk()).await {
                     Ok(Ok(Some(c))) => c,
                     Ok(Ok(None)) => break,
                     Ok(Err(e)) => {
@@ -449,7 +450,10 @@ pub async fn chat_stream_with_messages(
                         return;
                     }
                     Err(_) => {
-                        yield Err(ConnectorError::Network("stream timed out after 30s".to_string()));
+                        yield Err(ConnectorError::Network(format!(
+                            "stream timed out after {}s",
+                            SSE_CHUNK_TIMEOUT.as_secs()
+                        )));
                         return;
                     }
                 };
@@ -576,12 +580,12 @@ pub async fn chat_stream(
     ];
     let response = send_request_stream(config, &url, &ctx.request, headers).await?;
 
-    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> = Box::pin(
-        stream! {
+    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =
+        Box::pin(stream! {
             let mut response = response;
             let mut buf = SseBuffer::new();
             loop {
-                let chunk = match tokio::time::timeout(Duration::from_secs(30), response.chunk()).await {
+                let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, response.chunk()).await {
                     Ok(Ok(Some(c))) => c,
                     Ok(Ok(None)) => break,
                     Ok(Err(e)) => {
@@ -589,7 +593,10 @@ pub async fn chat_stream(
                         return;
                     }
                     Err(_) => {
-                        yield Err(ConnectorError::Network("stream timed out after 30s".to_string()));
+                        yield Err(ConnectorError::Network(format!(
+                            "stream timed out after {}s",
+                            SSE_CHUNK_TIMEOUT.as_secs()
+                        )));
                         return;
                     }
                 };
@@ -639,8 +646,7 @@ pub async fn chat_stream(
                     }
                 }
             }
-        },
-    );
+        });
 
     Ok(ChatStream::new(inner))
 }

@@ -1,4 +1,6 @@
-use super::super::common::{SseBuffer, send_get_request, send_request, send_request_stream};
+use super::super::common::{
+    SSE_CHUNK_TIMEOUT, SseBuffer, send_get_request, send_request, send_request_stream,
+};
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 use super::super::params::{Parameters, ResponseFormat, ToolDefinition};
@@ -6,7 +8,6 @@ use super::super::provider::{ProviderConfig, get_api_key};
 
 use async_stream::stream;
 use std::pin::Pin;
-use std::time::Duration;
 use tokio_stream::Stream;
 
 // Public ChatMessage from params module with native tool-call support.
@@ -258,7 +259,7 @@ fn process_sse_response(
         // use it when yielding synthetic tool-call tokens.
         let mut last_raw: Option<String> = None;
         loop {
-            let chunk = match tokio::time::timeout(Duration::from_secs(30), response.chunk()).await {
+            let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, response.chunk()).await {
                 Ok(Ok(Some(c))) => {
                     c
                 }
@@ -270,7 +271,10 @@ fn process_sse_response(
                     return;
                 }
                 Err(_) => {
-                    yield Err(ConnectorError::Network("stream timed out after 30s".to_string()));
+                    yield Err(ConnectorError::Network(format!(
+                        "stream timed out after {}s",
+                        SSE_CHUNK_TIMEOUT.as_secs()
+                    )));
                     return;
                 }
             };
