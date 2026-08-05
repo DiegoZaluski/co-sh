@@ -162,6 +162,12 @@ pub enum ContextItem {
         id: u64,
         call_id: String,
         content: String,
+        /// True when the tool produced no useful output (e.g. a zero-match
+        /// search). Such a result served its purpose the moment the model
+        /// reacted to it, so its chain is the first eviction target — even
+        /// when it is the newest chain.
+        #[serde(default)]
+        useless: bool,
     },
     /// The final text response of a completed agent loop. Replaces the raw
     /// assistant text in place; removed oldest-first by `trim_loop_closures`.
@@ -496,12 +502,20 @@ impl ContextManager {
 
     /// Add a tool RESULT. Structural, never prose-compressed.
     pub fn add_tool_result(&mut self, call_id: &str, content: &str) {
+        self.add_tool_result_flagged(call_id, content, false);
+    }
+
+    /// Add a tool RESULT with an explicit `useless` marker. Useless chains are
+    /// the first eviction targets of the tool pass (see [`Self::evict_tools`]);
+    /// everything else behaves exactly like [`Self::add_tool_result`].
+    pub fn add_tool_result_flagged(&mut self, call_id: &str, content: &str, useless: bool) {
         self.poll();
         let id = self.next_id();
         self.items.push_back(ContextItem::ToolResult {
             id,
             call_id: call_id.to_string(),
             content: content.to_string(),
+            useless,
         });
     }
 
@@ -617,8 +631,40 @@ impl ContextManager {
         }
     }
 
+    /// True when the item `id` belongs to a tool chain whose RESULT is marked
+    /// `useless` — a call that produced no useful output, so its chain is dead
+    /// weight once the model has reacted to it.
+    fn chain_is_useless(&self, id: u64) -> bool {
+        let Some(idx) = self.items.iter().position(|it| it.id() == id) else {
+            return false;
+        };
+        let call_id = match &self.items[idx] {
+            ContextItem::ToolCall { call_id, .. } | ContextItem::ToolResult { call_id, .. } => {
+                call_id
+            }
+            _ => return false,
+        };
+        self.items.iter().any(|it| {
+            matches!(
+                it,
+                ContextItem::ToolResult {
+                    call_id: c,
+                    useless: true,
+                    ..
+                } if c == call_id
+            )
+        })
+    }
+
     /// Evict tool chains from the middle outward (Goose technique) until the
     /// total drops below the 80% trigger.
+    ///
+    /// Useless chains (results marked `useless`, e.g. a zero-match search) are
+    /// evicted FIRST — a zero-value result carried its one bit of information
+    /// the moment the model read it, so keeping its chain burns context on
+    /// every subsequent call, even when it is the newest chain. The middle-out
+    /// order is preserved within each partition, so non-useless chains keep
+    /// their existing eviction behavior exactly.
     fn evict_tools(&mut self) {
         let trigger = self.trigger();
         let mut total = self.total_tokens();
@@ -634,29 +680,41 @@ impl ContextManager {
         if tool_ids.is_empty() {
             return;
         }
+        // Precompute the useless flag per id ONCE — the sort below would
+        // otherwise re-scan the whole item list for every id (O(n²) on the
+        // compaction path of long tool-heavy sessions).
+        let useless_flags: Vec<bool> = tool_ids
+            .iter()
+            .map(|id| self.chain_is_useless(*id))
+            .collect();
         // Expand outward from the middle with two pointers so EVERY index is
         // covered. (A previous alternating scheme dropped the newest tool item
-        // whenever the count was odd — n=1 produced an empty order.)
+        // whenever the count was odd — n=1 produced an empty order.) The order
+        // holds INDICES into `tool_ids` so the useless flags stay aligned.
         let middle = tool_ids.len() / 2;
-        let mut order = Vec::with_capacity(tool_ids.len());
+        let mut order: Vec<usize> = Vec::with_capacity(tool_ids.len());
         let mut left = middle;
         let mut right = middle;
         while left > 0 || right < tool_ids.len() {
             if left > 0 {
                 left -= 1;
-                order.push(tool_ids[left]);
+                order.push(left);
             }
             if right < tool_ids.len() {
-                order.push(tool_ids[right]);
+                order.push(right);
                 right += 1;
             }
         }
-        for id in order {
+        // Stable partition: useless chains first, middle-out order kept within
+        // each partition (a no-op when nothing is marked useless).
+        order.sort_by_key(|idx| !useless_flags[*idx]);
+        for idx in order {
+            let id = tool_ids[idx];
             if total < trigger {
                 break;
             }
-            if let Some(idx) = self.items.iter().position(|it| it.id() == id) {
-                total = total.saturating_sub(self.remove_item(idx));
+            if let Some(pos) = self.items.iter().position(|it| it.id() == id) {
+                total = total.saturating_sub(self.remove_item(pos));
             }
         }
     }

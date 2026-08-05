@@ -297,6 +297,56 @@ fn build_find_grep_inside_cwd_is_allowed() {
     );
 }
 
+// The `paths` array (multi-target find_grep) must feed the same approval
+// check as the single `path`: every target the tool opens is a real path the
+// guard must see — one outside-root entry triggers approval even when `path`
+// itself is absent. This is the guard-safe version of the oh-my-pi
+// multi-target syntax: the guard never parses a bespoke string.
+#[test]
+fn build_find_grep_paths_array_outside_cwd_needs_approval() {
+    let tmp_root = std::env::temp_dir().join("cosh_test_perm_gr_paths_root");
+    let outside_dir = std::env::temp_dir().join("cosh_test_perm_gr_paths_outside");
+    let _ = std::fs::create_dir_all(&tmp_root);
+    let _ = std::fs::create_dir_all(&outside_dir);
+
+    let args = serde_json::json!({
+        "pattern": "fn main",
+        "paths": [
+            "src",
+            outside_dir.to_str().unwrap()
+        ]
+    });
+    let result = check_tool_permission("find_grep", &args, Mode::Build, Some(tmp_root.as_path()));
+
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    let _ = std::fs::remove_dir_all(&outside_dir);
+
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "an outside-root entry in the paths array must trigger approval, got {result:?}"
+    );
+}
+
+// The flip side: when every `paths` entry is inside the root, no approval is
+// needed — the array does not change the guard's verdict for safe targets.
+#[test]
+fn build_find_grep_paths_array_inside_cwd_is_allowed() {
+    let args = serde_json::json!({
+        "pattern": "fn main",
+        "paths": ["src", "tests"]
+    });
+    let result = check_tool_permission(
+        "find_grep",
+        &args,
+        Mode::Build,
+        Some(Path::new("/home/user/project")),
+    );
+    assert!(
+        matches!(result, PermissionCheck::Allowed),
+        "all inside-root paths should be allowed, got {result:?}"
+    );
+}
+
 // web tools — freely available
 
 #[test]

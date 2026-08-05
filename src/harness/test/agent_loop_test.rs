@@ -1,4 +1,5 @@
 use super::super::core::Harness;
+use super::super::core::result_is_useless;
 use super::super::events::HarnessEvent;
 use crate::harness::context_manager::ContextItem;
 use std::sync::Arc;
@@ -223,4 +224,36 @@ async fn full_tool_loop_builds_correct_item_sequence_and_messages() {
         .filter(|m| m.role == "user" && m.content.as_deref() == Some("use tool"))
         .count();
     assert_eq!(user_count, 1, "the user input must be sent exactly once");
+}
+
+// The useless bridge: `result_is_useless` parses the find_grep result JSON
+// (which the tool serializes as its whole GrepOutput) and reads the `useless`
+// flag. This is the exact contract that turns a zero-match search into a
+// useless-tagged chain in the context manager.
+#[test]
+fn result_is_useless_reads_find_grep_json_contract() {
+    // Realistic zero-match GrepOutput: `useless: true` + note, no matches.
+    assert!(result_is_useless(
+        "find_grep",
+        r#"{"matches":[],"files":[],"total_matches":0,"useless":true,"note":"No matches found"}"#
+    ));
+
+    // A useful result — matches present, no flag (the tool omits it).
+    assert!(!result_is_useless(
+        "find_grep",
+        r#"{"matches":[{"path":"a.rs","line_number":1}],"total_matches":1}"#
+    ));
+    // Explicit false stays false.
+    assert!(!result_is_useless(
+        "find_grep",
+        r#"{"matches":[],"useless":false}"#
+    ));
+    // Malformed JSON is never interpreted as useless.
+    assert!(!result_is_useless("find_grep", "not json"));
+
+    // The gate is per-tool: no other tool's JSON is ever interpreted.
+    assert!(!result_is_useless(
+        "fs_read",
+        r#"{"useless":true}"#
+    ));
 }

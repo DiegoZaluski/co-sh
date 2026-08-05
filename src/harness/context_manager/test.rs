@@ -236,6 +236,7 @@ fn leading_orphaned_tool_results_are_skipped_in_messages() {
         id: 999,
         call_id: "orphan".to_string(),
         content: "stray".to_string(),
+        useless: false,
     });
     cm.add_user("hi");
     let msgs = cm.build_messages("");
@@ -513,6 +514,109 @@ fn evict_tools_preserves_the_newest_tool_chain() {
             .iter()
             .any(|it| { matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "c2") }),
         "the middle chain must be removed FIRST by middle-out removal"
+    );
+}
+
+// The `useless` marker inverts the middle-out priority: a chain whose RESULT
+// is marked `useless` (e.g. a zero-match search) is the FIRST eviction target
+// of the tool pass — even when it is the NEWEST chain, which pure middle-out
+// would otherwise preserve. On this layout middle-out removes the middle chain
+// (c2) first and keeps the newest (c4); useless-first removes c4 and keeps c2,
+// so asserting the exact opposite survival pins the useless-first order.
+#[test]
+fn evict_tools_prefers_useless_chains_first_even_when_newest() {
+    let mut cm = cm(1000); // trigger = 800
+    // Four small normal chains (~123 tokens each, "x " ≈ 1 token/2 chars)
+    // + one big USELESS newest chain (~352) ≈ 844 — over the trigger, but
+    // removing JUST the useless chain drops below it (so nothing else can be
+    // evicted — proving the useless chain went first by choice, not by order).
+    for i in 0..4 {
+        cm.add_tool_call(&format!("c{i}"), "read_file", "{}");
+        cm.add_tool_result(&format!("c{i}"), &"x ".repeat(120));
+    }
+    cm.add_tool_call("c4", "read_file", "{}");
+    cm.add_tool_result_flagged("c4", &"y ".repeat(350), true);
+    assert!(cm.total_tokens() >= 800, "precondition: over the trigger");
+
+    cm.evict_tools();
+
+    assert!(
+        cm.total_tokens() < 800,
+        "evict_tools must drop below the trigger, got {}",
+        cm.total_tokens()
+    );
+    // The useless NEWEST chain is gone first …
+    assert!(
+        !cm.items
+            .iter()
+            .any(|it| { matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "c4") }),
+        "the useless chain must be evicted even though it is the newest"
+    );
+    // … while a non-useless MIDDLE chain survives — the opposite of pure
+    // middle-out, which would evict c2 first and preserve c4.
+    assert!(
+        cm.items
+            .iter()
+            .any(|it| { matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "c2") }),
+        "the non-useless middle chain must survive the useless-first eviction"
+    );
+    // Chain integrity: no tool item survives without its call/result partner.
+    let snapshot: Vec<ContextItem> = cm.items.iter().cloned().collect();
+    for item in &snapshot {
+        match item {
+            ContextItem::ToolCall { call_id, .. } => {
+                assert!(snapshot.iter().any(|it| {
+                    matches!(it, ContextItem::ToolResult { call_id: c, .. } if c == call_id)
+                }));
+            }
+            ContextItem::ToolResult { call_id, .. } => {
+                assert!(snapshot.iter().any(|it| {
+                    matches!(it, ContextItem::ToolCall { call_id: c, .. } if c == call_id)
+                }));
+            }
+            _ => {}
+        }
+    }
+}
+
+// The useless marker is metadata for the eviction pass only: it is recorded on
+// the flagged result, defaults to false for the plain ingestion path, and never
+// changes what is delivered to the provider (the tool message renders the
+// content verbatim).
+#[test]
+fn tool_result_useless_flag_is_recorded_but_not_rendered() {
+    let mut cm = cm(10_000);
+    cm.add_tool_call("c1", "find_grep", "{}");
+    cm.add_tool_result_flagged("c1", "no matches", true);
+    cm.add_tool_call("c2", "fs_read", "{}");
+    cm.add_tool_result("c2", "file contents");
+
+    let items = cm.items_snapshot();
+    assert_eq!(
+        items
+            .iter()
+            .filter(|it| matches!(it, ContextItem::ToolResult { useless: true, .. }))
+            .count(),
+        1,
+        "exactly the flagged result is marked useless"
+    );
+    assert_eq!(
+        items
+            .iter()
+            .filter(|it| matches!(it, ContextItem::ToolResult { useless: false, .. }))
+            .count(),
+        1,
+        "the plain ingestion path records useless=false"
+    );
+
+    // Both results still render as ordinary tool messages.
+    let msgs = cm.build_messages("");
+    let tool_msgs: Vec<_> = msgs.iter().filter(|m| m.role == "tool").collect();
+    assert_eq!(tool_msgs.len(), 2, "both tool results must render");
+    assert_eq!(
+        tool_msgs[0].content.as_deref(),
+        Some("no matches"),
+        "useless must not leak into the delivered content"
     );
 }
 

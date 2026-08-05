@@ -184,6 +184,25 @@ pub struct Harness {
     pub(crate) test_tools: Vec<ToolSchema>,
 }
 
+/// Whether a tool RESULT should be flagged `useless` in the context manager.
+///
+/// Reads the tool's own declared output contract: `find_grep` marks zero-match
+/// results with `"useless": true` in its JSON, and the model sees the same
+/// field. Gate by tool name so no other tool's JSON is ever interpreted.
+/// `pub(crate)` for the bridge unit test in `harness::test`.
+pub(crate) fn result_is_useless(name: &str, result: &str) -> bool {
+    if name != "find_grep" {
+        return false;
+    }
+    match serde_json::from_str::<serde_json::Value>(result) {
+        Ok(value) => value
+            .get("useless")
+            .and_then(|field| field.as_bool())
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 impl Harness {
     #[must_use]
     pub fn new(connector: Connector, cwd: &str, disabled_tools: HashSet<String>) -> Self {
@@ -887,7 +906,8 @@ impl Harness {
         };
         self.context_manager
             .add_tool_call(&tool_id, name, &args_str);
-        self.context_manager.add_tool_result(&tool_id, result);
+        self.context_manager
+            .add_tool_result_flagged(&tool_id, result, result_is_useless(name, result));
     }
 
     /// Monotonic id generator for synthetic tool_call ids (inline JSON calls

@@ -625,10 +625,32 @@ impl Tools for CoshTools {
                 let pattern = args["pattern"]
                     .as_str()
                     .ok_or_else(|| "missing 'pattern'".to_string())?;
-                let path = args["path"]
-                    .as_str()
-                    .ok_or_else(|| "missing 'path'".to_string())?;
-                let result = self.find.grep(pattern, path)?;
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let paths = args
+                    .get("paths")
+                    .and_then(|v| v.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|p| p.as_str().map(String::from))
+                            .collect::<Vec<String>>()
+                    });
+                if path.is_none() && paths.as_ref().is_none_or(Vec::is_empty) {
+                    return Err("missing 'path' or 'paths'".to_string());
+                }
+                let skip = args
+                    .get("skip")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok());
+                let line_range = args
+                    .get("line_range")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let result =
+                    self.find
+                        .grep_with(pattern, path, paths, skip, line_range)?;
                 serde_json::to_string(&result).map_err(|e| e.to_string())
             }
 
