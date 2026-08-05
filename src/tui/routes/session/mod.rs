@@ -1177,20 +1177,50 @@ impl SessionView {
 
         let vp_top = i32::from(inner_area.y);
         let vp_bottom = i32::from(inner_area.bottom());
-        let mut y = vp_top - self.scroll_y;
         let click_x = i32::from(mouse.x);
         let click_y = i32::from(mouse.y);
 
         self.ensure_height_caches_fresh(session, max_w, config);
 
-        for (idx, msg) in session.messages.iter().enumerate() {
-            if idx > 0 {
-                y += 1;
-            }
+        // 1. Precompute Y positions for each message
+        let mut msg_y_position = Vec::with_capacity(session.messages.len());
+        let mut current_y = vp_top - self.scroll_y;
 
+        for (idx, _) in session.messages.iter().enumerate() {
+            if idx > 0 {
+                // space between messages
+                current_y += 1;
+            }
+            msg_y_position.push(current_y);
+            current_y += self.msg_height_cache[idx];
+        }
+
+        // 2. Binary search for the message that contains the click position
+        let mut low = 0;
+        let mut high = session.messages.len();
+        let mut target_msg_idx = None;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let msg_top = msg_y_position[mid];
+            let msg_h = self.msg_height_cache[mid];
+            let msg_bottom = msg_top + msg_h;
+
+            if click_y < msg_top {
+                high = mid;
+            } else if click_y >= msg_bottom {
+                low = mid + 1;
+            } else {
+                target_msg_idx = Some(mid);
+                break;
+            }
+        }
+
+        // 3. Confirm if message is visible in viewport
+        if let Some(idx) = target_msg_idx {
+            let msg = &session.messages[idx];
             let msg_h = self.msg_height_cache[idx];
-            let msg_top = y;
-            let msg_bottom = y + msg_h;
+            let msg_top = msg_y_position[idx];
+            let msg_bottom = msg_top + msg_h;
 
             // Check if click is within this message and message is visible
             if click_y >= msg_top
@@ -1249,8 +1279,6 @@ impl SessionView {
                     part_y += part_h;
                 }
             }
-
-            y += msg_h;
         }
 
         false
