@@ -11,6 +11,12 @@ pub struct Target {
     pub path: String,
     pub line: Option<usize>,
     pub symbol: Option<String>,
+    /// Optional 1-based inclusive line range(s) to read exactly, e.g.
+    /// `"50-100"` or `"10-20,200-220"` (comma-separated for multiple
+    /// disjoint ranges). Takes precedence over `line`/`symbol` and performs a
+    /// plain line slice — no AST block resolution — so the agent reads only
+    /// what it asked for (port of the oh-my-pi range selector).
+    pub line_range: Option<String>,
 }
 
 /// Configuration for file read operations.

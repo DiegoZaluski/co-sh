@@ -41,6 +41,7 @@ async fn read_gap_absolute_path_no_guard() {
                 path: "/etc/hostname".to_string(),
                 line: None,
                 symbol: None,
+                line_range: None,
             }],
         },
     )
@@ -69,6 +70,7 @@ async fn read_gap_dotdot_traversal_no_guard() {
                 path: "/home/inky/cosh/../../../etc/hostname".to_string(),
                 line: None,
                 symbol: None,
+                line_range: None,
             }],
         },
     )
@@ -95,6 +97,7 @@ async fn read_absolute_path_outside_root_is_denied() {
                 path: "/etc/hostname".to_string(),
                 line: None,
                 symbol: None,
+                line_range: None,
             }],
         },
     )
@@ -123,6 +126,7 @@ async fn read_traversal_relative_path_escapes_denied() {
                 path: traversal,
                 line: None,
                 symbol: None,
+                line_range: None,
             }],
         },
     )

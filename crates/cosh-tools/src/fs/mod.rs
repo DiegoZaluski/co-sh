@@ -85,11 +85,21 @@ impl Fs {
             description_read: serde_json::json!({
                 "name": "fs_read",
                 "description": concat!(
-                    "Read one or more files or named symbols from the project. ",
-                    "Each target can specify a file path, an optional line number to ",
-                    "read a single line, or an optional symbol name to look up a ",
-                    "specific code symbol (function, class, variable, etc.) within ",
-                    "the file."
+                    "Read one or more files, named symbols, or exact line ranges from ",
+                    "the project. Each target can specify: a path with an optional ",
+                    "`line` number (reads the syntactic block containing that line), ",
+                    "an optional `symbol` name (function, class, variable) to look up, ",
+                    "or an optional `line_range` (\"start-end\", 1-based inclusive, ",
+                    "comma-separated for multiple disjoint ranges) to read exact ",
+                    "lines without AST resolution. `line_range` takes precedence ",
+                    "over `line`/`symbol`. Every result carries a \u{00b6}path#TAG ",
+                    "header; lines are numbered `N| text` so edits can anchor ",
+                    "directly. Blocks larger than 24 lines are elided to their ",
+                    "head/tail with a footer naming the exact `line_range` to ",
+                    "re-read when you need the elided body. Lines longer than 200 ",
+                    "columns are truncated with `...` and flagged. After a range ",
+                    "read a footer reports how many lines remain and how to ",
+                    "continue — read only what you need instead of whole files."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -108,7 +118,7 @@ impl Fs {
                                         "type": "integer",
                                         "description": concat!(
                                             "Optional specific 1-based line number to read ",
-                                            "(reads only that line)"
+                                            "(reads the syntactic block containing that line)"
                                         )
                                     },
                                     "symbol": {
@@ -116,6 +126,14 @@ impl Fs {
                                         "description": concat!(
                                             "Optional symbol name to look up ",
                                             "(function, class, variable) within the file"
+                                        )
+                                    },
+                                    "line_range": {
+                                        "type": "string",
+                                        "description": concat!(
+                                            "Optional 1-based inclusive line range(s) to read exactly, ",
+                                            "e.g. \"50-100\" or \"10-20,200-220\"; takes precedence ",
+                                            "over line/symbol and does not use AST block resolution"
                                         )
                                     }
                                 },
