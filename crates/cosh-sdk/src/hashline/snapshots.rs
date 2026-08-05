@@ -55,6 +55,21 @@ pub trait SnapshotStore {
     /// Record the full normalized text of `path` and return its content tag.
     fn record(&mut self, path: &str, full_text: &str) -> String;
 
+    /// Lines of `path` surfaced to the model at version `hash`: `(1-indexed
+    /// line number, content)` in output order. Producers (grep / read / search)
+    /// record these so recovery can flag edits that anchor lines the model
+    /// never saw. Defaults to no seen lines — recording is opt-in.
+    fn seen_lines(&mut self, path: &str, hash: &str) -> Vec<(u32, String)> {
+        let _ = (path, hash);
+        Vec::new()
+    }
+
+    /// Record which lines of `path` the model saw at version `hash`. Default
+    /// no-op so existing store implementations keep compiling unchanged.
+    fn record_seen_lines(&mut self, path: &str, hash: &str, lines: &[(u32, String)]) {
+        let _ = (path, hash, lines);
+    }
+
     /// Drop the version history for a single path.
     fn invalidate(&mut self, path: &str);
 
@@ -83,6 +98,9 @@ pub struct InMemorySnapshotStoreOptions {
 /// to the path history.
 pub struct InMemorySnapshotStore {
     versions: LruCache<String, Vec<Snapshot>>,
+    /// Per-path seen-lines map: path → (tag → lines surfaced to the model).
+    /// Bounded by the same LRU window as the version history.
+    seen: LruCache<String, std::collections::HashMap<String, Vec<(u32, String)>>>,
     max_versions_per_path: usize,
 }
 
@@ -100,6 +118,7 @@ impl InMemorySnapshotStore {
         });
         Self {
             versions: LruCache::new(max_paths),
+            seen: LruCache::new(max_paths),
             max_versions_per_path: options
                 .max_versions_per_path
                 .unwrap_or(DEFAULT_MAX_VERSIONS_PER_PATH),
@@ -148,12 +167,30 @@ impl SnapshotStore for InMemorySnapshotStore {
         hash
     }
 
+    fn seen_lines(&mut self, path: &str, hash: &str) -> Vec<(u32, String)> {
+        self.seen
+            .get(path)
+            .and_then(|by_tag| by_tag.get(hash).cloned())
+            .unwrap_or_default()
+    }
+
+    fn record_seen_lines(&mut self, path: &str, hash: &str, lines: &[(u32, String)]) {
+        if lines.is_empty() {
+            return;
+        }
+        let mut by_tag = self.seen.pop(path).unwrap_or_default();
+        by_tag.insert(hash.to_string(), lines.to_vec());
+        self.seen.put(path.to_string(), by_tag);
+    }
+
     fn invalidate(&mut self, path: &str) {
         self.versions.pop(path);
+        self.seen.pop(path);
     }
 
     fn clear(&mut self) {
         self.versions.clear();
+        self.seen.clear();
     }
 }
 
@@ -179,6 +216,14 @@ impl<S: SnapshotStore> SnapshotStore for Arc<Mutex<S>> {
     #[allow(clippy::unwrap_used)]
     fn record(&mut self, path: &str, full_text: &str) -> String {
         self.lock().unwrap().record(path, full_text)
+    }
+    #[allow(clippy::unwrap_used)]
+    fn seen_lines(&mut self, path: &str, hash: &str) -> Vec<(u32, String)> {
+        self.lock().unwrap().seen_lines(path, hash)
+    }
+    #[allow(clippy::unwrap_used)]
+    fn record_seen_lines(&mut self, path: &str, hash: &str, lines: &[(u32, String)]) {
+        self.lock().unwrap().record_seen_lines(path, hash, lines)
     }
     #[allow(clippy::unwrap_used)]
     fn invalidate(&mut self, path: &str) {

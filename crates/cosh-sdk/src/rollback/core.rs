@@ -111,6 +111,22 @@ pub fn record(path: &str, text: &str) -> Option<String> {
     )
 }
 
+/// Record which lines of `path` the model saw at version `hash`, as surfaced
+/// by tool output (grep / read / search). Recovery consults these to flag
+/// edits that anchor lines the model never observed. Bounded by the session
+/// store's LRU window; no-op for an empty `lines` slice.
+///
+/// The store mutex is recovered transparently if poisoned.
+pub fn record_seen_lines(path: &str, hash: &str, lines: &[(u32, String)]) {
+    if lines.is_empty() {
+        return;
+    }
+    session_store()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .record_seen_lines(path, hash, lines);
+}
+
 /// Input for [`restore`].
 pub struct RestoreInput {
     /// Path of the file to restore.
