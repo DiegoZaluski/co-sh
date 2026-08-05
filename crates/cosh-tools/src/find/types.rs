@@ -33,6 +33,13 @@ pub struct GrepInput {
     pub pattern: String,
     /// The root directory to search within.
     pub path: String,
+    /// Multiple search targets (files or directories) to search in a single
+    /// call. When present, overrides `path`. Each target is validated
+    /// individually by the path guard.
+    pub paths: Option<Vec<String>>,
+    /// Restrict matches to a 1-based inclusive line range `"start-end"`.
+    /// Requires every target to be a single file.
+    pub line_range: Option<String>,
     /// Restrict the search to files whose names match this glob (e.g., `"*.rs"`).
     pub glob: Option<String>,
     /// Restrict the search to files of a given language type (e.g., `"rust"`, `"py"`, `"js"`).
@@ -41,6 +48,9 @@ pub struct GrepInput {
     pub ignore_case: Option<bool>,
     /// Maximum total number of matches to return across all files.
     pub max_count: Option<u32>,
+    /// Files to skip before collecting results — use to paginate when the
+    /// prior call hit the file window limit.
+    pub skip: Option<u32>,
     /// Lines of context to include before each match.
     pub context_before: Option<u32>,
     /// Lines of context to include after each match.
@@ -109,6 +119,12 @@ pub struct Grep {
     pub ignore_case: Option<bool>,
     /// Maximum total number of matches to return across all files.
     pub max_count: Option<u32>,
+    /// Files to skip before collecting results — use to paginate when the
+    /// prior call hit the file window limit.
+    pub skip: Option<u32>,
+    /// Restrict matches to a 1-based inclusive line range `"start-end"`.
+    /// Requires every target to be a single file.
+    pub line_range: Option<String>,
     /// Lines of context to include before each match.
     pub context_before: Option<u32>,
     /// Lines of context to include after each match.
@@ -122,7 +138,7 @@ pub struct Grep {
 }
 
 /// A context line adjacent to a grep match.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ContextEntry {
     /// 1-indexed line number in the source file.
     pub line_number: u32,
@@ -131,7 +147,7 @@ pub struct ContextEntry {
 }
 
 /// A single match found by the grep tool.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct GrepMatchEntry {
     /// File path where the match was found.
     pub path: String,
@@ -139,21 +155,57 @@ pub struct GrepMatchEntry {
     pub line_number: u32,
     /// Content of the matched line.
     pub line: String,
+    /// `true` when the line was truncated to the column limit (see the tool
+    /// description) — read the file for the full line.
+    pub truncated: Option<bool>,
     /// Context lines immediately before the match.
     pub context_before: Vec<ContextEntry>,
     /// Context lines immediately after the match.
     pub context_after: Vec<ContextEntry>,
 }
 
+/// Hashline anchor for a single file surfaced by the [`grep`](super::grep::grep) tool.
+///
+/// Lets the agent edit a file directly from grep output: pair a match's `path`
+/// with the matching `file_hash`/`header` and pass them to `fs_edit` without
+/// re-reading the file to obtain the current hashline tag.
+#[derive(Serialize)]
+pub struct GrepFileEntry {
+    /// File path, in the same form as the match paths in this result.
+    pub path: String,
+    /// 4-hex content hash of the whole file — the `file_hash` for `fs_edit`.
+    pub file_hash: String,
+    /// Hashline header `¶path#TAG` anchoring edits to this file. The path is
+    /// absolute so it round-trips through `fs_edit`'s path validation.
+    pub header: String,
+}
+
 /// Result returned by the [`grep`](super::grep::grep) tool.
 #[derive(Serialize)]
 pub struct GrepOutput {
-    /// All matches found, ordered by file path.
+    /// All matches found, ordered by file path. Bounded by the file window and
+    /// per-file caps described on the tool; page further files with `skip`.
     pub matches: Vec<GrepMatchEntry>,
-    /// Total number of matches across all files.
+    /// Total number of matches across all files (a lower bound when caps
+    /// trimmed the fetched matches).
     pub total_matches: u32,
     /// Number of files that contained at least one match.
     pub files_with_matches: u32,
     /// Number of files searched.
     pub files_searched: u32,
+    /// `true` when more files matched than the shown window — page with `skip`.
+    pub file_limit_reached: bool,
+    /// `true` when at least one file had more matches than shown (capped to
+    /// keep a single hot file from crowding out diverse hits).
+    pub per_file_limit_reached: bool,
+    /// Human-readable hint: a pagination instruction when the file window was
+    /// hit, or a no-match notice (`"No matches found"` / `"No more results …"`).
+    pub note: Option<String>,
+    /// `true` when no matches were selected. Such a result carries no new
+    /// information — adjust the pattern or scope instead of blindly retrying.
+    pub useless: Option<bool>,
+    /// Hashline anchors for shown files, in encounter order. Bounded to a
+    /// small window of files (whole-file tags require reading each file);
+    /// files beyond the window surface plain, headerless output.
+    pub files: Vec<GrepFileEntry>,
 }

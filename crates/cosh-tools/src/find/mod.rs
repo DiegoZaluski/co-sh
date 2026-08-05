@@ -25,13 +25,13 @@ pub mod grep;
 pub mod types;
 
 #[cfg(test)]
-mod test;
+mod tests;
 
 pub use glob::glob;
-pub use grep::grep;
+pub use grep::{grep, grep_targets};
 pub use types::{
-    ContextEntry, Glob, GlobEntry, GlobInput, GlobOutput, Grep, GrepInput, GrepMatchEntry,
-    GrepOutput,
+    ContextEntry, Glob, GlobEntry, GlobInput, GlobOutput, Grep, GrepFileEntry, GrepInput,
+    GrepMatchEntry, GrepOutput,
 };
 
 use std::path::{Path, PathBuf};
@@ -122,10 +122,25 @@ impl Find {
                 "name": "find_grep",
                 "description": concat!(
                     "Search file content for lines matching a regex pattern. ",
-                    "Supports case-insensitive matching, file name glob filtering, ",
-                    "language-specific search, context lines before/after each match, ",
-                    "max count limiting, hidden file inclusion, and .gitignore respect. ",
-                    "Returns match locations with line numbers, content, and context."
+                    "Multi-file searches surface at most 20 distinct files per call ",
+                    "(per-file match cap 20); a single-file scope surfaces up to 200 ",
+                    "matches. When more files matched, `file_limit_reached` is true and ",
+                    "`note` suggests paginating with `skip` (call again with the same ",
+                    "pattern/path plus skip=<N> for the next page). Lines longer than ",
+                    "200 characters are truncated with a `...` suffix and flagged via ",
+                    "`truncated` — read the file for the full line. Patterns containing ",
+                    "a newline (or the `\\n` escape) automatically enable multiline ",
+                    "matching. Zero selected matches are marked `useless` with a `note` ",
+                    "— adjust the pattern or scope instead of blindly retrying. Search ",
+                    "several targets in one call with `paths` (each validated ",
+                    "individually; when absent, `path` is used). Restrict to a 1-based ",
+                    "inclusive line range with `line_range` (\"start-end\", requires ",
+                    "single-file targets). Each shown file carries a hashline anchor in ",
+                    "the `files` array (path, file_hash, header like \u{00b6}path#TAG). ",
+                    "To edit a matched file directly, pass the header's absolute path ",
+                    "and the tag (file_hash) to fs_edit — no re-read is needed to ",
+                    "obtain the current hash. Files beyond the anchor window have no ",
+                    "entry."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -137,9 +152,22 @@ impl Find {
                         "path": {
                             "type": "string",
                             "description": "The root directory to search within"
+                        },
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Multiple search targets (files or directories) in one call; overrides `path`. Each target is validated individually."
+                        },
+                        "line_range": {
+                            "type": "string",
+                            "description": "1-based inclusive line range \"start-end\" (requires single-file targets)"
+                        },
+                        "skip": {
+                            "type": "number",
+                            "description": "Files to skip before collecting results — paginate when the prior call hit the file window limit"
                         }
                     },
-                    "required": ["pattern", "path"]
+                    "required": ["pattern"]
                 }
             }),
         }
@@ -334,14 +362,58 @@ impl Find {
     /// Returns an error when the path cannot be resolved, the pattern is
     /// an invalid regex, or the operation times out.
     pub fn grep(&self, pattern: &str, path: &str) -> Result<GrepOutput, String> {
-        let validated = self.guard.resolve(path)?;
-        let path_str = validated.to_string_lossy().to_string();
-        grep(
+        self.grep_with(pattern, Some(path.to_string()), None, None, None)
+    }
+
+    /// Like [`grep`](Self::grep), but pages past the first file window with
+    /// `skip` (files to skip before collecting results). Ignored for
+    /// single-file scopes.
+    pub fn grep_skipping(
+        &self,
+        pattern: &str,
+        path: &str,
+        skip: Option<u32>,
+    ) -> Result<GrepOutput, String> {
+        self.grep_with(pattern, Some(path.to_string()), None, skip, None)
+    }
+
+    /// Search one or more targets in a single call, with optional pagination
+    /// (`skip`) and a 1-based inclusive `line_range` (`"start-end"`).
+    ///
+    /// `paths` overrides `path` when present; each target is resolved and
+    /// validated individually by the path guard, so the approval shown to the
+    /// user is exactly the set of targets the search opens. `line_range`
+    /// requires every target to be a single file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a target cannot be resolved, no target is
+    /// provided, the pattern is an invalid regex, or the operation times out.
+    pub fn grep_with(
+        &self,
+        pattern: &str,
+        path: Option<String>,
+        paths: Option<Vec<String>>,
+        skip: Option<u32>,
+        line_range: Option<String>,
+    ) -> Result<GrepOutput, String> {
+        let raw_targets: Vec<String> = match paths {
+            Some(list) if !list.is_empty() => list,
+            _ => vec![path.ok_or_else(|| "missing 'path' or 'paths'".to_string())?],
+        };
+        let mut resolved: Vec<String> = Vec::with_capacity(raw_targets.len());
+        for target in &raw_targets {
+            let validated = self.guard.resolve(target)?;
+            resolved.push(validated.to_string_lossy().to_string());
+        }
+        grep_targets(
             &GrepConfig {
                 glob: self.name_glob.clone(),
                 file_type: self.language.clone(),
                 ignore_case: self.ignore_case,
                 max_count: self.max_count,
+                skip,
+                line_range,
                 context_before: self.context_before,
                 context_after: self.context_after,
                 hidden: self.hidden,
@@ -349,7 +421,7 @@ impl Find {
                 timeout_ms: self.timeout_ms,
             },
             pattern,
-            &path_str,
+            &resolved,
         )
     }
 }
