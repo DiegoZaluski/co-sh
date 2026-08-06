@@ -115,6 +115,22 @@ impl TreeSitter {
         .flatten()
     }
 
+    /// Run `f` with the parsed [`Tree`] and its source text for `path`,
+    /// re-parsing (incrementally) when the text changed.
+    ///
+    /// Unlike the higher-level [`resolve_block`]/[`resolve_symbol`] helpers,
+    /// this exposes the raw tree so advanced consumers (e.g. the AST rewrite
+    /// engine) can walk and match nodes themselves. Returns `None` when the
+    /// language is unsupported or parsing fails.
+    pub fn with_tree<R>(
+        &self,
+        path: &str,
+        text: &str,
+        f: impl FnOnce(&Tree, &str) -> R,
+    ) -> Option<R> {
+        self.with_entry(path, text, |entry, _| f(&entry.tree, &entry.text))
+    }
+
     pub fn invalidate(&self, path: &str) {
         if let Ok(mut guard) = self.inner.lock() {
             guard.pop(path);

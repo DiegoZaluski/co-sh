@@ -3,11 +3,11 @@
 // These cannot be unified without breaking upstream crates.
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod ast;
 pub mod connector;
 pub mod extract_action;
 pub mod find;
 pub mod hashline;
 pub mod rollback;
-pub mod tree_sitter;
-
 pub mod term_screen;
+pub mod tree_sitter;
