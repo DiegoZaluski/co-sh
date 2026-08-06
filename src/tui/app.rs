@@ -20,6 +20,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 use cosh::harness::HarnessEvent;
+use cosh::harness::context_manager::CompactionEvent;
 
 use crate::component::agent_spinner::AgentSpinner;
 use crate::component::prompt::PromptView;
@@ -1500,6 +1501,8 @@ impl App {
                 && self.session_view.is_sticky_bottom);
         live = live || self.rag_spinner_active();
         live = live || has_active_spinner;
+        // A running compaction stopwatch must tick every frame.
+        live = live || self.has_running_compaction();
         self.live_requested = live;
         let area = frame.area();
 
@@ -2067,8 +2070,10 @@ impl App {
                                 match self.sidebar.handle_key(key.code, &self.state) {
                                     SidebarAction::SwitchTo(session_id) => {
                                         self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
+                                        self.finalize_stale_compaction_lines();
                                         self.state
                                             .switch_to_session(session_id, &self.session_store);
+                                        self.finalize_stale_compaction_lines();
                                         return Ok(false);
                                     }
                                     SidebarAction::RequestDelete(_) | SidebarAction::None => {}
@@ -3157,6 +3162,104 @@ impl App {
         Ok(false)
     }
 
+    /// Append a one-shot compaction notice line (phases 2-4) to the current
+    /// session chat.
+    fn push_compaction_line(
+        session: &mut crate::types::Session,
+        phase: crate::types::CompactionPhase,
+    ) {
+        use crate::types::{CompactionPart, Message, MessageRole, Part};
+        session.messages.push(Message {
+            id: format!("msg-ctx-{}", session.messages.len()),
+            role: MessageRole::Assistant,
+            parts: vec![Part::Compaction(CompactionPart::done(phase))],
+            created_at: 0,
+            agent: None,
+            model: None,
+        });
+    }
+
+    /// Handle a compaction-phase notification from the harness: start the
+    /// pipeline stopwatch line, finalize it (freezing the elapsed time), or
+    /// append a one-shot phase notice.
+    ///
+    /// NOTE on the stopwatch: it measures from when THIS function processes
+    /// `PipelineStarted` to when it processes `PipelineFinished`, so channel
+    /// queue delay is included. That is the intended design ("the TUI times
+    /// it, the context manager only notifies") — do not "fix" it to use
+    /// harness-side timestamps.
+    fn handle_compaction_event(&mut self, event: CompactionEvent) {
+        use crate::types::{CompactionPart, CompactionPhase, Message, MessageRole, Part};
+        let Some(session) = self.state.current_session_mut() else {
+            return;
+        };
+        match event {
+            CompactionEvent::PipelineStarted => {
+                session.messages.push(Message {
+                    id: format!("msg-ctx-{}", session.messages.len()),
+                    role: MessageRole::Assistant,
+                    parts: vec![Part::Compaction(CompactionPart::running(
+                        CompactionPhase::Pipeline,
+                    ))],
+                    created_at: 0,
+                    agent: None,
+                    model: None,
+                });
+            }
+            CompactionEvent::PipelineFinished => {
+                let now = crate::types::now_ms();
+                let running = session.messages.iter_mut().rev().find(|m| {
+                    matches!(&m.parts[..], [Part::Compaction(c)]
+                        if c.phase == CompactionPhase::Pipeline && c.is_running())
+                });
+                if let Some(msg) = running
+                    && let Some(Part::Compaction(c)) = msg.parts.last_mut()
+                {
+                    c.elapsed_ms = Some(now.saturating_sub(c.started_at));
+                }
+            }
+            CompactionEvent::DraftsEvicted => {
+                Self::push_compaction_line(session, CompactionPhase::Drafts);
+            }
+            CompactionEvent::ToolsEvicted => {
+                Self::push_compaction_line(session, CompactionPhase::Tools);
+            }
+            CompactionEvent::ClosuresTrimmed => {
+                Self::push_compaction_line(session, CompactionPhase::Closures);
+            }
+        }
+    }
+
+    /// Close any still-running compaction lines in the current session so they
+    /// never tick forever (e.g. a session restored from disk with a line that
+    /// was mid-pipeline when the process died, or a loop interrupted right
+    /// after `PipelineStarted`).
+    fn finalize_stale_compaction_lines(&mut self) {
+        let now = crate::types::now_ms();
+        let Some(session) = self.state.current_session_mut() else {
+            return;
+        };
+        for msg in &mut session.messages {
+            if let Some(crate::types::Part::Compaction(c)) = msg.parts.last_mut()
+                && c.is_running()
+            {
+                c.elapsed_ms = Some(now.saturating_sub(c.started_at));
+            }
+        }
+    }
+
+    /// True when the current session has a still-running compaction line — the
+    /// render loop must stay live so the stopwatch ticks every frame.
+    fn has_running_compaction(&self) -> bool {
+        self.state.current_session().is_some_and(|s| {
+            s.messages.iter().any(|m| {
+                m.parts
+                    .iter()
+                    .any(|p| matches!(p, crate::types::Part::Compaction(c) if c.is_running()))
+            })
+        })
+    }
+
     fn poll_events(&mut self) {
         use crate::types::{
             Message, MessageRole, Part, ReasoningPart, SessionStatus, TextPart, ToolPart,
@@ -3454,6 +3557,9 @@ impl App {
                 HarnessEvent::Done { context_state } => {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
+                    // Safety net: a pipeline line interrupted at its start must
+                    // not stay running (the stopwatch would tick forever).
+                    self.finalize_stale_compaction_lines();
 
                     // Persist session to disk if it has valid dialog
                     if let Some(id) = self.state.current_session_id.clone()
@@ -3469,6 +3575,7 @@ impl App {
                 HarnessEvent::Stopped { context_state } => {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
+                    self.finalize_stale_compaction_lines();
                     self.toast_state.show(ToastOptions {
                         title: Some("Interrupted".into()),
                         message: "Agent loop was stopped.".into(),
@@ -3488,6 +3595,10 @@ impl App {
                 }
                 HarnessEvent::ContextInfo { info } => {
                     self.context_info = Some(info);
+                }
+
+                HarnessEvent::Compaction { event } => {
+                    self.handle_compaction_event(event);
                 }
 
                 HarnessEvent::Error(msg) => {
@@ -4140,8 +4251,10 @@ impl App {
                 SidebarAction::SwitchTo(session_id) => {
                     self.state.right_panel =
                         crate::routes::session::right_panel::types::RightPanelState::new();
+                    self.finalize_stale_compaction_lines();
                     self.state
                         .switch_to_session(session_id, &self.session_store);
+                    self.finalize_stale_compaction_lines();
                     return Ok(true);
                 }
                 SidebarAction::RequestDelete(session_id) => {

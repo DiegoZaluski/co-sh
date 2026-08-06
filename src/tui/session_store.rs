@@ -706,6 +706,24 @@ mod tests {
     }
 
     #[test]
+    fn test_ctx_roundtrip_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        // No companion file yet → load returns None.
+        assert!(store.load_ctx("12345").is_none());
+
+        // Save → load returns the exact bytes written.
+        let payload: &[u8] = b"bincode-encoded-context-state";
+        store.save_ctx("12345", payload);
+        assert_eq!(store.load_ctx("12345").as_deref(), Some(payload));
+
+        // Delete removes the companion file.
+        store.delete_ctx("12345");
+        assert!(store.load_ctx("12345").is_none());
+    }
+
+    #[test]
     fn test_delete_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
@@ -720,10 +738,15 @@ mod tests {
         );
 
         store.save_session(&session);
+        store.save_ctx("12345", b"context-state");
         assert!(store.has_session("12345"));
+        assert!(store.load_ctx("12345").is_some());
 
+        // Deleting the session must also remove its companion .ctx file — a
+        // stale .ctx would resurrect deleted context state on a future resume.
         store.delete_session("12345");
         assert!(!store.has_session("12345"));
+        assert!(store.load_ctx("12345").is_none());
     }
 
     #[test]
@@ -741,10 +764,31 @@ mod tests {
                 ],
             );
             store.save_session(&session);
+            store.save_ctx(&format!("{i:05}"), b"context-state");
         }
 
         let list = store.list_sessions();
         assert!(list.len() <= MAX_SESSIONS_ON_DISK);
+
+        // Every surviving session still has its companion .ctx, and the
+        // evicted ones lost both files — no orphaned .ctx can resurrect a
+        // session that was evicted from disk.
+        let survivor_ids: std::collections::HashSet<String> =
+            list.iter().map(|s| s.session_id.clone()).collect();
+        for i in 0..(MAX_SESSIONS_ON_DISK + 5) {
+            let id = format!("{i:05}");
+            if survivor_ids.contains(&id) {
+                assert!(
+                    store.load_ctx(&id).is_some(),
+                    "surviving session {id} keeps its .ctx"
+                );
+            } else {
+                assert!(
+                    store.load_ctx(&id).is_none(),
+                    "evicted session {id} lost its .ctx too"
+                );
+            }
+        }
     }
 
     #[test]

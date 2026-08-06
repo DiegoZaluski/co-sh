@@ -958,3 +958,80 @@ fn test_bash_output_with_control_chars_does_not_pollute_cells() {
         "bash output should still be rendered"
     );
 }
+
+#[test]
+fn compaction_line_formatting() {
+    use crate::types::{CompactionPart, CompactionPhase};
+
+    use super::compaction_line;
+
+    // Running pipeline: the stopwatch ticks from `started_at` (no spinner —
+    // the moving number is the activity signal). `now` is passed explicitly so
+    // the assertion is deterministic (no wall-clock race).
+    let running = CompactionPart {
+        phase: CompactionPhase::Pipeline,
+        started_at: 10_000,
+        elapsed_ms: None,
+    };
+    assert_eq!(
+        compaction_line(&running, 11_500),
+        "context compression · 1.500s"
+    );
+    // Millisecond precision: one tick later the same line shows 1.501s.
+    assert_eq!(
+        compaction_line(&running, 11_501),
+        "context compression · 1.501s"
+    );
+
+    // Finished pipeline: the same line, frozen — no checkmark, the stopped
+    // stopwatch is the completion signal.
+    let done = CompactionPart {
+        phase: CompactionPhase::Pipeline,
+        started_at: 0,
+        elapsed_ms: Some(2_340),
+    };
+    assert_eq!(compaction_line(&done, 0), "context compression · 2.340s");
+
+    // One-shot phase notices: plain colored labels — no stopwatch, no
+    // completion marker.
+    assert_eq!(
+        compaction_line(&CompactionPart::done(CompactionPhase::Drafts), 0),
+        "draft eviction"
+    );
+    assert_eq!(
+        compaction_line(&CompactionPart::done(CompactionPhase::Tools), 0),
+        "tool eviction"
+    );
+    assert_eq!(
+        compaction_line(&CompactionPart::done(CompactionPhase::Closures), 0),
+        "closure trimming"
+    );
+}
+
+#[test]
+fn compaction_part_serde_roundtrip() {
+    use crate::types::{CompactionPart, CompactionPhase, Part};
+
+    // The Compaction part must survive JSONL serialization (running + done).
+    let running = Part::Compaction(CompactionPart {
+        phase: CompactionPhase::Pipeline,
+        started_at: 1234,
+        elapsed_ms: None,
+    });
+    let json = serde_json::to_string(&running).unwrap();
+    assert_eq!(
+        json,
+        "{\"type\":\"Compaction\",\"phase\":\"Pipeline\",\"started_at\":1234,\"elapsed_ms\":null}"
+    );
+    let back: Part = serde_json::from_str(&json).unwrap();
+    assert_eq!(json, serde_json::to_string(&back).unwrap());
+
+    let done = Part::Compaction(CompactionPart {
+        phase: CompactionPhase::Closures,
+        started_at: 7,
+        elapsed_ms: Some(99),
+    });
+    let json = serde_json::to_string(&done).unwrap();
+    let back: Part = serde_json::from_str(&json).unwrap();
+    assert_eq!(json, serde_json::to_string(&back).unwrap());
+}

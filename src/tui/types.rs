@@ -36,6 +36,8 @@ pub enum Part {
     Tool(ToolPart),
     Reasoning(ReasoningPart),
     File(FilePart),
+    /// A context-compaction status line (pipeline stopwatch / phase notice).
+    Compaction(CompactionPart),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +74,67 @@ pub struct ReasoningPart {
 pub struct FilePart {
     pub filename: String,
     pub mime: String,
+}
+
+/// A context-compaction status line in the chat. The pipeline line carries a
+/// live stopwatch while it runs; the other phase lines are one-shot notices.
+/// Persisted with the session like any other part.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionPart {
+    /// Which compaction phase this line reports.
+    pub phase: CompactionPhase,
+    /// Wall-clock unix millis when the phase started (persisted so a restored
+    /// session can still show a coherent elapsed time).
+    pub started_at: u64,
+    /// Final elapsed millis when the phase finished; `None` while running.
+    pub elapsed_ms: Option<u64>,
+}
+
+/// Which context-compaction phase a [`CompactionPart`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompactionPhase {
+    /// Phase 1 — the TF-IDF → LSA → MMR pipeline. The only phase with a
+    /// stopwatch: it runs synchronously on the agent loop's thread and can
+    /// block it for seconds.
+    Pipeline,
+    /// Phase 2 — gradual draft eviction.
+    Drafts,
+    /// Phase 3 — tool-chain eviction.
+    Tools,
+    /// Phase 4 — loop-closure trimming.
+    Closures,
+}
+
+impl CompactionPart {
+    /// A fresh running phase line (stopwatch active).
+    pub fn running(phase: CompactionPhase) -> Self {
+        Self {
+            phase,
+            started_at: now_ms(),
+            elapsed_ms: None,
+        }
+    }
+
+    /// A finished one-shot phase line (no stopwatch — phases 2-4 are too fast).
+    pub fn done(phase: CompactionPhase) -> Self {
+        Self {
+            phase,
+            started_at: now_ms(),
+            elapsed_ms: Some(0),
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.elapsed_ms.is_none()
+    }
+}
+
+/// Current wall-clock time in unix milliseconds (used by the stopwatch).
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

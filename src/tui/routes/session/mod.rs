@@ -29,7 +29,8 @@ use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::types::{
-    AgentColors, FilePart, Message, MessageRole, Part, ReasoningPart, SessionStatus, ToolStatus,
+    AgentColors, CompactionPart, CompactionPhase, FilePart, Message, MessageRole, Part,
+    ReasoningPart, SessionStatus, ToolStatus,
 };
 use std::time::Instant;
 
@@ -138,9 +139,60 @@ fn hash_parts(msg: &Message) -> u64 {
                 hasher.write(f.filename.as_bytes());
                 hasher.write(f.mime.as_bytes());
             }
+            Part::Compaction(c) => {
+                // Hash the full state so the line re-renders exactly once when
+                // it finalizes (elapsed_ms transitions None → Some). While it
+                // runs the hash stays stable — the ticking stopwatch bypasses
+                // the cell cache instead (see `msg_has_running_compaction`).
+                hasher.write(&[phase_to_u8(c.phase)]);
+                hasher.write(&c.started_at.to_le_bytes());
+                match c.elapsed_ms {
+                    Some(ms) => {
+                        hasher.write(&[1]);
+                        hasher.write(&ms.to_le_bytes());
+                    }
+                    None => hasher.write(&[0]),
+                }
+            }
         }
     }
     hasher.finish()
+}
+
+fn phase_to_u8(phase: CompactionPhase) -> u8 {
+    match phase {
+        CompactionPhase::Pipeline => 0,
+        CompactionPhase::Drafts => 1,
+        CompactionPhase::Tools => 2,
+        CompactionPhase::Closures => 3,
+    }
+}
+
+/// All compaction phases use muted gray to indicate system messages.
+/// The `phase` parameter is kept for future per-phase color customization.
+fn compaction_color(_phase: CompactionPhase, theme: &Theme) -> RGBA {
+    theme.text_muted
+}
+
+/// The chat line text for a compaction part. `now` is the current wall-clock
+/// millis: while the pipeline line is running the elapsed number ticks every
+/// frame (the moving number IS the activity signal — no spinner needed); when
+/// it finalizes the same line freezes. Phases 2-4 are plain colored labels
+/// with no stopwatch and no completion marker.
+fn compaction_line(part: &CompactionPart, now: u64) -> String {
+    let elapsed = part
+        .elapsed_ms
+        .unwrap_or_else(|| now.saturating_sub(part.started_at));
+    match part.phase {
+        CompactionPhase::Pipeline => {
+            // Millisecond precision — the second counter flips visibly.
+            let secs = elapsed as f64 / 1000.0;
+            format!("context compression · {secs:.3}s")
+        }
+        CompactionPhase::Drafts => "draft eviction".to_string(),
+        CompactionPhase::Tools => "tool eviction".to_string(),
+        CompactionPhase::Closures => "closure trimming".to_string(),
+    }
 }
 
 /// Convert a `ToolStatus` to a single byte for hashing.
@@ -156,6 +208,16 @@ fn status_to_u8(status: &ToolStatus) -> u8 {
 /// Used to detect streaming/tool-status changes without full re-parse.
 fn msg_change_token(msg: &Message) -> u64 {
     hash_parts(msg)
+}
+
+/// True when the message contains a still-running compaction line — its
+/// stopwatch ticks every frame, so the per-message cell cache must be
+/// bypassed (the stored part data does not change while running, only the
+/// rendered elapsed time does).
+fn msg_has_running_compaction(msg: &Message) -> bool {
+    msg.parts
+        .iter()
+        .any(|p| matches!(p, Part::Compaction(c) if c.is_running()))
 }
 
 fn msg_content_token(
@@ -783,6 +845,16 @@ impl SessionView {
                     Self::render_file_badge(buf, x, y, max_w, theme, f);
                     y += 1;
                 }
+                Part::Compaction(c) => {
+                    // One-line status: the pipeline line ticks live (computed
+                    // from `started_at` vs now) until it finalizes; the other
+                    // phase lines are static notices. Height is always 1, so
+                    // the line never reflows while the stopwatch runs.
+                    let text = compaction_line(c, crate::types::now_ms());
+                    let style = Style::default().fg(rgba_color(compaction_color(c.phase, theme)));
+                    draw_text_line(buf, &text, x, y, max_w, style);
+                    y += 1;
+                }
                 Part::Text(_) => {}
             }
         }
@@ -939,6 +1011,7 @@ impl SessionView {
                 }
             }
             Part::File(_) => 1,
+            Part::Compaction(_) => 1,
             Part::Text(_) => 0,
         }
     }
@@ -1838,6 +1911,18 @@ impl SessionView {
                                     }
                                 }
                             }
+                            crate::types::Part::Compaction(c) => {
+                                let text = compaction_line(c, crate::types::now_ms());
+                                if p_top >= vp_top {
+                                    self.text_regions.push(TextRegion {
+                                        y1: content_offset,
+                                        y2: content_offset + 1,
+                                        x1: x_off,
+                                        x2: x_off + max_w,
+                                        text,
+                                    });
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -2063,6 +2148,7 @@ impl SessionView {
                     let token = msg_content_token(msg, config_tok, max_w, &self.tool_state);
                     let cache_hit = !is_streaming_msg
                         && !has_active_spinner
+                        && !msg_has_running_compaction(msg)
                         && token == self.msg_cache_tokens[idx]
                         && self.msg_cache_w[idx] == inner_area.width
                         && self.msg_cache_h[idx] > 0
@@ -2270,6 +2356,7 @@ impl SessionView {
                         let is_streaming_msg = idx == session.messages.len() - 1 && streaming;
                         let token = msg_content_token(msg, config_tok, max_w, &self.tool_state);
                         let cache_hit = !is_streaming_msg
+                            && !msg_has_running_compaction(msg)
                             && token == self.msg_cache_tokens[idx]
                             && self.msg_cache_w[idx] == inner_area.width
                             && self.msg_cache_h[idx] > 0;
@@ -2390,6 +2477,7 @@ impl SessionView {
                                 let token =
                                     msg_content_token(msg, config_tok, max_w, &self.tool_state);
                                 let cache_hit = !is_streaming_msg
+                                    && !msg_has_running_compaction(msg)
                                     && token == self.msg_cache_tokens[idx]
                                     && self.msg_cache_w[idx] == inner_area.width
                                     && self.msg_cache_h[idx] > 0
