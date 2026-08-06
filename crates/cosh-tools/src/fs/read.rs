@@ -7,7 +7,7 @@
 //! search targets a directory the entire tree is walked recursively.
 //!
 //! Output is hashline-numbered (`N| text`) so the model can anchor edits
-//! directly.  Token-saving behaviors (port of the oh-my-pi read):
+//! directly.  Token-saving behaviors:
 //!
 //! - **Exact range reads** — `line_range: "50-100"` (or comma-separated
 //!   `"10-20,200-220"`) returns only the requested lines, with a footer
@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Blocks at or below this many lines are returned whole; larger blocks are
-/// elided to their head/tail (port of the oh-my-pi structural summary idea).
+/// elided to their head/tail.
 const ELIDE_MIN_BLOCK_LINES: usize = 24;
 /// Lines kept from the head of an elided block.
 const ELIDE_KEEP_HEAD: usize = 3;
@@ -119,7 +119,9 @@ fn parse_line_ranges(raw: &str) -> Result<Vec<(u32, u32)>, String> {
             format!("line_range must be \"start-end\" (1-based, inclusive), got: {raw}")
         })?;
         if start < 1 || end < start {
-            return Err(format!("line_range must satisfy 1 <= start <= end, got: {raw}"));
+            return Err(format!(
+                "line_range must satisfy 1 <= start <= end, got: {raw}"
+            ));
         }
         ranges.push((start, end));
     }
@@ -252,7 +254,10 @@ fn elide_block(
     );
     out.extend(tail);
     truncated_any |= tr2;
-    let elided = (start_line + head_n as u32, start_line + tail_start as u32 - 1);
+    let elided = (
+        start_line + head_n as u32,
+        start_line + tail_start as u32 - 1,
+    );
     (out, Some(elided), truncated_any)
 }
 
@@ -361,7 +366,8 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
                 let start_idx = (span.start as usize - 1).min(end_idx);
                 let block_lines = file_lines[start_idx..end_idx].to_vec();
                 let mut seen = Vec::new();
-                let (body_lines, elided, truncated_any) = elide_block(&block_lines, span.start, &mut seen);
+                let (body_lines, elided, truncated_any) =
+                    elide_block(&block_lines, span.start, &mut seen);
                 record_seen(&target.path, &hash, &seen);
                 let mut notices: Vec<String> = Vec::new();
                 if let Some((s, e)) = elided {
@@ -469,7 +475,8 @@ async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadR
             let start_idx = (span.start as usize - 1).min(end_idx);
             let block_lines = file_lines[start_idx..end_idx].to_vec();
             let mut seen = Vec::new();
-            let (body_lines, elided, truncated_any) = elide_block(&block_lines, span.start, &mut seen);
+            let (body_lines, elided, truncated_any) =
+                elide_block(&block_lines, span.start, &mut seen);
             record_seen(p, &hash, &seen);
             let mut notices: Vec<String> = Vec::new();
             if let Some((s, e)) = elided {

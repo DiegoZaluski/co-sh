@@ -3,8 +3,7 @@
 //! Results carry a per-file hashline anchor (`¶path#TAG`): the tool records a
 //! whole-file snapshot for a bounded window of matched files and returns the
 //! content tag so the agent can edit a file directly from grep output without
-//! re-reading it just to obtain the current hash (port of the oh-my-pi grep
-//! behavior).
+//! re-reading it just to obtain the current hash.
 //!
 //! Output is windowed to keep the model context bounded: at most
 //! [`DEFAULT_FILE_LIMIT`] distinct files are surfaced per call (page further
@@ -26,10 +25,10 @@ use cosh_sdk::rollback;
 use super::types::{ContextEntry, Grep, GrepFileEntry, GrepMatchEntry, GrepOutput};
 
 /// Maximum number of distinct files surfaced in a single call. The agent
-/// paginates further pages via `skip` (port of the oh-my-pi file limit).
+/// paginates further pages via `skip`.
 const DEFAULT_FILE_LIMIT: usize = 20;
 /// Per-file match cap for multi-file searches — keeps a single hot file from
-/// crowding out diverse hits (port of the oh-my-pi per-file cap).
+/// crowding out diverse hits.
 const MULTI_FILE_PER_FILE_MATCHES: u32 = 20;
 /// Per-file match cap for single-file searches — there is no diversity
 /// concern when the scope is one file.
@@ -40,7 +39,7 @@ const SINGLE_FILE_MATCHES: u32 = 200;
 /// pagination headroom so the caller can see the total file count.
 const INTERNAL_TOTAL_CAP: u32 = 2000;
 /// Lines longer than this (characters) are truncated with a `...` suffix and
-/// flagged via `GrepMatchEntry::truncated` (port of the oh-my-pi column cap).
+/// flagged via `GrepMatchEntry::truncated`.
 const DEFAULT_MAX_COLUMN: u32 = 200;
 
 /// Resolve the absolute path of a match: single-file searches return absolute
@@ -294,7 +293,7 @@ pub fn grep_targets(grep: &Grep, pattern: &str, targets: &[String]) -> Result<Gr
 
     // A caller that sets `max_count` is not paginating: the cap bounds the
     // output and there is no `skip` contract to follow a "use skip=N"
-    // suggestion with, so the file window is not applied (mirrors oh-my-pi).
+    // suggestion with, so the file window is not applied.
     // Otherwise fetch up to the internal ceiling and window in this layer.
     let (sdk_max_count, file_window) = match grep.max_count {
         Some(cap) => (Some(cap), None),
@@ -305,7 +304,7 @@ pub fn grep_targets(grep: &Grep, pattern: &str, targets: &[String]) -> Result<Gr
     // otherwise silently return zero matches for such patterns.
     let effective_multiline = pattern.contains('\n') || pattern.contains("\\n");
     // Widened per-file fetch when a range is set so in-range matches are not
-    // starved by out-of-range ones (mirrors oh-my-pi's line-range fetch cap).
+    // starved by out-of-range ones.
     let fetch_per_file = match range {
         Some((start, end)) => end
             .saturating_sub(start)
@@ -429,7 +428,7 @@ pub fn grep_targets(grep: &Grep, pattern: &str, targets: &[String]) -> Result<Gr
     // Pagination only applies to the windowed path. A caller that set
     // `max_count` gets a match-bounded fetch (the engine stops early), so
     // `skip` cannot advance past files the fetch never covered — and that
-    // caller is not paginating anyway (mirrors oh-my-pi).
+    // caller is not paginating anyway.
     let can_paginate = is_multi_scope && file_window.is_some();
     let skip_files = if can_paginate {
         (grep.skip.unwrap_or(0) as usize).min(total_files)

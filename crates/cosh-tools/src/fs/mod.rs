@@ -23,7 +23,7 @@ pub mod write;
 
 use std::path::PathBuf;
 
-pub use edit::{EditResult, edit};
+pub use edit::{EditBatchError, EditResult, edit};
 pub use read::{ReadResult, read};
 pub use rollback::{RollbackResult, rollback};
 pub use types::{
@@ -320,6 +320,26 @@ impl Fs {
     ///   a correction prompt instead of a silent failure.
     /// - [`Replace`](EditEngine::Replace) runs only [`edit`].
     /// - [`Ast`](EditEngine::Ast) runs only [`ast_edit`].
+    ///
+    /// ## Failure semantics differ by engine
+    ///
+    /// Both engines abort a multi-file batch at the first failure, but only
+    /// the replace engine reports that abort as an explicit chain:
+    ///
+    /// - **Replace** ([`edit`]): targets are applied in the order the caller
+    ///   lists them, so **order carries intention** — the agent's edits may
+    ///   build on one another. When target N fails, the batch stops: targets
+    ///   before N stay applied and are returned with their fresh hashline
+    ///   tags in [`EditBatchError::applied`], and targets after N are
+    ///   deliberately skipped ([`EditBatchError::skipped`]) — reported as a
+    ///   *consequence* of N failing, never as independent failures.
+    /// - **AST** ([`ast_edit`]): files are resolved from `paths` (files,
+    ///   directories, globs) and processed in **sorted, deduplicated order**,
+    ///   not the caller's order — so order does **not** carry the same
+    ///   intention. A failure therefore aborts with a plain error string for
+    ///   the failing file; already-rewritten files and the ones that would
+    ///   have followed are not surfaced, because there is no caller-intended
+    ///   order to preserve.
     ///
     /// # Errors
     ///
@@ -635,7 +655,9 @@ impl Fs {
         };
         let targets: Vec<EditTarget> = serde_json::from_value(targets_value.clone())
             .map_err(|e| format!("invalid `targets` for the replace engine: {e}"))?;
-        edit(metadata.clone(), FsEdit { targets }).await
+        edit(metadata.clone(), FsEdit { targets })
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn edit_ast(

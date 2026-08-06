@@ -15,7 +15,7 @@ pub struct Target {
     /// `"50-100"` or `"10-20,200-220"` (comma-separated for multiple
     /// disjoint ranges). Takes precedence over `line`/`symbol` and performs a
     /// plain line slice — no AST block resolution — so the agent reads only
-    /// what it asked for (port of the oh-my-pi range selector).
+    /// what it asked for.
     pub line_range: Option<String>,
 }
 
@@ -58,7 +58,7 @@ pub struct FsEdit {
 }
 
 // ---------------------------------------------------------------------------
-// AST engine (port of oh-my-pi `ast_edit`)
+// AST engine
 // ---------------------------------------------------------------------------
 
 /// A single structural rewrite op for the AST engine.

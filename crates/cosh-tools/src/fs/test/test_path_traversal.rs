@@ -318,7 +318,10 @@ async fn edit_gap_symlink_escape() {
         "edit should be denied via symlink after canonicalize: {result:?}"
     );
     let err = result.unwrap_err();
-    assert!(err.contains("denied"), "error should mention denial: {err}");
+    assert!(
+        err.to_string().contains("denied"),
+        "error should mention denial: {err}"
+    );
 
     let content = std::fs::read_to_string(&outside_file).unwrap();
     assert_eq!(
@@ -397,7 +400,7 @@ async fn edit_traversal_escape_via_dotdot_is_denied() {
     );
     let err = result.unwrap_err();
     assert!(
-        err.contains("denied") || err.contains("outside"),
+        err.to_string().contains("denied") || err.to_string().contains("outside"),
         "error should mention denial: {err}"
     );
 

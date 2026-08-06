@@ -31,6 +31,8 @@ use cosh_sdk::hashline::{
 use cosh_sdk::rollback;
 use cosh_sdk::tree_sitter::tree_sitter;
 
+use crate::util::path_guard::assert_editable_file;
+
 use super::edit::EditResult;
 use super::types::{AstEditOp, FsAstEdit, FsMetadata};
 
@@ -91,8 +93,7 @@ fn newlines_before(text: &str, byte: usize) -> u32 {
 
 // Target path resolution
 
-/// Default hard cap on the number of files edited in one call (mirrors the
-/// upstream `PI_MAX_AST_FILES`).
+/// Default hard cap on the number of files edited in one call.
 pub const DEFAULT_MAX_FILES: usize = 1000;
 
 fn has_glob_chars(p: &str) -> bool {
@@ -167,8 +168,8 @@ fn expand_glob(metadata: &FsMetadata, root: &Path, pattern: &str) -> Result<Vec<
 /// deduplicated, supported file paths, capped at `max_files`.
 ///
 /// Returns the file list and whether the cap was reached (some requested files
-/// were dropped). Nonexistent explicit paths are silently skipped, matching the
-/// upstream behavior of a walker that simply yields nothing for an absent path.
+/// were dropped). Nonexistent explicit paths are silently skipped: an absent
+/// path simply yields nothing.
 fn resolve_target_files(
     metadata: &FsMetadata,
     root: &Path,
@@ -207,6 +208,12 @@ fn resolve_target_files(
 async fn rewrite_file(abs: &Path, ops: &[AstEditOp]) -> Result<FileEditOutcome, String> {
     let fs = DiskFilesystem::new();
     let path_str = abs.to_string_lossy().to_string();
+
+    // Never rewrite a file that declares itself machine-generated. This fires
+    // even for bulk directory/glob rewrites, where the model may never have
+    // opened the file and its change would be lost on the next generation run.
+    assert_editable_file(abs).map_err(|e| format!("failed to edit `{path_str}`: {e}"))?;
+
     let original = fs
         .read_text(&path_str)
         .await
@@ -240,8 +247,7 @@ async fn rewrite_file(abs: &Path, ops: &[AstEditOp]) -> Result<FileEditOutcome, 
         // Compile every pattern ast-grep derives for this op (a normal pattern
         // plus, for Rust, a statement-level contextual pattern — see
         // `compile_search_patterns`). Each derived pattern is applied in
-        // sequence with a re-parse in between, mirroring the upstream
-        // `rewrite_source` engine.
+        // sequence with a re-parse in between.
         let patterns = match compile_search_patterns(&op.pat, lang) {
             Ok(ps) => ps,
             Err(e) => {

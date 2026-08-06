@@ -176,7 +176,10 @@ async fn test_line_range_beyond_eof_is_skipped_with_notice() {
     .await;
 
     let r = &results[0];
-    let warning = r.warnings.as_deref().expect("out-of-bounds notice expected");
+    let warning = r
+        .warnings
+        .as_deref()
+        .expect("out-of-bounds notice expected");
     assert!(
         warning.contains("Range 10-12 is beyond end of file (6 lines total); skipped"),
         "got: {warning}"
@@ -209,7 +212,10 @@ async fn test_line_range_malformed_returns_warning_with_full_body() {
     .await;
 
     let r = &results[0];
-    let warning = r.warnings.as_deref().expect("malformed-range warning expected");
+    let warning = r
+        .warnings
+        .as_deref()
+        .expect("malformed-range warning expected");
     assert!(
         warning.contains("line_range must satisfy 1 <= start <= end"),
         "got: {warning}"

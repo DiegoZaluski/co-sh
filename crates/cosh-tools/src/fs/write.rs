@@ -13,17 +13,23 @@
 //! Returns `Err` if the [`FsMetadata`] has inconsistent allowlist/blocklist entries.
 //! Individual file write failures are reported inline in the returned string
 //! rather than aborting the batch.
+//!
+//! Content normalization is shared with [`read`](crate::fs::read) (LF + no BOM)
+//! and auto-generated files are refused via
+//! [`assert_editable_file`](crate::util::path_guard::assert_editable_file).
 use super::types::{FsMetadata, FsWrite};
 
-use crate::util::path_guard::{GuardResult, validate_path};
+use crate::util::path_guard::{GuardResult, assert_editable_file, validate_path};
 use cosh_sdk::hashline::{
     format,
     fs::{DiskFilesystem, Filesystem},
+    normalize,
 };
 use cosh_sdk::rollback;
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::OnceLock;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -36,6 +42,9 @@ pub struct WriteResult {
 
 /// Strip hashline display prefixes (`[path#hash]` headers and `N:` line prefixes)
 /// from content the model may have copied from read/search output.
+///
+/// The input must already be LF-normalized (no `\r`, no BOM) — the caller
+/// canonicalizes with [`normalize::normalize_to_lf`] first, mirroring `read`.
 #[allow(clippy::unwrap_used)]
 fn strip_write_content(content: &str) -> (String, bool) {
     static BRACKET_HEADER_RE: OnceLock<Regex> = OnceLock::new();
@@ -43,11 +52,7 @@ fn strip_write_content(content: &str) -> (String, bool) {
         BRACKET_HEADER_RE.get_or_init(|| Regex::new(r"^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$").unwrap());
 
     let trimmed = content.strip_suffix('\n').unwrap_or(content);
-    let lines: Vec<String> = trimmed
-        .replace('\r', "")
-        .split('\n')
-        .map(String::from)
-        .collect();
+    let lines: Vec<String> = trimmed.split('\n').map(String::from).collect();
 
     let stripped = cosh_sdk::hashline::prefixes::strip_new_line_prefixes(&lines);
     if stripped != lines {
@@ -106,7 +111,12 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
     let mut result: Vec<WriteResult> = vec![];
     let fs = DiskFilesystem::new();
     for target in &tg.targets {
-        let (clean_text, stripped) = strip_write_content(&target.text);
+        // Canonicalize to LF (and drop a UTF-8 BOM) exactly like `read` does, so
+        // the hash/header returned here matches what a follow-up read of the
+        // written file would report, and hashline prefix stripping sees one
+        // line-ending shape.
+        let normalized_input = normalize::normalize_to_lf(&normalize::strip_bom(&target.text).text);
+        let (clean_text, stripped) = strip_write_content(&normalized_input);
 
         // An inconsistent configuration — a path in both the allowlist and
         // the blocklist — is a hard error, not a per-file warning.
@@ -144,6 +154,22 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
         match metadata.fs_guard(&target.path) {
             Ok(validated_path) => {
                 let path_str = validated_path.to_string_lossy();
+
+                // Never clobber a file that declares itself machine-generated:
+                // the change would be overwritten by the next generation run.
+                // Creating a brand-new file is always allowed (nothing is being
+                // overwritten). Per-file warning, not a batch abort.
+                if let Err(msg) = assert_editable_file(Path::new(path_str.as_ref())) {
+                    let res = WriteResult {
+                        file_hash: String::new(),
+                        header: String::new(),
+                        path: target.path.clone(),
+                        warnings: Some(msg),
+                    };
+                    result.push(res);
+                    continue;
+                }
+
                 if let Ok(current) = fs.read_text(&path_str).await {
                     let _ = rollback::record(&path_str, &current);
                 }
