@@ -50,5 +50,13 @@ features = ["lancedb"]
 [dependencies.cosh-sdk]
 path = "../cosh-sdk"
 
+[dependencies.ast-grep-core]
+version = "0.39"
+default-features = false
+features = ["tree-sitter"]
+
+[dependencies.tree-sitter]
+version = "0.25"
+
 [lints]
 workspace = true

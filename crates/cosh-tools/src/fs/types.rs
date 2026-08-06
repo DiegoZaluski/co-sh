@@ -57,6 +57,38 @@ pub struct FsEdit {
     pub targets: Vec<EditTarget>,
 }
 
+// ---------------------------------------------------------------------------
+// AST engine (port of oh-my-pi `ast_edit`)
+// ---------------------------------------------------------------------------
+
+/// A single structural rewrite op for the AST engine.
+///
+/// `pat` is an AST-aware pattern (ast-grep style) that may use metavariables
+/// such as `$NAME` (matches exactly one node) and `$$$NAME` (matches zero or
+/// more nodes, e.g. an argument list). `out` is the replacement template;
+/// metavariables referenced there are substituted with the text captured when
+/// `pat` matched.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct AstEditOp {
+    /// AST pattern to match against the file's syntax tree.
+    pub pat: String,
+    /// Replacement template. Metavariables from `pat` may be referenced.
+    pub out: String,
+}
+
+/// The AST engine argument (arg 2 of the edit tool).
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct FsAstEdit {
+    /// Structural rewrite operations; applied in order over each matched file.
+    pub ops: Vec<AstEditOp>,
+    /// Files, directories, or globs to rewrite.
+    pub paths: Vec<String>,
+    /// Hard cap on the number of files edited in one call (defaults to
+    /// [`crate::fs::ast_edit::DEFAULT_MAX_FILES`]).
+    #[serde(default)]
+    pub max_files: Option<usize>,
+}
+
 /// Parameters for file rollback operations.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct FsRollbackInput {
