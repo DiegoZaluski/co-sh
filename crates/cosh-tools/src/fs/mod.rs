@@ -442,10 +442,16 @@ impl Fs {
             "description": concat!(
                 "Apply structural syntax-tree edits to one or more files. ",
                 "Rewrite each match of a pattern (`pat`) to a template (`out`) ",
-                "across the given `paths`. Patterns support metavariables ",
-                "$NAME (matches exactly one node) and $$$NAME (matches zero or more ",
-                "nodes, e.g. an argument list); the same metavariable must capture ",
-                "identical text in every occurrence for a match to succeed."
+                "across the given `paths`. Patterns must be full, structurally ",
+                "valid source snippets; they support metavariables $NAME (matches ",
+                "exactly one node) and $$$NAME (matches zero or more nodes, e.g. an ",
+                "argument list), and the same metavariable must capture identical ",
+                "text in every occurrence to match. A string literal pattern must ",
+                "include its quotes, and a metavariable captures a whole node — it ",
+                "does not match a substring inside a literal. So to change the text ",
+                "of a string, match the whole literal, e.g. `pat` ",
+                "`console.log(\"$M\")` for `out` `console.log(\"[$M]\")`; a pattern ",
+                "like `Hello, $X!` (a bare phrase) matches nothing."
             ),
             "inputSchema": {
                 "type": "object",
@@ -463,10 +469,13 @@ impl Fs {
                                         "pat": {
                                             "type": "string",
                                             "description": concat!(
-                                                "AST pattern to match. Supports metavariables ",
-                                                "$NAME (exactly one node) and $$$NAME (zero or more ",
-                                                "nodes, e.g. an argument list); same metavariable ",
-                                                "must capture identical text."
+                                                "Complete, structurally valid AST pattern. ",
+                                                "Supports metavariables $NAME (exactly one node) ",
+                                                "and $$$NAME (zero or more nodes, e.g. an argument ",
+                                                "list); the same metavariable must capture identical ",
+                                                "text. Include quotes around string literals; a ",
+                                                "metavariable matches a whole node, never a substring ",
+                                                "inside a literal."
                                             )
                                         },
                                         "out": {
@@ -508,8 +517,14 @@ impl Fs {
                 "engine: it matches a syntax-tree pattern (`pat`) that may use ",
                 "metavariables `$NAME` (one node) and `$$$NAME` (a list, e.g. an ",
                 "argument list) and rewrites each match to the template (`out`), ",
-                "enforcing metavariable identity. If a populated argument is filled ",
-                "with the other engine's schema, a correction is returned."
+                "enforcing metavariable identity. `pat` must be a complete, ",
+                "structurally valid snippet: string literals need their quotes, and ",
+                "a metavariable captures a whole node (never a substring inside a ",
+                "literal) — to change a string's text, match the whole literal, ",
+                "e.g. `pat` `console.log(\"$M\")` for `out` `console.log(\"[$M]\")`. ",
+                "If you only need to replace literal text (no restructuring), prefer ",
+                "`targets`. If a populated argument is filled with the other ",
+                "engine's schema, a correction is returned."
             ),
             "inputSchema": {
                 "type": "object",
@@ -576,10 +591,13 @@ impl Fs {
                                         "pat": {
                                             "type": "string",
                                             "description": concat!(
-                                                "AST pattern to match. Supports metavariables ",
-                                                "$NAME (exactly one node) and $$$NAME (zero or more ",
-                                                "nodes, e.g. an argument list); same metavariable ",
-                                                "must capture identical text."
+                                                "Complete, structurally valid AST pattern. ",
+                                                "Supports metavariables $NAME (exactly one node) ",
+                                                "and $$$NAME (zero or more nodes, e.g. an argument ",
+                                                "list); the same metavariable must capture identical ",
+                                                "text. Include quotes around string literals; a ",
+                                                "metavariable matches a whole node, never a substring ",
+                                                "inside a literal."
                                             )
                                         },
                                         "out": {
