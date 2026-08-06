@@ -67,4 +67,13 @@ pub enum HarnessEvent {
         /// Current context budget usage info.
         info: super::context_manager::ContextDisplayInfo,
     },
+    /// A compaction phase ran inside the context manager, emitted WHILE
+    /// [`ContextManager::run`] executes so the TUI can show live feedback in
+    /// the chat: the pipeline (phase 1) gets a running stopwatch (Started
+    /// before the compression work, Finished after it) and the other phases
+    /// are one-shot lines.
+    Compaction {
+        /// Which phase ran and how it should be displayed.
+        event: super::context_manager::CompactionEvent,
+    },
 }

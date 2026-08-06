@@ -60,6 +60,80 @@ async fn test_agent_loop_simple_conversation() {
 }
 
 #[tokio::test]
+async fn test_agent_loop_forwards_compaction_phases_to_the_tui() {
+    use crate::harness::context_manager::{CompactionEvent, ContextManager};
+
+    // ~5.8 chars/token with the default encoding, so 200 paragraphs of ~63
+    // chars ≈ 2100 tokens — comfortably over the 1600-token (80%) trigger.
+    let big_answer = (0..200)
+        .map(|i| format!("Answer paragraph {i} discusses rivers, mountains and weather. "))
+        .collect::<String>();
+
+    let mut h = Harness::new_test();
+    // Small budget so the preloaded history overflows the 80% trigger on the
+    // very first `run()` inside the loop — the pipeline then compresses the
+    // assistant history and the observer forwards the phases.
+    h.context_manager = ContextManager::new(2000);
+    h = h.with_history(&[
+        ("user".to_string(), "initial question".to_string()),
+        ("assistant".to_string(), big_answer),
+    ]);
+    h = h.with_mock_stream(Ok(vec!["final answer"]));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    handle.abort();
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::Compaction {
+                event: CompactionEvent::PipelineStarted
+            }
+        )),
+        "the harness must forward PipelineStarted to the TUI; events={events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::Compaction {
+                event: CompactionEvent::PipelineFinished
+            }
+        )),
+        "the harness must forward PipelineFinished to the TUI; events={events:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_agent_loop_with_tool_call() {
     let mut h = Harness::new_test()
         .with_test_tool(
@@ -252,8 +326,5 @@ fn result_is_useless_reads_find_grep_json_contract() {
     assert!(!result_is_useless("find_grep", "not json"));
 
     // The gate is per-tool: no other tool's JSON is ever interpreted.
-    assert!(!result_is_useless(
-        "fs_read",
-        r#"{"useless":true}"#
-    ));
+    assert!(!result_is_useless("fs_read", r#"{"useless":true}"#));
 }

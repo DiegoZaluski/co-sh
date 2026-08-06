@@ -1,45 +1,63 @@
-//! Single-owner LLM-free asynchronous context manager.
+//! Single-owner LLM-free synchronous context manager.
 //!
 //! The [`ContextManager`] is the **single owner** of the whole conversation —
 //! user prompts, assistant outputs, tool calls and tool results — before it
-//! reaches the LLM. Fresh content is handed to a background worker thread that
-//! compresses it with the deterministic TF-IDF → LSA → MMR pipeline
-//! ([`compression::init`]); the original text stays rendered in place until the
-//! compressed copy returns and is swapped in at the **same position** — a field
-//! update, so the message order is never reorganized.
+//! reaches the LLM. Fresh content is rendered verbatim; the TF-IDF → LSA →
+//! MMR compression pipeline runs **synchronously on the agent loop's thread**
+//! as the first phase of the 80% compaction ([`compression::init`]). There is
+//! no worker thread: no CPU is spent compressing anything unless the budget
+//! actually overflows, and the compressed copy is swapped in at the **same
+//! position** — a field update, so the message order is never reorganized.
 //!
-//! The most recent compressible assistant turn is never submitted immediately:
-//! it might be the agent loop's FINAL output, which must keep its original
-//! text. Its job is parked in a single deferred slot and flushed by the next
-//! poll — the moment the loop provably advances — or dropped by
-//! [`close_loop`](Self::close_loop). The final answer is therefore never
-//! compressed and no CPU is wasted on it.
+//! The most recent compressible assistant turn may be the agent loop's FINAL
+//! output, which must keep its original text: [`close_loop`](Self::close_loop)
+//! promotes the ORIGINAL text verbatim into a `LoopClosure` the moment the
+//! loop ends, so the final answer is always delivered in its original form
+//! even if a pipeline pass had already summarized the raw draft.
 //!
 //! [`build_messages`](Self::build_messages) renders the conversation as a
 //! provider-ready `Vec<ChatMessage>` with a **1:1 mapping** between items and
 //! messages, so every message keeps its original position by construction.
 //!
-//! When the held context reaches 80% of the single budget, three phases run
-//! (the LEAD rotates on every trigger — the default pass opens with the draft
-//! eviction so the task's tool data and the [`PromptAnchor`] survive one more
-//! cycle; the next opens with the tool pass):
+//! When the held context reaches 80% of the budget, the compaction runs. A
+//! **toggle** rotates which phase LEADS each overflow — pipeline → draft
+//! eviction → tool eviction, back to the pipeline — and within a single
+//! overflow the funnel falls through the toggle cycle (wrapping to the
+//! pipeline if needed) until the total drops below the 80% trigger:
 //!
-//!   1. **Tool eviction** (`evict_tools`) — tool chains are removed from the
+//!   1. **The pipeline** (`pipeline_pass`) — the compression runs here,
+//!      synchronously, on the agent loop's thread. It walks the timeline
+//!      oldest-first and summarizes every unprotected draft (old user
+//!      prompts + compressible assistant outputs), **segment by segment**: the
+//!      budget is checked at each [`LoopClosure`] boundary, so one completed
+//!      loop's drafts are compressed as a coherent block before the next
+//!      segment is considered. Below the trigger at a boundary → the pass is
+//!      done; still over → it continues into the next segment. It leads the
+//!      first overflow of each cycle and hands the lead to phase 2 when it
+//!      resolves;
+//!   2. **Gradual draft eviction** (`evict_drafts`) — the same draft pass as
+//!      before (old user inputs + assistant outputs, oldest-first, never
+//!      touching [`LoopClosure`]s, protected prompts, the [`PromptAnchor`] or
+//!      tool chains) but reduced to ONE chunk per stop: it removes a single
+//!      whole input/output, checks the budget, and stops the moment the total
+//!      drops below 80%. It is the toggle's **sticky** lead: it stays across
+//!      consecutive overflows (the persistent cursor resumes where it stopped,
+//!      so the context lives one overflow at a time) and only hands the lead
+//!      to phase 3 once the cursor reaches a [`LoopClosure`] (or exhausts the
+//!      timeline still over the trigger) — the oldest segment's drafts are
+//!      exhausted. The [`LoopClosure`] is the shared CHECKPOINT of phases 1
+//!      and 2: both stop at it and continue after it;
+//!   3. **Tool eviction** (`evict_tools`) — tool chains are removed from the
 //!      middle outward (the same idea as Goose's compaction fallback) until
 //!      the total drops below the trigger, preserving the newest chain and
-//!      the anchors;
-//!   2. **Draft eviction** (`evict_drafts`) — draft items (reasoning texts,
-//!      old unprotected prompts — anything that is not a [`LoopClosure`], a
-//!      protected prompt, the [`PromptAnchor`] or a tool chain) are removed
-//!      oldest-first until the total drops below the trigger again. Drafts
-//!      whose compression already landed (`compressed: Some`) are evicted
-//!      first (already reduced to summaries — the cheapest loss); raw drafts
-//!      with compression still in flight are the last resort. Tool chains are
-//!      NEVER removed here — `evict_tools` owns them;
-//!   3. **LoopClosure trimming** (`trim_loop_closures`) — if `LoopClosure`s
-//!      alone hold ≥ 40% of the budget, the oldest `LoopClosure` is discarded
-//!      one at a time until the SUM of `LoopClosure`s drops below 40% — the
-//!      40% limit applies only to the closures, never to the whole context.
+//!      the anchors. Completing it (as the lead or via the funnel) resets the
+//!      toggle back to the pipeline — the cycle restarts;
+//!   4. **LoopClosure trimming** (`trim_loop_closures`) — NOT part of the
+//!      toggle: it is always evaluated last and fires on its own condition —
+//!      when `LoopClosure`s alone hold ≥ 40% of the budget, the oldest one is
+//!      discarded one at a time until the SUM of `LoopClosure`s drops below
+//!      40% (the 40% limit applies only to the closures, never to the whole
+//!      context).
 //!
 //! The [`PromptAnchor`] is the first user prompt of the session, or the first
 //! prompt after a [`LoopClosure`] (a new task segment): it carries the user's
@@ -48,22 +66,21 @@
 //! is not eternal — when a new segment starts, the anchor moves to the new
 //! prompt and the old one becomes an ordinary removable prompt.
 //!
-//! `trim_loop_closures` is always evaluated last: `LoopClosure`s are the
-//! final summaries
-//! and the last resort. A budget breach caused by a huge user prompt needs no
-//! special casing — the guards plus the fall-through handle it like any other
-//! overflow, trimming closures whenever they hold enough removable mass. The
-//! one deliberate floor: protected prompts are never removed, so if the two
-//! most recent prompts alone exceed the model window (or the closures are too
-//! small to matter), the total can stay over budget — those anchors are
-//! intentionally untouchable.
-//!
 //! The two most recent user prompts are *protected* (never compressed, never
 //! removed), and the first prompt of each task segment becomes a
-//! [`PromptAnchor`] — verbatim and draft-eviction-proof while current. The
-//! final text response of each completed agent loop is promoted by
-//! [`close_loop`](Self::close_loop) into a `LoopClosure` that replaces the
-//! raw text in place.
+//! [`PromptAnchor`] — verbatim and draft-eviction-proof while current.
+//!
+//! Two deliberate floors keep the total above the trigger in rare cases, by
+//! design: (1) protected prompts and the current anchor are never removed, so
+//! if those alone exceed the model window (or the closures are too small to
+//! matter) the total can stay over budget — those anchors are intentionally
+//! untouchable; (2) phase 2 stops at the first [`LoopClosure`] boundary, so a
+//! pass can end over the trigger when the newest segment holds the only
+//! removable mass and the tool/closure phases cannot relieve it — the next
+//! `run()` leads with the tool pass and the funnel brings phase 2 past the
+//! closure, converging. A huge user prompt needs no special casing: the
+//! guards plus the fall-through handle it like any other overflow, trimming
+//! closures whenever they hold enough removable mass.
 
 pub mod compression;
 #[cfg(test)]
@@ -82,14 +99,14 @@ use compression::init::{CHUNK_CAPACITY, init as deterministic_compress};
 
 /// Default token budget for the total conversation context. Overridable via
 /// [`ContextManager::new`].
-pub const MAX_CONTEXT_TOKENS: usize = 100_000;
+pub const MAX_CONTEXT_TOKENS: usize = 10_000;
 
-/// Percentage of the budget at which the three-phase compaction runs.
+/// Percentage of the budget at which the four-phase compaction runs.
 const COMPACT_PCT: usize = 80;
 
 /// Percentage of the budget below which `trim_loop_closures` trims
-/// `LoopClosure`s. The tool/draft evictions aim for the 80% trigger instead
-/// — the minimum decompaction.
+/// `LoopClosure`s. The pipeline/draft/tool phases aim for the 80% trigger
+/// instead — the minimum decompaction.
 const TARGET_PCT: usize = 40;
 
 /// TF-IDF maximum document frequency filter for deterministic compression.
@@ -127,7 +144,8 @@ pub struct PromptAnchor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ContextItem {
     /// A user prompt. The two most recent are `protected` (never compressed,
-    /// never removed); older ones are compressed asynchronously.
+    /// never removed); older ones are compressed by the pipeline (phase 1 of
+    /// the compaction) when the 80% budget overflows.
     User {
         id: u64,
         protected: bool,
@@ -135,14 +153,14 @@ pub enum ContextItem {
         /// pipeline (it stays in its original form): the task anchor prompts.
         verbatim: bool,
         original: String,
-        /// Filled in place when the worker returns the compressed copy.
+        /// Filled in place when the pipeline returns the compressed copy.
         compressed: Option<String>,
     },
     /// An assistant text output.
     Assistant {
         id: u64,
         original: String,
-        /// Filled in place when the worker returns the compressed copy.
+        /// Filled in place when the pipeline returns the compressed copy.
         compressed: Option<String>,
         /// False when the output carried a tool call — the spec keeps such
         /// outputs in the structural layer (never prose-compressed).
@@ -166,11 +184,19 @@ pub enum ContextItem {
         /// search). Such a result served its purpose the moment the model
         /// reacted to it, so its chain is the first eviction target — even
         /// when it is the newest chain.
-        #[serde(default)]
+        ///
+        /// Format note: bincode 1.x is positional (no field boundaries), so
+        /// ANY added field is a format break — a snapshot from a build that
+        /// predates this field fails the whole deserialization and the TUI
+        /// falls back to the JSONL history (conversation recovered, only the
+        /// compression/closure state is lost — the accepted dev-stage
+        /// tradeoff).
         useless: bool,
     },
     /// The final text response of a completed agent loop. Replaces the raw
     /// assistant text in place; removed oldest-first by `trim_loop_closures`.
+    /// Also marks the segment boundary for the pipeline and for the gradual
+    /// draft eviction (phase 2 yields here).
     LoopClosure { id: u64, content: String },
 }
 
@@ -246,30 +272,17 @@ impl ContextItem {
     }
 }
 
-// Compression worker thread
+// Deterministic compression (synchronous, same thread as the agent loop)
 
-/// A job handed to the worker thread.
-struct CompressJob {
-    id: u64,
-    text: String,
-}
-
-/// A completed compression, matched back to its item by `id`.
-struct CompressResult {
-    id: u64,
-    compressed: String,
-}
-
-/// Deterministic compression with batching, so a single job can never stall
-/// the worker with an unbounded SVD/MMR pass.
+/// Deterministic compression with batching, so a single pass can never stall
+/// the agent loop with an unbounded SVD/MMR pass.
 ///
 /// The pipeline splits the input into sentence-level chunks and runs
 /// TF-IDF → LSA (full SVD) → MMR (O(n³)) over them. Without batching, a
 /// medium/large turn (a few thousand sentence-chunks) would run ONE pass over
-/// the whole text — seconds of work that monopolises the single FIFO worker
-/// thread and delays every later job (head-of-line blocking). Splitting into
-/// batches of at most [`DETERMINISTIC_MAX_CHUNKS`] sentences bounds every pass
-/// to the millisecond range. (Previously batching only kicked in above
+/// the whole text — seconds of work. Splitting into batches of at most
+/// [`DETERMINISTIC_MAX_CHUNKS`] sentences bounds every pass to the
+/// millisecond range. (Previously batching only kicked in above
 /// [`MAX_CONTEXT_TOKENS`] estimated tokens, leaving the medium range — the
 /// common case for a single chat turn — unbatched.)
 fn compress_text(text: &str) -> String {
@@ -293,46 +306,28 @@ fn compress_text(text: &str) -> String {
         .join(" ")
 }
 
-/// Spawn the compressor thread and return its work/result channels.
-/// The thread exits when the work sender is dropped.
-fn spawn_compressor() -> (
-    std::sync::mpsc::Sender<CompressJob>,
-    std::sync::mpsc::Receiver<CompressResult>,
-) {
-    let (work_tx, work_rx) = std::sync::mpsc::channel::<CompressJob>();
-    let (result_tx, result_rx) = std::sync::mpsc::channel::<CompressResult>();
-    std::thread::spawn(move || {
-        for job in work_rx {
-            // A panic in the deterministic pipeline (e.g. a degenerate SVD or
-            // text-splitter edge case) must not kill the worker thread — if it
-            // did, every subsequent job would fail silently and the item would
-            // stay raw forever. Degrade to the original text instead and keep
-            // processing.
-            let compressed =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compress_text(&job.text)))
-                    .unwrap_or_else(|_| job.text.clone());
-            if result_tx
-                .send(CompressResult {
-                    id: job.id,
-                    compressed,
-                })
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    (work_tx, result_rx)
+/// Deterministic compression that can never panic. A panic in the
+/// TF-IDF → LSA → MMR pipeline (e.g. a degenerate SVD or a text-splitter edge
+/// case) must not crash the agent loop — the draft simply stays raw and the
+/// eviction phases remain the fallback.
+fn try_compress(text: &str) -> Option<String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compress_text(text))).ok()
 }
 
-/// Snapshot of context manager state for bincode persistence. Channels and the
-/// worker thread are rebuilt on restore; in-flight items are re-submitted.
+/// Snapshot of context manager state for bincode persistence. The compression
+/// pipeline runs synchronously at the next 80% overflow, so nothing is
+/// in-flight between save and restore — the snapshot is a plain clone.
 #[derive(Serialize, Deserialize)]
 pub struct ContextManagerState {
     pub items: VecDeque<ContextItem>,
     pub next_id: u64,
     pub user_prompts: VecDeque<u64>,
     pub max_tokens: usize,
+    /// NOTE: bincode 1.x is positional and does NOT honor `#[serde(default)]`
+    /// — a snapshot missing ANY field (mid-stream or trailing) fails the
+    /// whole deserialization with an error, and the TUI falls back to the
+    /// JSONL history (conversation recovered, compression/closure state
+    /// lost). Adding a field is a format break; see the `useless` field.
     pub anchor: Option<PromptAnchor>,
 }
 
@@ -346,34 +341,99 @@ pub struct ContextDisplayInfo {
     pub budget_pct: u8,
 }
 
-/// Orchestrates the asynchronous TF-IDF → LSA → MMR compression of the whole
+/// Which compaction phase LEADS the next budget overflow (the toggle).
+///
+/// The cycle is pipeline → draft eviction → tool eviction → back to the
+/// pipeline. The draft pass is the sticky lead: it stays on itself across
+/// consecutive overflows until it reaches a [`LoopClosure`] (its oldest
+/// segment is exhausted), only then handing the lead to the tool pass. The
+/// tool pass completing resets the cycle to the pipeline. Scheduling bias
+/// only — not persisted; a restored manager starts the cycle at the pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToggleLead {
+    Pipeline,
+    Drafts,
+    Tools,
+}
+
+impl ToggleLead {
+    /// The next phase in the toggle cycle (wraps `Tools` back to `Pipeline`
+    /// — the funnel may "rotate to 1 again").
+    fn next(self) -> Self {
+        match self {
+            ToggleLead::Pipeline => ToggleLead::Drafts,
+            ToggleLead::Drafts => ToggleLead::Tools,
+            ToggleLead::Tools => ToggleLead::Pipeline,
+        }
+    }
+}
+
+/// A compaction-phase notification emitted while [`ContextManager::run`]
+/// executes, so the caller (the TUI) can show live feedback in the chat: a
+/// stopwatch for the pipeline (phase 1 — the only phase slow enough to block
+/// the agent loop) and one line per other phase that actually did work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactionEvent {
+    /// Phase 1 (the pipeline) is about to compress unprotected drafts — the
+    /// TUI starts the stopwatch. Only emitted when there is real work.
+    PipelineStarted,
+    /// Phase 1 finished compressing — the TUI stops the stopwatch.
+    PipelineFinished,
+    /// Phase 2 (gradual draft eviction) removed at least one chunk.
+    DraftsEvicted,
+    /// Phase 3 (tool-chain eviction) removed at least one chain.
+    ToolsEvicted,
+    /// Phase 4 (loop-closure trimming) discarded at least one closure.
+    ClosuresTrimmed,
+}
+
+/// Outcome of the gradual draft eviction pass (phase 2).
+#[derive(Clone, Copy, Debug)]
+enum DraftOutcome {
+    /// The total dropped below the trigger; the cursor is parked on a regular
+    /// item — phase 2's jurisdiction continues on the next overflow (the
+    /// toggle stays on the draft pass).
+    BelowTrigger,
+    /// The pass reached a [`LoopClosure`] (or the end of the timeline): the
+    /// oldest segment's drafts are exhausted. `below` tells the funnel whether
+    /// the call is done (`true`) or must fall through to the next toggle
+    /// phase (`false`). Either way the toggle hands the lead to the tool pass.
+    AtBoundary { below: bool },
+}
+
+/// Orchestrates the synchronous TF-IDF → LSA → MMR compression of the whole
 /// conversation, the in-place swaps, the 80/40 compaction phases, and the
 /// `LoopClosure` promotion of each finished agent loop.
 pub struct ContextManager {
     /// Conversation items in display order (oldest first). One item = one
     /// message; positions are stable.
     items: VecDeque<ContextItem>,
-    /// Work queue to the compressor thread.
-    work_tx: std::sync::mpsc::Sender<CompressJob>,
-    /// Completed compressions, drained on each poll.
-    result_rx: std::sync::mpsc::Receiver<CompressResult>,
-    /// Deferred compression job for the MOST RECENT compressible assistant
-    /// turn. The harness cannot know a turn is the loop's final output until it
-    /// closes the loop, so submitting it immediately would compress (and waste
-    /// CPU on) the final answer, which is then discarded by `close_loop`
-    /// anyway. Instead the job is parked here and only flushed (submitted)
-    /// once the loop provably advances — the next `poll()` (any subsequent
-    /// add, `build_messages` or `run`). `close_loop` drops it, keeping the
-    /// ORIGINAL text for the final output with zero wasted work. At most one
-    /// job can be pending: every `add_*` starts with a `poll()` that flushes
-    /// the previous candidate before a new one is parked.
-    pending_job: Option<CompressJob>,
-    /// Rotating eviction lead for the compaction. Each trigger alternates
-    /// whether `evict_tools` (tool chains, middle-out) or `evict_drafts`
-    /// (drafts, oldest-first) leads the pass, so tool chains are not always
-    /// the first eviction target. Scheduling bias only — not persisted; a
-    /// restored manager simply starts with the draft pass leading again.
-    compact_lead: bool,
+    /// Persistent position of the gradual draft eviction (phase 2): the id of
+    /// the NEXT item to consider. `None` means the walk starts at the
+    /// beginning of the timeline. The eviction removes one whole chunk per
+    /// stop and parks this cursor, so the next budget overflow resumes exactly
+    /// where this one stopped instead of jumping to the tool pass. Items the
+    /// walk skipped while non-removable (protected prompts, the anchor) are
+    /// behind the cursor, but whenever the timeline is exhausted while still
+    /// over the trigger the cursor resets to `None` and the next session walks
+    /// from the start — so a prompt that only became removable later is still
+    /// evicted eventually. Scheduling bias only — not persisted; a restored
+    /// manager simply starts over.
+    draft_cursor: Option<u64>,
+    /// Which compaction phase leads the next budget overflow (the toggle):
+    /// pipeline → draft eviction → tool eviction → pipeline. Phase 2 is the
+    /// sticky lead — it stays across consecutive overflows (one chunk per
+    /// stop) until it reaches a [`LoopClosure`]; the tool pass completing
+    /// resets the cycle. Scheduling bias only — not persisted; a restored
+    /// manager starts the cycle at the pipeline.
+    toggle_lead: ToggleLead,
+    /// Live compaction notifications for the TUI: called synchronously while
+    /// [`Self::run`] executes so the caller can show the pipeline stopwatch
+    /// and one line per phase that actually did work. Scheduling-only — not
+    /// part of the snapshot; the harness wires it per agent loop via
+    /// [`Self::set_compaction_observer`]. `Send` so a [`Harness`] holding the
+    /// manager stays movable into a tokio task.
+    compaction_observer: Option<Box<dyn FnMut(CompactionEvent) + Send>>,
     /// The current task anchor (the first prompt of the session or the first
     /// prompt after a LoopClosure). Protected from draft eviction while
     /// current; the anchored prompt is marked verbatim (never compressed).
@@ -405,18 +465,30 @@ fn assistant_message(text: &str) -> ChatMessage {
 
 impl ContextManager {
     pub fn new(max_tokens: usize) -> Self {
-        let (work_tx, result_rx) = spawn_compressor();
         Self {
             items: VecDeque::new(),
-            work_tx,
-            result_rx,
-            pending_job: None,
-            compact_lead: false,
+            draft_cursor: None,
+            toggle_lead: ToggleLead::Pipeline,
+            compaction_observer: None,
             anchor: None,
             next_id: 1,
             user_prompts: VecDeque::new(),
             max_tokens,
             encoding: TokenEncoding::Cl100k,
+        }
+    }
+
+    /// Route compaction-phase notifications to `f`, called synchronously
+    /// while [`Self::run`] executes (the TUI uses this to show the pipeline
+    /// stopwatch and the per-phase lines live in the chat). Replaces any
+    /// previous observer.
+    pub fn set_compaction_observer(&mut self, f: impl FnMut(CompactionEvent) + Send + 'static) {
+        self.compaction_observer = Some(Box::new(f));
+    }
+
+    fn emit(&mut self, event: CompactionEvent) {
+        if let Some(f) = self.compaction_observer.as_mut() {
+            f(event);
         }
     }
 
@@ -431,13 +503,14 @@ impl ContextManager {
     // Ingestion
 
     /// Add a user prompt. The two most recent prompts are protected (raw,
-    /// never compressed); when a third one arrives, the oldest protected prompt
-    /// loses protection and is submitted for compression.
+    /// never compressed); when a third one arrives, the oldest protected
+    /// prompt loses protection and becomes a plain draft — eligible for
+    /// synchronous compression by the pipeline (phase 1) at the next 80%
+    /// overflow, or for eviction by the draft pass.
     pub fn add_user(&mut self, text: &str) {
-        self.poll();
         if self.user_prompts.len() == PROTECTED_USER_PROMPTS {
             let oldest = self.user_prompts.pop_front().unwrap();
-            self.submit_for_compression(oldest);
+            self.unprotect(oldest);
         }
         let id = self.next_id();
         // A new task segment starts at the session's first prompt and after
@@ -461,25 +534,19 @@ impl ContextManager {
     }
 
     /// Add an assistant text output. When `compressible` is true the raw text
-    /// is rendered in place until the compressed copy returns (async); when
-    /// false (the output carried a tool call) it stays structural and is never
-    /// submitted to the compressor. If the worker is unavailable the item
-    /// simply stays uncompressed — nothing is lost.
+    /// is rendered in place until the pipeline (phase 1 of the compaction)
+    /// summarizes it — synchronously, at the next 80% overflow. When false
+    /// (the output carried a tool call) it stays structural and is never
+    /// submitted to the compressor.
     ///
-    /// The job is NOT submitted immediately: the turn might be the agent loop's
-    /// FINAL output, which must keep its original text. It is parked in
-    /// [`Self::pending_job`] and flushed by the next [`Self::poll`] — i.e. the
-    /// moment the loop provably advances — so the final answer is never
-    /// compressed and no work is wasted on it.
+    /// The FINAL output of a loop needs no special casing here: the harness
+    /// calls [`Self::close_loop`] the moment the loop ends, promoting the
+    /// ORIGINAL text verbatim into a `LoopClosure` — even if a pipeline pass
+    /// had already summarized the raw draft, the delivered final answer is
+    /// always the original text. A turn the loop provably advances past is
+    /// fair game for the pipeline.
     pub fn add_assistant(&mut self, text: &str, compressible: bool) {
-        self.poll();
         let id = self.next_id();
-        if compressible {
-            self.pending_job = Some(CompressJob {
-                id,
-                text: text.to_string(),
-            });
-        }
         self.items.push_back(ContextItem::Assistant {
             id,
             original: text.to_string(),
@@ -490,7 +557,6 @@ impl ContextManager {
 
     /// Add a tool CALL. Structural, never prose-compressed.
     pub fn add_tool_call(&mut self, call_id: &str, name: &str, arguments: &str) {
-        self.poll();
         let id = self.next_id();
         self.items.push_back(ContextItem::ToolCall {
             id,
@@ -509,7 +575,6 @@ impl ContextManager {
     /// the first eviction targets of the tool pass (see [`Self::evict_tools`]);
     /// everything else behaves exactly like [`Self::add_tool_result`].
     pub fn add_tool_result_flagged(&mut self, call_id: &str, content: &str, useless: bool) {
-        self.poll();
         let id = self.next_id();
         self.items.push_back(ContextItem::ToolResult {
             id,
@@ -517,38 +582,6 @@ impl ContextManager {
             content: content.to_string(),
             useless,
         });
-    }
-
-    /// Poll the result queue, swapping each returned compressed copy into the
-    /// place of its original (a field update — the list is never shifted).
-    /// Non-blocking; finding the item is a linear scan over the items.
-    ///
-    /// Also flushes the deferred [`Self::pending_job`] first: reaching a poll
-    /// means the conversation moved on, so the previous candidate turn is
-    /// provably not the loop's final output anymore and can be compressed.
-    pub fn poll(&mut self) {
-        if let Some(job) = self.pending_job.take() {
-            // Worker unavailable → the item simply stays uncompressed.
-            let _ = self.work_tx.send(job);
-        }
-        while let Ok(result) = self.result_rx.try_recv() {
-            let Some(idx) = self.items.iter().position(|it| it.id() == result.id) else {
-                continue;
-            };
-            match &mut self.items[idx] {
-                ContextItem::User { compressed, .. }
-                | ContextItem::Assistant {
-                    compressed,
-                    compressible: true,
-                    ..
-                } => {
-                    *compressed = Some(result.compressed);
-                }
-                _ => {
-                    // Structural items are never compressed — drop stray results.
-                }
-            }
-        }
     }
 
     /// True when the last item is a user prompt whose original text equals
@@ -567,15 +600,9 @@ impl ContextManager {
     /// cannot be a summary of what was done, so no `LoopClosure` is created.
     ///
     /// The harness has now told us this turn was the loop's FINAL output: the
-    /// deferred job (if any) is dropped so the final answer is never
-    /// compressed — the original text is promoted verbatim.
-    ///
-    /// Clearing the deferred job before the guard below is safe: any item
-    /// added after a compressible turn flushes the parked job via `poll()`, so
-    /// a parked job can only belong to the most recent assistant turn — which
-    /// is exactly the item the guard would promote.
+    /// ORIGINAL text is promoted verbatim, so the final answer is never
+    /// compressed.
     pub fn close_loop(&mut self) {
-        self.pending_job = None;
         let Some(last) = self.items.back() else {
             return;
         };
@@ -593,42 +620,199 @@ impl ContextManager {
 
     // Compaction phases
 
-    /// Per-iteration tick: drain finished compressions, then run the 80%
-    /// three-phase compaction when the held context reaches the trigger.
+    /// Per-iteration tick: run the 80% compaction when the held context
+    /// reaches the trigger.
     ///
-    /// The evictions run in a single pass with fall-through, but the LEAD
-    /// alternates on every trigger: the default opens with `evict_drafts`
-    /// (draft eviction — the task's tool data and the [`PromptAnchor`] live
-    /// one more cycle), the next with `evict_tools` (tool chains evicted
-    /// first, middle-out) — so no single content class is always the first
-    /// victim in tool-heavy sessions. `trim_loop_closures` is always
-    /// evaluated last; a breach caused by a huge user prompt needs no special
-    /// case — the guards and the fall-through handle it like any other
-    /// overflow.
+    /// A **toggle** rotates which phase LEADS each overflow, and the funnel
+    /// falls through the toggle cycle — wrapping to the pipeline if needed —
+    /// until the total drops below the 80% trigger:
     ///
-    /// Phases 1-2 aim for the 80% trigger (minimum decompaction): a pass ends
+    ///   1. **The pipeline** — unprotected drafts are summarized synchronously
+    ///      on the agent loop's thread, segment by segment (the budget is
+    ///      checked at each [`LoopClosure`] boundary);
+    ///   2. **Draft eviction** — one whole chunk (a full user input or
+    ///      assistant output) at a time from a persistent cursor, stopping the
+    ///      moment the total drops below 80%. The cursor makes the NEXT
+    ///      overflow continue where this one stopped; only a [`LoopClosure`]
+    ///      boundary (the oldest segment's drafts are exhausted) ends phase
+    ///      2's jurisdiction and hands the lead to the tool pass;
+    ///   3. **Tool eviction** — tool chains, middle-out. Completing it resets
+    ///      the toggle to the pipeline;
+    ///   4. **LoopClosure trimming** — outside the toggle, always evaluated
+    ///      last (fires only when closures alone hold ≥ 40% of the budget).
+    ///
+    /// After the call the toggle advances for the next overflow: the tool
+    /// pass completing resets to the pipeline; otherwise a phase-2 boundary
+    /// hands the lead to the tool pass; otherwise the draft pass stays the
+    /// lead (phase 1 resolving, or phase 2 still mid-segment, both hand or
+    /// keep the lead on phase 2).
+    ///
+    /// Phases 1-3 aim for the 80% trigger (minimum decompaction): a pass ends
     /// just under the ceiling, so in a busy tool loop the next `run()` — called
     /// after every dispatch — re-triggers with a minimal removal each time.
     /// That is the intended rolling eviction, not a bug.
     pub fn run(&mut self) {
-        self.poll();
-        if self.total_tokens() >= self.trigger() {
-            if self.compact_lead {
-                // Tools lead: tool chains are the first eviction target
-                // (middle-out), then drafts if still over the trigger.
-                self.evict_tools();
-                self.evict_drafts();
-            } else {
-                // Drafts lead (the default): reasoning drafts go first
-                // (oldest-first, compressed first), tool chains only if the
-                // drafts don't suffice — the task anchor and the tool data
-                // live one more cycle.
-                self.evict_drafts();
-                self.evict_tools();
-            }
-            self.trim_loop_closures();
-            self.compact_lead = !self.compact_lead;
+        if self.total_tokens() < self.trigger() {
+            return;
         }
+        // The funnel: lead with the toggle's current phase, and if it cannot
+        // resolve (total still ≥ trigger), fall through to the NEXT phase of
+        // the toggle cycle, wrapping to the pipeline if needed. Each phase
+        // runs at most once per call.
+        let mut lead = self.toggle_lead;
+        let mut tools_resolved = false; // phase 3 completed the job
+        let mut drafts_boundary = false; // phase 2 reached a LoopClosure/end
+        let mut attempts = 0;
+        loop {
+            let resolved = match lead {
+                ToggleLead::Pipeline => self.pipeline_pass(),
+                ToggleLead::Drafts => match self.evict_drafts() {
+                    DraftOutcome::BelowTrigger => true,
+                    DraftOutcome::AtBoundary { below } => {
+                        drafts_boundary = true;
+                        below
+                    }
+                },
+                ToggleLead::Tools => {
+                    // Each phase runs at most once per call, so a plain
+                    // assignment is enough.
+                    let ok = self.evict_tools();
+                    tools_resolved = ok;
+                    ok
+                }
+            };
+            if resolved {
+                break;
+            }
+            lead = lead.next();
+            attempts += 1;
+            if attempts >= 3 {
+                break;
+            }
+        }
+        // Advance the toggle for the NEXT overflow.
+        self.toggle_lead = if tools_resolved {
+            // Phase 3 completed (as the lead or via the funnel) → the cycle
+            // restarts at the pipeline.
+            ToggleLead::Pipeline
+        } else if drafts_boundary {
+            // Phase 2 exhausted its oldest segment → the tool pass leads next.
+            ToggleLead::Tools
+        } else {
+            // Phase 1 resolved (hand the lead to phase 2) or phase 2 resolved
+            // mid-segment (keep the lead) → the draft pass leads next.
+            ToggleLead::Drafts
+        };
+        // Phase 4 — LoopClosure trimming, outside the toggle, always last.
+        self.trim_loop_closures();
+    }
+
+    /// Phase 1 of the compaction: the compression pipeline, now synchronous.
+    ///
+    /// Walks the timeline oldest-first and compresses every unprotected
+    /// draft — un-protected, non-verbatim user prompts and compressible
+    /// assistant outputs that are still raw — **segment by segment**. The
+    /// budget is checked at each [`ContextItem::LoopClosure`] boundary: below
+    /// the 80% trigger → the pass is done (drafts beyond the boundary stay
+    /// raw — the minimum decompaction); still over → the walk continues into
+    /// the next segment. A segment's drafts are compressed as a coherent
+    /// block, so the model sees a consistent (compressed) view of each
+    /// completed loop instead of a mixed raw/summary mix.
+    ///
+    /// Returns `true` when the total dropped below the trigger (the funnel
+    /// stops here); `false` when the timeline was exhausted still over the
+    /// trigger — the funnel falls through to the next toggle phase
+    /// (`evict_drafts`, then the tool pass).
+    ///
+    /// Runs on the agent loop's thread — there is no worker thread anymore.
+    fn pipeline_pass(&mut self) -> bool {
+        let trigger = self.trigger();
+        let mut total = self.total_tokens();
+        if total < trigger {
+            return true;
+        }
+        // Only report the pass when there is at least one compressible draft —
+        // an empty pass is instant and invisible to the user, so it must not
+        // surface a stopwatch line.
+        let has_work = self.items.iter().any(|it| {
+            matches!(
+                it,
+                ContextItem::User {
+                    protected: false,
+                    verbatim: false,
+                    compressed: None,
+                    ..
+                } | ContextItem::Assistant {
+                    compressible: true,
+                    compressed: None,
+                    ..
+                }
+            )
+        });
+        if has_work {
+            self.emit(CompactionEvent::PipelineStarted);
+        }
+        let mut idx = 0;
+        while idx < self.items.len() {
+            if self.items[idx].is_loop() {
+                // Segment boundary: a whole loop's drafts have been
+                // summarized. Below the trigger → done; still over → the next
+                // segment's drafts are the next candidates.
+                if total < trigger {
+                    if has_work {
+                        self.emit(CompactionEvent::PipelineFinished);
+                    }
+                    return true;
+                }
+                idx += 1;
+                continue;
+            }
+            let eligible = matches!(
+                &self.items[idx],
+                ContextItem::User {
+                    protected: false,
+                    verbatim: false,
+                    compressed: None,
+                    ..
+                } | ContextItem::Assistant {
+                    compressible: true,
+                    compressed: None,
+                    ..
+                }
+            );
+            if !eligible {
+                idx += 1;
+                continue;
+            }
+            // Snapshot the job first (releases the borrow before mutating).
+            let original = match &self.items[idx] {
+                ContextItem::User { original, .. } | ContextItem::Assistant { original, .. } => {
+                    original.clone()
+                }
+                _ => unreachable!(),
+            };
+            let Some(compressed) = try_compress(&original) else {
+                // Degrade: keep the draft raw — the eviction phases still
+                // apply.
+                idx += 1;
+                continue;
+            };
+            let old_tokens = self.items[idx].tokens(self.encoding);
+            match &mut self.items[idx] {
+                ContextItem::User { compressed: c, .. }
+                | ContextItem::Assistant { compressed: c, .. } => *c = Some(compressed),
+                _ => unreachable!(),
+            }
+            total = total
+                .saturating_sub(old_tokens)
+                .saturating_add(self.items[idx].tokens(self.encoding));
+            idx += 1;
+        }
+        // End of the timeline — still over the trigger → not resolved.
+        if has_work {
+            self.emit(CompactionEvent::PipelineFinished);
+        }
+        total < trigger
     }
 
     /// True when the item `id` belongs to a tool chain whose RESULT is marked
@@ -665,11 +849,16 @@ impl ContextManager {
     /// every subsequent call, even when it is the newest chain. The middle-out
     /// order is preserved within each partition, so non-useless chains keep
     /// their existing eviction behavior exactly.
-    fn evict_tools(&mut self) {
+    ///
+    /// Returns `true` when the total dropped below the trigger; `false` when
+    /// there is nothing left to remove (or nothing to remove at all) — the
+    /// funnel then falls through to the next toggle phase (wrapping to the
+    /// pipeline).
+    fn evict_tools(&mut self) -> bool {
         let trigger = self.trigger();
         let mut total = self.total_tokens();
         if total < trigger {
-            return;
+            return true;
         }
         let tool_ids: Vec<u64> = self
             .items
@@ -678,7 +867,7 @@ impl ContextManager {
             .map(ContextItem::id)
             .collect();
         if tool_ids.is_empty() {
-            return;
+            return false;
         }
         // Precompute the useless flag per id ONCE — the sort below would
         // otherwise re-scan the whole item list for every id (O(n²) on the
@@ -708,6 +897,7 @@ impl ContextManager {
         // Stable partition: useless chains first, middle-out order kept within
         // each partition (a no-op when nothing is marked useless).
         order.sort_by_key(|idx| !useless_flags[*idx]);
+        let mut removed_any = false;
         for idx in order {
             let id = tool_ids[idx];
             if total < trigger {
@@ -715,77 +905,131 @@ impl ContextManager {
             }
             if let Some(pos) = self.items.iter().position(|it| it.id() == id) {
                 total = total.saturating_sub(self.remove_item(pos));
+                removed_any = true;
             }
         }
+        if removed_any {
+            self.emit(CompactionEvent::ToolsEvicted);
+        }
+        total < trigger
     }
 
-    /// Evict drafts — reasoning texts and old unprotected prompts, anything
-    /// that is not a [`LoopClosure`], a protected prompt, the [`PromptAnchor`]
-    /// or a tool chain — until the total drops below the 80% trigger, the
-    /// same limit `evict_tools` uses. Tool chains are owned by `evict_tools`
-    /// and are never removed here. Only the minimum needed is removed,
-    /// maximizing the context lifetime instead of halving the window every
-    /// pass.
+    /// Phase 2 of the compaction: gradual draft eviction.
     ///
-    /// Two passes: drafts whose compression has ALREADY landed (`compressed:
-    /// Some` — their content is already reduced to a summary, so removing
-    /// them is the cheapest loss) are evicted first; raw drafts whose
-    /// compression is still in flight (or never arrived) are the last resort,
-    /// because evicting one whole loses the full text instead of a summary.
-    fn evict_drafts(&mut self) {
+    /// Removes ONE whole chunk — a full user input or a full assistant output
+    /// — at a time, walking the timeline oldest-first from a persistent
+    /// cursor. After each removal the budget is checked: below the 80% trigger
+    /// → stop (the cursor parks on the next item, so the NEXT overflow resumes
+    /// exactly here — the decoupling is spread over many overflows and the
+    /// context lives much longer).
+    ///
+    /// Returns [`DraftOutcome::BelowTrigger`] when it stopped below the
+    /// trigger with the cursor parked on a regular item — the toggle stays on
+    /// the draft pass. Returns [`DraftOutcome::AtBoundary`] when it reaches a
+    /// [`ContextItem::LoopClosure`] (the oldest segment's drafts are
+    /// exhausted — the jurisdiction ends whether or not the total also dropped
+    /// below the trigger, `below`) or when the end of the timeline is reached
+    /// while STILL over the trigger (nothing left to evict). Ending the
+    /// timeline below the trigger is a plain `BelowTrigger`: the cursor resets
+    /// to `None` so the next overflow re-walks from the start, revisiting
+    /// items that only became removable later.
+    ///
+    /// Cursor parking: the walk-yield at a closure parks PAST it (`idx + 1`,
+    /// the next segment starts there), while a below-the-trigger stop with a
+    /// closure as the next item parks ON the closure — both are safe because
+    /// the resume looks for the first item with `id >= cursor`.
+    ///
+    /// Never removes [`LoopClosure`]s, protected prompts, the current
+    /// [`PromptAnchor`] or tool chains.
+    fn evict_drafts(&mut self) -> DraftOutcome {
         let trigger = self.trigger();
         let mut total = self.total_tokens();
         if total < trigger {
-            return;
+            // Defensive — `run` only calls this over the trigger.
+            return DraftOutcome::BelowTrigger;
         }
-        self.remove_drafts(&mut total, trigger, true);
-        if total < trigger {
-            return;
-        }
-        self.remove_drafts(&mut total, trigger, false);
-    }
-
-    /// Remove non-loop, non-protected items oldest-first while the total is at
-    /// or above the trigger. With `prefer_compressed` only drafts whose
-    /// compressed copy already landed are candidates; without it, only raw
-    /// ones (compression in flight or never arrived). Tool chains and
-    /// non-compressible assistants are always raw candidates (never
-    /// prose-compressed).
-    fn remove_drafts(&mut self, total: &mut usize, trigger: usize, prefer_compressed: bool) {
-        let ids: Vec<u64> = self.items.iter().map(ContextItem::id).collect();
-        for id in ids {
-            if *total < trigger {
+        // Resume from the persistent cursor (the id of the next item to
+        // consider), falling back to the start of the timeline. Ids are
+        // monotonic, so the first item with `id >= cursor` is the resume point
+        // even if the cursor item itself was removed by another phase.
+        let mut idx = self
+            .draft_cursor
+            .map(|cid| {
+                self.items
+                    .iter()
+                    .position(|it| it.id() >= cid)
+                    .unwrap_or(self.items.len())
+            })
+            .unwrap_or(0);
+        let mut removed_any = false;
+        loop {
+            // Advance past the non-removable items. A LoopClosure is the
+            // segment boundary: phase 2 yields here so the toggle can move on.
+            while idx < self.items.len() {
+                if self.items[idx].is_loop() {
+                    self.draft_cursor = self.items.get(idx + 1).map(|it| it.id());
+                    if removed_any {
+                        self.emit(CompactionEvent::DraftsEvicted);
+                    }
+                    return DraftOutcome::AtBoundary {
+                        below: total < trigger,
+                    };
+                }
+                if !self.is_removable_draft(idx) {
+                    idx += 1;
+                    continue;
+                }
                 break;
             }
-            let Some(idx) = self.items.iter().position(|it| it.id() == id) else {
-                continue;
-            };
-            if self.items[idx].is_loop() || self.items[idx].is_protected() {
-                // LoopClosures are the final summaries of completed loops and
-                // protected prompts are the active anchors — never removed.
-                continue;
-            }
-            if self.items[idx].is_tool() || self.anchor.is_some_and(|a| a.id == id) {
-                // Tool chains are owned by `evict_tools` (middle-out) — never
-                // the draft pass. The task anchor carries the user's intent
-                // and is draft-eviction-proof while it is the current anchor.
-                continue;
-            }
-            let already_compressed = matches!(
-                &self.items[idx],
-                ContextItem::User {
-                    compressed: Some(_),
-                    ..
-                } | ContextItem::Assistant {
-                    compressed: Some(_),
-                    ..
+            if idx >= self.items.len() {
+                // End of the timeline — no checkpoint ahead. Below the trigger
+                // → resolved, and the cursor resets so the next overflow
+                // re-walks from the start (revisiting items that only became
+                // removable later — the documented convergence). Still over
+                // → nothing left to evict: a boundary that hands the lead to
+                // the tool pass.
+                self.draft_cursor = None;
+                if removed_any {
+                    self.emit(CompactionEvent::DraftsEvicted);
                 }
-            );
-            if already_compressed != prefer_compressed {
-                continue;
+                return if total < trigger {
+                    DraftOutcome::BelowTrigger
+                } else {
+                    DraftOutcome::AtBoundary { below: false }
+                };
             }
-            *total = total.saturating_sub(self.remove_item(idx));
+            // Remove ONE chunk and check the budget immediately.
+            let removed = self.remove_item(idx);
+            total = total.saturating_sub(removed);
+            removed_any = true;
+            // The next item shifted into `idx`; park the cursor there.
+            self.draft_cursor = self.items.get(idx).map(|it| it.id());
+            if total < trigger {
+                // Below the trigger. If the very next item is a LoopClosure,
+                // the segment's drafts are exhausted too — phase 2's
+                // jurisdiction ends even though the budget was resolved (the
+                // walkthrough's "hit the checkpoint and the phase is done").
+                if removed_any {
+                    self.emit(CompactionEvent::DraftsEvicted);
+                }
+                return match self.items.get(idx) {
+                    Some(it) if it.is_loop() => DraftOutcome::AtBoundary { below: true },
+                    _ => DraftOutcome::BelowTrigger,
+                };
+            }
         }
+    }
+
+    /// True when the item at `idx` is a removable draft chunk: a user input or
+    /// an assistant output that is not a protected prompt, the current task
+    /// anchor or a tool-chain item. `LoopClosure`s are never removed here —
+    /// they are the segment boundary that ends phase 2's jurisdiction.
+    fn is_removable_draft(&self, idx: usize) -> bool {
+        let item = &self.items[idx];
+        if item.is_loop() || item.is_protected() || item.is_tool() {
+            return false;
+        }
+        !self.anchor.is_some_and(|a| a.id == item.id())
     }
 
     /// Trim `LoopClosure`s: when they alone hold ≥ 40% of the budget, discard
@@ -809,6 +1053,7 @@ impl ContextManager {
             .filter(|it| it.is_loop())
             .map(ContextItem::id)
             .collect();
+        let mut removed_any = false;
         for id in ids {
             if loop_tokens < target {
                 break;
@@ -816,7 +1061,11 @@ impl ContextManager {
             if let Some(idx) = self.items.iter().position(|it| it.id() == id) {
                 let removed = self.remove_item(idx);
                 loop_tokens = loop_tokens.saturating_sub(removed);
+                removed_any = true;
             }
+        }
+        if removed_any {
+            self.emit(CompactionEvent::ClosuresTrimmed);
         }
     }
 
@@ -824,15 +1073,13 @@ impl ContextManager {
 
     /// Render the whole conversation as provider-ready messages. One pass over
     /// the items (O(n) once per request); each item maps 1:1 to a message, so
-    /// positions are preserved. Polls finished compressions first so the view
-    /// is fresh.
+    /// positions are preserved.
     ///
     /// `current_input` is the harness's per-iteration steering message (e.g.
     /// "please continue with the tool results"): it is appended as a final
     /// `user` message, unless it duplicates the trailing user turn (which the
     /// harness already owns via [`add_user`](Self::add_user)).
     pub fn build_messages(&mut self, current_input: &str) -> Vec<ChatMessage> {
-        self.poll();
         let mut messages = Vec::with_capacity(self.items.len() + 1);
         // Skip leading tool results — a `tool` message right after `system` is
         // rejected by some providers (e.g. Mistral). Orphans should not exist
@@ -917,12 +1164,17 @@ impl ContextManager {
         self.items.iter().cloned().collect()
     }
 
-    /// Serializable snapshot for bincode persistence.
-    ///
-    /// A parked (`pending_job`) candidate is intentionally NOT serialized: on
-    /// restore it is covered by [`restore_state`](Self::restore_state)'s
-    /// re-submission of compressible items. Terminal paths clear the pending
-    /// job via `close_loop` before saving anyway.
+    /// The toggle's current lead phase (test accessor). Private — only the
+    /// child `test` module needs it, and it returns the module-private
+    /// [`ToggleLead`], so a broader visibility would trip `private_interfaces`.
+    #[cfg(test)]
+    fn toggle_for_test(&self) -> ToggleLead {
+        self.toggle_lead
+    }
+
+    /// Serializable snapshot for bincode persistence. The compression
+    /// pipeline runs synchronously at the next overflow, so there is no
+    /// in-flight work to exclude.
     pub fn save_state(&self) -> ContextManagerState {
         ContextManagerState {
             items: self.items.clone(),
@@ -933,54 +1185,23 @@ impl ContextManager {
         }
     }
 
-    /// Restore a previously saved snapshot, rebuilding the worker thread and
-    /// re-submitting every item that was still awaiting compression.
-    ///
-    /// The deferred job is not serialized (a saved session has moved on): any
-    /// compressible item that was still raw is re-submitted by the loop below,
-    /// which also covers a candidate that was parked at save time.
+    /// Restore a previously saved snapshot. The compression pipeline runs
+    /// synchronously at the next 80% overflow, so no re-submission is needed —
+    /// the items are restored verbatim and the pipeline summarizes them (or
+    /// the eviction phases remove them) exactly as in a fresh session.
     pub fn restore_state(&mut self, state: &ContextManagerState) {
         self.items = state.items.clone();
         self.next_id = state.next_id;
         self.user_prompts = state.user_prompts.clone();
         self.max_tokens = state.max_tokens;
         self.anchor = state.anchor;
-        self.pending_job = None;
-        // Scheduling bias only — a restored session restarts with the draft
-        // pass leading (the default order).
-        self.compact_lead = false;
-        let (work_tx, result_rx) = spawn_compressor();
-        self.work_tx = work_tx;
-        self.result_rx = result_rx;
-        for item in &self.items {
-            let job = match item {
-                // Only UNPROTECTED, NON-verbatim user prompts are re-submitted
-                // — protected prompts and the task anchors (verbatim) must
-                // never be compressed, so they stay verbatim across a
-                // save/restore.
-                ContextItem::User {
-                    id,
-                    original,
-                    protected: false,
-                    verbatim: false,
-                    compressed: None,
-                    ..
-                }
-                | ContextItem::Assistant {
-                    id,
-                    original,
-                    compressed: None,
-                    compressible: true,
-                    ..
-                } => Some((*id, original.clone())),
-                _ => None,
-            };
-            if let Some((id, text)) = job {
-                let _ = self.work_tx.send(CompressJob { id, text });
-            }
-        }
-        // The restored anchor prompt must be verbatim even if the snapshot
-        // predates the field (defensive).
+        // Scheduling bias only — a restored session restarts the gradual
+        // draft eviction from the beginning of the timeline and the toggle
+        // cycle at the pipeline.
+        self.draft_cursor = None;
+        self.toggle_lead = ToggleLead::Pipeline;
+        // Defensive: whatever the snapshot claims as the anchor must render
+        // verbatim, even if a hand-built state left the flag unset.
         if let Some(anchor) = self.anchor
             && let Some(idx) = self.items.iter().position(|it| it.id() == anchor.id)
             && let ContextItem::User { verbatim, .. } = &mut self.items[idx]
@@ -1059,9 +1280,14 @@ impl ContextManager {
         }
     }
 
-    /// Promote a previously protected user prompt (now no longer among the two
-    /// most recent) into the compressor queue.
-    fn submit_for_compression(&mut self, id: u64) {
+    /// Un-protect a previously protected user prompt (now no longer among the
+    /// two most recent): it becomes an ordinary draft. Compression is no
+    /// longer triggered here — the pipeline (phase 1 of the compaction)
+    /// summarizes unprotected drafts synchronously when the 80% budget
+    /// overflows, so this is purely a bookkeeping flip. Verbatim prompts (the
+    /// task anchor, or a former anchor) stay in their original form wherever
+    /// they sit — never compressed.
+    fn unprotect(&mut self, id: u64) {
         let Some(idx) = self.items.iter().position(|it| it.id() == id) else {
             return;
         };
@@ -1075,37 +1301,11 @@ impl ContextManager {
         else {
             return;
         };
-        let id = *id;
-        let verbatim = *verbatim;
-        let original = original.clone();
-        if verbatim {
-            // The task anchor (or a former anchor) stays in its original form
-            // — never submitted to the compression pipeline.
-            self.items[idx] = ContextItem::User {
-                id,
-                protected: false,
-                verbatim,
-                original,
-                compressed: None,
-            };
-            return;
-        }
-        if self
-            .work_tx
-            .send(CompressJob {
-                id,
-                text: original.clone(),
-            })
-            .is_err()
-        {
-            // Worker unavailable — keep the prompt protected so it is never lost.
-            return;
-        }
         self.items[idx] = ContextItem::User {
-            id,
+            id: *id,
             protected: false,
-            verbatim,
-            original,
+            verbatim: *verbatim,
+            original: original.clone(),
             compressed: None,
         };
     }

@@ -906,8 +906,11 @@ impl Harness {
         };
         self.context_manager
             .add_tool_call(&tool_id, name, &args_str);
-        self.context_manager
-            .add_tool_result_flagged(&tool_id, result, result_is_useless(name, result));
+        self.context_manager.add_tool_result_flagged(
+            &tool_id,
+            result,
+            result_is_useless(name, result),
+        );
     }
 
     /// Monotonic id generator for synthetic tool_call ids (inline JSON calls
@@ -960,6 +963,18 @@ impl Harness {
         // Store the stop signal so stream_chat can check it mid-stream.
         self.stop_signal = Some(stop_signal.clone());
 
+        // Route compaction-phase notifications to the TUI so it can show the
+        // pipeline stopwatch and the per-phase lines live in the chat. The
+        // pipeline runs synchronously on THIS thread, so the TUI (a separate
+        // thread) receives `PipelineStarted` before the compression work and
+        // `PipelineFinished` after it — exactly what the stopwatch needs.
+        self.context_manager.set_compaction_observer({
+            let tx = tx.clone();
+            move |event| {
+                let _ = tx.send(HarnessEvent::Compaction { event });
+            }
+        });
+
         // Pass the event tx to CoshTools for streaming tool output (e.g. bash)
         if let Some(ref mut cosh) = self.cosh_tools {
             cosh.set_event_tx(tx.clone());
@@ -987,8 +1002,9 @@ impl Harness {
             self.context_manager.add_user(input);
         }
 
-        // Drain any finished compressions and apply the 80% compaction before
-        // the first LLM request, so the initial context is already within budget.
+        // Apply the 80% compaction (the synchronous pipeline + eviction
+        // phases) before the first LLM request, so the initial context is
+        // already within budget.
         self.context_manager.run();
 
         // Send initial context info so the TUI budget bar shows immediately
