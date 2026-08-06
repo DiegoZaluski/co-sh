@@ -7,7 +7,7 @@ use cosh_sdk::extract_action::ToolSchema;
 use cosh_tools::{
     bash::{Bash, BashRunInput},
     find::Find,
-    fs::{EditTarget, Fs, FsRollbackInput, Target, TargetFile},
+    fs::{Fs, FsRollbackInput, Target, TargetFile},
     plan::{
         Plan,
         types::{
@@ -597,9 +597,7 @@ impl Tools for CoshTools {
             }
 
             "fs_edit" => {
-                let targets: Vec<EditTarget> =
-                    serde_json::from_value(args["targets"].clone()).map_err(|e| e.to_string())?;
-                let results = self.fs.edit(targets).await?;
+                let results = self.fs.edit(args).await?;
                 serde_json::to_string(&results).map_err(|e| e.to_string())
             }
 
