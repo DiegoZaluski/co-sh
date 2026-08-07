@@ -114,6 +114,10 @@ pub struct Harness {
     mode: Mode,
     /// Shared stop signal from the TUI, checked during streaming.
     stop_signal: Option<Arc<AtomicBool>>,
+    /// Event channel for streaming reasoning/thinking tokens to the TUI.
+    /// Set by [`run_agent_loop`](Self::run_agent_loop); the stream loop uses
+    /// it to emit [`HarnessEvent::Reasoning`] live while the model thinks.
+    reasoning_tx: Option<tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>>,
     /// To stop the agent loop.
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
@@ -216,6 +220,7 @@ impl Harness {
             cosh_tools: Some(CoshTools::new(cwd)),
             mode: Mode::Build,
             stop_signal: None,
+            reasoning_tx: None,
             stop: false,
             tool_issuer: VecDeque::new(),
             tool_call_synthetic: 0,
@@ -656,6 +661,16 @@ impl Harness {
                 );
             }
             self.process_stream_chunk(token, &mut extractor, &mut on_token);
+            // Stream reasoning/thinking deltas to the TUI so the user sees the
+            // model "think" while it works (never echoed back to the model).
+            let reasoning = chunk.reasoning();
+            if !reasoning.is_empty()
+                && let Some(ref rtx) = self.reasoning_tx
+            {
+                let _ = rtx.send(super::events::HarnessEvent::Reasoning {
+                    text: reasoning.to_string(),
+                });
+            }
         }
 
         self.last_failed_raw = extractor.take_last_failed_raw();
@@ -810,6 +825,16 @@ impl Harness {
                 );
             }
             self.process_stream_chunk(token, &mut extractor, &mut on_token);
+            // Stream reasoning/thinking deltas to the TUI so the user sees the
+            // model "think" while it works (never echoed back to the model).
+            let reasoning = chunk.reasoning();
+            if !reasoning.is_empty()
+                && let Some(ref rtx) = self.reasoning_tx
+            {
+                let _ = rtx.send(super::events::HarnessEvent::Reasoning {
+                    text: reasoning.to_string(),
+                });
+            }
         }
 
         // Capture the last failed tool call raw JSON for correction feedback
@@ -962,6 +987,9 @@ impl Harness {
 
         // Store the stop signal so stream_chat can check it mid-stream.
         self.stop_signal = Some(stop_signal.clone());
+
+        // Route reasoning/thinking tokens to the TUI as they stream in.
+        self.reasoning_tx = Some(tx.clone());
 
         // Route compaction-phase notifications to the TUI so it can show the
         // pipeline stopwatch and the per-phase lines live in the chat. The
@@ -1820,6 +1848,7 @@ impl Harness {
             cosh_tools: None,
             mode: Mode::Build,
             stop_signal: None,
+            reasoning_tx: None,
             stop: false,
             tool_issuer: VecDeque::new(),
             tool_call_synthetic: 0,

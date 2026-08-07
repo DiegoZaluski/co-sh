@@ -131,6 +131,12 @@ struct ChunkChoice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    /// Reasoning/thinking text delta (DeepSeek/GLM-style reasoning models).
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    /// Alternate reasoning field name used by some OpenAI-compatible models.
+    #[serde(default)]
+    reasoning: Option<String>,
     /// Streaming tool call deltas (OpenAI-compatible API).
     /// Each chunk may carry a partial tool call for one or more indices.
     #[serde(default)]
@@ -193,6 +199,7 @@ fn flush_tool_calls(
         out.push(StreamChunk {
             raw: raw.clone(),
             token: pending_tool_call_to_json(&tc),
+            reasoning: String::new(),
             finish_reason: Some("tool_calls".to_string()),
         });
     }
@@ -321,6 +328,10 @@ fn process_sse_response(
                             .and_then(|c| c.delta.content.as_deref())
                             .unwrap_or("")
                             .to_owned();
+                        let reasoning = ccr.choices.first()
+                            .and_then(|c| c.delta.reasoning.as_deref().or(c.delta.reasoning_content.as_deref()))
+                            .unwrap_or("")
+                            .to_owned();
                         let finish_reason = ccr.choices.first()
                             .and_then(|c| c.finish_reason.as_deref())
                             .map(String::from);
@@ -331,6 +342,18 @@ fn process_sse_response(
                             yield Ok(StreamChunk {
                                 raw: data.clone(),
                                 token,
+                                reasoning: String::new(),
+                                finish_reason: None,
+                            });
+                        }
+
+                        // Emit a reasoning delta whenever the model streams one
+                        // (even without text), so the TUI can show it live.
+                        if !reasoning.is_empty() {
+                            yield Ok(StreamChunk {
+                                raw: data.clone(),
+                                token: String::new(),
+                                reasoning,
                                 finish_reason: None,
                             });
                         }
@@ -349,6 +372,7 @@ fn process_sse_response(
                             yield Ok(StreamChunk {
                                 raw: data,
                                 token: String::new(),
+                                reasoning: String::new(),
                                 finish_reason,
                             });
                             return;

@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
-use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
+use cosh_tui::core::lib::rgba::{ColorInput, RGBA, ansi256_index_to_rgb};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::scroll_bar::{ScrollBarOrientation, ScrollBarRenderable};
@@ -626,7 +626,74 @@ impl SessionView {
             md.set_bg(Some(ColorInput::RGBA(theme.background)));
             md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
             md.render_self(buf, md_area);
+            // Dim the whole reasoning body toward the background so it reads as
+            // opaque "thinking" text — white becomes gray and syntax-highlight
+            // colors get grayed out. Uses the theme's `thinking_opacity`. Cells
+            // whose foreground is unset (Reset — how the markdown renderer
+            // paints plain paragraphs) are colored from the muted base first,
+            // so the plain text also ends up dimmed/gray instead of matching
+            // the normal reply's color.
+            Self::dim_reasoning_region(
+                buf,
+                md_area,
+                theme.thinking_opacity,
+                theme.text_muted,
+                theme.background,
+            );
             *line_h = 1 + md_h;
+        }
+    }
+
+    /// Resolve a ratatui [`Color`] to its (r, g, b) channels when possible.
+    fn color_to_rgb(c: Color) -> Option<(u8, u8, u8)> {
+        match c {
+            Color::Rgb(r, g, b) => Some((r, g, b)),
+            Color::Indexed(i) => Some(ansi256_index_to_rgb(i)),
+            _ => None,
+        }
+    }
+
+    /// Blend a foreground channel toward a background channel by `keep`
+    /// (1.0 = keep the fg fully, 0.0 = fully the bg colour).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn blend_channel(fg: u8, bg: u8, keep: f64) -> u8 {
+        (f64::from(fg) * keep + f64::from(bg) * (1.0 - keep)).round() as u8
+    }
+
+    /// Dim a rendered region toward its background so it looks "pushed back" /
+    /// opaque. Used for the reasoning/thinking body so the model's internal
+    /// text — including syntax highlighting — appears grayed-out (less bright)
+    /// compared to the normal reply. `opacity` comes from the theme's
+    /// `thinking_opacity` (1.0 = no dimming). `base_fg` is the fallback colour
+    /// used for cells with no explicit foreground (Reset — how plain markdown
+    /// paragraphs are painted), which is then also dimmed so the plain text is
+    /// visibly gray rather than matching the normal reply.
+    fn dim_reasoning_region(
+        buf: &mut Buffer,
+        area: Rect,
+        opacity: f64,
+        base_fg: RGBA,
+        fallback_bg: RGBA,
+    ) {
+        let keep = opacity.clamp(0.0, 1.0);
+        if keep >= 1.0 {
+            return;
+        }
+        let base = Self::color_to_rgb(rgba_color(base_fg)).unwrap_or((220, 220, 220));
+        let fallback = Self::color_to_rgb(rgba_color(fallback_bg)).unwrap_or((0, 0, 0));
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let Some(cell) = buf.cell_mut((x, y)) else {
+                    continue;
+                };
+                let (fr, fg_, fb) = Self::color_to_rgb(cell.fg).unwrap_or(base);
+                let (br, bg_, bb) = Self::color_to_rgb(cell.bg).unwrap_or(fallback);
+                cell.fg = Color::Rgb(
+                    Self::blend_channel(fr, br, keep),
+                    Self::blend_channel(fg_, bg_, keep),
+                    Self::blend_channel(fb, bb, keep),
+                );
+            }
         }
     }
 

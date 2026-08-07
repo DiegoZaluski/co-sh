@@ -430,6 +430,7 @@ pub async fn chat_stream(
                             yield Ok(StreamChunk {
                                 raw: data,
                                 token,
+                                reasoning: String::new(),
                                 finish_reason,
                             });
                             if should_stop {

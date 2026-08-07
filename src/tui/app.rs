@@ -3534,19 +3534,29 @@ impl App {
                 }
 
                 HarnessEvent::Reasoning { text } => {
+                    if text.trim().is_empty() {
+                        continue;
+                    }
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
-                    let part = Part::Reasoning(ReasoningPart {
-                        text: text.clone(),
-                        collapsed: true,
-                    });
                     match session.messages.last_mut() {
-                        Some(msg) if msg.role == MessageRole::Assistant => msg.parts.push(part),
+                        Some(msg) if msg.role == MessageRole::Assistant => {
+                            match msg.parts.last_mut() {
+                                Some(Part::Reasoning(rp)) => rp.text.push_str(&text),
+                                _ => msg.parts.push(Part::Reasoning(ReasoningPart {
+                                    text: text.clone(),
+                                    collapsed: true,
+                                })),
+                            }
+                        }
                         _ => session.messages.push(Message {
                             id: format!("msg-{}", session.messages.len()),
                             role: MessageRole::Assistant,
-                            parts: vec![part],
+                            parts: vec![Part::Reasoning(ReasoningPart {
+                                text: text.clone(),
+                                collapsed: true,
+                            })],
                             created_at: 0,
                             agent: None,
                             model: None,

@@ -18,7 +18,7 @@ use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::{Theme, ThemeRegistry};
-use crate::types::{Message, MessageRole, Part, Session, SessionStatus, TextPart};
+use crate::types::{Message, MessageRole, Part, ReasoningPart, Session, SessionStatus, TextPart};
 
 use super::SessionView;
 
@@ -229,6 +229,52 @@ fn test_scan_content_height_works() {
         "Expected content height 1-5, got {actual_h}"
     );
     eprintln!("[TEST] scan_content_height returned {actual_h} for simple text");
+}
+
+/// Verify that the reasoning/thinking body is dimmed toward the background by
+/// the theme's `thinking_opacity` — white becomes gray, highlight colors get
+/// grayed out — so it reads as "opaque thinking" vs. the normal reply.
+#[test]
+fn test_reasoning_body_is_dimmed() {
+    use ratatui::style::Color;
+
+    let theme = test_theme();
+    let (mr, mg, mb, _) = theme.text_muted.to_ints();
+    let (br, bg, bb, _) = theme.background.to_ints();
+    let keep = theme.thinking_opacity.clamp(0.0, 1.0);
+    assert!(
+        keep < 1.0,
+        "thinking_opacity should dim content (expected < 1.0, got {keep})"
+    );
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 20));
+    let mut line_h = 0u16;
+    let part = ReasoningPart {
+        text: "Hello thinking".to_string(),
+        collapsed: false,
+    };
+    super::SessionView::render_reasoning(&mut buf, 0, 0, &mut line_h, 80, &part, true, &theme);
+
+    // Header on row 0, body markdown starts at x+2=2, y+1=1.
+    let cell = buf
+        .cell((2, 1))
+        .expect("expected a body cell below the - Thought header");
+
+    let dim = |fg: u8, bg: u8| (f64::from(fg) * keep + f64::from(bg) * (1.0 - keep)).round() as u8;
+    match cell.fg {
+        Color::Rgb(r, g, b) => {
+            assert_eq!(
+                (r, g, b),
+                (dim(mr, br), dim(mg, bg), dim(mb, bb)),
+                "reasoning body must be dimmed by thinking_opacity"
+            );
+        }
+        other => panic!("expected dimmed Rgb foreground, got {other:?}"),
+    }
+    assert!(
+        line_h >= 2,
+        "reasoning (header + body) should occupy at least 2 rows, got {line_h}"
+    );
 }
 
 /// Test rendering with progressively larger messages to check for

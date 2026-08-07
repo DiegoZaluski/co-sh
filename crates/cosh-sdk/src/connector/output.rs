@@ -42,10 +42,20 @@ impl ChatOutput {
 pub struct StreamChunk {
     pub(crate) raw: String,
     pub(crate) token: String,
+    pub(crate) reasoning: String,
     pub(crate) finish_reason: Option<String>,
 }
 
 impl StreamChunk {
+    /// Reasoning/thinking delta for this chunk (if the provider streams it).
+    ///
+    /// Many reasoning models emit this separately from the visible text
+    /// token. It is shown in the TUI as a collapsible "Thought" block but is
+    /// never echoed back to the model.
+    #[must_use]
+    pub fn reasoning(&self) -> &str {
+        &self.reasoning
+    }
     /// Text delta for this chunk — the next token(s) in the model's reply.
     #[must_use]
     pub fn token(&self) -> &str {

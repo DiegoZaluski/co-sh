@@ -22,7 +22,7 @@ impl Default for TuiConfig {
             conceal: false,
             show_tool_details: true,
             show_generic_tool_output: true,
-            thinking_mode: false,
+            thinking_mode: true,
             theme_gen: 0,
         }
     }

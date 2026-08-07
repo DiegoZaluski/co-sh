@@ -351,6 +351,7 @@ fn flush_claude_tool_uses(
         out.push(StreamChunk {
             raw: raw.clone(),
             token: json.to_string(),
+            reasoning: String::new(),
             finish_reason: Some("tool_calls".to_string()),
         });
     }
@@ -493,6 +494,7 @@ pub async fn chat_stream_with_messages(
                                             yield Ok(StreamChunk {
                                                 raw: data.clone(),
                                                 token,
+                                                reasoning: String::new(),
                                                 finish_reason: None,
                                             });
                                         }
@@ -527,6 +529,7 @@ pub async fn chat_stream_with_messages(
                                         yield Ok(StreamChunk {
                                             raw: data,
                                             token: String::new(),
+                                            reasoning: String::new(),
                                             finish_reason,
                                         });
                                         return;
@@ -614,6 +617,7 @@ pub async fn chat_stream(
                                         yield Ok(StreamChunk {
                                             raw: data,
                                             token,
+                                            reasoning: String::new(),
                                             finish_reason: None,
                                         });
                                     }
@@ -625,6 +629,7 @@ pub async fn chat_stream(
                                     yield Ok(StreamChunk {
                                         raw: data,
                                         token: String::new(),
+                                        reasoning: String::new(),
                                         finish_reason,
                                     });
                                 }
