@@ -334,6 +334,11 @@ pub struct SessionView {
     /// Cached text regions per message. Populated during the render loop;
     /// consumed by `build_text_regions` to avoid redundant markdown parses.
     msg_cache_text_regions: Vec<Option<Vec<TextRegion>>>,
+    /// Reusable scratch buffer for temp renders (up to 5000 rows tall). Kept
+    /// across frames — `Buffer::resize` retains the underlying allocation, so
+    /// streaming no longer allocates/frees a large buffer every frame, which
+    /// fragmented the heap and degraded the TUI over the process lifetime.
+    scratch: Option<ratatui::buffer::Buffer>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -415,6 +420,7 @@ impl SessionView {
             msg_cache_w: Vec::new(),
             msg_cache_h: Vec::new(),
             msg_cache_text_regions: Vec::new(),
+            scratch: None,
             last_session_id: None,
             last_tool_state_version: 0,
         }
@@ -1678,7 +1684,12 @@ impl SessionView {
         config: &TuiConfig,
         theme: &Theme,
     ) {
-        self.text_regions.clear();
+        // Direct field borrows keep the reusable scratch buffer (a `&mut`
+        // borrow of `self.scratch`) disjoint from `self.text_regions` pushes
+        // and the other fields touched inside the per-part loop.
+        let text_regions = &mut self.text_regions;
+        let scratch = &mut self.scratch;
+        text_regions.clear();
 
         let scroll = self.scroll_y;
         let x_off = inner_area.x + 3;
@@ -1759,7 +1770,7 @@ impl SessionView {
                                             let cs_end = p_end_cs.min(vp_end_cs);
                                             for region in cached {
                                                 if region.y1 >= cs_start && region.y1 < cs_end {
-                                                    self.text_regions.push(TextRegion {
+                                                    text_regions.push(TextRegion {
                                                         y1: region.y1,
                                                         y2: region.y1 + 1,
                                                         x1: x_off,
@@ -1775,7 +1786,16 @@ impl SessionView {
                                         let generous_h =
                                             ((part_h as u16).saturating_mul(3)).clamp(200, 5000);
                                         let scan_area = Rect::new(0, 0, max_w, generous_h);
-                                        let mut temp = ratatui::buffer::Buffer::empty(scan_area);
+                                        // Reuse the scratch buffer instead of allocating a
+                                        // fresh multi-thousand-row buffer every frame while
+                                        // the last message streams.
+                                        let temp = scratch
+                                            .get_or_insert_with(|| {
+                                                ratatui::buffer::Buffer::empty(scan_area)
+                                            });
+                                        if *temp.area() != scan_area {
+                                            temp.resize(scan_area);
+                                        }
 
                                         let empty_style = Style::default()
                                             .bg(rgba_color(theme.background))
@@ -1797,7 +1817,7 @@ impl SessionView {
                                         md.set_table_border_color(Some(ColorInput::RGBA(
                                             RGBA::from_ints(255, 200, 0, 255),
                                         )));
-                                        md.render_self(&mut temp, scan_area);
+                                        md.render_self(temp, scan_area);
 
                                         let screen_end = p_bottom.min(vp_bottom) as u16;
                                         for (screen_line_y, ty) in
@@ -1818,7 +1838,7 @@ impl SessionView {
 
                                             let trimmed = line_text.trim_end().to_string();
                                             let cy = (screen_line_y as i32) - vp_top + scroll;
-                                            self.text_regions.push(TextRegion {
+                                            text_regions.push(TextRegion {
                                                 y1: cy,
                                                 y2: cy + 1,
                                                 x1: x_off,
@@ -1836,7 +1856,7 @@ impl SessionView {
                                         if logical_line.is_empty() {
                                             if screen_line_y < screen_end {
                                                 let cy = (screen_line_y as i32) - vp_top + scroll;
-                                                self.text_regions.push(TextRegion {
+                                                text_regions.push(TextRegion {
                                                     y1: cy,
                                                     y2: cy + 1,
                                                     x1: x_off,
@@ -1855,7 +1875,7 @@ impl SessionView {
                                                 break;
                                             }
                                             let cy = (screen_line_y as i32) - vp_top + scroll;
-                                            self.text_regions.push(TextRegion {
+                                            text_regions.push(TextRegion {
                                                 y1: cy,
                                                 y2: cy + 1,
                                                 x1: x_off,
@@ -1891,7 +1911,7 @@ impl SessionView {
                                 // Add inline tool label (only when visible)
                                 if p_top >= vp_top {
                                     let label = self::tool_render::tool_inline_text(t);
-                                    self.text_regions.push(TextRegion {
+                                    text_regions.push(TextRegion {
                                         y1: content_offset,
                                         y2: content_offset + 1,
                                         x1: x_off,
@@ -1929,7 +1949,7 @@ impl SessionView {
                                         for display_line in display.lines() {
                                             if out_screen_y < screen_end {
                                                 let cy = (out_screen_y as i32) - vp_top + scroll;
-                                                self.text_regions.push(TextRegion {
+                                                text_regions.push(TextRegion {
                                                     y1: cy,
                                                     y2: cy + 1,
                                                     x1: x_off,
@@ -1949,7 +1969,7 @@ impl SessionView {
                                         .is_expanded(&r.text[..r.text.floor_char_boundary(32)]);
                                 let header = if expanded { "- Thought" } else { "+ Thought" };
                                 if p_top >= vp_top {
-                                    self.text_regions.push(TextRegion {
+                                    text_regions.push(TextRegion {
                                         y1: content_offset,
                                         y2: content_offset + 1,
                                         x1: x_off,
@@ -1966,7 +1986,7 @@ impl SessionView {
                                     for line in truncated.lines() {
                                         if screen_line_y < screen_end && !line.is_empty() {
                                             let cy = (screen_line_y as i32) - vp_top + scroll;
-                                            self.text_regions.push(TextRegion {
+                                            text_regions.push(TextRegion {
                                                 y1: cy,
                                                 y2: cy + 1,
                                                 x1: x_off + 2,
@@ -1981,7 +2001,7 @@ impl SessionView {
                             crate::types::Part::Compaction(c) => {
                                 let text = compaction_line(c, crate::types::now_ms());
                                 if p_top >= vp_top {
-                                    self.text_regions.push(TextRegion {
+                                    text_regions.push(TextRegion {
                                         y1: content_offset,
                                         y2: content_offset + 1,
                                         x1: x_off,
@@ -2182,6 +2202,13 @@ impl SessionView {
             scrollbar.render_self(buf, scrollbar_area);
         }
 
+        // Reuse one scratch buffer across all temp renders in this frame (and
+        // across frames — `Buffer::resize` keeps the allocation). Removes the
+        // per-frame large allocations that accumulated heap churn and
+        // fragmented the allocator over long sessions. A direct field borrow
+        // keeps `scratch` disjoint from the `tool_state`/cache writes below.
+        let scratch = &mut self.scratch;
+
         let mut y = i32::from(inner_area.y) - self.scroll_y;
         let vp_top = i32::from(inner_area.y);
         let vp_bottom = i32::from(inner_area.bottom());
@@ -2205,13 +2232,22 @@ impl SessionView {
                 if is_top_clipped && is_assistant_non_error {
                     // ── Top-clipped assistant (non-error) ──
                     let is_streaming_msg = idx == session.messages.len() - 1 && streaming;
-                    // Bypass cache when any tool has an active spinner so the
-                    // beam animation advances every frame.
-                    let has_active_spinner = self
-                        .tool_state
-                        .tool_spinners
-                        .iter()
-                        .any(|(_, s)| !s.is_idle());
+                    // Bypass the cell cache only when THIS message contains an
+                    // active/finishing spinner so its beam advances every frame.
+                    // A global "any spinner in the session" check forced every
+                    // top-clipped message to re-render fully on every frame
+                    // while any tool animated — the main per-frame cost during
+                    // agent bursts.
+                    let has_active_spinner = msg.parts.iter().enumerate().any(|(pi, part)| {
+                        matches!(part, Part::Tool(t)
+                            if self.tool_state.tool_spinners
+                                .get(&format!(
+                                    "{}_{}",
+                                    tool_render::tool_display(&t.tool),
+                                    pi
+                                ))
+                                .is_some_and(|s| !s.is_idle()))
+                    });
                     let token = msg_content_token(msg, config_tok, max_w, &self.tool_state);
                     let cache_hit = !is_streaming_msg
                         && !has_active_spinner
@@ -2242,20 +2278,27 @@ impl SessionView {
                         }
                         render_actual_h = cached_h as i32;
                     } else {
-                        // ── Fall back: temp buffer render ──
+                        // ── Fall back: temp buffer render (scratch reused across frames) ──
                         let src_y = (vp_top - msg_top) as u16;
                         let dst_y = vp_top as u16;
                         let generous_h =
                             ((msg_h as u16).saturating_add(inner_area.height)).clamp(100, 5000);
                         let full_area = Rect::new(0, 0, inner_area.width, generous_h);
-                        let mut temp = Buffer::empty(full_area);
+                        let temp = scratch.get_or_insert_with(|| Buffer::empty(full_area));
+                        if *temp.area() != full_area {
+                            temp.resize(full_area);
+                        }
+                        // `Buffer::resize` keeps existing cell content, so clear it
+                        // before rendering: un-written cells would otherwise show
+                        // glyphs from the previous message rendered into this buffer.
+                        temp.reset();
                         temp.set_style(
                             full_area,
                             Style::default().bg(rgba_color(theme.background)),
                         );
 
                         let mut actual_h = Self::render_assistant_message(
-                            &mut temp,
+                            temp,
                             full_area,
                             msg,
                             theme,
@@ -2359,7 +2402,14 @@ impl SessionView {
 
                     if vis_h > 0 && msg_h > 0 {
                         let full_area = Rect::new(0, 0, inner_area.width, msg_h as u16);
-                        let mut temp = Buffer::empty(full_area);
+                        let temp = scratch.get_or_insert_with(|| Buffer::empty(full_area));
+                        if *temp.area() != full_area {
+                            temp.resize(full_area);
+                        }
+                        // `Buffer::resize` keeps existing cell content, so clear it
+                        // before rendering: un-written cells would otherwise show
+                        // glyphs from the previous message rendered into this buffer.
+                        temp.reset();
                         temp.set_style(
                             full_area,
                             Style::default().bg(rgba_color(theme.background)),
@@ -2370,7 +2420,7 @@ impl SessionView {
                                 let agent_name = msg.agent.as_deref().unwrap_or("default");
                                 let agent_color = agent_colors.get(agent_name, &unique_agents);
                                 Self::render_user_message(
-                                    &mut temp,
+                                    temp,
                                     full_area,
                                     msg,
                                     theme,
@@ -2385,7 +2435,7 @@ impl SessionView {
                             }
                             MessageRole::Assistant => {
                                 Self::render_assistant_message(
-                                    &mut temp,
+                                    temp,
                                     full_area,
                                     msg,
                                     theme,
@@ -2594,14 +2644,21 @@ impl SessionView {
                                         .saturating_add(inner_area.height))
                                     .clamp(100, 5000);
                                     let full_area = Rect::new(0, 0, inner_area.width, generous_h);
-                                    let mut temp = Buffer::empty(full_area);
+                                    let temp = scratch.get_or_insert_with(|| Buffer::empty(full_area));
+                                    if *temp.area() != full_area {
+                                        temp.resize(full_area);
+                                    }
+                                    // `Buffer::resize` keeps existing cell content, so clear it
+                                    // before rendering: un-written cells would otherwise show
+                                    // glyphs from the previous message rendered into this buffer.
+                        temp.reset();
                                     temp.set_style(
                                         full_area,
                                         Style::default().bg(rgba_color(theme.background)),
                                     );
 
                                     let mut actual_h = Self::render_assistant_message(
-                                        &mut temp,
+                                        temp,
                                         full_area,
                                         msg,
                                         theme,

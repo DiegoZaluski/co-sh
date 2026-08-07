@@ -1,3 +1,13 @@
+/// Maximum number of PTY sessions (bash + subagent) kept in the right panel.
+/// Older sessions are evicted first so the panel cannot grow without bound
+/// over the process lifetime (restarting the app used to be the only way to
+/// clear the accumulated output).
+const MAX_PTY_SESSIONS: usize = 20;
+
+/// Maximum number of characters of output retained per PTY session.
+/// Only the TAIL is kept, since the panel renders the most recent output.
+const MAX_PTY_OUTPUT_CHARS: usize = 60_000;
+
 /// A single todo item from the LLM's plan_todo_write tool.
 #[derive(Debug, Clone)]
 pub struct TodoItem {
@@ -56,6 +66,18 @@ pub struct RightPanelState {
     /// Per-section activation order values. Index by `section_kind_index()`.
     section_activity_order: [u64; 3],
 
+    // ── Derived buffer caches (avoid rebuilding all accumulated output per frame) ──
+    /// Bumped on every PTY mutation; the derived text buffers are rebuilt only
+    /// when this changes. Without this, every frame rebuilt the FULL output of
+    /// every bash/subagent session twice (height calc + render).
+    pty_gen: u64,
+    /// Cached bash line buffer (`$ command` + output lines), keyed to `pty_gen`.
+    bash_buffer_cache: Vec<String>,
+    bash_cache_gen: u64,
+    /// Cached subagent line buffer (command header + output lines), keyed to `pty_gen`.
+    subagent_buffer_cache: Vec<String>,
+    subagent_cache_gen: u64,
+
     // ── Per-section scroll state ───────────────────────────────────
     /// Scroll offset within the TODO section (only when items overflow).
     pub todo_scroll_y: i32,
@@ -85,6 +107,11 @@ impl RightPanelState {
             next_pty_id: 0,
             next_activity_id: 1,
             section_activity_order: [0; 3],
+            pty_gen: 0,
+            bash_buffer_cache: Vec::new(),
+            bash_cache_gen: 0,
+            subagent_buffer_cache: Vec::new(),
+            subagent_cache_gen: 0,
             todo_scroll_y: 0,
             bash_scroll_y: 0,
             subagent_scroll_y: 0,
@@ -210,6 +237,19 @@ impl RightPanelState {
             workdir,
             status: PtyStatus::Running,
         });
+        // Bound memory: evict the oldest COMPLETED sessions beyond the cap.
+        // A running session is never evicted (output updates target the last
+        // running one), but the agent runs commands sequentially, so the oldest
+        // entries are always finished.
+        self.pty_gen = self.pty_gen.wrapping_add(1);
+        while self.pty_sessions.len() > MAX_PTY_SESSIONS
+            && !matches!(
+                self.pty_sessions.first(),
+                Some(p) if matches!(p.status, PtyStatus::Running)
+            )
+        {
+            self.pty_sessions.remove(0);
+        }
     }
 
     /// Append output for the last running PTY session.
@@ -227,6 +267,8 @@ impl RightPanelState {
                 Some(SectionKind::Bash)
             };
             session.output.push_str(&output);
+            Self::truncate_output(&mut session.output);
+            self.pty_gen = self.pty_gen.wrapping_add(1);
         }
         if let Some(kind) = found_kind {
             self.mark_activity(kind);
@@ -235,6 +277,8 @@ impl RightPanelState {
 
     /// Mark the last running PTY session as completed.
     pub fn complete_last_pty(&mut self, final_output: String) {
+        let mut final_output = final_output;
+        Self::truncate_output(&mut final_output);
         if let Some(session) = self
             .pty_sessions
             .iter_mut()
@@ -243,11 +287,14 @@ impl RightPanelState {
         {
             session.output = final_output;
             session.status = PtyStatus::Completed;
+            self.pty_gen = self.pty_gen.wrapping_add(1);
         }
     }
 
     /// Mark the last running PTY session as failed.
     pub fn fail_last_pty(&mut self, error: String) {
+        let mut error = error;
+        Self::truncate_output(&mut error);
         if let Some(session) = self
             .pty_sessions
             .iter_mut()
@@ -256,7 +303,65 @@ impl RightPanelState {
         {
             session.output = error;
             session.status = PtyStatus::Failed;
+            self.pty_gen = self.pty_gen.wrapping_add(1);
         }
+    }
+
+    /// Trim a PTY output string to `MAX_PTY_OUTPUT_CHARS`, keeping the TAIL
+    /// (the panel shows the most recent output). Cuts at a line boundary when
+    /// possible so a partial line never appears at the top of the buffer.
+    fn truncate_output(output: &mut String) {
+        if output.len() <= MAX_PTY_OUTPUT_CHARS {
+            return;
+        }
+        let start = output.len() - MAX_PTY_OUTPUT_CHARS;
+        let cut = output[start..]
+            .find('\n')
+            .map_or(start, |i| start + i + 1);
+        output.drain(..cut);
+    }
+
+    /// Derived line buffer of all bash PTY sessions (`$ command` + output lines)
+    /// in order. Cached until the next PTY mutation: rebuilding the entire
+    /// accumulated output on every frame was the dominant per-frame cost of the
+    /// right panel as a session grew long.
+    pub(crate) fn bash_buffer(&mut self) -> &[String] {
+        if self.pty_gen != self.bash_cache_gen {
+            self.bash_buffer_cache.clear();
+            for pty in &self.pty_sessions {
+                if pty.command.starts_with("subagent:") {
+                    continue;
+                }
+                // Header: $ command (simulating a shell prompt)
+                self.bash_buffer_cache.push(format!("$ {}", pty.command));
+                for line in pty.output.lines() {
+                    self.bash_buffer_cache.push(line.to_string());
+                }
+            }
+            self.bash_cache_gen = self.pty_gen;
+        }
+        &self.bash_buffer_cache
+    }
+
+    /// Derived line buffer of all subagent PTY sessions (command header + output
+    /// lines) in order. Same-agent entries are deduplicated by `app.rs`.
+    /// Cached until the next PTY mutation (see [`Self::bash_buffer`]).
+    pub(crate) fn subagent_buffer(&mut self) -> &[String] {
+        if self.pty_gen != self.subagent_cache_gen {
+            self.subagent_buffer_cache.clear();
+            for pty in &self.pty_sessions {
+                if !pty.command.starts_with("subagent:") {
+                    continue;
+                }
+                // Header: the command line (e.g., "subagent: opencode")
+                self.subagent_buffer_cache.push(pty.command.clone());
+                for line in pty.output.lines() {
+                    self.subagent_buffer_cache.push(line.to_string());
+                }
+            }
+            self.subagent_cache_gen = self.pty_gen;
+        }
+        &self.subagent_buffer_cache
     }
 
     /// Check if there's any content to show in the panel.
@@ -377,5 +482,101 @@ mod tests {
         assert_eq!(todos.todo_scroll_y, i32::MAX);
         todos.scroll_up(5);
         assert_eq!(todos.todo_scroll_y, i32::MAX - 5);
+    }
+
+    /// The right panel must not accumulate every bash command of the process
+    /// lifetime — the oldest COMPLETED sessions are evicted beyond the cap.
+    #[test]
+    fn pty_sessions_are_evicted_beyond_cap() {
+        let mut state = RightPanelState::new();
+        for i in 0..(MAX_PTY_SESSIONS + 10) {
+            state.start_pty(format!("cmd{i}"), None);
+            state.complete_last_pty(format!("out{i}"));
+        }
+        assert!(state.pty_sessions.len() <= MAX_PTY_SESSIONS);
+        // The most recent commands survive; the oldest are gone.
+        assert!(state
+            .pty_sessions
+            .iter()
+            .any(|p| p.command == format!("cmd{}", MAX_PTY_SESSIONS + 9)));
+        assert!(!state
+            .pty_sessions
+            .iter()
+            .any(|p| p.command == "cmd0"));
+    }
+
+    /// A running session is never evicted (output updates target the last
+    /// running session), even when the cap is exceeded.
+    #[test]
+    fn running_pty_is_never_evicted() {
+        let mut state = RightPanelState::new();
+        for i in 0..(MAX_PTY_SESSIONS + 5) {
+            state.start_pty(format!("done{i}"), None);
+            state.complete_last_pty("ok".to_string());
+        }
+        // Leave the newest session running while over the cap.
+        state.start_pty("running".to_string(), None);
+        assert!(state
+            .pty_sessions
+            .iter()
+            .any(|p| p.command == "running"));
+    }
+
+    /// Output is truncated to `MAX_PTY_OUTPUT_CHARS`, keeping the TAIL (the
+    /// panel displays the most recent output).
+    #[test]
+    fn pty_output_is_truncated_to_max_chars() {
+        let mut state = RightPanelState::new();
+        state.start_pty("cmd".to_string(), None);
+        let big = "x".repeat(MAX_PTY_OUTPUT_CHARS + 5000);
+        state.update_last_pty(big);
+        let session = state.pty_sessions.last().unwrap();
+        assert!(session.output.len() <= MAX_PTY_OUTPUT_CHARS);
+        // The tail is preserved.
+        assert!(session.output.ends_with(&"x".repeat(100)));
+    }
+
+    /// The derived bash/subagent buffers are cached and only rebuilt when a
+    /// PTY mutation happens (previously rebuilt from scratch every frame).
+    #[test]
+    fn pty_buffers_rebuild_only_on_mutation() {
+        let mut state = RightPanelState::new();
+        state.start_pty("echo hi".to_string(), None);
+        state.complete_last_pty("hi".to_string());
+
+        let first = state.bash_buffer().to_vec();
+        assert_eq!(first, vec!["$ echo hi".to_string(), "hi".to_string()]);
+
+        // No mutation → the cached slice is served unchanged.
+        assert_eq!(state.bash_buffer(), first);
+
+        // Mutation bumps the generation → the cache is rebuilt with new output.
+        state.start_pty("echo yo".to_string(), None);
+        state.complete_last_pty("yo".to_string());
+        assert_eq!(
+            state.bash_buffer(),
+            vec![
+                "$ echo hi".to_string(),
+                "hi".to_string(),
+                "$ echo yo".to_string(),
+                "yo".to_string(),
+            ]
+        );
+    }
+
+    /// Bash and subagent sessions are separated into their own buffers.
+    #[test]
+    fn subagent_and_bash_buffers_are_separate() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.complete_last_pty("agent output".to_string());
+        state.start_pty("echo hi".to_string(), None);
+        state.complete_last_pty("hi".to_string());
+
+        assert_eq!(state.bash_buffer().len(), 2);
+        assert_eq!(
+            state.subagent_buffer().to_vec(),
+            vec!["subagent: opencode".to_string(), "agent output".to_string()]
+        );
     }
 }

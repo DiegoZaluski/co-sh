@@ -18,7 +18,10 @@ use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::{Theme, ThemeRegistry};
-use crate::types::{Message, MessageRole, Part, ReasoningPart, Session, SessionStatus, TextPart};
+use crate::types::{
+    Message, MessageRole, Part, ReasoningPart, Session, SessionStatus, TextPart, ToolPart,
+    ToolStatus,
+};
 
 use super::SessionView;
 
@@ -1080,4 +1083,87 @@ fn compaction_part_serde_roundtrip() {
     let json = serde_json::to_string(&done).unwrap();
     let back: Part = serde_json::from_str(&json).unwrap();
     assert_eq!(json, serde_json::to_string(&back).unwrap());
+}
+
+/// Build a state whose ONLY message is a COMPLETED bash tool with an output of
+/// `line` repeated 40 times. The block is expanded in the view so the FULL
+/// 40-line output renders (bash blocks collapse to 10 lines otherwise), making
+/// it taller than the test viewport. A single tool-only message ensures the
+/// text-region builder never touches the scratch buffer (which would mask
+/// stale-cell leaks).
+fn state_with_bash_block(session_id: &str, line: &str) -> AppState {
+    let mut output = String::new();
+    for _ in 0..40 {
+        output.push_str(line);
+        output.push('\n');
+    }
+    let mut st = AppState::new();
+    st.add_session(Session {
+        id: session_id.into(),
+        title: session_id.into(),
+        created_at: 0,
+        messages: vec![Message {
+            id: format!("{session_id}-0"),
+            role: MessageRole::Assistant,
+            parts: vec![Part::Tool(ToolPart {
+                tool: "bash_run".into(),
+                input: serde_json::json!({ "command": "test-cmd" }),
+                output: Some(output),
+                status: ToolStatus::Completed,
+                tool_call_id: Some("shell".into()),
+                is_start: false,
+                is_streaming: false,
+            })],
+            created_at: 0,
+            agent: None,
+            model: None,
+        }],
+    });
+    st.current_session_id = Some(session_id.into());
+    st.status = SessionStatus::Working;
+    st
+}
+
+/// Regression test for the reusable scratch buffer: rendering a different
+/// message into the reused temp buffer must NOT leak glyphs from the previous
+/// render. `Buffer::resize` keeps existing cell content and tool-block
+/// renderers only set styles (not chars), so the fallback must clear the
+/// buffer before drawing (previously `Buffer::empty` guaranteed clean cells).
+#[test]
+fn test_scratch_reuse_does_not_leak_previous_message() {
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 80, 40);
+
+    // Session A: an expanded bash block whose lines are full-width rows of 'A'.
+    let state_a = state_with_bash_block("session-a", &"A".repeat(70));
+    // Session B: same shape but 'B's; each line is short, so every cell the
+    // new render leaves untouched would expose stale 'A's.
+    let state_b = state_with_bash_block("session-b", &"B".repeat(10));
+
+    let mut view = SessionView::new();
+    // Expand the bash block so the full 40-line output renders (a tall message
+    // that must go through the temp-buffer fallback when clipped).
+    view.tool_state.toggle_expanded("shell");
+    let mut buf = Buffer::empty(area);
+
+    // Render A (populates the scratch via the bottom-clipped fallback).
+    view.render(&mut buf, area, &state_a, &theme, &config, 0.016);
+    // Switch to B: the session change forces a cache rebuild, so B's first
+    // render reuses the scratch with a different message.
+    view.render(&mut buf, area, &state_b, &theme, &config, 0.016);
+
+    // No 'A' glyph may survive into the visible buffer.
+    let leaked: Vec<char> = buf
+        .content()
+        .iter()
+        .filter_map(|cell| {
+            let ch = cell.symbol().chars().next().unwrap_or(' ');
+            (ch == 'A').then_some(ch)
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "stale glyphs leaked into buffer after scratch reuse: {leaked:?}"
+    );
 }

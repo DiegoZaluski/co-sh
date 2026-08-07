@@ -56,7 +56,7 @@ fn count_sections(state: &RightPanelState) -> (bool, bool, bool) {
 /// Mirrors the TOP_GAP / TOP_PAD / BOTTOM_PAD constants in each section.
 const BOX_OVERHEAD: i32 = 1 + 1 + 1;
 
-fn natural_section_height(state: &RightPanelState, inner_w: u16, kind: types::SectionKind) -> i32 {
+fn natural_section_height(state: &mut RightPanelState, inner_w: u16, kind: types::SectionKind) -> i32 {
     match kind {
         types::SectionKind::Todo => {
             if state.todos.is_empty() {
@@ -66,11 +66,11 @@ fn natural_section_height(state: &RightPanelState, inner_w: u16, kind: types::Se
             }
         }
         types::SectionKind::Bash => {
-            let lines = bash_buffer_lines(state).len() as i32;
+            let lines = state.bash_buffer().len() as i32;
             if lines == 0 { 0 } else { BOX_OVERHEAD + lines }
         }
         types::SectionKind::Subagent => {
-            let lines = subagent_buffer_lines(state).len() as i32;
+            let lines = state.subagent_buffer().len() as i32;
             if lines == 0 { 0 } else { BOX_OVERHEAD + lines }
         }
     }
@@ -215,40 +215,7 @@ pub fn render_right_panel(
     }
 }
 
-/// Build a continuous buffer of all subagent PTY command + output lines, in order.
-/// Same-agent entries are deduplicated by `app.rs` (retain by prefix).
-fn subagent_buffer_lines(state: &RightPanelState) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for pty in &state.pty_sessions {
-        if !pty.command.starts_with("subagent:") {
-            continue;
-        }
-        // Header: the command line (e.g., "subagent: opencode")
-        lines.push(pty.command.clone());
-        // Output lines
-        for line in pty.output.lines() {
-            lines.push(line.to_string());
-        }
-    }
-    lines
-}
 
-/// Build a continuous buffer of all bash command + output lines, in order.
-fn bash_buffer_lines(state: &RightPanelState) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for pty in &state.pty_sessions {
-        if pty.command.starts_with("subagent:") {
-            continue;
-        }
-        // Header: $ command (simulating a shell prompt)
-        lines.push(format!("$ {}", pty.command));
-        // Output lines
-        for line in pty.output.lines() {
-            lines.push(line.to_string());
-        }
-    }
-    lines
-}
 
 /// Render all bash PTYs as a single continuous text buffer with line-based scroll.
 fn render_bash_section(
@@ -265,8 +232,8 @@ fn render_bash_section(
     const TOP_PAD: u16 = 1;
     const BOTTOM_PAD: u16 = 1;
 
-    let buffer = bash_buffer_lines(state);
-    if buffer.is_empty() {
+    let total_lines = state.bash_buffer().len() as i32;
+    if total_lines == 0 {
         return;
     }
 
@@ -282,7 +249,6 @@ fn render_bash_section(
     let inner_h = box_h.saturating_sub(TOP_PAD + BOTTOM_PAD);
     let inner_w = max_w.saturating_sub(LEFT_PAD);
 
-    let total_lines = buffer.len() as i32;
     let has_scroll = total_lines > inner_h as i32;
     let scroll_y = if has_scroll {
         state.bash_scroll_y = state.bash_scroll_y.min(total_lines - inner_h as i32);
@@ -293,6 +259,7 @@ fn render_bash_section(
 
     let start_line = scroll_y as usize;
     let visible = inner_h as usize;
+    let buffer = state.bash_buffer();
 
     for (i, line) in buffer.iter().skip(start_line).take(visible).enumerate() {
         let line_y = inner_y + i as u16;
@@ -331,8 +298,8 @@ fn render_subagent_section(
     const TOP_PAD: u16 = 1;
     const BOTTOM_PAD: u16 = 1;
 
-    let buffer = subagent_buffer_lines(state);
-    if buffer.is_empty() {
+    let total_lines = state.subagent_buffer().len() as i32;
+    if total_lines == 0 {
         return;
     }
 
@@ -348,7 +315,6 @@ fn render_subagent_section(
     let inner_h = box_h.saturating_sub(TOP_PAD + BOTTOM_PAD);
     let inner_w = max_w.saturating_sub(LEFT_PAD);
 
-    let total_lines = buffer.len() as i32;
     let has_scroll = total_lines > inner_h as i32;
     let scroll_y = if has_scroll {
         state.subagent_scroll_y = state.subagent_scroll_y.min(total_lines - inner_h as i32);
@@ -359,6 +325,7 @@ fn render_subagent_section(
 
     let start_line = scroll_y as usize;
     let visible = inner_h as usize;
+    let buffer = state.subagent_buffer();
 
     for (i, line) in buffer.iter().skip(start_line).take(visible).enumerate() {
         let line_y = inner_y + i as u16;
