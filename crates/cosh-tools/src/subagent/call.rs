@@ -28,15 +28,27 @@ use std::time::{Duration, Instant};
 /// Only agents with a documented non-interactive / headless mode
 /// (e.g. `-p`, `--message`, `run`, `exec`) are included — purely
 /// interactive TUIs cannot be driven this way.
+///
+/// Static args are configured for optimal headless operation:
+/// - Auto-approval flags to prevent blocking on prompts
+/// - Sandbox/permission modes for safe automation
+/// - No-auto-commit flags where appropriate to preserve git control
 pub const AGENTS: &[(&str, &str, &[&str])] = &[
-    ("opencode", "opencode", &["run"]),
-    ("kilo", "kilo", &["run"]),
-    ("claude", "claude", &["-p"]),
-    ("devin", "devin", &["-p"]),
-    ("codex", "codex", &["exec"]),
+    ("opencode", "opencode", &["run", "--auto"]),
+    ("kilo", "kilo", &["run", "--auto"]),
+    ("claude", "claude", &["-p", "--permission-mode", "dontAsk", "--bare"]),
+    ("devin", "devin", &["-p", "--permission-mode", "dangerous"]),
+    ("codex", "codex", &["exec", "--sandbox", "workspace-write"]),
+    ("cline", "cline", &["-y"]),
+    ("cursor", "agent", &["-p", "--force", "--trust"]),
+    ("crush", "crush", &["run", "--yolo", "--quiet"]),
+    ("hermes", "hermes", &["-z"]),
+    ("openhands", "openhands", &["--headless", "-t"]),
+    ("pi", "pi", &["-p"]),
+    ("interpreter", "interpreter", &["exec", "--ask-for-approval", "auto"]),
     ("letta", "letta", &["-p"]),
-    ("vibe", "vibe", &["--prompt"]),
-    ("aider", "aider", &["--message"]),
+    ("vibe", "vibe", &["--prompt", "--agent", "auto-approve"]),
+    ("aider", "aider", &["--message", "--yes", "--no-auto-commits"]),
     ("omp", "omp", &["-p"]),
     ("goose", "goose", &["run", "-t"]),
     ("gemini", "gemini", &["-p"]),
@@ -65,15 +77,22 @@ fn install_hint(agent: &str) -> &'static str {
             "Install: npm install -g @anthropic-ai/claude-code. More: https://code.claude.com/docs"
         }
         "devin" => {
-            "Install: curl -fsSL https://cli.devin.ai/install.sh | bash. For headless mode also use --permission-mode (e.g. --permission-mode dangerous). More: https://devin.ai/cli"
+            "Install: curl -fsSL https://cli.devin.ai/install.sh | bash. For headless mode also use --permission-mode dangerous. More: https://devin.ai/cli"
         }
         "codex" => "Install: npm install -g @openai/codex. More: https://learn.chatgpt.com/docs",
+        "cline" => "Install: npm install -g cline. More: https://cline.bot/cli",
+        "cursor" => "Install: curl https://cursor.com/install -fsS | bash. More: https://cursor.com/cli",
+        "crush" => "Install: brew install charmbracelet/tap/crush. More: https://github.com/charmbracelet/crush",
+        "hermes" => "Install: pip install hermes-agent. More: https://github.com/NousResearch/hermes-agent",
+        "openhands" => "Install: pip install openhands. More: https://github.com/OpenHands/OpenHands-CLI",
+        "pi" => "Install: npm install -g @earendil-works/pi-coding-agent. More: https://github.com/badlogic/pi-mono",
+        "interpreter" => "Install: pip install open-interpreter. More: https://github.com/OpenInterpreter/open-interpreter",
         "letta" => "Install: npm install -g @letta-ai/letta-code. More: https://docs.letta.com",
         "vibe" => {
-            "Install: curl -LsSf https://mistral.ai/vibe/install.sh | bash. For headless mode also use --auto-approve. More: https://github.com/mistralai/mistral-vibe"
+            "Install: curl -LsSf https://mistral.ai/vibe/install.sh | bash. For headless mode also use --agent auto-approve. More: https://github.com/mistralai/mistral-vibe"
         }
         "aider" => {
-            "Install: pip install aider-chat. For headless mode also set AIDER_YES=true. More: https://aider.chat/docs/scripting.html"
+            "Install: pip install aider-chat. For headless mode also use --yes --no-auto-commits. More: https://aider.chat/docs/scripting.html"
         }
         "omp" => {
             "Install: curl -fsSL https://omp.sh/install | sh. More: https://github.com/can1357/oh-my-pi"
@@ -286,8 +305,19 @@ pub fn call(
     if result.is_empty() {
         let blocking_hint = match agent {
             "aider" => " aider may be waiting for confirmation. Set AIDER_YES=true or pass --yes.",
-            "devin" => " devin may be waiting for permission approval. Use --permission-mode.",
-            "vibe" => " vibe may be waiting for tool approval. Use --auto-approve.",
+            "devin" => " devin may be waiting for permission approval. Use --permission-mode dangerous.",
+            "vibe" => " vibe may be waiting for tool approval. Use --agent auto-approve.",
+            "claude" => " claude may be waiting for permission approval. Use --permission-mode dontAsk.",
+            "opencode" => " opencode may be waiting for permission approval. Use --auto.",
+            "kilo" => " kilo may be waiting for permission approval. Use --auto.",
+            "codex" => " codex may be waiting for permission approval. Use --sandbox workspace-write.",
+            "cline" => " cline may be waiting for permission approval. Use -y for YOLO mode.",
+            "cursor" => " cursor may be waiting for permission approval. Use agent -p --force --trust.",
+            "crush" => " crush may be waiting for permission approval. Use crush run --yolo.",
+            "hermes" => " hermes may be waiting for permission approval. Use hermes -z for oneshot mode.",
+            "openhands" => " openhands may be waiting for permission approval. Use --headless for auto-approve.",
+            "pi" => " pi may be waiting for permission approval. Use pi -p for print mode.",
+            "interpreter" => " interpreter may be waiting for permission approval. Use --ask-for-approval auto.",
             _ => "",
         };
         Err(format!(

@@ -11,14 +11,21 @@
 //!
 //! | Name | Binary | Invocation |
 //! |------|--------|------------|
-//! | `opencode` | `opencode` | `opencode run "<input>"` |
-//! | `kilo` | `kilo` | `kilo run "<input>"` |
-//! | `claude` | `claude` | `claude -p "<input>"` |
-//! | `devin` | `devin` | `devin -p "<input>"` |
-//! | `codex` | `codex` | `codex exec "<input>"` |
+//! | `opencode` | `opencode` | `opencode run --auto "<input>"` |
+//! | `kilo` | `kilo` | `kilo run --auto "<input>"` |
+//! | `claude` | `claude` | `claude -p --permission-mode dontAsk --bare "<input>"` |
+//! | `devin` | `devin` | `devin -p --permission-mode dangerous "<input>"` |
+//! | `codex` | `codex` | `codex exec --sandbox workspace-write "<input>"` |
+//! | `cline` | `cline` | `cline -y "<input>"` |
+//! | `cursor` | `agent` | `agent -p --force --trust "<input>"` |
+//! | `crush` | `crush` | `crush run --yolo --quiet "<input>"` |
+//! | `hermes` | `hermes` | `hermes -z "<input>"` |
+//! | `openhands` | `openhands` | `openhands --headless -t "<input>"` |
+//! | `pi` | `pi` | `pi -p "<input>"` |
+//! | `interpreter` | `interpreter` | `interpreter exec --ask-for-approval auto "<input>"` |
 //! | `letta` | `letta` | `letta -p "<input>"` |
-//! | `vibe` | `vibe` | `vibe --prompt "<input>"` |
-//! | `aider` | `aider` | `aider --message "<input>"` (needs `AIDER_YES=true`) |
+//! | `vibe` | `vibe` | `vibe --prompt --agent auto-approve "<input>"` |
+//! | `aider` | `aider` | `aider --message --yes --no-auto-commits "<input>"` |
 //! | `omp` | `omp` | `omp -p "<input>"` |
 //! | `goose` | `goose` | `goose run -t "<input>"` |
 //! | `gemini` | `gemini` | `gemini -p "<input>"` |
@@ -70,7 +77,8 @@ impl SubAgent {
                  {usage}",
                 common = "Call a supported agent CLI with the given input message and \
                           return its output. The agent runs as a child process; output \
-                          is streamed in real time.",
+                          is streamed in real time. All agents are configured with \
+                          auto-approval flags for headless operation.",
                 usage = "## When to use\n\
                          - Use `subagent_call` with `agent` and `input` to delegate \
                          a task to another agent CLI.\n\
@@ -100,7 +108,8 @@ impl SubAgent {
                  {usage}",
                 common = "Call a supported agent CLI with the given input message and \
                           return its output. The agent runs as a child process; output \
-                          is streamed in real time.",
+                          is streamed in real time. All agents are configured with \
+                          auto-approval flags for headless operation.",
                 usage = "## When to use\n\
                          - Use `subagent_call` with `agent` and `input` to delegate \
                          a task to another agent CLI.\n\
