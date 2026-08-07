@@ -49,7 +49,6 @@ enum Depth1State {
 }
 
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Default)]
 struct StreamState {
     buffer: String,
     pending_tool_call: Option<ToolCallData>,
@@ -63,6 +62,37 @@ struct StreamState {
     early_exit: bool,
     in_code_block: bool,
     fence_count: usize,
+    /// Whether the next character to be consumed is at the start of a line
+    /// (the previously consumed character was a newline, or we are at the start
+    /// of the stream). Markdown fences only open/close at a line start.
+    at_line_start: bool,
+    /// Whether the current run of backticks (if any) began at a line start.
+    /// Captured when the first backtick of a run is seen so a mid-line ````
+    /// (e.g. prose that merely *quotes* a fence) never toggles the code-block
+    /// state — doing so would swallow a following inline tool call as "fenced
+    /// display text" and leak its schema to the user.
+    fence_at_line_start: bool,
+}
+
+impl Default for StreamState {
+    fn default() -> Self {
+        Self {
+            buffer: String::new(),
+            pending_tool_call: None,
+            deferred_tail: String::new(),
+            depth: 0,
+            in_string: false,
+            escape: false,
+            depth1_state: None,
+            current_key: String::new(),
+            pending_key: None,
+            early_exit: false,
+            in_code_block: false,
+            fence_count: 0,
+            at_line_start: true,
+            fence_at_line_start: false,
+        }
+    }
 }
 
 const KNOWN_KEYS: &[&str] = &[
@@ -264,18 +294,32 @@ impl ExtractAction {
                     self.state = StreamState::default();
                 }
             } else if ch == '`' {
+                // Fences only open/close when their opening backtick sits at the
+                // start of a line (mirroring `is_in_code_block`). A ````
+                // quoted in the middle of prose (e.g. an agent describing a
+                // markdown snippet) must NOT flip the code-block state — doing
+                // so would swallow a following inline tool call as "fenced
+                // display text" and leak its schema to the user.
+                if self.state.fence_count == 0 {
+                    self.state.fence_at_line_start = self.state.at_line_start;
+                }
                 self.state.fence_count += 1;
                 output.push('`');
+                self.state.at_line_start = false;
             } else {
-                if self.state.fence_count >= 3 {
+                if self.state.fence_count >= 3 && self.state.fence_at_line_start {
                     self.state.in_code_block = !self.state.in_code_block;
                 }
                 self.state.fence_count = 0;
+                self.state.fence_at_line_start = false;
 
                 if self.state.in_code_block {
                     output.push(ch);
+                    self.state.at_line_start = ch == '\n';
                     continue;
                 }
+
+                self.state.at_line_start = ch == '\n';
 
                 if ch == '{' {
                     if !output.is_empty() {

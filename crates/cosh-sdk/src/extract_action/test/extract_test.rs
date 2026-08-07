@@ -516,3 +516,73 @@ fn batch_ask_questions_bare_args() {
     );
     assert_eq!(tool_items[0].name, "ask_questions");
 }
+
+#[test]
+fn stream_fence_quoted_midline_does_not_swallow_following_tool_call() {
+    // Regression: an agent describing a ```js snippet in the middle of a
+    // sentence, then emitting a real inline tool call right after it. Before
+    // the fix the naive fence counter toggled `in_code_block` on the mid-line
+    // backticks and leaked the tool call (and its schema) as plain text.
+    let mut ex = make_extractor();
+
+    let r = ex.extract_stream("when an agent writes ```js console.log in markdown ");
+    match r {
+        StreamAction::Text(t) => assert!(t.contains("console.log"), "prose: {t:?}"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+
+    let r = ex.extract_stream(r#"{"name": "expand_namespace", "arguments": {"server": "prod", "namespace": "acme"}}"#);
+    match r {
+        StreamAction::ToolCall(tc) => {
+            assert_eq!(tc.name, "expand_namespace");
+            assert_eq!(
+                tc.arguments,
+                serde_json::json!({"server": "prod", "namespace": "acme"})
+            );
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[test]
+fn stream_fence_split_across_tokens_midline_does_not_toggle() {
+    // The backtick run may arrive split across two stream chunks; the
+    // line-start knowledge must persist across those calls.
+    let mut ex = make_extractor();
+
+    let r = ex.extract_stream("prose ``");
+    match r {
+        StreamAction::Text(t) => assert_eq!(t, "prose ``"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+
+    // The third backtick + 'j' close the (mid-line) run — must NOT enter
+    // code-block even though the run was split across chunks.
+    let r = ex.extract_stream("`js continues ");
+    match r {
+        StreamAction::Text(t) => assert_eq!(t, "`js continues "),
+        other => panic!("expected Text, got {other:?}"),
+    }
+
+    let r = ex.extract_stream(r#"{"name": "fs.read", "arguments": {"path": "/x"}}"#);
+    match r {
+        StreamAction::ToolCall(tc) => assert_eq!(tc.name, "fs.read"),
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[test]
+fn stream_real_fenced_code_block_keeps_body_as_display_text() {
+    // A genuine markdown fence (opening ``` at a line start) still shields its
+    // body from tool-call detection — JSON inside stays visible as text.
+    let mut ex = make_extractor();
+    let content =
+        "```\n{\"name\": \"expand_namespace\", \"arguments\": {\"server\": \"s\", \"namespace\": \"n\"}}\n```\n";
+    let r = ex.extract_stream(content);
+    match r {
+        StreamAction::Text(t) => {
+            assert!(t.contains("expand_namespace"), "body should be visible: {t:?}")
+        }
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
