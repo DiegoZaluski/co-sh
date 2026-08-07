@@ -28,8 +28,13 @@ pub struct ServerSession {
 }
 
 pub const INSTRUCTIONS_BUILD: &str = concat!(
+    "## Identity\n",
     "You are Cosh, an expert software engineering agent with access to external tools.\n\n",
-    "## Behaviour\n",
+    "## Capabilities\n",
+    "- You have access to external tools for file operations, code execution, web search, and more.\n",
+    "- Tool invocation is defined entirely by each tool specification.\n",
+    "- The available tools and their specifications are listed below.\n\n",
+    "## Constraints\n",
     "- Respond directly to the user's request.\n",
     "- Do not introduce yourself unless the user explicitly asks who you are.\n",
     "- Do not volunteer information about your internal capabilities or available tools.\n",
@@ -41,13 +46,24 @@ pub const INSTRUCTIONS_BUILD: &str = concat!(
     "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
     "  Use that result to continue your response — do not call the same tool again with the same arguments.\n",
     "- If a tool returns an error, consider a different approach instead of retrying the same call.\n\n",
-    "Tool invocation is defined entirely by each tool specification.\n\n",
-    "The available tools and their specifications are listed below.\n"
+    "## Self-Review Loop\n",
+    "- After completing any code changes, you MUST call a subagent for code review using `subagent_call`.\n",
+    "- The subagent review should focus on: correctness, security, performance, and maintainability.\n",
+    "- If the review identifies critical issues (bugs, security vulnerabilities, broken functionality), fix them immediately.\n",
+    "- After fixing issues, call the subagent again to review the corrected code.\n",
+    "- Repeat this review-fix loop until the subagent reports only cosmetic/minor issues (style, formatting, optional improvements).\n",
+    "- Only invoke `stop_agent_loop` when the review confirms no critical issues remain.\n",
+    "- This self-correction loop ensures code quality before considering a task complete.\n"
 );
 
 pub const INSTRUCTIONS_ASK: &str = concat!(
+    "## Identity\n",
     "You are Cosh, a technical discussion and planning agent with access to read-only tools.\n\n",
-    "## Behaviour\n",
+    "## Capabilities\n",
+    "- You have access to read-only tools for code inspection, documentation, and information gathering.\n",
+    "- Tool invocation is defined entirely by each tool specification.\n",
+    "- The available tools and their specifications are listed below.\n\n",
+    "## Constraints\n",
     "- Respond directly to the user's request.\n",
     "- Do not introduce yourself unless the user explicitly asks who you are.\n",
     "- Your purpose is to discuss, explore, and plan technical work.\n",
@@ -59,9 +75,7 @@ pub const INSTRUCTIONS_ASK: &str = concat!(
     "- When the discussion has naturally concluded and no further exploration is required, invoke `stop_agent_loop`.\n",
     "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
     "  Use that result to continue your discussion — do not call the same tool again with the same arguments.\n",
-    "- If a tool returns an error, consider a different approach instead of retrying the same call.\n\n",
-    "Tool invocation is defined entirely by each tool specification.\n\n",
-    "The available tools and their specifications are listed below.\n"
+    "- If a tool returns an error, consider a different approach instead of retrying the same call.\n"
 );
 
 /// Maximum consecutive tool-call failures before aborting the agent loop.
@@ -372,12 +386,13 @@ impl Harness {
             Mode::Ask => INSTRUCTIONS_ASK,
         };
         let _ = write!(out, "{instructions}");
-        let _ = write!(out, "{TOOL_FORMAT}");
+        let _ = write!(out, "## Tool Format\n{TOOL_FORMAT}");
         for prompt in &self.system_prompts {
             let _ = write!(out, "## System: {}\n{}\n\n", prompt.title, prompt.text);
         }
 
-        let _ = write!(out, "## Harness Tools\n\n");
+        let _ = write!(out, "## Tools\n\n");
+        let _ = write!(out, "### Harness Tools\n\n");
         for tool in &self.harness_tools {
             if self.disabled_tools.contains(&tool.name) {
                 continue;
@@ -390,7 +405,7 @@ impl Harness {
             );
         }
         if let Some(ref cosh) = self.cosh_tools {
-            let _ = write!(out, "## System Tools\n\n");
+            let _ = write!(out, "### System Tools\n\n");
             match self.mode {
                 Mode::Build | Mode::Yolo => {
                     cosh.write_tool_descriptions_enabled(&mut out, &self.disabled_tools)
@@ -400,7 +415,7 @@ impl Harness {
         }
 
         for session in &self.sessions {
-            let _ = write!(out, "## MCP Server: {}\n\n", session.name_server);
+            let _ = write!(out, "### MCP Server: {}\n\n", session.name_server);
             for tool in &session.tools {
                 let desc = tool.description.as_deref().unwrap_or_default();
                 let schema = serde_json::to_string_pretty(&*tool.input_schema).unwrap_or_default();
