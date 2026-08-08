@@ -91,21 +91,27 @@ pub struct CompactionPart {
     pub started_at: u64,
     /// Final elapsed millis when the phase finished; `None` while running.
     pub elapsed_ms: Option<u64>,
+    /// The streamed text of the phase. Only the LLM phase (phase 3) fills it:
+    /// the summarizer's tokens accumulate here and the "Summarizing" box
+    /// renders them (collapsed = bounded preview that visually scrolls up,
+    /// expanded = full growing body). The other phases leave it empty.
+    #[serde(default)]
+    pub text: String,
 }
 
 /// Which context-compaction phase a [`CompactionPart`] reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompactionPhase {
-    /// Phase 1 — the TF-IDF → LSA → MMR pipeline. The only phase with a
-    /// stopwatch: it runs synchronously on the agent loop's thread and can
-    /// block it for seconds.
+    /// Phase 1 — the TF-IDF → LSA → MMR pipeline. It runs synchronously on
+    /// the agent loop's thread and can block it for seconds, so its line
+    /// carries a live stopwatch.
     Pipeline,
     /// Phase 2 — gradual draft eviction.
     Drafts,
-    /// Phase 3 — tool-chain eviction.
-    Tools,
-    /// Phase 4 — loop-closure trimming.
-    Closures,
+    /// Phase 3 — the LLM compaction (the last-resort fallback, driven by the
+    /// harness). The model call can take seconds, so its line carries a live
+    /// stopwatch like the pipeline's.
+    Llm,
 }
 
 impl CompactionPart {
@@ -115,15 +121,17 @@ impl CompactionPart {
             phase,
             started_at: now_ms(),
             elapsed_ms: None,
+            text: String::new(),
         }
     }
 
-    /// A finished one-shot phase line (no stopwatch — phases 2-4 are too fast).
+    /// A finished one-shot phase line (no stopwatch — the fast phases).
     pub fn done(phase: CompactionPhase) -> Self {
         Self {
             phase,
             started_at: now_ms(),
             elapsed_ms: Some(0),
+            text: String::new(),
         }
     }
 

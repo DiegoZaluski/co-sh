@@ -255,13 +255,7 @@ async fn full_tool_loop_builds_correct_item_sequence_and_messages() {
             .map(|i| format!("{:?}", std::mem::discriminant(i)))
             .collect::<Vec<_>>()
     );
-    assert!(matches!(
-        &items[0],
-        ContextItem::User {
-            protected: true,
-            ..
-        }
-    ));
+    assert!(matches!(&items[0], ContextItem::User { .. }));
     assert!(matches!(
         &items[1],
         ContextItem::Assistant {
@@ -298,6 +292,186 @@ async fn full_tool_loop_builds_correct_item_sequence_and_messages() {
         .filter(|m| m.role == "user" && m.content.as_deref() == Some("use tool"))
         .count();
     assert_eq!(user_count, 1, "the user input must be sent exactly once");
+}
+
+// ── Proof: the LLM compaction (phase 3) runs in the harness ──────────────
+//
+// When the deterministic phases exhaust every draft and the total is still
+// over the 80% trigger, `run_agent_loop` performs the LLM compaction: it
+// builds the summary prompt from the context manager, calls the model (the
+// mock chat response here), applies the summary, and re-adds the in-flight
+// input so the model sees the task verbatim. The TUI gets the lifecycle
+// events and the timeline ends as [Compaction, user, LoopClosure].
+#[tokio::test]
+async fn run_agent_loop_runs_the_llm_compaction_when_drafts_are_exhausted() {
+    use crate::harness::context_manager::ContextManager;
+    use crate::harness::events::LlmCompactionEvent;
+
+    let mut h = Harness::new_test();
+    // Small budget so the preloaded protected-only history overflows the 80%
+    // trigger with NOTHING for the deterministic phases to compress or evict
+    // (user prompts are protected by construction).
+    h.context_manager = ContextManager::new(2000); // trigger = 1600
+    h = h.with_history(&[
+        ("user".into(), "u ".repeat(1100)),
+        ("user".into(), "v ".repeat(1100)),
+    ]);
+    // The mock CHAT response is the compaction summary (the harness asks the
+    // model for it); the mock STREAM is the loop's final answer.
+    h = h
+        .with_mock_chat(Ok("## Objective\n- Compact the session"))
+        .with_mock_stream(Ok(vec!["final answer"]));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    handle.abort();
+
+    // The harness surfaced the LLM compaction lifecycle to the TUI.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Started
+            }
+        )),
+        "the harness must emit LlmCompaction::Started; events={events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Finished
+            }
+        )),
+        "the harness must emit LlmCompaction::Finished; events={events:?}"
+    );
+    // The summarizer STREAMS its tokens to the TUI (the "Summarizing" box):
+    // the mock chat response must arrive as LlmCompactionToken events.
+    let streamed: String = events
+        .iter()
+        .filter_map(|e| match e {
+            HarnessEvent::LlmCompactionToken { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        streamed.contains("## Objective"),
+        "the summary text must stream as LlmCompactionToken; streamed={streamed:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the loop completed normally after the compaction"
+    );
+}
+
+// When the summarization call FAILS (connector error, empty output), the
+// harness must surface `LlmCompaction::Failed` and continue the loop with the
+// context as it was (over budget but alive) — never panic or drop the turn.
+#[tokio::test]
+async fn run_agent_loop_survives_a_failed_llm_compaction() {
+    use crate::harness::context_manager::ContextManager;
+    use crate::harness::events::LlmCompactionEvent;
+
+    let mut h = Harness::new_test();
+    h.context_manager = ContextManager::new(2000); // trigger = 1600
+    h = h.with_history(&[
+        ("user".into(), "u ".repeat(1100)),
+        ("user".into(), "v ".repeat(1100)),
+    ]);
+    // The mock CHAT response is the FAILING summarization call; the mock
+    // STREAM is the loop's final answer. The loop must still complete.
+    h = h
+        .with_mock_chat(Err("provider exploded"))
+        .with_mock_stream(Ok(vec!["final answer"]));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    handle.abort();
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Started
+            }
+        )),
+        "the harness must attempt the LLM compaction; events={events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Failed
+            }
+        )),
+        "a failing summarization call must surface LlmCompaction::Failed; events={events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the loop must continue and complete even when the compaction fails"
+    );
 }
 
 // The useless bridge: `result_is_useless` parses the find_grep result JSON

@@ -1,4 +1,4 @@
-use super::context_manager::{ContextManager, MAX_CONTEXT_TOKENS};
+use super::context_manager::{ContextManager, MAX_CONTEXT_TOKENS, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
 use cosh_sdk::connector::{ChatMessage, Connector, ToolDefinition};
@@ -553,6 +553,141 @@ impl Harness {
         Ok(result)
     }
 
+    /// Run the LLM compaction (phase 3, the last-resort fallback): build the
+    /// prompt from the context manager's serialized context, ask the model
+    /// for the continuation summary, and apply it. The summarizer is a
+    /// SEPARATE agent: it streams with its OWN system prompt from the context
+    /// manager (never the agent loop's fixed system prompt), and each token is
+    /// forwarded to the TUI so the user watches the "Summarizing" box fill
+    /// live. Returns whether the summary was applied.
+    async fn llm_compact(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) -> bool {
+        use super::events::{HarnessEvent, LlmCompactionEvent};
+        let Some(request) = self.context_manager.llm_compaction_request() else {
+            return false;
+        };
+        let _ = tx.send(HarnessEvent::LlmCompaction {
+            event: LlmCompactionEvent::Started,
+        });
+        let mut summary = String::new();
+        let streamed = self
+            .stream_summarize_for_compaction(&request.system, &request.prompt, |chunk| {
+                summary.push_str(chunk);
+                let _ = tx.send(HarnessEvent::LlmCompactionToken {
+                    text: chunk.to_string(),
+                });
+            })
+            .await;
+        let ok = match streamed {
+            Ok(()) if !summary.trim().is_empty() => self
+                .context_manager
+                .apply_llm_summary(summary.trim().to_string()),
+            _ => false,
+        };
+        let _ = tx.send(HarnessEvent::LlmCompaction {
+            event: if ok {
+                LlmCompactionEvent::Finished
+            } else {
+                LlmCompactionEvent::Failed
+            },
+        });
+        ok
+    }
+
+    /// Ask the summarizer model for the compaction summary, STREAMING the
+    /// tokens through `on_token` (which forwards them to the TUI as
+    /// [`HarnessEvent::LlmCompactionToken`]). The summarizer is a dedicated
+    /// agent: it uses the context manager's OWN system prompt (`system`), not
+    /// the agent loop's fixed system prompt — it never sees the tool
+    /// definitions or the harness instructions. Mockable in tests exactly
+    /// like [`Self::chat`].
+    async fn stream_summarize_for_compaction(
+        &mut self,
+        system: &str,
+        prompt: &str,
+        mut on_token: impl FnMut(&str),
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(ref response) = self.mock_chat_response.clone() {
+            match response {
+                Ok(text) => {
+                    on_token(text);
+                    return Ok(());
+                }
+                Err(msg) => return Err(msg.clone()),
+            }
+        }
+
+        use tokio_stream::StreamExt;
+        // The summarizer is a SEPARATE agent: its request carries NO tool
+        // definitions (a dedicated connector call that clones the params with
+        // tools cleared), so the model answers with prose, never a tool call.
+        let mut stream = tokio::select! {
+            result = self.connector.stream_chat_with_system_no_tools(prompt, system) => {
+                match result {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::debug!("stream_summarize CONNECTOR_ERR={e}");
+                        return Err(e.to_string());
+                    }
+                }
+            }
+            _ = async {
+                loop {
+                    if self
+                        .stop_signal
+                        .as_ref()
+                        .is_some_and(|s| s.load(Ordering::Relaxed))
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            } => {
+                log::debug!("stream_summarize STOPPED during connect");
+                return Err(INTERRUPTED_MARKER.to_string());
+            }
+        };
+        loop {
+            // Poll the stream with a periodic stop check (like the main loop's
+            // streams), so a stalled provider stays interruptible by the user.
+            let chunk = {
+                let poll = tokio::select! {
+                    chunk = stream.next() => chunk.map(|c| c.map_err(|e| {
+                        log::debug!("stream_summarize STREAM_ERR={e}");
+                        e.to_string()
+                    })),
+                    () = tokio::time::sleep(Duration::from_millis(50)) => {
+                        continue;
+                    }
+                };
+                match poll {
+                    Some(Ok(c)) => c,
+                    Some(Err(e)) => return Err(e),
+                    None => break,
+                }
+            };
+            let stop = self
+                .stop_signal
+                .as_ref()
+                .is_some_and(|s| s.load(Ordering::Relaxed));
+            if stop {
+                log::debug!("stream_summarize STOPPED by signal");
+                // Interrupted mid-summary: do NOT half-apply a truncated
+                // summary — surface the interruption so `llm_compact` skips
+                // the compaction this round (the context stays as it was).
+                return Err(INTERRUPTED_MARKER.to_string());
+            }
+            let token = chunk.token();
+            if !token.is_empty() {
+                on_token(token);
+            }
+        }
+        Ok(())
+    }
+
     /// Stream a chat completion using a proper messages array (native tool-call
     /// format). This is the replacement for the old text-based
     /// [`stream_chat`](Self::stream_chat) when using the native tool API.
@@ -1047,8 +1182,17 @@ impl Harness {
 
         // Apply the 80% compaction (the synchronous pipeline + eviction
         // phases) before the first LLM request, so the initial context is
-        // already within budget.
-        self.context_manager.run();
+        // already within budget. When the deterministic phases exhaust every
+        // draft and the total is still over the trigger, the LLM compaction
+        // (phase 3, the last-resort fallback) runs; the in-flight input was
+        // folded into the summary, so it is re-added for the model to see the
+        // task verbatim.
+        if matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction) {
+            self.llm_compact(&tx).await;
+            if !self.context_manager.last_user_equals(input) {
+                self.context_manager.add_user(input);
+            }
+        }
 
         // Send initial context info so the TUI budget bar shows immediately
         // even before the first LLM call completes.
@@ -1723,7 +1867,13 @@ impl Harness {
             current_input =
                 "Please continue with your response based on the information above.".to_string();
 
-            self.context_manager.run();
+            // Compact before the next request. The LLM compaction (phase 3,
+            // the last-resort fallback) runs when the deterministic phases
+            // have nothing left to compress or evict and the total is still
+            // over the trigger — the harness performs the model call.
+            if matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction) {
+                self.llm_compact(&tx).await;
+            }
             let _ = tx.send(HarnessEvent::ContextInfo {
                 info: self.context_manager.display_info(),
             });

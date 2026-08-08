@@ -312,23 +312,26 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
             | Event::InlineHtml(text) => {
                 let text: &str = text.as_ref();
                 if ctx.in_code_block() {
-                    let code_max_w = max_w.saturating_sub(2).max(1);
                     let code_pad_v = 1u16;
-                    // Internal top + bottom padding rows (2 rows each for symmetry)
-                    // plus 2 extra rows for the blank separators (1 top, 1 bottom)
-                    y = y.saturating_add(code_pad_v * 2 + 2);
-                    let mut first = true;
+                    // The renderer draws exactly ONE top gap row (CodeBlock
+                    // start), one fresh row per code line, and one bottom
+                    // margin row (CodeBlock end) = N+2 rows total. The
+                    // estimator mirrors that: `code_pad_v * 2` = the top gap
+                    // row + the first code line's row, the remaining code
+                    // rows are added below, and the TagEnd::CodeBlock branch
+                    // adds the bottom margin row. (Was `* 2 + 2` — 2 rows
+                    // too tall, which shifted the Summarizing box's collapsed
+                    // tail window and left blank rows under code blocks.)
+                    y = y.saturating_add(code_pad_v * 2);
+                    // Every code row beyond the first is a fresh row (the pad
+                    // already accounted for the first row). Rows are counted
+                    // per line with the renderer's exact wrap behavior.
+                    let mut rows = 0u16;
                     for line in text.lines() {
-                        let wrapped = crate::core::lib::unicode_util::word_wrap(line, code_max_w);
-                        for wl in &wrapped {
-                            if !first {
-                                y += 1;
-                                x = area_x;
-                            }
-                            first = false;
-                            let w = crate::core::lib::unicode_util::str_display_width(wl) as u16;
-                            x = x.saturating_add(w.min(max_w.saturating_sub(x)));
-                        }
+                        rows = rows.saturating_add(code_line_rows(line, max_w));
+                    }
+                    if rows > 0 {
+                        y = y.saturating_add(rows.saturating_sub(1));
                     }
                 } else {
                     layout_word_wrap(text, max_w, &mut x, &mut y, area_x);
@@ -388,6 +391,96 @@ fn layout_word_wrap(text: &str, max_w: u16, x: &mut u16, y: &mut u16, area_x: u1
 
     // Flush last word
     flush_layout_word(word_w, x, y, max_w);
+}
+
+/// Count the rows a single code line occupies at box width `max_w`, mirroring
+/// the renderer's `flush_code_word` (md.rs) EXACTLY — this keeps
+/// `estimate_height` in lockstep with the real code-block layout:
+///
+/// - a word that doesn't fit the remaining space but fits a full line wraps
+///   whole to the next line;
+/// - a word wider than the whole line is broken at character level, wrapping
+///   in place only when the cursor would pass the right edge (so a word that
+///   exactly fills a row does NOT add an extra row);
+/// - the renderer reserves `CODE_PAD_H = 2` columns on the left of every code
+///   row, mirrored here by `min_x`.
+///
+/// The generic `word_wrap` utility is NOT used here: it starts a word wider
+/// than the remaining space on a fresh line, while the renderer packs it onto
+/// the current line — a 1-row drift for long unbroken words.
+///
+/// NOTE: this is a hand-synced mirror of `flush_code_word` in md.rs — any
+/// change to the renderer's code-line wrap must be reflected here. The TUI
+/// test `markdown_estimate_matches_render_height` pins the two in lockstep.
+fn code_line_rows(line: &str, max_w: u16) -> u16 {
+    // A code block inside a 1-2 column box cannot render meaningfully anyway
+    // (CODE_PAD_H alone overflows it) — treat it as a single row.
+    if max_w < 3 {
+        return 1;
+    }
+    let min_x = 2u16; // mirrors CODE_PAD_H in md.rs
+    let avail = max_w.saturating_sub(min_x);
+    let mut x = min_x;
+    let mut rows = 1u16;
+    let mut word_w = 0u16;
+
+    let flush = |word_w: u16, x: &mut u16, rows: &mut u16| {
+        if word_w == 0 {
+            return;
+        }
+        if *x + word_w <= max_w {
+            *x += word_w;
+            return;
+        }
+        if *x > min_x && word_w <= avail {
+            // Whole-word wrap: fits intact on a fresh line.
+            *rows += 1;
+            *x = min_x + word_w;
+            return;
+        }
+        // Word wider than the whole line: break at character level, wrapping
+        // only when the cursor would exceed the right edge (mirrors
+        // flush_code_word's per-grapheme wrap).
+        let mut remaining = word_w;
+        while remaining > 0 {
+            if *x >= max_w {
+                // Cursor already at the right edge: the next grapheme must
+                // wrap onto a fresh line.
+                *rows += 1;
+                *x = min_x;
+                continue;
+            }
+            let fit = max_w - *x;
+            if remaining <= fit {
+                *x += remaining;
+                break;
+            }
+            remaining -= fit;
+            *rows += 1;
+            *x = min_x;
+        }
+    };
+
+    for (grapheme, w) in crate::core::lib::unicode_util::graphemes_with_width(line) {
+        if grapheme == "\n" {
+            flush(word_w, &mut x, &mut rows);
+            word_w = 0;
+            rows += 1;
+            x = min_x;
+            continue;
+        }
+        if grapheme == " " {
+            flush(word_w, &mut x, &mut rows);
+            word_w = 0;
+            if x < max_w {
+                x += 1;
+            }
+            continue;
+        }
+        word_w += w;
+    }
+    flush(word_w, &mut x, &mut rows);
+    rows
 }
 
 /// Flush an accumulated word of `word_w` columns starting at `*x`, advancing

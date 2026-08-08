@@ -141,11 +141,14 @@ fn hash_parts(msg: &Message) -> u64 {
             }
             Part::Compaction(c) => {
                 // Hash the full state so the line re-renders exactly once when
-                // it finalizes (elapsed_ms transitions None → Some). While it
-                // runs the hash stays stable — the ticking stopwatch bypasses
-                // the cell cache instead (see `msg_has_running_compaction`).
+                // it finalizes (elapsed_ms transitions None → Some), and so a
+                // streamed "Summarizing" body (phase Llm text) invalidates the
+                // cache as tokens arrive. While the stopwatch alone ticks, the
+                // hash stays stable — the ticking bypasses the cell cache via
+                // `msg_has_running_compaction`.
                 hasher.write(&[phase_to_u8(c.phase)]);
                 hasher.write(&c.started_at.to_le_bytes());
+                hasher.write(c.text.as_bytes());
                 match c.elapsed_ms {
                     Some(ms) => {
                         hasher.write(&[1]);
@@ -163,8 +166,7 @@ fn phase_to_u8(phase: CompactionPhase) -> u8 {
     match phase {
         CompactionPhase::Pipeline => 0,
         CompactionPhase::Drafts => 1,
-        CompactionPhase::Tools => 2,
-        CompactionPhase::Closures => 3,
+        CompactionPhase::Llm => 2,
     }
 }
 
@@ -175,10 +177,10 @@ fn compaction_color(_phase: CompactionPhase, theme: &Theme) -> RGBA {
 }
 
 /// The chat line text for a compaction part. `now` is the current wall-clock
-/// millis: while the pipeline line is running the elapsed number ticks every
+/// millis: while a stopwatch line is running the elapsed number ticks every
 /// frame (the moving number IS the activity signal — no spinner needed); when
-/// it finalizes the same line freezes. Phases 2-4 are plain colored labels
-/// with no stopwatch and no completion marker.
+/// it finalizes the same line freezes. The draft eviction is a plain colored
+/// label with no stopwatch and no completion marker.
 fn compaction_line(part: &CompactionPart, now: u64) -> String {
     let elapsed = part
         .elapsed_ms
@@ -190,8 +192,39 @@ fn compaction_line(part: &CompactionPart, now: u64) -> String {
             format!("context compression · {secs:.3}s")
         }
         CompactionPhase::Drafts => "draft eviction".to_string(),
-        CompactionPhase::Tools => "tool eviction".to_string(),
-        CompactionPhase::Closures => "closure trimming".to_string(),
+        CompactionPhase::Llm => {
+            let secs = elapsed as f64 / 1000.0;
+            format!("llm compaction · {secs:.3}s")
+        }
+    }
+}
+
+/// Max body lines of the COLLAPSED "Summarizing" box. When the streamed
+/// summary exceeds it, only the LAST lines stay visible — the top lines
+/// visually leave the box (an LRU-like scroll-up effect, nothing is actually
+/// removed). Expanded, the box grows to fit the whole text.
+const SUMMARIZING_COLLAPSED_LINES: u16 = 8;
+
+/// Stable expand/collapse key for a "Summarizing" box: one per LLM-compaction
+/// line, keyed by its `started_at`.
+fn summarizing_id(part: &CompactionPart) -> String {
+    format!("summarize-{}", part.started_at)
+}
+
+/// The rendered height of the "Summarizing" box. The body is laid out with the
+/// SAME markdown algorithm as the render ([`estimate_height`], pulldown_cmark),
+/// so the allocated height always matches the drawn body exactly. Collapsed: a
+/// fixed preview of the LAST [`SUMMARIZING_COLLAPSED_LINES`] rows plus a hint
+/// row when the body overflows; expanded: the whole markdown body.
+fn summarizing_height(part: &CompactionPart, expanded: bool, max_w: u16) -> u16 {
+    let wrap_w = max_w.saturating_sub(3).max(1);
+    let body_h = estimate_height(&part.text, wrap_w).max(1);
+    if expanded {
+        body_h.saturating_add(1) // title + full body
+    } else if body_h > SUMMARIZING_COLLAPSED_LINES {
+        SUMMARIZING_COLLAPSED_LINES.saturating_add(2) // title + preview + hint
+    } else {
+        body_h.saturating_add(1)
     }
 }
 
@@ -602,6 +635,118 @@ impl SessionView {
         draw_text_line(buf, &label, x, y, max_w, style);
     }
 
+    /// Render the "Summarizing" box of the LLM compaction (phase 3): a
+    /// bordered title row with a live/elapsed stopwatch, and the streamed
+    /// summary body. Collapsed, the body is a fixed-height preview that shows
+    /// only the LAST lines (the top lines visually leave the box as the stream
+    /// grows — an LRU-like scroll-up; nothing is actually removed). Expanded,
+    /// the box grows to fit the whole text. Returns the rendered height.
+    #[allow(clippy::too_many_arguments)]
+    fn render_summarizing_box(
+        buf: &mut Buffer,
+        x: u16,
+        y: u16,
+        max_w: u16,
+        part: &CompactionPart,
+        expanded: bool,
+        theme: &Theme,
+    ) -> u16 {
+        let now = crate::types::now_ms();
+        let elapsed = part
+            .elapsed_ms
+            .unwrap_or_else(|| now.saturating_sub(part.started_at));
+        let secs = elapsed as f64 / 1000.0;
+        let wrap_w = max_w.saturating_sub(3).max(1);
+        let total_h = summarizing_height(part, expanded, max_w);
+        let area = Rect::new(x, y, max_w.saturating_add(3), total_h);
+
+        let mut border_box = BoxRenderable::new();
+        border_box.set_background_color(Some(theme.background_panel.into()));
+        border_box.set_border_color(Some(theme.background.into()));
+        border_box.set_border_sides(BorderSidesConfig {
+            left: true,
+            top: false,
+            right: false,
+            bottom: false,
+        });
+        border_box.set_custom_border_chars(BorderCharacters {
+            top_left: ' ',
+            top_right: ' ',
+            bottom_left: ' ',
+            bottom_right: ' ',
+            horizontal: ' ',
+            vertical: '┃',
+            top_t: ' ',
+            bottom_t: ' ',
+            left_t: '┃',
+            right_t: ' ',
+            cross: ' ',
+        });
+        border_box.render_self(buf, area);
+
+        let x_off = x + 3;
+        // `+`/`-` match the adjacent Thought block's expand/collapse affordance.
+        let mut title = if expanded { "- " } else { "+ " }.to_string();
+        title.push_str(&format!("Summarizing · {secs:.3}s"));
+        let title_style = Style::default().fg(rgba_color(theme.secondary));
+        draw_text_line(buf, &title, x_off, y, max_w.saturating_sub(3), title_style);
+
+        // Markdown-rendered body — the same renderer as the chat Text parts,
+        // so the raw markdown syntax never reaches the screen. The bg is the
+        // box's own `background_panel` (NOT the chat `background`): the border
+        // box already fills its whole area with the panel color, so painting
+        // the body with the chat background would leave a visible darker
+        // strip inside the box (default cosh: #07070A vs #0B0B12).
+        let body_h = estimate_height(&part.text, wrap_w).max(1);
+        let content = sanitize_text(&part.text);
+        let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(Some(content));
+        md.set_fg(Some(ColorInput::RGBA(theme.text)));
+        md.set_bg(Some(ColorInput::RGBA(theme.background_panel)));
+        md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
+        let overflow = !expanded && body_h > SUMMARIZING_COLLAPSED_LINES;
+        if overflow {
+            // Collapsed preview: the box shows the LAST
+            // `SUMMARIZING_COLLAPSED_LINES` rows of the laid-out markdown (the
+            // top rows leave the view as the stream grows — the LRU/scroll-up
+            // effect). Markdown only lays out from the top, so the full body
+            // is rendered into a scratch buffer first and only the final rows
+            // are blitted into the box.
+            let tmp_area = Rect::new(0, 0, wrap_w, body_h);
+            let mut tmp = ratatui::buffer::Buffer::empty(tmp_area);
+            md.render_self(&mut tmp, tmp_area);
+            let src_start = body_h - SUMMARIZING_COLLAPSED_LINES;
+            for (i, src_y) in (src_start..body_h).enumerate() {
+                let dst_y = y + 1 + i as u16;
+                if dst_y >= area.bottom() {
+                    break;
+                }
+                for cx in 0..wrap_w {
+                    if let Some(src) = tmp.cell((cx, src_y))
+                        && let Some(dst) = buf.cell_mut((x_off + cx, dst_y))
+                    {
+                        dst.set_symbol(src.symbol());
+                        dst.set_style(src.style());
+                    }
+                }
+            }
+        } else {
+            let body_area = Rect::new(x_off, y + 1, wrap_w, body_h.min(total_h.saturating_sub(1)));
+            md.render_self(buf, body_area);
+        }
+        if overflow {
+            let hint_y = y + 1 + SUMMARIZING_COLLAPSED_LINES;
+            draw_text_line(
+                buf,
+                "Click to expand",
+                x_off,
+                hint_y,
+                wrap_w,
+                Style::default().fg(rgba_color(theme.text_muted)),
+            );
+        }
+        total_h
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_reasoning(
         buf: &mut Buffer,
@@ -919,14 +1064,27 @@ impl SessionView {
                     y += 1;
                 }
                 Part::Compaction(c) => {
-                    // One-line status: the pipeline line ticks live (computed
-                    // from `started_at` vs now) until it finalizes; the other
-                    // phase lines are static notices. Height is always 1, so
-                    // the line never reflows while the stopwatch runs.
-                    let text = compaction_line(c, crate::types::now_ms());
-                    let style = Style::default().fg(rgba_color(compaction_color(c.phase, theme)));
-                    draw_text_line(buf, &text, x, y, max_w, style);
-                    y += 1;
+                    if c.phase == CompactionPhase::Llm && !c.text.is_empty() {
+                        let expanded = tool_state.is_expanded(&summarizing_id(c));
+                        let mut line_h =
+                            Self::render_summarizing_box(buf, x, y, max_w, c, expanded, theme);
+                        // Clamp to the remaining viewport like the tool blocks,
+                        // so an expanded long summary never draws past it.
+                        let available = bottom.saturating_sub(y);
+                        line_h = line_h.min(available);
+                        y += line_h;
+                    } else {
+                        // One-line status: the pipeline line ticks live
+                        // (computed from `started_at` vs now) until it
+                        // finalizes; the other phase lines are static notices.
+                        // Height is always 1, so the line never reflows while
+                        // the stopwatch runs.
+                        let text = compaction_line(c, crate::types::now_ms());
+                        let style =
+                            Style::default().fg(rgba_color(compaction_color(c.phase, theme)));
+                        draw_text_line(buf, &text, x, y, max_w, style);
+                        y += 1;
+                    }
                 }
                 Part::Text(_) => {}
             }
@@ -1099,7 +1257,18 @@ impl SessionView {
                 }
             }
             Part::File(_) => 1,
-            Part::Compaction(_) => 1,
+            Part::Compaction(c) => {
+                if c.phase == CompactionPhase::Llm && !c.text.is_empty() {
+                    // The "Summarizing" box: title row + wrapped body. Collapsed
+                    // keeps a fixed preview height (scroll-up); expanded grows
+                    // with the full streamed text. The width is the box's inner
+                    // width, so wrapped rows match the render exactly.
+                    let expanded = tool_state.is_expanded(&summarizing_id(c));
+                    summarizing_height(c, expanded, max_w)
+                } else {
+                    1
+                }
+            }
             Part::Text(_) => 0,
         }
     }
@@ -1441,6 +1610,19 @@ impl SessionView {
                                     return true;
                                 }
                             }
+                        }
+
+                        if let crate::types::Part::Compaction(c) = part
+                            && c.phase == CompactionPhase::Llm
+                            && !c.text.is_empty()
+                        {
+                            // Toggle the "Summarizing" box on any click
+                            // inside it (the part's row range matches the
+                            // rendered box — height caches are rebuilt with
+                            // the expansion state).
+                            let id = summarizing_id(c);
+                            self.tool_state.toggle_expanded(&id);
+                            return true;
                         }
 
                         return true;
@@ -2042,8 +2224,79 @@ impl SessionView {
                                 }
                             }
                             crate::types::Part::Compaction(c) => {
-                                let text = compaction_line(c, crate::types::now_ms());
-                                if p_top >= vp_top {
+                                if c.phase == CompactionPhase::Llm && !c.text.is_empty() {
+                                    // The "Summarizing" box: title row + the
+                                    // visible body rows (tail when collapsed,
+                                    // full text when expanded). The rows come
+                                    // from the RENDERED markdown (laid out into
+                                    // the shared scratch buffer and scanned),
+                                    // so copy/selection text matches what is
+                                    // on screen — never raw md syntax.
+                                    let expanded = self.tool_state.is_expanded(&summarizing_id(c));
+                                    let mut cy = content_offset;
+                                    let mut title = if expanded { "- " } else { "+ " }.to_string();
+                                    title.push_str("Summarizing");
+                                    if p_top >= vp_top {
+                                        text_regions.push(TextRegion {
+                                            y1: cy,
+                                            y2: cy + 1,
+                                            x1: x_off,
+                                            x2: x_off + max_w,
+                                            text: title,
+                                        });
+                                    }
+                                    cy += 1;
+                                    let wrap_w = max_w.saturating_sub(3).max(1);
+                                    let body_h = estimate_height(&c.text, wrap_w).max(1);
+                                    let (src_start, rows) =
+                                        if expanded || body_h <= SUMMARIZING_COLLAPSED_LINES {
+                                            (0, body_h)
+                                        } else {
+                                            (
+                                                body_h - SUMMARIZING_COLLAPSED_LINES,
+                                                SUMMARIZING_COLLAPSED_LINES,
+                                            )
+                                        };
+                                    let scan_area = Rect::new(0, 0, wrap_w, body_h);
+                                    let temp = scratch.get_or_insert_with(|| {
+                                        ratatui::buffer::Buffer::empty(scan_area)
+                                    });
+                                    if *temp.area() != scan_area {
+                                        temp.resize(scan_area);
+                                    }
+                                    let content = sanitize_text(&c.text);
+                                    let mut md =
+                                        cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
+                                            Some(content),
+                                        );
+                                    md.set_fg(Some(ColorInput::RGBA(theme.text)));
+                                    md.set_bg(Some(ColorInput::RGBA(theme.background_panel)));
+                                    md.set_table_border_color(Some(ColorInput::RGBA(
+                                        RGBA::from_ints(255, 200, 0, 255),
+                                    )));
+                                    md.render_self(temp, scan_area);
+                                    for k in 0..rows {
+                                        let src_y = src_start + k;
+                                        let mut line_text = String::new();
+                                        for tx in 0..wrap_w {
+                                            if let Some(cell) = temp.cell((tx, src_y)) {
+                                                line_text.push(
+                                                    cell.symbol().chars().next().unwrap_or(' '),
+                                                );
+                                            }
+                                        }
+                                        let trimmed = line_text.trim_end().to_string();
+                                        text_regions.push(TextRegion {
+                                            y1: cy,
+                                            y2: cy + 1,
+                                            x1: x_off + 2,
+                                            x2: x_off + max_w,
+                                            text: trimmed,
+                                        });
+                                        cy += 1;
+                                    }
+                                } else if p_top >= vp_top {
+                                    let text = compaction_line(c, crate::types::now_ms());
                                     text_regions.push(TextRegion {
                                         y1: content_offset,
                                         y2: content_offset + 1,

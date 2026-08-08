@@ -76,4 +76,34 @@ pub enum HarnessEvent {
         /// Which phase ran and how it should be displayed.
         event: super::context_manager::CompactionEvent,
     },
+    /// The LLM compaction (phase 3, the last-resort fallback) lifecycle. The
+    /// harness drives the model call (the context manager is synchronous and
+    /// LLM-free), so these events are emitted by the harness around the
+    /// summarization call — `Started` before it, `Finished`/`Failed` after.
+    LlmCompaction {
+        /// Which stage of the LLM compaction this event reports.
+        event: LlmCompactionEvent,
+    },
+    /// A text delta of the LLM-compaction summary, streamed live while the
+    /// summarizer model writes it. The TUI accumulates these into the
+    /// "Summarizing" box so the user sees the process visually, exactly like
+    /// the main agent's tokens stream into the chat.
+    LlmCompactionToken {
+        /// The next chunk of the summary text.
+        text: String,
+    },
+}
+
+/// A stage of the LLM compaction (phase 3, the last-resort fallback), emitted
+/// by the harness while it runs the summarization model call so the TUI can
+/// show a live line in the chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmCompactionEvent {
+    /// The harness is about to call the model for the continuation summary.
+    Started,
+    /// The summary was produced and applied — the context was compacted.
+    Finished,
+    /// The summarization call failed or produced no output — the compaction
+    /// is skipped this round and the context stays as it was.
+    Failed,
 }

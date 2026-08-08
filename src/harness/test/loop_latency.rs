@@ -165,24 +165,20 @@ async fn default_budget_holds_entire_conversation_until_80_percent() {
     );
 
     // (b) A small budget compacts at 80% → back just under the 80% trigger
-    // (the minimum decompaction; only trim_loop_closures trims closures
-    // toward 40%): the evictions work, they just trigger very late at the
-    // default 100k budget.
+    // (the minimum decompaction): the pipeline summarizes the compressible
+    // assistant drafts in place (user prompts are protected and never
+    // touched). The phases work, they just trigger very late at the default
+    // 100k budget.
     let mut small = ContextManager::new(4_000);
     for i in 0..20 {
         small.add_user("Continue.");
-        small.add_assistant("Working.", true);
-        small.add_tool_call(
-            &format!("c{i}"),
-            "fs_read",
-            r#"{"targets":[{"path":"a.rs"}]}"#,
-        );
-        // A realistic multi-word payload: ~500 estimated tokens per round
-        // (a bare `"x".repeat(600)` collapses to a handful of BPE tokens).
-        small.add_tool_result(
-            &format!("c{i}"),
-            &"the quick brown fox jumps over the lazy dog near the riverbank and the mountain trail. "
-                .repeat(30),
+        small.add_assistant(
+            &format!(
+                "Round {i}: {}",
+                "the quick brown fox jumps over the lazy dog near the riverbank and the mountain trail. "
+                    .repeat(20)
+            ),
+            true,
         );
     }
     let small_before = small.display_info();

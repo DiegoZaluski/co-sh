@@ -3207,26 +3207,83 @@ impl App {
                 });
             }
             CompactionEvent::PipelineFinished => {
-                let now = crate::types::now_ms();
-                let running = session.messages.iter_mut().rev().find(|m| {
-                    matches!(&m.parts[..], [Part::Compaction(c)]
-                        if c.phase == CompactionPhase::Pipeline && c.is_running())
-                });
-                if let Some(msg) = running
-                    && let Some(Part::Compaction(c)) = msg.parts.last_mut()
-                {
-                    c.elapsed_ms = Some(now.saturating_sub(c.started_at));
-                }
+                Self::finalize_compaction_line(session, CompactionPhase::Pipeline);
             }
             CompactionEvent::DraftsEvicted => {
                 Self::push_compaction_line(session, CompactionPhase::Drafts);
             }
-            CompactionEvent::ToolsEvicted => {
-                Self::push_compaction_line(session, CompactionPhase::Tools);
+        }
+    }
+
+    /// Freeze the still-running stopwatch line of the given phase. The
+    /// pipeline and the LLM compaction share this lifecycle: `Started` opens
+    /// a running line, its terminal event freezes it.
+    fn finalize_compaction_line(
+        session: &mut crate::types::Session,
+        phase: crate::types::CompactionPhase,
+    ) {
+        use crate::types::Part;
+        let now = crate::types::now_ms();
+        let running = session.messages.iter_mut().rev().find(|m| {
+            matches!(&m.parts[..], [Part::Compaction(c)]
+                if c.phase == phase && c.is_running())
+        });
+        if let Some(msg) = running
+            && let Some(Part::Compaction(c)) = msg.parts.last_mut()
+        {
+            c.elapsed_ms = Some(now.saturating_sub(c.started_at));
+        }
+    }
+
+    /// Handle an LLM-compaction lifecycle event (phase 3, the last-resort
+    /// fallback driven by the harness): `Started` opens the running
+    /// "Summarizing" box in the chat, `Finished`/`Failed` freezes it.
+    fn handle_llm_compaction_event(&mut self, event: cosh::harness::events::LlmCompactionEvent) {
+        use crate::types::{CompactionPart, CompactionPhase, Message, MessageRole, Part};
+        let Some(session) = self.state.current_session_mut() else {
+            return;
+        };
+        match event {
+            cosh::harness::events::LlmCompactionEvent::Started => {
+                session.messages.push(Message {
+                    id: format!("msg-ctx-{}", session.messages.len()),
+                    role: MessageRole::Assistant,
+                    parts: vec![Part::Compaction(CompactionPart::running(
+                        CompactionPhase::Llm,
+                    ))],
+                    created_at: 0,
+                    agent: None,
+                    model: None,
+                });
             }
-            CompactionEvent::ClosuresTrimmed => {
-                Self::push_compaction_line(session, CompactionPhase::Closures);
+            cosh::harness::events::LlmCompactionEvent::Finished
+            | cosh::harness::events::LlmCompactionEvent::Failed => {
+                Self::finalize_compaction_line(session, CompactionPhase::Llm);
             }
+        }
+    }
+
+    /// Accumulate a streamed summary token into the running "Summarizing"
+    /// box (the newest running LLM-compaction line in the current session).
+    /// Tokens append to the box's text so the user watches the summary being
+    /// written live, exactly like the main agent's tokens stream into the
+    /// chat.
+    fn handle_llm_compaction_token(&mut self, text: &str) {
+        use crate::types::{CompactionPhase, Part};
+        if text.is_empty() {
+            return;
+        }
+        let Some(session) = self.state.current_session_mut() else {
+            return;
+        };
+        let target = session.messages.iter_mut().rev().find(|m| {
+            matches!(&m.parts[..], [Part::Compaction(c)]
+                if c.phase == CompactionPhase::Llm && c.is_running())
+        });
+        if let Some(msg) = target
+            && let Some(Part::Compaction(c)) = msg.parts.last_mut()
+        {
+            c.text.push_str(text);
         }
     }
 
@@ -3647,6 +3704,14 @@ impl App {
 
                 HarnessEvent::Compaction { event } => {
                     self.handle_compaction_event(event);
+                }
+
+                HarnessEvent::LlmCompaction { event } => {
+                    self.handle_llm_compaction_event(event);
+                }
+
+                HarnessEvent::LlmCompactionToken { text } => {
+                    self.handle_llm_compaction_token(&text);
                 }
 
                 HarnessEvent::Error(msg) => {
