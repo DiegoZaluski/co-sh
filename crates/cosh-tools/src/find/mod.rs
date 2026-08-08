@@ -158,7 +158,7 @@ impl Find {
                         },
                         "path": {
                             "type": "string",
-                            "description": "A search root, glob, or literal file/directory. May be relative; CWD-relative results are returned."
+                            "description": "A search root, glob, or literal file/directory. May be relative; CWD-relative results are returned. Omitted: defaults to the working directory."
                         },
                         "paths": {
                             "type": "array",
@@ -188,6 +188,15 @@ impl Find {
                             "type": "string",
                             "enum": ["flat", "grouped", "tree"],
                             "description": "Output layout for the `formatted` field (default \"flat\")"
+                        },
+                        "sort_by_mtime": {
+                            "type": "boolean",
+                            "description": "Sort results by modification time, most recent first. Default true."
+                        },
+                        "timeout_ms": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Abort the search after this many milliseconds; partial results are returned with `timed_out: true`."
                         }
                     },
                     "required": ["pattern"]
@@ -450,7 +459,8 @@ impl Find {
     /// Like [`glob_with`](Self::glob_with), with the schema-driven call options
     /// bundled in [`GlobCallOptions`]: optional `file_type` (`"file"`,
     /// `"dir"`, `"symlink"`), `hidden` and `gitignore` toggles, `format`
-    /// (`"flat"`, `"grouped"`, `"tree"`), and an optional `max_results`.
+    /// (`"flat"`, `"grouped"`, `"tree"`), a `sort_by_mtime` toggle, an optional
+    /// `timeout_ms`, and an optional `max_results`.
     ///
     /// The effective result cap defaults to 200 (mirroring the reference
     /// tool) when neither this call's `max_results` nor the builder's is
@@ -459,12 +469,14 @@ impl Find {
     /// of `0` is rejected.
     ///
     /// `hidden` and `gitignore` default to `true` unless explicitly disabled
-    /// (reference-tool behavior). `file_type` filters results to one
-    /// filesystem kind and is an extension over the reference tool.
+    /// (reference-tool behavior). `sort_by_mtime` defaults to `true` —
+    /// the most recently modified files surface first. `file_type` filters
+    /// results to one filesystem kind and is an extension over the
+    /// reference tool.
     ///
     /// # Errors
     ///
-    /// Returns an error when the search paths are missing, a pattern is
+    /// Returns an error when a search path cannot be resolved, a pattern is
     /// invalid, `file_type` is unknown, `max_results` is zero, or the
     /// operation times out.
     pub fn glob_full(
@@ -481,6 +493,8 @@ impl Find {
             gitignore,
             max_results,
             format,
+            sort_by_mtime,
+            timeout_ms,
         } = opts;
         if let Some(0) = max_results {
             return Err("max_results must be a positive number".to_string());
@@ -498,35 +512,40 @@ impl Find {
         let gitignore = gitignore.or(self.gitignore).unwrap_or(true);
         let raw_targets: Vec<String> = match paths {
             Some(list) if !list.is_empty() => list,
-            _ => vec![path.ok_or_else(|| "missing 'path' or 'paths'".to_string())?],
+            // No explicit root: default to the workspace root (CWD) so a bare
+            // pattern never needs a `path`.
+            _ => vec![path.unwrap_or_else(|| ".".to_string())],
         };
         // Each raw entry becomes one resolved spec. Guard resolution keeps the
         // existing security contract; the parse step decides directory/glob/
         // file semantics and effective recursion.
-        let mut resolved: Vec<GlobTargetSpec> = Vec::with_capacity(raw_targets.len());
-        for target in &raw_targets {
-            let parsed = parse_find_pattern(target);
-            let base = self.guard.resolve(&parsed.base_path.to_string_lossy())?;
-            resolved.push(GlobTargetSpec {
-                base_path: base,
-                pattern: if parsed.has_glob {
-                    parsed.glob_pattern
-                } else {
-                    pattern.to_string()
-                },
-                has_glob: parsed.has_glob,
-            });
-        }
+        let resolved: Vec<GlobTargetSpec> = {
+            let mut resolved: Vec<GlobTargetSpec> = Vec::with_capacity(raw_targets.len());
+            for target in &raw_targets {
+                let parsed = parse_find_pattern(target);
+                let base = self.guard.resolve(&parsed.base_path.to_string_lossy())?;
+                resolved.push(GlobTargetSpec {
+                    base_path: base,
+                    pattern: if parsed.has_glob {
+                        parsed.glob_pattern
+                    } else {
+                        pattern.to_string()
+                    },
+                    has_glob: parsed.has_glob,
+                });
+            }
+            resolved
+        };
         let cwd = self.guard.root().clone();
         glob_targets_with(
             &Glob {
                 file_type,
                 recursive: self.recursive,
                 max_results: Some(max_results),
-                sort_by_mtime: self.sort_by_mtime,
+                sort_by_mtime: sort_by_mtime.or(self.sort_by_mtime),
                 hidden: Some(hidden),
                 gitignore: Some(gitignore),
-                timeout_ms: self.timeout_ms,
+                timeout_ms: timeout_ms.or(self.timeout_ms),
                 format: format.or_else(|| self.format.clone()),
             },
             &resolved,

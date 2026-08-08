@@ -46,22 +46,6 @@ pub fn has_glob_path_chars(s: &str) -> bool {
     s.chars().any(|c| matches!(c, '*' | '?' | '[' | '{'))
 }
 
-/// Split a semicolon-delimited list of paths into entries, trimming empties.
-///
-/// `toPathList(null)` yields an empty list; callers default to `["."]`.
-#[must_use]
-pub fn to_path_list(input: Option<&str>) -> Vec<String> {
-    input
-        .map(|s| {
-            s.split(';')
-                .map(str::trim)
-                .filter(|p| !p.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// A single path input parsed into a search root + effective glob.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFindPattern {
@@ -426,11 +410,13 @@ pub fn glob_targets_with(
     let mut timed_out = false;
     let mut limit_reached = false;
 
-    for target in valid {
-        let base_str = target.base_path.to_string_lossy().to_string();
-
-        // A literal file target (no glob chars AND an existing file)
-        // short-circuits the walk: the file is returned directly.
+    // A literal file target (no glob chars AND an existing file) short-circuits
+    // the walk: the file is returned directly. Cheap metadata read, done inline.
+    // Walk targets are scanned in parallel (one scoped thread per target) since
+    // each walk is independent I/O-bound work; results are merged back in target
+    // order afterwards so dedupe and ordering stay deterministic.
+    let mut walk_targets: Vec<&GlobTargetSpec> = Vec::new();
+    for target in &valid {
         if !target.has_glob && target.base_path.is_file() {
             make_literal_file_entry(
                 &target.base_path,
@@ -439,79 +425,130 @@ pub fn glob_targets_with(
                 &mut seen,
                 &mut merged,
             );
-            continue;
+        } else {
+            walk_targets.push(target);
         }
+    }
 
-        let wrapped: Option<Arc<GlobMatchCallback>> = on_match.as_ref().map(|cb| {
-            let cb = cb.clone();
-            let base_owned = base_str.clone();
-            let ancestor = ancestor.clone();
-            let cb_arc: Arc<GlobMatchCallback> = Arc::new(move |m: &GlobMatch| {
-                let rel = rebase_path(&base_owned, &m.path, ancestor.as_deref());
-                cb(&GlobMatch {
-                    path: rel,
-                    file_type: m.file_type,
-                    mtime: m.mtime,
-                    size: m.size,
+    // Struct-ok tuples per target: (entries, raw count before dedupe, timed_out,
+    // errored with message). Scoping keeps the borrows of `valid`, `cwd`, and
+    // `on_match` alive for the whole scan; each thread gets owned captures.
+    struct TargetScan {
+        entries: Vec<GlobEntry>,
+        entry_count: u32,
+        timed_out: bool,
+    }
+
+    let scans: Vec<Result<TargetScan, String>> = std::thread::scope(|scope| {
+        walk_targets
+            .iter()
+            .copied()
+            .map(|target| {
+                let base_str = target.base_path.to_string_lossy().to_string();
+                let wrapped: Option<Arc<GlobMatchCallback>> = on_match.as_ref().map(|cb| {
+                    let cb = cb.clone();
+                    let base_owned = base_str.clone();
+                    let ancestor = ancestor.clone();
+                    let cb_arc: Arc<GlobMatchCallback> = Arc::new(move |m: &GlobMatch| {
+                        let rel = rebase_path(&base_owned, &m.path, ancestor.as_deref());
+                        cb(&GlobMatch {
+                            path: rel,
+                            file_type: m.file_type,
+                            mtime: m.mtime,
+                            size: m.size,
+                        });
+                    });
+                    cb_arc
                 });
-            });
-            cb_arc
-        });
+                let pattern = if target.pattern.is_empty() {
+                    "**".to_string()
+                } else {
+                    target.pattern.clone()
+                };
+                let path = base_str.clone();
+                let ancestor_owned = ancestor.clone();
+                scope.spawn(move || -> Result<TargetScan, String> {
+                    let sdk_result = sdk_glob(GlobOptions {
+                        pattern,
+                        path,
+                        file_type,
+                        // Recursion is already encoded in the pattern by the
+                        // tool's parser: bare globs arrive as `**/…`
+                        // (recursive), scoped globs as `dir/…` (shallow).
+                        // Disable the SDK's own `**/`-prepending so a scoped
+                        // `*.rs` does not silently escalate into `**/*.rs`.
+                        recursive: Some(false),
+                        hidden: glob.hidden,
+                        max_results: fetch_max,
+                        gitignore: glob.gitignore,
+                        sort_by_mtime: Some(glob.sort_by_mtime.unwrap_or(true)),
+                        cache: None,
+                        include_node_modules: None,
+                        timeout_ms,
+                        on_match: wrapped,
+                    })?;
+                    let mut entries: Vec<GlobEntry> = Vec::new();
+                    for m in sdk_result.matches {
+                        let abs = Path::new(&base_str).join(&m.path);
+                        let display = if cwd.is_some() || ancestor_owned.is_some() {
+                            display_path(
+                                &abs,
+                                cwd,
+                                ancestor_owned.as_deref(),
+                                m.file_type == FileType::Dir,
+                            )
+                        } else {
+                            // Legacy single-target calls (no CWD) keep paths
+                            // relative to the searched root.
+                            with_trailing_slash(
+                                &m.path.replace('\\', "/"),
+                                m.file_type == FileType::Dir,
+                            )
+                        };
+                        entries.push(GlobEntry {
+                            path: display,
+                            file_type: file_type_str(m.file_type).to_owned(),
+                            mtime_ms: m.mtime,
+                            size_bytes: m.size,
+                        });
+                    }
+                    let entry_count = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+                    Ok(TargetScan {
+                        entries,
+                        entry_count,
+                        timed_out: sdk_result.timed_out,
+                    })
+                })
+            })
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| "glob target scan panicked".to_string())
+                    .and_then(|inner| inner)
+            })
+            .collect()
+    });
 
-        let sdk_result = sdk_glob(GlobOptions {
-            pattern: if target.pattern.is_empty() {
-                "**".to_string()
-            } else {
-                target.pattern.clone()
-            },
-            path: base_str.clone(),
-            file_type,
-            // Recursion is already encoded in the pattern by the tool's
-            // parser: bare globs arrive as `**/…` (recursive), scoped globs as
-            // `dir/…` (shallow). Disable the SDK's own `**/`-prepending so a
-            // scoped `*.rs` does not silently escalate into `**/*.rs`.
-            recursive: Some(false),
-            hidden: glob.hidden,
-            max_results: fetch_max,
-            gitignore: glob.gitignore,
-            sort_by_mtime: glob.sort_by_mtime,
-            cache: None,
-            include_node_modules: None,
-            timeout_ms,
-            on_match: wrapped,
-        })?;
-
-        timed_out = timed_out || sdk_result.timed_out;
-        let entry_count = sdk_result.matches.len() as u32;
-        for m in sdk_result.matches {
-            let abs = Path::new(&base_str).join(&m.path);
-            let display = if cwd.is_some() || ancestor.is_some() {
-                display_path(&abs, cwd, ancestor.as_deref(), m.file_type == FileType::Dir)
-            } else {
-                // Legacy single-target calls (no CWD) keep paths relative to
-                // the searched root.
-                with_trailing_slash(&m.path.replace('\\', "/"), m.file_type == FileType::Dir)
-            };
-            if seen.insert(display.clone()) {
-                merged.push(GlobEntry {
-                    path: display,
-                    file_type: file_type_str(m.file_type).to_owned(),
-                    mtime_ms: m.mtime,
-                    size_bytes: m.size,
-                });
+    for scan in scans {
+        let scan = scan?;
+        timed_out = timed_out || scan.timed_out;
+        for entry in scan.entries {
+            if seen.insert(entry.path.clone()) {
+                merged.push(entry);
             }
         }
         // A capped target means more entries may exist than were returned.
         if let Some(max) = glob.max_results
-            && entry_count > max
+            && scan.entry_count > max
         {
             limit_reached = true;
         }
     }
 
     // Global re-rank when sorting: each target's results were individually
-    // capped, so the merged top-N must reflect the global mtime order.
-    if glob.sort_by_mtime.unwrap_or(false) {
+    // capped, so the merged top-N must reflect the global mtime order. Sorting
+    // is the default: most recently modified files surface first.
+    if glob.sort_by_mtime.unwrap_or(true) {
         merged.sort_by(|a, b| {
             b.mtime_ms
                 .unwrap_or(0.0)

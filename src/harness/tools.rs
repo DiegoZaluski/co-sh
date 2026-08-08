@@ -667,21 +667,27 @@ impl Tools for CoshTools {
                 let pattern = args["pattern"]
                     .as_str()
                     .ok_or_else(|| "missing 'pattern'".to_string())?;
-                let path = args.get("path").and_then(|v| v.as_str()).map(String::from);
+                let mut path = args.get("path").and_then(|v| v.as_str()).map(String::from);
                 let paths = args.get("paths").and_then(|v| v.as_array()).map(|list| {
                     list.iter()
                         .filter_map(|p| p.as_str().map(String::from))
                         .collect::<Vec<String>>()
                 });
                 if path.is_none() && paths.as_ref().is_none_or(Vec::is_empty) {
-                    return Err("missing 'path' or 'paths'".to_string());
+                    // Default to the workspace root (CWD) so a single pattern
+                    // never needs an explicit `path`.
+                    path = Some(".".to_string());
                 }
-                let max_results = match args.get("max_results") {
-                    Some(v) => Some(u32::try_from(
-                        v.as_u64().ok_or_else(|| "max_results must be a positive integer".to_string())?,
-                    ).map_err(|_| "max_results must be a positive integer".to_string())?),
-                    None => None,
-                };
+                let max_results =
+                    match args.get("max_results") {
+                        Some(v) => Some(
+                            u32::try_from(v.as_u64().ok_or_else(|| {
+                                "max_results must be a positive integer".to_string()
+                            })?)
+                            .map_err(|_| "max_results must be a positive integer".to_string())?,
+                        ),
+                        None => None,
+                    };
                 let format = args
                     .get("format")
                     .and_then(|v| v.as_str())
@@ -692,6 +698,11 @@ impl Tools for CoshTools {
                     .map(String::from);
                 let hidden = args.get("hidden").and_then(|v| v.as_bool());
                 let gitignore = args.get("gitignore").and_then(|v| v.as_bool());
+                let sort_by_mtime = args.get("sort_by_mtime").and_then(|v| v.as_bool());
+                let timeout_ms = args
+                    .get("timeout_ms")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok());
                 // Stream each match live to the TUI while the scan runs,
                 // batched so a huge tree does not flood the event channel.
                 let batcher = self
@@ -708,21 +719,21 @@ impl Tools for CoshTools {
                     });
                     cb
                 });
-                let result = self
-                    .find
-                    .glob_full(
-                        pattern,
-                        path,
-                        paths,
-                        GlobCallOptions {
-                            file_type,
-                            hidden,
-                            gitignore,
-                            max_results,
-                            format,
-                        },
-                        on_match,
-                    );
+                let result = self.find.glob_full(
+                    pattern,
+                    path,
+                    paths,
+                    GlobCallOptions {
+                        file_type,
+                        hidden,
+                        gitignore,
+                        max_results,
+                        format,
+                        sort_by_mtime,
+                        timeout_ms,
+                    },
+                    on_match,
+                );
                 // Flush the tail even on error so the last streamed matches are
                 // not lost when the scan fails at the very end.
                 if let Some(batcher) = batcher {

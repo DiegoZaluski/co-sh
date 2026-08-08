@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::super::glob::{format_path_relative_to_cwd, parse_find_pattern, to_path_list};
+use super::super::glob::{format_path_relative_to_cwd, parse_find_pattern};
 
 #[test]
 fn parse_bare_glob_recurses() {
@@ -59,13 +59,13 @@ fn parse_backslashes_normalized() {
 }
 
 #[test]
-fn to_path_list_splits_on_semicolon() {
-    assert_eq!(
-        to_path_list(Some("src/**/*.rs; test/**/*.rs")),
-        vec!["src/**/*.rs".to_string(), "test/**/*.rs".to_string()]
-    );
-    assert!(to_path_list(None).is_empty());
-    assert!(to_path_list(Some(" ; ")).is_empty());
+fn semicolons_are_literal_path_characters() {
+    // The legacy `;`-delimited `path` syntax is gone; a semicolon is a literal
+    // character in a path, not a separator. Use `paths` for multiple roots.
+    let parsed = parse_find_pattern("src/**/*.rs; test/**/*.rs");
+    assert_eq!(parsed.base_path.to_string_lossy(), "src");
+    assert_eq!(parsed.glob_pattern, "**/*.rs; test/**/*.rs");
+    assert!(parsed.has_glob);
 }
 
 #[test]

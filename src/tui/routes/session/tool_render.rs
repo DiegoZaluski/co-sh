@@ -1,6 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -54,6 +54,41 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
         if cx >= right {
             break;
         }
+        if let Some(cell) = buf.cell_mut((cx, y)) {
+            cell.set_char(ch);
+            cell.set_style(style);
+        }
+    }
+}
+
+/// Draw a glob file row with markdown-link styling, but only over the path
+/// glyphs: the leading indentation (tree/grouped formats pad rows with spaces)
+/// keeps the base style so the underline starts exactly on the first letter.
+fn draw_link_row(
+    buf: &mut Buffer,
+    text: &str,
+    x: u16,
+    y: u16,
+    max_w: u16,
+    content_style: Style,
+    link_style: Style,
+) {
+    let indent_chars = text.chars().take_while(|c| *c == ' ').count();
+    let is_link = !text.trim_end().ends_with('/');
+    let right = x + max_w;
+    for (i, ch) in text.chars().enumerate() {
+        if ch.is_control() {
+            continue;
+        }
+        let cx = x + i as u16;
+        if cx >= right {
+            break;
+        }
+        let style = if is_link && i >= indent_chars {
+            link_style
+        } else {
+            content_style
+        };
         if let Some(cell) = buf.cell_mut((cx, y)) {
             cell.set_char(ch);
             cell.set_style(style);
@@ -1069,18 +1104,25 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     );
 
     let content_style = Style::default().fg(rgba_color(ctx.theme.text));
+    let link_style = Style::default()
+        .fg(rgba_color(ctx.theme.markdown_link))
+        .add_modifier(Modifier::UNDERLINED);
     for (i, line) in display.lines().enumerate() {
         let ly = ctx.y + 1 + i as u16;
         if ly >= area.bottom() {
             break;
         }
-        draw_text_line(
+        // Emulate the chat's markdown link styling for file rows: the underline
+        // starts on the first path glyph (leading grouped/tree indentation is
+        // exempt). Directory headers (ending in `/`) stay plain.
+        draw_link_row(
             ctx.buf,
             line,
             x_off,
             ly,
             ctx.max_w.saturating_sub(3),
             content_style,
+            link_style,
         );
     }
     if collapsed.overflow {

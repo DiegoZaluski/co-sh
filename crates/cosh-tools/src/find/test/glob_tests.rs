@@ -304,8 +304,8 @@ fn glob_precancelled_timeout_is_error() {
 // (flat/grouped/tree).
 // -------------------------------------------------------------------------
 
+use super::super::glob::parse_find_pattern;
 use super::super::glob::{GlobTargetSpec, glob_targets_with};
-use super::super::glob::{parse_find_pattern, to_path_list};
 
 #[test]
 fn glob_scoped_glob_does_not_recurse_into_subdirs() {
@@ -525,12 +525,13 @@ fn glob_invalid_format_rejected() {
 }
 
 #[test]
-fn to_path_list_handles_semicolons() {
-    assert_eq!(
-        to_path_list(Some("a.rs; b.rs")),
-        vec!["a.rs".to_string(), "b.rs".to_string()]
-    );
-    assert!(to_path_list(None).is_empty());
+fn to_path_list_semicolon_syntax_removed() {
+    // The legacy `;`-delimited `path` syntax is gone: a semicolon is a literal
+    // character in a path, not a separator. Use `paths` for multiple roots.
+    let spec = parse_find_pattern("a.rs; b.rs");
+    assert_eq!(spec.base_path.to_string_lossy(), "a.rs; b.rs");
+    assert_eq!(spec.glob_pattern, "");
+    assert!(!spec.has_glob);
 }
 
 // -------------------------------------------------------------------------
@@ -797,8 +798,8 @@ fn find_glob_hidden_never_leaks_git() {
     write_file(&tmp.path().join(".git").join("config"), "x");
     let find = Find::new().cwd(tmp.path());
 
-    let out = glob_full_typed(&find, tmp.path(), "**", None, None, None)
-        .expect("glob should succeed");
+    let out =
+        glob_full_typed(&find, tmp.path(), "**", None, None, None).expect("glob should succeed");
 
     for entry in &out.matches {
         assert!(
@@ -820,8 +821,8 @@ fn find_glob_gitignore_respected_by_default() {
     write_file(&root.join("ignored.log"), "x");
     let find = Find::new().cwd(root);
 
-    let out = glob_full_typed(&find, root, "**", None, Some(false), None)
-        .expect("glob should succeed");
+    let out =
+        glob_full_typed(&find, root, "**", None, Some(false), None).expect("glob should succeed");
 
     let paths: Vec<&str> = out.matches.iter().map(|m| m.path.as_str()).collect();
     assert!(paths.iter().any(|p| p.ends_with("kept.txt")));

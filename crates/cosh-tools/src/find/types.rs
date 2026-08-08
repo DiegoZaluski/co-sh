@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 pub struct GlobInput {
     /// The glob pattern to match (e.g. "**/*.rs", "src/**", "*.toml").
     pub pattern: String,
-    /// The root directory to search within.
-    pub path: String,
+    /// The root directory to search within. Omitted: defaults to the working
+    /// directory.
+    pub path: Option<String>,
     /// Multiple search roots in one call. When present, overrides `path`.
     /// Each target is validated individually by the path guard; missing
     /// targets are skipped with a warning instead of failing the whole call.
@@ -24,7 +25,7 @@ pub struct GlobInput {
     pub max_results: Option<u32>,
     /// Respect `.gitignore` rules (default: `true`).
     pub gitignore: Option<bool>,
-    /// Sort results by modification time, most recent first (default: `false`).
+    /// Sort results by modification time, most recent first (default: `true`).
     pub sort_by_mtime: Option<bool>,
     /// Output layout for the `formatted` field: `"flat"`, `"grouped"`, or
     /// `"tree"`. When unset, no formatted rendering is attached.
@@ -87,7 +88,7 @@ pub struct Glob {
     pub max_results: Option<u32>,
     /// Respect `.gitignore` rules (default: `true`).
     pub gitignore: Option<bool>,
-    /// Sort results by modification time, most recent first (default: `false`).
+    /// Sort results by modification time, most recent first (default: `true`).
     pub sort_by_mtime: Option<bool>,
     /// Output layout (`"flat"`, `"grouped"`, `"tree"`).
     pub format: Option<String>,
@@ -114,6 +115,11 @@ pub struct GlobCallOptions {
     pub max_results: Option<u32>,
     /// Output layout: `"flat"`, `"grouped"`, or `"tree"`.
     pub format: Option<String>,
+    /// Sort results by modification time, most recent first. Omitted defaults
+    /// to `true` (the most recently edited files surface first).
+    pub sort_by_mtime: Option<bool>,
+    /// Abort the search after this many milliseconds.
+    pub timeout_ms: Option<u32>,
 }
 
 /// A single filesystem entry matched by a glob search.
