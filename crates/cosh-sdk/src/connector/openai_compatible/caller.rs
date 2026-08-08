@@ -380,10 +380,10 @@ fn process_sse_response(
                     }
                     Err(e) => {
                         if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&data) {
-                            yield Err(ConnectorError::HttpError {
-                                status: 200,
-                                body: api_err.error.message,
-                            });
+                            yield Err(ConnectorError::classify_http(
+                                200,
+                                api_err.error.message,
+                            ));
                             return;
                         }
                         yield Err(ConnectorError::Deserialization(format!(
@@ -460,10 +460,7 @@ pub async fn chat(
         Ok(r) => r,
         Err(e) => {
             if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&response_text) {
-                return Err(ConnectorError::HttpError {
-                    status: 200,
-                    body: api_err.error.message,
-                });
+                return Err(ConnectorError::classify_http(200, api_err.error.message));
             }
             return Err(ConnectorError::Deserialization(format!(
                 "{e}. Raw response: {response_text}"

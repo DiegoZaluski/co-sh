@@ -91,12 +91,10 @@ pub async fn send_get_request(
             .text()
             .await
             .unwrap_or_else(|_| "Unable to read error response".to_string());
-        let error_msg = format!("HTTP {} - {}", status.as_u16(), error_text);
+        let status = status.as_u16();
+        let error_msg = format!("HTTP {status} - {error_text}");
         log::error!("HTTP Error captured: {error_msg}");
-        return Err(ConnectorError::HttpError {
-            status: status.as_u16(),
-            body: error_text,
-        });
+        return Err(ConnectorError::classify_http(status, error_text));
     }
 
     Ok(response.text().await?)
@@ -137,12 +135,10 @@ pub async fn send_request_stream(
             .text()
             .await
             .unwrap_or_else(|_| "Unable to read error response".to_string());
-        let error_msg = format!("HTTP {} - {}", status.as_u16(), error_text);
+        let status = status.as_u16();
+        let error_msg = format!("HTTP {status} - {error_text}");
         log::error!("HTTP Error captured: {error_msg}");
-        return Err(ConnectorError::HttpError {
-            status: status.as_u16(),
-            body: error_text,
-        });
+        return Err(ConnectorError::classify_http(status, error_text));
     }
 
     Ok(response)
