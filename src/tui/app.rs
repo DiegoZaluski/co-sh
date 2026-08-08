@@ -3714,6 +3714,25 @@ impl App {
                     self.handle_llm_compaction_token(&text);
                 }
 
+                HarnessEvent::Toast { message, variant } => {
+                    // Route harness notifications (context-window overflow,
+                    // exhausted retries) through the existing toast system.
+                    use crate::ui::toast::{ToastOptions, ToastVariant as TuiToastVariant};
+                    use cosh::harness::events::ToastVariant as HarnessToastVariant;
+                    let variant = match variant {
+                        HarnessToastVariant::Info => TuiToastVariant::Info,
+                        HarnessToastVariant::Success => TuiToastVariant::Success,
+                        HarnessToastVariant::Warning => TuiToastVariant::Warning,
+                        HarnessToastVariant::Error => TuiToastVariant::Error,
+                    };
+                    self.toast_state.show(ToastOptions {
+                        title: None,
+                        message,
+                        variant,
+                        duration_ms: 8000,
+                    });
+                }
+
                 HarnessEvent::Error(msg) => {
                     self.state.status = SessionStatus::Retry {
                         message: msg.clone(),
