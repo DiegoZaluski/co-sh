@@ -209,7 +209,7 @@ pub struct Harness {
 /// field. Gate by tool name so no other tool's JSON is ever interpreted.
 /// `pub(crate)` for the bridge unit test in `harness::test`.
 pub(crate) fn result_is_useless(name: &str, result: &str) -> bool {
-    if name != "find_grep" {
+    if !matches!(name, "find_grep" | "find_glob") {
         return false;
     }
     match serde_json::from_str::<serde_json::Value>(result) {

@@ -325,6 +325,18 @@ fn result_is_useless_reads_find_grep_json_contract() {
     // Malformed JSON is never interpreted as useless.
     assert!(!result_is_useless("find_grep", "not json"));
 
+    // find_glob speaks the same contract: a zero-match GlobOutput is useless,
+    // a timed-out partial is NOT (it is an incomplete scan, not a dead end).
+    assert!(result_is_useless(
+        "find_glob",
+        r#"{"matches":[],"total":0,"useless":true,"note":"No files found matching pattern"}"#
+    ));
+    assert!(!result_is_useless(
+        "find_glob",
+        r#"{"matches":[],"total":0,"timed_out":true,"note":"incomplete"}"#
+    ));
+    assert!(!result_is_useless("find_glob", "not json"));
+
     // The gate is per-tool: no other tool's JSON is ever interpreted.
     assert!(!result_is_useless("fs_read", r#"{"useless":true}"#));
 }

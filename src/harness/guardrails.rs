@@ -35,7 +35,8 @@ pub enum PermissionCheck {
 ///
 /// Supports the following argument shapes:
 /// - `{ "targets": [{ "path": "..." }, ...] }` (fs_read, fs_write, fs_edit)
-/// - `{ "path": "..." }` (fs_rollback, find_glob, find_grep)
+/// - `{ "path": "..." }` (fs_rollback)
+/// - `{ "path": "..." }` / `{ "paths": [...] }` (find_glob, find_grep)
 pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<String> {
     match tool_name {
         "fs_read" | "fs_write" | "fs_edit" => {
@@ -49,15 +50,10 @@ pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<Stri
                 Vec::new()
             }
         }
-        "fs_rollback" | "find_glob" => args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(|s| vec![s.to_string()])
-            .unwrap_or_default(),
-        // find_grep: the single `path` plus every entry of the optional `paths`
-        // array — each target is a real path the tool opens, so the approval
-        // check must see all of them.
-        "find_grep" => {
+        // find_glob / find_grep: the single `path` plus every entry of the
+        // optional `paths` array — each target is a real path the tool opens,
+        // so the approval check must see all of them.
+        "find_glob" | "find_grep" => {
             let mut out: Vec<String> = args
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -65,10 +61,7 @@ pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<Stri
                 .into_iter()
                 .collect();
             if let Some(list) = args.get("paths").and_then(|v| v.as_array()) {
-                out.extend(
-                    list.iter()
-                        .filter_map(|p| p.as_str().map(String::from)),
-                );
+                out.extend(list.iter().filter_map(|p| p.as_str().map(String::from)));
             }
             out
         }

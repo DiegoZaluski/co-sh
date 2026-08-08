@@ -99,7 +99,7 @@ use compression::init::{CHUNK_CAPACITY, init as deterministic_compress};
 
 /// Default token budget for the total conversation context. Overridable via
 /// [`ContextManager::new`].
-pub const MAX_CONTEXT_TOKENS: usize = 10_000;
+pub const MAX_CONTEXT_TOKENS: usize = 100_000;
 
 /// Percentage of the budget at which the four-phase compaction runs.
 const COMPACT_PCT: usize = 80;

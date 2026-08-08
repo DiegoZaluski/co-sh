@@ -1,12 +1,14 @@
 use std::collections::HashSet;
 use std::fmt::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::events::HarnessEvent;
 use cosh_sdk::extract_action::ToolSchema;
+use cosh_sdk::find::{GlobMatch, GrepMatch};
 use cosh_tools::{
     bash::{Bash, BashRunInput},
-    find::Find,
+    find::{Find, GlobCallOptions, GlobMatchCallback, GrepMatchCallback},
     fs::{Fs, FsRollbackInput, Target, TargetFile},
     plan::{
         Plan,
@@ -71,6 +73,59 @@ pub struct RecallDb {
     pub uri: String,
     pub table_name: String,
     pub embedder: RecallEmbedderConfig,
+}
+
+/// Batches streamed search matches and flushes them to the TUI in chunks
+/// (rate-limited), so a huge scan does not flood the event channel with one
+/// event per match and the tool part's live output stays bounded.
+///
+/// The reference implementation throttles live updates to ~200ms; we flush
+/// on a line count OR an interval, whichever comes first.
+struct StreamBatcher {
+    tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
+    tool: &'static str,
+    lines: Vec<String>,
+    last_flush: Instant,
+}
+
+impl StreamBatcher {
+    const MAX_LINES_PER_FLUSH: usize = 100;
+    const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
+
+    fn new(tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>, tool: &'static str) -> Self {
+        Self {
+            tx,
+            tool,
+            lines: Vec::new(),
+            last_flush: Instant::now(),
+        }
+    }
+
+    /// Buffer one streamed match line; flush when the batch or the interval
+    /// is exceeded.
+    fn push(&mut self, line: String) {
+        self.lines.push(line);
+        if self.lines.len() >= Self::MAX_LINES_PER_FLUSH
+            || self.last_flush.elapsed() >= Self::FLUSH_INTERVAL
+        {
+            self.flush();
+        }
+    }
+
+    /// Send whatever is buffered (called by the dispatch after the search
+    /// finishes so the tail of a slow scan is not lost).
+    fn flush(&mut self) {
+        if self.lines.is_empty() {
+            return;
+        }
+        let batch = std::mem::take(&mut self.lines);
+        let _ = self.tx.send(HarnessEvent::ToolOutput {
+            tool: self.tool.to_string(),
+            output: format!("{}\n", batch.join("\n")),
+            finished: false,
+        });
+        self.last_flush = Instant::now();
+    }
 }
 
 pub struct CoshTools {
@@ -612,10 +667,71 @@ impl Tools for CoshTools {
                 let pattern = args["pattern"]
                     .as_str()
                     .ok_or_else(|| "missing 'pattern'".to_string())?;
-                let path = args["path"]
-                    .as_str()
-                    .ok_or_else(|| "missing 'path'".to_string())?;
-                let result = self.find.glob(pattern, path)?;
+                let path = args.get("path").and_then(|v| v.as_str()).map(String::from);
+                let paths = args.get("paths").and_then(|v| v.as_array()).map(|list| {
+                    list.iter()
+                        .filter_map(|p| p.as_str().map(String::from))
+                        .collect::<Vec<String>>()
+                });
+                if path.is_none() && paths.as_ref().is_none_or(Vec::is_empty) {
+                    return Err("missing 'path' or 'paths'".to_string());
+                }
+                let max_results = match args.get("max_results") {
+                    Some(v) => Some(u32::try_from(
+                        v.as_u64().ok_or_else(|| "max_results must be a positive integer".to_string())?,
+                    ).map_err(|_| "max_results must be a positive integer".to_string())?),
+                    None => None,
+                };
+                let format = args
+                    .get("format")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let file_type = args
+                    .get("file_type")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let hidden = args.get("hidden").and_then(|v| v.as_bool());
+                let gitignore = args.get("gitignore").and_then(|v| v.as_bool());
+                // Stream each match live to the TUI while the scan runs,
+                // batched so a huge tree does not flood the event channel.
+                let batcher = self
+                    .event_tx
+                    .clone()
+                    .map(|tx| Arc::new(Mutex::new(StreamBatcher::new(tx, "find_glob"))));
+                let on_match: Option<Arc<GlobMatchCallback>> = batcher.as_ref().map(|batcher| {
+                    let batcher = batcher.clone();
+                    let cb: Arc<GlobMatchCallback> = Arc::new(move |m: &GlobMatch| {
+                        batcher
+                            .lock()
+                            .expect("stream batcher lock poisoned")
+                            .push(m.path.clone());
+                    });
+                    cb
+                });
+                let result = self
+                    .find
+                    .glob_full(
+                        pattern,
+                        path,
+                        paths,
+                        GlobCallOptions {
+                            file_type,
+                            hidden,
+                            gitignore,
+                            max_results,
+                            format,
+                        },
+                        on_match,
+                    );
+                // Flush the tail even on error so the last streamed matches are
+                // not lost when the scan fails at the very end.
+                if let Some(batcher) = batcher {
+                    batcher
+                        .lock()
+                        .expect("stream batcher lock poisoned")
+                        .flush();
+                }
+                let result = result?;
                 serde_json::to_string(&result).map_err(|e| e.to_string())
             }
 
@@ -623,18 +739,12 @@ impl Tools for CoshTools {
                 let pattern = args["pattern"]
                     .as_str()
                     .ok_or_else(|| "missing 'pattern'".to_string())?;
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let paths = args
-                    .get("paths")
-                    .and_then(|v| v.as_array())
-                    .map(|list| {
-                        list.iter()
-                            .filter_map(|p| p.as_str().map(String::from))
-                            .collect::<Vec<String>>()
-                    });
+                let path = args.get("path").and_then(|v| v.as_str()).map(String::from);
+                let paths = args.get("paths").and_then(|v| v.as_array()).map(|list| {
+                    list.iter()
+                        .filter_map(|p| p.as_str().map(String::from))
+                        .collect::<Vec<String>>()
+                });
                 if path.is_none() && paths.as_ref().is_none_or(Vec::is_empty) {
                     return Err("missing 'path' or 'paths'".to_string());
                 }
@@ -646,9 +756,34 @@ impl Tools for CoshTools {
                     .get("line_range")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let result =
-                    self.find
-                        .grep_with(pattern, path, paths, skip, line_range)?;
+                // Stream each match live to the TUI while the search runs,
+                // batched so a huge tree does not flood the event channel.
+                let batcher = self
+                    .event_tx
+                    .clone()
+                    .map(|tx| Arc::new(Mutex::new(StreamBatcher::new(tx, "find_grep"))));
+                let on_match: Option<Arc<GrepMatchCallback>> = batcher.as_ref().map(|batcher| {
+                    let batcher = batcher.clone();
+                    let cb: Arc<GrepMatchCallback> = Arc::new(move |m: &GrepMatch| {
+                        batcher
+                            .lock()
+                            .expect("stream batcher lock poisoned")
+                            .push(m.path.clone());
+                    });
+                    cb
+                });
+                let result = self
+                    .find
+                    .grep_with_streaming(pattern, path, paths, skip, line_range, on_match);
+                // Flush the tail even on error so the last streamed matches are
+                // not lost when the search fails at the very end.
+                if let Some(batcher) = batcher {
+                    batcher
+                        .lock()
+                        .expect("stream batcher lock poisoned")
+                        .flush();
+                }
+                let result = result?;
                 serde_json::to_string(&result).map_err(|e| e.to_string())
             }
 
@@ -834,5 +969,75 @@ impl Tools for CoshTools {
 
             _ => Err(format!("unknown cosh tool: {name}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_batcher_tests {
+    use tokio::sync::mpsc;
+
+    use super::HarnessEvent;
+
+    #[test]
+    fn flush_drains_tail_into_single_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut batcher = super::StreamBatcher::new(tx.clone(), "find_glob");
+        batcher.push("src/a.rs".into());
+        batcher.push("src/b.rs".into());
+        batcher.flush();
+
+        let event = rx.try_recv().expect("flush must emit the buffered lines");
+        assert!(
+            rx.try_recv().is_err(),
+            "one flush must emit exactly one event"
+        );
+        let HarnessEvent::ToolOutput {
+            tool,
+            output,
+            finished,
+        } = event
+        else {
+            panic!("expected ToolOutput event");
+        };
+        assert_eq!(tool, "find_glob");
+        assert!(!finished, "streamed chunks are never terminal events");
+        assert_eq!(output, "src/a.rs\nsrc/b.rs\n");
+        assert!(batcher.lines.is_empty(), "flush must empty the buffer");
+    }
+
+    #[test]
+    fn flush_with_empty_buffer_sends_nothing() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut batcher = super::StreamBatcher::new(tx, "find_grep");
+        batcher.flush();
+        assert!(
+            rx.try_recv().is_err(),
+            "an empty flush must not emit an event"
+        );
+    }
+
+    #[test]
+    fn push_auto_flushes_when_batch_cap_is_reached() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut batcher = super::StreamBatcher::new(tx.clone(), "find_glob");
+        assert!(rx.try_recv().is_err());
+
+        for i in 0..super::StreamBatcher::MAX_LINES_PER_FLUSH {
+            batcher.push(format!("f{i}.rs"));
+        }
+        let event = rx.try_recv().expect("the cap must auto-flush a batch");
+        let HarnessEvent::ToolOutput { output, .. } = event else {
+            panic!("expected ToolOutput event");
+        };
+        assert_eq!(
+            output.lines().count(),
+            super::StreamBatcher::MAX_LINES_PER_FLUSH,
+            "a full batch must be sent as one event"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no extra event before the next flush"
+        );
+        assert!(batcher.lines.is_empty());
     }
 }
