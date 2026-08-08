@@ -811,6 +811,7 @@ fn test_bash_output_expand_toggles_and_grows_height() {
                 tool_call_id: Some("bash-1".into()),
                 is_start: true,
                 is_streaming: false,
+                cached_line_count: None,
             }),
         ],
         created_at: 0,
@@ -886,6 +887,7 @@ fn test_bash_output_collapse_shrinks_without_scroll_gap() {
                 tool_call_id: Some("bash-1".into()),
                 is_start: true,
                 is_streaming: false,
+                cached_line_count: None,
             }),
         ],
         created_at: 0,
@@ -939,6 +941,105 @@ fn test_bash_output_collapse_shrinks_without_scroll_gap() {
     assert!(!buffer_text(&buf).contains("line 119"));
 }
 
+/// Glob results render as an expandable block: collapsed preview shows only a
+/// bounded set of file paths, a click toggles the full grouped list, and the
+/// message/part heights grow to match (mirroring the bash block behaviour).
+#[test]
+fn test_glob_output_expand_shows_grouped_list() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    // 40 matches strongly exceed the collapse preview (10 lines).
+    let matches: Vec<serde_json::Value> = (0..40)
+        .map(|i| {
+            serde_json::json!({
+                "path": format!("src/mod{i}.rs"),
+                "file_type": "file",
+                "mtime_ms": null,
+                "size_bytes": null
+            })
+        })
+        .collect();
+    // The tool emits `formatted` (grouped), `scope`, and `cwd` alongside the
+    // matches; the TUI prefers `formatted` for the block body.
+    let output = serde_json::json!({
+        "matches": matches,
+        "total": 40u32,
+        "formatted": (0..40).map(|i| format!("src/mod{i}.rs")).collect::<Vec<_>>().join("\n"),
+        "scope": ".",
+        "cwd": "/work"
+    })
+    .to_string();
+    let msg = Message {
+        id: "msg-glob".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            Part::Text(TextPart {
+                text: "Let me find those.".into(),
+                synthetic: false,
+            }),
+            Part::Tool(ToolPart {
+                tool: "find_glob".into(),
+                input: serde_json::json!({ "pattern": "*.rs", "path": "." }),
+                output: Some(output),
+                status: ToolStatus::Completed,
+                tool_call_id: Some("glob-1".into()),
+                is_start: true,
+                is_streaming: false,
+                cached_line_count: None,
+            }),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 60));
+
+    // First render: glob is collapsed to a preview (10 lines max).
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let collapsed_msg_h = view.msg_height_cache[0];
+    let collapsed_part_h = view.part_heights_cache[0][1];
+    assert!(!view.tool_state.is_expanded("glob-1"));
+    assert!(!buffer_text(&buf).contains("src/mod39.rs"));
+    // The header is visible even when collapsed.
+    assert!(buffer_text(&buf).contains("Glob"));
+
+    // Click inside the glob block.
+    let text_h = view.part_heights_cache[0][0];
+    let glob_top = area.y + text_h;
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        glob_top + 2,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&click, area, &state, &config));
+    assert!(view.tool_state.is_expanded("glob-1"));
+
+    // Second render: heights grow and the full grouped list is visible.
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    assert!(view.msg_height_cache[0] > collapsed_msg_h);
+    assert!(view.part_heights_cache[0][1] > collapsed_part_h);
+    assert!(buffer_text(&buf).contains("src/mod39.rs"));
+
+    let selected = view.get_text_in_region(
+        area.x,
+        area.y,
+        area.x + area.width.saturating_sub(1),
+        area.y + area.height.saturating_sub(1),
+    );
+    assert!(selected.contains("src/mod39.rs"));
+}
+
 /// Regression test for ratatui panics on control characters in buffer cells.
 ///
 /// Raw bash output commonly contains `\r` (progress spinners), `\t`, and
@@ -965,6 +1066,7 @@ fn test_bash_output_with_control_chars_does_not_pollute_cells() {
             tool_call_id: Some("bash-ctrl".into()),
             is_start: true,
             is_streaming: false,
+            cached_line_count: None,
         })],
         created_at: 0,
         agent: None,
@@ -1113,6 +1215,7 @@ fn state_with_bash_block(session_id: &str, line: &str) -> AppState {
                 tool_call_id: Some("shell".into()),
                 is_start: false,
                 is_streaming: false,
+                cached_line_count: None,
             })],
             created_at: 0,
             agent: None,

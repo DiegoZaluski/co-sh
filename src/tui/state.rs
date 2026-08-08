@@ -255,6 +255,7 @@ impl AppState {
                             tool_call_id: Some("glob-1".to_string()),
                             is_start: false,
                             is_streaming: false,
+                            cached_line_count: None,
                         }),
                         Part::File(FilePart {
                             filename: "src/main.rs".to_string(),
@@ -300,6 +301,7 @@ impl AppState {
                             tool_call_id: Some("read-1".to_string()),
                             is_start: false,
                             is_streaming: false,
+                            cached_line_count: None,
                         }),
                         Part::Tool(ToolPart {
                             tool: "grep".to_string(),
@@ -309,6 +311,7 @@ impl AppState {
                             tool_call_id: Some("grep-1".to_string()),
                             is_start: false,
                             is_streaming: false,
+                            cached_line_count: None,
                         }),
                         Part::Text(TextPart {
                             text: "I can see you have a basic Rust project. Let me add **clap** for CLI argument parsing and **serde_json** for JSON processing."
@@ -338,6 +341,7 @@ impl AppState {
                             tool_call_id: Some("write-1".to_string()),
                             is_start: false,
                             is_streaming: false,
+                            cached_line_count: None,
                         }),
                         Part::Text(TextPart {
                             text: "Now let me also add the Cargo.toml changes:".to_string(),
@@ -354,6 +358,7 @@ impl AppState {
                             tool_call_id: Some("edit-1".to_string()),
                             is_start: false,
                             is_streaming: false,
+                            cached_line_count: None,
                         }),
                     ],
                     created_at: 5000,
@@ -392,6 +397,7 @@ impl AppState {
                             tool_call_id: Some("shell-1".to_string()),
                             is_start: false,
                             is_streaming: false,
+                            cached_line_count: None,
                         }),
                         Part::Text(TextPart {
                             text: "The project compiles! Let me now add proper error handling:"
@@ -406,6 +412,7 @@ impl AppState {
                             tool_call_id: Some("edit-2".to_string()),
                             is_start: false,
                             is_streaming: false,
+                            cached_line_count: None,
                         }),
                         Part::Tool(ToolPart {
                             tool: "websearch".to_string(),
@@ -415,6 +422,7 @@ impl AppState {
                             tool_call_id: Some("web-1".to_string()),
                             is_start: false,
                             is_streaming: false,
+                            cached_line_count: None,
                         }),
                     ],
                     created_at: 7000,

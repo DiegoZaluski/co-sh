@@ -3352,6 +3352,7 @@ impl App {
                         tool_call_id: None,
                         is_start: true,
                         is_streaming: false,
+                        cached_line_count: None,
                     });
                     match session.messages.last_mut() {
                         Some(msg) if msg.role == MessageRole::Assistant => msg.parts.push(part),
@@ -3385,6 +3386,7 @@ impl App {
                                 tool_call_id: None,
                                 is_start: false,
                                 is_streaming: false,
+                                cached_line_count: None,
                             };
                             crate::routes::session::tool_render::tool_inline_text(&temp_part)
                         };
@@ -3518,10 +3520,46 @@ impl App {
                     self.state.right_panel.fail_last_pty(error.clone());
                 }
                 HarnessEvent::ToolOutput {
-                    tool: _tool,
+                    tool,
                     output,
                     finished,
                 } => {
+                    // Streaming find results (glob/grep matches) are appended to
+                    // the running tool part so the chat shows a live counter.
+                    // Everything else (bash, subagent) streams into the right
+                    // panel PTY.
+                    if matches!(tool.as_str(), "find_glob" | "find_grep") {
+                        let Some(session) = self.state.current_session_mut() else {
+                            continue;
+                        };
+                        let mut appended = false;
+                        'find_part: for msg in session.messages.iter_mut().rev() {
+                            for part in msg.parts.iter_mut().rev() {
+                                if let Part::Tool(tp) = part
+                                    && tp.status == ToolStatus::Running
+                                    && tp.tool == tool
+                                {
+                                    let out = tp.output.get_or_insert_with(String::new);
+                                    let added_lines = output.lines().count() as u32;
+                                    out.push_str(&output);
+                                    // Update cached line count for efficient display
+                                    tp.cached_line_count = Some(
+                                        tp.cached_line_count
+                                            .unwrap_or(0)
+                                            .saturating_add(added_lines),
+                                    );
+                                    appended = true;
+                                    break 'find_part;
+                                }
+                            }
+                        }
+                        if !appended {
+                            log::debug!(
+                                "ToolOutput for {tool} with no running part; dropping chunk"
+                            );
+                        }
+                        continue;
+                    }
                     // Update right panel PTY with streaming output
                     self.state.right_panel.update_last_pty(output.clone());
                     // Auto-follow if user is at the bottom

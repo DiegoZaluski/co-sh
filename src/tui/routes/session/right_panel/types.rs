@@ -315,9 +315,7 @@ impl RightPanelState {
             return;
         }
         let start = output.len() - MAX_PTY_OUTPUT_CHARS;
-        let cut = output[start..]
-            .find('\n')
-            .map_or(start, |i| start + i + 1);
+        let cut = output[start..].find('\n').map_or(start, |i| start + i + 1);
         output.drain(..cut);
     }
 
@@ -495,14 +493,13 @@ mod tests {
         }
         assert!(state.pty_sessions.len() <= MAX_PTY_SESSIONS);
         // The most recent commands survive; the oldest are gone.
-        assert!(state
-            .pty_sessions
-            .iter()
-            .any(|p| p.command == format!("cmd{}", MAX_PTY_SESSIONS + 9)));
-        assert!(!state
-            .pty_sessions
-            .iter()
-            .any(|p| p.command == "cmd0"));
+        assert!(
+            state
+                .pty_sessions
+                .iter()
+                .any(|p| p.command == format!("cmd{}", MAX_PTY_SESSIONS + 9))
+        );
+        assert!(!state.pty_sessions.iter().any(|p| p.command == "cmd0"));
     }
 
     /// A running session is never evicted (output updates target the last
@@ -516,10 +513,7 @@ mod tests {
         }
         // Leave the newest session running while over the cap.
         state.start_pty("running".to_string(), None);
-        assert!(state
-            .pty_sessions
-            .iter()
-            .any(|p| p.command == "running"));
+        assert!(state.pty_sessions.iter().any(|p| p.command == "running"));
     }
 
     /// Output is truncated to `MAX_PTY_OUTPUT_CHARS`, keeping the TAIL (the

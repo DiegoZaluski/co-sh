@@ -876,7 +876,7 @@ impl SessionView {
                     let tool_display = tool_render::tool_display(&tool.tool);
                     let is_block = matches!(tool.status, ToolStatus::Completed)
                         && tool.output.as_deref().is_some_and(|o| !o.trim().is_empty())
-                        && matches!(tool_display, "bash" | "write" | "edit" | "todo");
+                        && matches!(tool_display, "bash" | "write" | "edit" | "todo" | "glob");
 
                     // Top margin — skip if this is the first part in the message
                     // or if there isn't room for at least 1 row after it.
@@ -1032,14 +1032,29 @@ impl SessionView {
                     && !t.output.as_deref().unwrap_or("").trim().is_empty()
                     && matches!(
                         tool_render::tool_display(&t.tool),
-                        "bash" | "write" | "edit" | "todo"
+                        "bash" | "write" | "edit" | "todo" | "glob"
                     );
                 if is_block {
                     let output = t.output.as_deref().unwrap_or("").trim();
                     // Add 2 rows for the block's internal padding (top/bottom border lines),
                     // plus 2 rows for the external vertical margin that render_parts adds
                     // around block-type tools (1 top, 1 bottom).
-                    if tool_render::tool_display(&t.tool) == "todo" {
+                    if tool_render::tool_display(&t.tool) == "glob" {
+                        // Glob block: preview collapsed, full list when expanded
+                        // (mirrors render_glob's collapse_tool_output).
+                        let id = t.tool_call_id.as_deref().unwrap_or("glob");
+                        let body = self::tool_render::glob_block_text(t).unwrap_or_default();
+                        let collapsed = crate::util::scroll::collapse_tool_output(&body, 10, 800);
+                        let expanded = tool_state.is_expanded(id);
+                        let display = if expanded || !collapsed.overflow {
+                            &body
+                        } else {
+                            &collapsed.output
+                        };
+                        let lines =
+                            display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
+                        lines + 4
+                    } else if tool_render::tool_display(&t.tool) == "todo" {
                         let formatted = tool_render::format_todo_output(output, &t.tool);
                         let lines = formatted.len().max(1) as u16;
                         lines + 4
@@ -1390,20 +1405,29 @@ impl SessionView {
                     );
 
                     if click_y >= part_y && click_y < part_y + part_h {
-                        if let crate::types::Part::Tool(tool) = part
-                            && tool_render::tool_display(&tool.tool) == "bash"
-                        {
-                            let output = tool.output.as_deref().unwrap_or("").trim().to_string();
-                            if !output.is_empty() {
-                                let id = tool.tool_call_id.as_deref().unwrap_or("shell");
-                                let collapsed =
-                                    crate::util::scroll::collapse_tool_output(&output, 10, 800);
-                                if collapsed.overflow {
-                                    // Toggle on any click inside the bash block. The part's
-                                    // row range already matches the rendered block because the
-                                    // height caches are rebuilt with the expansion state.
-                                    self.tool_state.toggle_expanded(id);
-                                    return true;
+                        if let crate::types::Part::Tool(tool) = part {
+                            let display = tool_render::tool_display(&tool.tool);
+                            if display == "bash" || display == "glob" {
+                                let output =
+                                    tool.output.as_deref().unwrap_or("").trim().to_string();
+                                if !output.is_empty() {
+                                    let id = tool.tool_call_id.as_deref().unwrap_or(
+                                        if display == "glob" { "glob" } else { "shell" },
+                                    );
+                                    let text = if display == "glob" {
+                                        tool_render::glob_block_text(tool).unwrap_or_default()
+                                    } else {
+                                        output
+                                    };
+                                    let collapsed =
+                                        crate::util::scroll::collapse_tool_output(&text, 10, 800);
+                                    if collapsed.overflow {
+                                        // Toggle on any click inside the block. The part's
+                                        // row range already matches the rendered block because the
+                                        // height caches are rebuilt with the expansion state.
+                                        self.tool_state.toggle_expanded(id);
+                                        return true;
+                                    }
                                 }
                             }
                         }
@@ -1789,10 +1813,9 @@ impl SessionView {
                                         // Reuse the scratch buffer instead of allocating a
                                         // fresh multi-thousand-row buffer every frame while
                                         // the last message streams.
-                                        let temp = scratch
-                                            .get_or_insert_with(|| {
-                                                ratatui::buffer::Buffer::empty(scan_area)
-                                            });
+                                        let temp = scratch.get_or_insert_with(|| {
+                                            ratatui::buffer::Buffer::empty(scan_area)
+                                        });
                                         if *temp.area() != scan_area {
                                             temp.resize(scan_area);
                                         }
@@ -1923,25 +1946,45 @@ impl SessionView {
                                 if let Some(ref output) = t.output {
                                     let trimmed = output.trim();
                                     if !trimmed.is_empty() {
-                                        let display = if config.show_tool_details
-                                            || !matches!(
-                                                t.status,
-                                                crate::types::ToolStatus::Completed
-                                            ) {
-                                            trimmed.to_string()
-                                        } else {
-                                            let id = t.tool_call_id.as_deref().unwrap_or("shell");
+                                        let is_glob =
+                                            self::tool_render::tool_display(&t.tool) == "glob";
+                                        let is_completed =
+                                            matches!(t.status, crate::types::ToolStatus::Completed);
+                                        let preview_collapse = |body: String| {
+                                            let id = t
+                                                .tool_call_id
+                                                .as_deref()
+                                                .unwrap_or(if is_glob { "glob" } else { "shell" });
                                             let collapsed =
                                                 crate::util::scroll::collapse_tool_output(
-                                                    trimmed, 10, 800,
+                                                    &body, 10, 800,
                                                 );
                                             if self.tool_state.is_expanded(id)
                                                 || !collapsed.overflow
                                             {
-                                                trimmed.to_string()
+                                                body
                                             } else {
                                                 collapsed.output
                                             }
+                                        };
+                                        // Glob results copy as the rendered file
+                                        // list (flat/grouped/tree), not the raw JSON.
+                                        let body = if is_glob {
+                                            self::tool_render::glob_block_text(t)
+                                                .unwrap_or_default()
+                                        } else {
+                                            String::new()
+                                        };
+                                        let display = if is_glob {
+                                            if !body.is_empty() && is_completed {
+                                                preview_collapse(body)
+                                            } else {
+                                                body
+                                            }
+                                        } else if config.show_tool_details || !is_completed {
+                                            trimmed.to_string()
+                                        } else {
+                                            preview_collapse(trimmed.to_string())
                                         };
                                         let first_output_screen = (p_top.max(vp_top) + 1) as u16;
                                         let screen_end = p_bottom.min(vp_bottom) as u16;
@@ -2644,14 +2687,15 @@ impl SessionView {
                                         .saturating_add(inner_area.height))
                                     .clamp(100, 5000);
                                     let full_area = Rect::new(0, 0, inner_area.width, generous_h);
-                                    let temp = scratch.get_or_insert_with(|| Buffer::empty(full_area));
+                                    let temp =
+                                        scratch.get_or_insert_with(|| Buffer::empty(full_area));
                                     if *temp.area() != full_area {
                                         temp.resize(full_area);
                                     }
                                     // `Buffer::resize` keeps existing cell content, so clear it
                                     // before rendering: un-written cells would otherwise show
                                     // glyphs from the previous message rendered into this buffer.
-                        temp.reset();
+                                    temp.reset();
                                     temp.set_style(
                                         full_area,
                                         Style::default().bg(rgba_color(theme.background)),

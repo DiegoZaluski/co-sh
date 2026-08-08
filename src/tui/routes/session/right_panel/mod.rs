@@ -56,7 +56,11 @@ fn count_sections(state: &RightPanelState) -> (bool, bool, bool) {
 /// Mirrors the TOP_GAP / TOP_PAD / BOTTOM_PAD constants in each section.
 const BOX_OVERHEAD: i32 = 1 + 1 + 1;
 
-fn natural_section_height(state: &mut RightPanelState, inner_w: u16, kind: types::SectionKind) -> i32 {
+fn natural_section_height(
+    state: &mut RightPanelState,
+    inner_w: u16,
+    kind: types::SectionKind,
+) -> i32 {
     match kind {
         types::SectionKind::Todo => {
             if state.todos.is_empty() {
@@ -214,8 +218,6 @@ pub fn render_right_panel(
         }
     }
 }
-
-
 
 /// Render all bash PTYs as a single continuous text buffer with line-based scroll.
 fn render_bash_section(

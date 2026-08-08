@@ -55,6 +55,9 @@ pub struct ToolPart {
     pub tool_call_id: Option<String>,
     pub is_start: bool,
     pub is_streaming: bool,
+    /// Cached line count for streaming tools (glob/grep) to avoid O(n) recounting
+    #[serde(skip)]
+    pub cached_line_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

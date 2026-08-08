@@ -844,6 +844,139 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     }
 }
 
+/// Live/result summary for the streaming search tools (glob/grep).
+///
+/// Returns the label suffix (live match counter while running; match count +
+/// flags when completed) and whether the result carries a warning flag
+/// (timed out / limit reached) that deserves the warning color.
+///
+/// The completed output JSON is parsed ONCE and both the suffix and the
+/// warning flag are derived from that single parse.
+fn search_tool_summary(part: &ToolPart) -> (Option<String>, bool) {
+    let is_running = matches!(part.status, ToolStatus::Running);
+    let output = part.output.as_deref().unwrap_or("");
+    if is_running {
+        // Use cached line count for O(1) lookup instead of O(n) lines().count()
+        let count = part.cached_line_count.unwrap_or_else(|| {
+            // Fallback to O(n) count if cache not available (shouldn't happen in normal flow)
+            output.lines().count() as u32
+        });
+        return ((count > 0).then(|| format!(" — {count} matches")), false);
+    }
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(output) else {
+        return (None, false);
+    };
+    let timed_out = json
+        .get("timed_out")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let limit_reached = json
+        .get("limit_reached")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let warning = timed_out || limit_reached;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(count) = json
+        .get("matches")
+        .and_then(|m| m.as_array())
+        .map(|a| a.len())
+    {
+        parts.push(format!("{count} matches"));
+    }
+    if timed_out {
+        parts.push("timed out, partial".to_string());
+    }
+    if limit_reached {
+        parts.push("limit reached".to_string());
+    }
+    if json
+        .get("useless")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        parts.push("no matches".to_string());
+    }
+    if parts.is_empty() {
+        return (None, warning);
+    }
+    (Some(format!(" — {}", parts.join(", "))), warning)
+}
+
+/// Extract the display-ready glob output text from a completed tool part.
+///
+/// Prefers the tool's `formatted` field (flat/grouped/tree layout produced by
+/// the tool layer from the `format` argument); falls back to joining the raw
+/// `matches` paths one per line. Returns `None` when there is no listable
+/// output (still running, empty, or not JSON).
+pub(crate) fn glob_block_text(part: &ToolPart) -> Option<String> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(part.output.as_deref()?) else {
+        return None;
+    };
+    if let Some(formatted) = json
+        .get("formatted")
+        .and_then(|f| f.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(formatted.to_string());
+    }
+    json.get("matches")
+        .and_then(|m| m.as_array())
+        .and_then(|list| {
+            let rows: Vec<String> = list
+                .iter()
+                .filter_map(|e| e.get("path").and_then(|p| p.as_str()))
+                .map(String::from)
+                .collect();
+            (!rows.is_empty()).then(|| rows.join("\n"))
+        })
+}
+
+/// Status glyph prefix and warning flag for a completed search-tool result.
+struct GlobStatus<'a> {
+    glyph: &'a str,
+    warning: bool,
+}
+
+fn glob_status(part: &ToolPart) -> Option<GlobStatus<'_>> {
+    if !matches!(part.status, ToolStatus::Completed) {
+        return None;
+    }
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(part.output.as_deref()?) else {
+        return None;
+    };
+    let warning = json
+        .get("timed_out")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || json
+            .get("limit_reached")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    let glyph = if warning {
+        "\u{26A0}"
+    } else if json
+        .get("useless")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        "\u{2715}"
+    } else if json
+        .get("matches")
+        .and_then(|m| m.as_array())
+        .is_some_and(|a| !a.is_empty())
+    {
+        "\u{2713}"
+    } else {
+        ""
+    };
+    Some(GlobStatus { glyph, warning })
+}
+
+/// Render a glob tool. Completed globs with results draw an expandable block:
+/// the labelled header plus the file list (grouped/flat per the tool's
+/// `format`), collapsed to a fixed preview until toggled. Running globs keep
+/// the lightweight single-line spinner label.
 pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let pattern = input_value(&part.input, "pattern").unwrap_or_default();
     let path = input_value(&part.input, "path");
@@ -854,12 +987,13 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     if let Some(p) = path {
         let _ = write!(label, " in {p}");
     }
+    let status = is_completed.then(|| glob_status(part)).flatten();
+    if let Some(status) = &status
+        && !status.glyph.is_empty()
+    {
+        let _ = write!(label, " {glyph}", glyph = status.glyph);
+    }
 
-    let fg = if is_completed {
-        ctx.theme.text_muted
-    } else {
-        ctx.theme.text
-    };
     let tool_id = format!("glob_{}", part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
@@ -868,8 +1002,103 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         .tool_spinners
         .get(&tool_id)
         .filter(|s| !s.is_idle());
-    *ctx.line_h = 1;
-    render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, spinner);
+
+    let fg = if is_completed {
+        if status.as_ref().is_some_and(|s| s.warning) {
+            ctx.theme.warning
+        } else {
+            ctx.theme.text_muted
+        }
+    } else {
+        ctx.theme.text
+    };
+
+    // Only completed globs with listable output render the expandable block.
+    let Some(body) = glob_block_text(part) else {
+        *ctx.line_h = 1;
+        render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, spinner);
+        return;
+    };
+
+    let id = part.tool_call_id.as_deref().unwrap_or("glob");
+    let expanded = ctx.state.is_expanded(id);
+    let collapsed = crate::util::scroll::collapse_tool_output(&body, 10, 800);
+    let display = if expanded || !collapsed.overflow {
+        &body
+    } else {
+        &collapsed.output
+    };
+
+    let lines = display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
+    let area = Rect::new(ctx.x, ctx.y, ctx.max_w.saturating_add(3), lines + 2);
+    *ctx.line_h = area.height;
+
+    let mut border_box = BoxRenderable::new();
+    border_box.set_background_color(Some(ctx.theme.background_panel.into()));
+    border_box.set_border_color(Some(ctx.theme.background.into()));
+    border_box.set_border_sides(BorderSidesConfig {
+        left: true,
+        top: false,
+        right: false,
+        bottom: false,
+    });
+    border_box.set_custom_border_chars(BorderCharacters {
+        top_left: ' ',
+        top_right: ' ',
+        bottom_left: ' ',
+        bottom_right: ' ',
+        horizontal: ' ',
+        vertical: '┃',
+        top_t: ' ',
+        bottom_t: ' ',
+        left_t: '┃',
+        right_t: ' ',
+        cross: ' ',
+    });
+    border_box.render_self(ctx.buf, area);
+
+    let x_off = ctx.x + 3;
+    let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
+    draw_text_line(
+        ctx.buf,
+        &label,
+        x_off,
+        ctx.y,
+        ctx.max_w.saturating_sub(3),
+        title_style,
+    );
+
+    let content_style = Style::default().fg(rgba_color(ctx.theme.text));
+    for (i, line) in display.lines().enumerate() {
+        let ly = ctx.y + 1 + i as u16;
+        if ly >= area.bottom() {
+            break;
+        }
+        draw_text_line(
+            ctx.buf,
+            line,
+            x_off,
+            ly,
+            ctx.max_w.saturating_sub(3),
+            content_style,
+        );
+    }
+    if collapsed.overflow {
+        let hint_y = ctx.y + 1 + display.lines().count() as u16;
+        let hint = if expanded {
+            "Click to collapse"
+        } else {
+            "Click to expand"
+        };
+        draw_text_line(
+            ctx.buf,
+            hint,
+            x_off,
+            hint_y,
+            ctx.max_w.saturating_sub(3),
+            Style::default().fg(rgba_color(ctx.theme.text_muted)),
+        );
+    }
 }
 
 pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
@@ -905,9 +1134,17 @@ pub fn render_grep(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     if let Some(p) = path {
         let _ = write!(label, " in {p}");
     }
+    let (summary, has_warning) = search_tool_summary(part);
+    if let Some(summary) = summary {
+        label.push_str(&summary);
+    }
 
     let fg = if is_completed {
-        ctx.theme.text_muted
+        if has_warning {
+            ctx.theme.warning
+        } else {
+            ctx.theme.text_muted
+        }
     } else {
         ctx.theme.text
     };
