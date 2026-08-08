@@ -92,6 +92,14 @@
 //! inside the same `run()` (the 1 → 2 grind repeats), so the alternation
 //! converges to the 80% trigger or to `NeedsLlmCompaction` within a single
 //! overflow.
+//!
+//! When the provider itself rejects the compaction because the serialized
+//! context exceeds ITS window (a `ContextWindowExceeded` error), the harness
+//! drains tool chains one at a time via [`Self::evict_tool_chain_for_overflow`]
+//! (never inputs, closures or summaries) and retries; once every chain is gone
+//! the overflow is recorded as stuck for that provider
+//! ([`Self::mark_overflow`]) and the user is notified through the TUI until
+//! they switch the model.
 
 pub mod compression;
 #[cfg(test)]
@@ -385,11 +393,21 @@ fn build_llm_prompt(previous_summary: Option<&str>, context: &str) -> String {
 /// Snapshot of context manager state for bincode persistence. The compression
 /// pipeline runs synchronously at the next 80% overflow, so nothing is
 /// in-flight between save and restore — the snapshot is a plain clone.
+///
+/// NOTE: bincode 1.x is positional — ADDING a field is a format break (an
+/// old snapshot fails the whole deserialization and the TUI falls back to the
+/// JSONL history; the accepted dev-stage tradeoff). `overflow_provider` was
+/// added with the context-window overflow recovery.
 #[derive(Serialize, Deserialize)]
 pub struct ContextManagerState {
     pub items: VecDeque<ContextItem>,
     pub next_id: u64,
     pub max_tokens: usize,
+    /// The provider whose context window overflowed the LLM compaction with
+    /// every tool chain drained. While set (same provider), the harness skips
+    /// the doomed summarizer call and only re-notifies — until the user
+    /// switches the model. `None` = no known stuck overflow.
+    pub overflow_provider: Option<String>,
 }
 
 /// Snapshot of context manager state for TUI display: the budget percentage
@@ -488,6 +506,11 @@ pub struct ContextManager {
     /// [`Self::set_model`]). Defaults to [`TokenEncoding::Cl100k`] — the
     /// generic cross-provider estimate.
     encoding: TokenEncoding,
+    /// The provider whose context window overflowed the LLM compaction with
+    /// every tool chain drained (see [`Self::overflow_stuck`]). Persisted with
+    /// the snapshot so a stuck session stays notified across turns until the
+    /// user switches the model.
+    overflow_provider: Option<String>,
 }
 
 /// Build a plain assistant text message (no tool calls).
@@ -510,6 +533,7 @@ impl ContextManager {
             next_id: 1,
             max_tokens,
             encoding: TokenEncoding::Cl100k,
+            overflow_provider: None,
         }
     }
 
@@ -1070,7 +1094,121 @@ impl ContextManager {
             .push_back(ContextItem::Compaction { id, summary });
         self.draft_cursor = None;
         self.segment_start = None;
+        // A successful compaction is proof the provider accepts the context
+        // again — any recorded stuck overflow is no longer relevant.
+        self.clear_overflow();
         self.total_tokens() < self.trigger()
+    }
+
+    // Context-window overflow recovery (driven by the harness)
+
+    /// Remove ONE tool chain (call + result TOGETHER — the native tool-call
+    /// format rejects an unpaired half, so `remove_item` always drops the
+    /// pair) to relieve a provider-side context-window overflow. The harness
+    /// drains one chain per attempt ("1 por vez") and re-requests after each;
+    /// when the provider reported its window, the harness also drains locally
+    /// with the token estimate to skip the pointless HTTP round trips.
+    ///
+    /// Removal order (the accepted design): useless chains first, then the
+    /// largest (most tokens freed per item), then middle-out as the tiebreak
+    /// — the intent at both ends (oldest task start, newest in-flight work)
+    /// survives the longest. Unlike the automatic sweep, NO chain is exempt:
+    /// when the context still does not fit, everything goes.
+    ///
+    /// Returns whether a chain was removed; `false` means no tool chain
+    /// remains anywhere — the overflow cannot be relieved this way.
+    pub fn evict_tool_chain_for_overflow(&mut self) -> bool {
+        // Collect the distinct chains (call/result halves share a call_id).
+        let mut chains: Vec<(String, usize, bool, usize)> = Vec::new();
+        for item in &self.items {
+            let (ContextItem::ToolCall { call_id, .. }
+            | ContextItem::ToolResult { call_id, .. }) = item
+            else {
+                continue;
+            };
+            if chains.iter().any(|(cid, ..)| cid == call_id) {
+                continue;
+            }
+            let tokens: usize = self
+                .items
+                .iter()
+                .filter(|it| {
+                    matches!(
+                        it,
+                        ContextItem::ToolCall { call_id: c, .. }
+                        | ContextItem::ToolResult { call_id: c, .. } if c == call_id
+                    )
+                })
+                .map(|it| it.tokens(self.encoding))
+                .sum();
+            let useless = self.items.iter().any(|it| {
+                matches!(
+                    it,
+                    ContextItem::ToolResult {
+                        call_id: c,
+                        useless: true,
+                        ..
+                    } if c == call_id
+                )
+            });
+            chains.push((call_id.clone(), tokens, useless, 0));
+        }
+        if chains.is_empty() {
+            return false;
+        }
+        // Middle-out distance from the chain list's middle (the tiebreak).
+        let mid = chains.len() / 2;
+        for (i, chain) in chains.iter_mut().enumerate() {
+            chain.3 = i.abs_diff(mid);
+        }
+        chains.sort_by(|a, b| {
+            b.2.cmp(&a.2) // useless chains first
+                .then(b.1.cmp(&a.1)) // then by size, descending
+                .then(a.3.cmp(&b.3)) // middle-out tiebreak
+        });
+        let (call_id, ..) = &chains[0];
+        let Some(idx) = self.items.iter().position(|it| {
+            matches!(
+                it,
+                ContextItem::ToolCall { call_id: c, .. }
+                | ContextItem::ToolResult { call_id: c, .. } if c == call_id
+            )
+        }) else {
+            return false;
+        };
+        self.remove_item(idx);
+        true
+    }
+
+    /// True when the LLM compaction is KNOWN to be stuck for `provider`: a
+    /// previous overflow drained every tool chain and the total still exceeds
+    /// the window. The harness then skips the doomed summarizer call (it would
+    /// only burn a paid request per dispatch) and re-surfaces the notification
+    /// until the user switches the model.
+    pub fn overflow_stuck(&self, provider: &str) -> bool {
+        self.overflow_provider.as_deref() == Some(provider)
+    }
+
+    /// Record that the LLM compaction is stuck for `provider` (every tool
+    /// chain was drained and the context still exceeds the provider window).
+    pub fn mark_overflow(&mut self, provider: &str) {
+        self.overflow_provider = Some(provider.to_string());
+    }
+
+    /// Forget a recorded stuck overflow — called when the provider changes
+    /// (model switch) or a compaction succeeds, so the next overflow starts
+    /// fresh.
+    pub fn clear_overflow(&mut self) {
+        self.overflow_provider = None;
+    }
+
+    /// Called by the harness at loop start with the ACTIVE provider: when it
+    /// differs from a recorded stuck provider, the user switched the model —
+    /// clear the stuck state and retry from scratch.
+    pub fn sync_provider(&mut self, provider: &str) {
+        if self.overflow_provider.as_deref() != Some(provider) {
+            self.clear_overflow();
+        }
     }
 
     // Rendering & persistence
@@ -1174,6 +1312,7 @@ impl ContextManager {
             items: self.items.clone(),
             next_id: self.next_id,
             max_tokens: self.max_tokens,
+            overflow_provider: self.overflow_provider.clone(),
         }
     }
 
@@ -1186,6 +1325,7 @@ impl ContextManager {
         self.items = state.items.clone();
         self.next_id = state.next_id;
         self.max_tokens = state.max_tokens;
+        self.overflow_provider = state.overflow_provider.clone();
         // Scheduling bias only — a restored session restarts the gradual
         // draft eviction and the segment frontier from the beginning of the
         // timeline.

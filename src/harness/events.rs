@@ -92,6 +92,31 @@ pub enum HarnessEvent {
         /// The next chunk of the summary text.
         text: String,
     },
+    /// A user-visible notification, rendered by the TUI through its existing
+    /// toast system. Emitted when the context-window overflow could not be
+    /// relieved (every tool chain drained) or a provider error survived its
+    /// retries — the session keeps working, but the user must act (switch
+    /// the model, start a new session).
+    Toast {
+        /// The message to display.
+        message: String,
+        /// Severity/color variant.
+        variant: ToastVariant,
+    },
+}
+
+/// Severity of a [`HarnessEvent::Toast`]. Kept in the harness (not the TUI)
+/// so the TUI maps it onto its own toast variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastVariant {
+    /// Neutral informational notice.
+    Info,
+    /// Successful completion notice.
+    Success,
+    /// A warning the user should act on (e.g. context-window overflow).
+    Warning,
+    /// An error that survived its retries.
+    Error,
 }
 
 /// A stage of the LLM compaction (phase 3, the last-resort fallback), emitted

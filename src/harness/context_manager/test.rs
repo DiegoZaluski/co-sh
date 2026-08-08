@@ -368,6 +368,124 @@ fn sweep_keeps_useful_chains_intact() {
     assert_eq!(cm.items_snapshot().len(), before, "nothing is swept");
 }
 
+// ── Context-window overflow recovery ────────────────────────────────────
+
+fn has_chain(cm: &ContextManager, call_id: &str) -> bool {
+    cm.items.iter().any(|it| match it {
+        ContextItem::ToolCall { call_id: c, .. } | ContextItem::ToolResult { call_id: c, .. } => {
+            c == call_id
+        }
+        _ => false,
+    })
+}
+
+/// The harness drains a provider-side context-window overflow ONE chain per
+/// call ("1 por vez"): useless chains first, then the LARGEST, then the rest
+/// — always the call+result PAIR together (a lone half would break the native
+/// tool-call format) — and never a user prompt, assistant draft, LoopClosure
+/// or compaction summary.
+#[test]
+fn evict_tool_chain_for_overflow_removes_one_chain_at_a_time() {
+    let mut cm = cm(10_000);
+    cm.add_user("protected user prompt");
+    cm.add_assistant("plain draft", true);
+    cm.add_tool_call("t0", "find_grep", "{}");
+    cm.add_tool_result_flagged("t0", "no matches", true); // useless
+    cm.add_tool_call("t1", "fs_read", "{}");
+    cm.add_tool_result("t1", "file contents"); // useful, small
+    cm.add_tool_call("t2", "bash_run", "{}");
+    cm.add_tool_result("t2", &"big payload ".repeat(200)); // useful, LARGE
+    cm.add_assistant("final answer", true);
+    cm.close_loop(); // → LoopClosure, protected
+
+    // Useless chain goes first.
+    assert!(cm.evict_tool_chain_for_overflow());
+    assert!(!has_chain(&cm, "t0"), "useless chain is drained first");
+    assert!(has_chain(&cm, "t1") && has_chain(&cm, "t2"));
+
+    // Then the largest (most tokens freed per removal).
+    assert!(cm.evict_tool_chain_for_overflow());
+    assert!(!has_chain(&cm, "t2"), "the largest chain goes second");
+    assert!(has_chain(&cm, "t1"));
+
+    // Then the last one.
+    assert!(cm.evict_tool_chain_for_overflow());
+    assert!(!has_chain(&cm, "t1"));
+
+    // Nothing left — the harness must stop draining.
+    assert!(!cm.evict_tool_chain_for_overflow());
+
+    // Protected items survived untouched.
+    assert!(
+        cm.items
+            .iter()
+            .any(|it| matches!(it, ContextItem::User { .. })),
+        "user prompts are never drained"
+    );
+    assert!(
+        cm.items
+            .iter()
+            .any(|it| matches!(it, ContextItem::LoopClosure { .. })),
+        "LoopClosures are never drained"
+    );
+    assert!(
+        cm.items
+            .iter()
+            .any(|it| matches!(it, ContextItem::Assistant { .. })),
+        "assistant drafts are never drained"
+    );
+}
+
+/// The pair (call + result) is removed TOGETHER — the native tool-call
+/// format rejects a lone half.
+#[test]
+fn evict_tool_chain_for_overflow_removes_both_halves() {
+    let mut cm = cm(10_000);
+    cm.add_tool_call("t0", "fs_write", "{}");
+    cm.add_tool_result("t0", "written");
+
+    assert!(cm.evict_tool_chain_for_overflow());
+    assert!(
+        !cm.items
+            .iter()
+            .any(|it| it.is_tool()),
+        "both halves of the chain are gone"
+    );
+}
+
+/// The stuck-overflow lifecycle: marked per provider, cleared on provider
+/// switch (model change) or on a successful compaction, and persisted with
+/// the snapshot so a stuck session stays notified across turns.
+#[test]
+fn overflow_stuck_state_lifecycle() {
+    let mut cm = cm(10_000);
+    assert!(!cm.overflow_stuck("openai"));
+
+    cm.mark_overflow("openai");
+    assert!(cm.overflow_stuck("openai"));
+    assert!(!cm.overflow_stuck("anthropic"));
+
+    // The harness syncs the active provider at loop start: a switch clears.
+    cm.sync_provider("anthropic");
+    assert!(!cm.overflow_stuck("openai"));
+
+    // Same provider keeps the stuck state.
+    cm.mark_overflow("anthropic");
+    cm.sync_provider("anthropic");
+    assert!(cm.overflow_stuck("anthropic"));
+
+    // A successful compaction proves the provider accepts the context again.
+    cm.apply_llm_summary("## Objective\n- done".to_string());
+    assert!(!cm.overflow_stuck("anthropic"));
+
+    // The stuck state survives save/restore (persisted notification).
+    cm.mark_overflow("openai");
+    let state = cm.save_state();
+    let mut restored = ContextManager::new(10_000);
+    restored.restore_state(&state);
+    assert!(restored.overflow_stuck("openai"));
+}
+
 // ── Compaction phases ────────────────────────────────────────────────────
 
 // The pipeline (phase 1) compresses compressible assistant drafts IN PLACE

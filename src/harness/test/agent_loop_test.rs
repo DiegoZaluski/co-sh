@@ -474,6 +474,367 @@ async fn run_agent_loop_survives_a_failed_llm_compaction() {
     );
 }
 
+// ── Context-window overflow recovery (provider rejects the prompt size) ──
+
+// When the summarizer call fails with a context-window overflow, the harness
+// drains ONE tool chain per attempt ("1 por vez") and retries; once every
+// chain is gone it marks the provider stuck and notifies the user through a
+// Toast — the loop still completes normally on the next main request.
+#[tokio::test]
+async fn run_agent_loop_drains_tool_chains_on_context_window_overflow() {
+    use crate::harness::context_manager::ContextManager;
+    use crate::harness::core::CONTEXT_WINDOW_MARKER;
+    use crate::harness::events::{LlmCompactionEvent, ToastVariant};
+
+    let mut h = Harness::new_test();
+    h.context_manager = ContextManager::new(2000); // trigger = 1600
+    h = h.with_history(&[
+        ("user".into(), "u ".repeat(1100)),
+        ("user".into(), "v ".repeat(1100)),
+    ]);
+    // Two tool chains the harness can drain (the mock CHAT response is the
+    // summarizer call).
+    h.context_manager.add_tool_call("t0", "fs_read", "{}");
+    h.context_manager.add_tool_result("t0", "contents A");
+    h.context_manager.add_tool_call("t1", "fs_read", "{}");
+    h.context_manager.add_tool_result("t1", "contents B");
+    h = h
+        .with_mock_chat(Err(CONTEXT_WINDOW_MARKER)) // summarizer: always overflow
+        .with_mock_stream(Ok(vec!["final answer"]));
+
+    // The harness (with its context manager) is moved into the task; the CM
+    // state after the loop is reported back through this channel.
+    let (state_tx, mut state_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(bool, Vec<ContextItem>)>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+        let _ = state_tx.send((
+            h.context_manager.overflow_stuck("openai"),
+            h.context_manager.items_snapshot(),
+        ));
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    let (stuck, items) = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        state_rx.recv(),
+    )
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or((false, Vec::new()));
+    handle.abort();
+
+    // The exhausted overflow surfaces a persistent warning to the user.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::Toast {
+                variant: ToastVariant::Warning,
+                ..
+            }
+        )),
+        "the overflow must surface a warning toast; events={events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Failed
+            }
+        )),
+        "the compaction is reported as failed; events={events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the loop completes after the overflow is handled"
+    );
+    // Every tool chain was drained from the timeline (call + result).
+    assert!(
+        !items.iter().any(|it| {
+            matches!(
+                it,
+                ContextItem::ToolCall { .. } | ContextItem::ToolResult { .. }
+            )
+        }),
+        "all tool chains were drained"
+    );
+    // The provider is recorded as stuck (the notification persists).
+    assert!(stuck, "the provider must be marked stuck after the chains are exhausted");
+}
+
+// A generic (non-context-window) summarizer error is retried
+// MAX_COMPACTION_RETRIES times with backoff, then surfaces an Error toast;
+// the loop still completes.
+#[tokio::test]
+async fn run_agent_loop_retries_generic_compaction_failures_then_notifies() {
+    use crate::harness::context_manager::ContextManager;
+    use crate::harness::events::{LlmCompactionEvent, ToastVariant};
+
+    let mut h = Harness::new_test();
+    h.context_manager = ContextManager::new(2000); // trigger = 1600
+    h = h.with_history(&[
+        ("user".into(), "u ".repeat(1100)),
+        ("user".into(), "v ".repeat(1100)),
+    ]);
+    h = h
+        .with_mock_chat(Err("provider exploded")) // generic failure, every attempt
+        .with_mock_stream(Ok(vec!["final answer"]));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(8);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    handle.abort();
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::Toast {
+                variant: ToastVariant::Error,
+                ..
+            }
+        )),
+        "the generic failure must surface an error toast; events={events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Failed
+            }
+        )),
+        "the compaction is reported as failed; events={events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the loop completes after the retries are exhausted"
+    );
+}
+
+// Once the provider is recorded as stuck (every chain drained, still over),
+// the doomed summarizer call is SKIPPED — no LlmCompaction lifecycle events —
+// and the throttled warning toast is re-surfaced instead.
+#[tokio::test]
+async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
+    use crate::harness::context_manager::ContextManager;
+    use crate::harness::events::ToastVariant;
+
+    let mut h = Harness::new_test();
+    h.context_manager = ContextManager::new(2000); // trigger = 1600
+    h = h.with_history(&[
+        ("user".into(), "u ".repeat(1100)),
+        ("user".into(), "v ".repeat(1100)),
+    ]);
+    // The provider is already known to overflow with every chain drained.
+    h.context_manager.mark_overflow("openai");
+    h = h.with_mock_stream(Ok(vec!["final answer"]));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    handle.abort();
+
+    // The user is still reminded (throttled toast)…
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::Toast {
+                variant: ToastVariant::Warning,
+                ..
+            }
+        )),
+        "the stuck overflow must keep surfacing the warning; events={events:?}"
+    );
+    // …but the doomed summarizer call is NOT made: no lifecycle events.
+    assert!(
+        !events.iter().any(|e| matches!(e, HarnessEvent::LlmCompaction { .. })),
+        "no summarizer call when the provider is stuck; events={events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the loop completes without the summarizer"
+    );
+}
+
+// The MAIN request path also recovers: when the provider rejects the agent
+// request (not just the summarizer), the harness drains one chain and retries
+// with REBUILT messages (the removed call/result pair must not be re-sent).
+#[tokio::test]
+async fn run_agent_loop_drains_chains_on_main_request_overflow() {
+    use crate::harness::context_manager::ContextManager;
+    use crate::harness::core::CONTEXT_WINDOW_MARKER;
+
+    let mut h = Harness::new_test();
+    h.context_manager = ContextManager::new(2000); // trigger = 1600
+    h = h.with_history(&[
+        ("user".into(), "u ".repeat(1100)),
+        ("user".into(), "v ".repeat(1100)),
+    ]);
+    // The provider is already stuck (the summarizer is skipped) — the
+    // overflow now hits the MAIN request instead.
+    h.context_manager.mark_overflow("openai");
+    h.context_manager.add_tool_call("t0", "fs_read", "{}");
+    h.context_manager.add_tool_result("t0", "contents");
+    h = h.with_mock_streams(vec![
+        Err(CONTEXT_WINDOW_MARKER), // main request: overflow → drain one chain
+        Ok(vec!["final answer"]),  // retry with rebuilt messages: succeeds
+    ]);
+
+    let (state_tx, mut state_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Vec<ContextItem>>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+        let _ = state_tx.send(h.context_manager.items_snapshot());
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    let items = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        state_rx.recv(),
+    )
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    handle.abort();
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the retry succeeds and the loop completes; events={events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Error(_))),
+        "no terminal error after the drain retry"
+    );
+    assert!(
+        !items.iter().any(|it| {
+            matches!(
+                it,
+                ContextItem::ToolCall { .. } | ContextItem::ToolResult { .. }
+            )
+        }),
+        "the drained chain is not re-sent"
+    );
+}
+
 // The useless bridge: `result_is_useless` parses the find_grep result JSON
 // (which the tool serializes as its whole GrepOutput) and reads the `useless`
 // flag. This is the exact contract that turns a zero-match search into a

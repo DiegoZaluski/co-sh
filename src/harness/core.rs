@@ -1,7 +1,7 @@
 use super::context_manager::{ContextManager, MAX_CONTEXT_TOKENS, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
-use cosh_sdk::connector::{ChatMessage, Connector, ToolDefinition};
+use cosh_sdk::connector::{ChatMessage, Connector, ConnectorError, ToolDefinition};
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use cosh_tools::TOOL_FORMAT;
 use rmcp::ServiceExt;
@@ -93,6 +93,44 @@ pub(crate) const MAX_ITERATIONS: u64 = 100;
 /// string value — prevents the fallback retry from misinterpreting a user
 /// cancellation as a connector error.
 const INTERRUPTED_MARKER: &str = "__cosh_interrupted__";
+
+/// Internal marker returned by a stream function when the provider rejected
+/// the request because the prompt exceeds its context window. Compared by
+/// identity (constant), like [`INTERRUPTED_MARKER`] — the harness drains one
+/// tool chain and retries when it sees this. `pub(crate)` so tests can
+/// simulate the overflow through the mock paths.
+pub(crate) const CONTEXT_WINDOW_MARKER: &str = "__cosh_context_window_exceeded__";
+
+/// How many times a generic (non-context-window) summarizer error is retried
+/// before the harness gives up and surfaces a TUI notification.
+const MAX_COMPACTION_RETRIES: usize = 3;
+
+/// Base of the exponential backoff between summarizer retries (attempt N
+/// waits `2^(N-1) * BASE`).
+const COMPACTION_RETRY_BACKOFF_BASE: Duration = Duration::from_millis(250);
+
+/// Minimum time between two persistent context-overflow toasts: the user
+/// must keep being reminded while the provider is stuck, but not spammed on
+/// every dispatch iteration.
+const OVERFLOW_TOAST_COOLDOWN: Duration = Duration::from_secs(15);
+
+/// Backoff after the `attempt`-th failed summarizer attempt (1-based).
+fn compaction_retry_backoff(attempt: usize) -> Duration {
+    COMPACTION_RETRY_BACKOFF_BASE.saturating_mul(1u32 << attempt.min(4))
+}
+
+/// The classified result of a single summarizer attempt, so [`Harness::llm_compact`]
+/// can decide between retrying (generic errors), draining tool chains
+/// (context-window overflow) or giving up.
+#[derive(Debug)]
+enum CompactionErr {
+    /// The user interrupted the generation.
+    Interrupted,
+    /// The provider rejected the prompt as larger than its context window.
+    ContextWindow { window_tokens: Option<usize> },
+    /// Any other connector error.
+    Other(String),
+}
 
 pub struct PromptSystem {
     pub title: String,
@@ -190,6 +228,20 @@ pub struct Harness {
     /// connector's API call fails.
     fallbacks: Vec<(String, String)>,
 
+    /// Window size (tokens) parsed from the LAST context-window overflow
+    /// error, stashed by [`Self::stream_chat_with_messages`] so the retry
+    /// loop can drain tool chains locally (without an HTTP round trip per
+    /// chain) until the estimate fits. Reset at the start of every stream.
+    last_context_window: Option<usize>,
+
+    /// When the persistent context-overflow toast was last shown, for the
+    /// throttling cooldown (see [`Self::notify_context_overflow`]).
+    last_overflow_toast: Option<tokio::time::Instant>,
+
+    /// How many consecutive generic (non-context-window) summarizer failures
+    /// in the current compaction attempt — bounded by [`MAX_COMPACTION_RETRIES`].
+    compaction_generic_retries: usize,
+
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
     #[cfg(test)]
@@ -248,6 +300,9 @@ impl Harness {
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
+            last_context_window: None,
+            last_overflow_toast: None,
+            compaction_generic_retries: 0,
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
@@ -560,27 +615,94 @@ impl Harness {
     /// manager (never the agent loop's fixed system prompt), and each token is
     /// forwarded to the TUI so the user watches the "Summarizing" box fill
     /// live. Returns whether the summary was applied.
+    ///
+    /// Overflow recovery (the accepted design): when the provider rejects the
+    /// prompt as larger than its context window, ONE tool chain is drained
+    /// per attempt and the call is retried ("1 por vez"); when the provider
+    /// reported its window, further chains are drained locally with the token
+    /// estimate so no HTTP round trip is paid per chain. Once every chain is
+    /// gone the overflow is marked stuck for this provider and the user is
+    /// notified. Generic errors are retried [`MAX_COMPACTION_RETRIES`] times
+    /// with exponential backoff, then a TUI notification is surfaced.
     async fn llm_compact(
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
-        use super::events::{HarnessEvent, LlmCompactionEvent};
+        use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
         let Some(request) = self.context_manager.llm_compaction_request() else {
             return false;
         };
+        let provider = self.connector.provider_name().unwrap_or("?");
+        // The provider's window already overflowed with every tool chain
+        // drained: the summarizer call is doomed — skip it and re-surface the
+        // notification (throttled) instead of burning a paid call per dispatch.
+        if self.context_manager.overflow_stuck(provider) {
+            self.notify_context_overflow(tx);
+            return false;
+        }
         let _ = tx.send(HarnessEvent::LlmCompaction {
             event: LlmCompactionEvent::Started,
         });
+        // This call starts a fresh retry budget — a previous call (entry or
+        // mid-loop) must not shorten it.
+        self.compaction_generic_retries = 0;
         let mut summary = String::new();
-        let streamed = self
-            .stream_summarize_for_compaction(&request.system, &request.prompt, |chunk| {
-                summary.push_str(chunk);
-                let _ = tx.send(HarnessEvent::LlmCompactionToken {
-                    text: chunk.to_string(),
-                });
-            })
-            .await;
-        let ok = match streamed {
+        let outcome = loop {
+            // A failed attempt's partial tokens must not pollute the summary
+            // applied from a later successful attempt (the TUI box keeps its
+            // already-streamed text, but the APPLIED value stays clean).
+            summary.clear();
+            match self
+                .stream_summarize_for_compaction(&request.system, &request.prompt, |chunk| {
+                    summary.push_str(chunk);
+                    let _ = tx.send(HarnessEvent::LlmCompactionToken {
+                        text: chunk.to_string(),
+                    });
+                })
+                .await
+            {
+                Ok(()) => break Ok(()),
+                Err(CompactionErr::Interrupted) => {
+                    self.compaction_generic_retries = 0;
+                    break Err(CompactionErr::Interrupted);
+                }
+                Err(CompactionErr::ContextWindow { window_tokens }) => {
+                    if self.context_manager.evict_tool_chain_for_overflow() {
+                        // One chain per attempt. When the provider reported
+                        // its window, drain LOCALLY (no HTTP round trip per
+                        // chain) until the estimate fits, then retry once.
+                        if let Some(window) = window_tokens {
+                            while self.context_manager.display_info().total_tokens > window
+                                && self.context_manager.evict_tool_chain_for_overflow()
+                            {}
+                        }
+                        continue;
+                    }
+                    // No tool chain left to relieve the overflow — stuck.
+                    self.context_manager.mark_overflow(provider);
+                    self.notify_context_overflow(tx);
+                    self.compaction_generic_retries = 0;
+                    break Err(CompactionErr::ContextWindow { window_tokens: None });
+                }
+                Err(CompactionErr::Other(e)) => {
+                    self.compaction_generic_retries += 1;
+                    if self.compaction_generic_retries >= MAX_COMPACTION_RETRIES {
+                        self.compaction_generic_retries = 0;
+                        let _ = tx.send(HarnessEvent::Toast {
+                            message: format!("LLM compaction failed: {e}"),
+                            variant: ToastVariant::Error,
+                        });
+                        break Err(CompactionErr::Other(e));
+                    }
+                    tokio::time::sleep(compaction_retry_backoff(
+                        self.compaction_generic_retries,
+                    ))
+                    .await;
+                    continue;
+                }
+            }
+        };
+        let ok = match outcome {
             Ok(()) if !summary.trim().is_empty() => self
                 .context_manager
                 .apply_llm_summary(summary.trim().to_string()),
@@ -596,6 +718,30 @@ impl Harness {
         ok
     }
 
+    /// Surface the context-window overflow to the user through the TUI toast
+    /// system, throttled by [`OVERFLOW_TOAST_COOLDOWN`] so a stuck provider
+    /// keeps reminding the user ("switch the model / start a new session")
+    /// without spamming a toast on every dispatch iteration.
+    fn notify_context_overflow(&mut self, tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>) {
+        use super::events::{HarnessEvent, ToastVariant};
+        let now = tokio::time::Instant::now();
+        let cooldown_ok = match self.last_overflow_toast {
+            Some(last) => now.duration_since(last) >= OVERFLOW_TOAST_COOLDOWN,
+            None => true,
+        };
+        if !cooldown_ok {
+            return;
+        }
+        self.last_overflow_toast = Some(now);
+        let provider = self.connector.provider_name().unwrap_or("?");
+        let _ = tx.send(HarnessEvent::Toast {
+            message: format!(
+                "Context window exceeded ({provider}). Switch model or start new session."
+            ),
+            variant: ToastVariant::Warning,
+        });
+    }
+
     /// Ask the summarizer model for the compaction summary, STREAMING the
     /// tokens through `on_token` (which forwards them to the TUI as
     /// [`HarnessEvent::LlmCompactionToken`]). The summarizer is a dedicated
@@ -603,12 +749,16 @@ impl Harness {
     /// the agent loop's fixed system prompt — it never sees the tool
     /// definitions or the harness instructions. Mockable in tests exactly
     /// like [`Self::chat`].
+    ///
+    /// Errors are CLASSIFIED (not flattened to strings) so the caller can
+    /// distinguish a context-window overflow — the one error that draining
+    /// tool chains can fix — from generic failures and user interruptions.
     async fn stream_summarize_for_compaction(
         &mut self,
         system: &str,
         prompt: &str,
         mut on_token: impl FnMut(&str),
-    ) -> Result<(), String> {
+    ) -> Result<(), CompactionErr> {
         #[cfg(test)]
         if let Some(ref response) = self.mock_chat_response.clone() {
             match response {
@@ -616,7 +766,15 @@ impl Harness {
                     on_token(text);
                     return Ok(());
                 }
-                Err(msg) => return Err(msg.clone()),
+                Err(msg) => {
+                    return Err(match msg.as_str() {
+                        INTERRUPTED_MARKER => CompactionErr::Interrupted,
+                        CONTEXT_WINDOW_MARKER => CompactionErr::ContextWindow {
+                            window_tokens: None,
+                        },
+                        other => CompactionErr::Other(other.to_string()),
+                    });
+                }
             }
         }
 
@@ -630,7 +788,12 @@ impl Harness {
                     Ok(s) => s,
                     Err(e) => {
                         log::debug!("stream_summarize CONNECTOR_ERR={e}");
-                        return Err(e.to_string());
+                        return Err(match e {
+                            ConnectorError::ContextWindowExceeded {
+                                window_tokens, ..
+                            } => CompactionErr::ContextWindow { window_tokens },
+                            other => CompactionErr::Other(other.to_string()),
+                        });
                     }
                 }
             }
@@ -647,7 +810,7 @@ impl Harness {
                 }
             } => {
                 log::debug!("stream_summarize STOPPED during connect");
-                return Err(INTERRUPTED_MARKER.to_string());
+                return Err(CompactionErr::Interrupted);
             }
         };
         loop {
@@ -665,7 +828,7 @@ impl Harness {
                 };
                 match poll {
                     Some(Ok(c)) => c,
-                    Some(Err(e)) => return Err(e),
+                    Some(Err(e)) => return Err(CompactionErr::Other(e)),
                     None => break,
                 }
             };
@@ -678,7 +841,7 @@ impl Harness {
                 // Interrupted mid-summary: do NOT half-apply a truncated
                 // summary — surface the interruption so `llm_compact` skips
                 // the compaction this round (the context stays as it was).
-                return Err(INTERRUPTED_MARKER.to_string());
+                return Err(CompactionErr::Interrupted);
             }
             let token = chunk.token();
             if !token.is_empty() {
@@ -730,6 +893,11 @@ impl Harness {
 
         use tokio_stream::StreamExt;
 
+        // A fresh real stream: forget any stashed context-window size from a
+        // previous attempt (the mock path returns before this and sets its
+        // own expectations).
+        self.last_context_window = None;
+
         log::debug!("stream_chat_with_messages messages={}", messages.len());
 
         let mut stream = tokio::select! {
@@ -738,7 +906,18 @@ impl Harness {
                     Ok(s) => s,
                     Err(e) => {
                         log::debug!("stream_chat_with_messages CONNECTOR_ERR={e}");
-                        return Err(e.to_string());
+                        // A context-window overflow must reach the retry loop
+                        // as the identity marker (with the window size stashed)
+                        // so it is never confused with a generic error.
+                        return Err(match e {
+                            ConnectorError::ContextWindowExceeded {
+                                window_tokens, ..
+                            } => {
+                                self.last_context_window = window_tokens;
+                                CONTEXT_WINDOW_MARKER.to_string()
+                            }
+                            other => other.to_string(),
+                        });
                     }
                 }
             }
@@ -1172,6 +1351,12 @@ impl Harness {
         self.context_manager
             .set_model(self.connector.effective_model());
 
+        // A model/provider switch clears a previously recorded stuck
+        // context-window overflow — the new provider gets a fresh chance.
+        self.context_manager
+            .sync_provider(self.connector.provider_name().unwrap_or("?"));
+        self.compaction_generic_retries = 0;
+
         // Add the initial user input to the context manager (the single owner
         // of the conversation) so the model sees it as a proper `user` message.
         // Skip when it is already the trailing protected user turn (e.g. it was
@@ -1228,19 +1413,54 @@ impl Harness {
                 break;
             }
 
-            // Phase 1: stream the LLM response using native tool-call format
+            // Phase 1: stream the LLM response using native tool-call format.
+            // The messages are rebuilt on EVERY attempt: when a context-window
+            // overflow drains tool chains below, the retry must not re-send
+            // the removed call/result pairs.
             log::debug!("run_agent_loop PHASE1_START iteration={iteration}");
-            let messages = self.context_manager.build_messages(&current_input);
             let system_context = self.build_chat_context();
             let mut assistant_response = String::new();
-            let result = self
-                .stream_chat_with_messages(&system_context, &messages, |token| {
-                    assistant_response.push_str(token);
-                    let _ = tx.send(HarnessEvent::Token {
-                        text: token.to_string(),
-                    });
-                })
-                .await;
+            let result = loop {
+                let messages = self.context_manager.build_messages(&current_input);
+                let attempt = self
+                    .stream_chat_with_messages(&system_context, &messages, |token| {
+                        assistant_response.push_str(token);
+                        let _ = tx.send(HarnessEvent::Token {
+                            text: token.to_string(),
+                        });
+                    })
+                    .await;
+                if let Err(ref e) = attempt
+                    && e == CONTEXT_WINDOW_MARKER
+                {
+                    let window = self.last_context_window.take();
+                    if self.context_manager.evict_tool_chain_for_overflow() {
+                        // One chain per attempt; when the provider
+                        // reported its window, drain locally (no HTTP
+                        // round trip per chain) until the estimate fits.
+                        // NOTE: the local estimate counts COMPRESSED drafts
+                        // while the request sends originals (and the
+                        // transcript truncates tool results), so it is
+                        // approximate in both directions — only a hint to
+                        // skip round trips, never a hard guarantee.
+                        if let Some(window) = window {
+                            while self.context_manager.display_info().total_tokens > window
+                                && self.context_manager.evict_tool_chain_for_overflow()
+                            {}
+                        }
+                        // Recoverable: still draining — no toast yet (the
+                        // retry may succeed).
+                        continue;
+                    }
+                    // No chain left: the overflow is stuck. Surface the
+                    // (throttled) warning and fall through to the normal
+                    // error handling with a HUMAN-readable message.
+                    self.context_manager
+                        .mark_overflow(self.connector.provider_name().unwrap_or("?"));
+                    self.notify_context_overflow(&tx);
+                }
+                break attempt;
+            };
             log::debug!(
                 "run_agent_loop PHASE1_END iteration={} result_ok={}",
                 iteration,
@@ -1292,7 +1512,27 @@ impl Harness {
                     continue;
                 }
 
-                let _ = tx.send(HarnessEvent::Error(e));
+                // Generic terminal error: also surface a TUI notification, as
+                // the user asked (the context-window case is notified
+                // separately and throttled — do not double-toast it here).
+                // The CONTEXT_WINDOW_MARKER is internal — never show it to
+                // the user: translate it to a human message first.
+                let user_msg = if e == CONTEXT_WINDOW_MARKER {
+                    format!(
+                        "Context window exceeded ({}). Switch model or start new session.",
+                        self.connector.provider_name().unwrap_or("?")
+                    )
+                } else {
+                    e.clone()
+                };
+                let _ = tx.send(HarnessEvent::Error(user_msg));
+                if e != CONTEXT_WINDOW_MARKER {
+                    use super::events::ToastVariant;
+                    let _ = tx.send(HarnessEvent::Toast {
+                        message: e,
+                        variant: ToastVariant::Error,
+                    });
+                }
                 break;
             }
 
@@ -2027,6 +2267,9 @@ impl Harness {
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
+            last_context_window: None,
+            last_overflow_toast: None,
+            compaction_generic_retries: 0,
             mock_chat_response: None,
             mock_stream_queue: VecDeque::new(),
             mock_finish_reasons: VecDeque::new(),
