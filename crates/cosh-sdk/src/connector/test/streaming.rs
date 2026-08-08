@@ -134,3 +134,50 @@ async fn terminated_without_done() {
             .contains("Stream terminated")
     );
 }
+
+// The LLM summarizer must NEVER see the agent loop's tool definitions: a
+// connector with tools configured that calls `stream_chat_with_system_no_tools`
+// sends a request WITHOUT the `tools`/`tool_choice` keys — so the model
+// answers with prose instead of a tool call.
+#[tokio::test]
+async fn stream_with_system_no_tools_omits_tools_from_request() {
+    use super::super::ToolDefinition;
+    use super::super::ToolFunction;
+
+    let tool = ToolDefinition::new(
+        ToolFunction::new("read_file")
+            .with_description("Read a file")
+            .with_parameters(serde_json::json!({"type":"object"})),
+    );
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"summary\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = connector(port)
+        .with_tools(vec![tool])
+        .with_tool_choice(serde_json::json!("auto"));
+    let mut stream = c
+        .stream_chat_with_system_no_tools("summarize", "You are a summarizer")
+        .await
+        .unwrap();
+    handle.join().unwrap();
+
+    // The request body must carry the system prompt but NO tools.
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[0]["content"], "You are a summarizer");
+    assert!(
+        json.get("tools").is_none(),
+        "the summarizer request must not expose tool schemas: {json}"
+    );
+    assert!(json.get("tool_choice").is_none());
+
+    // The stream still delivers the model's prose.
+    let mut tokens = String::new();
+    while let Some(chunk) = stream.next().await {
+        tokens.push_str(chunk.unwrap().token());
+    }
+    assert_eq!(tokens, "summary");
+}

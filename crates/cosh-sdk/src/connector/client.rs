@@ -265,6 +265,36 @@ impl Connector {
         }
     }
 
+    /// Stream a chat completion with a system prompt and NO tool definitions.
+    ///
+    /// Used by the LLM summarizer (a separate agent): it must never see the
+    /// agent loop's tool schemas, or it will answer with tool calls instead of
+    /// prose. The connector's own `params.tools` is untouched — the request
+    /// is built from a cloned params with `tools`/`tool_choice` cleared, so
+    /// the shared connector keeps its tools for the main loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MissingApiKey` if no API key is found, `HttpError` on non-2xx status,
+    /// or `Network` on transport failure before the stream starts.
+    pub async fn stream_chat_with_system_no_tools(
+        &self,
+        prompt: &str,
+        system: &str,
+    ) -> Result<ChatStream, ConnectorError> {
+        let provider = self.provider()?;
+        let mut params = self.params.clone();
+        params.tools = None;
+        params.tool_choice = None;
+        match provider.family {
+            Family::OpenAICompatible => {
+                openai_compatible::chat_stream(provider, &params, prompt, Some(system)).await
+            }
+            Family::Gemini => gemini::chat_stream(provider, &params, prompt, Some(system)).await,
+            Family::Claude => claude::chat_stream(provider, &params, prompt, Some(system)).await,
+        }
+    }
+
     /// Stream a chat completion with a full messages array (including system,
     /// user, assistant with `tool_calls`, and tool roles).
     ///
