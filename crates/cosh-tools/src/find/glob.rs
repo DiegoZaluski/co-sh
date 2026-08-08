@@ -73,6 +73,16 @@ pub fn parse_find_pattern(input: &str) -> ParsedFindPattern {
     let normalized = input.replace('\\', "/");
     let normalized = normalized.trim().trim_end_matches('/');
 
+    // Handle empty/whitespace-only input by treating it as current directory
+    if normalized.is_empty() {
+        return ParsedFindPattern {
+            base_path: PathBuf::from("."),
+            glob_pattern: String::new(),
+            has_glob: false,
+            recursive: false,
+        };
+    }
+
     match normalized
         .char_indices()
         .find(|(_, c)| matches!(c, '*' | '?' | '[' | '{'))
@@ -557,7 +567,7 @@ pub fn glob_targets_with(
         });
     }
     if let Some(max) = glob.max_results {
-        if merged.len() as u32 > max {
+        if merged.len() > max as usize {
             limit_reached = true;
         }
         merged.truncate(max as usize);
