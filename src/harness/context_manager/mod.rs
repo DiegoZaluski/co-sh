@@ -108,7 +108,7 @@ mod test;
 use crate::util::TokenEncoding;
 use cosh_sdk::connector::{
     ChatMessage, ToolCallFunctionMsg, ToolCallMsg, assistant_tool_call_message,
-    tool_result_message, user_message,
+    discover_context_window, tool_result_message, user_message,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -418,6 +418,8 @@ pub struct ContextDisplayInfo {
     pub total_tokens: usize,
     /// Percentage of the budget used (0-100).
     pub budget_pct: u8,
+    /// Maximum token budget for the context manager.
+    pub max_tokens: usize,
 }
 
 /// A compaction-phase notification emitted while [`ContextManager::run`]
@@ -535,6 +537,27 @@ impl ContextManager {
             encoding: TokenEncoding::Cl100k,
             overflow_provider: None,
         }
+    }
+
+    /// Create a new ContextManager with automatic context window discovery.
+    ///
+    /// Attempts to discover the model's context window via public APIs (OpenRouter
+    /// and Anthropic). Falls back to [`MAX_CONTEXT_TOKENS`] if discovery fails.
+    ///
+    /// # Arguments
+    ///
+    /// * `model_name` - The model identifier (e.g., "gpt-4o", "claude-sonnet-4-5")
+    ///
+    /// # Returns
+    ///
+    /// A new ContextManager with the discovered context window, or the default
+    /// [`MAX_CONTEXT_TOKENS`] if discovery fails.
+    pub async fn with_discovered_context(model_name: &str) -> Self {
+        let max_tokens = discover_context_window(model_name)
+            .await
+            .unwrap_or(MAX_CONTEXT_TOKENS);
+
+        Self::new(max_tokens)
     }
 
     /// Route compaction-phase notifications to `f`, called synchronously
@@ -1294,6 +1317,7 @@ impl ContextManager {
             } else {
                 0
             },
+            max_tokens: self.max_tokens,
         }
     }
 

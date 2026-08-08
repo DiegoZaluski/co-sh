@@ -2243,3 +2243,59 @@ fn llm_compaction_is_invisible_to_the_sync_observer() {
         "the sync observer reports nothing for the LLM compaction"
     );
 }
+
+// ── Context window discovery ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn with_discovered_context_uses_discovered_value() {
+    // Test with a known OpenRouter model that should have a context window
+    let cm = ContextManager::with_discovered_context("openai/gpt-4o").await;
+
+    // The discovered context window should be greater than the default
+    assert!(
+        cm.display_info().max_tokens > MAX_CONTEXT_TOKENS,
+        "Discovered context window should be greater than default"
+    );
+}
+
+#[tokio::test]
+async fn with_discovered_context_falls_back_to_default() {
+    // Test with an invalid model name that won't be found
+    let cm = ContextManager::with_discovered_context("invalid-model-xyz-12345").await;
+
+    // Should fall back to the default MAX_CONTEXT_TOKENS
+    assert_eq!(
+        cm.display_info().max_tokens,
+        MAX_CONTEXT_TOKENS,
+        "Invalid model should fall back to default MAX_CONTEXT_TOKENS"
+    );
+}
+
+#[tokio::test]
+async fn with_discovered_context_works_with_claude_models() {
+    // Test with a Claude model (should try Anthropic API)
+    let cm = ContextManager::with_discovered_context("claude-opus-5").await;
+
+    // Either discover the real context window or fall back to default
+    // The important thing is that it doesn't crash
+    let max_tokens = cm.display_info().max_tokens;
+    assert!(
+        max_tokens >= MAX_CONTEXT_TOKENS,
+        "Context window should be at least the default value"
+    );
+}
+
+#[tokio::test]
+async fn with_discovered_context_creates_valid_context_manager() {
+    // Test that the created ContextManager is valid and functional
+    let mut cm = ContextManager::with_discovered_context("openai/gpt-4o").await;
+
+    // Verify basic functionality works
+    assert_eq!(cm.total_tokens(), 0, "New context manager should be empty");
+    assert!(cm.items.is_empty(), "New context manager should have empty items");
+
+    // Add some content and verify it works
+    cm.add_user("test message");
+    assert!(cm.total_tokens() > 0, "Should track tokens after adding content");
+    assert!(!cm.items.is_empty(), "Should have items after adding content");
+}
