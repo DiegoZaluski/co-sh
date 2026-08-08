@@ -121,6 +121,9 @@ pub struct GrepOptions {
     pub max_count_per_file: Option<u32>,
     /// Timeout in milliseconds for the operation.
     pub timeout_ms: Option<u32>,
+    /// Called for every match as the walk finds it (directory searches only,
+    /// content mode). Lets callers stream live results while a scan runs.
+    pub on_match: Option<Arc<GrepMatchCallback>>,
 }
 
 /// A context line (before or after a match).
@@ -177,6 +180,10 @@ pub struct GrepMatch {
     pub match_count: Option<u32>,
 }
 
+/// Callback invoked for every match as the walk finds it. Runs on walker
+/// worker threads, so it must be cheap and `Sync`.
+pub type GrepMatchCallback = dyn Fn(&GrepMatch) + Send + Sync;
+
 /// Result of searching files.
 pub struct GrepResult {
     /// Matches or per-file counts, depending on output mode.
@@ -192,6 +199,11 @@ pub struct GrepResult {
     pub limit_reached: Option<bool>,
     /// Number of files skipped because they exceed the size limit.
     pub skipped_oversized: Option<u32>,
+    /// `true` when the search was cut short by the timeout and `matches` only
+    /// holds the partial results found up to that point. The search is
+    /// INCOMPLETE — an empty `matches` with `timed_out: true` is not proof of
+    /// absence.
+    pub timed_out: bool,
 }
 
 #[allow(dead_code)]
@@ -235,6 +247,7 @@ struct MatchCollector {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 struct CollectedMatch {
     line_number: u64,
     line: String,
@@ -738,6 +751,7 @@ struct GrepConfig {
     max_columns: Option<u32>,
     mode: Option<GrepOutputMode>,
     max_count_per_file: Option<u32>,
+    on_match: Option<Arc<GrepMatchCallback>>,
 }
 
 #[allow(dead_code)]
@@ -1066,9 +1080,10 @@ struct StreamingGrepVisitor<'a> {
     searcher: Searcher,
     results: Vec<FileSearchResult>,
     shared_results: Arc<Mutex<Vec<Vec<FileSearchResult>>>>,
-    error: Arc<Mutex<Option<String>>>,
+    error: Arc<Mutex<Option<task::AbortReason>>>,
     skipped_oversized: Arc<AtomicU64>,
     ct: &'a task::CancelToken,
+    on_match: Option<Arc<GrepMatchCallback>>,
     visited: usize,
 }
 
@@ -1091,8 +1106,8 @@ impl ParallelVisitor for StreamingGrepVisitor<'_> {
     fn visit(&mut self, entry: std::result::Result<ignore::DirEntry, ignore::Error>) -> WalkState {
         if self.visited == 0 || self.visited >= 128 {
             self.visited = 0;
-            if let Err(err) = self.ct.heartbeat() {
-                *self.error.lock().expect("error lock poisoned") = Some(err);
+            if let Err(reason) = self.ct.heartbeat_reason() {
+                *self.error.lock().expect("error lock poisoned") = Some(reason);
                 return WalkState::Quit;
             }
         }
@@ -1153,12 +1168,26 @@ impl ParallelVisitor for StreamingGrepVisitor<'_> {
             search
         };
 
+        let relative_owned = relative.into_owned();
         self.results.push(FileSearchResult {
-            relative_path: relative.into_owned(),
+            relative_path: relative_owned,
             matches: search.matches,
             match_count: search.match_count,
             limit_reached: search.limit_reached,
         });
+        // Stream each match live (content mode only — count/files modes have
+        // no per-line payload worth streaming).
+        if let Some(on_match) = &self.on_match {
+            let relative_path = self
+                .results
+                .last()
+                .expect("just pushed")
+                .relative_path
+                .clone();
+            for matched in &self.results.last().expect("just pushed").matches {
+                on_match(&to_grep_match(relative_path.clone(), matched.clone()));
+            }
+        }
         WalkState::Continue
     }
 }
@@ -1171,9 +1200,10 @@ struct StreamingGrepVisitorBuilder<'a> {
     type_filter: Option<&'a TypeFilter>,
     params: SearchParams,
     shared_results: Arc<Mutex<Vec<Vec<FileSearchResult>>>>,
-    error: Arc<Mutex<Option<String>>>,
+    error: Arc<Mutex<Option<task::AbortReason>>>,
     skipped_oversized: Arc<AtomicU64>,
     ct: &'a task::CancelToken,
+    on_match: Option<Arc<GrepMatchCallback>>,
 }
 
 impl<'a> ParallelVisitorBuilder<'a> for StreamingGrepVisitorBuilder<'a> {
@@ -1190,6 +1220,7 @@ impl<'a> ParallelVisitorBuilder<'a> for StreamingGrepVisitorBuilder<'a> {
             error: Arc::clone(&self.error),
             skipped_oversized: Arc::clone(&self.skipped_oversized),
             ct: self.ct,
+            on_match: self.on_match.clone(),
             visited: 0,
         })
     }
@@ -1211,7 +1242,8 @@ fn run_streaming_grep(
     use_gitignore: bool,
     skip_node_modules: bool,
     ct: &task::CancelToken,
-) -> Result<(Vec<FileSearchResult>, u64), String> {
+    on_match: Option<Arc<GrepMatchCallback>>,
+) -> Result<(Vec<FileSearchResult>, u64, bool), String> {
     let mut builder = fs_cache::build_walker(
         search_path,
         include_hidden,
@@ -1237,15 +1269,14 @@ fn run_streaming_grep(
         error: Arc::clone(&error),
         skipped_oversized: Arc::clone(&skipped_oversized),
         ct,
+        on_match,
     };
+    // A timeout that already elapsed before the walk starts is an error —
+    // nothing was searched, so there is nothing to salvage.
     ct.heartbeat()?;
     builder.build_parallel().visit(&mut visitor_builder);
 
     let walk_error = error.lock().expect("error lock poisoned").take();
-    if let Some(error) = walk_error {
-        return Err(error);
-    }
-
     let mut results: Vec<FileSearchResult> = shared_results
         .lock()
         .expect("grep result collection lock poisoned")
@@ -1253,7 +1284,16 @@ fn run_streaming_grep(
         .flatten()
         .collect();
     results.sort_unstable_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    Ok((results, skipped_oversized.load(Ordering::Relaxed)))
+
+    if let Some(reason) = walk_error {
+        if reason != task::AbortReason::Timeout {
+            return Err(reason.to_string());
+        }
+        // Mid-walk timeout: keep the partial results the visitors drained on
+        // drop. An empty partial is an incomplete scan, not proof of absence.
+        return Ok((results, skipped_oversized.load(Ordering::Relaxed), true));
+    }
+    Ok((results, skipped_oversized.load(Ordering::Relaxed), false))
 }
 
 #[allow(dead_code)]
@@ -1496,6 +1536,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
             files_searched: 0,
             limit_reached: None,
             skipped_oversized: None,
+            timed_out: false,
         });
     }
 
@@ -1510,6 +1551,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
                 files_searched: 0,
                 limit_reached: None,
                 skipped_oversized: None,
+                timed_out: false,
             });
         }
 
@@ -1523,6 +1565,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
                     files_searched: 0,
                     limit_reached: None,
                     skipped_oversized: Some(1),
+                    timed_out: false,
                 });
             }
             Ok(ReadFile::Skipped) | Err(_) => {
@@ -1533,6 +1576,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
                     files_searched: 0,
                     limit_reached: None,
                     skipped_oversized: None,
+                    timed_out: false,
                 });
             }
         };
@@ -1549,6 +1593,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
                     files_searched: 1,
                     limit_reached: None,
                     skipped_oversized: None,
+                    timed_out: false,
                 });
             }
 
@@ -1568,6 +1613,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
                 files_searched: 1,
                 limit_reached: None,
                 skipped_oversized: None,
+                timed_out: false,
             });
         }
 
@@ -1582,6 +1628,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
                 files_searched: 1,
                 limit_reached: None,
                 skipped_oversized: None,
+                timed_out: false,
             });
         }
 
@@ -1625,6 +1672,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
             files_searched: 1,
             limit_reached: if limit_reached { Some(true) } else { None },
             skipped_oversized: None,
+            timed_out: false,
         });
     }
 
@@ -1648,7 +1696,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
             type_filter.as_ref(),
         );
         if entries.is_empty() && scan.cache_age_ms >= fs_cache::empty_recheck_ms() {
-            let fresh = fs_cache::force_rescan(&search_path, scan_options, true, ct)?;
+            let (fresh, _timed_out) = fs_cache::force_rescan(&search_path, scan_options, true, ct)?;
             entries = collect_files(
                 &search_path,
                 &fresh,
@@ -1660,7 +1708,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
     } else {
         None
     };
-
+    let mut timed_out = false;
     let results = if let Some(entries) = entries {
         // Check cancellation before heavy work
         ct.heartbeat()?;
@@ -1672,13 +1720,14 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
                 files_searched: 0,
                 limit_reached: None,
                 skipped_oversized: None,
+                timed_out: false,
             });
         }
         let skipped = AtomicU64::new(0);
         let results = run_parallel_search(&entries, &matcher, params, &skipped);
         (results, skipped.load(Ordering::Relaxed))
     } else {
-        run_streaming_grep(
+        let (results, skipped, timed_out_flag) = run_streaming_grep(
             &search_path,
             &matcher,
             glob_set.as_ref(),
@@ -1688,7 +1737,10 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
             use_gitignore,
             !mentions_node_modules,
             ct,
-        )?
+            options.on_match.clone(),
+        )?;
+        timed_out = timed_out_flag;
+        (results, skipped)
     };
     let (results, skipped_oversized) = results;
     let (aggregated_matches, total_matches, files_with_matches, files_searched, limit_reached) =
@@ -1705,6 +1757,7 @@ fn grep_sync(options: &GrepConfig, ct: &task::CancelToken) -> Result<GrepResult,
         } else {
             None
         },
+        timed_out,
     })
 }
 
@@ -1737,6 +1790,7 @@ pub fn grep(options: GrepOptions) -> Result<GrepResult, String> {
         max_columns: options.max_columns,
         mode: options.mode,
         max_count_per_file: options.max_count_per_file,
+        on_match: options.on_match,
     };
     grep_sync(&config, &ct)
 }
@@ -1822,6 +1876,7 @@ mod tests {
             max_columns: None,
             mode: None,
             max_count_per_file: None,
+            on_match: None,
         }
     }
 

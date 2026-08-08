@@ -139,6 +139,11 @@ pub struct ScanResult {
     pub entries: Vec<GlobMatch>,
     /// How old the cached data is in milliseconds (0 = freshly scanned).
     pub cache_age_ms: u64,
+    /// `true` when the scan was cut short by the timeout and `entries` only
+    /// holds the partial results collected up to that point. The scan is
+    /// INCOMPLETE — an empty `entries` with `timed_out: true` is not proof of
+    /// absence.
+    pub timed_out: bool,
 }
 
 #[allow(clippy::expect_used)]
@@ -317,7 +322,7 @@ struct EntryVisitor<'a> {
     ct: &'a task::CancelToken,
     entries: Vec<GlobMatch>,
     shared_entries: Arc<Mutex<Vec<Vec<GlobMatch>>>>,
-    error: Arc<Mutex<Option<String>>>,
+    error: Arc<Mutex<Option<task::AbortReason>>>,
     visited: usize,
 }
 
@@ -340,8 +345,8 @@ impl ParallelVisitor for EntryVisitor<'_> {
     fn visit(&mut self, entry: std::result::Result<ignore::DirEntry, ignore::Error>) -> WalkState {
         if self.visited == 0 || self.visited >= 128 {
             self.visited = 0;
-            if let Err(err) = self.ct.heartbeat() {
-                *self.error.lock().expect("error lock poisoned") = Some(err);
+            if let Err(reason) = self.ct.heartbeat_reason() {
+                *self.error.lock().expect("error lock poisoned") = Some(reason);
                 return WalkState::Quit;
             }
         }
@@ -362,7 +367,7 @@ struct EntryVisitorBuilder<'a> {
     detail: ScanDetail,
     ct: &'a task::CancelToken,
     shared_entries: Arc<Mutex<Vec<Vec<GlobMatch>>>>,
-    error: Arc<Mutex<Option<String>>>,
+    error: Arc<Mutex<Option<task::AbortReason>>>,
 }
 
 impl<'a> ParallelVisitorBuilder<'a> for EntryVisitorBuilder<'a> {
@@ -381,12 +386,18 @@ impl<'a> ParallelVisitorBuilder<'a> for EntryVisitorBuilder<'a> {
 
 /// Scans filesystem entries and records normalized relative paths with file
 /// metadata.
+///
+/// Returns a `(entries, timed_out)` pair: on a mid-scan timeout the entries
+/// collected so far are kept with `timed_out: true` instead of failing the
+/// whole scan — an empty partial is an incomplete scan, not proof of absence.
+/// A timeout that elapses BEFORE the walk starts still surfaces as an error
+/// (nothing was collected, so there is nothing to salvage).
 #[allow(clippy::expect_used)]
 fn collect_entries(
     root: &Path,
     options: ScanOptions,
     ct: &task::CancelToken,
-) -> Result<Vec<GlobMatch>, String> {
+) -> Result<(Vec<GlobMatch>, bool), String> {
     let mut builder = build_walker(
         root,
         options.include_hidden,
@@ -411,18 +422,22 @@ fn collect_entries(
     builder.build_parallel().visit(&mut visitor_builder);
 
     let walk_error = error.lock().expect("error lock poisoned").take();
-    if let Some(error) = walk_error {
-        return Err(error);
-    }
-
-    let mut entries: Vec<GlobMatch> = shared_entries
+    let entries: Vec<GlobMatch> = shared_entries
         .lock()
         .expect("entry collection lock poisoned")
         .drain(..)
         .flatten()
         .collect();
-    entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    Ok(entries)
+    if let Some(reason) = walk_error {
+        if reason != task::AbortReason::Timeout {
+            return Err(reason.to_string());
+        }
+        // Mid-scan timeout: the per-thread buckets were drained by `Drop` on
+        // teardown, so `entries` holds whatever the walk finished before the
+        // deadline. Keep it as a partial instead of losing the work.
+        return Ok((entries, true));
+    }
+    Ok((entries, false))
 }
 
 pub(crate) fn collect_entry(
@@ -492,10 +507,11 @@ pub fn get_or_scan(
     let ttl = cache_ttl_ms();
     if ttl == 0 {
         // Caching disabled – always scan fresh.
-        let entries = collect_entries(root, options, ct)?;
+        let (entries, timed_out) = collect_entries(root, options, ct)?;
         return Ok(ScanResult {
             entries,
             cache_age_ms: 0,
+            timed_out,
         });
     }
 
@@ -516,6 +532,7 @@ pub fn get_or_scan(
                 return Ok(ScanResult {
                     entries: entry.entries.clone(),
                     cache_age_ms: u64::try_from(age.as_millis()).unwrap_or(u64::MAX),
+                    timed_out: false,
                 });
             }
         }
@@ -525,18 +542,23 @@ pub fn get_or_scan(
         .expect("FS_CACHE lock poisoned")
         .remove(&key);
 
-    let entries = collect_entries(root, options, ct)?;
-    FS_CACHE.lock().expect("FS_CACHE lock poisoned").insert(
-        key,
-        CacheEntry {
-            created_at: now,
-            entries: entries.clone(),
-        },
-    );
-    evict_oldest();
+    let (entries, timed_out) = collect_entries(root, options, ct)?;
+    if !timed_out {
+        // Never cache a partial (timed-out) snapshot: it would be served as a
+        // seemingly complete scan within the TTL.
+        FS_CACHE.lock().expect("FS_CACHE lock poisoned").insert(
+            key,
+            CacheEntry {
+                created_at: now,
+                entries: entries.clone(),
+            },
+        );
+        evict_oldest();
+    }
     Ok(ScanResult {
         entries,
         cache_age_ms: 0,
+        timed_out,
     })
 }
 
@@ -557,7 +579,7 @@ pub fn force_rescan(
     options: ScanOptions,
     store: bool,
     ct: &task::CancelToken,
-) -> Result<Vec<GlobMatch>, String> {
+) -> Result<(Vec<GlobMatch>, bool), String> {
     let key = CacheKey {
         root: root.to_path_buf(),
         include_hidden: options.include_hidden,
@@ -570,8 +592,10 @@ pub fn force_rescan(
         .expect("FS_CACHE lock poisoned")
         .remove(&key);
 
-    let entries = collect_entries(root, options, ct)?;
-    if store {
+    let (entries, timed_out) = collect_entries(root, options, ct)?;
+    if store && !timed_out {
+        // Never cache a partial (timed-out) snapshot: it would be served as a
+        // seemingly complete scan within the TTL.
         let now = Instant::now();
         FS_CACHE.lock().expect("FS_CACHE lock poisoned").insert(
             key,
@@ -582,7 +606,7 @@ pub fn force_rescan(
         );
         evict_oldest();
     }
-    Ok(entries)
+    Ok((entries, timed_out))
 }
 
 // Invalidation
@@ -745,7 +769,7 @@ mod tests {
         fs::write(root.path().join("real.txt"), "ok").unwrap();
 
         let ct = CancelToken::default();
-        let entries = super::collect_entries(
+        let (entries, timed_out) = super::collect_entries(
             root.path(),
             super::ScanOptions {
                 include_hidden: true,
@@ -757,6 +781,7 @@ mod tests {
             &ct,
         )
         .unwrap();
+        assert!(!timed_out, "complete scans must not be marked timed_out");
         let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
         assert!(
             !paths.iter().any(|p| p.contains("node_modules")),
@@ -810,7 +835,7 @@ mod tests {
         let ct = CancelToken::default();
 
         // With skip: should only get app.js
-        let entries = super::force_rescan(
+        let (entries, timed_out) = super::force_rescan(
             root.path(),
             super::ScanOptions {
                 include_hidden: true,
@@ -823,11 +848,12 @@ mod tests {
             &ct,
         )
         .unwrap();
+        assert!(!timed_out);
         assert_eq!(entries.len(), 1, "skip=true got: {}", entries.len());
         assert_eq!(entries[0].path, "app.js");
 
         // Without skip: should get app.js + 100 node_modules files + directories
-        let entries = super::force_rescan(
+        let (entries, timed_out) = super::force_rescan(
             root.path(),
             super::ScanOptions {
                 include_hidden: true,
@@ -840,6 +866,7 @@ mod tests {
             &ct,
         )
         .unwrap();
+        assert!(!timed_out);
         assert!(entries.len() > 100, "skip=false got: {}", entries.len());
     }
 
@@ -849,7 +876,7 @@ mod tests {
         fs::write(root.path().join("real.txt"), "ok").unwrap();
 
         let ct = CancelToken::default();
-        let minimal = super::collect_entries(
+        let (minimal, _) = super::collect_entries(
             root.path(),
             super::ScanOptions {
                 include_hidden: true,
@@ -868,7 +895,7 @@ mod tests {
         assert_eq!(minimal_file.mtime, None);
         assert_eq!(minimal_file.size, None);
 
-        let full = super::collect_entries(
+        let (full, timed_out) = super::collect_entries(
             root.path(),
             super::ScanOptions {
                 include_hidden: true,
@@ -880,6 +907,7 @@ mod tests {
             &ct,
         )
         .unwrap();
+        assert!(!timed_out);
         let full_file = full
             .iter()
             .find(|entry| entry.path == "real.txt")

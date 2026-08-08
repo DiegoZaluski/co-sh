@@ -114,15 +114,33 @@ impl CancelToken {
     /// Panics if the internal state mutex is poisoned.
     #[allow(clippy::expect_used, clippy::significant_drop_tightening)]
     pub fn heartbeat(&self) -> Result<(), String> {
+        self.heartbeat_reason().map_err(|reason| reason.to_string())
+    }
+
+    /// Check if cancellation has been requested, returning the typed
+    /// [`AbortReason`] so callers can distinguish a timeout from an explicit
+    /// abort.
+    ///
+    /// Callers that want to salvage partial work on timeout (e.g. return the
+    /// matches collected so far instead of failing the whole search) should
+    /// use this and match on [`AbortReason::Timeout`].
+    ///
+    /// # Errors
+    /// Returns an error if the operation has been aborted or has timed out.
+    ///
+    /// # Panics
+    /// Panics if the internal state mutex is poisoned.
+    #[allow(clippy::expect_used, clippy::significant_drop_tightening)]
+    pub fn heartbeat_reason(&self) -> Result<(), AbortReason> {
         let state = self.state.lock().expect("cancel state lock poisoned");
         if state.aborted {
-            return Err(state.reason.to_string());
+            return Err(state.reason);
         }
         if let Some(timeout_ms) = state.timeout_ms
             && u64::try_from(state.created_at.elapsed().as_millis()).unwrap_or(u64::MAX)
                 >= timeout_ms
         {
-            return Err("Timeout".to_string());
+            return Err(AbortReason::Timeout);
         }
         Ok(())
     }
