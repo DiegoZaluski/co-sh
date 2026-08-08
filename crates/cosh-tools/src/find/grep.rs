@@ -22,6 +22,7 @@ use cosh_sdk::find::{GrepOptions, GrepOutputMode, grep as sdk_grep};
 use cosh_sdk::hashline::format::format_hashline_header;
 use cosh_sdk::rollback;
 
+use super::common_ancestor;
 use super::types::{ContextEntry, Grep, GrepFileEntry, GrepMatchEntry, GrepOutput};
 
 /// Maximum number of distinct files surfaced in a single call. The agent
@@ -41,6 +42,14 @@ const INTERNAL_TOTAL_CAP: u32 = 2000;
 /// Lines longer than this (characters) are truncated with a `...` suffix and
 /// flagged via `GrepMatchEntry::truncated`.
 const DEFAULT_MAX_COLUMN: u32 = 200;
+/// Default timeout for a grep search (milliseconds). On expiry the partial
+/// matches found so far are returned with `timed_out: true` instead of a
+/// blind error.
+pub const DEFAULT_GREP_TIMEOUT_MS: u32 = 5000;
+
+/// Callback invoked for every match as the walk finds it. Runs on walker
+/// worker threads, so it must be cheap and `Sync`.
+pub type GrepMatchCallback = dyn Fn(&cosh_sdk::find::GrepMatch) + Send + Sync;
 
 /// Resolve the absolute path of a match: single-file searches return absolute
 /// paths, directory searches return paths relative to the searched root.
@@ -97,7 +106,10 @@ fn hashline_entry_for_file(
 /// search is ever fed from a differently-ordered source (e.g. a scan cache).
 fn group_by_file(
     shown: &[GrepMatchEntry],
-) -> (Vec<&str>, std::collections::HashMap<&str, Vec<GrepMatchEntry>>) {
+) -> (
+    Vec<&str>,
+    std::collections::HashMap<&str, Vec<GrepMatchEntry>>,
+) {
     let mut order: Vec<&str> = Vec::new();
     let mut groups: std::collections::HashMap<&str, Vec<GrepMatchEntry>> =
         std::collections::HashMap::new();
@@ -141,45 +153,17 @@ fn build_hashline_files(root: &str, shown: &[GrepMatchEntry]) -> Vec<GrepFileEnt
     entries
 }
 
-/// Deepest common ancestor directory of the given (existing) paths. A file
-/// target contributes its parent directory. Returns `None` only for an empty
-/// input.
-///
-/// Note: when the targets share NO common ancestor (e.g. different mount
-/// points), the rebase falls back to each target's raw relative paths, which
-/// can collide across targets. On a single-`/` filesystem every absolute path
-/// shares `/`, so this only matters for exotic layouts.
-fn common_ancestor(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
-    let mut iter = paths.iter();
-    let first = iter.next()?;
-    let mut ancestor = if first.is_file() {
-        first.parent()?.to_path_buf()
-    } else {
-        first.clone()
-    };
-    for path in iter {
-        while !path.starts_with(&ancestor) {
-            if !ancestor.pop() {
-                return None;
-            }
-        }
-    }
-    Some(ancestor)
-}
-
 /// Parse `"start-end"` into a 1-based inclusive `(start, end)` line range.
 fn parse_line_range(raw: &str) -> Result<(u32, u32), String> {
-    let (start, end) = raw
-        .split_once('-')
-        .ok_or_else(|| format!("line_range must be \"start-end\" (1-based, inclusive), got: {raw}"))?;
-    let start: u32 = start
-        .trim()
-        .parse()
-        .map_err(|_| format!("line_range must be \"start-end\" (1-based, inclusive), got: {raw}"))?;
-    let end: u32 = end
-        .trim()
-        .parse()
-        .map_err(|_| format!("line_range must be \"start-end\" (1-based, inclusive), got: {raw}"))?;
+    let (start, end) = raw.split_once('-').ok_or_else(|| {
+        format!("line_range must be \"start-end\" (1-based, inclusive), got: {raw}")
+    })?;
+    let start: u32 = start.trim().parse().map_err(|_| {
+        format!("line_range must be \"start-end\" (1-based, inclusive), got: {raw}")
+    })?;
+    let end: u32 = end.trim().parse().map_err(|_| {
+        format!("line_range must be \"start-end\" (1-based, inclusive), got: {raw}")
+    })?;
     if start < 1 || end < start {
         return Err(format!(
             "line_range must satisfy 1 <= start <= end, got: {raw}"
@@ -219,9 +203,18 @@ fn apply_line_range(matches: Vec<GrepMatchEntry>, range: (u32, u32)) -> (Vec<Gre
 ///
 /// # Errors
 /// Returns an error when the path cannot be resolved, `pattern` is an
-/// invalid regex, or the operation is cancelled by a timeout.
+/// invalid regex, or the operation is cancelled by a timeout before any work
+/// could be salvaged.
 pub fn grep(grep: &Grep, pattern: &str, path: &str) -> Result<GrepOutput, String> {
     grep_targets(grep, pattern, &[path.to_string()])
+}
+
+/// Search file content for lines matching a regex pattern across one or more
+/// targets.
+///
+/// Convenience wrapper over [`grep_targets_with`] without streaming.
+pub fn grep_targets(grep: &Grep, pattern: &str, targets: &[String]) -> Result<GrepOutput, String> {
+    grep_targets_with(grep, pattern, targets, None)
 }
 
 /// Search file content for lines matching a regex pattern across one or more
@@ -250,15 +243,25 @@ pub fn grep(grep: &Grep, pattern: &str, path: &str) -> Result<GrepOutput, String
 /// - Zero selected matches are marked `useless` with a no-match note: such a
 ///   result carries no new information — adjust the pattern or scope instead
 ///   of blindly retrying.
+/// - A timeout is not an error: the partial matches found so far are returned
+///   with `timed_out: true` and an explanatory `note`. An empty `timed_out`
+///   result is an INCOMPLETE scan, never "no matches found".
 /// - `total_matches` is the deduplicated per-line union across targets
 ///   (before the per-file caps and window trim), so two matches on the SAME
 ///   line of the same file count once.
+/// - `on_match` streams each match as the walk finds it (paths rebased to
+///   the common ancestor for multi-target calls, formatted `path:line`).
 ///
 /// # Errors
 /// Returns an error when a target cannot be resolved, `pattern` is an invalid
 /// regex, `line_range` is malformed or targets a directory, or the operation
-/// is cancelled by a timeout.
-pub fn grep_targets(grep: &Grep, pattern: &str, targets: &[String]) -> Result<GrepOutput, String> {
+/// is cancelled by a timeout before any work could be salvaged.
+pub fn grep_targets_with(
+    grep: &Grep,
+    pattern: &str,
+    targets: &[String],
+    on_match: Option<std::sync::Arc<GrepMatchCallback>>,
+) -> Result<GrepOutput, String> {
     if targets.is_empty() {
         return Err("no search targets provided".to_string());
     }
@@ -315,19 +318,56 @@ pub fn grep_targets(grep: &Grep, pattern: &str, targets: &[String]) -> Result<Gr
         None => per_file_cap + 1,
     };
 
-    let ancestor = if multi { common_ancestor(&resolved) } else { None };
+    let ancestor = if multi {
+        common_ancestor(&resolved)
+    } else {
+        None
+    };
     let root = ancestor
         .as_ref()
         .map(|a| a.to_string_lossy().to_string())
         .unwrap_or_else(|| targets[0].clone());
+
+    // A sane default timeout: on expiry the partials are returned with
+    // `timed_out` instead of a blind error.
+    let timeout_ms = grep.timeout_ms.or(Some(DEFAULT_GREP_TIMEOUT_MS));
 
     // Run the engine per target and merge.
     let mut raw: Vec<GrepMatchEntry> = Vec::new();
     let mut files_with_matches = 0u32;
     let mut files_searched = 0u32;
     let mut limit_reached = false;
+    let mut timed_out = false;
     let mut seen: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
     for target in &resolved {
+        // Stream this target's matches live, rebased to the common ancestor
+        // and formatted `path:line` for the display counter.
+        let wrapped_cb: Option<std::sync::Arc<GrepMatchCallback>> = on_match.as_ref().map(|cb| {
+            let cb = cb.clone();
+            let target_owned = target.to_string_lossy().to_string();
+            let ancestor = ancestor.clone();
+            let cb_arc: std::sync::Arc<GrepMatchCallback> =
+                std::sync::Arc::new(move |m: &cosh_sdk::find::GrepMatch| {
+                    let path_out = if let Some(a) = ancestor.as_deref() {
+                        let abs = std::path::Path::new(&target_owned).join(&m.path);
+                        abs.strip_prefix(a)
+                            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                            .unwrap_or_else(|_| m.path.clone())
+                    } else {
+                        m.path.clone()
+                    };
+                    cb(&cosh_sdk::find::GrepMatch {
+                        path: format!("{path_out}:{}", m.line_number),
+                        line_number: m.line_number,
+                        line: String::new(),
+                        context_before: None,
+                        context_after: None,
+                        truncated: None,
+                        match_count: None,
+                    });
+                });
+            cb_arc
+        });
         let result = sdk_grep(GrepOptions {
             pattern: pattern.to_owned(),
             path: target.to_string_lossy().to_string(),
@@ -346,11 +386,13 @@ pub fn grep_targets(grep: &Grep, pattern: &str, targets: &[String]) -> Result<Gr
             max_columns: Some(DEFAULT_MAX_COLUMN),
             mode: Some(GrepOutputMode::Content),
             max_count_per_file: Some(fetch_per_file),
-            timeout_ms: grep.timeout_ms,
+            timeout_ms,
+            on_match: wrapped_cb,
         })?;
         files_with_matches = files_with_matches.saturating_add(result.files_with_matches);
         files_searched = files_searched.saturating_add(result.files_searched);
         limit_reached = limit_reached || result.limit_reached == Some(true);
+        timed_out = timed_out || result.timed_out;
 
         for m in result.matches {
             let path_out = if multi {
@@ -438,7 +480,12 @@ pub fn grep_targets(grep: &Grep, pattern: &str, targets: &[String]) -> Result<Gr
 
     let window_files: Vec<&str> = if can_paginate {
         match file_window {
-            Some(window) => order.iter().skip(skip_files).take(window).copied().collect(),
+            Some(window) => order
+                .iter()
+                .skip(skip_files)
+                .take(window)
+                .copied()
+                .collect(),
             None => order.iter().skip(skip_files).copied().collect(),
         }
     } else {
@@ -468,23 +515,45 @@ pub fn grep_targets(grep: &Grep, pattern: &str, targets: &[String]) -> Result<Gr
         )
     });
 
-    let (note, useless) = if shown.is_empty() {
-        let skip_past_end = can_paginate
-            && grep.skip.unwrap_or(0) > 0
-            && total_files > 0
-            && skip_files >= total_files;
-        let text = if skip_past_end {
-            format!(
-                "No more results ({} files total; skip={} is past the end)",
-                total_files_label,
-                grep.skip.unwrap_or(0)
-            )
+    let timeout_note = timed_out.then(|| {
+        if shown.is_empty() {
+            "Search timed out before finding matches — the scan is incomplete, NOT proof of absence; narrow the scope instead of retrying blindly".to_string()
         } else {
-            "No matches found".to_string()
-        };
-        (Some(text), Some(true))
+            "Search timed out; results are partial and incomplete".to_string()
+        }
+    });
+    let (note, useless) = if shown.is_empty() {
+        if timed_out {
+            // A timed-out empty result is an incomplete scan, not a verified
+            // absence — never mark it useless or claim "No matches found".
+            (timeout_note, None)
+        } else {
+            let skip_past_end = can_paginate
+                && grep.skip.unwrap_or(0) > 0
+                && total_files > 0
+                && skip_files >= total_files;
+            let text = if skip_past_end {
+                format!(
+                    "No more results ({} files total; skip={} is past the end)",
+                    total_files_label,
+                    grep.skip.unwrap_or(0)
+                )
+            } else {
+                "No matches found".to_string()
+            };
+            (Some(text), Some(true))
+        }
     } else {
-        (window_note, None)
+        match timeout_note {
+            Some(t) => (
+                Some(match window_note {
+                    Some(w) => format!("{t}\n{w}"),
+                    None => t,
+                }),
+                None,
+            ),
+            None => (window_note, None),
+        }
     };
 
     let files = build_hashline_files(&root, &shown);
@@ -499,5 +568,6 @@ pub fn grep_targets(grep: &Grep, pattern: &str, targets: &[String]) -> Result<Gr
         note,
         useless,
         files,
+        timed_out: if timed_out { Some(true) } else { None },
     })
 }

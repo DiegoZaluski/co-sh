@@ -10,6 +10,10 @@ pub struct GlobInput {
     pub pattern: String,
     /// The root directory to search within.
     pub path: String,
+    /// Multiple search roots in one call. When present, overrides `path`.
+    /// Each target is validated individually by the path guard; missing
+    /// targets are skipped with a warning instead of failing the whole call.
+    pub paths: Option<Vec<String>>,
     /// Restrict results to a filesystem kind: `"file"`, `"dir"`, or `"symlink"`.
     pub file_type: Option<String>,
     /// Search subdirectories recursively (default: `true`).
@@ -22,6 +26,9 @@ pub struct GlobInput {
     pub gitignore: Option<bool>,
     /// Sort results by modification time, most recent first (default: `false`).
     pub sort_by_mtime: Option<bool>,
+    /// Output layout for the `formatted` field: `"flat"`, `"grouped"`, or
+    /// `"tree"`. When unset, no formatted rendering is attached.
+    pub format: Option<String>,
     /// Abort the search after this many milliseconds.
     pub timeout_ms: Option<u32>,
 }
@@ -72,7 +79,9 @@ pub struct Glob {
     pub file_type: Option<String>,
     /// Search subdirectories recursively (default: `true`).
     pub recursive: Option<bool>,
-    /// Include hidden files and directories whose names start with `.` (default: `false`).
+    /// Include hidden files and directories whose names start with `.`.
+    /// Omitted: the tool defaults to `true` (reference-tool behavior); the
+    /// walker ALWAYS skips `.git` regardless.
     pub hidden: Option<bool>,
     /// Maximum number of entries to return.
     pub max_results: Option<u32>,
@@ -80,8 +89,31 @@ pub struct Glob {
     pub gitignore: Option<bool>,
     /// Sort results by modification time, most recent first (default: `false`).
     pub sort_by_mtime: Option<bool>,
+    /// Output layout (`"flat"`, `"grouped"`, `"tree"`).
+    pub format: Option<String>,
     /// Abort the search after this many milliseconds.
     pub timeout_ms: Option<u32>,
+}
+
+/// Schema-driven call options bundled for the `find_glob` entry point,
+/// keeping `glob_full` argument count low as the schema grows.
+///
+/// `file_type` filters results to one filesystem kind (`"file"`, `"dir"`,
+/// `"symlink"`) and is an extension over the reference tool (oh-my-pi).
+/// `hidden` and `gitignore` default to `true` (reference behavior) when
+/// omitted; `max_results` defaults to 200 with a hard ceiling of 200.
+#[derive(Clone, Debug, Default)]
+pub struct GlobCallOptions {
+    /// Restrict results to a filesystem kind: `"file"`, `"dir"`, or `"symlink"`.
+    pub file_type: Option<String>,
+    /// Whether to include hidden entries. Omitted defaults to `true`.
+    pub hidden: Option<bool>,
+    /// Whether to respect `.gitignore`. Omitted defaults to `true`.
+    pub gitignore: Option<bool>,
+    /// Maximum number of entries to return (clamped to 200).
+    pub max_results: Option<u32>,
+    /// Output layout: `"flat"`, `"grouped"`, or `"tree"`.
+    pub format: Option<String>,
 }
 
 /// A single filesystem entry matched by a glob search.
@@ -104,6 +136,32 @@ pub struct GlobOutput {
     pub matches: Vec<GlobEntry>,
     /// Total number of entries returned.
     pub total: u32,
+    /// `true` when the search hit `max_results` and more entries may exist.
+    pub limit_reached: Option<bool>,
+    /// `true` when the scan was cut short by the timeout; `matches` holds the
+    /// partial results found up to that point. An empty `matches` with this
+    /// flag is an INCOMPLETE scan, not proof of absence.
+    pub timed_out: Option<bool>,
+    /// Human-readable hint for the caller (timeout guidance, no-match notice,
+    /// pagination/limit notes).
+    pub note: Option<String>,
+    /// `true` when no matches were selected. Such a result carries no new
+    /// information — adjust the pattern or scope instead of blindly retrying.
+    pub useless: Option<bool>,
+    /// User-supplied targets whose directory was missing on disk. These were
+    /// skipped; the surviving targets' results are still returned.
+    pub missing_paths: Option<Vec<String>>,
+    /// Matched paths rendered in the requested `format` (`flat`/`grouped`/
+    /// `tree`), OR the plain newline-joined paths when no format was
+    /// requested. Always present (even for empty results) so the model never
+    /// needs to reconstruct grouping from the structured entries.
+    pub formatted: String,
+    /// The directory this search was scoped to, in the same relative form as
+    /// the match paths (`.`, `src`, `crates/…`).
+    pub scope: String,
+    /// Working directory the paths are relative to. Lets the TUI renderer
+    /// resolve match paths to absolute paths for OSC 8 file hyperlinks.
+    pub cwd: Option<String>,
 }
 
 /// Configuration for the [`grep`](super::grep::grep) tool.
@@ -208,4 +266,8 @@ pub struct GrepOutput {
     /// small window of files (whole-file tags require reading each file);
     /// files beyond the window surface plain, headerless output.
     pub files: Vec<GrepFileEntry>,
+    /// `true` when the search was cut short by the timeout; `matches` holds
+    /// the partial results found up to that point. An empty `matches` with
+    /// this flag is an INCOMPLETE search, not proof of absence.
+    pub timed_out: Option<bool>,
 }

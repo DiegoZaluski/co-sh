@@ -1,6 +1,6 @@
+use super::super::Find;
 use super::super::grep::{grep, grep_targets};
 use super::super::types::Grep;
-use super::super::Find;
 use cosh_sdk::hashline::snapshots::SnapshotStore;
 
 const FIND_DIR: &str = "/home/inky/cosh/crates/cosh-sdk/src/find";
@@ -9,10 +9,7 @@ const GLOB_FILE: &str = "/home/inky/cosh/crates/cosh-sdk/src/find/glob.rs";
 /// Create a scratch directory for grep tests that need controlled fixtures.
 /// Recreated fresh on each call so tests are independent of prior state.
 fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "cosh_find_test_{name}_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("cosh_find_test_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp test directory");
     dir
@@ -163,11 +160,7 @@ fn grep_surfaces_hashline_anchors_per_file() {
             f.header
         );
         // Each anchor must pair with at least one match.
-        let paired = out
-            .matches
-            .iter()
-            .filter(|m| m.path == f.path)
-            .count();
+        let paired = out.matches.iter().filter(|m| m.path == f.path).count();
         assert!(paired > 0, "no match pairs with anchor {}", f.path);
     }
 }
@@ -202,8 +195,8 @@ fn grep_single_file_anchor_matches_content_hash() {
 
 #[test]
 fn grep_without_matches_has_no_anchors() {
-    let out = grep(&Grep::default(), "zzz_no_such_pattern_xyz", GLOB_FILE)
-        .expect("grep should succeed");
+    let out =
+        grep(&Grep::default(), "zzz_no_such_pattern_xyz", GLOB_FILE).expect("grep should succeed");
 
     assert!(out.matches.is_empty());
     assert!(out.files.is_empty(), "no matches means no anchors");
@@ -214,8 +207,12 @@ fn grep_auto_enables_multiline_for_cross_line_patterns() {
     let dir = temp_dir("multiline");
     std::fs::write(dir.join("a.txt"), "fn foo() {\n  return 1;\n}\n").unwrap();
 
-    let out = grep(&Grep::default(), r"foo\(\) \{\n  return", dir.to_str().unwrap())
-        .expect("grep should succeed");
+    let out = grep(
+        &Grep::default(),
+        r"foo\(\) \{\n  return",
+        dir.to_str().unwrap(),
+    )
+    .expect("grep should succeed");
 
     assert_eq!(
         out.total_matches, 1,
@@ -230,12 +227,15 @@ fn grep_truncates_long_lines() {
     let long = format!("x{}y", "a".repeat(1000));
     std::fs::write(dir.join("a.txt"), format!("{long}\n")).unwrap();
 
-    let out = grep(&Grep::default(), "x", dir.to_str().unwrap())
-        .expect("grep should succeed");
+    let out = grep(&Grep::default(), "x", dir.to_str().unwrap()).expect("grep should succeed");
 
     assert!(!out.matches.is_empty(), "expected a match");
     let m = &out.matches[0];
-    assert_eq!(m.truncated, Some(true), "long line must be flagged truncated");
+    assert_eq!(
+        m.truncated,
+        Some(true),
+        "long line must be flagged truncated"
+    );
     assert!(
         m.line.ends_with("..."),
         "truncated line must end with an ellipsis, got: {}",
@@ -256,8 +256,8 @@ fn grep_file_window_paginates_with_skip() {
         std::fs::write(dir.join(format!("f{i:02}.txt")), format!("needle {i}\n")).unwrap();
     }
 
-    let first = grep(&Grep::default(), "needle", dir.to_str().unwrap())
-        .expect("grep should succeed");
+    let first =
+        grep(&Grep::default(), "needle", dir.to_str().unwrap()).expect("grep should succeed");
     assert!(
         first.file_limit_reached,
         "more files than the window must flag pagination"
@@ -278,7 +278,10 @@ fn grep_file_window_paginates_with_skip() {
         dir.to_str().unwrap(),
     )
     .expect("paged grep should succeed");
-    assert!(!second.matches.is_empty(), "page two must still have matches");
+    assert!(
+        !second.matches.is_empty(),
+        "page two must still have matches"
+    );
     let page_two: Vec<&str> = second.matches.iter().map(|m| m.path.as_str()).collect();
     assert!(
         page_two.iter().any(|p| !page_one.contains(p)),
@@ -301,8 +304,7 @@ fn grep_per_file_cap_limits_hot_file() {
     std::fs::write(dir.join("hot.txt"), &hot).unwrap();
     std::fs::write(dir.join("other.txt"), "needle other\n").unwrap();
 
-    let out = grep(&Grep::default(), "needle", dir.to_str().unwrap())
-        .expect("grep should succeed");
+    let out = grep(&Grep::default(), "needle", dir.to_str().unwrap()).expect("grep should succeed");
 
     assert!(
         out.per_file_limit_reached,
@@ -368,8 +370,8 @@ fn grep_total_cap_skips_file_window_pagination() {
 
 #[test]
 fn grep_zero_matches_is_marked_useless() {
-    let out = grep(&Grep::default(), "zzz_no_such_pattern_xyz", GLOB_FILE)
-        .expect("grep should succeed");
+    let out =
+        grep(&Grep::default(), "zzz_no_such_pattern_xyz", GLOB_FILE).expect("grep should succeed");
 
     assert!(out.matches.is_empty());
     assert_eq!(
@@ -410,8 +412,7 @@ fn grep_records_seen_lines_for_anchored_files() {
     let dir = temp_dir("seen");
     std::fs::write(dir.join("a.txt"), "line one\nneedle here\nline three\n").unwrap();
 
-    let out = grep(&Grep::default(), "needle", dir.to_str().unwrap())
-        .expect("grep should succeed");
+    let out = grep(&Grep::default(), "needle", dir.to_str().unwrap()).expect("grep should succeed");
 
     assert_eq!(out.files.len(), 1, "one anchored file expected");
     let anchor = &out.files[0];
@@ -428,7 +429,8 @@ fn grep_records_seen_lines_for_anchored_files() {
 
     assert!(!seen.is_empty(), "anchored file must record seen lines");
     assert!(
-        seen.iter().any(|(line, content)| *line == 2 && content.contains("needle")),
+        seen.iter()
+            .any(|(line, content)| *line == 2 && content.contains("needle")),
         "seen lines must cover the matched line, got: {seen:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -449,7 +451,10 @@ fn grep_targets_multi_target_rebases_paths_to_common_ancestor() {
     let out = grep_targets(
         &Grep::default(),
         "needle",
-        &[a.to_string_lossy().to_string(), b.to_string_lossy().to_string()],
+        &[
+            a.to_string_lossy().to_string(),
+            b.to_string_lossy().to_string(),
+        ],
     )
     .expect("multi-target grep should succeed");
 
@@ -505,11 +510,7 @@ fn grep_line_range_filters_matches() {
 
     let mut lines: Vec<u32> = out.matches.iter().map(|m| m.line_number).collect();
     lines.sort_unstable();
-    assert_eq!(
-        lines,
-        vec![2, 3, 4],
-        "only in-range lines must be kept"
-    );
+    assert_eq!(lines, vec![2, 3, 4], "only in-range lines must be kept");
     assert_eq!(out.total_matches, 3);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -550,10 +551,7 @@ fn grep_line_range_malformed_errors() {
             "fn",
             GLOB_FILE,
         );
-        assert!(
-            result.is_err(),
-            "malformed line_range {bad:?} must fail"
-        );
+        assert!(result.is_err(), "malformed line_range {bad:?} must fail");
     }
 }
 

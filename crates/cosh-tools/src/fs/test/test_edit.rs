@@ -341,7 +341,10 @@ async fn edit_stops_at_failed_target_keeps_applied_and_skips_the_rest() {
     // keep editing it without re-reading.
     let fresh_hash = compute_file_hash("ALPHA\n");
     let fresh_tag = format!("\u{b6}{path_a}#{fresh_hash}");
-    assert!(msg.contains(&fresh_tag), "expected fresh tag {fresh_tag} in: {msg}");
+    assert!(
+        msg.contains(&fresh_tag),
+        "expected fresh tag {fresh_tag} in: {msg}"
+    );
 
     // Disk state: A was applied, B and C untouched.
     assert_eq!(std::fs::read_to_string(path_a).unwrap(), "ALPHA\n");
@@ -390,7 +393,10 @@ async fn edit_first_target_failure_applies_nothing_and_skips_all_rest() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.failed_path, path_a);
-    assert!(err.applied.is_empty(), "nothing may be applied before the first target");
+    assert!(
+        err.applied.is_empty(),
+        "nothing may be applied before the first target"
+    );
     assert_eq!(err.skipped, vec![path_b.to_string(), path_c.to_string()]);
 
     let msg = err.to_string();

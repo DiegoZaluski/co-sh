@@ -53,7 +53,10 @@ impl fmt::Display for EditBatchError {
         if !self.applied.is_empty() {
             // Each applied result carries its new hashline anchor (`¶path#TAG`),
             // so the model can keep editing those files without re-reading.
-            write!(f, "\nApplied before the failure (fresh tags for follow-up edits):")?;
+            write!(
+                f,
+                "\nApplied before the failure (fresh tags for follow-up edits):"
+            )?;
             for r in &self.applied {
                 let anchor = if r.header.is_empty() {
                     r.path.clone()
@@ -152,10 +155,7 @@ async fn edit_target(target: EditTarget, metadata: &FsMetadata) -> Result<EditRe
 
     let _ = rollback::record(&path_str, &prepared.normalized);
 
-    let section = patcher
-        .commit(prepared)
-        .await
-        .map_err(|e| e.to_string())?;
+    let section = patcher.commit(prepared).await.map_err(|e| e.to_string())?;
 
     cosh_sdk::tree_sitter::tree_sitter().invalidate(&path_str);
 

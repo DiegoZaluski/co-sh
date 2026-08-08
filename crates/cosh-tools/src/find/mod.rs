@@ -25,20 +25,48 @@ pub mod grep;
 pub mod types;
 
 #[cfg(test)]
-mod tests;
+mod test;
 
-pub use glob::glob;
-pub use grep::{grep, grep_targets};
+pub use glob::{GlobMatchCallback, GlobTargetSpec, glob, glob_targets_with, glob_with};
+pub use grep::{GrepMatchCallback, grep, grep_targets, grep_targets_with};
 pub use types::{
-    ContextEntry, Glob, GlobEntry, GlobInput, GlobOutput, Grep, GrepFileEntry, GrepInput,
-    GrepMatchEntry, GrepOutput,
+    ContextEntry, Glob, GlobCallOptions, GlobEntry, GlobInput, GlobOutput, Grep, GrepFileEntry,
+    GrepInput, GrepMatchEntry, GrepOutput,
 };
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Deepest common ancestor directory of the given (existing) paths. A file
+/// target contributes its parent directory. Returns `None` only for an empty
+/// input.
+///
+/// Note: when the targets share NO common ancestor (e.g. different mount
+/// points), the rebase falls back to each target's raw relative paths, which
+/// can collide across targets. On a single-`/` filesystem every absolute path
+/// shares `/`, so this only matters for exotic layouts.
+pub(crate) fn common_ancestor(paths: &[PathBuf]) -> Option<PathBuf> {
+    let mut iter = paths.iter();
+    let first = iter.next()?;
+    let mut ancestor = if first.is_file() {
+        first.parent()?.to_path_buf()
+    } else {
+        first.clone()
+    };
+    for path in iter {
+        while !path.starts_with(&ancestor) {
+            if !ancestor.pop() {
+                return None;
+            }
+        }
+    }
+    Some(ancestor)
+}
 
 use crate::ToolDescription;
 use crate::util::path_guard::PathGuard;
-use types::{Glob as GlobConfig, Grep as GrepConfig};
+use glob::parse_find_pattern;
+use types::Grep as GrepConfig;
 
 /// Shared-state wrapper for file-search tool operations.
 ///
@@ -50,6 +78,7 @@ pub struct Find {
     recursive: Option<bool>,
     max_results: Option<u32>,
     sort_by_mtime: Option<bool>,
+    format: Option<String>,
     name_glob: Option<String>,
     language: Option<String>,
     ignore_case: Option<bool>,
@@ -94,14 +123,31 @@ impl Find {
             gitignore: None,
             guard: PathGuard::new(Path::new(""), None, None),
             timeout_ms: None,
+            format: None,
             description_glob: serde_json::json!({
                 "name": "find_glob",
                 "description": concat!(
                     "Find files and directories matching a glob pattern. ",
-                    "Supports recursive search, file type filtering (file/dir/symlink), ",
-                    "sorting by modification time, hidden file inclusion, and ",
-                    ".gitignore respect. Returns a list of matching entries with ",
-                    "path, file type, size, and modification time."
+                    "Search one or more roots in a single call: `paths` (array) ",
+                    "overrides `path`; each entry is a root, glob, or literal ",
+                    "file/directory (e.g. \"src/**/*.rs\", \"*.rs\", or \"src\"). ",
+                    "Literal directories are searched recursively; a bare glob (no ",
+                    "directory prefix) is matched recursively across its root; a ",
+                    "glob WITH a directory prefix (\"src/*.rs\") stays scoped to ",
+                    "that directory (shallow). Missing targets are skipped with a ",
+                    "warning. Zero matches are marked `useless` with a `note` ",
+                    "(adjust the pattern or scope, do not retry blindly). A ",
+                    "timeout returns the partial results with `timed_out: true` — ",
+                    "an empty timed-out result is an INCOMPLETE scan, NOT proof of ",
+                    "absence; scope to a deeper directory instead of retrying. ",
+                    "Results are capped at 200 by default; the optional ",
+                    "`max_results` only LOWERS that cap (a value above 200 ",
+                    "is clamped to 200). ",
+                    "When the cap cuts the list, `limit_reached: true` means more ",
+                    "entries may exist. `format` renders the `formatted` ",
+                    "field as \"flat\", \"grouped\" (per-directory headers), or ",
+                    "\"tree\" (indented). Each entry carries path, file type, ",
+                    "size, and modification time."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -112,10 +158,39 @@ impl Find {
                         },
                         "path": {
                             "type": "string",
-                            "description": "The root directory to search within"
+                            "description": "A search root, glob, or literal file/directory. May be relative; CWD-relative results are returned."
+                        },
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Multiple search roots/globs in one call; overrides `path`. Each target is validated individually; missing targets are skipped with a warning."
+                        },
+                        "file_type": {
+                            "type": "string",
+                            "enum": ["file", "dir", "symlink"],
+                            "description": "Restrict results to one filesystem kind. Omitted: return files, dirs, and symlinks mixed."
+                        },
+                        "hidden": {
+                            "type": "boolean",
+                            "description": "Include hidden files/directories (names starting with `.`). Default true; `.git` is ALWAYS excluded regardless."
+                        },
+                        "gitignore": {
+                            "type": "boolean",
+                            "description": "Respect .gitignore rules. Default true; pass false to include ignored files explicitly."
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200,
+                            "description": "Maximum results to return. Defaults to 200; the ceiling is 200, so a larger value only clamps down to it. Use it to shrink, never to request more."
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": ["flat", "grouped", "tree"],
+                            "description": "Output layout for the `formatted` field (default \"flat\")"
                         }
                     },
-                    "required": ["pattern", "path"]
+                    "required": ["pattern"]
                 }
             }),
             description_grep: serde_json::json!({
@@ -131,7 +206,10 @@ impl Find {
                     "`truncated` — read the file for the full line. Patterns containing ",
                     "a newline (or the `\\n` escape) automatically enable multiline ",
                     "matching. Zero selected matches are marked `useless` with a `note` ",
-                    "— adjust the pattern or scope instead of blindly retrying. Search ",
+                    "— adjust the pattern or scope instead of blindly retrying. A ",
+                    "timeout returns the partial matches with `timed_out: true` — an ",
+                    "empty timed-out result is an INCOMPLETE scan, NOT proof of ",
+                    "absence; narrow the scope instead of retrying blindly. Search ",
                     "several targets in one call with `paths` (each validated ",
                     "individually; when absent, `path` is used). Restrict to a 1-based ",
                     "inclusive line range with `line_range` (\"start-end\", requires ",
@@ -200,6 +278,13 @@ impl Find {
     #[must_use]
     pub const fn sort_by_mtime(mut self, v: bool) -> Self {
         self.sort_by_mtime = Some(v);
+        self
+    }
+
+    /// Output layout for glob results (`"flat"`, `"grouped"`, `"tree"`).
+    #[must_use]
+    pub fn glob_format(mut self, f: impl Into<String>) -> Self {
+        self.format = Some(f.into());
         self
     }
 
@@ -336,20 +421,117 @@ impl Find {
     /// Returns an error when the search path does not exist, the pattern
     /// is invalid, or the operation times out.
     pub fn glob(&self, pattern: &str, path: &str) -> Result<GlobOutput, String> {
-        let validated = self.guard.resolve(path)?;
-        let path_str = validated.to_string_lossy().to_string();
-        glob(
-            &GlobConfig {
-                file_type: self.file_type.clone(),
+        self.glob_with(pattern, Some(path.to_string()), None, None)
+    }
+
+    /// Like [`glob`](Self::glob), but searches one or more targets in a single
+    /// call (`paths` overrides `path`; each target is guard-resolved
+    /// individually), optionally streaming matches live via `on_match`.
+    ///
+    /// Each entry in `path`/`paths` may be a directory, a literal file, or a
+    /// glob (with or without a directory prefix); the effective pattern and
+    /// recursion are derived from its shape. Output paths are rebased to the
+    /// CWD when they live under it (feature: relative-to-CWD resolution).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the search paths are missing, a pattern is
+    /// invalid, or the operation times out.
+    pub fn glob_with(
+        &self,
+        pattern: &str,
+        path: Option<String>,
+        paths: Option<Vec<String>>,
+        on_match: Option<Arc<GlobMatchCallback>>,
+    ) -> Result<GlobOutput, String> {
+        self.glob_full(pattern, path, paths, GlobCallOptions::default(), on_match)
+    }
+
+    /// Like [`glob_with`](Self::glob_with), with the schema-driven call options
+    /// bundled in [`GlobCallOptions`]: optional `file_type` (`"file"`,
+    /// `"dir"`, `"symlink"`), `hidden` and `gitignore` toggles, `format`
+    /// (`"flat"`, `"grouped"`, `"tree"`), and an optional `max_results`.
+    ///
+    /// The effective result cap defaults to 200 (mirroring the reference
+    /// tool) when neither this call's `max_results` nor the builder's is
+    /// set, and the ceiling is fixed: a `max_results` above 200 is clamped
+    /// down, so the caller can only lower the result set. A `max_results`
+    /// of `0` is rejected.
+    ///
+    /// `hidden` and `gitignore` default to `true` unless explicitly disabled
+    /// (reference-tool behavior). `file_type` filters results to one
+    /// filesystem kind and is an extension over the reference tool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the search paths are missing, a pattern is
+    /// invalid, `file_type` is unknown, `max_results` is zero, or the
+    /// operation times out.
+    pub fn glob_full(
+        &self,
+        pattern: &str,
+        path: Option<String>,
+        paths: Option<Vec<String>>,
+        opts: GlobCallOptions,
+        on_match: Option<Arc<GlobMatchCallback>>,
+    ) -> Result<GlobOutput, String> {
+        let GlobCallOptions {
+            file_type,
+            hidden,
+            gitignore,
+            max_results,
+            format,
+        } = opts;
+        if let Some(0) = max_results {
+            return Err("max_results must be a positive number".to_string());
+        }
+        let max_results = max_results
+            .or(self.max_results)
+            .unwrap_or(glob::DEFAULT_GLOB_LIMIT)
+            .min(glob::MAX_GLOB_LIMIT);
+        // Model-facing defaults mirror the reference tool (oh-my-pi): hidden
+        // and gitignore are ON unless explicitly disabled. `file_type` is an
+        // optional extension. Each flag falls back to the builder-configured
+        // value first.
+        let file_type = file_type.or_else(|| self.file_type.clone());
+        let hidden = hidden.or(self.hidden).unwrap_or(true);
+        let gitignore = gitignore.or(self.gitignore).unwrap_or(true);
+        let raw_targets: Vec<String> = match paths {
+            Some(list) if !list.is_empty() => list,
+            _ => vec![path.ok_or_else(|| "missing 'path' or 'paths'".to_string())?],
+        };
+        // Each raw entry becomes one resolved spec. Guard resolution keeps the
+        // existing security contract; the parse step decides directory/glob/
+        // file semantics and effective recursion.
+        let mut resolved: Vec<GlobTargetSpec> = Vec::with_capacity(raw_targets.len());
+        for target in &raw_targets {
+            let parsed = parse_find_pattern(target);
+            let base = self.guard.resolve(&parsed.base_path.to_string_lossy())?;
+            resolved.push(GlobTargetSpec {
+                base_path: base,
+                pattern: if parsed.has_glob {
+                    parsed.glob_pattern
+                } else {
+                    pattern.to_string()
+                },
+                has_glob: parsed.has_glob,
+            });
+        }
+        let cwd = self.guard.root().clone();
+        glob_targets_with(
+            &Glob {
+                file_type,
                 recursive: self.recursive,
-                max_results: self.max_results,
+                max_results: Some(max_results),
                 sort_by_mtime: self.sort_by_mtime,
-                hidden: self.hidden,
-                gitignore: self.gitignore,
+                hidden: Some(hidden),
+                gitignore: Some(gitignore),
                 timeout_ms: self.timeout_ms,
+                format: format.or_else(|| self.format.clone()),
             },
-            pattern,
-            &path_str,
+            &resolved,
+            on_match,
+            Some(&cwd),
         )
     }
 
@@ -397,6 +579,21 @@ impl Find {
         skip: Option<u32>,
         line_range: Option<String>,
     ) -> Result<GrepOutput, String> {
+        self.grep_with_streaming(pattern, path, paths, skip, line_range, None)
+    }
+
+    /// Like [`grep_with`](Self::grep_with), optionally streaming each match
+    /// live via `on_match` (formatted `path:line`, rebased for multi-target
+    /// calls).
+    pub fn grep_with_streaming(
+        &self,
+        pattern: &str,
+        path: Option<String>,
+        paths: Option<Vec<String>>,
+        skip: Option<u32>,
+        line_range: Option<String>,
+        on_match: Option<Arc<GrepMatchCallback>>,
+    ) -> Result<GrepOutput, String> {
         let raw_targets: Vec<String> = match paths {
             Some(list) if !list.is_empty() => list,
             _ => vec![path.ok_or_else(|| "missing 'path' or 'paths'".to_string())?],
@@ -406,7 +603,7 @@ impl Find {
             let validated = self.guard.resolve(target)?;
             resolved.push(validated.to_string_lossy().to_string());
         }
-        grep_targets(
+        grep_targets_with(
             &GrepConfig {
                 glob: self.name_glob.clone(),
                 file_type: self.language.clone(),
@@ -422,6 +619,7 @@ impl Find {
             },
             pattern,
             &resolved,
+            on_match,
         )
     }
 }

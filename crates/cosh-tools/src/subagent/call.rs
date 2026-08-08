@@ -36,7 +36,11 @@ use std::time::{Duration, Instant};
 pub const AGENTS: &[(&str, &str, &[&str])] = &[
     ("opencode", "opencode", &["run", "--auto"]),
     ("kilo", "kilo", &["run", "--auto"]),
-    ("claude", "claude", &["-p", "--permission-mode", "dontAsk", "--bare"]),
+    (
+        "claude",
+        "claude",
+        &["-p", "--permission-mode", "dontAsk", "--bare"],
+    ),
     ("devin", "devin", &["-p", "--permission-mode", "dangerous"]),
     ("codex", "codex", &["exec", "--sandbox", "workspace-write"]),
     ("cline", "cline", &["-y"]),
@@ -45,10 +49,18 @@ pub const AGENTS: &[(&str, &str, &[&str])] = &[
     ("hermes", "hermes", &["-z"]),
     ("openhands", "openhands", &["--headless", "-t"]),
     ("pi", "pi", &["-p"]),
-    ("interpreter", "interpreter", &["exec", "--ask-for-approval", "auto"]),
+    (
+        "interpreter",
+        "interpreter",
+        &["exec", "--ask-for-approval", "auto"],
+    ),
     ("letta", "letta", &["-p"]),
     ("vibe", "vibe", &["--prompt", "--agent", "auto-approve"]),
-    ("aider", "aider", &["--message", "--yes", "--no-auto-commits"]),
+    (
+        "aider",
+        "aider",
+        &["--message", "--yes", "--no-auto-commits"],
+    ),
     ("omp", "omp", &["-p"]),
     ("goose", "goose", &["run", "-t"]),
     ("gemini", "gemini", &["-p"]),
@@ -81,12 +93,24 @@ fn install_hint(agent: &str) -> &'static str {
         }
         "codex" => "Install: npm install -g @openai/codex. More: https://learn.chatgpt.com/docs",
         "cline" => "Install: npm install -g cline. More: https://cline.bot/cli",
-        "cursor" => "Install: curl https://cursor.com/install -fsS | bash. More: https://cursor.com/cli",
-        "crush" => "Install: brew install charmbracelet/tap/crush. More: https://github.com/charmbracelet/crush",
-        "hermes" => "Install: pip install hermes-agent. More: https://github.com/NousResearch/hermes-agent",
-        "openhands" => "Install: pip install openhands. More: https://github.com/OpenHands/OpenHands-CLI",
-        "pi" => "Install: npm install -g @earendil-works/pi-coding-agent. More: https://github.com/badlogic/pi-mono",
-        "interpreter" => "Install: pip install open-interpreter. More: https://github.com/OpenInterpreter/open-interpreter",
+        "cursor" => {
+            "Install: curl https://cursor.com/install -fsS | bash. More: https://cursor.com/cli"
+        }
+        "crush" => {
+            "Install: brew install charmbracelet/tap/crush. More: https://github.com/charmbracelet/crush"
+        }
+        "hermes" => {
+            "Install: pip install hermes-agent. More: https://github.com/NousResearch/hermes-agent"
+        }
+        "openhands" => {
+            "Install: pip install openhands. More: https://github.com/OpenHands/OpenHands-CLI"
+        }
+        "pi" => {
+            "Install: npm install -g @earendil-works/pi-coding-agent. More: https://github.com/badlogic/pi-mono"
+        }
+        "interpreter" => {
+            "Install: pip install open-interpreter. More: https://github.com/OpenInterpreter/open-interpreter"
+        }
         "letta" => "Install: npm install -g @letta-ai/letta-code. More: https://docs.letta.com",
         "vibe" => {
             "Install: curl -LsSf https://mistral.ai/vibe/install.sh | bash. For headless mode also use --agent auto-approve. More: https://github.com/mistralai/mistral-vibe"
@@ -305,19 +329,33 @@ pub fn call(
     if result.is_empty() {
         let blocking_hint = match agent {
             "aider" => " aider may be waiting for confirmation. Set AIDER_YES=true or pass --yes.",
-            "devin" => " devin may be waiting for permission approval. Use --permission-mode dangerous.",
+            "devin" => {
+                " devin may be waiting for permission approval. Use --permission-mode dangerous."
+            }
             "vibe" => " vibe may be waiting for tool approval. Use --agent auto-approve.",
-            "claude" => " claude may be waiting for permission approval. Use --permission-mode dontAsk.",
+            "claude" => {
+                " claude may be waiting for permission approval. Use --permission-mode dontAsk."
+            }
             "opencode" => " opencode may be waiting for permission approval. Use --auto.",
             "kilo" => " kilo may be waiting for permission approval. Use --auto.",
-            "codex" => " codex may be waiting for permission approval. Use --sandbox workspace-write.",
+            "codex" => {
+                " codex may be waiting for permission approval. Use --sandbox workspace-write."
+            }
             "cline" => " cline may be waiting for permission approval. Use -y for YOLO mode.",
-            "cursor" => " cursor may be waiting for permission approval. Use agent -p --force --trust.",
+            "cursor" => {
+                " cursor may be waiting for permission approval. Use agent -p --force --trust."
+            }
             "crush" => " crush may be waiting for permission approval. Use crush run --yolo.",
-            "hermes" => " hermes may be waiting for permission approval. Use hermes -z for oneshot mode.",
-            "openhands" => " openhands may be waiting for permission approval. Use --headless for auto-approve.",
+            "hermes" => {
+                " hermes may be waiting for permission approval. Use hermes -z for oneshot mode."
+            }
+            "openhands" => {
+                " openhands may be waiting for permission approval. Use --headless for auto-approve."
+            }
             "pi" => " pi may be waiting for permission approval. Use pi -p for print mode.",
-            "interpreter" => " interpreter may be waiting for permission approval. Use --ask-for-approval auto.",
+            "interpreter" => {
+                " interpreter may be waiting for permission approval. Use --ask-for-approval auto."
+            }
             _ => "",
         };
         Err(format!(

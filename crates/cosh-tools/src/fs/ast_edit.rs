@@ -150,6 +150,7 @@ fn expand_glob(metadata: &FsMetadata, root: &Path, pattern: &str) -> Result<Vec<
         sort_by_mtime: None,
         include_node_modules: None,
         timeout_ms: None,
+        on_match: None,
     })
     .map_err(|e| format!("glob `{pattern}` failed: {e}"))?;
     let mut v = Vec::new();
