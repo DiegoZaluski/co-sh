@@ -1396,6 +1396,50 @@ fn test_summarizing_box_collapsed_tail_and_expand() {
     );
     let collapsed_h = view.msg_height_cache[0];
 
+    // The box has 1 row of padding above the title (and 1 below the content):
+    // the title must not sit on the box's first row.
+    let title_row = (0..area.height)
+        .find(|&r| {
+            let row_text: String = (0..area.width)
+                .filter_map(|cx| buf.cell((cx, r)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row_text.contains("Summarizing")
+        })
+        .expect("title row must exist");
+    assert!(title_row > 0, "the Summarizing title has 1 row of padding above it");
+    // The padding row must be blank except for the box's left border (┃).
+    let above_glyphs: Vec<char> = (0..area.width)
+        .filter_map(|cx| buf.cell((cx, title_row - 1)))
+        .filter_map(|c| c.symbol().chars().next())
+        .filter(|&ch| ch != ' ')
+        .collect();
+    assert!(
+        above_glyphs.iter().all(|&c| c == '┃'),
+        "the row above the title is blank top padding (only the border)"
+    );
+
+    // 1 row of bottom padding below the last content row (the "Click to
+    // expand" hint in the collapsed preview).
+    let hint_row = (0..area.height)
+        .find(|&r| {
+            let row_text: String = (0..area.width)
+                .filter_map(|cx| buf.cell((cx, r)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row_text.contains("Click to expand")
+        })
+        .expect("hint row must exist");
+    let below_glyphs: Vec<char> = (0..area.width)
+        .filter_map(|cx| buf.cell((cx, hint_row + 1)))
+        .filter_map(|c| c.symbol().chars().next())
+        .filter(|&ch| ch != ' ')
+        .collect();
+    assert!(
+        below_glyphs.iter().all(|&c| c == '┃'),
+        "the row below the hint is blank bottom padding (only the border)"
+    );
+
     // A long line must WRAP DOWN inside the box — the whole 200-char run
     // appears across several rows instead of being cut at the right edge
     // (~77 chars fit per row at width 80 minus the border indent).

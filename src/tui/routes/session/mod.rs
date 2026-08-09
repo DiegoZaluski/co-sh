@@ -205,6 +205,10 @@ fn compaction_line(part: &CompactionPart, now: u64) -> String {
 /// removed). Expanded, the box grows to fit the whole text.
 const SUMMARIZING_COLLAPSED_LINES: u16 = 8;
 
+/// Vertical padding inside the box: 1 blank row above the title and 1 below
+/// the last content row, so the content never touches the box edges.
+const SUMMARIZING_PAD_V: u16 = 1;
+
 /// Stable expand/collapse key for a "Summarizing" box: one per LLM-compaction
 /// line, keyed by its `started_at`.
 fn summarizing_id(part: &CompactionPart) -> String {
@@ -215,16 +219,19 @@ fn summarizing_id(part: &CompactionPart) -> String {
 /// SAME markdown algorithm as the render ([`estimate_height`], pulldown_cmark),
 /// so the allocated height always matches the drawn body exactly. Collapsed: a
 /// fixed preview of the LAST [`SUMMARIZING_COLLAPSED_LINES`] rows plus a hint
-/// row when the body overflows; expanded: the whole markdown body.
+/// row when the body overflows; expanded: the whole markdown body. Every case
+/// adds [`SUMMARIZING_PAD_V`] rows of padding above the title and below the
+/// content.
 fn summarizing_height(part: &CompactionPart, expanded: bool, max_w: u16) -> u16 {
     let wrap_w = max_w.saturating_sub(3).max(1);
     let body_h = estimate_height(&part.text, wrap_w).max(1);
+    let pad = SUMMARIZING_PAD_V * 2;
     if expanded {
-        body_h.saturating_add(1) // title + full body
+        body_h.saturating_add(1).saturating_add(pad) // pad + title + full body + pad
     } else if body_h > SUMMARIZING_COLLAPSED_LINES {
-        SUMMARIZING_COLLAPSED_LINES.saturating_add(2) // title + preview + hint
+        SUMMARIZING_COLLAPSED_LINES.saturating_add(2).saturating_add(pad) // pad + title + preview + hint + pad
     } else {
-        body_h.saturating_add(1)
+        body_h.saturating_add(1).saturating_add(pad)
     }
 }
 
@@ -685,11 +692,14 @@ impl SessionView {
         border_box.render_self(buf, area);
 
         let x_off = x + 3;
+        // 1 blank row of padding above the title (the bottom pad is the last
+        // row of the box); matches SUMMARIZING_PAD_V in summarizing_height.
+        let title_y = y + SUMMARIZING_PAD_V;
         // `+`/`-` match the adjacent Thought block's expand/collapse affordance.
         let mut title = if expanded { "- " } else { "+ " }.to_string();
         title.push_str(&format!("Summarizing · {secs:.3}s"));
         let title_style = Style::default().fg(rgba_color(theme.secondary));
-        draw_text_line(buf, &title, x_off, y, max_w.saturating_sub(3), title_style);
+        draw_text_line(buf, &title, x_off, title_y, max_w.saturating_sub(3), title_style);
 
         // Markdown-rendered body — the same renderer as the chat Text parts,
         // so the raw markdown syntax never reaches the screen. The bg is the
@@ -716,7 +726,7 @@ impl SessionView {
             md.render_self(&mut tmp, tmp_area);
             let src_start = body_h - SUMMARIZING_COLLAPSED_LINES;
             for (i, src_y) in (src_start..body_h).enumerate() {
-                let dst_y = y + 1 + i as u16;
+                let dst_y = y + SUMMARIZING_PAD_V + 1 + i as u16;
                 if dst_y >= area.bottom() {
                     break;
                 }
@@ -730,11 +740,16 @@ impl SessionView {
                 }
             }
         } else {
-            let body_area = Rect::new(x_off, y + 1, wrap_w, body_h.min(total_h.saturating_sub(1)));
+            let body_area = Rect::new(
+                x_off,
+                y + SUMMARIZING_PAD_V + 1,
+                wrap_w,
+                body_h.min(total_h.saturating_sub(1 + SUMMARIZING_PAD_V)),
+            );
             md.render_self(buf, body_area);
         }
         if overflow {
-            let hint_y = y + 1 + SUMMARIZING_COLLAPSED_LINES;
+            let hint_y = y + SUMMARIZING_PAD_V + 1 + SUMMARIZING_COLLAPSED_LINES;
             draw_text_line(
                 buf,
                 "Click to expand",
