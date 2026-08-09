@@ -314,28 +314,40 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                 if ctx.in_code_block() {
                     let code_pad_v = 1u16;
                     // The renderer (md.rs) advances the cursor through a code
-                    // block as follows: ONE top gap row (CodeBlock start),
-                    // one fresh row per code line, ONE bottom-padding row,
-                    // ONE blank separator row (both inside render_code_block),
-                    // and ONE more blank row at TagEnd::CodeBlock = N+4 rows
-                    // total. When content FOLLOWS the block, all of those rows
-                    // are real layout rows — the trailing content lands after
-                    // them, so the estimate must count them all or that
-                    // content is clipped off the bottom of the message.
+                    // block as follows: ONE top-gap row ONLY when a language
+                    // tag is present (drawn by the CodeBlock start handler,
+                    // carrying the label), one fresh row per code line, ONE
+                    // bottom-padding row, ONE blank separator row (both
+                    // inside render_code_block), and ONE more blank row at
+                    // TagEnd::CodeBlock. Language-less blocks have no internal
+                    // top-gap row — their only top spacing is the margin row
+                    // left by the previous block's TagEnd — so they total N+3
+                    // rows; blocks WITH a language total N+4. When content
+                    // FOLLOWS the block, all of those rows are real layout
+                    // rows — the trailing content lands after them, so the
+                    // estimate must count them all or that content is clipped
+                    // off the bottom of the message.
                     //
-                    // The estimator mirrors that: `code_pad_v * 2 + 2` = top
-                    // gap row + first code line's row + bottom-padding row +
-                    // blank separator row; the remaining code rows are added
-                    // below; and the TagEnd::CodeBlock branch adds the final
-                    // blank row. (A code block at the very end of the text
-                    // leaves the last three rows blank, which the glyph-based
-                    // content scan ignores — that small over-estimate just
-                    // shows blank rows under the block. For the Summarizing
-                    // box this also shifts its collapsed tail window up by
-                    // those rows for summaries ending in a code block; that
-                    // cosmetic trade-off is accepted so that summaries with
-                    // text AFTER a code block are never clipped.)
-                    y = y.saturating_add(code_pad_v * 2 + 2);
+                    // The estimator mirrors that: `code_pad_v * 2 + 1` (N+3)
+                    // for language-less blocks, `code_pad_v * 2 + 2` (N+4)
+                    // when a language label is present — optional label row +
+                    // first code line's row + bottom-padding row + blank
+                    // separator row; the remaining code rows are added below;
+                    // and the TagEnd::CodeBlock branch adds the final blank
+                    // row. (A code block at the very end of the text leaves
+                    // the last rows blank, which the glyph-based content scan
+                    // ignores — that small over-estimate just shows blank
+                    // rows under the block. For the Summarizing box this also
+                    // shifts its collapsed tail window up by those rows for
+                    // summaries ending in a code block; that cosmetic
+                    // trade-off is accepted so that summaries with text AFTER
+                    // a code block are never clipped.)
+                    let label_rows = if ctx.code_block_lang().is_empty() {
+                        0u16
+                    } else {
+                        1u16
+                    };
+                    y = y.saturating_add(code_pad_v * 2 + 1 + label_rows);
                     // Every code row beyond the first is a fresh row (the pad
                     // already accounted for the first row). Rows are counted
                     // per line with the renderer's exact wrap behavior.

@@ -1,4 +1,9 @@
 use super::super::estimate_height;
+use super::super::MarkdownRenderable;
+use crate::core::renderable::Renderable;
+use crate::core::rgba::{ColorInput, RGBA};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 #[test]
 fn test_plain_text() {
@@ -13,15 +18,16 @@ fn test_text_wrapping() {
     assert_eq!(h, 3, "200 chars at 80 wide = 3 lines");
 }
 
+/// Language-less code block with 2 lines: no internal top-gap row — the only
+/// top spacing is the margin row left by the previous block — so the height
+/// is 2 code rows + bottom padding (1) + blank separator (1) + TagEnd blank
+/// (1) = 5 rows. Pinned EXACT so a regression in the accounting cannot hide
+/// inside a loose range.
 #[test]
 fn test_code_block_lines() {
     let text = "```\nline1\nline2\n```";
     let h = estimate_height(text, 80);
-    let valid = (4..=8).contains(&h);
-    assert!(
-        valid,
-        "code block with 2 lines should estimate 4-8 rows (got {h})"
-    );
+    assert_eq!(h, 5, "2-line code block should estimate 5 rows (got {h})");
 }
 
 #[test]
@@ -113,14 +119,17 @@ fn test_wide_table_needs_multiple_rows() {
     );
 }
 
+/// Fenced code block with a language tag and 3 code lines: the label row (1)
+/// + 3 code rows + bottom padding (1) + blank separator (1) + TagEnd blank
+/// (1) = 7 rows. Pinned EXACT so a regression in the accounting (e.g. the
+/// N+2 vs N+4 mistake) cannot pass inside a loose range.
 #[test]
 fn test_code_block_fenced_height() {
     let text = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```";
     let h = estimate_height(text, 80);
-    // Code block: newline before(0 or 1) + 4 lines of code + newline after(0 or 1)
-    assert!(
-        h >= 3,
-        "Fenced code block with 4 lines should be >= 3, got {h}"
+    assert_eq!(
+        h, 7,
+        "3-line fenced code block should estimate 7 rows (got {h})"
     );
 }
 
@@ -173,4 +182,67 @@ fn test_horizontal_rules_sequence() {
     let text = "---\n\n---\n\n---";
     let h = estimate_height(text, 80);
     assert_eq!(h, 3, "three horizontal rules = 3 lines");
+}
+
+/// Count rows from `y=0` that contain at least one non-space glyph (the same
+/// "content height" oracle the TUI uses).
+fn scan_glyph_rows(buf: &Buffer, w: u16, h: u16) -> u16 {
+    let mut last_row: Option<u16> = None;
+    for y in 0..h {
+        for x in 0..w {
+            if let Some(cell) = buf.cell((x, y))
+                && cell.symbol().chars().next().unwrap_or(' ') != ' '
+            {
+                last_row = Some(y);
+                break;
+            }
+        }
+    }
+    last_row.map(|r| r + 1).unwrap_or(0)
+}
+
+/// Pins `estimate_height` against the ACTUAL rendered rows for code blocks
+/// across widths. A divergence between the two — e.g. an estimate of 7 rows
+/// for content that renders in 27 — silently breaks the chat layout (clipped
+/// or overlapping content), and the loose single-value layout tests above
+/// cannot see it. This test is the false-positive guard: it compares the two
+/// implementations directly, so any change to the renderer OR the estimator
+/// that drifts apart fails here.
+#[test]
+fn test_code_block_estimate_matches_render() {
+    let cases: &[&str] = &[
+        // No language tag (the reported case: asymmetric padding).
+        "```\nlet a = 1;\nlet b = 2;\n```",
+        // Language tag (top gap row carries the label).
+        "```rust\nfn main() {}\n```",
+        "```python\ndef f():\n    return 1\n```",
+        // Text BEFORE and AFTER the block — the clipping regression.
+        "Some text.\n\n```\ncode\n```\n\nThe end.",
+        "```json\n{\"a\": 1}\n```\n\nFinal paragraph.",
+        // A long unbroken code line that must wrap.
+        "```\nlet very_long = \"this_is_a_very_long_line_with_no_spaces_that_wraps_inside_the_code_block\";\n```",
+    ];
+    for text in cases {
+        for w in [14u16, 40, 80, 120] {
+            let est = estimate_height(text, w).max(1);
+            // Tall buffer: the renderer also paints padding rows beyond the
+            // glyph height, so give it plenty of room before scanning.
+            let h = est.saturating_add(40);
+            let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+            let mut md = MarkdownRenderable::new(Some(text.to_string()));
+            md.set_fg(Some(ColorInput::RGBA(RGBA::from_ints(220, 220, 220, 255))));
+            md.set_bg(Some(ColorInput::RGBA(RGBA::from_ints(0, 0, 0, 0))));
+            md.render_self(&mut buf, Rect::new(0, 0, w, h));
+            let actual = scan_glyph_rows(&buf, w, h);
+            // The estimate must never be SMALLER than the rendered glyph
+            // height: an under-estimate clips the message in the chat. (A
+            // block at the very end of the text over-estimates by the blank
+            // padding rows, which the glyph scan does not count — harmless.)
+            assert!(
+                est >= actual,
+                "estimate {est} < rendered {actual} rows for {text:?} at max_w={w} \
+                 (an under-estimate clips the chat message)"
+            );
+        }
+    }
 }

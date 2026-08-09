@@ -611,18 +611,25 @@ impl Renderable for MarkdownRenderable {
                                 y += 1;
                                 x = area.x;
                             }
-                            // Code block background fill row (1 row of margin via para TagEnd)
-                            if y < max_y {
+                            // The blank row left by the previous block's TagEnd
+                            // is the code block's top MARGIN (external spacing).
+                            // Blocks WITHOUT a language tag get no internal
+                            // top-gap row: the box starts directly at the first
+                            // code line, so their only top spacing is that
+                            // margin. Blocks WITH a language tag keep one
+                            // internal top-gap row that carries the label.
+                            // Cursor advance: N+3 for language-less blocks
+                            // (N lines + bottom padding + separator + TagEnd
+                            // blank), N+4 when the label row is present.
+                            if !ctx.code_block_lang().is_empty() && y < max_y {
                                 y += 1;
                                 x = area.x;
-                            }
-                            if y < max_y {
-                                let cb_bg = palette.code_bg_color();
-                                Self::fill_row(buf, area.x, y, max_x, Style::default().bg(cb_bg));
+                                if y < max_y {
+                                    let cb_bg = palette.code_bg_color();
+                                    Self::fill_row(buf, area.x, y, max_x, Style::default().bg(cb_bg));
 
-                                // Draw language label on the top gap row
-                                let lang = ctx.code_block_lang();
-                                if !lang.is_empty() {
+                                    // Draw language label on the top gap row
+                                    let lang = ctx.code_block_lang();
                                     let label_style = Style::default()
                                         .fg(rgba_to_color(palette.muted_color()))
                                         .bg(cb_bg)

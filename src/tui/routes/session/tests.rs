@@ -1533,3 +1533,88 @@ fn test_scratch_reuse_does_not_leak_previous_message() {
         "stale glyphs leaked into buffer after scratch reuse: {leaked:?}"
     );
 }
+
+/// Regression test for the asymmetric code-block padding: the chat's layout
+/// advance must account for the code block's full padding (top gap + lines +
+/// bottom padding + blank separator), or the next message would be drawn ON
+/// TOP of the block's bottom padding — visually erasing it. Before the fix,
+/// code blocks WITHOUT a language tag showed 2 blank rows above and none
+/// below, because the render advance (glyph-only scan) was 2 rows shorter
+/// than the allocated (estimated) height.
+#[test]
+fn test_code_block_bottom_padding_not_overlapped() {
+    use crate::types::TextPart;
+
+    let code_msg = Message {
+        id: "msg-code".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Text(TextPart {
+            text: "```\nlet x = 1;\nlet y = 2;\n```".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let reply = Message {
+        id: "msg-reply".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Text(TextPart {
+            text: "the reply".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = AppState::new();
+    let session = Session {
+        id: "test-session".into(),
+        title: "Test".into(),
+        created_at: 0,
+        messages: vec![code_msg, reply],
+    };
+    state.add_session(session);
+    state.current_session_id = Some("test-session".into());
+    state.status = SessionStatus::Idle;
+
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 90, 40);
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // The layout advance must equal the estimated layout. If it were shorter
+    // (the old glyph-scan advance), the following message would be drawn over
+    // the code block's bottom padding.
+    assert_eq!(
+        view.actual_total_height, view.cached_total_height,
+        "layout advance shorter than the estimated layout: the code block's \
+         bottom padding would be overlapped by the next message \
+         (actual={} cached={})",
+        view.actual_total_height,
+        view.cached_total_height
+    );
+
+    // Sanity-check the drawn rows: code lines at rows 1-2 (the top-gap row 0
+    // carries only background, no glyphs), then the bottom padding + separator
+    // (rows 3-4), the inter-message gap (row 5) and the reply at row 6. If the
+    // bottom padding were overlapped, the reply would start at row 4.
+    let mut reply_rows = Vec::new();
+    for row in 0..12 {
+        let has = (5..85).any(|cx| {
+            buf.cell((cx, row))
+                .is_some_and(|c| c.symbol().chars().next().unwrap_or(' ') != ' ')
+        });
+        if has {
+            reply_rows.push(row);
+        }
+    }
+    assert_eq!(
+        reply_rows,
+        vec![1, 2, 6],
+        "unexpected glyph layout: the code block's bottom padding should be \
+         preserved (2 blank rows) before the reply"
+    );
+}

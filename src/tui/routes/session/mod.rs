@@ -966,13 +966,23 @@ impl SessionView {
                     ))));
                     md.render_self(buf, area);
                     // During streaming, skip the expensive scan_content_height
-                    // for the last message since it will be re-rendered next frame.
-                    // The estimated height from the same markdown layout algorithm
-                    // is already accurate; the +5 padding ensures nothing is clipped.
+                    // for the last message since it will be re-rendered next
+                    // frame. The estimated height from the same markdown layout
+                    // algorithm is already accurate, so no padding is needed.
                     let actual_h = if streaming {
                         render_h
                     } else {
-                        Self::scan_content_height(buf, x, y, max_w, render_h)
+                        // The glyph scan ignores the code block's padding rows
+                        // (top gap, bottom padding and blank separator), so
+                        // advancing purely by the scan would make the next
+                        // part/message overlap them — which visually erases the
+                        // block's bottom padding (code blocks without a
+                        // language tag ended up with 2 blank rows on top and
+                        // none at the bottom). The estimate mirrors the
+                        // renderer's full cursor advance, so advance by
+                        // whichever is taller.
+                        let scanned = Self::scan_content_height(buf, x, y, max_w, render_h);
+                        scanned.max(est_h)
                     };
                     y += actual_h.max(1);
                 }
