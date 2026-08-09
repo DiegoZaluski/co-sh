@@ -313,16 +313,29 @@ pub fn estimate_height(text: &str, max_w: u16) -> u16 {
                 let text: &str = text.as_ref();
                 if ctx.in_code_block() {
                     let code_pad_v = 1u16;
-                    // The renderer draws exactly ONE top gap row (CodeBlock
-                    // start), one fresh row per code line, and one bottom
-                    // margin row (CodeBlock end) = N+2 rows total. The
-                    // estimator mirrors that: `code_pad_v * 2` = the top gap
-                    // row + the first code line's row, the remaining code
-                    // rows are added below, and the TagEnd::CodeBlock branch
-                    // adds the bottom margin row. (Was `* 2 + 2` — 2 rows
-                    // too tall, which shifted the Summarizing box's collapsed
-                    // tail window and left blank rows under code blocks.)
-                    y = y.saturating_add(code_pad_v * 2);
+                    // The renderer (md.rs) advances the cursor through a code
+                    // block as follows: ONE top gap row (CodeBlock start),
+                    // one fresh row per code line, ONE bottom-padding row,
+                    // ONE blank separator row (both inside render_code_block),
+                    // and ONE more blank row at TagEnd::CodeBlock = N+4 rows
+                    // total. When content FOLLOWS the block, all of those rows
+                    // are real layout rows — the trailing content lands after
+                    // them, so the estimate must count them all or that
+                    // content is clipped off the bottom of the message.
+                    //
+                    // The estimator mirrors that: `code_pad_v * 2 + 2` = top
+                    // gap row + first code line's row + bottom-padding row +
+                    // blank separator row; the remaining code rows are added
+                    // below; and the TagEnd::CodeBlock branch adds the final
+                    // blank row. (A code block at the very end of the text
+                    // leaves the last three rows blank, which the glyph-based
+                    // content scan ignores — that small over-estimate just
+                    // shows blank rows under the block. For the Summarizing
+                    // box this also shifts its collapsed tail window up by
+                    // those rows for summaries ending in a code block; that
+                    // cosmetic trade-off is accepted so that summaries with
+                    // text AFTER a code block are never clipped.)
+                    y = y.saturating_add(code_pad_v * 2 + 2);
                     // Every code row beyond the first is a fresh row (the pad
                     // already accounted for the first row). Rows are counted
                     // per line with the renderer's exact wrap behavior.
@@ -411,7 +424,9 @@ fn layout_word_wrap(text: &str, max_w: u16, x: &mut u16, y: &mut u16, area_x: u1
 ///
 /// NOTE: this is a hand-synced mirror of `flush_code_word` in md.rs — any
 /// change to the renderer's code-line wrap must be reflected here. The TUI
-/// test `markdown_estimate_matches_render_height` pins the two in lockstep.
+/// test `markdown_estimate_matches_render_height` pins that `estimate_height`
+/// never under-counts the renderer's rows (so chat messages are never
+/// clipped).
 fn code_line_rows(line: &str, max_w: u16) -> u16 {
     // A code block inside a 1-2 column box cannot render meaningfully anyway
     // (CODE_PAD_H alone overflows it) — treat it as a single row.

@@ -1283,12 +1283,60 @@ fn markdown_estimate_matches_render_height() {
             md.render_self(&mut buf, area);
             let actual = SessionView::scan_content_height(&buf, 0, 0, max_w, area.height);
             assert!(actual > 0, "empty render for {text:?}");
-            assert_eq!(
-                est, actual,
-                "estimate={est} actual={actual} for {text:?} at max_w={max_w} (drift would \
-             shift the Summarizing box's collapsed tail window and clip/blank rows)"
+            // The estimate must never be SMALLER than the rendered glyph
+            // height for the constructs exercised here: the chat allocates
+            // each message area from the estimate and clips whatever does not
+            // fit, so an under-estimate silently cuts the last lines of the
+            // message (a code block followed by text was under-counted by 2
+            // rows and clipped the trailing paragraph). A small over-estimate
+            // is harmless — a code block at the very end of the text leaves
+            // its bottom-pad/separator/TagEnd rows blank, which the glyph
+            // scan does not count. (Known pre-existing, out-of-scope drift:
+            // blockquotes under-estimate by 1 at very narrow widths because
+            // the estimator does not apply the renderer's 2-column inset.)
+            assert!(
+                est >= actual,
+                "estimate={est} actual={actual} for {text:?} at max_w={max_w} (under-estimate \
+             clips the message's last rows)"
             );
         }
+    }
+}
+
+/// Regression test for the truncation bug: a message whose text continues
+/// AFTER a code block ("here is the code... and that is why...") must never
+/// be clipped. The chat lays the last message out at `estimate_height` rows;
+/// if that estimate is 2 rows short (the renderer's code-block bottom-pad and
+/// blank-separator rows were not counted), the trailing paragraph after the
+/// code block is cut off at the bottom of the chat — exactly the reported
+/// "last assistant output truncated when the screen is expanded" symptom
+/// (shrinking the window makes the chat scrollable, which routes the message
+/// through the full-height render path and the text reappears).
+#[test]
+fn test_text_after_code_block_not_clipped() {
+    use cosh_tui::core::renderables::markdown::estimate_height;
+    // Realistic shape: prose, a code block, then a closing paragraph — the
+    // trailing paragraph is what got clipped.
+    let text = "Aqui está a explicação completa. O problema ocorre porque o layout estima a altura de forma diferente do render real quando existem blocos de código.\n\n```rust\nfn compute(input: &str) -> i32 {\n    let parsed: Vec<i32> = input.split(',').filter_map(|s| s.parse().ok()).collect();\n    parsed.iter().sum()\n}\n```\n\nConclusão final do assistente.";
+    let theme = test_theme();
+    let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+    for max_w in [14u16, 20, 40, 60, 80, 100, 120, 150] {
+        let est = estimate_height(text, max_w).max(1);
+        // Allocate EXACTLY the estimated height, like the chat does, and
+        // render the message into it.
+        let area = Rect::new(0, 0, max_w, est);
+        buf.resize(area);
+        buf.reset();
+        let mut md = MarkdownRenderable::new(Some(text.to_string()));
+        md.set_fg(Some(ColorInput::RGBA(theme.text)));
+        md.set_bg(Some(ColorInput::RGBA(theme.background)));
+        md.render_self(&mut buf, area);
+        let actual = SessionView::scan_content_height(&buf, 0, 0, max_w, est);
+        assert_eq!(
+            est, actual,
+            "trailing paragraph after a code block was clipped at max_w={max_w} \
+             (estimate={est}, rendered={actual})"
+        );
     }
 }
 
