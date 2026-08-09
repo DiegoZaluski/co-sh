@@ -7,3 +7,4 @@ pub(crate) mod find_dispatch;
 pub(crate) mod internal_tool;
 pub(crate) mod loop_latency;
 pub(crate) mod permission;
+pub(crate) mod repro_compaction_loop;

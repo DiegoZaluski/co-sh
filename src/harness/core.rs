@@ -1,6 +1,8 @@
 use super::context_manager::{ContextManager, MAX_CONTEXT_TOKENS, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
+#[cfg(not(test))]
+use cosh_sdk::connector::discover_context_window;
 use cosh_sdk::connector::{ChatMessage, Connector, ConnectorError, ToolDefinition};
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use cosh_tools::TOOL_FORMAT;
@@ -8,10 +10,14 @@ use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, Tool};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
+#[cfg(not(test))]
+use std::collections::HashMap;
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(test))]
+use std::sync::{Mutex, OnceLock};
 use tokio::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +125,50 @@ fn compaction_retry_backoff(attempt: usize) -> Duration {
     COMPACTION_RETRY_BACKOFF_BASE.saturating_mul(1u32 << attempt.min(4))
 }
 
+/// Timeout for one context-window discovery call: a hanging network request
+/// must never stall the agent loop start.
+#[cfg(not(test))]
+const CONTEXT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Process-global cache of discovered context windows, keyed by model name.
+/// Discovery hits public APIs (OpenRouter/Anthropic), so it must happen at
+/// most once per model per process — never once per user message.
+#[cfg(not(test))]
+static DISCOVERED_WINDOW_CACHE: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+/// Discover the ACTIVE model's real context window, cached per model and
+/// bounded by [`CONTEXT_DISCOVERY_TIMEOUT`]. Returns `None` (keeping the
+/// current budget) when the model is unknown or discovery fails.
+///
+/// The compaction trigger is 80% of the context manager's budget: with the
+/// hardcoded 100k default and a 300k-window model, the LLM compaction would
+/// fire at 80k — far below the model's actual capacity — and re-trigger on
+/// every overflow (the "infinite summarization" loop). Sizing the budget to
+/// the model's real window is what keeps the trigger sane.
+#[cfg(not(test))]
+async fn discovered_context_window(model: Option<&str>) -> Option<usize> {
+    let model = model?;
+    let cache = DISCOVERED_WINDOW_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(window) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(model)
+    {
+        return Some(*window);
+    }
+    let window = tokio::time::timeout(CONTEXT_DISCOVERY_TIMEOUT, discover_context_window(model))
+        .await
+        .ok()
+        .flatten();
+    if let Some(window) = window {
+        cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(model.to_string(), window);
+    }
+    window
+}
+
 /// The classified result of a single summarizer attempt, so [`Harness::llm_compact`]
 /// can decide between retrying (generic errors), draining tool chains
 /// (context-window overflow) or giving up.
@@ -130,6 +180,17 @@ enum CompactionErr {
     ContextWindow { window_tokens: Option<usize> },
     /// Any other connector error.
     Other(String),
+}
+
+/// Outcome of a single [`Harness::llm_compact`] run.
+enum CompactionOutcome {
+    /// A summary was produced and is ready to be applied.
+    Applied,
+    /// Chain draining alone brought the total below the 80% trigger — the
+    /// compaction is no longer needed.
+    ResolvedByDrain,
+    /// The summarizer call failed or produced nothing.
+    Failed,
 }
 
 pub struct PromptSystem {
@@ -620,18 +681,18 @@ impl Harness {
     /// prompt as larger than its context window, ONE tool chain is drained
     /// per attempt and the call is retried ("1 por vez"); when the provider
     /// reported its window, further chains are drained locally with the token
-    /// estimate so no HTTP round trip is paid per chain. Once every chain is
-    /// gone the overflow is marked stuck for this provider and the user is
-    /// notified. Generic errors are retried [`MAX_COMPACTION_RETRIES`] times
-    /// with exponential backoff, then a TUI notification is surfaced.
+    /// estimate so no HTTP round trip is paid per chain. The prompt is
+    /// REBUILT before every attempt, so a retry always serializes the
+    /// current (post-drain) timeline — never a stale prompt that still
+    /// contains the removed chains. Once every chain is gone the overflow is
+    /// marked stuck for this provider and the user is notified. Generic
+    /// errors are retried [`MAX_COMPACTION_RETRIES`] times with exponential
+    /// backoff, then a TUI notification is surfaced.
     async fn llm_compact(
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
         use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
-        let Some(request) = self.context_manager.llm_compaction_request() else {
-            return false;
-        };
         let provider = self.connector.provider_name().unwrap_or("?");
         // The provider's window already overflowed with every tool chain
         // drained: the summarizer call is doomed — skip it and re-surface the
@@ -640,6 +701,12 @@ impl Harness {
             self.notify_context_overflow(tx);
             return false;
         }
+        // Defensive — the harness only calls this after `NeedsLlmCompaction`,
+        // so there is normally something to compact.
+        let mut request = match self.context_manager.llm_compaction_request() {
+            Some(request) => request,
+            None => return false,
+        };
         let _ = tx.send(HarnessEvent::LlmCompaction {
             event: LlmCompactionEvent::Started,
         });
@@ -661,10 +728,10 @@ impl Harness {
                 })
                 .await
             {
-                Ok(()) => break Ok(()),
+                Ok(()) => break CompactionOutcome::Applied,
                 Err(CompactionErr::Interrupted) => {
                     self.compaction_generic_retries = 0;
-                    break Err(CompactionErr::Interrupted);
+                    break CompactionOutcome::Failed;
                 }
                 Err(CompactionErr::ContextWindow { window_tokens }) => {
                     if self.context_manager.evict_tool_chain_for_overflow() {
@@ -674,7 +741,18 @@ impl Harness {
                         if let Some(window) = window_tokens {
                             while self.context_manager.display_info().total_tokens > window
                                 && self.context_manager.evict_tool_chain_for_overflow()
-                            {}
+                            {
+                            }
+                        }
+                        // REBUILD the request from the SHRUNK timeline: a
+                        // stale prompt (serialized before the drain) still
+                        // contains the removed chains, so retrying it is
+                        // doomed to overflow again. When the drain already
+                        // brought the total below the trigger, the overflow
+                        // is resolved and there is nothing left to summarize.
+                        match self.context_manager.llm_compaction_request() {
+                            Some(rebuilt) => request = rebuilt,
+                            None => break CompactionOutcome::ResolvedByDrain,
                         }
                         continue;
                     }
@@ -682,7 +760,7 @@ impl Harness {
                     self.context_manager.mark_overflow(provider);
                     self.notify_context_overflow(tx);
                     self.compaction_generic_retries = 0;
-                    break Err(CompactionErr::ContextWindow { window_tokens: None });
+                    break CompactionOutcome::Failed;
                 }
                 Err(CompactionErr::Other(e)) => {
                     self.compaction_generic_retries += 1;
@@ -692,21 +770,21 @@ impl Harness {
                             message: format!("LLM compaction failed: {e}"),
                             variant: ToastVariant::Error,
                         });
-                        break Err(CompactionErr::Other(e));
+                        break CompactionOutcome::Failed;
                     }
-                    tokio::time::sleep(compaction_retry_backoff(
-                        self.compaction_generic_retries,
-                    ))
-                    .await;
+                    tokio::time::sleep(compaction_retry_backoff(self.compaction_generic_retries))
+                        .await;
                     continue;
                 }
             }
         };
         let ok = match outcome {
-            Ok(()) if !summary.trim().is_empty() => self
+            CompactionOutcome::Applied if !summary.trim().is_empty() => self
                 .context_manager
                 .apply_llm_summary(summary.trim().to_string()),
-            _ => false,
+            // The drain alone resolved the overflow — a successful pass.
+            CompactionOutcome::ResolvedByDrain => true,
+            CompactionOutcome::Applied | CompactionOutcome::Failed => false,
         };
         let _ = tx.send(HarnessEvent::LlmCompaction {
             event: if ok {
@@ -722,7 +800,10 @@ impl Harness {
     /// system, throttled by [`OVERFLOW_TOAST_COOLDOWN`] so a stuck provider
     /// keeps reminding the user ("switch the model / start a new session")
     /// without spamming a toast on every dispatch iteration.
-    fn notify_context_overflow(&mut self, tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>) {
+    fn notify_context_overflow(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) {
         use super::events::{HarnessEvent, ToastVariant};
         let now = tokio::time::Instant::now();
         let cooldown_ok = match self.last_overflow_toast {
@@ -1351,6 +1432,18 @@ impl Harness {
         self.context_manager
             .set_model(self.connector.effective_model());
 
+        // Size the compaction budget to the ACTIVE model's real context window
+        // instead of the hardcoded default: with a far larger window (e.g.
+        // 300k vs the 100k default) the 80% trigger would otherwise fire at a
+        // fraction of the model's actual capacity, re-triggering the LLM
+        // compaction on every overflow — the "infinite summarization" loop.
+        // Cached per model + timeout-bounded; on failure the current budget
+        // (default or restored snapshot) is kept.
+        #[cfg(not(test))]
+        if let Some(window) = discovered_context_window(self.connector.effective_model()).await {
+            self.context_manager.set_max_tokens(window);
+        }
+
         // A model/provider switch clears a previously recorded stuck
         // context-window overflow — the new provider gets a fresh chance.
         self.context_manager
@@ -1446,7 +1539,8 @@ impl Harness {
                         if let Some(window) = window {
                             while self.context_manager.display_info().total_tokens > window
                                 && self.context_manager.evict_tool_chain_for_overflow()
-                            {}
+                            {
+                            }
                         }
                         // Recoverable: still draining — no toast yet (the
                         // retry may succeed).

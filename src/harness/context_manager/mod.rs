@@ -582,6 +582,15 @@ impl ContextManager {
         self.encoding = TokenEncoding::for_model(model);
     }
 
+    /// Override the token budget, e.g. from context-window discovery for the
+    /// active model ([`Self::with_discovered_context`]). The 80% compaction
+    /// trigger ([`Self::run`]) re-scales with it, so the LLM compaction fires
+    /// at a sane fraction of the model's REAL window instead of a hardcoded
+    /// default that is far below it.
+    pub fn set_max_tokens(&mut self, max_tokens: usize) {
+        self.max_tokens = max_tokens;
+    }
+
     // Ingestion
 
     /// Add a user prompt. Protected by construction: it is never compressed
