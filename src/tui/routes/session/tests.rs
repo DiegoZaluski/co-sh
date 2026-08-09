@@ -1029,6 +1029,28 @@ fn test_glob_output_expand_shows_grouped_list() {
     // The header is visible even when collapsed.
     assert!(buffer_text(&buf).contains("Glob"));
 
+    // The box has 1 row of internal padding above the title (the bottom pad
+    // is the last row), matching the Summarizing box.
+    let title_row = (0..area.height)
+        .find(|&r| {
+            let row_text: String = (0..area.width)
+                .filter_map(|cx| buf.cell((cx, r)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row_text.contains("Glob")
+        })
+        .expect("glob title row must exist");
+    assert!(title_row > 0, "the Glob title has 1 row of padding above it");
+    let above_glyphs: Vec<char> = (0..area.width)
+        .filter_map(|cx| buf.cell((cx, title_row - 1)))
+        .filter_map(|c| c.symbol().chars().next())
+        .filter(|&ch| ch != ' ')
+        .collect();
+    assert!(
+        above_glyphs.iter().all(|&c| c == '┃'),
+        "the row above the Glob title is blank top padding (only the border)"
+    );
+
     // Click inside the glob block.
     let text_h = view.part_heights_cache[0][0];
     let glob_top = area.y + text_h;

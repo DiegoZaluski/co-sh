@@ -1012,6 +1012,10 @@ fn glob_status(part: &ToolPart) -> Option<GlobStatus<'_>> {
 /// the labelled header plus the file list (grouped/flat per the tool's
 /// `format`), collapsed to a fixed preview until toggled. Running globs keep
 /// the lightweight single-line spinner label.
+/// Vertical padding inside the Glob box: 1 blank row above the title and 1
+/// below the last content row (mirrors the Summarizing box).
+const GLOB_PAD_V: u16 = 1;
+
 pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let pattern = input_value(&part.input, "pattern").unwrap_or_default();
     let path = input_value(&part.input, "path");
@@ -1065,7 +1069,9 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     };
 
     let lines = display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
-    let area = Rect::new(ctx.x, ctx.y, ctx.max_w.saturating_add(3), lines + 2);
+    // 1 blank row of internal padding above the title (the bottom-padding
+    // row is the last row of the box), matching the Summarizing box.
+    let area = Rect::new(ctx.x, ctx.y, ctx.max_w.saturating_add(3), lines + 2 + GLOB_PAD_V);
     *ctx.line_h = area.height;
 
     let mut border_box = BoxRenderable::new();
@@ -1098,7 +1104,7 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         ctx.buf,
         &label,
         x_off,
-        ctx.y,
+        ctx.y + GLOB_PAD_V,
         ctx.max_w.saturating_sub(3),
         title_style,
     );
@@ -1108,7 +1114,7 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         .fg(rgba_color(ctx.theme.markdown_link))
         .add_modifier(Modifier::UNDERLINED);
     for (i, line) in display.lines().enumerate() {
-        let ly = ctx.y + 1 + i as u16;
+        let ly = ctx.y + GLOB_PAD_V + 1 + i as u16;
         if ly >= area.bottom() {
             break;
         }
@@ -1126,7 +1132,7 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         );
     }
     if collapsed.overflow {
-        let hint_y = ctx.y + 1 + display.lines().count() as u16;
+        let hint_y = ctx.y + GLOB_PAD_V + 1 + display.lines().count() as u16;
         let hint = if expanded {
             "Click to collapse"
         } else {
