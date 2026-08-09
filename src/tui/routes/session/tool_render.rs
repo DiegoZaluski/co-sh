@@ -515,7 +515,14 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
 
         let title = format!("$ {command}");
         let lines = display.lines().count() as u16 + u16::from(collapsed.overflow);
-        let area = Rect::new(ctx.x, ctx.y, ctx.max_w.saturating_add(3), lines + 2);
+        // 1 blank row of internal padding above the title (the bottom-padding
+        // row is the last row of the box), matching the Glob box.
+        let area = Rect::new(
+            ctx.x,
+            ctx.y,
+            ctx.max_w.saturating_add(3),
+            lines + 2 + TOOL_BOX_PAD_V,
+        );
         *ctx.line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
@@ -548,14 +555,14 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
             ctx.buf,
             &title,
             x_off,
-            ctx.y,
+            ctx.y + TOOL_BOX_PAD_V,
             ctx.max_w.saturating_sub(3),
             title_style,
         );
 
         let content_style = Style::default().fg(rgba_color(ctx.theme.text));
         for (i, line) in display.lines().enumerate() {
-            let ly = ctx.y + 1 + i as u16;
+            let ly = ctx.y + TOOL_BOX_PAD_V + 1 + i as u16;
             if ly >= area.bottom() {
                 break;
             }
@@ -569,7 +576,7 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
             );
         }
         if collapsed.overflow {
-            let hint_y = ctx.y + 1 + display.lines().count() as u16;
+            let hint_y = ctx.y + TOOL_BOX_PAD_V + 1 + display.lines().count() as u16;
             let hint = if expanded {
                 "Click to collapse"
             } else {
@@ -720,7 +727,14 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     if is_completed && !content.is_empty() {
         let max_lines = 20u16;
         let display_lines = content.lines().count().min(max_lines as usize) as u16;
-        let area = Rect::new(ctx.x, ctx.y, ctx.max_w.saturating_add(3), display_lines + 2);
+        // 1 blank row of internal padding above the title (the bottom-padding
+        // row is the last row of the box), matching the Glob box.
+        let area = Rect::new(
+            ctx.x,
+            ctx.y,
+            ctx.max_w.saturating_add(3),
+            display_lines + 2 + TOOL_BOX_PAD_V,
+        );
         *ctx.line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
@@ -753,7 +767,7 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
             ctx.buf,
             &title,
             ctx.x + 3,
-            ctx.y,
+            ctx.y + TOOL_BOX_PAD_V,
             ctx.max_w.saturating_sub(3),
             title_style,
         );
@@ -765,7 +779,7 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         draw_highlighted_code_with_ln(
             ctx.buf,
             ctx.x + 3,
-            ctx.y + 1,
+            ctx.y + 1 + TOOL_BOX_PAD_V,
             max_w_inner,
             CodeBlockSpec {
                 content: &content,
@@ -1012,9 +1026,10 @@ fn glob_status(part: &ToolPart) -> Option<GlobStatus<'_>> {
 /// the labelled header plus the file list (grouped/flat per the tool's
 /// `format`), collapsed to a fixed preview until toggled. Running globs keep
 /// the lightweight single-line spinner label.
-/// Vertical padding inside the Glob box: 1 blank row above the title and 1
-/// below the last content row (mirrors the Summarizing box).
-const GLOB_PAD_V: u16 = 1;
+/// Vertical padding inside the tool boxes (Glob, bash, write): 1 blank row
+/// above the title and 1 below the last content row (mirrors the Summarizing
+/// box).
+const TOOL_BOX_PAD_V: u16 = 1;
 
 pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let pattern = input_value(&part.input, "pattern").unwrap_or_default();
@@ -1071,7 +1086,12 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let lines = display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
     // 1 blank row of internal padding above the title (the bottom-padding
     // row is the last row of the box), matching the Summarizing box.
-    let area = Rect::new(ctx.x, ctx.y, ctx.max_w.saturating_add(3), lines + 2 + GLOB_PAD_V);
+    let area = Rect::new(
+        ctx.x,
+        ctx.y,
+        ctx.max_w.saturating_add(3),
+        lines + 2 + TOOL_BOX_PAD_V,
+    );
     *ctx.line_h = area.height;
 
     let mut border_box = BoxRenderable::new();
@@ -1104,7 +1124,7 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         ctx.buf,
         &label,
         x_off,
-        ctx.y + GLOB_PAD_V,
+        ctx.y + TOOL_BOX_PAD_V,
         ctx.max_w.saturating_sub(3),
         title_style,
     );
@@ -1114,7 +1134,7 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         .fg(rgba_color(ctx.theme.markdown_link))
         .add_modifier(Modifier::UNDERLINED);
     for (i, line) in display.lines().enumerate() {
-        let ly = ctx.y + GLOB_PAD_V + 1 + i as u16;
+        let ly = ctx.y + TOOL_BOX_PAD_V + 1 + i as u16;
         if ly >= area.bottom() {
             break;
         }
@@ -1132,7 +1152,7 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         );
     }
     if collapsed.overflow {
-        let hint_y = ctx.y + GLOB_PAD_V + 1 + display.lines().count() as u16;
+        let hint_y = ctx.y + TOOL_BOX_PAD_V + 1 + display.lines().count() as u16;
         let hint = if expanded {
             "Click to collapse"
         } else {

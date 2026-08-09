@@ -851,6 +851,28 @@ fn test_bash_output_expand_toggles_and_grows_height() {
     assert!(!view.tool_state.is_expanded("bash-1"));
     assert!(!buffer_text(&buf).contains("line 19"));
 
+    // The box has 1 row of internal padding above the title (the bottom pad
+    // is the last row), matching the Glob box.
+    let title_row = (0..area.height)
+        .find(|&r| {
+            let row_text: String = (0..area.width)
+                .filter_map(|cx| buf.cell((cx, r)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row_text.contains("echo hello")
+        })
+        .expect("bash title row must exist");
+    assert!(title_row > 0, "the bash title has 1 row of padding above it");
+    let above_glyphs: Vec<char> = (0..area.width)
+        .filter_map(|cx| buf.cell((cx, title_row - 1)))
+        .filter_map(|c| c.symbol().chars().next())
+        .filter(|&ch| ch != ' ')
+        .collect();
+    assert!(
+        above_glyphs.iter().all(|&c| c == '┃'),
+        "the row above the bash title is blank top padding (only the border)"
+    );
+
     // Click inside the bash block (second part, so it starts after the text part).
     let text_h = view.part_heights_cache[0][0];
     let bash_top = area.y + text_h;

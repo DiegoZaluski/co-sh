@@ -1270,7 +1270,9 @@ impl SessionView {
                         };
                         let lines =
                             display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
-                        lines + 4
+                        // Internal box: top padding (1) + title + content +
+                        // bottom padding (1) = lines + 3; +2 external margins.
+                        lines + 5
                     }
                 } else {
                     1
