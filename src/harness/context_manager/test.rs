@@ -841,17 +841,16 @@ fn run_distributes_eviction_without_hitting_recent_first() {
 
 // The manager builds the request with the ENTIRE remaining context serialized
 // opencode-style: user prompts, assistant texts, tool calls, tool results
-// (truncated), LoopClosures and previous summaries all appear in the prompt.
+// (verbatim — never truncated), LoopClosures and previous summaries all
+// appear in the prompt.
 #[test]
 fn llm_compaction_request_serializes_the_whole_context() {
     let mut cm = cm(1000); // trigger = 800
     cm.add_user("what is the weather"); // [User]
     cm.add_assistant("Let me search.", false); // [Assistant]
     cm.add_tool_call("c1", "find_grep", r#"{"query":"weather"}"#);
-    cm.add_tool_result(
-        "c1",
-        &"payload ".repeat(1_000), // > TOOL_OUTPUT_MAX_CHARS → truncated
-    );
+    let huge_payload = "payload ".repeat(1_000); // must NOT be truncated
+    cm.add_tool_result("c1", &huge_payload);
     cm.add_assistant("No matches found.", true);
     cm.close_loop(); // → [Assistant]: No matches found.
 
@@ -876,8 +875,12 @@ fn llm_compaction_request_serializes_the_whole_context() {
         "tool results are serialized"
     );
     assert!(
-        request.prompt.contains("[truncated]"),
-        "huge tool results are truncated to bound the prompt"
+        request.prompt.contains(&huge_payload),
+        "tool results are passed VERBATIM — a huge payload is never truncated"
+    );
+    assert!(
+        !request.prompt.contains("[truncated]"),
+        "no truncation marker: the summarizer sees the full tool payloads"
     );
     assert!(
         request.prompt.contains("[Assistant]: No matches found."),
@@ -896,6 +899,9 @@ fn llm_compaction_request_serializes_the_whole_context() {
 
 // Update mode: when a previous Compaction item exists, the prompt asks the
 // model to UPDATE the anchored summary instead of creating one from scratch.
+// The previous summary is NOT duplicated: it appears exactly once, as the
+// `[Previous summary]:` line at the top of the transcript, and the instruction
+// references it by that label (no `<previous-summary>` block anymore).
 #[test]
 fn llm_compaction_request_uses_update_mode_with_previous_summary() {
     let mut cm = cm(1000);
@@ -917,16 +923,26 @@ fn llm_compaction_request_uses_update_mode_with_previous_summary() {
 
     let request = cm.llm_compaction_request().unwrap();
     assert!(
-        request.prompt.contains("Update the anchored summary below"),
+        request
+            .prompt
+            .contains("Update the summary labeled [Previous summary]"),
         "a previous summary switches the prompt to update mode"
     );
     assert!(
-        request.prompt.contains("<previous-summary>"),
-        "the previous summary is passed as the anchor"
+        !request.prompt.contains("<previous-summary>"),
+        "the instruction block is gone — the summary is never embedded twice"
     );
     assert!(
-        request.prompt.contains("Refactor the context manager"),
-        "the previous summary content is embedded"
+        request.prompt.contains("[Previous summary]: ## Objective"),
+        "the previous summary appears once, as the first line of the transcript"
+    );
+    assert_eq!(
+        request
+            .prompt
+            .matches("Refactor the context manager")
+            .count(),
+        1,
+        "the previous summary content is delivered EXACTLY once in the prompt"
     );
 }
 

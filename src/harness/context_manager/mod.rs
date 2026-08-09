@@ -136,15 +136,21 @@ const MMR_RATIO: f64 = 0.4;
 /// Larger inputs are split into batches to bound the O(n²) SVD/MMR cost.
 const DETERMINISTIC_MAX_CHUNKS: usize = 200;
 
-/// Maximum characters of a single tool result included in the LLM-compaction
-/// transcript (opencode's `TOOL_OUTPUT_MAX_CHARS`): tool payloads are the
-/// bulkiest content, so they are truncated to keep the summary prompt small.
-const TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
+// Tool results are NOT truncated in the LLM-compaction transcript: the tools
+// themselves bound their output (hashline-numbered reads, capped search
+// results), and cutting a payload the model may still need forces it to
+// re-read the source afterwards — spending more tokens on re-reading than
+// the truncation ever saved. The summary prompt is bounded by the model's
+// own window, and the existing overflow recovery drains tool chains if the
+// transcript ever exceeds it.
 
 /// The summarization template the LLM compaction asks the model to fill
 /// (opencode's `SUMMARY_TEMPLATE`, kept as inspiration): a structured anchor
 /// that preserves the objective, the work state and the next move so the
-/// session can continue seamlessly from the summary.
+/// session can continue seamlessly from the summary. The `Code & Anchors`
+/// section exists so the agent resumes editing where it stopped WITHOUT
+/// re-reading whole files: hashline anchors (`¶path#TAG`) and the exact code
+/// blocks the next step touches are carried forward verbatim.
 const SUMMARY_TEMPLATE: &str = "\
 Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
@@ -169,13 +175,18 @@ Output exactly the Markdown structure shown inside <template> and keep the secti
 2. [next action if known, or \"(none)\"]
 
 ## Relevant Files
-- [file or directory path: why it matters, or \"(none)\"]
+- [file path with its hashline anchor (¶path#TAG) and the line ranges that matter, then why it matters; or \"(none)\"]
+
+## Code & Anchors
+- [code blocks, function signatures, hashline anchors (¶path#TAG) and line numbers the next step needs to resume without re-reading whole files; otherwise \"(none)\"]
 </template>
 
 Rules:
 - Keep every section, even when empty.
-- Use terse bullets, not prose paragraphs.
-- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
+- Use terse bullets, not prose paragraphs — except code, which is ALWAYS copied verbatim inside Markdown code fences.
+- Preserve exact file paths, hashline anchors (¶path#TAG), line numbers, symbols, commands, error strings, URLs, and identifiers when known.
+- Carry code VERBATIM: quote the important code blocks, function signatures and error messages exactly as they appear in the transcript. Never paraphrase code — a paraphrased block cannot be applied or edited.
+- The summary must let the agent resume editing where it stopped: for every file the next step touches, keep the hashline anchor of its last read/written state and the specific lines/symbols involved.
 - Do not mention the summary process or that context was compacted.";
 
 /// The SYSTEM prompt of the LLM summarizer — its OWN instructions, completely
@@ -189,7 +200,9 @@ You read the transcript of everything that happened in the session and produce
 a single anchored Markdown summary that lets the session continue seamlessly.
 Rules:
 - Follow the template exactly; never add sections, never change their order.
-- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
+- Preserve exact file paths, hashline anchors (¶path#TAG), line numbers, symbols, commands, error strings, URLs, and identifiers when known.
+- Carry code VERBATIM: quote the important code blocks, function signatures and error messages exactly as they appear in the transcript (inside fenced blocks). The agent edits files by hashline anchor and line number — paraphrased code cannot be used.
+- Prefer a few exact code blocks over prose descriptions of the same code.
 - Keep facts precise; do not invent details that are not in the transcript.
 - In update mode, preserve still-true details, remove stale details, and merge in the new facts.
 - Do not mention the summary process or that context was compacted.";
@@ -348,16 +361,6 @@ fn try_compress(text: &str) -> Option<String> {
 
 // LLM compaction (phase 3 — the last-resort fallback, driven by the harness)
 
-/// Truncate a tool result for the LLM-compaction transcript.
-fn truncate(value: &str) -> String {
-    if value.len() <= TOOL_OUTPUT_MAX_CHARS {
-        value.to_string()
-    } else {
-        let cut = value.floor_char_boundary(TOOL_OUTPUT_MAX_CHARS);
-        format!("{}\n[truncated]", &value[..cut])
-    }
-}
-
 /// Serialize one conversation item into the opencode-style transcript the
 /// LLM compaction sends to the model.
 fn serialize_item(item: &ContextItem) -> String {
@@ -367,10 +370,15 @@ fn serialize_item(item: &ContextItem) -> String {
         ContextItem::ToolCall {
             name, arguments, ..
         } => format!("[Assistant tool call]: {name}({arguments})"),
-        ContextItem::ToolResult { content, .. } => {
-            format!("[Tool result]: {}", truncate(content))
-        }
+        // Tool results are passed VERBATIM — no truncation (see the note
+        // above `SUMMARY_TEMPLATE`): the tools bound their own output, and
+        // truncating a payload the model still needs forces it to re-read the
+        // source.
+        ContextItem::ToolResult { content, .. } => format!("[Tool result]: {content}"),
         ContextItem::LoopClosure { content, .. } => format!("[Assistant]: {content}"),
+        // The previous summary stays in the timeline (index 0 after
+        // `apply_llm_summary`) — the update-mode instruction references it by
+        // this exact label instead of embedding a second copy in the prompt.
         ContextItem::Compaction { summary, .. } => format!("[Previous summary]: {summary}"),
     }
 }
@@ -378,14 +386,19 @@ fn serialize_item(item: &ContextItem) -> String {
 /// Build the compaction prompt (opencode-style): create a new anchored summary
 /// from the serialized conversation, or update the previous summary when one
 /// exists (avoiding the summary-of-summary quality loss).
-fn build_llm_prompt(previous_summary: Option<&str>, context: &str) -> String {
-    let instruction = match previous_summary {
-        Some(prev) => format!(
-            "Update the anchored summary below using the conversation history above.\n\
-             Preserve still-true details, remove stale details, and merge in the new facts.\n\
-             <previous-summary>\n{prev}\n</previous-summary>"
-        ),
-        None => "Create a new anchored summary from the conversation history.".to_string(),
+///
+/// The previous summary is NOT embedded here — it stays in the timeline as the
+/// FIRST line of the transcript (`[Previous summary]: …`, index 0), and update
+/// mode only references it by that label. One copy, never duplicated: the
+/// model sees the anchor exactly where the timeline naturally starts, followed
+/// by the delta (everything that happened since) to merge into it.
+fn build_llm_prompt(has_previous_summary: bool, context: &str) -> String {
+    let instruction = if has_previous_summary {
+        "Update the summary labeled [Previous summary] at the top of the transcript below, \
+         using the rest of the conversation history. Preserve still-true details, \
+         remove stale details, and merge in the new facts."
+    } else {
+        "Create a new anchored summary from the conversation history."
     };
     format!("{instruction}\n\n{SUMMARY_TEMPLATE}\n\n{context}")
 }
@@ -1087,9 +1100,12 @@ impl ContextManager {
     /// the entire remaining context — protected items included — serialized
     /// into an opencode-style transcript, wrapped in the summarization prompt.
     ///
-    /// `previous_summary` is the newest [`ContextItem::Compaction`] (if any),
-    /// which switches the prompt to update mode (the old summary is passed as
-    /// the anchor instead of being re-summarized from scratch).
+    /// A [`ContextItem::Compaction`] item (the previous summary) switches the
+    /// prompt to update mode: the summary is NOT embedded in the instruction —
+    /// it stays in the timeline as the first line of the transcript
+    /// (`[Previous summary]: …`), and the instruction references it by that
+    /// label so the model merges the new facts into the anchor instead of
+    /// re-summarizing from scratch (avoiding summary-of-summary quality loss).
     ///
     /// Returns `None` when there is nothing to compact (empty timeline, or
     /// the total is already below the trigger — defensive, the harness only
@@ -1098,10 +1114,10 @@ impl ContextManager {
         if self.items.is_empty() || self.total_tokens() < self.trigger() {
             return None;
         }
-        let previous_summary = self.items.iter().rev().find_map(|it| match it {
-            ContextItem::Compaction { summary, .. } => Some(summary.clone()),
-            _ => None,
-        });
+        let has_previous_summary = self
+            .items
+            .iter()
+            .any(|it| matches!(it, ContextItem::Compaction { .. }));
         let context = self
             .items
             .iter()
@@ -1110,7 +1126,7 @@ impl ContextManager {
             .join("\n\n");
         Some(LlmCompactionRequest {
             system: SUMMARIZER_SYSTEM.to_string(),
-            prompt: build_llm_prompt(previous_summary.as_deref(), &context),
+            prompt: build_llm_prompt(has_previous_summary, &context),
         })
     }
 

@@ -132,9 +132,11 @@ const CONTEXT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Process-global cache of discovered context windows, keyed by model name.
 /// Discovery hits public APIs (OpenRouter/Anthropic), so it must happen at
-/// most once per model per process — never once per user message.
+/// most once per model per process — never once per user message. A FAILED
+/// discovery is cached as `None` too: an unknown model must not be re-queried
+/// (and re-logged as a warning) on every loop start.
 #[cfg(not(test))]
-static DISCOVERED_WINDOW_CACHE: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+static DISCOVERED_WINDOW_CACHE: OnceLock<Mutex<HashMap<String, Option<usize>>>> = OnceLock::new();
 
 /// Discover the ACTIVE model's real context window, cached per model and
 /// bounded by [`CONTEXT_DISCOVERY_TIMEOUT`]. Returns `None` (keeping the
@@ -154,18 +156,17 @@ async fn discovered_context_window(model: Option<&str>) -> Option<usize> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(model)
     {
-        return Some(*window);
+        return *window;
     }
     let window = tokio::time::timeout(CONTEXT_DISCOVERY_TIMEOUT, discover_context_window(model))
         .await
         .ok()
         .flatten();
-    if let Some(window) = window {
-        cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(model.to_string(), window);
-    }
+    log::debug!("context window discovery for {model}: {window:?}");
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(model.to_string(), window);
     window
 }
 
@@ -1533,7 +1534,8 @@ impl Harness {
                         // round trip per chain) until the estimate fits.
                         // NOTE: the local estimate counts COMPRESSED drafts
                         // while the request sends originals (and the
-                        // transcript truncates tool results), so it is
+                        // compaction transcript passes tool results verbatim,
+                        // untruncated), so it is
                         // approximate in both directions — only a hint to
                         // skip round trips, never a hard guarantee.
                         if let Some(window) = window {
