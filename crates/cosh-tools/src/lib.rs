@@ -35,3 +35,24 @@ pub const TOOL_FORMAT: &str = concat!(
     "CORRECT:",
     "{\"name\": \"tool_name\", \"arguments\": {...}}\n"
 );
+
+/// Native function-calling instruction for providers that MUST use their
+/// structured tool mechanism instead of inline JSON text.
+///
+/// Gemini 3.x models obey the legacy inline-JSON `TOOL_FORMAT` literally:
+/// with it in the prompt they emit tool calls as raw TEXT frames (`{"name":
+/// "fs_read", ...}`) even when the request also carries `toolConfig AUTO` —
+/// the API then rejects the turn with `MALFORMED_FUNCTION_CALL` and stray
+/// fragments (`}`) plus reasoning text leak to the user. The harness selects
+/// this variant when the active provider is Gemini (OpenAI/Claude ignore the
+/// inline instruction and use their native mechanism regardless).
+pub const TOOL_FORMAT_NATIVE: &str = concat!(
+    "## Tool format\n",
+    "You call tools using the NATIVE function calling mechanism: the platform \n",
+    "exposes each tool as a structured functionCall and delivers the result \n",
+    "after you invoke it. NEVER write a tool call as JSON inside your text \n",
+    "response — no {\"name\": ..., \"arguments\": ...} objects in prose, code \n",
+    "blocks or anywhere else. Text output is reserved for answering the user. \n",
+    "When you need a tool, invoke it as a native function call; the platform \n",
+    "handles the rest.\n"
+);
