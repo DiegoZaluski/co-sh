@@ -1,0 +1,560 @@
+//! Tests for the Gemini provider, focused on the native tool-calling path
+//! (`stream_chat_with_messages`) and the v1/v1beta API-version handling.
+use super::super::{
+    ToolCallFunctionMsg, ToolCallMsg, ToolDefinition, ToolFunction, assistant_tool_call_message,
+    tool_result_message, user_message,
+};
+use super::common::{gemini_connector, mock_server};
+use tokio_stream::StreamExt;
+
+/// The internal API_VERSION switch must always resolve to a real Gemini
+/// API surface. It is asserted loosely (rather than pinned to "v1") so a
+/// developer flipping the switch to "v1beta" to test experimental features
+/// does not break the test suite.
+#[test]
+fn provider_api_version_is_valid() {
+    let version = crate::connector::gemini::API_VERSION;
+    assert!(
+        version == "v1" || version == "v1beta",
+        "internal API_VERSION switch must be one of v1/v1beta, got {version}"
+    );
+}
+
+/// The REAL Gemini API separates SSE events with CRLF CRLF ("\r\n\r\n")
+/// — NOT the LF LF ("\n\n") the old mock used. This body was captured
+/// verbatim from a live `streamGenerateContent?alt=sse` call and is the
+/// regression guard for the silent-failure bug: a parser that only split
+/// on "\n\n" buffered the whole body and emitted zero frames (no tokens,
+/// no error — the loop "starts and stops with nothing on screen").
+#[tokio::test]
+async fn stream_parses_real_gemini_crlf_wire_format() {
+    let sse = concat!(
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}],\"role\":\"model\"},\"index\":0}],",
+        "\"usageMetadata\":{\"promptTokenCount\":2}}\r\n\r\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" there\"}],\"role\":\"model\"},\"index\":0}],",
+        "\"usageMetadata\":{\"promptTokenCount\":2}}\r\n\r\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\",\"thoughtSignature\":\"abc\"}],\"role\":\"model\"},",
+        "\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":2}}\r\n\r\n",
+    );
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    handle.join().unwrap();
+
+    let mut tokens = String::new();
+    let mut last_fr = None;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        tokens.push_str(chunk.token());
+        if let Some(fr) = chunk.finish_reason() {
+            last_fr = Some(fr.to_string());
+        }
+    }
+    assert_eq!(tokens, "Hi there");
+    assert_eq!(last_fr.as_deref(), Some("STOP"));
+}
+
+/// A stream that ends WITHOUT a trailing blank line after the final
+/// `data:` frame must still deliver that frame — `SseBuffer::flush()`
+/// recovers it at EOF (the SSE spec dispatches pending data on end of
+/// stream). Guards the consumer-level wiring of the flush path in the
+/// Gemini streaming loops: the final token and finish chunk must survive
+/// even when the server closes the connection right after the last
+/// `data:` line.
+#[tokio::test]
+async fn stream_delivers_final_frame_without_trailing_separator() {
+    // NOTE: the last frame has NO trailing "\r\n\r\n" — the connection
+    // closes right after the final `data:` line.
+    let sse = concat!(
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}],\"role\":\"model\"},\"index\":0}]}\r\n\r\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" there\"}],\"role\":\"model\"},\"index\":0}]}\r\n\r\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\",\"index\":0}]}",
+    );
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    handle.join().unwrap();
+
+    let mut tokens = String::new();
+    let mut last_fr = None;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        tokens.push_str(chunk.token());
+        if let Some(fr) = chunk.finish_reason() {
+            last_fr = Some(fr.to_string());
+        }
+    }
+    assert_eq!(tokens, "Hi there");
+    assert_eq!(last_fr.as_deref(), Some("STOP"));
+}
+
+/// A plain-text tool result (not valid JSON) must still be preserved —
+/// wrapped as `{"result": ...}` — never dropped to an empty object.
+#[tokio::test]
+async fn tool_result_plain_text_is_wrapped_not_dropped() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+
+    let messages = vec![
+        user_message("run bash"),
+        assistant_tool_call_message(vec![ToolCallMsg {
+            id: "call_1".to_string(),
+            kind: "function".to_string(),
+            function: ToolCallFunctionMsg {
+                name: "bash".to_string(),
+                arguments: "{}".to_string(),
+            },
+            thought_signature: None,
+        }]),
+        // Plain-text output, e.g. bash stdout — NOT valid JSON.
+        tool_result_message("call_1", "hello from bash\nline two"),
+    ];
+    let mut stream = c.stream_chat_with_messages("sys", &messages).await.unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let response = &json["contents"][2]["parts"][0]["functionResponse"]["response"];
+    assert_eq!(
+        response,
+        &serde_json::json!({"result": "hello from bash\nline two"}),
+        "plain-text tool results must be wrapped, not dropped"
+    );
+}
+
+/// `stream_chat_with_messages` must build a Gemini `contents[]` request from
+/// the OpenAI-style message array: system travels in `systemInstruction`,
+/// assistant tool_calls become `functionCall` parts, tool results become
+/// `functionResponse` parts in a user content.
+#[tokio::test]
+async fn stream_with_messages_builds_gemini_contents() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let tool = ToolDefinition::new(
+        ToolFunction::new("get_weather")
+            .with_description("Get the weather")
+            .with_parameters(serde_json::json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})),
+    );
+    let c = gemini_connector(port).with_tools(vec![tool]);
+
+    let messages = vec![
+        user_message("What's the weather in SP?"),
+        assistant_tool_call_message(vec![ToolCallMsg {
+            id: "call_1".to_string(),
+            kind: "function".to_string(),
+            function: ToolCallFunctionMsg {
+                name: "get_weather".to_string(),
+                arguments: r#"{"city":"SP"}"#.to_string(),
+            },
+            thought_signature: None,
+        }]),
+        tool_result_message("call_1", r#"{"temp":22}"#),
+    ];
+    let mut stream = c
+        .stream_chat_with_messages("You are a helper", &messages)
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // System prompt travels at the top level, not as a message role.
+    assert_eq!(
+        json["systemInstruction"]["parts"][0]["text"],
+        "You are a helper"
+    );
+
+    let contents = json["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3, "user / model / user");
+    assert_eq!(contents[0]["role"], "user");
+    assert_eq!(contents[0]["parts"][0]["text"], "What's the weather in SP?");
+    assert_eq!(contents[1]["role"], "model");
+    assert_eq!(
+        contents[1]["parts"][0]["functionCall"]["name"],
+        "get_weather"
+    );
+    assert_eq!(
+        contents[1]["parts"][0]["functionCall"]["args"],
+        serde_json::json!({"city":"SP"})
+    );
+    // No thought signature was attached to the call — none must be emitted.
+    assert!(
+        contents[1]["parts"][0].get("thoughtSignature").is_none(),
+        "calls without a signature must not emit thoughtSignature"
+    );
+    assert_eq!(contents[2]["role"], "user");
+    assert_eq!(
+        contents[2]["parts"][0]["functionResponse"]["name"],
+        "get_weather"
+    );
+    assert_eq!(
+        contents[2]["parts"][0]["functionResponse"]["response"],
+        serde_json::json!({"temp":22})
+    );
+    // Tools are declared via functionDeclarations.
+    assert_eq!(
+        json["tools"][0]["functionDeclarations"][0]["name"],
+        "get_weather"
+    );
+}
+
+/// A Gemini 3.x thought signature attached to a native `functionCall` must
+/// be replayed as a SIBLING of the `functionCall` part (NOT inside it — the
+/// API rejects `thoughtSignature` inside `functionCall` with 400, verified
+/// empirically). Regression guard for the "Function call is missing a
+/// thought_signature" HTTP 400.
+#[tokio::test]
+async fn stream_with_messages_replays_thought_signature_sibling() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+
+    let messages = vec![
+        user_message("read the file"),
+        assistant_tool_call_message(vec![ToolCallMsg {
+            id: "fc_1".to_string(),
+            kind: "function".to_string(),
+            function: ToolCallFunctionMsg {
+                name: "fs_read".to_string(),
+                arguments: r#"{"targets":[{"path":"TODO.md"}]}"#.to_string(),
+            },
+            thought_signature: Some("sig_abc123".to_string()),
+        }]),
+        tool_result_message("fc_1", r#"{"result":"content"}"#),
+    ];
+    let mut stream = c.stream_chat_with_messages("sys", &messages).await.unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let part = &json["contents"][1]["parts"][0];
+    assert_eq!(part["functionCall"]["name"], "fs_read");
+    assert_eq!(
+        part["thoughtSignature"], "sig_abc123",
+        "thoughtSignature must be replayed as a SIBLING of functionCall"
+    );
+    // And it must NOT be inside the functionCall object.
+    assert!(
+        part["functionCall"].get("thoughtSignature").is_none(),
+        "thoughtSignature must not be nested inside functionCall"
+    );
+}
+
+/// A `functionCall` part arriving with a sibling `thoughtSignature` in the
+/// STREAM must surface it in the synthetic tool-call token JSON, so the
+/// harness extractor can carry it into the next request's history.
+#[tokio::test]
+async fn stream_with_messages_surfaces_thought_signature_in_token() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"fs_read\",\"args\":{\"targets\":[{\"path\":\"TODO.md\"}]},\"id\":\"fc_1\"},\"thoughtSignature\":\"sig_xyz\"}]}}]}\n\n\
+data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+    let stream = c
+        .stream_chat_with_messages("sys", &[user_message("read it")])
+        .await
+        .unwrap();
+    handle.join().unwrap();
+
+    let chunks: Vec<_> = stream.collect().await;
+    assert_eq!(chunks.len(), 1, "only the synthetic tool-call token");
+    let chunk = chunks[0].as_ref().unwrap();
+    let json: serde_json::Value = serde_json::from_str(chunk.token()).unwrap();
+    assert_eq!(json["name"], "fs_read");
+    assert_eq!(json["id"], "fc_1");
+    assert_eq!(
+        json["thought_signature"], "sig_xyz",
+        "the streamed thought signature must surface in the synthetic token"
+    );
+}
+
+/// Consecutive messages that map to the same Gemini role must be merged
+/// into a single content (Gemini rejects repeated roles).
+#[tokio::test]
+async fn stream_with_messages_merges_consecutive_same_role() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+
+    // Two tool results in a row (parallel calls) both map to "user".
+    let messages = vec![
+        user_message("run both"),
+        assistant_tool_call_message(vec![
+            ToolCallMsg {
+                id: "call_1".to_string(),
+                kind: "function".to_string(),
+                function: ToolCallFunctionMsg {
+                    name: "tool_a".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                thought_signature: None,
+            },
+            ToolCallMsg {
+                id: "call_2".to_string(),
+                kind: "function".to_string(),
+                function: ToolCallFunctionMsg {
+                    name: "tool_b".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                thought_signature: None,
+            },
+        ]),
+        tool_result_message("call_1", r#"{"a":1}"#),
+        tool_result_message("call_2", r#"{"b":2}"#),
+    ];
+    let mut stream = c.stream_chat_with_messages("sys", &messages).await.unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let contents = json["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3, "user / model / merged user");
+    assert_eq!(contents[2]["role"], "user");
+    let parts = contents[2]["parts"].as_array().unwrap();
+    assert_eq!(
+        parts.len(),
+        2,
+        "both functionResponses merged into one content"
+    );
+    assert_eq!(parts[0]["functionResponse"]["name"], "tool_a");
+    assert_eq!(parts[1]["functionResponse"]["name"], "tool_b");
+}
+
+/// Streaming must emit text tokens from SSE frames.
+#[tokio::test]
+async fn stream_with_messages_emits_text_tokens() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}]}}]}\n\n\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" world\"}]}}]}\n\n\
+data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    handle.join().unwrap();
+
+    let mut tokens = String::new();
+    while let Some(chunk) = stream.next().await {
+        tokens.push_str(chunk.unwrap().token());
+    }
+    assert_eq!(tokens, "Hello world");
+}
+
+/// A `functionCall` part in the stream must be flushed as a synthetic
+/// inline-JSON token (the format the harness extractor expects), carrying
+/// the call id for round-tripping.
+#[tokio::test]
+async fn stream_with_messages_flushes_tool_calls() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"city\":\"SP\"},\"id\":\"fc_1\"}}]}}]}\n\n\
+data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+    let stream = c
+        .stream_chat_with_messages("sys", &[user_message("weather?")])
+        .await
+        .unwrap();
+    handle.join().unwrap();
+
+    let chunks: Vec<_> = stream.collect().await;
+    assert_eq!(chunks.len(), 1, "only the synthetic tool-call token");
+    let chunk = chunks[0].as_ref().unwrap();
+    assert_eq!(chunk.finish_reason(), Some("tool_calls"));
+    let json: serde_json::Value = serde_json::from_str(chunk.token()).unwrap();
+    assert_eq!(json["name"], "get_weather");
+    assert_eq!(json["arguments"], serde_json::json!({"city":"SP"}));
+    assert_eq!(json["id"], "fc_1");
+    assert!(
+        json.get("thought_signature").is_none(),
+        "a call without a signature must not carry the key"
+    );
+}
+
+/// Non-streaming chat on v1 must still work (regression guard for the
+/// base-url rewrite).
+#[tokio::test]
+async fn chat_still_works() {
+    let body = r#"{"candidates":[{"content":{"parts":[{"text":"Hello world"}]}}]}"#;
+    let (port, _body, _raw, handle) = mock_server(body, 200);
+    let result = gemini_connector(port).chat("hello").await;
+    handle.join().unwrap();
+    assert_eq!(result.unwrap().message(), "Hello world");
+}
+
+/// Gemini's streaming endpoint only emits SSE `data:` frames when the
+/// request carries `?alt=sse` — without it the API returns a raw JSON body
+/// the SSE parser silently drops (empty stream, no tokens, no error). This
+/// guards both streaming entry points against regressing to that silent
+/// failure.
+#[tokio::test]
+async fn stream_requests_use_alt_sse() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, _body, raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+
+    // stream_chat (chat_stream)
+    let mut stream = c.stream_chat("hi").await.unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+    let req = raw.lock().unwrap().take().unwrap();
+    assert!(
+        req.contains("streamGenerateContent?alt=sse"),
+        "chat_stream request must ask for SSE: {req}"
+    );
+
+    // stream_chat_with_messages (agent-loop path)
+    let (port, _body, raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+    let req = raw.lock().unwrap().take().unwrap();
+    assert!(
+        req.contains("streamGenerateContent?alt=sse"),
+        "chat_stream_with_messages request must ask for SSE: {req}"
+    );
+}
+
+/// With tools registered, the request MUST carry `toolConfig` with mode
+/// "AUTO". Without it, Gemini 3.x models obey the prompt's inline-JSON
+/// instruction (`TOOL_FORMAT`) and emit tool calls as raw TEXT — the JSON
+/// split across frames, leaking stray fragments (a lone `}`) to the user
+/// while the extractor still dispatches the call. Regression guard for the
+/// "called a tool without being asked + garbage output" bug.
+#[tokio::test]
+async fn request_forces_native_function_calling_config() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let tool = ToolDefinition::new(
+        ToolFunction::new("get_weather")
+            .with_description("Get the weather")
+            .with_parameters(serde_json::json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})),
+    );
+    let c = gemini_connector(port).with_tools(vec![tool]);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["toolConfig"]["functionCallingConfig"]["mode"],
+        "AUTO",
+        "tools present must force native function calling, got: {body}"
+    );
+}
+
+/// Without tools there must be no `toolConfig` at all.
+#[tokio::test]
+async fn request_omits_tool_config_without_tools() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json.get("toolConfig").is_none(), "no tools → no toolConfig");
+}
+
+/// Tool schemas with JSON Schema keywords the Gemini API rejects
+/// (`const`, `oneOf`, `additionalProperties`) must be sanitized before
+/// serialization — the 400 `Unknown name "const"` regression guard.
+/// The payload sent to the API must only contain supported keywords.
+#[tokio::test]
+async fn tool_schema_with_const_and_one_of_is_sanitized() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    // Mirrors the real plan_todo_write tool schema (const + oneOf) plus
+    // the additionalProperties:false pattern from skills tools.
+    let tool = ToolDefinition::new(
+        ToolFunction::new("plan_todo_write")
+            .with_description("Mutate the TODO list")
+            .with_parameters(serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "action": {
+                        "type": "object",
+                        "description": "The mutation action to perform",
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": { "type": "string", "const": "Add" },
+                                    "group": { "type": "string" }
+                                },
+                                "required": ["type", "group"]
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": { "type": "string", "const": "Remove" },
+                                    "id": { "type": "string" }
+                                },
+                                "required": ["type", "id"]
+                            }
+                        ]
+                    }
+                },
+                "required": ["action"]
+            })),
+    );
+    let c = gemini_connector(port).with_tools(vec![tool]);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let param = &json["tools"][0]["functionDeclarations"][0]["parameters"];
+
+    // Unsupported keywords must be gone from the whole payload.
+    let raw = body.as_str();
+    assert!(
+        !raw.contains("\"const\"") && !raw.contains("oneOf") && !raw.contains("additionalProperties"),
+        "payload still contains Gemini-rejected keywords: {raw}"
+    );
+
+    // The discriminator becomes an enum, branches merge into one object.
+    let action = &param["properties"]["action"];
+    assert_eq!(action["type"], "object");
+    assert!(action.get("oneOf").is_none());
+    assert_eq!(param["type"], "object");
+}

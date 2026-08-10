@@ -322,10 +322,7 @@ impl Connector {
                     .await
             }
             Family::Gemini => {
-                // TODO: implement for Gemini
-                Err(ConnectorError::NotImplemented(
-                    "stream_chat_with_messages for Gemini",
-                ))
+                gemini::chat_stream_with_messages(provider, params, system, messages).await
             }
             Family::Claude => {
                 claude::chat_stream_with_messages(provider, params, system, messages).await
@@ -358,6 +355,26 @@ impl Connector {
     #[must_use]
     pub fn provider_name(&self) -> Option<&'static str> {
         self.provider.map(|p| p.name)
+    }
+
+    /// Whether the provider endpoint runs on this machine (`localhost` /
+    /// `127.0.0.1`).
+    ///
+    /// Local model servers (ollama, lmstudio, vllm, llamacpp) may lack
+    /// reliable native function calling, so the harness keeps the legacy
+    /// inline-JSON `TOOL_FORMAT` prompt for them; cloud providers get the
+    /// native function-calling instruction.
+    #[must_use]
+    pub fn is_local(&self) -> bool {
+        let base_url = self
+            .params
+            .base_url
+            .as_deref()
+            .or_else(|| self.provider.map(|p| p.base_url))
+            .unwrap_or_default();
+        base_url.contains("localhost")
+            || base_url.contains("127.0.0.1")
+            || base_url.contains("::1")
     }
 
     /// The model override, if one was set via [`with_model`](Self::with_model).

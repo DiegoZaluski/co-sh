@@ -147,3 +147,11 @@ pub fn claude_connector_no_key(port: u16) -> Connector {
         .unwrap()
         .with_base_url(format!("http://127.0.0.1:{port}"))
 }
+
+/// Build a Gemini Connector pointed at a mock server on the given port.
+pub fn gemini_connector(port: u16) -> Connector {
+    Connector::new("gemini")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}"))
+        .with_api_key("gk-test")
+}

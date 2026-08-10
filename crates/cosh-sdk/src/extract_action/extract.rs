@@ -16,6 +16,13 @@ pub struct ToolCallData {
     pub id: String,
     pub name: String,
     pub arguments: JsonValue,
+    /// Gemini 3.x thought signature: the sibling `thoughtSignature` the
+    /// model attached to a native `functionCall` part. MUST be replayed
+    /// verbatim when the call is re-sent in the conversation history — the
+    /// Gemini API rejects a functionCall without its original signature with
+    /// HTTP 400 (`Function call is missing a thought_signature`). Empty for
+    /// inline-JSON calls and for every other provider.
+    pub thought_signature: String,
 }
 
 /// Action returned by [`ExtractAction::extract_stream`].
@@ -107,6 +114,7 @@ const KNOWN_KEYS: &[&str] = &[
     "tool_call_id",
     "parameters",
     "description",
+    "thought_signature",
 ];
 
 fn is_known_key(key: &str, tool_keys: &[String]) -> bool {
@@ -532,6 +540,13 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
         .unwrap_or("")
         .to_string();
 
+    // Gemini 3.x thought signature (sibling of a native functionCall).
+    let thought_signature = obj
+        .get("thought_signature")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
     // Standard tool call envelope: {"name": "...", "arguments": {...}}
     if let Some(name) = obj
         .get("name")
@@ -562,6 +577,7 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
             id,
             name: name.to_string(),
             arguments: args,
+            thought_signature,
         });
     }
 
@@ -580,6 +596,7 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
             id,
             name: matches[0].name.clone(),
             arguments: value.clone(),
+            thought_signature,
         });
     }
 

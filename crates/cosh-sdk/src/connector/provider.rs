@@ -247,17 +247,21 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             default_model: "llama3.3",
             needs_extra_headers: false,
         },
-    ),
-    (
-        "gemini",
+    ),        ("gemini",
         ProviderConfig {
             name: "gemini",
             family: Family::Gemini,
-            base_url: "https://generativelanguage.googleapis.com/v1beta",
-            default_model: "gemini-2.0-flash",
+            // Stable v1 API surface. The gemini module keeps an internal
+            // v1beta switch for testing experimental features — library
+            // users cannot select the version via the public API.
+            base_url: "https://generativelanguage.googleapis.com/v1",
+            // Current default on the v1 API. Older defaults are gone from
+            // v1: gemini-1.5-flash/2.5-flash return 404 ("not found for
+            // API version v1") and gemini-2.0-flash is rate-limited on
+            // free tiers — the docs-recommended gemini-3.6-flash works.
+            default_model: "gemini-3.6-flash",
             needs_extra_headers: false,
-        },
-    ),
+        },),
     (
         "claude",
         ProviderConfig {

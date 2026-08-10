@@ -247,6 +247,34 @@ pub fn build_full_messages(system: &str, messages: &[ApiChatMessage]) -> Vec<Api
     out
 }
 
+/// Drop the internal Gemini `thought_signature` from every tool call before
+/// the messages reach the OpenAI-compatible wire format (which has no such
+/// field — the API rejects unknown keys with 400). The signature is an
+/// internal transport detail only the Gemini caller reads.
+fn strip_thought_signatures(messages: &[ApiChatMessage]) -> Vec<ApiChatMessage> {
+    let has_signature = messages.iter().any(|m| {
+        m.tool_calls.as_ref().is_some_and(|tcs| {
+            tcs.iter().any(|tc| tc.thought_signature.is_some())
+        })
+    });
+    // The common path (no Gemini-originated calls in history) must not pay
+    // a full clone of the message array just to strip nothing.
+    if !has_signature {
+        return messages.to_vec();
+    }
+    let mut out = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let mut msg = msg.clone();
+        if let Some(tcs) = &mut msg.tool_calls {
+            for tc in tcs {
+                tc.thought_signature = None;
+            }
+        }
+        out.push(msg);
+    }
+    out
+}
+
 /// Shared SSE processing loop for streaming chat completions.
 ///
 /// Handles parsing SSE frames, accumulating tool call deltas,
@@ -266,26 +294,29 @@ fn process_sse_response(
         // use it when yielding synthetic tool-call tokens.
         let mut last_raw: Option<String> = None;
         loop {
-            let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, response.chunk()).await {
-                Ok(Ok(Some(c))) => {
-                    c
-                }
-                Ok(Ok(None)) => {
-                    break;
-                }
-                Ok(Err(e)) => {
-                    yield Err(ConnectorError::Network(e.to_string()));
-                    return;
-                }
-                Err(_) => {
-                    yield Err(ConnectorError::Network(format!(
-                        "stream timed out after {}s",
-                        SSE_CHUNK_TIMEOUT.as_secs()
-                    )));
-                    return;
-                }
-            };
-            for data in buf.push_and_drain(&chunk) {
+            let (frames, ended) =
+                match tokio::time::timeout(SSE_CHUNK_TIMEOUT, response.chunk()).await {
+                    Ok(Ok(Some(c))) => (buf.push_and_drain(&c), false),
+                    Ok(Ok(None)) => {
+                        // End-of-stream: emit any final frame that arrived
+                        // without a trailing blank line (the SSE spec
+                        // dispatches pending data on EOF) instead of
+                        // silently dropping it.
+                        (buf.flush(), true)
+                    }
+                    Ok(Err(e)) => {
+                        yield Err(ConnectorError::Network(e.to_string()));
+                        return;
+                    }
+                    Err(_) => {
+                        yield Err(ConnectorError::Network(format!(
+                            "stream timed out after {}s",
+                            SSE_CHUNK_TIMEOUT.as_secs()
+                        )));
+                        return;
+                    }
+                };
+            for data in frames {
                 if data == "[DONE]" {
                     // Flush any accumulated tool calls before ending.
                     for chunk in flush_tool_calls(&mut pending_tool_calls, &mut last_raw) {
@@ -392,6 +423,9 @@ fn process_sse_response(
                         return;
                     }
                 }
+            }
+            if ended {
+                break;
             }
         }
         // Stream ended without [DONE]
@@ -541,7 +575,11 @@ pub async fn chat_stream_with_messages(
         .clone()
         .unwrap_or_else(|| config.default_model.to_string());
 
+    // OpenAI's wire format has no `thought_signature` — a Gemini-originated
+    // call (carried internally on ToolCallMsg) must be stripped before
+    // serialization, otherwise the request would be rejected with 400.
     let all_messages = build_full_messages(system, messages);
+    let all_messages = strip_thought_signatures(&all_messages);
     let request = build_chat_request(model, all_messages, params, true);
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/chat/completions");

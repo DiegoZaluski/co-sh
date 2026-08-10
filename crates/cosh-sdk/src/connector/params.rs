@@ -21,6 +21,16 @@ pub struct ToolCallMsg {
     #[serde(rename = "type")]
     pub kind: String,
     pub function: ToolCallFunctionMsg,
+    /// Gemini 3.x thought signature, carried ONLY as an internal transport
+    /// detail: when a thinking model emits a native `functionCall`, the part
+    /// travels with a sibling `thoughtSignature` that MUST be replayed
+    /// verbatim when the call is re-sent in the conversation history (the
+    /// API rejects the replay with HTTP 400 otherwise). Other providers
+    /// never set it, and `skip_serializing_if` keeps it off their wire
+    /// format; the Gemini caller re-emits it as the `thoughtSignature`
+    /// sibling of the `functionCall` part.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// The function details within a tool call message.

@@ -443,22 +443,29 @@ pub async fn chat_stream_with_messages(
             let mut last_raw: Option<String>;
 
             loop {
-                let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, response.chunk()).await {
-                    Ok(Ok(Some(c))) => c,
-                    Ok(Ok(None)) => break,
-                    Ok(Err(e)) => {
-                        yield Err(ConnectorError::Network(e.to_string()));
-                        return;
-                    }
-                    Err(_) => {
-                        yield Err(ConnectorError::Network(format!(
-                            "stream timed out after {}s",
-                            SSE_CHUNK_TIMEOUT.as_secs()
-                        )));
-                        return;
-                    }
-                };
-                for data in buf.push_and_drain(&chunk) {
+                let (frames, ended) =
+                    match tokio::time::timeout(SSE_CHUNK_TIMEOUT, response.chunk()).await {
+                        Ok(Ok(Some(c))) => (buf.push_and_drain(&c), false),
+                        Ok(Ok(None)) => {
+                            // End-of-stream: emit any final frame that arrived
+                            // without a trailing blank line (the SSE spec
+                            // dispatches pending data on EOF) instead of
+                            // silently dropping it.
+                            (buf.flush(), true)
+                        }
+                        Ok(Err(e)) => {
+                            yield Err(ConnectorError::Network(e.to_string()));
+                            return;
+                        }
+                        Err(_) => {
+                            yield Err(ConnectorError::Network(format!(
+                                "stream timed out after {}s",
+                                SSE_CHUNK_TIMEOUT.as_secs()
+                            )));
+                            return;
+                        }
+                    };
+                for data in frames {
                     match serde_json::from_str::<serde_json::Value>(&data) {
                         Ok(v) => {
                             last_raw = Some(data.clone());
@@ -560,6 +567,9 @@ pub async fn chat_stream_with_messages(
                         }
                     }
                 }
+                if ended {
+                    break;
+                }
             }
         },
     );
@@ -588,22 +598,29 @@ pub async fn chat_stream(
             let mut response = response;
             let mut buf = SseBuffer::new();
             loop {
-                let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, response.chunk()).await {
-                    Ok(Ok(Some(c))) => c,
-                    Ok(Ok(None)) => break,
-                    Ok(Err(e)) => {
-                        yield Err(ConnectorError::Network(e.to_string()));
-                        return;
-                    }
-                    Err(_) => {
-                        yield Err(ConnectorError::Network(format!(
-                            "stream timed out after {}s",
-                            SSE_CHUNK_TIMEOUT.as_secs()
-                        )));
-                        return;
-                    }
-                };
-                for data in buf.push_and_drain(&chunk) {
+                let (frames, ended) =
+                    match tokio::time::timeout(SSE_CHUNK_TIMEOUT, response.chunk()).await {
+                        Ok(Ok(Some(c))) => (buf.push_and_drain(&c), false),
+                        Ok(Ok(None)) => {
+                            // End-of-stream: emit any final frame that arrived
+                            // without a trailing blank line (the SSE spec
+                            // dispatches pending data on EOF) instead of
+                            // silently dropping it.
+                            (buf.flush(), true)
+                        }
+                        Ok(Err(e)) => {
+                            yield Err(ConnectorError::Network(e.to_string()));
+                            return;
+                        }
+                        Err(_) => {
+                            yield Err(ConnectorError::Network(format!(
+                                "stream timed out after {}s",
+                                SSE_CHUNK_TIMEOUT.as_secs()
+                            )));
+                            return;
+                        }
+                    };
+                for data in frames {
                     match serde_json::from_str::<serde_json::Value>(&data) {
                         Ok(v) => {
                             let kind = v["type"].as_str().unwrap_or("");
@@ -649,6 +666,9 @@ pub async fn chat_stream(
                             return;
                         }
                     }
+                }
+                if ended {
+                    break;
                 }
             }
         });
