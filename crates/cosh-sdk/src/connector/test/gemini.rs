@@ -558,3 +558,49 @@ data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReas
     assert!(action.get("oneOf").is_none());
     assert_eq!(param["type"], "object");
 }
+
+/// A reasoning effort maps onto Gemini 3.x `thinkingConfig.thinkingLevel`.
+#[tokio::test]
+async fn reasoning_effort_sets_thinking_level() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port).with_reasoning_effort("high");
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "high",
+        "reasoning effort must map onto thinkingLevel, got: {body}"
+    );
+}
+
+/// No reasoning effort → no `thinkingConfig` at all (model default).
+#[tokio::test]
+async fn request_omits_thinking_config_without_effort() {
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.get("generationConfig").is_none()
+            || json["generationConfig"].get("thinkingConfig").is_none(),
+        "no effort → no thinkingConfig"
+    );
+}

@@ -68,6 +68,33 @@ struct Metadata {
     user_id: Option<String>,
 }
 
+/// Claude extended-thinking block — `thinking: { type: "enabled",
+/// budget_tokens: N }`. The harness maps its `low`/`medium`/`high` reasoning
+/// effort onto token budgets; `default` (no effort) omits the field entirely.
+#[derive(serde::Serialize)]
+struct ThinkingBlock {
+    #[serde(rename = "type")]
+    kind: String,
+    budget_tokens: u32,
+}
+
+/// Map a reasoning effort onto a Claude extended-thinking token budget.
+/// Returns `None` for the default (no effort) or unknown levels.
+fn thinking_for_effort(effort: &str) -> Option<ThinkingBlock> {
+    let budget_tokens = match effort {
+        "minimal" => 1024,
+        "low" => 2048,
+        "medium" => 8192,
+        "high" => 24_576,
+        "max" => 32_768,
+        _ => return None,
+    };
+    Some(ThinkingBlock {
+        kind: "enabled".to_string(),
+        budget_tokens,
+    })
+}
+
 #[derive(serde::Serialize)]
 struct MessageRequest {
     model: String,
@@ -87,6 +114,8 @@ struct MessageRequest {
     tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<Metadata>,
 }
@@ -174,6 +203,10 @@ fn build_request(
     let stop_sequences = params.stop.as_ref().and_then(convert_stop);
     let tools = params.tools.as_ref().map(|t| build_tools(t));
     let tool_choice = params.tool_choice.as_ref().and_then(convert_tool_choice);
+    let thinking = params
+        .reasoning_effort
+        .as_deref()
+        .and_then(thinking_for_effort);
     let metadata = params.user.as_ref().map(|uid| Metadata {
         user_id: Some(uid.clone()),
     });
@@ -189,6 +222,7 @@ fn build_request(
         stop_sequences,
         tools,
         tool_choice,
+        thinking,
         metadata,
     }
 }
@@ -380,6 +414,8 @@ struct ClaudeMessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingBlock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<Metadata>,
 }
 
@@ -404,6 +440,10 @@ pub async fn chat_stream_with_messages(
     let stop_sequences = params.stop.as_ref().and_then(convert_stop);
     let tools = params.tools.as_ref().map(|t| build_tools(t));
     let tool_choice = params.tool_choice.as_ref().and_then(convert_tool_choice);
+    let thinking = params
+        .reasoning_effort
+        .as_deref()
+        .and_then(thinking_for_effort);
     let metadata = params.user.as_ref().map(|uid| Metadata {
         user_id: Some(uid.clone()),
     });
@@ -419,6 +459,7 @@ pub async fn chat_stream_with_messages(
         stop_sequences,
         tools,
         tool_choice,
+        thinking,
         metadata,
     };
 

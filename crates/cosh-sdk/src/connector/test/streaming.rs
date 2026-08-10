@@ -3,7 +3,7 @@
 //! Covers: receiving all SSE chunks, system prompt inclusion in the request body,
 //! HTTP error propagation before stream start, and stream termination without
 //! a `[DONE]` signal.
-use super::super::StreamChunk;
+use super::super::{StreamChunk, user_message};
 use super::common::{connector, mock_server};
 use tokio_stream::StreamExt;
 
@@ -180,4 +180,50 @@ data: [DONE]\n\n";
         tokens.push_str(chunk.unwrap().token());
     }
     assert_eq!(tokens, "summary");
+}
+
+/// A reasoning effort is sent as the OpenAI top-level `reasoning_effort`.
+#[tokio::test]
+async fn reasoning_effort_sets_openai_field() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = connector(port).with_reasoning_effort("low");
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["reasoning_effort"], "low",
+        "effort must be sent top-level, got: {body}"
+    );
+}
+
+/// No effort → no `reasoning_effort` field in the payload.
+#[tokio::test]
+async fn request_omits_reasoning_effort_without_setting() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.get("reasoning_effort").is_none(),
+        "no effort → no reasoning_effort field"
+    );
 }

@@ -144,6 +144,18 @@ struct GenerationConfig {
     response_logprobs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     logprobs: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<ThinkingConfig>,
+}
+
+/// Gemini 3.x thinking knob — `generationConfig.thinkingConfig.thinkingLevel`.
+///
+/// Gemini 3 models accept `"minimal" | "low" | "medium" | "high"`; the
+/// harness maps its `low`/`medium`/`high` reasoning effort onto these.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThinkingConfig {
+    thinking_level: String,
 }
 
 #[derive(serde::Serialize)]
@@ -278,6 +290,18 @@ fn build_generation_config(params: &Parameters) -> Option<GenerationConfig> {
         _ => None,
     });
 
+    let thinking_config = params.reasoning_effort.as_ref().and_then(|effort| {
+        // Gemini 3.x accepts minimal/low/medium/high; anything else maps to
+        // the model default (omit the knob).
+        let level = match effort.as_str() {
+            "minimal" | "low" | "medium" | "high" => effort.as_str(),
+            _ => return None,
+        };
+        Some(ThinkingConfig {
+            thinking_level: level.to_string(),
+        })
+    });
+
     let has_any = params.max_tokens.is_some()
         || params.temperature.is_some()
         || params.top_p.is_some()
@@ -287,7 +311,8 @@ fn build_generation_config(params: &Parameters) -> Option<GenerationConfig> {
         || params.seed.is_some()
         || response_mime_type.is_some()
         || params.logprobs.is_some()
-        || params.top_logprobs.is_some();
+        || params.top_logprobs.is_some()
+        || thinking_config.is_some();
 
     if !has_any {
         return None;
@@ -305,6 +330,7 @@ fn build_generation_config(params: &Parameters) -> Option<GenerationConfig> {
         response_mime_type,
         response_logprobs: params.logprobs,
         logprobs: params.top_logprobs,
+        thinking_config,
     })
 }
 

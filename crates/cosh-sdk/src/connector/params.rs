@@ -205,6 +205,7 @@ pub struct Parameters {
     pub(crate) response_format: Option<ResponseFormat>,
     pub(crate) logprobs: Option<bool>,
     pub(crate) top_logprobs: Option<u32>,
+    pub(crate) reasoning_effort: Option<String>,
     pub(crate) tools: Option<Vec<ToolDefinition>>,
     pub(crate) tool_choice: Option<serde_json::Value>,
     pub(crate) user: Option<String>,

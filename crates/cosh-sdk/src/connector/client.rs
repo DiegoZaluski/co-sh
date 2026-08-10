@@ -142,6 +142,19 @@ impl Connector {
         self
     }
 
+    /// Reasoning effort for models that support it (`"low"`, `"medium"`,
+    /// `"high"`).
+    ///
+    /// Each family maps this onto its native knob: OpenAI-compatible sends
+    /// the top-level `reasoning_effort`, Gemini sends
+    /// `generationConfig.thinkingConfig.thinkingLevel`, and Claude enables
+    /// extended thinking with a matching token budget. Models without a
+    /// reasoning knob ignore it.
+    pub fn with_reasoning_effort(mut self, v: impl Into<String>) -> Self {
+        self.params.reasoning_effort = Some(v.into());
+        self
+    }
+
     /// A unique identifier for the end-user (for monitoring/abuse detection).
     pub fn with_user(mut self, v: impl Into<String>) -> Self {
         self.params.user = Some(v.into());

@@ -46,6 +46,8 @@ struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     user: Option<String>,
 }
 
@@ -458,6 +460,7 @@ fn build_chat_request(
         top_logprobs: params.top_logprobs,
         tools: params.tools.clone(),
         tool_choice: params.tool_choice.clone(),
+        reasoning_effort: params.reasoning_effort.clone(),
         user: params.user.clone(),
     }
 }

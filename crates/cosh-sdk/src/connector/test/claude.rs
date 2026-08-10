@@ -286,3 +286,37 @@ async fn user_id_in_metadata() {
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["metadata"]["user_id"], "user-123");
 }
+
+/// A reasoning effort enables Claude extended thinking with a budget.
+#[tokio::test]
+async fn reasoning_effort_enables_thinking_block() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port)
+        .with_reasoning_effort("high")
+        .chat("hello")
+        .await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["thinking"]["type"], "enabled");
+    assert_eq!(json["thinking"]["budget_tokens"], 24_576);
+}
+
+/// No effort → no `thinking` block (Claude's default behavior).
+#[tokio::test]
+async fn request_omits_thinking_without_effort() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port).chat("hello").await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json.get("thinking").is_none(), "no effort → no thinking block");
+}
