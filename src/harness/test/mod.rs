@@ -3,7 +3,7 @@ pub(crate) mod bash_dispatch;
 pub(crate) mod bug_hunt;
 pub(crate) mod chat_tests;
 pub(crate) mod dispatch;
-pub(crate) mod find_dispatch;
+// pub(crate) mod find_dispatch;
 pub(crate) mod internal_tool;
 pub(crate) mod loop_latency;
 pub(crate) mod permission;

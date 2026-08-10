@@ -201,6 +201,7 @@ async fn dispatch_next_errors_on_unknown_tool() {
         id: String::new(),
         name: "unknown.tool".into(),
         arguments: json!({}),
+        thought_signature: String::new(),
     });
 
     let err = h.dispatch_next().await.unwrap_err();
@@ -221,6 +222,7 @@ async fn dispatch_next_errors_on_non_object_args() {
         id: String::new(),
         name: "some.tool".into(),
         arguments: json!("not-an-object"),
+        thought_signature: String::new(),
     });
 
     let err = h.dispatch_next().await.unwrap_err();
@@ -240,6 +242,7 @@ async fn dispatch_next_success_removes_from_queue() {
         id: String::new(),
         name: "ok.tool".into(),
         arguments: json!({}),
+        thought_signature: String::new(),
     });
 
     assert!(h.dispatch_next().await.is_ok());
@@ -268,6 +271,7 @@ async fn dispatch_next_preserves_item_on_server_error() {
         id: String::new(),
         name: "crash.tool".into(),
         arguments: json!({"x": 1}),
+        thought_signature: String::new(),
     });
 
     // Dispatch fails — server returned error
@@ -305,6 +309,7 @@ async fn dispatch_next_passes_correct_arguments() {
         id: String::new(),
         name: "echo.tool".into(),
         arguments: json!({"msg": "hello", "count": 42}),
+        thought_signature: String::new(),
     });
 
     let result = h.dispatch_next().await;
@@ -327,11 +332,13 @@ async fn dispatch_next_respects_order() {
         id: String::new(),
         name: "alpha.read".into(),
         arguments: json!({"seq": 1}),
+        thought_signature: String::new(),
     });
     h.push_tool_call(ToolCallData {
         id: String::new(),
         name: "beta.write".into(),
         arguments: json!({"seq": 2}),
+        thought_signature: String::new(),
     });
 
     let r1 = h.dispatch_next().await.unwrap();
@@ -357,6 +364,7 @@ async fn dispatch_next_multiple_calls_sequential() {
             id: String::new(),
             name: "seq.tool".into(),
             arguments: json!({"n": i}),
+            thought_signature: String::new(),
         });
     }
 

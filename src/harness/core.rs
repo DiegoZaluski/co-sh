@@ -509,7 +509,20 @@ impl Harness {
             Mode::Ask => INSTRUCTIONS_ASK,
         };
         let _ = write!(out, "{instructions}");
-        let _ = write!(out, "## Tool Format\n{TOOL_FORMAT}");
+        // All providers officially recommend native function calling and warn
+        // that inline-JSON instructions in the prompt conflict with it (the
+        // Gemini API rejects the turn with MALFORMED_FUNCTION_CALL when a
+        // model obeys the inline format over toolConfig AUTO). Cloud providers
+        // therefore get the NATIVE instruction. Only local model servers
+        // (ollama/lmstudio/vllm/llamacpp) may lack reliable native function
+        // calling and keep the legacy inline-JSON TOOL_FORMAT as a fallback
+        // the extractor can capture.
+        let tool_format = if self.connector.is_local() {
+            TOOL_FORMAT
+        } else {
+            cosh_tools::TOOL_FORMAT_NATIVE
+        };
+        let _ = write!(out, "## Tool Format\n{tool_format}");
         for prompt in &self.system_prompts {
             let _ = write!(out, "## System: {}\n{}\n\n", prompt.title, prompt.text);
         }
@@ -621,7 +634,13 @@ impl Harness {
                         self.tool_issuer.push_back(tc);
                     }
                     Some(result) if !result.is_empty() => {
-                        self.push_tool_history(&tc.id, &tc.name, &tc.arguments, &result);
+                        self.push_tool_history(
+                            &tc.id,
+                            &tc.name,
+                            &tc.arguments,
+                            &tc.thought_signature,
+                            &result,
+                        );
                     }
                     _ => {}
                 },
@@ -1115,7 +1134,13 @@ impl Harness {
                     self.tool_issuer.push_back(tc);
                 }
                 Some(result) if !result.is_empty() => {
-                    self.push_tool_history(&tc.id, &tc.name, &tc.arguments, &result);
+                    self.push_tool_history(
+                        &tc.id,
+                        &tc.name,
+                        &tc.arguments,
+                        &tc.thought_signature,
+                        &result,
+                    );
                 }
                 _ => {}
             },
@@ -1348,7 +1373,14 @@ impl Harness {
     /// layer — never prose-compressed). The native `tool_call → tool` chain is
     /// preserved 1:1: the call item renders as an `assistant` message with
     /// `tool_calls`, the result as a `tool` message with the matching id.
-    fn push_tool_history(&mut self, id: &str, name: &str, args: &serde_json::Value, result: &str) {
+    fn push_tool_history(
+        &mut self,
+        id: &str,
+        name: &str,
+        args: &serde_json::Value,
+        signature: &str,
+        result: &str,
+    ) {
         let args_str = serde_json::to_string(args).unwrap_or_default();
         // Providers require a non-empty tool_call_id; synthesize one when the
         // extractor did not attach an id (inline JSON calls).
@@ -1357,8 +1389,11 @@ impl Harness {
         } else {
             id.to_string()
         };
+        // `signature` is the Gemini 3.x thought signature (empty for every
+        // other path) — carried so the follow-up request can replay the
+        // native functionCall with its sibling thoughtSignature.
         self.context_manager
-            .add_tool_call(&tool_id, name, &args_str);
+            .add_tool_call_with_signature(&tool_id, name, &args_str, signature);
         self.context_manager.add_tool_result_flagged(
             &tool_id,
             result,
@@ -1729,11 +1764,17 @@ impl Harness {
                     break;
                 }
 
-                // Peek at tool info before consuming the item
+                // Peek at tool info before consuming the item. The Gemini 3.x
+                // thought signature is captured alongside so it survives the
+                // dispatch and can be replayed in the follow-up request.
                 let info = self
                     .tool_issuer
                     .front()
                     .map(|tc| (tc.id.clone(), tc.name.clone(), tc.arguments.clone()));
+                let info_sig = self
+                    .tool_issuer
+                    .front()
+                    .map(|tc| tc.thought_signature.clone());
 
                 if let Some((ref _call_id, ref name, ref args)) = info {
                     // log::debug!("run_agent_loop DISPATCH tool={name}");
@@ -1792,7 +1833,13 @@ impl Harness {
                                         } else {
                                             call_id.clone()
                                         };
-                                        self.push_tool_history(&tool_id, name, args, &json);
+                                        self.push_tool_history(
+                                            &tool_id,
+                                            name,
+                                            args,
+                                            info_sig.as_deref().unwrap_or_default(),
+                                            &json,
+                                        );
                                     }
                                     let _ = tx.send(HarnessEvent::ToolResult { output: json });
                                 }
@@ -2022,7 +2069,11 @@ impl Harness {
                                                         call_id.clone()
                                                     };
                                                     self.push_tool_history(
-                                                        &tool_id, name, args, &msg,
+                                                        &tool_id,
+                                                        name,
+                                                        args,
+                                                        info_sig.as_deref().unwrap_or_default(),
+                                                        &msg,
                                                     );
                                                 }
                                                 self.correction_memory.push(&msg);
@@ -2115,7 +2166,13 @@ impl Harness {
                                 } else {
                                     call_id.clone()
                                 };
-                                self.push_tool_history(&tool_id, name, args, &output);
+                                self.push_tool_history(
+                                    &tool_id,
+                                    name,
+                                    args,
+                                    info_sig.as_deref().unwrap_or_default(),
+                                    &output,
+                                );
                             }
                             let _ = tx.send(HarnessEvent::ToolResult { output });
                         }
@@ -2128,7 +2185,13 @@ impl Harness {
                                 } else {
                                     call_id.clone()
                                 };
-                                self.push_tool_history(&tool_id, name, args, &e);
+                                self.push_tool_history(
+                                    &tool_id,
+                                    name,
+                                    args,
+                                    info_sig.as_deref().unwrap_or_default(),
+                                    &e,
+                                );
                             }
                             self.tool_failure_count += 1;
                             log::debug!(

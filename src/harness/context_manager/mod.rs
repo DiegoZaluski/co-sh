@@ -236,6 +236,11 @@ pub enum ContextItem {
         call_id: String,
         name: String,
         arguments: String,
+        /// Gemini 3.x thought signature of the native `functionCall` —
+        /// replayed verbatim in the next request's history (the API rejects
+        /// the call without it). Empty for inline-JSON calls and for every
+        /// other provider.
+        thought_signature: String,
     },
     /// A tool RESULT — structural, never prose-compressed. Renders as a
     /// `tool` message with the matching `tool_call_id`.
@@ -286,8 +291,11 @@ impl ContextItem {
                 ..
             } => enc.estimate(compressed.as_deref().unwrap_or(original)),
             ContextItem::ToolCall {
-                name, arguments, ..
-            } => enc.estimate(name) + enc.estimate(arguments),
+                name,
+                arguments,
+                thought_signature,
+                ..
+            } => enc.estimate(name) + enc.estimate(arguments) + enc.estimate(thought_signature),
             ContextItem::ToolResult { content, .. } => enc.estimate(content),
             ContextItem::LoopClosure { content, .. } => enc.estimate(content),
             ContextItem::Compaction { summary, .. } => enc.estimate(summary),
@@ -663,12 +671,27 @@ impl ContextManager {
 
     /// Add a tool CALL. Structural, never prose-compressed.
     pub fn add_tool_call(&mut self, call_id: &str, name: &str, arguments: &str) {
+        self.add_tool_call_with_signature(call_id, name, arguments, "");
+    }
+
+    /// Add a tool CALL carrying a Gemini 3.x `thought_signature` (the native
+    /// `functionCall` sibling the model attached — must be replayed verbatim
+    /// in the next request's history). Structural, never prose-compressed.
+    /// Every non-Gemini path passes an empty signature.
+    pub fn add_tool_call_with_signature(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        arguments: &str,
+        thought_signature: &str,
+    ) {
         let id = self.next_id();
         self.items.push_back(ContextItem::ToolCall {
             id,
             call_id: call_id.to_string(),
             name: name.to_string(),
             arguments: arguments.to_string(),
+            thought_signature: thought_signature.to_string(),
         });
     }
 
@@ -1355,6 +1378,7 @@ impl ContextManager {
                     call_id,
                     name,
                     arguments,
+                    thought_signature,
                     ..
                 } => {
                     messages.push(assistant_tool_call_message(vec![ToolCallMsg {
@@ -1364,6 +1388,8 @@ impl ContextManager {
                             name: name.clone(),
                             arguments: arguments.clone(),
                         },
+                        thought_signature: (!thought_signature.is_empty())
+                            .then(|| thought_signature.clone()),
                     }]));
                 }
                 ContextItem::ToolResult {

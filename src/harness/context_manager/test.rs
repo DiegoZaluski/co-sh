@@ -283,6 +283,36 @@ fn tool_call_and_result_render_native_chain() {
 }
 
 #[test]
+fn tool_call_with_signature_round_trips_through_messages() {
+    let mut cm_sig = cm(10_000);
+    cm_sig.add_user("read it");
+    // Gemini 3.x native functionCall carrying its thought signature.
+    cm_sig.add_tool_call_with_signature(
+        "fc_1",
+        "fs_read",
+        r#"{"targets":[{"path":"/a"}]}"#,
+        "sig_roundtrip_123",
+    );
+    cm_sig.add_tool_result("fc_1", "content");
+
+    let msgs = cm_sig.build_messages("");
+    let tc = msgs[1].tool_calls.as_ref().expect("tool_calls present");
+    assert_eq!(
+        tc[0].thought_signature.as_deref(),
+        Some("sig_roundtrip_123"),
+        "the thought signature must survive into the native tool_calls message"
+    );
+    // A plain call (no signature) must render None — not an empty string —
+    // so non-Gemini providers never see the key on their wire format.
+    let mut cm_plain = cm(10_000);
+    cm_plain.add_user("read it");
+    cm_plain.add_tool_call("fc_2", "fs_read", "{}");
+    let msgs_plain = cm_plain.build_messages("");
+    let tc_plain = msgs_plain[1].tool_calls.as_ref().expect("tool_calls present");
+    assert_eq!(tc_plain[0].thought_signature, None);
+}
+
+#[test]
 fn tool_items_are_never_prose_compressed() {
     let mut cm = cm(10_000);
     cm.add_tool_call("c1", "read_file", "{}");
