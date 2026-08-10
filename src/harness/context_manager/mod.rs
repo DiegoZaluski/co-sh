@@ -102,6 +102,7 @@
 //! they switch the model.
 
 pub mod compression;
+pub mod todo_ctxt;
 #[cfg(test)]
 mod test;
 
@@ -110,6 +111,8 @@ use cosh_sdk::connector::{
     ChatMessage, ToolCallFunctionMsg, ToolCallMsg, assistant_tool_call_message,
     discover_context_window, tool_result_message, user_message,
 };
+use cosh_tools::plan::types::TodoList;
+use todo_ctxt::TodoContext;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use text_splitter::TextSplitter;
@@ -526,6 +529,11 @@ pub struct ContextManager {
     /// the snapshot so a stuck session stays notified across turns until the
     /// user switches the model.
     overflow_provider: Option<String>,
+    /// The dedicated protected TODO block: mirrors the tools' `Plan` list and
+    /// renders it as a protected `user` message at the FRONT of the messages.
+    /// Never compressed, evicted, drained or summarized — see [`todo_ctxt`]
+    /// for the protection and removal rules.
+    todo: TodoContext,
 }
 
 /// Build a plain assistant text message (no tool calls).
@@ -549,6 +557,7 @@ impl ContextManager {
             max_tokens,
             encoding: TokenEncoding::Cl100k,
             overflow_provider: None,
+            todo: TodoContext::new(),
         }
     }
 
@@ -604,6 +613,16 @@ impl ContextManager {
     /// default that is far below it.
     pub fn set_max_tokens(&mut self, max_tokens: usize) {
         self.max_tokens = max_tokens;
+    }
+
+    /// Replace the mirrored tool TODO list. The harness syncs it from the
+    /// tools' `Plan` state at loop start and after every `plan_*` dispatch.
+    /// The dedicated [`TodoContext`] renders it as a protected block at the
+    /// FRONT of the messages — structurally immune to every compaction phase
+    /// (see [`todo_ctxt`] for the removal rules: all tasks terminal, or the
+    /// model empties the plan).
+    pub fn set_todo_list(&mut self, list: TodoList) {
+        self.todo.sync(list);
     }
 
     // Ingestion
@@ -1331,6 +1350,15 @@ impl ContextManager {
         {
             messages.push(user_message(current_input));
         }
+        // The protected TODO block is injected at the FRONT — right after the
+        // system prompt (passed separately by the harness), before the
+        // conversation history. It is re-rendered live from the tools' Plan
+        // state on every call, so it is structurally immune to the pipeline,
+        // the draft eviction, the tool-chain drain and even the LLM
+        // compaction (see `todo_ctxt`).
+        if let Some(msg) = self.todo.message() {
+            messages.insert(0, msg);
+        }
         messages
     }
 
@@ -1382,6 +1410,11 @@ impl ContextManager {
         // timeline.
         self.draft_cursor = None;
         self.segment_start = None;
+        // The TODO block mirror is not persisted (the tools' Plan state is
+        // not part of the snapshot): clear it so a restored session never
+        // surfaces a stale block — the harness re-syncs it at the next loop
+        // start from the authoritative Plan.
+        self.todo.clear();
     }
 
     // helpers
@@ -1398,7 +1431,11 @@ impl ContextManager {
     }
 
     fn total_tokens(&self) -> usize {
-        self.items.iter().map(|it| it.tokens(self.encoding)).sum()
+        self.items
+            .iter()
+            .map(|it| it.tokens(self.encoding))
+            .sum::<usize>()
+            .saturating_add(self.todo.tokens(self.encoding))
     }
 
     /// Index of the segment frontier's item — where the current segment

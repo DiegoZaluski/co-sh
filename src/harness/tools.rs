@@ -173,6 +173,17 @@ impl CoshTools {
         self.fs.root()
     }
 
+    /// Snapshot of the current tool TODO list, mirrored by the harness into
+    /// its dedicated protected TODO context block (see
+    /// `context_manager::todo_ctxt`). Cloned so the caller owns the data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `plan` mutex is poisoned.
+    pub fn todo_list(&self) -> cosh_tools::plan::types::TodoList {
+        self.plan.lock().unwrap().list().clone()
+    }
+
     /// Add a path to the file-system write allowlist.
     pub fn add_fs_allowlist_path(&mut self, path: std::path::PathBuf) {
         self.fs.add_allowlist_path(path);

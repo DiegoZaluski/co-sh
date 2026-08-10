@@ -1333,6 +1333,17 @@ impl Harness {
         self.connector.set_tools(defs);
     }
 
+    /// Mirror the tools' current TODO list into the dedicated protected TODO
+    /// context block (see `context_manager::todo_ctxt`). Called at loop start
+    /// and after every `plan_*` dispatch so the block always reflects the
+    /// authoritative `Plan` state.
+    fn sync_todo_context(&mut self) {
+        if let Some(cosh) = &self.cosh_tools {
+            let list = cosh.todo_list();
+            self.context_manager.set_todo_list(list);
+        }
+    }
+
     /// Add a tool call + its result to the context manager (structural
     /// layer — never prose-compressed). The native `tool_call → tool` chain is
     /// preserved 1:1: the call item renders as an `assistant` message with
@@ -1456,6 +1467,11 @@ impl Harness {
         self.context_manager
             .sync_provider(self.connector.provider_name().unwrap_or("?"));
         self.compaction_generic_retries = 0;
+
+        // Mirror the tools' current TODO list into the dedicated protected
+        // TODO block (a plan may already exist from a previous loop) so the
+        // model sees it from the very first iteration.
+        self.sync_todo_context();
 
         // Add the initial user input to the context manager (the single owner
         // of the conversation) so the model sees it as a proper `user` message.
@@ -2293,12 +2309,13 @@ impl Harness {
         };
 
         // Tier 1: cosh tools
+        let mut dispatched: Option<String> = None;
         if let Some(ref cosh) = self.cosh_tools {
             let args = serde_json::Value::Object(args_map.clone());
             match cosh.dispatch(&tool_name, args).await {
                 Ok(result) => {
                     self.tool_issuer.pop_front();
-                    return Ok(result);
+                    dispatched = Some(result);
                 }
                 Err(err) if err.starts_with("unknown cosh tool") => {}
                 Err(err) => {
@@ -2306,6 +2323,15 @@ impl Harness {
                     return Err(err);
                 }
             }
+        }
+        if let Some(result) = dispatched {
+            // Any plan tool may have changed the TODO list; mirror the
+            // authoritative Plan state into the protected TODO block so the
+            // model always sees the up-to-date plan.
+            if tool_name.starts_with("plan_") {
+                self.sync_todo_context();
+            }
+            return Ok(result);
         }
 
         // Tier 2: MCP sessions
