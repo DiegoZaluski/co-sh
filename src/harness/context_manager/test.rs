@@ -157,6 +157,106 @@ fn build_messages_appends_current_input_unless_duplicate() {
     assert_eq!(msgs[1].content.as_deref(), Some("please continue"));
 }
 
+// ── Abandoned input cleanup (Esc before any LLM output) ──────────────────
+
+// The user sends input A, cancels with Esc before the LLM produced anything,
+// then sends input B: the timeline ends with two consecutive User turns with
+// no output between. The abandoned A is dropped — only B stays.
+#[test]
+fn remove_abandoned_inputs_drops_the_earlier_consecutive_turn() {
+    let mut cm = cm(10_000);
+    cm.add_user("input one (abandoned)");
+    cm.add_user("input two (fresh)");
+
+    assert!(cm.remove_abandoned_inputs(), "an abandoned turn is removed");
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].content.as_deref(), Some("input two (fresh)"));
+}
+
+// A turn that produced ANY output (assistant text promoted to a LoopClosure)
+// is never removed — the LLM already answered, so the user did not give up
+// on the input.
+#[test]
+fn remove_abandoned_inputs_keeps_a_turn_that_produced_output() {
+    let mut cm = cm(10_000);
+    cm.add_user("answered question");
+    cm.add_assistant("Here is the answer.", true);
+    cm.close_loop(); // → LoopClosure
+    cm.add_user("follow-up");
+
+    assert!(
+        !cm.remove_abandoned_inputs(),
+        "output between the turns means nothing was abandoned"
+    );
+    assert_eq!(cm.items_snapshot().len(), 3);
+}
+
+// Tool work between the two inputs counts as output — nothing is removed.
+#[test]
+fn remove_abandoned_inputs_keeps_a_turn_with_tool_work_after_it() {
+    let mut cm = cm(10_000);
+    cm.add_user("do it");
+    cm.add_tool_call("c1", "fs_read", "{}");
+    cm.add_tool_result("c1", "contents");
+    cm.add_user("next");
+
+    assert!(!cm.remove_abandoned_inputs());
+    assert_eq!(cm.items_snapshot().len(), 4);
+}
+
+// Three consecutive abandoned inputs: all but the newest are dropped.
+#[test]
+fn remove_abandoned_inputs_keeps_only_the_newest_of_a_consecutive_run() {
+    let mut cm = cm(10_000);
+    cm.add_user("a");
+    cm.add_user("b");
+    cm.add_user("c");
+
+    assert!(cm.remove_abandoned_inputs());
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].content.as_deref(), Some("c"));
+}
+
+// No-op on an empty timeline or a single user turn.
+#[test]
+fn remove_abandoned_inputs_is_a_noop_without_a_consecutive_pair() {
+    let mut cm = cm(10_000);
+    assert!(!cm.remove_abandoned_inputs(), "empty timeline");
+    cm.add_user("single");
+    assert!(!cm.remove_abandoned_inputs(), "one user turn only");
+}
+
+// The scheduling bias (draft cursor / segment frontier) is reset after the
+// removal, so the next overflow starts fresh.
+#[test]
+fn remove_abandoned_inputs_resets_the_scheduling_state() {
+    let mut cm = cm(1000); // trigger = 800
+    cm.add_user(&"u ".repeat(50));
+    cm.add_assistant(&"A ".repeat(500), false);
+    cm.add_tool_call("c1", "read_file", "{}");
+    cm.add_tool_result("c1", &"t ".repeat(500));
+    cm.run(); // evicts draft A and parks the cursor on the chain
+    let chain_id = cm
+        .items
+        .iter()
+        .find(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "c1"))
+        .map(ContextItem::id)
+        .unwrap();
+    assert_eq!(
+        cm.draft_cursor,
+        Some(chain_id),
+        "precondition: cursor parked on the chain"
+    );
+
+    cm.add_user("abandoned");
+    cm.add_user("fresh");
+    assert!(cm.remove_abandoned_inputs());
+    assert_eq!(cm.draft_cursor, None, "scheduling bias is reset");
+    assert_eq!(cm.segment_start, None, "segment frontier is reset");
+}
+
 // Structural tool layer (native chain)
 
 #[test]

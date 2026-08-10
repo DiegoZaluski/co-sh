@@ -76,7 +76,13 @@ fn bug01_user_input_is_duplicated_in_first_request() {
 async fn bug02_history_turns_survive_the_loop_in_the_context_manager() {
     let marker = "LOADED_TURN_MARKER_XYZ";
     let h = Harness::new_test()
-        .with_history(&[("user".into(), marker.into())])
+        .with_history(&[
+            ("user".into(), marker.into()),
+            // The loaded turn is a COMPLETED one (it has an answer): the next
+            // input lands after an output, never directly on a user turn (that
+            // pattern is the abandoned-input case, which the harness drops).
+            ("assistant".into(), "loaded reply".into()),
+        ])
         .with_mock_stream(Ok(vec!["final answer"]));
 
     let (mut h, _events) = run_loop_and_collect(h, "hi").await;

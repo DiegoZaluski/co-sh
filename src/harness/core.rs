@@ -1481,6 +1481,13 @@ impl Harness {
             self.context_manager.add_user(input);
         }
 
+        // A fresh input landing directly on top of a previous user turn with
+        // NO output between means the earlier input was abandoned: the user
+        // cancelled that run with Esc before the LLM produced anything, then
+        // typed this one. Drop the abandoned turn(s) so the model never sees
+        // an input the user gave up on — only the newest input stays.
+        self.context_manager.remove_abandoned_inputs();
+
         // Apply the 80% compaction (the synchronous pipeline + eviction
         // phases) before the first LLM request, so the initial context is
         // already within budget. When the deterministic phases exhaust every

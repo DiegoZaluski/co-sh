@@ -701,6 +701,44 @@ impl ContextManager {
         )
     }
 
+    /// Drop ABANDONED input turns: when the timeline ends with two or more
+    /// consecutive `User` turns with NO output between them (assistant text,
+    /// tool work, LoopClosure or summary), every turn but the newest is an
+    /// input the user gave up on — the run ended without the LLM producing
+    /// anything (typically cancelled with Esc), and a new input followed.
+    /// Each older turn of the run is removed, so the model only ever sees the
+    /// newest input. A turn that produced ANY output after it is never
+    /// touched.
+    ///
+    /// Called by the harness at loop start right after the fresh input is
+    /// added, so an abandoned prompt never survives into the request.
+    ///
+    /// Returns whether at least one abandoned turn was removed.
+    pub fn remove_abandoned_inputs(&mut self) -> bool {
+        // Count the trailing consecutive User turns.
+        let mut trailing_users = 0usize;
+        for item in self.items.iter().rev() {
+            if matches!(item, ContextItem::User { .. }) {
+                trailing_users += 1;
+            } else {
+                break;
+            }
+        }
+        if trailing_users <= 1 {
+            return false;
+        }
+        // Keep the NEWEST input (the last item); drop the rest of the run.
+        let start = self.items.len() - trailing_users;
+        let end = self.items.len() - 1;
+        self.items.drain(start..end);
+        // Scheduling bias only — the removed tail may hold the draft cursor
+        // and the segment frontier; reset them so the next overflow starts
+        // fresh.
+        self.draft_cursor = None;
+        self.segment_start = None;
+        true
+    }
+
     /// Promote the last assistant text output of the finished agent loop into a
     /// [`ContextItem::LoopClosure`], replacing the raw text in place. Guard: if
     /// the last item is not an assistant text (e.g. it was a tool call), it

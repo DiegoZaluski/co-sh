@@ -312,10 +312,15 @@ async fn run_agent_loop_runs_the_llm_compaction_when_drafts_are_exhausted() {
     // trigger with NOTHING for the deterministic phases to compress or evict
     // (user prompts are protected by construction).
     h.context_manager = ContextManager::new(2000); // trigger = 1600
+    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
+    // below): protected-only over the trigger, and the loop input lands after
+    // an output — never directly on a user turn (that pattern is the
+    // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
         ("user".into(), "u ".repeat(1100)),
-        ("user".into(), "v ".repeat(1100)),
+        ("assistant".into(), "a ".repeat(1100)),
     ]);
+    h.context_manager.close_loop();
     // The mock CHAT response is the compaction summary (the harness asks the
     // model for it); the mock STREAM is the loop's final answer.
     h = h
@@ -405,10 +410,15 @@ async fn run_agent_loop_survives_a_failed_llm_compaction() {
 
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
+    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
+    // below): protected-only over the trigger, and the loop input lands after
+    // an output — never directly on a user turn (that pattern is the
+    // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
         ("user".into(), "u ".repeat(1100)),
-        ("user".into(), "v ".repeat(1100)),
+        ("assistant".into(), "a ".repeat(1100)),
     ]);
+    h.context_manager.close_loop();
     // The mock CHAT response is the FAILING summarization call; the mock
     // STREAM is the loop's final answer. The loop must still complete.
     h = h
@@ -474,6 +484,81 @@ async fn run_agent_loop_survives_a_failed_llm_compaction() {
     );
 }
 
+// ── Abandoned input cleanup: Esc before any output, then a new input ─────
+//
+// The user sends input A and cancels (Esc) before the LLM produced anything,
+// then sends input B. The harness rebuilds with_history(A) and B lands
+// directly on top of A — two consecutive user turns with no output between.
+// The abandoned A must be dropped from the model context; B is sent exactly
+// once.
+#[tokio::test]
+async fn abandoned_input_is_dropped_when_a_new_input_follows() {
+    let mut h = Harness::new_test()
+        .with_history(&[("user".into(), "abandoned input A".into())])
+        .with_mock_stream(Ok(vec!["final answer"]));
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    h.run_agent_loop(
+        "fresh input B",
+        tx,
+        answer_rx,
+        perm_rx,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await;
+
+    let msgs = h.build_messages_for_test("");
+    let texts: Vec<&str> = msgs.iter().filter_map(|m| m.content.as_deref()).collect();
+    assert!(
+        !texts.contains(&"abandoned input A"),
+        "the abandoned input must not reach the model; texts={texts:?}"
+    );
+    assert_eq!(
+        texts.iter().filter(|t| **t == "fresh input B").count(),
+        1,
+        "the fresh input is sent exactly once; texts={texts:?}"
+    );
+}
+
+// A run that DID produce output before the cancel keeps its input: the next
+// input is a normal follow-up turn, not a replacement.
+#[tokio::test]
+async fn input_with_output_before_cancel_is_kept() {
+    let mut h = Harness::new_test()
+        .with_history(&[
+            ("user".into(), "answered input A".into()),
+            ("assistant".into(), "an answer already streamed".into()),
+        ])
+        .with_mock_stream(Ok(vec!["final answer"]));
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    h.run_agent_loop(
+        "follow-up B",
+        tx,
+        answer_rx,
+        perm_rx,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await;
+
+    let msgs = h.build_messages_for_test("");
+    let texts: Vec<&str> = msgs.iter().filter_map(|m| m.content.as_deref()).collect();
+    assert!(
+        texts.contains(&"answered input A"),
+        "a turn with output after it is kept; texts={texts:?}"
+    );
+    assert!(
+        texts.contains(&"an answer already streamed"),
+        "the previous output stays in context; texts={texts:?}"
+    );
+}
+
 // ── Context-window overflow recovery (provider rejects the prompt size) ──
 
 // When the summarizer call fails with a context-window overflow, the harness
@@ -488,10 +573,15 @@ async fn run_agent_loop_drains_tool_chains_on_context_window_overflow() {
 
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
+    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
+    // below): protected-only over the trigger, and the loop input lands after
+    // an output — never directly on a user turn (that pattern is the
+    // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
         ("user".into(), "u ".repeat(1100)),
-        ("user".into(), "v ".repeat(1100)),
+        ("assistant".into(), "a ".repeat(1100)),
     ]);
+    h.context_manager.close_loop();
     // Two tool chains the harness can drain (the mock CHAT response is the
     // summarizer call).
     h.context_manager.add_tool_call("t0", "fs_read", "{}");
@@ -601,10 +691,15 @@ async fn run_agent_loop_retries_generic_compaction_failures_then_notifies() {
 
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
+    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
+    // below): protected-only over the trigger, and the loop input lands after
+    // an output — never directly on a user turn (that pattern is the
+    // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
         ("user".into(), "u ".repeat(1100)),
-        ("user".into(), "v ".repeat(1100)),
+        ("assistant".into(), "a ".repeat(1100)),
     ]);
+    h.context_manager.close_loop();
     h = h
         .with_mock_chat(Err("provider exploded")) // generic failure, every attempt
         .with_mock_stream(Ok(vec!["final answer"]));
@@ -679,10 +774,15 @@ async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
 
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
+    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
+    // below): protected-only over the trigger, and the loop input lands after
+    // an output — never directly on a user turn (that pattern is the
+    // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
         ("user".into(), "u ".repeat(1100)),
-        ("user".into(), "v ".repeat(1100)),
+        ("assistant".into(), "a ".repeat(1100)),
     ]);
+    h.context_manager.close_loop();
     // The provider is already known to overflow with every chain drained.
     h.context_manager.mark_overflow("openai");
     h = h.with_mock_stream(Ok(vec!["final answer"]));
@@ -754,10 +854,15 @@ async fn run_agent_loop_drains_chains_on_main_request_overflow() {
 
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
+    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
+    // below): protected-only over the trigger, and the loop input lands after
+    // an output — never directly on a user turn (that pattern is the
+    // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
         ("user".into(), "u ".repeat(1100)),
-        ("user".into(), "v ".repeat(1100)),
+        ("assistant".into(), "a ".repeat(1100)),
     ]);
+    h.context_manager.close_loop();
     // The provider is already stuck (the summarizer is skipped) — the
     // overflow now hits the MAIN request instead.
     h.context_manager.mark_overflow("openai");

@@ -30,10 +30,14 @@ async fn repro_llm_compaction_repeats_mid_loop_when_protected_content_regrows() 
     h.context_manager = ContextManager::new(2000); // trigger = 1600
     // Protected-only history over the trigger: no drafts for the pipeline or
     // the eviction pass → NeedsLlmCompaction at loop start.
+    // The loaded turn is a COMPLETED one (user + answer): the loop input
+    // lands after an output, never directly on a user turn (that pattern is
+    // the abandoned-input case, which the harness now drops).
     h = h.with_history(&[
         ("user".into(), "u ".repeat(1100)),
-        ("user".into(), "v ".repeat(1100)),
+        ("assistant".into(), "a ".repeat(1100)),
     ]);
+    h.context_manager.close_loop();
     h = h.with_test_tool(
         "test_tool",
         serde_json::json!({
