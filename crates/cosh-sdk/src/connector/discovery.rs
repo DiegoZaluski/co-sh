@@ -56,7 +56,8 @@ struct AnthropicModelInfo {
 /// The catalog is a map keyed by provider id (`google`, `zhipuai`, …); each
 /// provider carries a `models` map keyed by model id (bare like `glm-5`, or
 /// vendor-prefixed like `google/gemini-2.5-flash`), and every model exposes
-/// its context window under `limit.context`. The outer map is caught with
+/// its context window under `limit.context` plus reasoning metadata under
+/// `reasoning` / `reasoning_options`. The outer map is caught with
 /// `#[serde(flatten)]` and other provider fields (name, api, doc, …) are
 /// ignored.
 #[derive(Debug, Deserialize)]
@@ -71,14 +72,131 @@ struct ModelsDevProvider {
     models: HashMap<String, ModelsDevModel>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct ModelsDevModel {
     limit: ModelsDevLimit,
+    /// Whether the model advertises reasoning/thinking support. `None` when
+    /// the (possibly stale) catalog entry predates the field — treated as
+    /// "unknown" so callers fall back to a heuristic instead of concluding
+    /// the model has no reasoning.
+    #[serde(default)]
+    reasoning: Option<bool>,
+    /// How reasoning can be configured (effort levels, token budgets, or a
+    /// plain toggle). Effort-style options carry the accepted values.
+    #[serde(default)]
+    reasoning_options: Vec<ModelsDevReasoningOption>,
 }
 
+/// One entry of a model's `reasoning_options`. The catalog occasionally
+/// emits `null` inside the effort `values` array (`[null, "low", …]`), so
+/// the elements are deserialized as optional and filtered later.
 #[derive(Debug, Deserialize)]
+struct ModelsDevReasoningOption {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    values: Vec<Option<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct ModelsDevLimit {
     context: Option<usize>,
+}
+
+/// Reasoning metadata for a model, resolved from the cached models.dev catalog.
+///
+/// The providers' own `/models` endpoints (OpenAI, Gemini, Claude) do NOT
+/// expose reasoning capability — the catalog is the authoritative offline
+/// source. `None` means the model is absent from the cached catalog and the
+/// caller should fall back to a name heuristic.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelReasoning {
+    /// Whether the model advertises reasoning/thinking support.
+    pub supported: bool,
+    /// The accepted effort levels (e.g. `["low", "medium", "high"]`) when
+    /// the catalog advertises effort-style configuration. `None` when it only
+    /// advertises a toggle or token budget (callers can offer the standard
+    /// low/medium/high set).
+    pub efforts: Option<Vec<String>>,
+}
+
+/// Resolves a model's reasoning metadata, fastest source first:
+///
+/// 1. The static table of known, current models (no disk read — the most
+///    common models always resolve, immune to a missing/stale catalog cache);
+/// 2. The cached models.dev catalog (same file [`discover_context_window`]
+///    maintains) for the long tail of models not worth hardcoding;
+/// 3. `None` — the caller falls back to its name heuristic.
+///
+/// Synchronous and offline, so the TUI can consult it instantly when
+/// rendering the model dialog. Matching is exact and case/vendor tolerant
+/// in both tiers, mirroring the context-window lookup.
+#[must_use]
+pub fn model_reasoning(model_name: &str, cache_dir: Option<&str>) -> Option<ModelReasoning> {
+    if let Some(meta) = static_known_reasoning(model_name) {
+        return Some(meta);
+    }
+    model_reasoning_from_catalog(model_name, cache_dir)
+}
+
+/// Resolves a model's reasoning metadata from the cached models.dev catalog.
+///
+/// This is the second tier of [`model_reasoning`] (the static table is tried
+/// first). Synchronous and offline: reads `models.dev.json` from the on-disk
+/// catalog cache, so the TUI can consult it instantly when rendering the
+/// model dialog. Matching is vendor-prefix and case tolerant, mirroring the
+/// context-window lookup.
+///
+/// # Returns
+///
+/// * `Some(ModelReasoning)` — the model was found; `supported`/`efforts`
+///   reflect the catalog entry.
+/// * `None` — the model is not in the cached catalog (or the cache is
+///   missing/unreadable); the caller should fall back to a heuristic.
+#[must_use]
+pub fn model_reasoning_from_catalog(
+    model_name: &str,
+    cache_dir: Option<&str>,
+) -> Option<ModelReasoning> {
+    let dir = resolve_cache_dir(cache_dir?)?;
+    let cache = CatalogCache::new(dir);
+    let raw = cache.load_raw(MODELS_DEV_CATALOG_FILE)?;
+    let catalog: ModelsDevCatalog = serde_json::from_str(&raw).ok()?;
+
+    let needle_lower = model_name.to_lowercase();
+    let needle_bare = needle_lower.rsplit('/').next().unwrap_or(&needle_lower);
+    for provider in catalog.providers.values() {
+        for (id, model) in &provider.models {
+            let id_lower = id.to_lowercase();
+            let id_bare = id_lower.rsplit('/').next().unwrap_or(&id_lower);
+            let matches = id_lower == needle_lower
+                || id_bare == needle_lower
+                || id_lower == needle_bare
+                || id_bare == needle_bare;
+            if !matches {
+                continue;
+            }
+            // A catalog entry without the `reasoning` field (stale/older
+            // schema) is "unknown", not "no reasoning" — report a miss so
+            // the caller falls back to its heuristic.
+            let supported = model.reasoning?;
+            let efforts = model
+                .reasoning_options
+                .iter()
+                .find(|o| o.kind == "effort")
+                .map(|o| {
+                    o.values
+                        .iter()
+                        .filter_map(|v| v.clone())
+                        .collect::<Vec<String>>()
+                });
+            return Some(ModelReasoning {
+                supported,
+                efforts,
+            });
+        }
+    }
+    None
 }
 
 /// Resolves the user-supplied cache directory (e.g. `"cosh"` or `"cosh/cache"`)
@@ -141,6 +259,18 @@ impl CatalogCache {
 /// A known context window and the exact, current model ids it applies to.
 struct KnownContextWindow {
     window: usize,
+    aliases: &'static [&'static str],
+}
+
+/// Known reasoning capability for a set of exact model ids.
+struct KnownReasoning {
+    /// Whether the model advertises a configurable reasoning/thinking knob.
+    supported: bool,
+    /// The exact effort levels the model accepts (`low`, `medium`, `high`, …)
+    /// when it exposes effort-style reasoning; `None` for models that only
+    /// offer a toggle or a token budget (callers then offer the standard
+    /// low/medium/high set, which each provider's wire mapping tolerates).
+    efforts: Option<&'static [&'static str]>,
     aliases: &'static [&'static str],
 }
 
@@ -461,6 +591,351 @@ const KNOWN_CONTEXT_WINDOWS: &[KnownContextWindow] = &[
     },
 ];
 
+/// Known reasoning capabilities for the most used, current models, checked
+/// BEFORE the on-disk catalog is read.
+///
+/// Mirrors [`KNOWN_CONTEXT_WINDOWS`]: every alias here is an EXACT model id —
+/// there is no family catch-all like `"claude"` or `"qwen3"` that could
+/// mis-claim reasoning (a generic `"qwen3"` → yes would wrongly enable the
+/// reasoning dialog for the non-reasoning `qwen3-8b`/`qwen3-max`/`qwen3-coder`
+/// line, which the name heuristic still does today).
+///
+/// Values are taken from the models.dev catalog (the only source that exposes
+/// per-model reasoning metadata): `supported` is the catalog's `reasoning`
+/// flag and `efforts` its effort-style `reasoning_options.values`, verbatim.
+/// Models whose catalog entry lists only a toggle or a token budget carry
+/// `efforts: None` — the caller then offers the standard low/medium/high set,
+/// which every provider's wire mapping tolerates. Every alias here has a real
+/// catalog entry behind it — models absent from the catalog are intentionally
+/// NOT listed (a guessed `false` would permanently shadow a future catalog
+/// update; a guessed `true` would offer a knob the model rejects).
+const KNOWN_REASONING: &[KnownReasoning] = &[
+    // OpenAI — GPT-5.x reasoning line. Effort sets follow the catalog, which
+    // varies per model (newer flagships accept none/minimal/xhigh/max).
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["low", "medium", "high"]),
+        aliases: &[
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5.1",
+            "gpt-5.1-codex",
+            "gpt-5.1-codex-mini",
+            "gpt-5.2",
+            "gpt-5.4",
+        ],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["low", "medium", "high", "xhigh"]),
+        aliases: &["gpt-5.1-codex-max", "gpt-5.2-codex"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["medium", "high", "xhigh"]),
+        aliases: &["gpt-5.2-pro", "gpt-5.4-pro", "gpt-5.5-pro"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["none", "low", "medium", "high", "xhigh"]),
+        aliases: &[
+            "gpt-5.3-codex",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.5",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["none", "low", "medium", "high", "xhigh", "max"]),
+        aliases: &["gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["minimal", "low", "medium", "high"]),
+        aliases: &["gpt-5-nano"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["high"]),
+        aliases: &["gpt-5-pro"],
+    },
+    // OpenAI — o-series reasoning.
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["low", "medium", "high"]),
+        aliases: &["o1", "o3", "o3-mini", "o3-pro", "o4-mini"],
+    },
+    // OpenAI — legacy chat models without a reasoning knob (incl. o1-mini,
+    // which the name heuristic would wrongly claim via its "o1" prefix).
+    KnownReasoning {
+        supported: false,
+        efforts: None,
+        aliases: &[
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "o1-mini",
+            "gpt-5.2-chat",
+            "gpt-5.3-chat",
+        ],
+    },
+    // Anthropic — both the dotted and the dashed spellings carry their own
+    // catalog entries (the effort sets differ slightly between them).
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["low", "medium", "high"]),
+        aliases: &[
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-6",
+            "claude-opus-4.5",
+            "claude-opus-4-5",
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-haiku-4-5",
+        ],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["none", "low", "medium", "high", "max"]),
+        aliases: &["claude-sonnet-4.6", "claude-opus-4.6"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["low", "medium", "high", "xhigh", "max"]),
+        aliases: &[
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-fable-5",
+        ],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["none", "low", "medium", "high", "xhigh", "max"]),
+        aliases: &["claude-opus-4.7", "claude-opus-4.8"],
+    },
+    // Claude 4.5/4.1 and haiku expose only a toggle or a token budget — no
+    // effort values in the catalog.
+    KnownReasoning {
+        supported: true,
+        efforts: None,
+        aliases: &[
+            "claude-sonnet-4",
+            "claude-sonnet-4.5",
+            "claude-opus-4",
+            "claude-opus-4.1",
+            "claude-opus-4-1",
+            "claude-haiku-4.5",
+        ],
+    },
+    // Claude 3.x has no reasoning knob.
+    KnownReasoning {
+        supported: false,
+        efforts: None,
+        aliases: &["claude-3-haiku", "claude-3-sonnet", "claude-3-5-haiku"],
+    },
+    // DeepSeek.
+    KnownReasoning {
+        supported: true,
+        efforts: None,
+        aliases: &["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-r1"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
+        aliases: &["deepseek-chat-v3.1"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: None,
+        aliases: &["deepseek-v3.2"],
+    },
+    KnownReasoning {
+        supported: false,
+        efforts: None,
+        aliases: &[
+            "deepseek-chat",
+            "deepseek-chat-v3-0324",
+            "deepseek-reasoner",
+            "deepseek-v3.1",
+        ],
+    },
+    // Google Gemini — 2.5 exposes thinking only (budget knob, no efforts);
+    // the 3.x line adds effort levels.
+    KnownReasoning {
+        supported: true,
+        efforts: None,
+        aliases: &[
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-3-pro",
+            "gemini-3.1-pro",
+        ],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["minimal", "low", "high"]),
+        aliases: &["gemini-3-flash"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["minimal", "low", "medium", "high"]),
+        aliases: &[
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.6-flash",
+        ],
+    },
+    KnownReasoning {
+        supported: false,
+        efforts: None,
+        aliases: &["gemini-2.0-flash"],
+    },
+    // Qwen — only the thinking-flavoured 3.x models reason; the plain
+    // qwen3 base/coder/max line does NOT (the name heuristic gets this
+    // wrong today — the static table fixes it with exact matches).
+    KnownReasoning {
+        supported: true,
+        efforts: None,
+        aliases: &[
+            "qwen3.5-plus",
+            "qwen3.5-9b",
+            "qwen3.5-35b-a3b",
+            "qwen3.5-122b-a10b",
+            "qwen3.6-flash",
+            "qwen3.6-plus",
+            "qwen3.6-27b",
+            "qwen3.7-flash",
+            "qwen3.7-plus",
+            "qwen3.7-max",
+            "qwen3.8-max",
+        ],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["none", "minimal", "low", "medium", "high"]),
+        aliases: &["qwen3.5-397b-a17b", "qwen3.6-35b-a3b"],
+    },
+    KnownReasoning {
+        supported: false,
+        efforts: None,
+        aliases: &[
+            "qwen3-8b",
+            "qwen3-14b",
+            "qwen3-32b",
+            "qwen3-235b-a22b",
+            "qwen3-30b-a3b",
+            "qwen3-max",
+            "qwen3-coder",
+            "qwen3-coder-flash",
+            "qwen3-coder-plus",
+            "qwen3-coder-30b-a3b-instruct",
+            "qwen3-vl-30b-a3b-instruct",
+            "qwen3-vl-8b-instruct",
+            "qwen3.5-flash",
+            "qwen3.5-27b",
+            "qwen2.5-72b-instruct",
+            "qwen2.5-7b-instruct",
+            "qwen2.5-vl-72b-instruct",
+        ],
+    },
+    // Kimi.
+    KnownReasoning {
+        supported: true,
+        efforts: None,
+        aliases: &["kimi-k3", "kimi-k2-thinking", "kimi-k2.5"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["none", "minimal", "low", "medium", "high"]),
+        aliases: &["kimi-k2.6", "kimi-k2.7-code"],
+    },
+    KnownReasoning {
+        supported: false,
+        efforts: None,
+        aliases: &["kimi-k2", "kimi-k2-0905"],
+    },
+    // Mistral — only the 3.5/2603 generation exposes a reasoning knob.
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["none", "high"]),
+        aliases: &["mistral-medium-3.5", "mistral-small-2603"],
+    },
+    KnownReasoning {
+        supported: false,
+        efforts: None,
+        aliases: &[
+            "mistral-large",
+            "mistral-large-2512",
+            "mistral-medium",
+            "mistral-small",
+            "mistral-small-4",
+            "codestral",
+            "codestral-2508",
+            "ministral-3b-2512",
+            "ministral-8b-2512",
+            "ministral-14b-2512",
+            "mistral-nemo",
+        ],
+    },
+    // xAI Grok.
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["low", "medium", "high"]),
+        aliases: &["grok-4.20", "grok-3-mini", "grok-latest"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: None,
+        aliases: &["grok-4", "grok-4-fast", "grok-4.3", "grok-4.5"],
+    },
+    KnownReasoning {
+        supported: false,
+        efforts: None,
+        aliases: &["grok-3"],
+    },
+    // Meta Llama — no reasoning knob.
+    KnownReasoning {
+        supported: false,
+        efforts: None,
+        aliases: &[
+            "llama-4-scout",
+            "llama-4-maverick",
+            "llama-3.1-8b-instruct",
+            "llama-3.1-70b-instruct",
+            "llama-3.3-70b-instruct",
+        ],
+    },
+    // Zhipu GLM.
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["high", "max"]),
+        aliases: &["glm-5.2"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: None,
+        aliases: &[
+            "glm-4.5",
+            "glm-4.5-air",
+            "glm-4.6",
+            "glm-4.7",
+            "glm-4.7-flash",
+            "glm-5",
+            "glm-5-turbo",
+            "glm-5.1",
+        ],
+    },
+];
+
 /// Look up a model's window in the static table.
 ///
 /// Matching is EXACT and case-insensitive against a model's registered
@@ -485,6 +960,35 @@ fn static_known_window(model: &str) -> Option<usize> {
             })
         })
         .map(|entry| entry.window)
+}
+
+/// Look up a model's reasoning capability in the static table.
+///
+/// Matching follows the exact same rules as [`static_known_window`] (exact,
+/// case-insensitive, `~`- and vendor-prefix tolerant) — the two tables are
+/// keyed consistently, so a model that resolves its window statically also
+/// resolves its reasoning statically, without ever touching the disk catalog.
+///
+/// Returns `None` for models absent from the table — the caller then falls
+/// back to the catalog and finally to a name heuristic.
+fn static_known_reasoning(model: &str) -> Option<ModelReasoning> {
+    let lower = model.trim_start_matches('~').to_lowercase();
+    let bare = lower.rsplit('/').next().unwrap_or(&lower);
+    KNOWN_REASONING
+        .iter()
+        .find(|entry| {
+            entry.aliases.iter().any(|alias| {
+                let a = alias.to_lowercase();
+                let a_bare = a.rsplit('/').next().unwrap_or(&a);
+                lower == a || lower == a_bare || bare == a || bare == a_bare
+            })
+        })
+        .map(|entry| ModelReasoning {
+            supported: entry.supported,
+            efforts: entry
+                .efforts
+                .map(|efforts| efforts.iter().map(|e| (*e).to_string()).collect()),
+        })
 }
 
 /// Flexible match against the OpenRouter catalog: the needle matches a model
@@ -753,6 +1257,127 @@ mod tests {
         assert_eq!(static_known_window("deepseek-chat"), Some(128_000));
     }
 
+    // Static reasoning table (no network, no disk).
+
+    #[test]
+    fn static_reasoning_table_covers_the_most_common_models() {
+        // Current flagship models resolve their reasoning statically.
+        assert_eq!(
+            static_known_reasoning("deepseek-v4-flash").map(|m| m.supported),
+            Some(true)
+        );
+        assert_eq!(
+            static_known_reasoning("gpt-5").map(|m| m.supported),
+            Some(true)
+        );
+        assert_eq!(
+            static_known_reasoning("claude-sonnet-4-5").map(|m| m.supported),
+            Some(true)
+        );
+        // Non-reasoning models resolve to an explicit "no".
+        assert_eq!(
+            static_known_reasoning("gpt-4o").map(|m| m.supported),
+            Some(false)
+        );
+        // o1-mini and the plain qwen3 line are the exact cases the name
+        // heuristic gets wrong ("o1" prefix / "qwen3" substring): the static
+        // table must say no, not fall through to the heuristic.
+        assert_eq!(
+            static_known_reasoning("o1-mini").map(|m| m.supported),
+            Some(false)
+        );
+        assert_eq!(
+            static_known_reasoning("qwen3-8b").map(|m| m.supported),
+            Some(false)
+        );
+        assert_eq!(
+            static_known_reasoning("qwen3-max").map(|m| m.supported),
+            Some(false)
+        );
+        assert_eq!(
+            static_known_reasoning("qwen3-coder").map(|m| m.supported),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn static_reasoning_reports_efforts_verbatim() {
+        // gpt-5 accepts low/medium/high; the catalog says so and the table
+        // mirrors it exactly.
+        let gpt5 = static_known_reasoning("gpt-5").expect("gpt-5 must be known");
+        assert_eq!(
+            gpt5.efforts,
+            Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()])
+        );
+        // A model whose catalog entry lists only a toggle (no effort values)
+        // carries `efforts: None` — callers offer the standard set.
+        let glm5 = static_known_reasoning("glm-5").expect("glm-5 must be known");
+        assert!(glm5.supported);
+        assert!(glm5.efforts.is_none());
+        // Effort sets vary per model and are preserved verbatim.
+        let opus46 = static_known_reasoning("claude-opus-4.6").expect("known");
+        assert_eq!(
+            opus46.efforts,
+            Some(vec![
+                "none".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn static_reasoning_matches_case_vendor_and_tilde_variants() {
+        // Bare, capitalized and vendor-prefixed spellings all resolve.
+        assert_eq!(
+            static_known_reasoning("DeepSeek-V4-Flash").map(|m| m.supported),
+            Some(true)
+        );
+        assert_eq!(
+            static_known_reasoning("deepseek/deepseek-v4-flash").map(|m| m.supported),
+            Some(true)
+        );
+        assert_eq!(
+            static_known_reasoning("~deepseek/deepseek-v4-flash").map(|m| m.supported),
+            Some(true)
+        );
+        assert_eq!(
+            static_known_reasoning("anthropic/claude-sonnet-4-5").map(|m| m.supported),
+            Some(true)
+        );
+        assert_eq!(
+            static_known_reasoning("openai/gpt-4o").map(|m| m.supported),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn static_reasoning_family_names_never_match() {
+        // Family names are no catch-alls: they must never match any model.
+        assert_eq!(static_known_reasoning("claude"), None);
+        assert_eq!(static_known_reasoning("deepseek"), None);
+        assert_eq!(static_known_reasoning("qwen3"), None);
+        // Unknown models fall through to the catalog.
+        assert_eq!(static_known_reasoning("totally-unknown-model-123"), None);
+    }
+
+    #[test]
+    fn model_reasoning_serves_the_static_table_without_disk() {
+        // A bogus cache dir proves the static tier resolves first: the model
+        // is answered even though the catalog read would fail.
+        let meta = model_reasoning("gpt-5", Some("/nonexistent/cosh/cache"))
+            .expect("static hit");
+        assert!(meta.supported);
+        assert_eq!(
+            meta.efforts,
+            Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()])
+        );
+        // Unknown models with no cache fall through to None (then heuristic).
+        assert!(model_reasoning("totally-unknown-model-123", None).is_none());
+    }
+
     // OpenRouter flexible matching (no network).
 
     fn model(id: &str, canonical: Option<&str>, context: Option<usize>) -> OpenRouterModel {
@@ -823,6 +1448,7 @@ mod tests {
                         (*id).to_string(),
                         ModelsDevModel {
                             limit: ModelsDevLimit { context: *context },
+                            ..Default::default()
                         },
                     )
                 })
@@ -887,6 +1513,86 @@ mod tests {
         // The file name is exactly the fixed "models.dev.json" under the dir.
         assert!(dir.join(MODELS_DEV_CATALOG_FILE).is_file());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Write a small models.dev-style catalog into a temp cache dir and return
+    /// the cache dir name. `tag` must differ per test — the catalog resolver
+    /// is exercised in parallel and shared directories would race.
+    fn seed_models_dev_cache(tag: &str, raw: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-mdreason-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let cache = CatalogCache::new(dir.clone());
+        cache.save_raw(MODELS_DEV_CATALOG_FILE, raw);
+        dir.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn catalog_reasoning_resolves_supported_model_with_efforts() {
+        let raw = r#"{
+            "anthropic": {
+                "models": {
+                    "claude-sonnet-4-6": {
+                        "limit": {"context": 200000},
+                        "reasoning": true,
+                        "reasoning_options": [
+                            {"type": "effort", "values": ["low", "medium", "high", "max"]},
+                            {"type": "budget_tokens", "min": 1024}
+                        ]
+                    }
+                }
+            }
+        }"#;
+        let dir = seed_models_dev_cache("efforts", raw);
+        let meta = model_reasoning_from_catalog("claude-sonnet-4-6", Some(&dir))
+            .expect("model must resolve");
+        assert!(meta.supported);
+        let efforts = meta.efforts.unwrap_or_default();
+        assert_eq!(efforts, vec!["low", "medium", "high", "max"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catalog_reasoning_reports_non_reasoning_model() {
+        let raw = r#"{"openai": {"models": {"gpt-image-2": {"limit": {"context": 1000}, "reasoning": false}}}}"#;
+        let dir = seed_models_dev_cache("nonreasoning", raw);
+        let meta = model_reasoning_from_catalog("gpt-image-2", Some(&dir))
+            .expect("model must resolve");
+        assert!(!meta.supported);
+        assert_eq!(meta.efforts, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catalog_reasoning_toggle_model_has_no_efforts() {
+        let raw = r#"{"zhipuai": {"models": {"glm-5": {"limit": {"context": 204800}, "reasoning": true, "reasoning_options": [{"type": "toggle"}]}}}}"#;
+        let dir = seed_models_dev_cache("toggle", raw);
+        let meta = model_reasoning_from_catalog("glm-5", Some(&dir))
+            .expect("model must resolve");
+        assert!(meta.supported);
+        assert_eq!(meta.efforts, None, "toggle models advertise no effort values");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catalog_reasoning_unknown_model_returns_none() {
+        let raw = r#"{"openai": {"models": {"gpt-4o": {"limit": {"context": 128000}, "reasoning": false}}}}"#;
+        let dir = seed_models_dev_cache("unknown", raw);
+        assert!(model_reasoning_from_catalog("nonexistent-model", Some(&dir)).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A catalog entry missing the `reasoning` field (older schema) is
+    /// "unknown", not "no reasoning" — the lookup reports a miss so callers
+    /// fall back to their heuristic.
+    #[test]
+    fn catalog_reasoning_missing_field_is_unknown() {
+        let raw = r#"{"openai": {"models": {"gpt-4o": {"limit": {"context": 128000}}}}}"#;
+        let dir = seed_models_dev_cache("missingfield", raw);
+        assert!(model_reasoning_from_catalog("gpt-4o", Some(&dir)).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

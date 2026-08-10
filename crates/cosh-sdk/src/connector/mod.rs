@@ -9,7 +9,7 @@
 
 pub(crate) mod claude;
 pub(crate) mod common;
-pub(crate) mod context_discovery;
+pub(crate) mod discovery;
 pub(crate) mod gemini;
 pub(crate) mod openai_compatible;
 
@@ -20,7 +20,9 @@ mod params;
 mod provider;
 
 pub use client::Connector;
-pub use context_discovery::discover_context_window;
+pub use discovery::{
+    ModelReasoning, discover_context_window, model_reasoning, model_reasoning_from_catalog,
+};
 pub use error::ConnectorError;
 pub use output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 pub use params::{
