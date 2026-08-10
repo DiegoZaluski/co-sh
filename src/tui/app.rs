@@ -133,6 +133,9 @@ pub struct App {
     theme_dialog_original: Option<String>,
     /// Stores the model that was active when the model dialog opened (for cancel/restore)
     model_dialog_original: Option<String>,
+    /// Stores the reasoning level that was active when the model dialog opened
+    /// (for cancel/restore).
+    reasoning_dialog_original: Option<String>,
     /// Stale-while-revalidate cache for model listings, keyed by provider.
     model_cache: crate::util::cache::StaleCache<String, Vec<cosh::ModelEntry>>,
     /// Generic preferences cache (theme, etc.) persisted as key-value pairs.
@@ -242,6 +245,7 @@ impl App {
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
             theme_dialog_original: None,
             model_dialog_original: None,
+            reasoning_dialog_original: None,
             model_cache: crate::util::cache::StaleCache::new("cache", "model.json"),
             prefs_cache,
             session_store,
@@ -317,8 +321,9 @@ impl App {
 
         let current = self.llm_config.model.clone().unwrap_or_default();
 
-        // Store the current model so we can restore on cancel
+        // Store the current model (and reasoning) so we can restore on cancel
         self.model_dialog_original = Some(current.clone());
+        self.reasoning_dialog_original = self.llm_config.reasoning.clone();
 
         // Collect providers and check if their API key is still configured.
         // If a provider's env var is missing, invalidate its cache entry so
@@ -855,30 +860,14 @@ impl App {
                         }
                     };
                     if let Some((model, provider)) = selection {
-                        if model == "auto" {
-                            self.llm_config.model = Some("auto".to_string());
-                            self.llm_config.provider = String::new();
-                        } else {
-                            self.llm_config.model = Some(model);
-                            self.llm_config.provider = provider;
-                        }
+                        self.confirm_model_entry(&model, &provider);
                     }
                 }
-                self.model_dialog_original = None;
-                self.dialog.pop();
                 true
             }
             KeyCode::Esc => {
-                // Restore original model
-                if let Some(ref orig) = self.model_dialog_original {
-                    self.llm_config.model = if orig.is_empty() {
-                        None
-                    } else {
-                        Some(orig.clone())
-                    };
-                }
-                self.model_dialog_original = None;
-                self.dialog.pop();
+                // Restore original model + reasoning
+                self.restore_model_dialog();
                 true
             }
             KeyCode::Backspace => {
@@ -895,6 +884,150 @@ impl App {
             }
             KeyCode::Char(ch) => {
                 self.model_dialog_push_filter(ch);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Apply a picked model — or, when the model supports configurable
+    /// reasoning, push the reasoning sub-dialog on top of the model list.
+    fn confirm_model_entry(&mut self, model: &str, provider: &str) {
+        if model == "auto" {
+            self.llm_config.model = Some("auto".to_string());
+            self.llm_config.provider = String::new();
+            self.llm_config.reasoning = None;
+            self.model_dialog_original = None;
+            self.reasoning_dialog_original = None;
+            self.dialog.pop();
+            return;
+        }
+
+        if crate::config::model_supports_reasoning(model) {
+            let current = self.llm_config.reasoning.clone().unwrap_or_default();
+            let levels = crate::config::model_reasoning_levels(model);
+            let start = levels
+                .iter()
+                .position(|l| l == &current)
+                .unwrap_or(0);
+            // Push the sub-dialog FIRST, then set its initial selection —
+            // mutating the ModelList's `selected` (the current top before
+            // the push) would corrupt the model highlight after Esc.
+            self.dialog.show(DialogType::ReasoningList {
+                model: model.to_string(),
+                provider: provider.to_string(),
+                levels,
+                current,
+            });
+            if let Some(inst) = self.dialog.current_mut() {
+                inst.selected = start;
+            }
+        } else {
+            self.llm_config.model = Some(model.to_string());
+            self.llm_config.provider = provider.to_string();
+            // Keep the previous reasoning level — the new model either
+            // ignores it or uses it; user can change it from the dialog.
+            self.model_dialog_original = None;
+            self.reasoning_dialog_original = None;
+            self.dialog.pop();
+        }
+    }
+
+    /// Restore the model + reasoning that were active when the dialog opened.
+    fn restore_model_dialog(&mut self) {
+        if let Some(ref orig) = self.model_dialog_original {
+            self.llm_config.model = if orig.is_empty() {
+                None
+            } else {
+                Some(orig.clone())
+            };
+        }
+        if let Some(ref orig) = self.reasoning_dialog_original {
+            self.llm_config.reasoning = if orig.is_empty() {
+                None
+            } else {
+                Some(orig.clone())
+            };
+        }
+        self.model_dialog_original = None;
+        self.reasoning_dialog_original = None;
+        self.dialog.pop();
+    }
+
+    fn is_reasoning_dialog_visible(&self) -> bool {
+        self.dialog.visible()
+            && matches!(
+                self.dialog.current().map(|d| &d.dialog_type),
+                Some(DialogType::ReasoningList { .. })
+            )
+    }
+
+    fn handle_reasoning_dialog_key(&mut self, key: KeyCode) -> bool {
+        if !self.is_reasoning_dialog_visible() {
+            return false;
+        }
+
+        match key {
+            KeyCode::Up => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ReasoningList { levels, .. } = &d.dialog_type
+                    && !levels.is_empty()
+                {
+                    d.selected = if d.selected == 0 {
+                        levels.len() - 1
+                    } else {
+                        d.selected - 1
+                    };
+                }
+                true
+            }
+            KeyCode::Down => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::ReasoningList { levels, .. } = &d.dialog_type
+                    && !levels.is_empty()
+                {
+                    d.selected = (d.selected + 1) % levels.len();
+                }
+                true
+            }
+            KeyCode::Enter => {
+                let (model, provider, level) = {
+                    let Some(d) = self.dialog.current() else {
+                        return true;
+                    };
+                    let DialogType::ReasoningList {
+                        model,
+                        provider,
+                        levels,
+                        ..
+                    } = &d.dialog_type
+                    else {
+                        return true;
+                    };
+                    let idx = d.selected.min(levels.len().saturating_sub(1));
+                    (
+                        model.clone(),
+                        provider.clone(),
+                        levels[idx].clone(),
+                    )
+                };
+                self.llm_config.model = Some(model);
+                self.llm_config.provider = provider;
+                self.llm_config.reasoning = if level == "default" {
+                    None
+                } else {
+                    Some(level)
+                };
+                self.model_dialog_original = None;
+                self.reasoning_dialog_original = None;
+                // Pop both the reasoning sub-dialog and the model list.
+                self.dialog.pop();
+                self.dialog.pop();
+                true
+            }
+            KeyCode::Esc => {
+                // Back to the model list (nothing applied yet).
+                self.dialog.pop();
                 true
             }
             _ => false,
@@ -1946,7 +2079,15 @@ impl App {
                         return Ok(false);
                     }
 
-                    // Check model dialog SECOND, before action lookup
+                    // Check reasoning sub-dialog SECOND (pushed on top of the
+                    // model list), before the model dialog.
+                    if self.is_reasoning_dialog_visible()
+                        && self.handle_reasoning_dialog_key(key.code)
+                    {
+                        return Ok(false);
+                    }
+
+                    // Check model dialog THIRD, before action lookup
                     if self.is_model_dialog_visible() && self.handle_model_dialog_key(key.code) {
                         return Ok(false);
                     }
@@ -2533,6 +2674,7 @@ impl App {
                             let event_tx = self.event_tx.clone();
                             let provider = self.llm_config.provider.clone();
                             let model = self.llm_config.model.clone();
+                            let reasoning = self.llm_config.reasoning.clone();
                             let fallbacks = self.router_view.fallbacks.clone();
                             // Auto-rotate: move the first working fallback to the front so the
                             // next message tries the provider that actually worked before wasting
@@ -2680,10 +2822,15 @@ impl App {
                                             } else {
                                                 match Connector::new(&provider) {
                                                     Ok(c) => {
-                                                        connector = if let Some(ref m) = model {
+                                                        let with_model = if let Some(ref m) = model {
                                                             c.with_model(m)
                                                         } else {
                                                             c
+                                                        };
+                                                        connector = if let Some(ref r) = reasoning {
+                                                            with_model.with_reasoning_effort(r)
+                                                        } else {
+                                                            with_model
                                                         };
                                                     }
                                                     Err(e) => {
@@ -4071,6 +4218,9 @@ impl App {
                             DialogType::ModelList { .. } => {
                                 self.handle_model_dialog_key(KeyCode::Up);
                             }
+                            DialogType::ReasoningList { .. } => {
+                                self.handle_reasoning_dialog_key(KeyCode::Up);
+                            }
                             DialogType::ThemeList { .. } => {
                                 self.handle_theme_dialog_key(KeyCode::Up);
                             }
@@ -4108,6 +4258,9 @@ impl App {
                         match &d.dialog_type {
                             DialogType::ModelList { .. } => {
                                 self.handle_model_dialog_key(KeyCode::Down);
+                            }
+                            DialogType::ReasoningList { .. } => {
+                                self.handle_reasoning_dialog_key(KeyCode::Down);
                             }
                             DialogType::ThemeList { .. } => {
                                 self.handle_theme_dialog_key(KeyCode::Down);
@@ -4201,10 +4354,18 @@ impl App {
                                     };
                                 let selected_idx = d.selected.min(models.len().saturating_sub(1));
                                 if let Some(entry) = models.get(selected_idx) {
-                                    self.llm_config.model = Some(entry.model.clone());
-                                    self.llm_config.provider.clone_from(&entry.provider);
+                                    // Applies the model — or pushes the reasoning
+                                    // sub-dialog when the model supports it.
+                                    self.confirm_model_entry(&entry.model, &entry.provider);
                                 }
-                                self.model_dialog_original = None;
+                                // confirm_model_entry pops the dialog itself (or
+                                // stacked a reasoning dialog on top) — skip the
+                                // unconditional pop below in that case.
+                                return Ok(true);
+                            }
+                            DialogType::ReasoningList { .. } => {
+                                self.handle_reasoning_dialog_key(KeyCode::Enter);
+                                return Ok(true);
                             }
                             DialogType::ApiKeyInput {
                                 provider,
@@ -4228,6 +4389,12 @@ impl App {
                     return Ok(true);
                 }
                 DialogAction::Dismissed => {
+                    // Reasoning sub-dialog dismissed (click outside): pop back
+                    // to the model list, keeping the restore state intact.
+                    if self.is_reasoning_dialog_visible() {
+                        self.dialog.pop();
+                        return Ok(true);
+                    }
                     // Restore original if needed
                     if self.is_theme_dialog_visible()
                         && let Some(ref orig) = self.theme_dialog_original
@@ -4236,17 +4403,13 @@ impl App {
                         self.theme = t.clone();
                         self.config.theme_gen += 1;
                     }
-                    if self.is_model_dialog_visible()
-                        && let Some(ref orig) = self.model_dialog_original
-                    {
-                        self.llm_config.model = if orig.is_empty() {
-                            None
-                        } else {
-                            Some(orig.clone())
-                        };
+                    if self.is_model_dialog_visible() {
+                        self.restore_model_dialog();
+                        return Ok(true);
                     }
                     self.theme_dialog_original = None;
                     self.model_dialog_original = None;
+                    self.reasoning_dialog_original = None;
                     self.dialog.pop();
                     return Ok(true);
                 }
