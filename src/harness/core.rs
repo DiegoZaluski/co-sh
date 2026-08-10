@@ -158,10 +158,16 @@ async fn discovered_context_window(model: Option<&str>) -> Option<usize> {
     {
         return *window;
     }
-    let window = tokio::time::timeout(CONTEXT_DISCOVERY_TIMEOUT, discover_context_window(model))
-        .await
-        .ok()
-        .flatten();
+    // On-disk catalog caching under `~/.local/share/cosh/cache` (see `cosh-sdk`'s
+    // `discover_context_window`), so repeated launches reuse the downloaded
+    // models.dev / OpenRouter catalogs instead of re-fetching them.
+    let window = tokio::time::timeout(
+        CONTEXT_DISCOVERY_TIMEOUT,
+        discover_context_window(model, Some("cosh/cache")),
+    )
+    .await
+    .ok()
+    .flatten();
     log::debug!("context window discovery for {model}: {window:?}");
     cache
         .lock()

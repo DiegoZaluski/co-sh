@@ -1247,6 +1247,7 @@ dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.0",
  "csscolorparser 0.7.2",
+ "directories",
  "downcast-rs",
  "env_logger",
  "finl_unicode",

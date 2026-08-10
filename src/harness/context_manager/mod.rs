@@ -566,7 +566,9 @@ impl ContextManager {
     /// A new ContextManager with the discovered context window, or the default
     /// [`MAX_CONTEXT_TOKENS`] if discovery fails.
     pub async fn with_discovered_context(model_name: &str) -> Self {
-        let max_tokens = discover_context_window(model_name)
+        // On-disk catalog caching under `~/.local/share/cosh/cache`, so repeated
+        // launches reuse the downloaded models.dev / OpenRouter catalogs.
+        let max_tokens = discover_context_window(model_name, Some("cosh/cache"))
             .await
             .unwrap_or(MAX_CONTEXT_TOKENS);
 
