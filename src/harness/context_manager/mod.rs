@@ -102,9 +102,9 @@
 //! they switch the model.
 
 pub mod compression;
-pub mod todo_ctxt;
 #[cfg(test)]
 mod test;
+pub mod todo_ctxt;
 
 use crate::util::TokenEncoding;
 use cosh_sdk::connector::{
@@ -112,10 +112,10 @@ use cosh_sdk::connector::{
     discover_context_window, tool_result_message, user_message,
 };
 use cosh_tools::plan::types::TodoList;
-use todo_ctxt::TodoContext;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use text_splitter::TextSplitter;
+use todo_ctxt::TodoContext;
 
 use compression::init::{CHUNK_CAPACITY, init as deterministic_compress};
 
@@ -1251,8 +1251,8 @@ impl ContextManager {
         // Collect the distinct chains (call/result halves share a call_id).
         let mut chains: Vec<(String, usize, bool, usize)> = Vec::new();
         for item in &self.items {
-            let (ContextItem::ToolCall { call_id, .. }
-            | ContextItem::ToolResult { call_id, .. }) = item
+            let (ContextItem::ToolCall { call_id, .. } | ContextItem::ToolResult { call_id, .. }) =
+                item
             else {
                 continue;
             };

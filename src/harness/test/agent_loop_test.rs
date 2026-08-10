@@ -631,14 +631,11 @@ async fn run_agent_loop_drains_tool_chains_on_context_window_overflow() {
             Err(_) => continue,
         }
     }
-    let (stuck, items) = tokio::time::timeout(
-        tokio::time::Duration::from_secs(2),
-        state_rx.recv(),
-    )
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or((false, Vec::new()));
+    let (stuck, items) = tokio::time::timeout(tokio::time::Duration::from_secs(2), state_rx.recv())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or((false, Vec::new()));
     handle.abort();
 
     // The exhausted overflow surfaces a persistent warning to the user.
@@ -678,7 +675,10 @@ async fn run_agent_loop_drains_tool_chains_on_context_window_overflow() {
         "all tool chains were drained"
     );
     // The provider is recorded as stuck (the notification persists).
-    assert!(stuck, "the provider must be marked stuck after the chains are exhausted");
+    assert!(
+        stuck,
+        "the provider must be marked stuck after the chains are exhausted"
+    );
 }
 
 // A generic (non-context-window) summarizer error is retried
@@ -833,7 +833,9 @@ async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
     );
     // …but the doomed summarizer call is NOT made: no lifecycle events.
     assert!(
-        !events.iter().any(|e| matches!(e, HarnessEvent::LlmCompaction { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::LlmCompaction { .. })),
         "no summarizer call when the provider is stuck; events={events:?}"
     );
     assert!(
@@ -870,11 +872,10 @@ async fn run_agent_loop_drains_chains_on_main_request_overflow() {
     h.context_manager.add_tool_result("t0", "contents");
     h = h.with_mock_streams(vec![
         Err(CONTEXT_WINDOW_MARKER), // main request: overflow → drain one chain
-        Ok(vec!["final answer"]),  // retry with rebuilt messages: succeeds
+        Ok(vec!["final answer"]),   // retry with rebuilt messages: succeeds
     ]);
 
-    let (state_tx, mut state_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Vec<ContextItem>>();
+    let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<ContextItem>>();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -907,14 +908,11 @@ async fn run_agent_loop_drains_chains_on_main_request_overflow() {
             Err(_) => continue,
         }
     }
-    let items = tokio::time::timeout(
-        tokio::time::Duration::from_secs(2),
-        state_rx.recv(),
-    )
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_default();
+    let items = tokio::time::timeout(tokio::time::Duration::from_secs(2), state_rx.recv())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     handle.abort();
 
     assert!(
@@ -924,9 +922,7 @@ async fn run_agent_loop_drains_chains_on_main_request_overflow() {
         "the retry succeeds and the loop completes; events={events:?}"
     );
     assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, HarnessEvent::Error(_))),
+        !events.iter().any(|e| matches!(e, HarnessEvent::Error(_))),
         "no terminal error after the drain retry"
     );
     assert!(

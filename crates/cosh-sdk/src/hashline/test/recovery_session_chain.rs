@@ -102,7 +102,10 @@ fn replays_edits_onto_current_when_every_anchor_line_is_unchanged() {
 #[test]
 fn warns_when_edit_anchors_lines_not_surfaced_by_tool_output() {
     let SeedTwoSnapshots {
-        mut store, v1_text, h0, ..
+        mut store,
+        v1_text,
+        h0,
+        ..
     } = seed_two_snapshots();
     // The tool output that minted h0 surfaced only line 1 (e.g. a grep that
     // matched line 1 and showed no context). The model now edits line 3 —
@@ -133,7 +136,10 @@ fn warns_when_edit_anchors_lines_not_surfaced_by_tool_output() {
 #[test]
 fn no_unseen_warning_when_anchors_were_surfaced() {
     let SeedTwoSnapshots {
-        mut store, v1_text, h0, ..
+        mut store,
+        v1_text,
+        h0,
+        ..
     } = seed_two_snapshots();
     // Line 3 was surfaced to the model — the edit is not blind.
     store.record_seen_lines(PATH, &h0, &[(1, "L1".to_string()), (3, "L3".to_string())]);

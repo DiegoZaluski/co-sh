@@ -104,9 +104,7 @@ mod tests {
     #[test]
     fn splits_lf_frames() {
         let mut buf = SseBuffer::new();
-        let frames = buf.push_and_drain(
-            b"data: {\"a\":1}\n\ndata: {\"b\":2}\n\n",
-        );
+        let frames = buf.push_and_drain(b"data: {\"a\":1}\n\ndata: {\"b\":2}\n\n");
         assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
     }
 
@@ -117,9 +115,7 @@ mod tests {
     #[test]
     fn splits_crlf_frames() {
         let mut buf = SseBuffer::new();
-        let frames = buf.push_and_drain(
-            b"data: {\"a\":1}\r\n\r\ndata: {\"b\":2}\r\n\r\n",
-        );
+        let frames = buf.push_and_drain(b"data: {\"a\":1}\r\n\r\ndata: {\"b\":2}\r\n\r\n");
         assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
     }
 
@@ -142,8 +138,14 @@ mod tests {
 
     #[test]
     fn separator_offsets_are_correct() {
-        assert_eq!(next_sse_separator(b"data: x\n\n"), Some(b"data: x\n\n".len()));
-        assert_eq!(next_sse_separator(b"data: x\r\n\r\n"), Some(b"data: x\r\n\r\n".len()));
+        assert_eq!(
+            next_sse_separator(b"data: x\n\n"),
+            Some(b"data: x\n\n".len())
+        );
+        assert_eq!(
+            next_sse_separator(b"data: x\r\n\r\n"),
+            Some(b"data: x\r\n\r\n".len())
+        );
         assert_eq!(next_sse_separator(b"data: x"), None);
     }
 
@@ -174,7 +176,10 @@ mod tests {
         // Server that never emits blank lines (NDJSON-ish): every `data:`
         // line still becomes a frame at EOF.
         let mut buf = SseBuffer::new();
-        assert!(buf.push_and_drain(b"data: {\"a\":1}\ndata: {\"b\":2}").is_empty());
+        assert!(
+            buf.push_and_drain(b"data: {\"a\":1}\ndata: {\"b\":2}")
+                .is_empty()
+        );
         assert_eq!(buf.flush(), vec![r#"{"a":1}"#, r#"{"b":2}"#]);
     }
 }

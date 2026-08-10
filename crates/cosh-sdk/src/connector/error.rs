@@ -190,23 +190,58 @@ mod tests {
         // OpenAI
         assert!(ConnectorError::classify_http(400, "This model's maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens.".into()).is_context_window());
         // Anthropic
-        assert!(ConnectorError::classify_http(400, "prompt is too long: 18000 tokens > 16000 maximum".into()).is_context_window());
+        assert!(
+            ConnectorError::classify_http(
+                400,
+                "prompt is too long: 18000 tokens > 16000 maximum".into()
+            )
+            .is_context_window()
+        );
         // Gemini
-        assert!(ConnectorError::classify_http(400, "The input is 200000 tokens long which exceeds the max input tokens of 1048576.".into()).is_context_window());
+        assert!(
+            ConnectorError::classify_http(
+                400,
+                "The input is 200000 tokens long which exceeds the max input tokens of 1048576."
+                    .into()
+            )
+            .is_context_window()
+        );
         // 413 payload-too-large with a context marker
-        assert!(ConnectorError::classify_http(413, "request body too large: exceeds the maximum context length".into()).is_context_window());
+        assert!(
+            ConnectorError::classify_http(
+                413,
+                "request body too large: exceeds the maximum context length".into()
+            )
+            .is_context_window()
+        );
         // API-error frames arrive with status 200 — the BODY is the signal
-        assert!(ConnectorError::classify_http(200, "This model's maximum context length is 64000 tokens.".into()).is_context_window());
+        assert!(
+            ConnectorError::classify_http(
+                200,
+                "This model's maximum context length is 64000 tokens.".into()
+            )
+            .is_context_window()
+        );
     }
 
     #[test]
     fn does_not_classify_unrelated_errors() {
         // Plain 400s that must stay HttpError: bad JSON, invalid tool args, auth…
-        assert!(!ConnectorError::classify_http(400, "Invalid JSON in request body".into()).is_context_window());
-        assert!(!ConnectorError::classify_http(400, "messages.0: tool_call_id does not match".into()).is_context_window());
+        assert!(
+            !ConnectorError::classify_http(400, "Invalid JSON in request body".into())
+                .is_context_window()
+        );
+        assert!(
+            !ConnectorError::classify_http(400, "messages.0: tool_call_id does not match".into())
+                .is_context_window()
+        );
         assert!(!ConnectorError::classify_http(401, "invalid api key".into()).is_context_window());
-        assert!(!ConnectorError::classify_http(500, "internal server error".into()).is_context_window());
-        assert!(!ConnectorError::classify_http(429, "rate limit exceeded".into()).is_context_window());
+        assert!(
+            !ConnectorError::classify_http(500, "internal server error".into()).is_context_window()
+        );
+        assert!(
+            !ConnectorError::classify_http(429, "rate limit exceeded".into()).is_context_window()
+        );
     }
 
     #[test]
@@ -220,7 +255,10 @@ mod tests {
         };
         assert_eq!(window_tokens, Some(128000));
 
-        let anthropic = ConnectorError::classify_http(400, "prompt is too long: 18000 tokens > 16000 maximum".into());
+        let anthropic = ConnectorError::classify_http(
+            400,
+            "prompt is too long: 18000 tokens > 16000 maximum".into(),
+        );
         let ConnectorError::ContextWindowExceeded { window_tokens, .. } = anthropic else {
             panic!("expected ContextWindowExceeded");
         };
@@ -228,7 +266,8 @@ mod tests {
 
         // No size keyword near the number → falls back to the largest
         // token-sized number in the body.
-        let fallback = ConnectorError::classify_http(400, "prompt is too long: 250000 tokens".into());
+        let fallback =
+            ConnectorError::classify_http(400, "prompt is too long: 250000 tokens".into());
         let ConnectorError::ContextWindowExceeded { window_tokens, .. } = fallback else {
             panic!("expected ContextWindowExceeded");
         };

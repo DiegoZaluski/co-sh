@@ -225,11 +225,8 @@ impl<S: SnapshotStore> Recovery<S> {
             // Replay onto current is gated by line-count equality AND
             // anchor-content alignment — see `replay_session_chain_on_current`
             // for why both guards together still don't fully prove correctness.
-            recovered = replay_session_chain_on_current(
-                &snapshot.text,
-                &args.current_text,
-                &args.edits,
-            );
+            recovered =
+                replay_session_chain_on_current(&snapshot.text, &args.current_text, &args.edits);
         }
 
         let mut result = recovered?;
@@ -244,11 +241,7 @@ impl<S: SnapshotStore> Recovery<S> {
     /// outside that window is the model working against unseen content — worth
     /// a "verify the diff" hedge. Silent when no seen lines were recorded for
     /// the tag (e.g. the file was read via a tool that does not track them).
-    fn append_unseen_anchor_warning(
-        &mut self,
-        result: &mut RecoveryResult,
-        args: &RecoveryArgs,
-    ) {
+    fn append_unseen_anchor_warning(&mut self, result: &mut RecoveryResult, args: &RecoveryArgs) {
         let seen = self.store.seen_lines(&args.path, &args.file_hash);
         if seen.is_empty() {
             return;

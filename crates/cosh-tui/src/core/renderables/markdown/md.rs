@@ -626,7 +626,13 @@ impl Renderable for MarkdownRenderable {
                                 x = area.x;
                                 if y < max_y {
                                     let cb_bg = palette.code_bg_color();
-                                    Self::fill_row(buf, area.x, y, max_x, Style::default().bg(cb_bg));
+                                    Self::fill_row(
+                                        buf,
+                                        area.x,
+                                        y,
+                                        max_x,
+                                        Style::default().bg(cb_bg),
+                                    );
 
                                     // Draw language label on the top gap row
                                     let lang = ctx.code_block_lang();

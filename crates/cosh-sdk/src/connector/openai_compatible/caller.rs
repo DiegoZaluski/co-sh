@@ -255,9 +255,9 @@ pub fn build_full_messages(system: &str, messages: &[ApiChatMessage]) -> Vec<Api
 /// internal transport detail only the Gemini caller reads.
 fn strip_thought_signatures(messages: &[ApiChatMessage]) -> Vec<ApiChatMessage> {
     let has_signature = messages.iter().any(|m| {
-        m.tool_calls.as_ref().is_some_and(|tcs| {
-            tcs.iter().any(|tc| tc.thought_signature.is_some())
-        })
+        m.tool_calls
+            .as_ref()
+            .is_some_and(|tcs| tcs.iter().any(|tc| tc.thought_signature.is_some()))
     });
     // The common path (no Gemini-originated calls in history) must not pay
     // a full clone of the message array just to strip nothing.

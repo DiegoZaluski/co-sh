@@ -464,8 +464,7 @@ data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReas
     let body = captured.lock().unwrap().take().unwrap();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        json["toolConfig"]["functionCallingConfig"]["mode"],
-        "AUTO",
+        json["toolConfig"]["functionCallingConfig"]["mode"], "AUTO",
         "tools present must force native function calling, got: {body}"
     );
 }
@@ -548,7 +547,9 @@ data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReas
     // Unsupported keywords must be gone from the whole payload.
     let raw = body.as_str();
     assert!(
-        !raw.contains("\"const\"") && !raw.contains("oneOf") && !raw.contains("additionalProperties"),
+        !raw.contains("\"const\"")
+            && !raw.contains("oneOf")
+            && !raw.contains("additionalProperties"),
         "payload still contains Gemini-rejected keywords: {raw}"
     );
 
@@ -576,8 +577,7 @@ data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReas
     let body = captured.lock().unwrap().take().unwrap();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        json["generationConfig"]["thinkingConfig"]["thinkingLevel"],
-        "high",
+        json["generationConfig"]["thinkingConfig"]["thinkingLevel"], "high",
         "reasoning effort must map onto thinkingLevel, got: {body}"
     );
 }

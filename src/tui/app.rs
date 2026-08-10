@@ -906,10 +906,7 @@ impl App {
         if crate::config::model_supports_reasoning(model) {
             let current = self.llm_config.reasoning.clone().unwrap_or_default();
             let levels = crate::config::model_reasoning_levels(model);
-            let start = levels
-                .iter()
-                .position(|l| l == &current)
-                .unwrap_or(0);
+            let start = levels.iter().position(|l| l == &current).unwrap_or(0);
             // Push the sub-dialog FIRST, then set its initial selection —
             // mutating the ModelList's `selected` (the current top before
             // the push) would corrupt the model highlight after Esc.
@@ -1005,11 +1002,7 @@ impl App {
                         return true;
                     };
                     let idx = d.selected.min(levels.len().saturating_sub(1));
-                    (
-                        model.clone(),
-                        provider.clone(),
-                        levels[idx].clone(),
-                    )
+                    (model.clone(), provider.clone(), levels[idx].clone())
                 };
                 self.llm_config.model = Some(model);
                 self.llm_config.provider = provider;

@@ -190,10 +190,7 @@ pub fn model_reasoning_from_catalog(
                         .filter_map(|v| v.clone())
                         .collect::<Vec<String>>()
                 });
-            return Some(ModelReasoning {
-                supported,
-                efforts,
-            });
+            return Some(ModelReasoning { supported, efforts });
         }
     }
     None
@@ -1307,7 +1304,11 @@ mod tests {
         let gpt5 = static_known_reasoning("gpt-5").expect("gpt-5 must be known");
         assert_eq!(
             gpt5.efforts,
-            Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()])
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string()
+            ])
         );
         // A model whose catalog entry lists only a toggle (no effort values)
         // carries `efforts: None` — callers offer the standard set.
@@ -1367,12 +1368,15 @@ mod tests {
     fn model_reasoning_serves_the_static_table_without_disk() {
         // A bogus cache dir proves the static tier resolves first: the model
         // is answered even though the catalog read would fail.
-        let meta = model_reasoning("gpt-5", Some("/nonexistent/cosh/cache"))
-            .expect("static hit");
+        let meta = model_reasoning("gpt-5", Some("/nonexistent/cosh/cache")).expect("static hit");
         assert!(meta.supported);
         assert_eq!(
             meta.efforts,
-            Some(vec!["low".to_string(), "medium".to_string(), "high".to_string()])
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string()
+            ])
         );
         // Unknown models with no cache fall through to None (then heuristic).
         assert!(model_reasoning("totally-unknown-model-123", None).is_none());
@@ -1520,11 +1524,8 @@ mod tests {
     /// the cache dir name. `tag` must differ per test — the catalog resolver
     /// is exercised in parallel and shared directories would race.
     fn seed_models_dev_cache(tag: &str, raw: &str) -> String {
-        let dir = std::env::temp_dir().join(format!(
-            "cosh-mdreason-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cosh-mdreason-{}-{}", std::process::id(), tag));
         let cache = CatalogCache::new(dir.clone());
         cache.save_raw(MODELS_DEV_CATALOG_FILE, raw);
         dir.to_string_lossy().into_owned()
@@ -1559,8 +1560,8 @@ mod tests {
     fn catalog_reasoning_reports_non_reasoning_model() {
         let raw = r#"{"openai": {"models": {"gpt-image-2": {"limit": {"context": 1000}, "reasoning": false}}}}"#;
         let dir = seed_models_dev_cache("nonreasoning", raw);
-        let meta = model_reasoning_from_catalog("gpt-image-2", Some(&dir))
-            .expect("model must resolve");
+        let meta =
+            model_reasoning_from_catalog("gpt-image-2", Some(&dir)).expect("model must resolve");
         assert!(!meta.supported);
         assert_eq!(meta.efforts, None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1570,10 +1571,12 @@ mod tests {
     fn catalog_reasoning_toggle_model_has_no_efforts() {
         let raw = r#"{"zhipuai": {"models": {"glm-5": {"limit": {"context": 204800}, "reasoning": true, "reasoning_options": [{"type": "toggle"}]}}}}"#;
         let dir = seed_models_dev_cache("toggle", raw);
-        let meta = model_reasoning_from_catalog("glm-5", Some(&dir))
-            .expect("model must resolve");
+        let meta = model_reasoning_from_catalog("glm-5", Some(&dir)).expect("model must resolve");
         assert!(meta.supported);
-        assert_eq!(meta.efforts, None, "toggle models advertise no effort values");
+        assert_eq!(
+            meta.efforts, None,
+            "toggle models advertise no effort values"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

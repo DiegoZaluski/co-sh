@@ -229,7 +229,9 @@ fn summarizing_height(part: &CompactionPart, expanded: bool, max_w: u16) -> u16 
     if expanded {
         body_h.saturating_add(1).saturating_add(pad) // pad + title + full body + pad
     } else if body_h > SUMMARIZING_COLLAPSED_LINES {
-        SUMMARIZING_COLLAPSED_LINES.saturating_add(2).saturating_add(pad) // pad + title + preview + hint + pad
+        SUMMARIZING_COLLAPSED_LINES
+            .saturating_add(2)
+            .saturating_add(pad) // pad + title + preview + hint + pad
     } else {
         body_h.saturating_add(1).saturating_add(pad)
     }
@@ -699,7 +701,14 @@ impl SessionView {
         let mut title = if expanded { "- " } else { "+ " }.to_string();
         title.push_str(&format!("Summarizing · {secs:.3}s"));
         let title_style = Style::default().fg(rgba_color(theme.secondary));
-        draw_text_line(buf, &title, x_off, title_y, max_w.saturating_sub(3), title_style);
+        draw_text_line(
+            buf,
+            &title,
+            x_off,
+            title_y,
+            max_w.saturating_sub(3),
+            title_style,
+        );
 
         // Markdown-rendered body — the same renderer as the chat Text parts,
         // so the raw markdown syntax never reaches the screen. The bg is the

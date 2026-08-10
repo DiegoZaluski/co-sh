@@ -119,7 +119,9 @@ fn heuristic_model_supports_reasoning(model: &str) -> bool {
         return true;
     }
     // Gemini 3.x and Claude 4.x both ship a thinking knob.
-    if m.starts_with("gemini-3") || m.starts_with("claude-sonnet-4") || m.starts_with("claude-opus-4")
+    if m.starts_with("gemini-3")
+        || m.starts_with("claude-sonnet-4")
+        || m.starts_with("claude-opus-4")
     {
         return true;
     }

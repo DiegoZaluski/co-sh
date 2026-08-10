@@ -1729,10 +1729,9 @@ impl DialogState {
                     };
                     let (name_fg, name_bg) = if is_selected {
                         let (pr, pg, pb, _) = theme.primary.to_ints();
-                        let lum = (0.299 * f32::from(pr)
-                            + 0.587 * f32::from(pg)
-                            + 0.114 * f32::from(pb))
-                            / 255.0;
+                        let lum =
+                            (0.299 * f32::from(pr) + 0.587 * f32::from(pg) + 0.114 * f32::from(pb))
+                                / 255.0;
                         (
                             if lum > 0.5 {
                                 Color::Rgb(0, 0, 0)

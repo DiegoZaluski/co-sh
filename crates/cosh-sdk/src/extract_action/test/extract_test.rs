@@ -531,7 +531,9 @@ fn stream_fence_quoted_midline_does_not_swallow_following_tool_call() {
         other => panic!("expected Text, got {other:?}"),
     }
 
-    let r = ex.extract_stream(r#"{"name": "expand_namespace", "arguments": {"server": "prod", "namespace": "acme"}}"#);
+    let r = ex.extract_stream(
+        r#"{"name": "expand_namespace", "arguments": {"server": "prod", "namespace": "acme"}}"#,
+    );
     match r {
         StreamAction::ToolCall(tc) => {
             assert_eq!(tc.name, "expand_namespace");
@@ -576,12 +578,14 @@ fn stream_real_fenced_code_block_keeps_body_as_display_text() {
     // A genuine markdown fence (opening ``` at a line start) still shields its
     // body from tool-call detection — JSON inside stays visible as text.
     let mut ex = make_extractor();
-    let content =
-        "```\n{\"name\": \"expand_namespace\", \"arguments\": {\"server\": \"s\", \"namespace\": \"n\"}}\n```\n";
+    let content = "```\n{\"name\": \"expand_namespace\", \"arguments\": {\"server\": \"s\", \"namespace\": \"n\"}}\n```\n";
     let r = ex.extract_stream(content);
     match r {
         StreamAction::Text(t) => {
-            assert!(t.contains("expand_namespace"), "body should be visible: {t:?}")
+            assert!(
+                t.contains("expand_namespace"),
+                "body should be visible: {t:?}"
+            )
         }
         other => panic!("expected Text, got {other:?}"),
     }

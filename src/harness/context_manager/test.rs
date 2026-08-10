@@ -308,7 +308,10 @@ fn tool_call_with_signature_round_trips_through_messages() {
     cm_plain.add_user("read it");
     cm_plain.add_tool_call("fc_2", "fs_read", "{}");
     let msgs_plain = cm_plain.build_messages("");
-    let tc_plain = msgs_plain[1].tool_calls.as_ref().expect("tool_calls present");
+    let tc_plain = msgs_plain[1]
+        .tool_calls
+        .as_ref()
+        .expect("tool_calls present");
     assert_eq!(tc_plain[0].thought_signature, None);
 }
 
@@ -576,9 +579,7 @@ fn evict_tool_chain_for_overflow_removes_both_halves() {
 
     assert!(cm.evict_tool_chain_for_overflow());
     assert!(
-        !cm.items
-            .iter()
-            .any(|it| it.is_tool()),
+        !cm.items.iter().any(|it| it.is_tool()),
         "both halves of the chain are gone"
     );
 }
@@ -2438,10 +2439,19 @@ async fn with_discovered_context_creates_valid_context_manager() {
 
     // Verify basic functionality works
     assert_eq!(cm.total_tokens(), 0, "New context manager should be empty");
-    assert!(cm.items.is_empty(), "New context manager should have empty items");
+    assert!(
+        cm.items.is_empty(),
+        "New context manager should have empty items"
+    );
 
     // Add some content and verify it works
     cm.add_user("test message");
-    assert!(cm.total_tokens() > 0, "Should track tokens after adding content");
-    assert!(!cm.items.is_empty(), "Should have items after adding content");
+    assert!(
+        cm.total_tokens() > 0,
+        "Should track tokens after adding content"
+    );
+    assert!(
+        !cm.items.is_empty(),
+        "Should have items after adding content"
+    );
 }

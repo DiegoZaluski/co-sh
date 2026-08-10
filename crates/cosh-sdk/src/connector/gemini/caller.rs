@@ -25,7 +25,9 @@ use super::API_VERSION;
 #[derive(serde::Serialize)]
 #[serde(untagged)]
 enum Part {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     FunctionCall {
         #[serde(rename = "functionCall")]
         function_call: FunctionCallPart,
@@ -58,7 +60,9 @@ impl Part {
     }
 
     fn function_response(fr: FunctionResponsePart) -> Self {
-        Part::FunctionResponse { function_response: fr }
+        Part::FunctionResponse {
+            function_response: fr,
+        }
     }
 }
 
@@ -368,10 +372,8 @@ fn merge_branch_prop(
         if let (
             Some(serde_json::Value::Array(existing_enum)),
             Some(serde_json::Value::Array(new_enum)),
-        ) = (
-            existing.get("enum"),
-            value.get("enum"),
-        ) {
+        ) = (existing.get("enum"), value.get("enum"))
+        {
             let mut merged = existing_enum.clone();
             for item in new_enum {
                 if !merged.contains(item) {
@@ -950,8 +952,8 @@ pub async fn chat_stream_with_messages(
     )
     .await?;
 
-    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =
-        Box::pin(stream! {
+    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> = Box::pin(
+        stream! {
             let mut response = response;
             let mut buf = SseBuffer::new();
             // Accumulate complete functionCall parts; Gemini emits them
@@ -1054,7 +1056,8 @@ pub async fn chat_stream_with_messages(
                     });
                 }
             }
-        });
+        },
+    );
 
     Ok(ChatStream::new(inner))
 }

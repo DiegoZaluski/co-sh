@@ -247,7 +247,9 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             default_model: "llama3.3",
             needs_extra_headers: false,
         },
-    ),        ("gemini",
+    ),
+    (
+        "gemini",
         ProviderConfig {
             name: "gemini",
             family: Family::Gemini,
@@ -261,7 +263,8 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             // free tiers — the docs-recommended gemini-3.6-flash works.
             default_model: "gemini-3.6-flash",
             needs_extra_headers: false,
-        },),
+        },
+    ),
     (
         "claude",
         ProviderConfig {

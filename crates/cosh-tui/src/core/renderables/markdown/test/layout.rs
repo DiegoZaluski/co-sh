@@ -1,5 +1,5 @@
-use super::super::estimate_height;
 use super::super::MarkdownRenderable;
+use super::super::estimate_height;
 use crate::core::renderable::Renderable;
 use crate::core::rgba::{ColorInput, RGBA};
 use ratatui::buffer::Buffer;

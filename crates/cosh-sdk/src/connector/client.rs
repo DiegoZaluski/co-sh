@@ -385,9 +385,7 @@ impl Connector {
             .as_deref()
             .or_else(|| self.provider.map(|p| p.base_url))
             .unwrap_or_default();
-        base_url.contains("localhost")
-            || base_url.contains("127.0.0.1")
-            || base_url.contains("::1")
+        base_url.contains("localhost") || base_url.contains("127.0.0.1") || base_url.contains("::1")
     }
 
     /// The model override, if one was set via [`with_model`](Self::with_model).

@@ -862,7 +862,10 @@ fn test_bash_output_expand_toggles_and_grows_height() {
             row_text.contains("echo hello")
         })
         .expect("bash title row must exist");
-    assert!(title_row > 0, "the bash title has 1 row of padding above it");
+    assert!(
+        title_row > 0,
+        "the bash title has 1 row of padding above it"
+    );
     let above_glyphs: Vec<char> = (0..area.width)
         .filter_map(|cx| buf.cell((cx, title_row - 1)))
         .filter_map(|c| c.symbol().chars().next())
@@ -1062,7 +1065,10 @@ fn test_glob_output_expand_shows_grouped_list() {
             row_text.contains("Glob")
         })
         .expect("glob title row must exist");
-    assert!(title_row > 0, "the Glob title has 1 row of padding above it");
+    assert!(
+        title_row > 0,
+        "the Glob title has 1 row of padding above it"
+    );
     let above_glyphs: Vec<char> = (0..area.width)
         .filter_map(|cx| buf.cell((cx, title_row - 1)))
         .filter_map(|c| c.symbol().chars().next())
@@ -1451,7 +1457,10 @@ fn test_summarizing_box_collapsed_tail_and_expand() {
             row_text.contains("Summarizing")
         })
         .expect("title row must exist");
-    assert!(title_row > 0, "the Summarizing title has 1 row of padding above it");
+    assert!(
+        title_row > 0,
+        "the Summarizing title has 1 row of padding above it"
+    );
     // The padding row must be blank except for the box's left border (┃).
     let above_glyphs: Vec<char> = (0..area.width)
         .filter_map(|cx| buf.cell((cx, title_row - 1)))
@@ -1681,8 +1690,7 @@ fn test_code_block_bottom_padding_not_overlapped() {
         "layout advance shorter than the estimated layout: the code block's \
          bottom padding would be overlapped by the next message \
          (actual={} cached={})",
-        view.actual_total_height,
-        view.cached_total_height
+        view.actual_total_height, view.cached_total_height
     );
 
     // Sanity-check the drawn rows: code lines at rows 1-2 (the top-gap row 0

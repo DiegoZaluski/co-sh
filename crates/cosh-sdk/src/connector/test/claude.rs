@@ -318,5 +318,8 @@ async fn request_omits_thinking_without_effort() {
 
     let body = captured.lock().unwrap().take().unwrap();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(json.get("thinking").is_none(), "no effort → no thinking block");
+    assert!(
+        json.get("thinking").is_none(),
+        "no effort → no thinking block"
+    );
 }
