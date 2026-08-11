@@ -20,8 +20,10 @@ async fn unknown_provider() {
 async fn missing_api_key() {
     let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::remove("OPENAI_API_KEY");
+    // Isolate from any key stored in the OS keyring under the cosh service.
     let err = Connector::new("openai")
         .unwrap()
+        .with_service_keyring("cosh-tests-no-key")
         .chat("hello")
         .await
         .unwrap_err();
@@ -261,15 +263,18 @@ async fn openrouter_extra_headers() {
     assert!(req.contains("x-title:"), "missing x-title header");
 }
 
-/// Ensures `Connector::chat()` falls back to `OPENAI_API_KEY` env var when
-/// no key is explicitly set.
+/// Ensures `Connector::chat()` falls back to `OPENAI_API_KEY` env var when no
+/// key is stored (keyring isolation via a non-existent service).
 #[tokio::test]
 async fn api_key_env_fallback() {
     let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::set("OPENAI_API_KEY", "sk-from-env");
     let (port, _body, _raw, handle) =
         mock_server(r#"{"choices":[{"message":{"content":"ok"}}]}"#, 200);
-    let result = connector_no_key(port).chat("hello").await;
+    let result = connector_no_key(port)
+        .with_service_keyring("cosh-tests-no-key")
+        .chat("hello")
+        .await;
     handle.join().unwrap();
     assert!(result.is_ok());
 }

@@ -1,5 +1,79 @@
 //! Provider registry — known LLM backends, their base URLs, default models,
 //! and API key environment variable names.
+//!
+use keyring::Entry;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use zeroize::Zeroizing;
+
+/// Default keyring service under which cosh stores its API keys.
+///
+/// `Connector`'s parameters already default `service_keyring` to this value,
+/// so ordinary consumers don't need to reference it — it exists so the SDK
+/// reads keys under the same service string that the TUI writes via
+/// `save_provider_api_key`. Override only builders that pass a custom
+/// service: [`Connector::with_service_keyring`](crate::connector::Connector::with_service_keyring).
+pub const COSH_SERVICE: &str = "cosh";
+
+/// Process-lifetime cache mapping `(service, env_var)` to the resolved key.
+type KeyringCache = HashMap<(String, String), Zeroizing<String>>;
+
+/// Process-lifetime cache of resolved keyring keys, keyed by
+/// `(service, env_var)`.
+///
+/// The first successful keyring lookup for a given key stays alive in process
+/// memory, so repeated resolutions (model listing, chat, provider detection)
+/// avoid re-hitting the OS credential store on every call. Only successful
+/// lookups are cached — misses still consult the keyring each time, keeping
+/// keys added/updated outside the app visible immediately.
+///
+/// Cache omitting Zeroizing would hold keys in plain `String` for the whole
+/// process too; `Zeroizing` makes sure the memory is wiped when an entry is
+/// invalidated or dropped instead.
+///
+/// Use [`invalidate_api_key`] after storing or updating a key so the cache
+/// never serves a stale value from a previous save.
+static KEYRING_CACHE: LazyLock<Mutex<KeyringCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Read a key from the OS keyring, caching successful lookups so repeat
+/// resolutions don't re-hit the credential store.
+fn keyring_lookup(service: &str, env_var: &str) -> Option<String> {
+    let key = (service.to_owned(), env_var.to_owned());
+    if let Some(cached) = KEYRING_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        return Some((**cached).clone());
+    }
+
+    let found = Entry::new(service, env_var)
+        .and_then(|e| e.get_password())
+        .ok()?;
+    KEYRING_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, Zeroizing::new(found.clone()));
+    Some(found)
+}
+
+/// Forget cached keys for an env var, e.g. right after saving/updating that
+/// provider's key so the freshest value is resolved next time.
+pub fn invalidate_api_key(env_var: &str) {
+    KEYRING_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(_, var), _| var != env_var);
+}
+
+/// Forget every cached key. The process keeps resolving new lookups from the
+/// OS keyring afterwards.
+pub fn clear_api_key_cache() {
+    KEYRING_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
@@ -332,11 +406,21 @@ pub fn get_provider(name: &str) -> Option<&'static ProviderConfig> {
         .map(|(_, config)| config)
 }
 
-pub fn get_api_key(provider: &str) -> Option<String> {
+pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {
     let env_var = API_KEY_ENVS
         .iter()
         .find(|(key, _)| *key == provider)
         .map_or("OPENAI_API_KEY", |(_, var)| *var);
+
+    // The OS keyring is the authoritative store for keys saved explicitly
+    // through the app (ADD Provider). Prefer it over the process environment
+    // so stale shell/.env exports don't shadow the key the user configured.
+    // Environment variables remain a fallback for providers never stored.
+    let service = service.unwrap_or(COSH_SERVICE);
+    if let Some(key) = keyring_lookup(service, env_var) {
+        return Some(key);
+    }
+
     std::env::var(env_var).ok()
 }
 
@@ -366,19 +450,25 @@ pub fn known_providers_with_env() -> impl Iterator<Item = (&'static str, &'stati
     API_KEY_ENVS.iter().map(|(name, env)| (*name, *env))
 }
 
-/// Return the first provider whose API-key environment variable is set.
+/// Whether a provider has an API key available, either from the OS credential
+/// store (keyring) under the cosh service or from its environment variable.
 ///
-/// The iteration order follows the registration order in the provider table.
+/// Useful for the UI to decide whether a provider is "configured" without
+/// having to distinguish between the two storage backends. Resolution order
+/// matches [`get_api_key`]: keyring first, then environment.
+#[must_use]
+pub fn has_api_key(provider: &str) -> bool {
+    get_api_key(provider, Some(COSH_SERVICE)).is_some()
+}
+
+/// Return the first provider with an available API key.
+///
+/// Checks both the environment variables and the OS credential store. The
+/// iteration order follows the registration order in the provider table.
 #[must_use]
 pub fn detect_provider() -> Option<&'static str> {
-    for (name, _) in PROVIDERS {
-        let env_var = API_KEY_ENVS
-            .iter()
-            .find(|(key, _)| *key == *name)
-            .map_or("OPENAI_API_KEY", |(_, var)| *var);
-        if std::env::var(env_var).is_ok() {
-            return Some(name);
-        }
-    }
-    None
+    PROVIDERS
+        .iter()
+        .find(|(name, _)| has_api_key(name))
+        .map(|(name, _)| *name)
 }

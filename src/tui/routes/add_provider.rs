@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use cosh_sdk::connector::known_providers_with_env;
+use cosh_sdk::connector::{has_api_key, known_providers_with_env};
 use cosh_tui::core::types::MouseEvent;
 
 use crate::component::search_bar::SearchBar;
@@ -186,7 +186,7 @@ impl AddProviderView {
             let is_selected = idx == self.selection.selected_index;
             let row_color = if is_selected { primary } else { fg };
 
-            let is_configured = std::env::var(env_var).is_ok();
+            let is_configured = has_api_key(name);
             let symbol = if is_configured { "✔" } else { " " };
             let sym_color = if is_configured {
                 Color::Green

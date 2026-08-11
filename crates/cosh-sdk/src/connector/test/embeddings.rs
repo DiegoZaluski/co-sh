@@ -18,8 +18,10 @@ async fn unknown_provider() {
 async fn missing_api_key() {
     let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::remove("OPENAI_API_KEY");
+    // Isolate from any key stored in the OS keyring under the cosh service.
     let err = Connector::new("openai")
         .unwrap()
+        .with_service_keyring("cosh-tests-no-key")
         .embed("text")
         .await
         .unwrap_err();

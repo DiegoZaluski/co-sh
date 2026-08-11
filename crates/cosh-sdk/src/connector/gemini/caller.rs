@@ -635,11 +635,12 @@ fn prepare_request(
     params: &Parameters,
     prompt: &str,
     system_prompt: Option<&str>,
+    service: Option<&str>,
 ) -> Result<RequestContext, ConnectorError> {
     let api_key = params
         .api_key
         .clone()
-        .or_else(|| get_api_key(config.name))
+        .or_else(|| get_api_key(config.name, service))
         .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
 
     let (contents, system_instruction) = build_contents(prompt, system_prompt);
@@ -665,8 +666,9 @@ pub async fn chat(
     params: &Parameters,
     prompt: &str,
     system_prompt: Option<&str>,
+    service: Option<&str>,
 ) -> Result<ChatOutput, ConnectorError> {
-    let ctx = prepare_request(config, params, prompt, system_prompt)?;
+    let ctx = prepare_request(config, params, prompt, system_prompt, service)?;
     let model = params
         .model
         .clone()
@@ -694,8 +696,9 @@ pub async fn chat_stream(
     params: &Parameters,
     prompt: &str,
     system_prompt: Option<&str>,
+    service: Option<&str>,
 ) -> Result<ChatStream, ConnectorError> {
-    let ctx = prepare_request(config, params, prompt, system_prompt)?;
+    let ctx = prepare_request(config, params, prompt, system_prompt, service)?;
     let model = params
         .model
         .clone()
@@ -915,11 +918,12 @@ pub async fn chat_stream_with_messages(
     params: &Parameters,
     system: &str,
     messages: &[ChatMessage],
+    service: Option<&str>,
 ) -> Result<ChatStream, ConnectorError> {
     let api_key = params
         .api_key
         .clone()
-        .or_else(|| get_api_key(config.name))
+        .or_else(|| get_api_key(config.name, service))
         .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
     let model = params
         .model
@@ -1066,11 +1070,12 @@ pub async fn embed(
     config: &ProviderConfig,
     params: &Parameters,
     input: &str,
+    service: Option<&str>,
 ) -> Result<Vec<f32>, ConnectorError> {
     let api_key = params
         .api_key
         .clone()
-        .or_else(|| get_api_key(config.name))
+        .or_else(|| get_api_key(config.name, service))
         .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
     let model = params
         .model
@@ -1116,11 +1121,12 @@ struct GeminiListModelsResponse {
 pub async fn list_models(
     config: &ProviderConfig,
     params: &Parameters,
+    service: Option<&str>,
 ) -> Result<LsOutput, ConnectorError> {
     let api_key = params
         .api_key
         .clone()
-        .or_else(|| get_api_key(config.name))
+        .or_else(|| get_api_key(config.name, service))
         .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
 
     let base_url = resolve_base_url(config, params);

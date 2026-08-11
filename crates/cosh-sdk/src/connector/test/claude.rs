@@ -220,8 +220,10 @@ async fn network_error() {
 async fn missing_api_key() {
     let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::remove("ANTHROPIC_API_KEY");
+    // Isolate from any key stored in the OS keyring under the cosh service.
     let err = Connector::new("claude")
         .unwrap()
+        .with_service_keyring("cosh-tests-no-key")
         .chat("hello")
         .await
         .unwrap_err();
@@ -239,7 +241,10 @@ async fn api_key_env_fallback() {
     let _guard = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-from-env");
     let body = r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#;
     let (port, _body, _raw, handle) = mock_server(body, 200);
-    let result = claude_connector_no_key(port).chat("hello").await;
+    let result = claude_connector_no_key(port)
+        .with_service_keyring("cosh-tests-no-key")
+        .chat("hello")
+        .await;
     handle.join().unwrap();
     assert!(result.is_ok());
 }

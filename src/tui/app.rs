@@ -326,12 +326,12 @@ impl App {
         self.reasoning_dialog_original = self.llm_config.reasoning.clone();
 
         // Collect providers and check if their API key is still configured.
-        // If a provider's env var is missing, invalidate its cache entry so
-        // stale models don't appear as available options.
+        // If a provider has no key (env var or keyring), invalidate its cache
+        // entry so stale models don't appear as available options.
         let providers_to_check: Vec<&str> = {
             let mut active = Vec::new();
-            for (provider, env_var) in known_providers_with_env() {
-                if std::env::var(env_var).is_ok() {
+            for (provider, _) in known_providers_with_env() {
+                if cosh_sdk::connector::has_api_key(provider) {
                     active.push(provider);
                 } else {
                     // Provider no longer configured — purge cached models
@@ -674,14 +674,20 @@ impl App {
                         ..
                     } = &d.dialog_type
                 {
-                    save_provider_api_key(provider, env_var, input);
+                    if let Err(e) = save_provider_api_key(env_var, input) {
+                        use crate::ui::toast::{ToastOptions, ToastVariant};
+                        self.toast_state.show(ToastOptions {
+                            title: Some("Key not saved".to_string()),
+                            message: format!("Failed to store the API key in the OS keyring: {e}"),
+                            variant: ToastVariant::Error,
+                            duration_ms: 6000,
+                        });
+                    } else {
+                        cosh_sdk::connector::invalidate_api_key(env_var);
+                    }
                     // Invalidate model cache for this provider so the next
                     // dialog open fetches fresh models with the new key.
                     self.model_cache.invalidate(&provider.to_string());
-                    // SAFETY: Setting env vars is safe in a single-threaded CLI context
-                    unsafe {
-                        std::env::set_var(env_var, input);
-                    }
                 }
                 self.dialog.pop();
                 true
@@ -1041,8 +1047,7 @@ impl App {
     fn collect_cached_models(&self) -> Vec<cosh::ModelEntry> {
         let mut models = Vec::new();
         for (provider, _) in cosh_sdk::connector::known_providers_with_env() {
-            if std::env::var(cosh_sdk::connector::get_provider_env_var(provider).unwrap_or(""))
-                .is_ok()
+            if cosh_sdk::connector::has_api_key(provider)
                 && let Some(cached) = self.model_cache.get(&provider.to_string())
             {
                 models.extend(cached.iter().cloned());
@@ -4366,14 +4371,22 @@ impl App {
                                 input,
                                 ..
                             } if !input.is_empty() => {
-                                save_provider_api_key(provider, env_var, input);
+                                if let Err(e) = save_provider_api_key(env_var, input) {
+                                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                                    self.toast_state.show(ToastOptions {
+                                        title: Some("Key not saved".to_string()),
+                                        message: format!(
+                                            "Failed to store the API key in the OS keyring: {e}"
+                                        ),
+                                        variant: ToastVariant::Error,
+                                        duration_ms: 6000,
+                                    });
+                                } else {
+                                    cosh_sdk::connector::invalidate_api_key(env_var);
+                                }
                                 // Invalidate model cache for this provider so the next
                                 // dialog open fetches fresh models with the new key.
                                 self.model_cache.invalidate(&provider.to_string());
-                                // SAFETY: Setting env vars is safe in a single-threaded CLI context
-                                unsafe {
-                                    std::env::set_var(env_var, input);
-                                }
                             }
                             _ => {}
                         }
@@ -4897,24 +4910,16 @@ fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
-/// Save a provider API key to `.env` in the project root (CWD).
+/// Persist a provider API key in the OS credential store (keyring) under the
+/// `cosh` service keyed by the provider's API key environment variable name.
 ///
-/// NOTE: This is a temporary development-only mechanism. It will be replaced
-/// by the `keyring` crate for proper system keychain integration in the future.
-fn save_provider_api_key(provider: &str, env_var: &str, api_key: &str) {
-    let path = std::path::PathBuf::from(".env");
-    let export_line = format!("export {env_var}=\"{api_key}\"\n");
-    let comment_line = format!("# cosh: {provider} API key\n");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        use std::io::Write;
-        let _ = write!(file, "\n{comment_line}{export_line}");
-    } else {
-        // Silently fail - env var is still set for the current process
-    }
+/// The key is stored via the native store (Secret Service on Linux, Keychain
+/// on macOS, Credential Manager on Windows). Errors are returned to the caller
+/// so it can surface them instead of failing silently.
+fn save_provider_api_key(env_var: &str, api_key: &str) -> Result<(), keyring::Error> {
+    let entry = keyring::Entry::new(cosh_sdk::connector::COSH_SERVICE, env_var)?;
+    entry.set_password(api_key)?;
+    Ok(())
 }
 
 // Embedding helpers (feature-gated)

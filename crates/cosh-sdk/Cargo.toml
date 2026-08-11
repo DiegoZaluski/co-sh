@@ -98,7 +98,13 @@ tokio-stream = "0.1"
 reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 directories = "6.0.0"
-
+zeroize = { version = "=1.7", features = ["derive"] }
+keyring = { version = "4.1.6", features = [
+    "v1",
+    "apple-native-keyring-store",
+    "windows-native-keyring-store",
+    "zbus-secret-service-keyring-store",
+] }
 # term_screen dependencies
 base64 = "0.22"
 bitflags = { version = "2", features = ["serde"] }

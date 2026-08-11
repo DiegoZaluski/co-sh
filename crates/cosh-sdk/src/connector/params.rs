@@ -1,3 +1,7 @@
+use zeroize::Zeroize;
+
+use crate::connector::provider::COSH_SERVICE;
+
 /// A chat message for structured conversation history with native tool call support.
 ///
 /// This mirrors the `OpenAI` Chat Completion message format so the model
@@ -192,23 +196,68 @@ impl ToolDefinition {
 ///
 /// Users configure these through [`Connector`](crate::connector::Connector)
 /// builder methods rather than constructing this struct directly.
-#[derive(Clone, Default, Debug)]
+#[derive(Zeroize, Clone, Debug)]
 pub struct Parameters {
+    #[zeroize(skip)]
     pub(crate) model: Option<String>,
+    #[zeroize(skip)]
     pub(crate) max_tokens: Option<u32>,
+    #[zeroize(skip)]
     pub(crate) temperature: Option<f32>,
+    #[zeroize(skip)]
     pub(crate) top_p: Option<f32>,
+    #[zeroize(skip)]
     pub(crate) stop: Option<serde_json::Value>,
+    #[zeroize(skip)]
     pub(crate) frequency_penalty: Option<f32>,
+    #[zeroize(skip)]
     pub(crate) presence_penalty: Option<f32>,
+    #[zeroize(skip)]
     pub(crate) seed: Option<i64>,
+    #[zeroize(skip)]
     pub(crate) response_format: Option<ResponseFormat>,
+    #[zeroize(skip)]
     pub(crate) logprobs: Option<bool>,
+    #[zeroize(skip)]
     pub(crate) top_logprobs: Option<u32>,
+    #[zeroize(skip)]
     pub(crate) reasoning_effort: Option<String>,
+    #[zeroize(skip)]
     pub(crate) tools: Option<Vec<ToolDefinition>>,
+    #[zeroize(skip)]
     pub(crate) tool_choice: Option<serde_json::Value>,
+    #[zeroize(skip)]
     pub(crate) user: Option<String>,
+    #[zeroize(skip)]
     pub(crate) base_url: Option<String>,
+
+    pub(crate) service_keyring: Option<String>,
     pub(crate) api_key: Option<String>,
+}
+
+impl Default for Parameters {
+    fn default() -> Self {
+        Self {
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            seed: None,
+            response_format: None,
+            logprobs: None,
+            top_logprobs: None,
+            reasoning_effort: None,
+            tools: None,
+            tool_choice: None,
+            user: None,
+            base_url: None,
+            // Default to the canonical cosh keyring service so callers only
+            // need `with_service_keyring` when they want to override it.
+            service_keyring: Some(COSH_SERVICE.to_string()),
+            api_key: None,
+        }
+    }
 }

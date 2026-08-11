@@ -7,8 +7,10 @@ use super::common::{ENV_LOCK, EnvGuard, claude_connector, connector, mock_server
 async fn missing_api_key() {
     let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::remove("OPENAI_API_KEY");
+    // Isolate from any key stored in the OS keyring under the cosh service.
     let err = Connector::new("openai")
         .unwrap()
+        .with_service_keyring("cosh-tests-no-key")
         .list_models()
         .await
         .unwrap_err();

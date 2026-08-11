@@ -30,7 +30,8 @@ pub use params::{
     assistant_tool_call_message, system_message, tool_result_message, user_message,
 };
 pub use provider::{
-    detect_provider, get_provider_env_var, known_providers, known_providers_with_env,
+    COSH_SERVICE, clear_api_key_cache, detect_provider, get_api_key, get_provider_env_var,
+    has_api_key, invalidate_api_key, known_providers, known_providers_with_env,
 };
 
 #[cfg(test)]

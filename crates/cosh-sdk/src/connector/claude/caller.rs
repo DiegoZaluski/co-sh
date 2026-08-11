@@ -251,11 +251,12 @@ fn prepare_request(
     prompt: &str,
     system_prompt: Option<&str>,
     stream: bool,
+    service: Option<&str>,
 ) -> Result<RequestContext, ConnectorError> {
     let api_key = params
         .api_key
         .clone()
-        .or_else(|| get_api_key(config.name))
+        .or_else(|| get_api_key(config.name, service))
         .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
 
     let messages = build_messages(prompt);
@@ -275,8 +276,9 @@ pub async fn chat(
     params: &Parameters,
     prompt: &str,
     system_prompt: Option<&str>,
+    service: Option<&str>,
 ) -> Result<ChatOutput, ConnectorError> {
-    let ctx = prepare_request(config, params, prompt, system_prompt, false)?;
+    let ctx = prepare_request(config, params, prompt, system_prompt, false, service)?;
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/messages");
 
@@ -424,11 +426,12 @@ pub async fn chat_stream_with_messages(
     params: &Parameters,
     system: &str,
     messages: &[ApiChatMessage],
+    service: Option<&str>,
 ) -> Result<ChatStream, ConnectorError> {
     let api_key = params
         .api_key
         .clone()
-        .or_else(|| get_api_key(config.name))
+        .or_else(|| get_api_key(config.name, service))
         .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
     let model = params
         .model
@@ -623,8 +626,9 @@ pub async fn chat_stream(
     params: &Parameters,
     prompt: &str,
     system_prompt: Option<&str>,
+    service: Option<&str>,
 ) -> Result<ChatStream, ConnectorError> {
-    let ctx = prepare_request(config, params, prompt, system_prompt, true)?;
+    let ctx = prepare_request(config, params, prompt, system_prompt, true, service)?;
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/messages");
 
@@ -733,11 +737,12 @@ struct ClaudeListModelsResponse {
 pub async fn list_models(
     config: &ProviderConfig,
     params: &Parameters,
+    service: Option<&str>,
 ) -> Result<LsOutput, ConnectorError> {
     let api_key = params
         .api_key
         .clone()
-        .or_else(|| get_api_key(config.name))
+        .or_else(|| get_api_key(config.name, service))
         .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
 
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);

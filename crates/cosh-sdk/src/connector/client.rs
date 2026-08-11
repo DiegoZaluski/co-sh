@@ -173,6 +173,11 @@ impl Connector {
         self
     }
 
+    pub fn with_service_keyring(mut self, v: impl Into<String>) -> Self {
+        self.params.service_keyring = Some(v.into());
+        self
+    }
+
     /// Send a chat completion request with a user prompt.
     ///
     /// # Errors
@@ -181,12 +186,13 @@ impl Connector {
     /// `Deserialization` if the response is malformed, or `Network` on transport failure.
     pub async fn chat(&self, prompt: &str) -> Result<ChatOutput, ConnectorError> {
         let provider = self.provider()?;
+        let service = self.params.service_keyring.as_deref();
         match provider.family {
             Family::OpenAICompatible => {
-                openai_compatible::chat(provider, &self.params, prompt, None).await
+                openai_compatible::chat(provider, &self.params, prompt, None, service).await
             }
-            Family::Gemini => gemini::chat(provider, &self.params, prompt, None).await,
-            Family::Claude => claude::chat(provider, &self.params, prompt, None).await,
+            Family::Gemini => gemini::chat(provider, &self.params, prompt, None, service).await,
+            Family::Claude => claude::chat(provider, &self.params, prompt, None, service).await,
         }
     }
 
@@ -202,12 +208,17 @@ impl Connector {
         system: &str,
     ) -> Result<ChatOutput, ConnectorError> {
         let provider = self.provider()?;
+        let service = self.params.service_keyring.as_deref();
         match provider.family {
             Family::OpenAICompatible => {
-                openai_compatible::chat(provider, &self.params, prompt, Some(system)).await
+                openai_compatible::chat(provider, &self.params, prompt, Some(system), service).await
             }
-            Family::Gemini => gemini::chat(provider, &self.params, prompt, Some(system)).await,
-            Family::Claude => claude::chat(provider, &self.params, prompt, Some(system)).await,
+            Family::Gemini => {
+                gemini::chat(provider, &self.params, prompt, Some(system), service).await
+            }
+            Family::Claude => {
+                claude::chat(provider, &self.params, prompt, Some(system), service).await
+            }
         }
     }
 
@@ -219,11 +230,13 @@ impl Connector {
     /// `Deserialization` if the response is malformed, or `Network` on transport failure.
     pub async fn embed(&self, input: &str) -> Result<Vec<f32>, ConnectorError> {
         let provider = self.provider()?;
+        let service = self.params.service_keyring.as_deref();
+
         match provider.family {
             Family::OpenAICompatible => {
-                openai_compatible::embed(provider, &self.params, input).await
+                openai_compatible::embed(provider, &self.params, input, service).await
             }
-            Family::Gemini => gemini::embed(provider, &self.params, input).await,
+            Family::Gemini => gemini::embed(provider, &self.params, input, service).await,
             Family::Claude => Err(ConnectorError::NotImplemented("embedding")),
         }
     }
@@ -240,12 +253,19 @@ impl Connector {
     /// or `Network` on transport failure before the stream starts.
     pub async fn stream_chat(&self, prompt: &str) -> Result<ChatStream, ConnectorError> {
         let provider = self.provider()?;
+        // The explicit `service` argument wins if provided, otherwise fall
+        // back to the connector's configured keyring service.
+        let service = self.params.service_keyring.as_deref();
         match provider.family {
             Family::OpenAICompatible => {
-                openai_compatible::chat_stream(provider, &self.params, prompt, None).await
+                openai_compatible::chat_stream(provider, &self.params, prompt, None, service).await
             }
-            Family::Gemini => gemini::chat_stream(provider, &self.params, prompt, None).await,
-            Family::Claude => claude::chat_stream(provider, &self.params, prompt, None).await,
+            Family::Gemini => {
+                gemini::chat_stream(provider, &self.params, prompt, None, service).await
+            }
+            Family::Claude => {
+                claude::chat_stream(provider, &self.params, prompt, None, service).await
+            }
         }
     }
 
@@ -265,15 +285,23 @@ impl Connector {
         system: &str,
     ) -> Result<ChatStream, ConnectorError> {
         let provider = self.provider()?;
+        let service = self.params.service_keyring.as_deref();
         match provider.family {
             Family::OpenAICompatible => {
-                openai_compatible::chat_stream(provider, &self.params, prompt, Some(system)).await
+                openai_compatible::chat_stream(
+                    provider,
+                    &self.params,
+                    prompt,
+                    Some(system),
+                    service,
+                )
+                .await
             }
             Family::Gemini => {
-                gemini::chat_stream(provider, &self.params, prompt, Some(system)).await
+                gemini::chat_stream(provider, &self.params, prompt, Some(system), service).await
             }
             Family::Claude => {
-                claude::chat_stream(provider, &self.params, prompt, Some(system)).await
+                claude::chat_stream(provider, &self.params, prompt, Some(system), service).await
             }
         }
     }
@@ -299,12 +327,18 @@ impl Connector {
         let mut params = self.params.clone();
         params.tools = None;
         params.tool_choice = None;
+        let service = self.params.service_keyring.as_deref();
         match provider.family {
             Family::OpenAICompatible => {
-                openai_compatible::chat_stream(provider, &params, prompt, Some(system)).await
+                openai_compatible::chat_stream(provider, &params, prompt, Some(system), service)
+                    .await
             }
-            Family::Gemini => gemini::chat_stream(provider, &params, prompt, Some(system)).await,
-            Family::Claude => claude::chat_stream(provider, &params, prompt, Some(system)).await,
+            Family::Gemini => {
+                gemini::chat_stream(provider, &params, prompt, Some(system), service).await
+            }
+            Family::Claude => {
+                claude::chat_stream(provider, &params, prompt, Some(system), service).await
+            }
         }
     }
 
@@ -331,14 +365,34 @@ impl Connector {
         let params = &self.params;
         match provider.family {
             Family::OpenAICompatible => {
-                openai_compatible::chat_stream_with_messages(provider, params, system, messages)
-                    .await
+                openai_compatible::chat_stream_with_messages(
+                    provider,
+                    params,
+                    system,
+                    messages,
+                    self.params.service_keyring.as_deref(),
+                )
+                .await
             }
             Family::Gemini => {
-                gemini::chat_stream_with_messages(provider, params, system, messages).await
+                gemini::chat_stream_with_messages(
+                    provider,
+                    params,
+                    system,
+                    messages,
+                    self.params.service_keyring.as_deref(),
+                )
+                .await
             }
             Family::Claude => {
-                claude::chat_stream_with_messages(provider, params, system, messages).await
+                claude::chat_stream_with_messages(
+                    provider,
+                    params,
+                    system,
+                    messages,
+                    self.params.service_keyring.as_deref(),
+                )
+                .await
             }
         }
     }
@@ -426,10 +480,29 @@ impl Connector {
         let provider = self.provider()?;
         match provider.family {
             Family::OpenAICompatible => {
-                openai_compatible::list_models(provider, &self.params).await
+                openai_compatible::list_models(
+                    provider,
+                    &self.params,
+                    self.params.service_keyring.as_deref(),
+                )
+                .await
             }
-            Family::Gemini => gemini::list_models(provider, &self.params).await,
-            Family::Claude => claude::list_models(provider, &self.params).await,
+            Family::Gemini => {
+                gemini::list_models(
+                    provider,
+                    &self.params,
+                    self.params.service_keyring.as_deref(),
+                )
+                .await
+            }
+            Family::Claude => {
+                claude::list_models(
+                    provider,
+                    &self.params,
+                    self.params.service_keyring.as_deref(),
+                )
+                .await
+            }
         }
     }
 }
