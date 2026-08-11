@@ -1835,7 +1835,12 @@ impl App {
             );
             let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
 
-            // Question dialog inline (between messages and spinner), only during session
+            // The dialogs grow upward from the prompt; clamp their height so
+            // they never cover the header row (area.y + 1) or run off-screen.
+            // Long content inside the question dialog scrolls instead.
+            let max_dialog_h = spinner_area_y.saturating_sub(area.y + 1);
+            let question_h = question_h.min(max_dialog_h);
+            let permission_h = permission_h.min(max_dialog_h);
             let question_area_y = spinner_area_y.saturating_sub(question_h);
             let permission_area_y = spinner_area_y.saturating_sub(permission_h);
             let prompt_padding: u16 = 1;
@@ -1969,7 +1974,12 @@ impl App {
                     );
                     // Question/permission dialog rendered inline between messages and prompt
                     if self.question_dialog.visible {
-                        self.question_dialog.render(buf, question_area, &self.theme);
+                        let now = std::time::SystemTime::now();
+                        // Sync focus so the answer input's cursor blurs when the
+                        // terminal loses focus (same as every other cursor).
+                        self.question_dialog.cursor.terminal_focused = self.terminal_focused;
+                        self.question_dialog
+                            .render(buf, question_area, &self.theme, now);
                     } else if self.permission_dialog.visible {
                         self.permission_dialog
                             .render(buf, permission_area, &self.theme);
@@ -2092,7 +2102,7 @@ impl App {
 
                     // Check question dialog THIRD (inline)
                     if self.question_dialog.visible && matches!(self.mode(), AppMode::Session) {
-                        let consumed = self.question_dialog.handle_key(key.code);
+                        let consumed = self.question_dialog.handle_key_event(key);
                         if consumed {
                             // Check if user submitted answers (Enter on confirm tab)
                             if self.question_dialog.submitted {
@@ -3291,6 +3301,9 @@ impl App {
                         *cursor_pos += cleaned.len();
                         d.cursor.note_activity();
                     }
+                } else if self.question_dialog.visible && matches!(self.mode(), AppMode::Session) {
+                    // Paste into the inline question dialog's text answer.
+                    self.question_dialog.handle_paste(&text);
                 } else if self.is_rag_mode() {
                     self.handle_rag_paste(&text);
                 } else {
@@ -4150,11 +4163,13 @@ impl App {
                         };
                         let spinner_h = u16::from(
                             matches!(self.state.status, SessionStatus::Working)
-                                && self.agent_spinner.is_some(),
+                                && self.agent_spinner.is_some()
+                                && !self.question_dialog.visible,
                         );
                         let footer_y = main_area.bottom().saturating_sub(1);
                         let prompt_area_y = footer_y.saturating_sub(prompt_h);
                         let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
+                        let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
                         let question_area_y = spinner_area_y.saturating_sub(question_h);
                         let session_bottom = question_area_y.saturating_sub(1);
                         let session_area = Rect::new(
@@ -4230,6 +4245,10 @@ impl App {
                         && Self::is_in_right_panel(x, self.terminal_size())
                     {
                         self.state.right_panel.scroll_up(3);
+                    } else if matches!(self.mode(), AppMode::Session)
+                        && self.question_dialog.visible
+                    {
+                        self.question_dialog.scroll_up();
                     } else if matches!(self.mode(), AppMode::Session) {
                         self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
                     } else if matches!(self.mode(), AppMode::Home) {
@@ -4271,6 +4290,10 @@ impl App {
                         && Self::is_in_right_panel(x, self.terminal_size())
                     {
                         self.state.right_panel.scroll_down(3);
+                    } else if matches!(self.mode(), AppMode::Session)
+                        && self.question_dialog.visible
+                    {
+                        self.question_dialog.scroll_down();
                     } else if matches!(self.mode(), AppMode::Session) {
                         self.session_view.scroll_y = (self.session_view.scroll_y + 3).max(0);
                     } else if matches!(self.mode(), AppMode::Home) {
@@ -4507,6 +4530,7 @@ impl App {
                 .required_height(main_area.width.saturating_sub(4));
             let footer_y = main_area.bottom().saturating_sub(1);
             let prompt_area_y = footer_y.saturating_sub(prompt_h);
+            let question_h = question_h.min(prompt_area_y.saturating_sub(area.y + 1));
             let question_area_y = prompt_area_y.saturating_sub(question_h);
             let question_area = Rect::new(
                 main_area.x + 2,
@@ -4592,11 +4616,14 @@ impl App {
                 0
             };
             let spinner_h = u16::from(
-                matches!(self.state.status, SessionStatus::Working) && self.agent_spinner.is_some(),
+                matches!(self.state.status, SessionStatus::Working)
+                    && self.agent_spinner.is_some()
+                    && !self.question_dialog.visible,
             );
             let footer_y = main_area.bottom().saturating_sub(1);
             let prompt_area_y = footer_y.saturating_sub(prompt_h);
             let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
+            let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
             let question_area_y = spinner_area_y.saturating_sub(question_h);
             let session_bottom = question_area_y;
             let session_area = Rect::new(
