@@ -2,7 +2,7 @@ use super::context_manager::{ContextManager, MAX_CONTEXT_TOKENS, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
 #[cfg(not(test))]
-use cosh_sdk::connector::discover_context_window;
+use cosh_sdk::connector::{discover_context_window, effective_context_window};
 use cosh_sdk::connector::{ChatMessage, ClaudeThinkingBlock, Connector, ConnectorError, ToolDefinition};
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use cosh_tools::TOOL_FORMAT;
@@ -138,15 +138,17 @@ const CONTEXT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(not(test))]
 static DISCOVERED_WINDOW_CACHE: OnceLock<Mutex<HashMap<String, Option<usize>>>> = OnceLock::new();
 
-/// Discover the ACTIVE model's real context window, cached per model and
-/// bounded by [`CONTEXT_DISCOVERY_TIMEOUT`]. Returns `None` (keeping the
-/// current budget) when the model is unknown or discovery fails.
+/// Discover the ACTIVE model's real context window (the RAW advertised
+/// window, cached per model and bounded by [`CONTEXT_DISCOVERY_TIMEOUT`]).
+/// Returns `None` (keeping the current budget) when the model is unknown or
+/// discovery fails.
 ///
 /// The compaction trigger is 80% of the context manager's budget: with the
 /// hardcoded 100k default and a 300k-window model, the LLM compaction would
 /// fire at 80k — far below the model's actual capacity — and re-trigger on
 /// every overflow (the "infinite summarization" loop). Sizing the budget to
-/// the model's real window is what keeps the trigger sane.
+/// the model's EFFECTIVE window (a conservative fraction of the raw one, see
+/// `effective_context_window`) is what keeps the trigger sane.
 #[cfg(not(test))]
 async fn discovered_context_window(model: Option<&str>) -> Option<usize> {
     let model = model?;
@@ -1678,13 +1680,13 @@ impl Harness {
         self.context_manager
             .set_model(self.connector.effective_model());
 
-        // Size the compaction budget to the ACTIVE model's real context window
-        // instead of the hardcoded default: with a far larger window (e.g.
-        // 300k vs the 100k default) the 80% trigger would otherwise fire at a
-        // fraction of the model's actual capacity, re-triggering the LLM
-        // compaction on every overflow — the "infinite summarization" loop.
-        // Cached per model + timeout-bounded; on failure the current budget
-        // (default or restored snapshot) is kept.
+        // Size the compaction budget to the ACTIVE model's EFFECTIVE context
+        // window instead of the hardcoded default: with a far larger window
+        // (e.g. 300k vs the 100k default) the 80% trigger would otherwise
+        // fire at a fraction of the model's actual capacity, re-triggering the
+        // LLM compaction on every overflow — the "infinite summarization"
+        // loop. Cached per model + timeout-bounded; on failure the current
+        // budget (default or restored snapshot) is kept.
         #[cfg(not(test))]
         {
             // Remember the discovery outcome: it is the KNOWN window that
@@ -1695,7 +1697,13 @@ impl Harness {
             if let Some(window) = discovered_context_window(self.connector.effective_model()).await
             {
                 self.discovered_window = Some(window);
-                self.context_manager.set_max_tokens(window);
+                // Size the budget to the model's EFFECTIVE window, not the raw
+                // advertised one — the advertised capacity is a poor estimate
+                // of what the model can actually reason over (the "sweet
+                // spot" sizing, see `effective_context_window`). The RAW
+                // window is kept above in `discovered_window`, where it still
+                // drives the split-and-concatenate contingency.
+                self.context_manager.set_max_tokens(effective_context_window(window));
             }
         }
 
@@ -1894,7 +1902,11 @@ impl Harness {
                                         .await
                                 {
                                     self.discovered_window = Some(window);
-                                    self.context_manager.set_max_tokens(window);
+                                    // Same effective sizing as the loop start
+                                    // (the raw window stays in
+                                    // `discovered_window` for the split).
+                                    self.context_manager
+                                        .set_max_tokens(effective_context_window(window));
                                 }
                             }
                             self.tool_issuer.clear();

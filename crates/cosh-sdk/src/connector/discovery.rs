@@ -1107,6 +1107,49 @@ pub async fn discover_context_window(model_name: &str, cache_dir: Option<&str>) 
     discovered
 }
 
+// ── Effective context window (the "sweet spot" budget) ─────────────────────
+//
+// The advertised window (MCW) is the raw capacity the vendor lists, but the
+// window a model can actually reason over (MECW) is far smaller and grows
+// SUBLINEARLY as the advertised window grows (Paulsen 2025, "Context Is What
+// You Need", arXiv:2509.21361): small windows are genuinely usable almost
+// whole, giant windows are strongly limited ("the bigger the window, the
+// bigger the illusion"). The harness sizes its compaction budget to this
+// EFFECTIVE value, so the 80% trigger fires BEFORE the model enters its
+// degradation zone instead of only when the provider's hard limit is near.
+
+/// Intercept of the effective-fraction curve: the fraction at a ~1k-token
+/// window (before the ceiling clamps it).
+const FRAC_A: f64 = 2.612;
+/// Logarithmic decay rate of the effective fraction, per decade of window
+/// size (per `log10` unit).
+const FRAC_B: f64 = 0.443;
+/// Floor on the effective fraction. Kept above `FRAC_B / ln(10)` (≈0.192),
+/// where the raw product `window · fraction` starts DECREASING — the clamp
+/// keeps the whole function monotonic: a larger advertised window never
+/// yields a smaller effective window.
+const FRAC_FLOOR: f64 = 0.20;
+/// Ceiling on the effective fraction for the smallest windows (they are
+/// genuinely usable almost whole).
+const FRAC_CAP: f64 = 0.85;
+
+/// Compute the EFFECTIVE context window from a model's advertised (maximum)
+/// context window — the "sweet spot" budget sizing.
+///
+/// The effective fraction decays logarithmically with the advertised window
+/// size and is clamped to [`FRAC_CAP`] (small windows) and [`FRAC_FLOOR`]
+/// (giant windows). The function is deliberately conservative: when the exact
+/// effective value is unknown, it stays BELOW it with a small margin.
+///
+/// It is only ever applied to a REAL discovered window — never to the
+/// harness's default fallback budget, which does not represent any model's
+/// actual context size.
+#[must_use]
+pub fn effective_context_window(window: usize) -> usize {
+    let frac = (FRAC_A - FRAC_B * (window as f64).log10()).clamp(FRAC_FLOOR, FRAC_CAP);
+    (window as f64 * frac).round() as usize
+}
+
 /// Discover context window from Anthropic's API.
 ///
 /// NOTE: the endpoint requires an `x-api-key` header — unauthenticated calls
@@ -1778,5 +1821,63 @@ mod tests {
         assert!(!is_valid_context_window(100), "100 is too small");
         assert!(!is_valid_context_window(500), "500 is too small");
         assert!(!is_valid_context_window(3_000_000), "3M is too large");
+    }
+
+    // Effective context window (the "sweet spot" budget sizing).
+
+    #[test]
+    fn effective_window_never_exceeds_the_raw_window() {
+        // The effective window is always a fraction of the advertised one.
+        for w in [1000usize, 8_000, 16_000, 64_000, 128_000, 200_000, 1_000_000, 2_000_000] {
+            let eff = effective_context_window(w);
+            assert!(eff <= w, "{w} -> {eff} exceeds the raw window");
+            assert!(eff > 0, "{w} -> 0 effective");
+        }
+    }
+
+    #[test]
+    fn effective_window_fraction_decays_with_window_size() {
+        // The effective FRACTION shrinks as the advertised window grows
+        // (sublinear effective growth — Paulsen 2025).
+        let frac = |w: usize| effective_context_window(w) as f64 / w as f64;
+        // Small windows stay nearly whole (ceiling-clamped).
+        assert_eq!(effective_context_window(8_000), 6_800);
+        // Mid-size windows lose roughly half.
+        assert_eq!(effective_context_window(64_000), 30_903);
+        // A 128k model's effective window is far below its advertised one.
+        assert_eq!(effective_context_window(128_000), 44_737);
+        assert!(frac(128_000) < frac(16_000));
+        // Giant windows are strongly limited (floor-clamped).
+        assert_eq!(effective_context_window(1_000_000), 200_000);
+        assert!(frac(1_000_000) < frac(128_000));
+    }
+
+    #[test]
+    fn effective_window_is_monotonic_in_the_raw_window() {
+        // A larger advertised window never yields a smaller effective one —
+        // guaranteed by the floor (FRAC_FLOOR > FRAC_B / ln(10)).
+        let mut prev = 0usize;
+        let mut w = 1_000usize;
+        while w <= 2_000_000 {
+            let eff = effective_context_window(w);
+            assert!(
+                eff >= prev,
+                "effective window decreased at {w}: {prev} -> {eff}"
+            );
+            prev = eff;
+            w = (w as f64 * 1.05) as usize + 1;
+        }
+    }
+
+    #[test]
+    fn effective_window_clamps_at_the_edges() {
+        // Ceiling: tiny windows are used almost whole.
+        assert_eq!(effective_context_window(1_000), 850);
+        assert_eq!(effective_context_window(8_000), 6_800);
+        // The default fallback budget (100k) resizes to ~40% of itself.
+        assert_eq!(effective_context_window(100_000), 39_700);
+        // Floor: giant windows never drop below the 20% fraction.
+        assert_eq!(effective_context_window(1_000_000), 200_000);
+        assert_eq!(effective_context_window(2_000_000), 400_000);
     }
 }

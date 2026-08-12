@@ -21,7 +21,8 @@ mod provider;
 
 pub use client::Connector;
 pub use discovery::{
-    ModelReasoning, discover_context_window, model_reasoning, model_reasoning_from_catalog,
+    ModelReasoning, discover_context_window, effective_context_window, model_reasoning,
+    model_reasoning_from_catalog,
 };
 pub use error::ConnectorError;
 pub use output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};

@@ -109,7 +109,8 @@ pub mod todo_ctxt;
 use crate::util::TokenEncoding;
 use cosh_sdk::connector::{
     ChatMessage, ClaudeThinkingBlock, ToolCallFunctionMsg, ToolCallMsg,
-    assistant_tool_call_message, discover_context_window, tool_result_message, user_message,
+    assistant_tool_call_message, discover_context_window, effective_context_window,
+    tool_result_message, user_message,
 };
 use cosh_tools::plan::types::TodoList;
 use serde::{Deserialize, Serialize};
@@ -795,7 +796,11 @@ impl ContextManager {
     /// Create a new ContextManager with automatic context window discovery.
     ///
     /// Attempts to discover the model's context window via public APIs (OpenRouter
-    /// and Anthropic). Falls back to [`MAX_CONTEXT_TOKENS`] if discovery fails.
+    /// and Anthropic). A REAL discovered window is resized to its EFFECTIVE
+    /// value — the "sweet spot" budget that sits below the model's degradation
+    /// zone (see [`effective_context_window`]). Falls back to
+    /// [`MAX_CONTEXT_TOKENS`] if discovery fails; the default is never resized
+    /// because it is not a real window.
     ///
     /// # Arguments
     ///
@@ -803,13 +808,16 @@ impl ContextManager {
     ///
     /// # Returns
     ///
-    /// A new ContextManager with the discovered context window, or the default
-    /// [`MAX_CONTEXT_TOKENS`] if discovery fails.
+    /// A new ContextManager with the effective discovered context window, or the
+    /// default [`MAX_CONTEXT_TOKENS`] if discovery fails.
     pub async fn with_discovered_context(model_name: &str) -> Self {
         // On-disk catalog caching under `~/.local/share/cosh/cache`, so repeated
         // launches reuse the downloaded models.dev / OpenRouter catalogs.
         let max_tokens = discover_context_window(model_name, Some("cosh/cache"))
             .await
+            // Only a REAL discovered window is resized to its effective value;
+            // the default fallback stays untouched (it is not a real window).
+            .map(effective_context_window)
             .unwrap_or(MAX_CONTEXT_TOKENS);
 
         Self::new(max_tokens)
@@ -852,6 +860,12 @@ impl ContextManager {
     /// trigger ([`Self::run`]) re-scales with it, so the LLM compaction fires
     /// at a sane fraction of the model's REAL window instead of a hardcoded
     /// default that is far below it.
+    ///
+    /// Callers passing a DISCOVERED window should pass its effective value
+    /// ([`effective_context_window`]) — the advertised window is not what the
+    /// model can reason over. The default budget ([`MAX_CONTEXT_TOKENS`]) is
+    /// never resized; a restored snapshot passes back the already-effective
+    /// value it persisted.
     pub fn set_max_tokens(&mut self, max_tokens: usize) {
         self.max_tokens = max_tokens;
     }

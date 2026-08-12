@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::util::estimate_tokens;
+use cosh_sdk::connector::effective_context_window;
 
 fn cm(max_tokens: usize) -> ContextManager {
     ContextManager::new(max_tokens)
@@ -2465,13 +2466,17 @@ fn llm_compaction_is_invisible_to_the_sync_observer() {
 
 #[tokio::test]
 async fn with_discovered_context_uses_discovered_value() {
-    // Test with a known OpenRouter model that should have a context window
+    // Test with a known model that should have a context window
     let cm = ContextManager::with_discovered_context("openai/gpt-4o").await;
 
-    // The discovered context window should be greater than the default
-    assert!(
-        cm.display_info().max_tokens > MAX_CONTEXT_TOKENS,
-        "Discovered context window should be greater than default"
+    // gpt-4o resolves statically to a 128k window; the budget is sized to the
+    // EFFECTIVE window — far below the advertised one, because the compaction
+    // must fire before the model's degradation zone, not at the provider's
+    // hard limit.
+    assert_eq!(
+        cm.display_info().max_tokens,
+        effective_context_window(128_000),
+        "Budget should be the effective context of the discovered 128k window"
     );
 }
 
@@ -2493,12 +2498,13 @@ async fn with_discovered_context_works_with_claude_models() {
     // Test with a Claude model (should try Anthropic API)
     let cm = ContextManager::with_discovered_context("claude-opus-5").await;
 
-    // Either discover the real context window or fall back to default
-    // The important thing is that it doesn't crash
+    // claude-opus-5 resolves statically to a 1M window; the budget is the
+    // EFFECTIVE window (floored at 20% of the advertised one).
     let max_tokens = cm.display_info().max_tokens;
-    assert!(
-        max_tokens >= MAX_CONTEXT_TOKENS,
-        "Context window should be at least the default value"
+    assert_eq!(
+        max_tokens,
+        effective_context_window(1_000_000),
+        "Budget should be the effective context of the discovered 1M window"
     );
 }
 
