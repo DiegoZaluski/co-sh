@@ -3892,6 +3892,15 @@ impl App {
                     self.context_info = Some(info);
                 }
 
+                HarnessEvent::ContextSnapshot { context_state } => {
+                    // Incremental persistence: the harness emits a throttled
+                    // serialized context snapshot mid-run so a crash/restart
+                    // does not lose the in-flight run. Persist the session
+                    // JSONL and the `.ctx` companion file here, mirroring the
+                    // Done/Stopped handlers.
+                    self.persist_incrementally(&context_state);
+                }
+
                 HarnessEvent::Compaction { event } => {
                     self.handle_compaction_event(event);
                 }
@@ -4002,6 +4011,24 @@ impl App {
                     self.permission_dialog.selected = 2;
                 }
             }
+        }
+    }
+
+    /// Incremental persistence: called on each throttled `ContextSnapshot`
+    /// event so a crash/restart mid-run resumes from the latest context
+    /// instead of the session-start state. Mirrors the Done/Stopped save
+    /// logic and skips sessions with no valid dialog yet.
+    fn persist_incrementally(&mut self, context_state: &[u8]) {
+        if self.state.status != SessionStatus::Working {
+            return;
+        }
+        if let Some(id) = self.state.current_session_id.clone()
+            && let Some(session) = self.state.session_cache.get(&id)
+            && is_valid_session(session)
+        {
+            self.session_store.save_session(session);
+            self.session_store.save_ctx(&id, context_state);
+            self.state.ensure_session_summary(&id);
         }
     }
 
