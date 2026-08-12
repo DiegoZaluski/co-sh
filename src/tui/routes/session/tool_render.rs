@@ -252,6 +252,15 @@ impl ToolRenderState {
             }
         }
     }
+
+    /// Drop spinners that have finished (phase Idle). Idle spinners are never
+    /// rendered — every render path filters with `!is_idle()` — so keeping
+    /// them would grow the map by one entry per tool call the session ever
+    /// made. Dropping them bounds the map by the number of tools currently
+    /// animating, and a re-created spinner is indistinguishable.
+    pub fn sweep_idle_spinners(&mut self) {
+        self.tool_spinners.retain(|_, s| !s.is_idle());
+    }
 }
 
 impl Default for ToolRenderState {

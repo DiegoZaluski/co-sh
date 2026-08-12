@@ -209,6 +209,21 @@ const SUMMARIZING_COLLAPSED_LINES: u16 = 8;
 /// the last content row, so the content never touches the box edges.
 const SUMMARIZING_PAD_V: u16 = 1;
 
+/// Generous in-memory budget for the per-message render cache (cells +
+/// text regions). Once the total exceeds this, the oldest entries outside a
+/// guard around the viewport are evicted LRU-style — the transcript on disk
+/// keeps the full session, so scroll-back simply re-renders the evicted
+/// message. Bounding this cache keeps the TUI fluid on very long sessions.
+const RENDER_CACHE_BUDGET: usize = 64 * 1024 * 1024; // 64 MB
+
+/// Eviction stops once the cache is back under this water mark, so a small
+/// scroll doesn't immediately re-trigger eviction (anti-thrash).
+const RENDER_CACHE_LOW_WATER: usize = 48 * 1024 * 1024; // 48 MB
+
+/// Row margin (in content rows) above/below the viewport that is never
+/// evicted — ordinary scrolling within a few screens stays re-render-free.
+const RENDER_CACHE_GUARD_ROWS: i32 = 400;
+
 /// Stable expand/collapse key for a "Summarizing" box: one per LLM-compaction
 /// line, keyed by its `started_at`.
 fn summarizing_id(part: &CompactionPart) -> String {
@@ -381,6 +396,13 @@ pub struct SessionView {
     /// streaming no longer allocates/frees a large buffer every frame, which
     /// fragmented the heap and degraded the TUI over the process lifetime.
     scratch: Option<ratatui::buffer::Buffer>,
+    /// Monotonic frame counter — recency stamp for the render-cache LRU.
+    render_frame: u64,
+    /// Last frame each message's cached cells/regions were used (hit or
+    /// stored). `prune_render_cache` evicts the oldest stamps first.
+    msg_cache_last_used: Vec<u64>,
+    /// Approximate live bytes held by `msg_cache_cells` + `msg_cache_text_regions`.
+    msg_cache_bytes: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -463,6 +485,9 @@ impl SessionView {
             msg_cache_h: Vec::new(),
             msg_cache_text_regions: Vec::new(),
             scratch: None,
+            render_frame: 0,
+            msg_cache_last_used: Vec::new(),
+            msg_cache_bytes: 0,
             last_session_id: None,
             last_tool_state_version: 0,
         }
@@ -918,6 +943,80 @@ impl SessionView {
             }
         }
         last_row.map(|r| r - y + 1).unwrap_or(0)
+    }
+    /// Approximate live bytes of one cached entry (rendered cells + region
+    /// strings). Only the byte-heavy `Vec<Cell>` and the region text are
+    /// counted — the fixed per-message overhead is negligible. An associated
+    /// function (no `&self`) so the store sites can compute it from disjoint
+    /// field borrows while the reusable `scratch` buffer is still borrowed.
+    fn cache_entry_bytes_of(
+        cells: &Option<Vec<ratatui::buffer::Cell>>,
+        regions: &Option<Vec<TextRegion>>,
+    ) -> usize {
+        let cells = cells.as_ref().map_or(0, |c| {
+            c.len()
+                .saturating_mul(std::mem::size_of::<ratatui::buffer::Cell>())
+        });
+        let regions = regions.as_ref().map_or(0, |r| {
+            r.iter().fold(0usize, |acc, reg| {
+                acc.saturating_add(reg.text.capacity())
+                    .saturating_add(std::mem::size_of::<TextRegion>())
+            })
+        });
+        cells.saturating_add(regions)
+    }
+
+    /// Evict per-message render-cache entries (cells + text regions) LRU-style
+    /// until the cache is back under [`RENDER_CACHE_LOW_WATER`]. Messages
+    /// inside a generous row guard around the viewport are never evicted, so
+    /// ordinary scrolling stays re-render-free; only old content far from the
+    /// current position sheds its cached cells. The transcript is untouched —
+    /// an evicted message simply re-renders if the user scrolls back to it.
+    fn prune_render_cache(&mut self, vp_top: i32, vp_bottom: i32) {
+        if self.msg_cache_tokens.is_empty() {
+            return;
+        }
+        let n = self.msg_cache_tokens.len();
+        // Content-space guard: the visible content window is
+        // [scroll_y, scroll_y + viewport_height], and the message walk below
+        // is in content rows. `vp_top`/`vp_bottom` are SCREEN rows — only
+        // their difference (the viewport height) is coordinate-independent.
+        let visible_h = vp_bottom - vp_top;
+        let guard_top = self.scroll_y - RENDER_CACHE_GUARD_ROWS;
+        let guard_bottom = self.scroll_y + visible_h + RENDER_CACHE_GUARD_ROWS;
+
+        // Content-row walk (mirrors the render loop: 1 gap row between messages).
+        let mut y = 0i32;
+        let mut candidates: Vec<usize> = Vec::new();
+        for idx in 0..n {
+            if idx > 0 {
+                y += 1;
+            }
+            let msg_top = y;
+            y += self.msg_height_cache.get(idx).copied().unwrap_or(0);
+            let msg_bottom = y;
+            let outside_guard = msg_bottom <= guard_top || msg_top >= guard_bottom;
+            if outside_guard && self.msg_cache_cells[idx].is_some() {
+                candidates.push(idx);
+            }
+        } // Evict oldest-first until back under the low-water mark.
+        candidates.sort_by_key(|&i| self.msg_cache_last_used[i]);
+        for idx in candidates {
+            if self.msg_cache_bytes <= RENDER_CACHE_LOW_WATER {
+                break;
+            }
+            self.msg_cache_bytes = self
+                .msg_cache_bytes
+                .saturating_sub(Self::cache_entry_bytes_of(
+                    &self.msg_cache_cells[idx],
+                    &self.msg_cache_text_regions[idx],
+                ));
+            self.msg_cache_tokens[idx] = !0;
+            self.msg_cache_w[idx] = 0;
+            self.msg_cache_h[idx] = 0;
+            self.msg_cache_cells[idx] = None;
+            self.msg_cache_text_regions[idx] = None;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2473,6 +2572,8 @@ impl SessionView {
             self.msg_cache_w.clear();
             self.msg_cache_h.clear();
             self.msg_cache_text_regions.clear();
+            self.msg_cache_last_used.clear();
+            self.msg_cache_bytes = 0;
         }
         // Only resize when message count actually changed (avoids O(n) fill per frame).
         if n_msgs != self.msg_cache_tokens.len() {
@@ -2481,7 +2582,10 @@ impl SessionView {
             self.msg_cache_w.resize(n_msgs, 0);
             self.msg_cache_h.resize(n_msgs, 0);
             self.msg_cache_text_regions.resize(n_msgs, None);
+            self.msg_cache_last_used.resize(n_msgs, 0);
         }
+
+        self.render_frame = self.render_frame.wrapping_add(1);
 
         let total_height = self.cached_total_height;
         let visible_height = i32::from(inner_area.height);
@@ -2561,6 +2665,9 @@ impl SessionView {
 
             // Check if message overlaps with viewport (using i32, no u16 wrap)
             if msg_bottom > vp_top && msg_top < vp_bottom {
+                // Recency stamp for the render-cache LRU: any message the user
+                // can currently see counts as recently used.
+                self.msg_cache_last_used[idx] = self.render_frame;
                 let is_top_clipped = msg_top < vp_top;
 
                 if is_top_clipped && is_assistant_non_error {
@@ -2719,11 +2826,28 @@ impl SessionView {
                                 x_off_text,
                                 max_w,
                             );
+                            // Re-account the entry's byte cost (old subtracted,
+                            // new added) and stamp it most-recently-used. The
+                            // writes are per-field so the borrow of the reusable
+                            // `scratch` buffer stays disjoint.
+                            self.msg_cache_bytes =
+                                self.msg_cache_bytes
+                                    .saturating_sub(Self::cache_entry_bytes_of(
+                                        &self.msg_cache_cells[idx],
+                                        &self.msg_cache_text_regions[idx],
+                                    ));
                             self.msg_cache_tokens[idx] = token;
                             self.msg_cache_w[idx] = inner_area.width;
                             self.msg_cache_h[idx] = ah;
                             self.msg_cache_cells[idx] = Some(cells);
                             self.msg_cache_text_regions[idx] = Some(regions);
+                            self.msg_cache_bytes =
+                                self.msg_cache_bytes
+                                    .saturating_add(Self::cache_entry_bytes_of(
+                                        &self.msg_cache_cells[idx],
+                                        &self.msg_cache_text_regions[idx],
+                                    ));
+                            self.msg_cache_last_used[idx] = self.render_frame;
                         }
 
                         render_actual_h = actual_h.max(1);
@@ -2886,11 +3010,24 @@ impl SessionView {
                                     x_off_text,
                                     max_w,
                                 );
+                                self.msg_cache_bytes = self.msg_cache_bytes.saturating_sub(
+                                    Self::cache_entry_bytes_of(
+                                        &self.msg_cache_cells[idx],
+                                        &self.msg_cache_text_regions[idx],
+                                    ),
+                                );
                                 self.msg_cache_tokens[idx] = token;
                                 self.msg_cache_w[idx] = inner_area.width;
                                 self.msg_cache_h[idx] = ah;
                                 self.msg_cache_cells[idx] = Some(cells);
                                 self.msg_cache_text_regions[idx] = Some(regions);
+                                self.msg_cache_bytes = self.msg_cache_bytes.saturating_add(
+                                    Self::cache_entry_bytes_of(
+                                        &self.msg_cache_cells[idx],
+                                        &self.msg_cache_text_regions[idx],
+                                    ),
+                                );
+                                self.msg_cache_last_used[idx] = self.render_frame;
                             }
                         }
                     }
@@ -3074,11 +3211,24 @@ impl SessionView {
                                             x_off_text,
                                             max_w,
                                         );
+                                        self.msg_cache_bytes = self.msg_cache_bytes.saturating_sub(
+                                            Self::cache_entry_bytes_of(
+                                                &self.msg_cache_cells[idx],
+                                                &self.msg_cache_text_regions[idx],
+                                            ),
+                                        );
                                         self.msg_cache_tokens[idx] = token;
                                         self.msg_cache_w[idx] = inner_area.width;
                                         self.msg_cache_h[idx] = ah;
                                         self.msg_cache_cells[idx] = Some(cells);
                                         self.msg_cache_text_regions[idx] = Some(regions);
+                                        self.msg_cache_bytes = self.msg_cache_bytes.saturating_add(
+                                            Self::cache_entry_bytes_of(
+                                                &self.msg_cache_cells[idx],
+                                                &self.msg_cache_text_regions[idx],
+                                            ),
+                                        );
+                                        self.msg_cache_last_used[idx] = self.render_frame;
                                     }
                                 }
                             }
@@ -3158,6 +3308,17 @@ impl SessionView {
                 }
             }
         }
+
+        // ── Bounded process memory on long sessions ──────────────────────────
+        // The render cache is the fattest in-memory copy (up to ~40 bytes per
+        // rendered cell). Once it exceeds the generous budget, shed the oldest
+        // entries outside the viewport guard; idle tool spinners (never
+        // rendered) are dropped every frame so the map stays bounded by the
+        // number of tools currently animating.
+        if self.msg_cache_bytes > RENDER_CACHE_BUDGET {
+            self.prune_render_cache(vp_top, vp_bottom);
+        }
+        self.tool_state.sweep_idle_spinners();
 
         self.handle_auto_scroll(delta_time, total_height, visible_height);
 

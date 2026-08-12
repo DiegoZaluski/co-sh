@@ -1714,3 +1714,103 @@ fn test_code_block_bottom_padding_not_overlapped() {
          preserved (2 blank rows) before the reply"
     );
 }
+
+#[test]
+fn render_cache_prunes_oldest_entries_outside_the_viewport_guard() {
+    use ratatui::buffer::Cell;
+
+    use super::TextRegion;
+
+    let mut view = SessionView::new();
+    // 10 tall messages: message i occupies content rows [i*201, i*201+200].
+    view.msg_height_cache = vec![200; 10];
+    // Seed the render-cache vectors as if every message had been rendered.
+    let entry = || Some(vec![Cell::default(); 100]);
+    view.msg_cache_tokens = (1u64..=10).collect();
+    view.msg_cache_w = vec![80; 10];
+    view.msg_cache_h = vec![200; 10];
+    view.msg_cache_cells = (0..10).map(|_| entry()).collect();
+    let region = TextRegion {
+        y1: 0,
+        y2: 1,
+        x1: 0,
+        x2: 80,
+        text: "x".into(),
+    };
+    view.msg_cache_text_regions = (0..10).map(|_| Some(vec![region.clone()])).collect();
+    // msg6 carries the OLDEST stamp (recency 1) but sits inside the guard —
+    // the guard must beat recency. Among the outside-guard candidates,
+    // msg0 is the oldest and msg5 the newest.
+    view.msg_cache_last_used = vec![3, 4, 5, 6, 7, 8, 1, 2, 3, 4];
+
+    // Real scroll semantics: scrolled down 1608 rows into the session, with a
+    // 92-row screen viewport. The content-space guard is [1208, 2100]:
+    // messages 0..=5 end above it, messages 6..=9 are inside it.
+    view.scroll_y = 1608;
+    let per_entry = SessionView::cache_entry_bytes_of(
+        &view.msg_cache_cells[0],
+        &view.msg_cache_text_regions[0],
+    );
+    // Fake a slightly-over-budget total worth 7 candidate evictions, so the
+    // prune evicts every outside-guard candidate and stops one entry's worth
+    // above the low-water mark.
+    view.msg_cache_bytes = super::RENDER_CACHE_LOW_WATER + 7 * per_entry;
+
+    view.prune_render_cache(0, 92);
+
+    for idx in 0..=5 {
+        assert!(
+            view.msg_cache_cells[idx].is_none(),
+            "msg {idx} outside guard must be evicted"
+        );
+        assert_eq!(
+            view.msg_cache_tokens[idx], !0,
+            "msg {idx} cache token reset"
+        );
+    }
+    for idx in 6..=9 {
+        assert!(
+            view.msg_cache_cells[idx].is_some(),
+            "msg {idx} inside guard must survive"
+        );
+    }
+    // msg6 had the oldest stamp but the guard kept it — the LRU must not
+    // have touched it.
+    assert!(view.msg_cache_cells[6].is_some());
+    // Exactly the 6 candidates were evicted; the byte counter follows the
+    // deterministic subtraction.
+    assert_eq!(
+        view.msg_cache_bytes,
+        super::RENDER_CACHE_LOW_WATER + per_entry
+    );
+}
+
+#[test]
+fn sweep_idle_spinners_drops_only_finished_ones() {
+    use crate::component::spinner_highlight::HighlightSpinner;
+
+    use super::tool_render::ToolRenderState;
+
+    let base = test_theme().text;
+    let mut state = ToolRenderState::new();
+
+    // A spinner that finished its sweep → phase Idle → must be dropped.
+    let mut done = HighlightSpinner::new("done", base, base);
+    done.finish();
+    // Default speed 0.008, delta 1.0 → 0.24 per advance; the beam needs
+    // ~7 advances to exit past 1.3 and reach Idle.
+    for _ in 0..20 {
+        done.advance(1.0);
+    }
+    assert!(done.is_idle(), "finish() + advance must reach Idle");
+    state.tool_spinners.insert("done-1".into(), done);
+
+    // A still-running spinner must survive the sweep.
+    let running = HighlightSpinner::new("run", base, base);
+    state.tool_spinners.insert("run-1".into(), running);
+
+    state.sweep_idle_spinners();
+
+    assert!(!state.tool_spinners.contains_key("done-1"));
+    assert!(state.tool_spinners.contains_key("run-1"));
+}
