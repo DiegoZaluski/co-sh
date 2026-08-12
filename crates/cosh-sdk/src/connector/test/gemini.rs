@@ -604,3 +604,63 @@ data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReas
         "no effort → no thinkingConfig"
     );
 }
+
+/// Thinking-config requests MUST be routed to the `v1beta` API surface: the
+/// stable `v1` generateContent endpoint rejects `thinkingConfig` with HTTP
+/// 400, and every official Google doc/example sends thinking configuration
+/// through `/v1beta`. A request WITHOUT a thinking level keeps the stable
+/// version.
+#[test]
+fn api_version_routes_thinking_to_beta() {
+    use crate::connector::params::Parameters;
+    use crate::connector::gemini::{api_version_for, resolve_base_url};
+
+    // With a reasoning effort → v1beta.
+    for effort in ["minimal", "low", "medium", "high"] {
+        let params = Parameters {
+            reasoning_effort: Some(effort.to_string()),
+            ..Parameters::default()
+        };
+        assert_eq!(
+            api_version_for(&params),
+            "v1beta",
+            "thinking level '{effort}' must route to v1beta"
+        );
+    }
+    // No effort → stable v1.
+    let params = Parameters::default();
+    assert_eq!(api_version_for(&params), "v1");
+
+    // The full base-URL rewrite: the version segment of the registered
+    // stable URL is replaced with the effective version.
+    let config = crate::connector::provider::ProviderConfig {
+        name: "gemini",
+        family: crate::connector::provider::Family::Gemini,
+        base_url: "https://generativelanguage.googleapis.com/v1",
+        default_model: "gemini-3-pro-preview",
+        needs_extra_headers: false,
+    };
+    let thinking = Parameters {
+        reasoning_effort: Some("high".to_string()),
+        ..Parameters::default()
+    };
+    assert_eq!(
+        resolve_base_url(&config, &thinking),
+        "https://generativelanguage.googleapis.com/v1beta",
+        "thinking requests must hit /v1beta/models/...:streamGenerateContent"
+    );
+    assert_eq!(
+        resolve_base_url(&config, &Parameters::default()),
+        "https://generativelanguage.googleapis.com/v1"
+    );
+    // A user-supplied base_url wins verbatim (proxies / test servers).
+    let custom = Parameters {
+        base_url: Some("http://127.0.0.1:9999/custom".to_string()),
+        reasoning_effort: Some("high".to_string()),
+        ..Parameters::default()
+    };
+    assert_eq!(
+        resolve_base_url(&config, &custom),
+        "http://127.0.0.1:9999/custom"
+    );
+}

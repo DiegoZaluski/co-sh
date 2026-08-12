@@ -292,9 +292,11 @@ async fn user_id_in_metadata() {
     assert_eq!(json["metadata"]["user_id"], "user-123");
 }
 
-/// A reasoning effort enables Claude extended thinking with a budget.
+/// A reasoning effort on a 4.6+ model (the default `claude-sonnet-4-6`)
+/// enables ADAPTIVE thinking with `output_config.effort` — `type:"enabled"`
+/// is deprecated there (400 on 4.7+).
 #[tokio::test]
-async fn reasoning_effort_enables_thinking_block() {
+async fn reasoning_effort_enables_adaptive_thinking_on_46() {
     let (port, captured, _raw, handle) = mock_server(
         r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
         200,
@@ -307,8 +309,81 @@ async fn reasoning_effort_enables_thinking_block() {
 
     let body = captured.lock().unwrap().take().unwrap();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["thinking"]["type"], "adaptive");
+    assert_eq!(json["thinking"]["output_config"]["effort"], "high");
+    assert!(
+        json["thinking"].get("budget_tokens").is_none(),
+        "adaptive thinking carries no token budget"
+    );
+    // Adaptive mode has no budget constraint — max_tokens stays at the default.
+    assert_eq!(json["max_tokens"], 4096);
+}
+
+/// On Claude 4.5 and earlier the reasoning effort maps onto MANUAL extended
+/// thinking (`type: "enabled"` + `budget_tokens`) — the only mode those
+/// models support (`type: "adaptive"` returns 400 there).
+#[tokio::test]
+async fn reasoning_effort_on_old_model_uses_manual_thinking() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port)
+        .with_model("claude-sonnet-4-5")
+        .with_reasoning_effort("high")
+        .chat("hello")
+        .await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["thinking"]["type"], "enabled");
     assert_eq!(json["thinking"]["budget_tokens"], 24_576);
+}
+
+/// Manual extended thinking requires `max_tokens > budget_tokens` (thinking
+/// tokens count toward the turn's output ceiling; the API returns 400
+/// otherwise). The floor is raised to `budget + headroom` when the caller did
+/// not set a larger max_tokens.
+#[tokio::test]
+async fn manual_thinking_raises_max_tokens_above_budget() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port)
+        .with_model("claude-sonnet-4-5")
+        .with_reasoning_effort("high")
+        .with_max_tokens(2000)
+        .chat("hello")
+        .await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // budget 24576 + 1024 headroom — the explicit 2000 is overridden.
+    assert_eq!(json["max_tokens"], 24_576 + 1024);
+}
+
+/// An explicit max_tokens that already clears the budget is respected
+/// verbatim.
+#[tokio::test]
+async fn explicit_max_tokens_above_budget_is_respected() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port)
+        .with_model("claude-sonnet-4-5")
+        .with_reasoning_effort("high")
+        .with_max_tokens(30_000)
+        .chat("hello")
+        .await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["max_tokens"], 30_000);
 }
 
 /// No effort → no `thinking` block (Claude's default behavior).
@@ -327,4 +402,183 @@ async fn request_omits_thinking_without_effort() {
         json.get("thinking").is_none(),
         "no effort → no thinking block"
     );
+}
+
+/// A stream that ends with a tool_use must emit the turn's thinking blocks
+/// (summary text + signature, captured via `thinking_delta` and
+/// `signature_delta`) as a single chunk BEFORE the tool-call chunks — the
+/// harness replays them verbatim on the follow-up request (the Anthropic API
+/// validates the signature and rejects missing blocks with 400). The
+/// thinking deltas are ALSO streamed as `reasoning` for the TUI.
+#[tokio::test]
+async fn streaming_thinking_blocks_survive_tool_use_turn() {
+    let sse = "\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"Let me reason\"}}\n\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" about it more\"}}\n\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_abc123\"}}\n\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash\",\"input\":{}}}\n\n\
+data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}\n\n\
+data: {\"type\":\"content_block_stop\",\"index\":1}\n\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":50}}\n\n\
+data: {\"type\":\"message_stop\"}\n\n";
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = claude_connector(port);
+    let stream = c
+        .stream_chat_with_messages("sys", &[super::super::user_message("hi")])
+        .await
+        .unwrap();
+    handle.join().unwrap();
+
+    let chunks: Vec<_> = stream.collect().await;
+    let chunks: Vec<_> = chunks.into_iter().map(|c| c.unwrap()).collect();
+
+    // Streaming order: reasoning chunks first (the live TUI feed), then the
+    // single verbatim thinking-block chunk, then the tool-call token.
+    let thinking_pos = chunks
+        .iter()
+        .position(|c| c.thinking_blocks().is_some())
+        .expect("turn with tool use must carry its thinking blocks");
+    let tool_pos = chunks
+        .iter()
+        .position(|c| c.finish_reason() == Some("tool_calls"))
+        .expect("the tool-call token");
+    assert!(
+        thinking_pos < tool_pos,
+        "the thinking blocks must precede the tool-call token"
+    );
+
+    let thinking_chunk = &chunks[thinking_pos];
+    let blocks = thinking_chunk.thinking_blocks().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(
+        blocks[0].thinking,
+        "Let me reason about it more",
+        "thinking_delta deltas must be accumulated into the block"
+    );
+    assert_eq!(blocks[0].signature, "sig_abc123");
+    assert!(thinking_chunk.token().is_empty());
+    assert_eq!(thinking_chunk.finish_reason(), None);
+
+    // The tool-use token carries the accumulated args.
+    let tool_chunk = &chunks[tool_pos];
+    let json: serde_json::Value = serde_json::from_str(tool_chunk.token()).unwrap();
+    assert_eq!(json["name"], "bash");
+    assert_eq!(json["arguments"], serde_json::json!({"cmd":"ls"}));
+    assert_eq!(json["id"], "toolu_1");
+}
+
+/// The thinking deltas stream as `reasoning` chunks so the TUI shows the
+/// model thinking live — but never as visible text tokens.
+#[tokio::test]
+async fn streaming_thinking_deltas_are_reasoning_not_tokens() {
+    let sse = "\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"think\"}}\n\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" harder\"}}\n\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Answer\"}}\n\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null}}\n\n\
+data: {\"type\":\"message_stop\"}\n\n";
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = claude_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[super::super::user_message("hi")])
+        .await
+        .unwrap();
+    handle.join().unwrap();
+
+    let mut tokens = String::new();
+    let mut reasoning = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        tokens.push_str(chunk.token());
+        reasoning.push_str(chunk.reasoning());
+    }
+    assert_eq!(tokens, "Answer", "thinking must never leak into visible tokens");
+    assert_eq!(reasoning, "think harder");
+}
+
+/// A previous assistant tool-call turn with thinking blocks must replay them
+/// VERBATIM (text + signature) as `thinking` content blocks at the start of
+/// the assistant message — the API rejects modified or missing blocks with
+/// 400.
+#[tokio::test]
+async fn assistant_tool_turn_replays_thinking_blocks_verbatim() {
+    use super::super::{ClaudeThinkingBlock, ToolCallFunctionMsg, ToolCallMsg, assistant_tool_call_message};
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+
+    let mut call = assistant_tool_call_message(vec![ToolCallMsg {
+        id: "toolu_1".to_string(),
+        kind: "function".to_string(),
+        function: ToolCallFunctionMsg {
+            name: "bash".to_string(),
+            arguments: r#"{"cmd":"ls"}"#.to_string(),
+        },
+        thought_signature: None,
+    }]);
+    call.thinking_blocks = Some(vec![ClaudeThinkingBlock {
+        thinking: "Let me reason about it more".to_string(),
+        signature: "sig_abc123".to_string(),
+    }]);
+    let messages = vec![super::super::user_message("hi"), call];
+
+    let mut stream = claude_connector(port)
+        .stream_chat_with_messages("sys", &messages)
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let assistant = json["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("assistant message");
+    let content = assistant["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2, "thinking block + tool_use");
+    assert_eq!(content[0]["type"], "thinking");
+    assert_eq!(content[0]["thinking"], "Let me reason about it more");
+    assert_eq!(content[0]["signature"], "sig_abc123");
+    assert_eq!(content[1]["type"], "tool_use");
+    assert_eq!(content[1]["id"], "toolu_1");
+}
+
+/// Assistant turns WITHOUT thinking blocks must not carry a `thinking`
+/// content block — the wire format stays clean for non-reasoning turns.
+#[tokio::test]
+async fn assistant_tool_turn_without_blocks_has_no_thinking_content() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let messages = vec![
+        super::super::user_message("hi"),
+        super::super::assistant_tool_call_message(vec![super::super::ToolCallMsg {
+            id: "toolu_1".to_string(),
+            kind: "function".to_string(),
+            function: super::super::ToolCallFunctionMsg {
+                name: "bash".to_string(),
+                arguments: "{}".to_string(),
+            },
+            thought_signature: None,
+        }]),
+    ];
+    let mut stream = claude_connector(port)
+        .stream_chat_with_messages("sys", &messages)
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let content = json["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1, "only the tool_use block");
+    assert_eq!(content[0]["type"], "tool_use");
 }

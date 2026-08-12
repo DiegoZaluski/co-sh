@@ -3,7 +3,7 @@ use super::super::common::{
 };
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
-use super::super::params::{Parameters, ToolDefinition};
+use super::super::params::{ClaudeThinkingBlock, Parameters, ToolDefinition};
 use super::super::provider::{ProviderConfig, get_api_key};
 
 // Public ChatMessage type for structured conversation history.
@@ -37,6 +37,15 @@ enum ClaudeContentBlock {
         tool_use_id: String,
         content: String,
     },
+    /// A thinking block from a PREVIOUS response, replayed verbatim (text +
+    /// signature) at the start of the assistant message so the API can
+    /// validate the reasoning continuity.
+    Thinking {
+        #[serde(rename = "type")]
+        kind: String,
+        thinking: String,
+        signature: String,
+    },
 }
 
 #[derive(serde::Serialize)]
@@ -68,31 +77,114 @@ struct Metadata {
     user_id: Option<String>,
 }
 
-/// Claude extended-thinking block — `thinking: { type: "enabled",
-/// budget_tokens: N }`. The harness maps its `low`/`medium`/`high` reasoning
-/// effort onto token budgets; `default` (no effort) omits the field entirely.
+/// Claude thinking configuration — either manual extended thinking
+/// (`thinking: { type: "enabled", budget_tokens: N }`, the only mode on
+/// Claude 4.5 and earlier) or adaptive thinking (`thinking: { type:
+/// "adaptive" }` plus `output_config.effort`, the current mode on the 4.6
+/// generation and later — `type: "enabled"` is deprecated there and returns
+/// 400 on 4.7+). The harness maps its reasoning effort onto the right knob
+/// for the model; `default` (no effort) omits the field entirely.
 #[derive(serde::Serialize)]
-struct ThinkingBlock {
-    #[serde(rename = "type")]
-    kind: String,
-    budget_tokens: u32,
+#[serde(untagged)]
+enum ThinkingConfig {
+    Manual {
+        #[serde(rename = "type")]
+        kind: String,
+        budget_tokens: u32,
+    },
+    Adaptive {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_config: Option<OutputConfig>,
+    },
 }
 
-/// Map a reasoning effort onto a Claude extended-thinking token budget.
-/// Returns `None` for the default (no effort) or unknown levels.
-fn thinking_for_effort(effort: &str) -> Option<ThinkingBlock> {
-    let budget_tokens = match effort {
-        "minimal" => 1024,
-        "low" => 2048,
-        "medium" => 8192,
-        "high" => 24_576,
-        "max" => 32_768,
-        _ => return None,
-    };
-    Some(ThinkingBlock {
+/// `output_config` for adaptive thinking — the reasoning depth the model
+/// applies to the whole response (thinking included).
+#[derive(serde::Serialize)]
+struct OutputConfig {
+    effort: String,
+}
+
+/// Minimum output headroom reserved ABOVE the thinking budget so the final
+/// answer always fits: thinking tokens count toward `max_tokens` and the API
+/// returns 400 when `budget_tokens >= max_tokens`.
+const THINKING_OUTPUT_HEADROOM: u32 = 1024;
+
+/// Whether the model accepts adaptive thinking (`thinking.type: "adaptive"`).
+///
+/// Per Anthropic's current docs, adaptive thinking is the mode for the 4.6
+/// generation and later (Sonnet 4.6, Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 5,
+/// Opus 5, Fable 5, Mythos 5). Earlier Claude 4 models (Sonnet 4.5, Opus
+/// 4.5, Haiku 4.5, Opus 4, Opus 4.1, Sonnet 4) and Claude 3.x support only
+/// manual extended thinking — `type: "adaptive"` returns 400 there.
+fn model_supports_adaptive_thinking(model: &str) -> bool {
+    let m = model.to_ascii_lowercase().replace('.', "-");
+    m.contains("sonnet-4-6")
+        || m.contains("opus-4-6")
+        || m.contains("opus-4-7")
+        || m.contains("opus-4-8")
+        || m.contains("sonnet-5")
+        || m.contains("opus-5")
+        || m.contains("fable-5")
+        || m.contains("mythos-5")
+}
+
+/// Manual extended-thinking budget for a reasoning effort (Claude 4.5 and
+/// earlier). Returns `None` for levels the API has no budget for.
+fn budget_for_effort(effort: &str) -> Option<u32> {
+    match effort {
+        "minimal" => Some(1024),
+        "low" => Some(2048),
+        "medium" => Some(8192),
+        "high" => Some(24_576),
+        "max" => Some(32_768),
+        _ => None,
+    }
+}
+
+/// Map a reasoning effort onto the model's thinking configuration.
+///
+/// Newer models (4.6+) get adaptive thinking with `output_config.effort`;
+/// older models get manual extended thinking with a token budget. Returns
+/// `None` for the default (no effort) or for levels a model cannot express
+/// (`minimal`/`none` — Claude has no such effort, so the model default is
+/// used instead of guessing).
+fn thinking_for_effort(model: &str, effort: &str) -> Option<ThinkingConfig> {
+    if model_supports_adaptive_thinking(model) {
+        return match effort {
+            "low" | "medium" | "high" | "xhigh" | "max" => Some(ThinkingConfig::Adaptive {
+                kind: "adaptive".to_string(),
+                output_config: Some(OutputConfig {
+                    effort: effort.to_string(),
+                }),
+            }),
+            _ => None,
+        };
+    }
+    budget_for_effort(effort).map(|budget_tokens| ThinkingConfig::Manual {
         kind: "enabled".to_string(),
         budget_tokens,
     })
+}
+
+/// Resolve the effective `max_tokens` for a request.
+///
+/// Manual extended thinking requires `max_tokens > budget_tokens` — the
+/// budget counts toward the turn's output ceiling and the API rejects the
+/// request with 400 when it leaves no room for the answer. When a manual
+/// budget is active the floor is raised to `budget + headroom`, so an
+/// explicit caller max_tokens is only respected verbatim when it already
+/// clears budget + headroom; a smaller explicit value is raised to the
+/// floor (the 1024 headroom guarantees the answer always fits).
+fn effective_max_tokens(user_max: Option<u32>, thinking: &Option<ThinkingConfig>) -> u32 {
+    match thinking {
+        Some(ThinkingConfig::Manual { budget_tokens, .. }) => {
+            user_max.unwrap_or(0).max(*budget_tokens + THINKING_OUTPUT_HEADROOM)
+        }
+        _ => user_max.unwrap_or(4096),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -115,7 +207,7 @@ struct MessageRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<ThinkingBlock>,
+    thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<Metadata>,
 }
@@ -206,14 +298,14 @@ fn build_request(
     let thinking = params
         .reasoning_effort
         .as_deref()
-        .and_then(thinking_for_effort);
+        .and_then(|effort| thinking_for_effort(&model, effort));
     let metadata = params.user.as_ref().map(|uid| Metadata {
         user_id: Some(uid.clone()),
     });
 
     MessageRequest {
         model,
-        max_tokens: params.max_tokens.unwrap_or(4096),
+        max_tokens: effective_max_tokens(params.max_tokens, &thinking),
         messages,
         system: system_prompt.map(String::from),
         stream: if stream { Some(true) } else { None },
@@ -303,6 +395,20 @@ fn convert_to_claude_messages(history: &[ApiChatMessage]) -> Vec<ClaudeMessage> 
         match msg.role.as_str() {
             "assistant" if msg.tool_calls.is_some() => {
                 let mut content = Vec::new();
+                // Claude extended thinking: replay the thinking blocks that
+                // preceded the tool_use in the original response, VERBATIM
+                // (the Anthropic API validates the signature cryptographically
+                // and rejects modified or missing blocks with 400). Only the
+                // thinking-enabled Claude path sets them.
+                if let Some(blocks) = &msg.thinking_blocks {
+                    for block in blocks {
+                        content.push(ClaudeContentBlock::Thinking {
+                            kind: "thinking".to_string(),
+                            thinking: block.thinking.clone(),
+                            signature: block.signature.clone(),
+                        });
+                    }
+                }
                 if let Some(ref text) = msg.content
                     && !text.is_empty()
                 {
@@ -370,6 +476,28 @@ struct ClaudePendingToolUse {
     input_json: String,
 }
 
+/// Emit the turn's accumulated Claude thinking blocks as a single chunk.
+///
+/// The blocks (summary text + signature) are delivered verbatim so the
+/// harness can replay them on the follow-up request — the Anthropic API
+/// validates the signature and requires the exact blocks that preceded the
+/// `tool_use`. Returns `None` when the turn had no thinking blocks.
+fn take_thinking_chunk(
+    pending_thinking: &mut Vec<ClaudeThinkingBlock>,
+    last_raw: &Option<String>,
+) -> Option<StreamChunk> {
+    if pending_thinking.is_empty() {
+        return None;
+    }
+    Some(StreamChunk {
+        raw: last_raw.clone().unwrap_or_default(),
+        token: String::new(),
+        reasoning: String::new(),
+        thinking_blocks: Some(std::mem::take(pending_thinking)),
+        finish_reason: None,
+    })
+}
+
 /// Flush accumulated Claude tool uses as synthetic [`StreamChunk`] tokens.
 fn flush_claude_tool_uses(
     pending: &mut Vec<ClaudePendingToolUse>,
@@ -389,6 +517,7 @@ fn flush_claude_tool_uses(
             token: json.to_string(),
             reasoning: String::new(),
             finish_reason: Some("tool_calls".to_string()),
+            thinking_blocks: None,
         });
     }
     out
@@ -416,7 +545,7 @@ struct ClaudeMessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<ThinkingBlock>,
+    thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<Metadata>,
 }
@@ -446,14 +575,14 @@ pub async fn chat_stream_with_messages(
     let thinking = params
         .reasoning_effort
         .as_deref()
-        .and_then(thinking_for_effort);
+        .and_then(|effort| thinking_for_effort(&model, effort));
     let metadata = params.user.as_ref().map(|uid| Metadata {
         user_id: Some(uid.clone()),
     });
 
     let request = ClaudeMessagesRequest {
         model,
-        max_tokens: params.max_tokens.unwrap_or(4096),
+        max_tokens: effective_max_tokens(params.max_tokens, &thinking),
         messages: claude_messages,
         system: Some(system.to_string()),
         stream: Some(true),
@@ -485,6 +614,15 @@ pub async fn chat_stream_with_messages(
             // Track the current content block index for tool_use accumulation.
             let mut current_block_index: Option<usize> = None;
             let mut last_raw: Option<String>;
+            // Claude extended-thinking capture: thinking blocks (summary text
+            // + signature) accumulate here and are emitted as a single chunk
+            // at turn end so the harness can replay them verbatim on the
+            // follow-up request (the API requires the exact blocks that
+            // preceded the tool_use, signature included).
+            let mut pending_thinking: Vec<ClaudeThinkingBlock> = Vec::new();
+            // Index of the currently open thinking block (None = none open).
+            let mut thinking_block_index: Option<usize> = None;
+            let mut current_thinking: Option<ClaudeThinkingBlock> = None;
 
             loop {
                 let (frames, ended) =
@@ -518,8 +656,8 @@ pub async fn chat_stream_with_messages(
                                 "content_block_start" => {
                                     let block = &v["content_block"];
                                     let block_type = block["type"].as_str().unwrap_or("");
+                                    let idx = v["index"].as_u64().unwrap_or(0) as usize;
                                     if block_type == "tool_use" {
-                                        let idx = v["index"].as_u64().unwrap_or(0) as usize;
                                         let id = block["id"].as_str().unwrap_or("").to_string();
                                         let name = block["name"].as_str().unwrap_or("").to_string();
                                         if idx >= pending_tool_uses.len() {
@@ -531,6 +669,39 @@ pub async fn chat_stream_with_messages(
                                             input_json: String::new(),
                                         };
                                         current_block_index = Some(idx);
+                                    } else if block_type == "thinking" {
+                                        // Open a thinking block for verbatim
+                                        // replay capture. The block's initial
+                                        // text arrives HERE (the rest via
+                                        // `thinking_delta`, the signature via
+                                        // `signature_delta`).
+                                        let initial = block["thinking"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .to_string();
+                                        thinking_block_index = Some(idx);
+                                        current_thinking = Some(ClaudeThinkingBlock {
+                                            thinking: initial.clone(),
+                                            signature: block["signature"]
+                                                .as_str()
+                                                .unwrap_or("")
+                                                .to_string(),
+                                        });
+                                        // Stream the initial thinking text to
+                                        // the TUI as reasoning too — the block
+                                        // start carries the FIRST chunk of the
+                                        // summary, without it the TUI would
+                                        // miss it (only `thinking_delta`
+                                        // chunks would stream).
+                                        if !initial.is_empty() {
+                                            yield Ok(StreamChunk {
+                                                raw: data.clone(),
+                                                token: String::new(),
+                                                reasoning: initial,
+                                                finish_reason: None,
+                                                thinking_blocks: None,
+                                            });
+                                        }
                                     }
                                 }
                                 "content_block_delta" => {
@@ -547,7 +718,35 @@ pub async fn chat_stream_with_messages(
                                                 token,
                                                 reasoning: String::new(),
                                                 finish_reason: None,
+                                                thinking_blocks: None,
                                             });
+                                        }
+                                        "thinking_delta" => {
+                                            let text = delta["thinking"]
+                                                .as_str()
+                                                .unwrap_or("")
+                                                .to_owned();
+                                            if !text.is_empty() {
+                                                if let Some(t) = current_thinking.as_mut() {
+                                                    t.thinking.push_str(&text);
+                                                }
+                                                // Stream the thinking summary
+                                                // to the TUI as reasoning.
+                                                yield Ok(StreamChunk {
+                                                    raw: data.clone(),
+                                                    token: String::new(),
+                                                    reasoning: text,
+                                                    finish_reason: None,
+                                                    thinking_blocks: None,
+                                                });
+                                            }
+                                        }
+                                        "signature_delta" => {
+                                            if let Some(t) = current_thinking.as_mut()
+                                                && let Some(sig) = delta["signature"].as_str()
+                                            {
+                                                t.signature = sig.to_string();
+                                            }
                                         }
                                         "input_json_delta" => {
                                             if let Some(idx) = current_block_index
@@ -561,6 +760,15 @@ pub async fn chat_stream_with_messages(
                                     }
                                 }
                                 "content_block_stop" => {
+                                    // Close an open thinking block (its
+                                    // thinking_delta/signature_delta filled it).
+                                    if let Some(idx) = thinking_block_index
+                                        && v["index"].as_u64().map(|i| i as usize) == Some(idx)
+                                        && let Some(t) = current_thinking.take()
+                                    {
+                                        pending_thinking.push(t);
+                                        thinking_block_index = None;
+                                    }
                                     current_block_index = None;
                                 }
                                 "message_delta" => {
@@ -570,6 +778,17 @@ pub async fn chat_stream_with_messages(
                                     let should_stop = finish_reason.is_some();
 
                                     if should_stop && !pending_tool_uses.is_empty() {
+                                        // The turn ends with a tool call: the
+                                        // thinking blocks that preceded it are
+                                        // REQUIRED on the follow-up request —
+                                        // emit them (verbatim, signature
+                                        // included) before the tool-call
+                                        // chunks so the harness can replay.
+                                        if let Some(chunk) =
+                                            take_thinking_chunk(&mut pending_thinking, &last_raw)
+                                        {
+                                            yield Ok(chunk);
+                                        }
                                         for chunk in flush_claude_tool_uses(&mut pending_tool_uses, &mut last_raw) {
                                             yield Ok(chunk);
                                         }
@@ -582,13 +801,22 @@ pub async fn chat_stream_with_messages(
                                             token: String::new(),
                                             reasoning: String::new(),
                                             finish_reason,
+                                            thinking_blocks: None,
                                         });
                                         return;
                                     }
                                 }
                                 "message_stop" => {
-                                    // Flush any remaining tool uses
+                                    // Flush any remaining tool uses (and the
+                                    // turn's thinking blocks, which are only
+                                    // required when a tool_use accompanied
+                                    // them).
                                     if !pending_tool_uses.is_empty() {
+                                        if let Some(chunk) =
+                                            take_thinking_chunk(&mut pending_thinking, &last_raw)
+                                        {
+                                            yield Ok(chunk);
+                                        }
                                         for chunk in flush_claude_tool_uses(&mut pending_tool_uses, &mut last_raw) {
                                             yield Ok(chunk);
                                         }
@@ -681,6 +909,7 @@ pub async fn chat_stream(
                                             token,
                                             reasoning: String::new(),
                                             finish_reason: None,
+                                            thinking_blocks: None,
                                         });
                                     }
                                 }
@@ -693,6 +922,7 @@ pub async fn chat_stream(
                                         token: String::new(),
                                         reasoning: String::new(),
                                         finish_reason,
+                                        thinking_blocks: None,
                                     });
                                 }
                                 "message_stop" => return,

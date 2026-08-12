@@ -203,6 +203,7 @@ fn flush_tool_calls(
             token: pending_tool_call_to_json(&tc),
             reasoning: String::new(),
             finish_reason: Some("tool_calls".to_string()),
+            thinking_blocks: None,
         });
     }
     out
@@ -234,6 +235,7 @@ fn build_messages(prompt: &str, system_prompt: Option<&str>) -> Vec<ApiChatMessa
             content: Some(system.to_string()),
             tool_calls: None,
             tool_call_id: None,
+            thinking_blocks: None,
         });
     }
     messages.push(pub_user_message(prompt));
@@ -249,24 +251,27 @@ pub fn build_full_messages(system: &str, messages: &[ApiChatMessage]) -> Vec<Api
     out
 }
 
-/// Drop the internal Gemini `thought_signature` from every tool call before
-/// the messages reach the OpenAI-compatible wire format (which has no such
-/// field — the API rejects unknown keys with 400). The signature is an
-/// internal transport detail only the Gemini caller reads.
-fn strip_thought_signatures(messages: &[ApiChatMessage]) -> Vec<ApiChatMessage> {
-    let has_signature = messages.iter().any(|m| {
-        m.tool_calls
-            .as_ref()
-            .is_some_and(|tcs| tcs.iter().any(|tc| tc.thought_signature.is_some()))
+/// Drop the internal transport-only fields before the messages reach the
+/// OpenAI-compatible wire format (which has no such fields — the API rejects
+/// unknown keys with 400): the Gemini `thought_signature` on tool calls and
+/// the Claude `thinking_blocks` on assistant messages. Both are internal
+/// details only their native callers read.
+fn strip_internal_fields(messages: &[ApiChatMessage]) -> Vec<ApiChatMessage> {
+    let has_internal = messages.iter().any(|m| {
+        m.thinking_blocks.is_some()
+            || m.tool_calls
+                .as_ref()
+                .is_some_and(|tcs| tcs.iter().any(|tc| tc.thought_signature.is_some()))
     });
-    // The common path (no Gemini-originated calls in history) must not pay
-    // a full clone of the message array just to strip nothing.
-    if !has_signature {
+    // The common path (no cross-provider history) must not pay a full clone
+    // of the message array just to strip nothing.
+    if !has_internal {
         return messages.to_vec();
     }
     let mut out = Vec::with_capacity(messages.len());
     for msg in messages {
         let mut msg = msg.clone();
+        msg.thinking_blocks = None;
         if let Some(tcs) = &mut msg.tool_calls {
             for tc in tcs {
                 tc.thought_signature = None;
@@ -377,6 +382,7 @@ fn process_sse_response(
                                 token,
                                 reasoning: String::new(),
                                 finish_reason: None,
+                                thinking_blocks: None,
                             });
                         }
 
@@ -388,6 +394,7 @@ fn process_sse_response(
                                 token: String::new(),
                                 reasoning,
                                 finish_reason: None,
+                                thinking_blocks: None,
                             });
                         }
 
@@ -407,6 +414,7 @@ fn process_sse_response(
                                 token: String::new(),
                                 reasoning: String::new(),
                                 finish_reason,
+                                thinking_blocks: None,
                             });
                             return;
                         }
@@ -585,7 +593,7 @@ pub async fn chat_stream_with_messages(
     // call (carried internally on ToolCallMsg) must be stripped before
     // serialization, otherwise the request would be rejected with 400.
     let all_messages = build_full_messages(system, messages);
-    let all_messages = strip_thought_signatures(&all_messages);
+    let all_messages = strip_internal_fields(&all_messages);
     let request = build_chat_request(model, all_messages, params, true);
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/chat/completions");

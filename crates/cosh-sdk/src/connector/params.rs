@@ -2,6 +2,20 @@ use zeroize::Zeroize;
 
 use crate::connector::provider::COSH_SERVICE;
 
+/// A Claude extended-thinking block captured from a previous response.
+///
+/// Replayed VERBATIM (text + signature) at the start of the assistant
+/// message when the turn is re-sent in a multi-turn or tool-use conversation
+/// — the Anthropic API validates the signature cryptographically and rejects
+/// modified or missing blocks with HTTP 400. Only the Claude caller sets
+/// this; `skip_serializing_if` keeps it off every other provider's wire
+/// format.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ClaudeThinkingBlock {
+    pub thinking: String,
+    pub signature: String,
+}
+
 /// A chat message for structured conversation history with native tool call support.
 ///
 /// This mirrors the `OpenAI` Chat Completion message format so the model
@@ -16,6 +30,12 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCallMsg>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Claude extended-thinking blocks that preceded this assistant turn
+    /// (see [`ClaudeThinkingBlock`]). Internal transport detail — only the
+    /// Claude caller reads it, and `skip_serializing_if` keeps it off the
+    /// OpenAI-compatible wire format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_blocks: Option<Vec<ClaudeThinkingBlock>>,
 }
 
 /// A tool call within an assistant message (OpenAI-compatible format).
@@ -52,6 +72,7 @@ pub fn tool_result_message(tool_call_id: &str, content: &str) -> ChatMessage {
         content: Some(content.to_string()),
         tool_calls: None,
         tool_call_id: Some(tool_call_id.to_string()),
+        thinking_blocks: None,
     }
 }
 
@@ -63,6 +84,7 @@ pub fn assistant_tool_call_message(tool_calls: Vec<ToolCallMsg>) -> ChatMessage 
         content: None,
         tool_calls: Some(tool_calls),
         tool_call_id: None,
+        thinking_blocks: None,
     }
 }
 
@@ -74,6 +96,7 @@ pub fn user_message(content: &str) -> ChatMessage {
         content: Some(content.to_string()),
         tool_calls: None,
         tool_call_id: None,
+        thinking_blocks: None,
     }
 }
 
@@ -85,6 +108,7 @@ pub fn system_message(content: &str) -> ChatMessage {
         content: Some(content.to_string()),
         tool_calls: None,
         tool_call_id: None,
+        thinking_blocks: None,
     }
 }
 

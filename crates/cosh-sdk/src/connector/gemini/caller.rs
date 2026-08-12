@@ -613,13 +613,29 @@ struct RequestContext {
     request: GenerateContentRequest,
 }
 
+/// Effective Gemini API version for a request.
+///
+/// Thinking-config requests (`generationConfig.thinkingConfig.thinkingLevel`)
+/// must target `v1beta` — Google gates thinking configuration to the beta
+/// surface: the stable `v1` endpoint rejects `thinkingConfig` with HTTP 400,
+/// and every official doc/example routes it through `/v1beta`. Everything
+/// else keeps the stable [`API_VERSION`].
+pub(crate) fn api_version_for(params: &Parameters) -> &'static str {
+    let has_thinking_level = params
+        .reasoning_effort
+        .as_deref()
+        .is_some_and(|e| matches!(e, "minimal" | "low" | "medium" | "high"));
+    if has_thinking_level { "v1beta" } else { API_VERSION }
+}
+
 /// Resolve the effective Gemini API base URL.
 ///
 /// A user-supplied `params.base_url` (e.g. a proxy or test server) wins
 /// verbatim. Otherwise the provider's registered stable URL is used with
-/// its version segment re-written to the INTERNAL [`API_VERSION`] switch
-/// (stable `v1` by default, `v1beta` when testing experimental features).
-fn resolve_base_url(config: &ProviderConfig, params: &Parameters) -> String {
+/// its version segment re-written to the effective version — the INTERNAL
+/// [`API_VERSION`] switch (stable `v1` by default) or `v1beta` for requests
+/// that carry a thinking level (see [`api_version_for`]).
+pub(crate) fn resolve_base_url(config: &ProviderConfig, params: &Parameters) -> String {
     if let Some(custom) = params.base_url.as_deref() {
         return custom.to_string();
     }
@@ -627,7 +643,7 @@ fn resolve_base_url(config: &ProviderConfig, params: &Parameters) -> String {
     let prefix = default
         .rsplit_once('/')
         .map_or(default, |(prefix, _)| prefix);
-    format!("{prefix}/{API_VERSION}")
+    format!("{prefix}/{}", api_version_for(params))
 }
 
 fn prepare_request(
@@ -762,6 +778,7 @@ pub async fn chat_stream(
                                 token,
                                 reasoning: String::new(),
                                 finish_reason,
+                                thinking_blocks: None,
                             });
                             if should_stop {
                                 return;
@@ -1001,6 +1018,7 @@ pub async fn chat_stream_with_messages(
                                             token: text.to_string(),
                                             reasoning: String::new(),
                                             finish_reason: None,
+                                            thinking_blocks: None,
                                         });
                                     }
                                     if let Some(fc) = &part.function_call {
@@ -1022,6 +1040,7 @@ pub async fn chat_stream_with_messages(
                                             token: tool_call_token(&fc, &sig),
                                             reasoning: String::new(),
                                             finish_reason: Some("tool_calls".to_string()),
+                                            thinking_blocks: None,
                                         });
                                     }
                                     return;
@@ -1032,6 +1051,7 @@ pub async fn chat_stream_with_messages(
                                         token: String::new(),
                                         reasoning: String::new(),
                                         finish_reason,
+                                        thinking_blocks: None,
                                     });
                                     return;
                                 }
@@ -1057,6 +1077,7 @@ pub async fn chat_stream_with_messages(
                         token: tool_call_token(&fc, &sig),
                         reasoning: String::new(),
                         finish_reason: Some("tool_calls".to_string()),
+                        thinking_blocks: None,
                     });
                 }
             }

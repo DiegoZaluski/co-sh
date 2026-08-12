@@ -1,4 +1,5 @@
 use super::error::ConnectorError;
+use super::params::ClaudeThinkingBlock;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::Stream;
@@ -44,6 +45,11 @@ pub struct StreamChunk {
     pub(crate) token: String,
     pub(crate) reasoning: String,
     pub(crate) finish_reason: Option<String>,
+    /// Claude extended-thinking blocks completed in this turn (text +
+    /// signature), carried verbatim so the harness can replay them on the
+    /// follow-up request. `None` for every other provider and for turns
+    /// without thinking blocks.
+    pub(crate) thinking_blocks: Option<Vec<ClaudeThinkingBlock>>,
 }
 
 impl StreamChunk {
@@ -60,6 +66,15 @@ impl StreamChunk {
     #[must_use]
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// Claude extended-thinking blocks completed in this turn, replayed
+    /// verbatim on the follow-up request so the Anthropic API can validate
+    /// the reasoning signatures. Only the Claude caller populates this;
+    /// other providers always yield `None`.
+    #[must_use]
+    pub fn thinking_blocks(&self) -> Option<&[ClaudeThinkingBlock]> {
+        self.thinking_blocks.as_deref()
     }
 
     /// Why the stream finished, if this chunk is the last one.
