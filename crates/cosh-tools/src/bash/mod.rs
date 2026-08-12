@@ -69,7 +69,10 @@ impl Bash {
                     "pseudo-terminal (PTY) mode. PTY mode multiplexes stdout and ",
                     "stderr for colored output and interactive prompts. ",
                     "Security validation blocks dangerous patterns like rm -rf /, ",
-                    "fork bombs, and remote execution."
+                    "fork bombs, and remote execution. Outputs above the token ",
+                    "budget are head/tail-truncated: the middle is saved to a log ",
+                    "file (path given in the truncation notice) that you can read ",
+                    "back in parts with fs_read (line_range) or find_grep."
                 ),
                 "inputSchema": {
                     "type": "object",

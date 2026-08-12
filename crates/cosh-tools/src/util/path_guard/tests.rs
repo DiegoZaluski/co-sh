@@ -78,6 +78,34 @@ fn validate_path_denies_relative_traversal_via_dotdot() {
 }
 
 #[test]
+fn validate_path_allows_harness_scratch_dir_outside_root() {
+    // The harness scratch dir (<temp>/cosh, where truncated tool-output logs
+    // live) is ephemeral — it must be readable without an explicit allowlist.
+    let root = Path::new("/home/user/project");
+    let scratch = std::env::temp_dir().join(super::HARNESS_SCRATCH_DIR);
+    let log = scratch.join("0123456789abcdef.log");
+    let result = validate_path(log.to_str().unwrap(), root, None, None);
+    assert!(
+        matches!(result, GuardResult::Allowed(_)),
+        "scratch logs must be allowed outside root, got {result:?}"
+    );
+}
+
+#[test]
+fn validate_path_denies_scratch_dir_when_blocklisted() {
+    // The blocklist keeps priority even over the scratch exemption.
+    let root = Path::new("/home/user/project");
+    let scratch = std::env::temp_dir().join(super::HARNESS_SCRATCH_DIR);
+    let blocklist = [scratch.clone()];
+    let log = scratch.join("deadbeef.log");
+    let result = validate_path(log.to_str().unwrap(), root, None, Some(&blocklist));
+    assert!(
+        matches!(result, GuardResult::Denied(_)),
+        "blocklisted scratch path must be denied, got {result:?}"
+    );
+}
+
+#[test]
 fn validate_path_denies_blocked_path() {
     let root = Path::new("/home/user/project").to_path_buf();
     let blocklist = [PathBuf::from("/home/user/project/secret")];

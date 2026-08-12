@@ -201,6 +201,30 @@ fn build_fs_read_outside_cwd_needs_approval() {
 }
 
 #[test]
+fn build_fs_read_scratch_log_is_allowed_without_approval() {
+    // Truncated-output logs live under <temp>/cosh — reading them back is part
+    // of the truncation contract and must never trigger the approval dialog.
+    let tmp_root = std::env::temp_dir().join("cosh_test_perm_scratch_root");
+    let scratch_dir = std::env::temp_dir().join("cosh");
+    let _ = std::fs::create_dir_all(&scratch_dir);
+    let log = scratch_dir.join("cosh_test_perm_scratch.log");
+    let _ = std::fs::write(&log, b"truncated middle content");
+
+    let args = serde_json::json!({
+        "targets": [{ "path": log.to_str().unwrap() }]
+    });
+    let result = check_tool_permission("fs_read", &args, Mode::Build, Some(tmp_root.as_path()));
+
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_dir_all(&tmp_root);
+
+    assert!(
+        matches!(result, PermissionCheck::Allowed),
+        "scratch log reads must be allowed without approval, got {result:?}"
+    );
+}
+
+#[test]
 fn build_fs_read_inside_cwd_is_allowed() {
     let args = serde_json::json!({
         "targets": [{ "path": "src/main.rs" }]

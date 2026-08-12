@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::events::HarnessEvent;
+use super::truncate::truncate_tool_output;
 use cosh_sdk::extract_action::ToolSchema;
 use cosh_sdk::find::{GlobMatch, GrepMatch};
 use cosh_tools::{
@@ -645,7 +646,12 @@ impl Tools for CoshTools {
                     }
                 }
 
-                Ok(output)
+                // Keep the model context lean: outputs above the token budget
+                // are head/tail-truncated with the middle saved to a scratch
+                // log (see `truncate`). The TUI already received the full
+                // output as a live stream above, so the user is unaffected.
+                let truncated = truncate_tool_output(&output);
+                Ok(truncated.text)
             }
 
             "fs_read" => {

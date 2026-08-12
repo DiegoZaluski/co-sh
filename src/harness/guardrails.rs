@@ -69,14 +69,38 @@ pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<Stri
     }
 }
 
+/// True when `path` lives under the harness scratch directory
+/// (`<OS temp>/cosh`), where truncated tool-output logs are written.
+///
+/// Scratch logs are ephemeral by definition — reading them back is part of
+/// the truncation contract (the model is told to inspect them), so they must
+/// never trigger the approval dialog. The PathGuard applies the same
+/// exemption, keeping both layers consistent.
+fn is_scratch_log_path(path: &Path) -> bool {
+    let Ok(scratch) = std::env::temp_dir()
+        .join(cosh_tools::util::path_guard::HARNESS_SCRATCH_DIR)
+        .canonicalize()
+    else {
+        return false;
+    };
+    path.canonicalize()
+        .ok()
+        .is_some_and(|canon| canon.starts_with(&scratch))
+}
+
 /// Check whether any path in the list is absolute and outside the project root.
 ///
 /// If an absolute path is detected **and** it does not start with the project
-/// root, the tool needs user approval.
+/// root (and is not under the harness scratch dir), the tool needs user
+/// approval.
 fn needs_path_approval(paths: &[String], project_root: Option<&Path>) -> Option<(String, String)> {
     for p in paths {
         let path = Path::new(p);
         if path.is_absolute() {
+            // Ephemeral scratch logs are never approval-worthy.
+            if is_scratch_log_path(path) {
+                continue;
+            }
             let inside_root = project_root
                 .and_then(|root| root.canonicalize().ok())
                 .is_some_and(|root_canon| {

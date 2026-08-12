@@ -25,6 +25,18 @@ pub enum GuardResult {
 ///
 /// The error message is uniform across all tools, making it easy for the AI
 /// agent to understand why a path was denied.
+/// Name of the harness scratch directory (under the OS temp dir).
+///
+/// The harness writes truncated tool-output logs here (see `harness::truncate`)
+/// and the model reads them back with `fs_read`/`find_grep`. Temp dirs are
+/// ephemeral by nature, so this directory is exempt from the outside-root
+/// denial — but never from the blocklist, which keeps priority.
+///
+/// The exemption is shared by every tool using this guard (reads AND writes):
+/// writes into the scratch dir are still gated by the harness approval dialog
+/// in Build/Ask modes — the guard alone no longer blocks them.
+pub const HARNESS_SCRATCH_DIR: &str = "cosh";
+
 pub struct PathGuard {
     root: PathBuf,
     allowlist: Option<Vec<PathBuf>>,
@@ -190,6 +202,12 @@ pub fn normalize_path(path: &Path, root: &Path) -> PathBuf {
 /// The path is first normalized (`.`/`..` resolved). The root is also normalized
 /// so both sides are compared on equal footing.
 ///
+/// Besides the project root and the explicit allowlist, paths under the
+/// harness scratch directory (`<OS temp>/cosh`, where truncated tool-output
+/// logs live) are allowed: the OS temp dir is ephemeral scratch by definition,
+/// and blocking it would break the agent's ability to read its own logs back.
+/// The blocklist always takes priority, so even scratch paths can be denied.
+///
 /// Returns `Allowed(normalized_path)` when the path passes all checks,
 /// `Denied(reason)` when it is blocked, and `Mismatch(msg)` when the
 /// path appears in both the allowlist and blocklist simultaneously.
@@ -217,6 +235,12 @@ pub fn validate_path(
         })
     });
     let in_root = normalized.starts_with(&root_norm);
+    // Ephemeral scratch exemption — absolute temp dir is already absolute, so
+    // normalize_path ignores `root` for it. Blocklist keeps priority below.
+    let in_scratch = normalized.starts_with(normalize_path(
+        &std::env::temp_dir().join(HARNESS_SCRATCH_DIR),
+        root,
+    ));
 
     if blocked && allowed {
         return GuardResult::Mismatch(
@@ -226,7 +250,7 @@ pub fn validate_path(
     if blocked {
         return GuardResult::Denied("path is in blocklist".into());
     }
-    if !in_root && !allowed {
+    if !in_root && !allowed && !in_scratch {
         return GuardResult::Denied("path is outside project root".into());
     }
 
