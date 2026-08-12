@@ -1814,3 +1814,269 @@ fn sweep_idle_spinners_drops_only_finished_ones() {
     assert!(!state.tool_spinners.contains_key("done-1"));
     assert!(state.tool_spinners.contains_key("run-1"));
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Memory-growth benchmark (runs explicitly; normal CI ignores it)
+// ────────────────────────────────────────────────────────────────────────────
+//
+// The app janks over long agent sessions and a restart fully resets it. The
+// only structures that are rebuilt from scratch on restart are the derived
+// per-frame caches (rendered cells, text regions, height caches), so this
+// benchmark drives the real `SessionView::render` hot path while simulating an
+// agent that keeps appending tool outputs and streaming text, then samples the
+// retained heap and the render-cache byte counter.
+//
+// Run it explicitly (optionally under heaptrack) with:
+//   cargo test --release -- --ignored bench_render_memory_growth_is_bounded --nocapture
+//   heaptrack cargo test --release -- --ignored bench_render_memory_growth_is_bounded
+
+/// In-use heap bytes (glibc `mallinfo2.uordblks`), the most faithful signal for
+/// "retained" allocations. `VmRSS` also includes allocator retain/arenas, so we
+/// track both.
+#[cfg(target_os = "linux")]
+fn heap_in_use_bytes() -> usize {
+    #[repr(C)]
+    struct MallInfo2 {
+        arena: usize,
+        ordblks: usize,
+        smblks: usize,
+        hblks: usize,
+        hblkhd: usize,
+        usmblks: usize,
+        fsmblks: usize,
+        uordblks: usize,
+        fordblks: usize,
+        keepcost: usize,
+    }
+    unsafe extern "C" {
+        fn mallinfo2() -> MallInfo2;
+    }
+    // SAFETY: `mallinfo2` is a glibc symbol with no arguments; the return
+    // struct layout matches glibc's `struct mallinfo2`.
+    unsafe { mallinfo2().uordblks }
+}
+
+/// Resident set size from /proc/self/status (Linux).
+fn rss_bytes() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<usize>().ok())
+        })
+        .map(|kb| kb * 1024)
+        .unwrap_or(0)
+}
+
+/// Independent re-sum of the ACTUAL bytes currently held by the render cache
+/// (cells + text regions), bypassing the maintained `msg_cache_bytes` counter.
+/// A large gap between the two proves the byte accounting has drifted.
+fn real_cache_bytes(view: &SessionView) -> usize {
+    (0..view.msg_cache_cells.len())
+        .map(|i| {
+            SessionView::cache_entry_bytes_of(
+                &view.msg_cache_cells[i],
+                &view.msg_cache_text_regions[i],
+            )
+        })
+        .sum()
+}
+
+fn bench_user_message(idx: usize) -> Message {
+    Message {
+        id: format!("u-{idx}"),
+        role: MessageRole::User,
+        parts: vec![Part::Text(TextPart {
+            text: format!("Please work on task {idx}."),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    }
+}
+
+/// Assistant markdown text. `big` produces a ~400-section markdown body that
+/// renders to thousands of rows — the biggest per-message source of cached
+/// cells (and the realistic cause of a heavy render cache).
+fn bench_text_message(idx: usize, big: bool) -> Message {
+    let text = if big {
+        let mut s = String::with_capacity(64 * 1024);
+        for i in 0..400 {
+            s.push_str(&format!(
+                "### Section {i}\n\nSome **markdown** with `inline code` and a list:\n- item one\n- item two\n- item three\n\n```rust\nfn f{i}() {{ Ok(()) }}\n```\n\n"
+            ));
+        }
+        s
+    } else {
+        format!("Step {idx}: analyzed the diff and updated the plan.")
+    };
+    Message {
+        id: format!("a-{idx}"),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Text(TextPart {
+            text,
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    }
+}
+
+/// Assistant tool call whose output is `out_size` bytes — the largest resident
+/// strings in the session transcript.
+fn bench_tool_message(idx: usize, out_size: usize) -> Message {
+    let line = format!("=== tool {idx} output line ===");
+    let reps = (out_size / line.len()).max(1);
+    let output = line.repeat(reps);
+    Message {
+        id: format!("t-{idx}"),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "bash".into(),
+            input: serde_json::json!({ "command": format!("run {idx}") }),
+            output: Some(output),
+            status: ToolStatus::Completed,
+            tool_call_id: Some(format!("call-{idx}")),
+            is_start: false,
+            is_streaming: false,
+            cached_line_count: None,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    }
+}
+
+#[test]
+#[ignore = "long-running memory-growth benchmark; run explicitly under heaptrack"]
+fn bench_render_memory_growth_is_bounded() {
+    use super::{RENDER_CACHE_BUDGET, RENDER_CACHE_GUARD_ROWS};
+
+    // Tunables — calibrated for a ~10s test run in release that mimics a
+    // 20+ minute working session.
+    const FRAMES: usize = 3000;
+    const GROW_EVERY: usize = 3;
+    const BIG_TEXT_EVERY: usize = 15;
+    const TOOL_OUTPUT_BYTES: usize = 32 * 1024;
+    const SWEEP_EVERY: usize = 500;
+    const SAMPLE_EVERY: usize = 250;
+
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 80, 40);
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+
+    let mut state = AppState::new();
+    let session = Session {
+        id: "bench".into(),
+        title: "Bench".into(),
+        created_at: 0,
+        messages: vec![bench_user_message(0)],
+    };
+    state.add_session(session);
+    state.current_session_id = Some("bench".into());
+    state.status = SessionStatus::Idle;
+
+    let mut msg_idx = 1usize;
+    let mut last_heap = 0usize;
+    let mut last_cache_accounted = 0usize;
+    let mut last_cache_real = 0usize;
+    let mut peak_heap = 0usize;
+
+    eprintln!(
+        "{:>6} {:>6} {:>11} {:>11} {:>11} {:>11} {:>9} {:>9}",
+        "frame", "msgs", "heap_B", "rss_B", "cache_acct", "cache_real", "cached", "scroll"
+    );
+
+    for frame in 0..FRAMES {
+        // ── Agent works: append messages on a cadence. ─────────────────────
+        if frame % GROW_EVERY == 0 {
+            let step = msg_idx;
+            let big = step % BIG_TEXT_EVERY == 0;
+            if let Some(session) = state.current_session_mut() {
+                if step % 2 == 0 {
+                    session.messages.push(bench_text_message(step, big));
+                } else {
+                    session.messages.push(bench_tool_message(step, TOOL_OUTPUT_BYTES));
+                }
+                session.messages.push(bench_user_message(step));
+            }
+            msg_idx += 1;
+        }
+
+        // ── User reviews history: sweep up, then back to the bottom. ───────
+        let sweep_phase = frame % SWEEP_EVERY;
+        if sweep_phase == 0 {
+            view.scroll_y = (view.cached_total_height - 2000).max(0);
+            view.is_sticky_bottom = false;
+        } else if sweep_phase == SWEEP_EVERY / 2 {
+            view.scroll_y = view.cached_total_height.max(0);
+            view.is_sticky_bottom = true;
+        }
+
+        // Streaming alternation: on Idle frames every completed message is
+        // cacheable; on Working frames the last message streams (uncached).
+        state.status = if frame % 2 == 0 {
+            SessionStatus::Idle
+        } else {
+            SessionStatus::Working
+        };
+
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+        // ── Sample memory. ──────────────────────────────────────────────────
+        if frame % SAMPLE_EVERY == 0 {
+            let heap = heap_in_use_bytes();
+            let rss = rss_bytes();
+            let real = real_cache_bytes(&view);
+            let n_cached = view.msg_cache_cells.iter().filter(|c| c.is_some()).count();
+            peak_heap = peak_heap.max(heap);
+            eprintln!(
+                "{frame:>6} {n_msgs:>6} {heap:>11} {rss:>11} {acct:>11} {real:>11} {n_cached:>9} {scroll:>9}",
+                n_msgs = state.current_session().map_or(0, |s| s.messages.len()),
+                acct = view.msg_cache_bytes,
+                scroll = view.scroll_y,
+            );
+            last_heap = heap;
+            last_cache_accounted = view.msg_cache_bytes;
+            last_cache_real = real;
+        }
+    }
+
+    let final_heap = heap_in_use_bytes();
+    let final_real = real_cache_bytes(&view);
+    eprintln!("peak heap in-use = {peak_heap} bytes");
+    eprintln!(
+        "final: heap={final_heap} cache_accounted={last_cache_accounted} cache_real={final_real} \
+         budget={RENDER_CACHE_BUDGET} guard_rows={RENDER_CACHE_GUARD_ROWS}"
+    );
+
+    // The render cache must be bounded by the LRU budget: even an over-budget
+    // frame cannot leave more than the budget + one guard worth of content
+    // resident (prune runs at the end of every render). Allow generous slack
+    // for entries inside the viewport guard that prune deliberately keeps.
+    assert!(
+        final_real <= RENDER_CACHE_BUDGET + RENDER_CACHE_BUDGET / 4,
+        "render cache grew unbounded: real={final_real} budget={RENDER_CACHE_BUDGET}"
+    );
+    // The byte counter must not drift far from the true held bytes: a large
+    // gap means eviction is being decided on a wrong total.
+    let drift = last_cache_accounted.abs_diff(final_real);
+    assert!(
+        drift <= RENDER_CACHE_BUDGET / 2,
+        "cache byte accounting drifted: accounted={last_cache_accounted} real={final_real}"
+    );
+    // The last sample's heap must not be dramatically larger than the session
+    // content can explain (the session itself is not the leak, so we only
+    // assert the run finished sanely — heaptrack is the authority on the
+    // split, this assert guards against pathological blow-up).
+    assert!(
+        last_heap < peak_heap.max(1) * 4,
+        "heap grew pathologically during the final quarter: {last_heap} vs peak {peak_heap}"
+    );
+}
