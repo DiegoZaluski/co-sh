@@ -2709,3 +2709,168 @@ fn prune_render_cache_evicts_only_outside_guard_in_recency_order() {
         );
     }
 }
+
+/// Edge cases of the partial-selection eviction: an overshoot that clears
+/// the low-water mark already must evict nothing, and an overshoot larger
+/// than the combined candidate sizes must evict every candidate (the
+/// selection window degrades to the full candidate list) while the guard
+/// interior still survives.
+#[test]
+fn prune_render_cache_handles_overshoot_edges() {
+    use ratatui::buffer::Cell;
+    let mut view = SessionView::new();
+    let n = 100usize;
+    // Message i occupies rows [i*11, i*11+10]; total = 1000 + 99 gaps = 1099.
+    view.msg_height_cache = vec![10; n];
+    let mut prefix_y: Vec<i32> = (0..n).map(|i| (i * 11) as i32).collect();
+    prefix_y.push(1099);
+    view.prefix_y = prefix_y;
+    view.msg_cache_tokens = vec![0; n];
+    view.msg_cache_w = vec![0; n];
+    view.msg_cache_h = vec![0; n];
+    // Stamps follow the index order: message 0 is the oldest.
+    view.msg_cache_last_used = (0..n as u64).collect();
+    view.msg_cache_cells = (0..n)
+        .map(|_| Some(vec![Cell::default(); 8]))
+        .collect();
+    view.msg_cache_text_regions = (0..n).map(|_| Some(Vec::new())).collect();
+    let per_entry = SessionView::cache_entry_bytes_of(
+        &view.msg_cache_cells[0],
+        &view.msg_cache_text_regions[0],
+    );
+
+    // Scrolled to the bottom: the guard is [scroll_y-400, scroll_y+40+400];
+    // messages whose bottom is at/before the guard top are the candidates.
+    view.scroll_y = 1099 - 40;
+    let vp_top = 0i32;
+    let vp_bottom = 40i32;
+    let guard_top = view.scroll_y - super::RENDER_CACHE_GUARD_ROWS;
+    let guard_bottom =
+        view.scroll_y + (vp_bottom - vp_top) + super::RENDER_CACHE_GUARD_ROWS;
+    let is_candidate: Vec<bool> = (0..n)
+        .map(|i| {
+            let top = (i * 11) as i32;
+            let bottom = top + 10;
+            bottom <= guard_top || top >= guard_bottom
+        })
+        .collect();
+    let candidate_count = is_candidate.iter().filter(|&&c| c).count();
+    assert!(candidate_count > 0 && candidate_count < n);
+
+    // Case 1: bytes already at the low-water mark → no overshoot → nothing
+    // is evicted.
+    view.msg_cache_bytes = super::RENDER_CACHE_LOW_WATER;
+    view.prune_render_cache(vp_top, vp_bottom);
+    for idx in 0..n {
+        assert!(
+            view.msg_cache_cells[idx].is_some(),
+            "msg {idx} evicted with zero overshoot"
+        );
+    }
+
+    // Case 2: overshoot larger than the combined candidate sizes → every
+    // candidate is evicted (window degrades to the full list) and the guard
+    // interior survives.
+    view.msg_cache_bytes =
+        super::RENDER_CACHE_LOW_WATER + 4 * candidate_count * per_entry;
+    view.prune_render_cache(vp_top, vp_bottom);
+    for idx in 0..n {
+        if is_candidate[idx] {
+            assert!(
+                view.msg_cache_cells[idx].is_none(),
+                "msg {idx} (candidate) survived a full eviction"
+            );
+        } else {
+            assert!(
+                view.msg_cache_cells[idx].is_some(),
+                "msg {idx} (inside guard) must survive"
+            );
+        }
+    }
+    assert_eq!(
+        view.msg_cache_bytes,
+        super::RENDER_CACHE_LOW_WATER + 3 * candidate_count * per_entry
+    );
+}
+
+/// Messages rendered in the same frame share the render-frame recency stamp,
+/// so stamp ties are common. The partial selection breaks ties arbitrarily;
+/// what must hold is the LRU invariant: only outside-guard candidates are
+/// evicted, the guard interior survives, at least one entry is shed when
+/// there is an overshoot, and the byte counter ends at or under the
+/// low-water mark.
+#[test]
+fn prune_render_cache_breaks_stamp_ties_without_violating_invariants() {
+    use ratatui::buffer::Cell;
+    let mut view = SessionView::new();
+    let n = 200usize;
+    // Message i occupies rows [i*11, i*11+10]; total = 2000 + 199 = 2199.
+    view.msg_height_cache = vec![10; n];
+    let mut prefix_y: Vec<i32> = (0..n).map(|i| (i * 11) as i32).collect();
+    prefix_y.push(2199);
+    view.prefix_y = prefix_y;
+    view.msg_cache_tokens = vec![0; n];
+    view.msg_cache_w = vec![0; n];
+    view.msg_cache_h = vec![0; n];
+    // Every message shares the SAME recency stamp — the worst tie case.
+    view.msg_cache_last_used = vec![7; n];
+    // Vary the sizes so the byte crossing lands mid-tie-group.
+    view.msg_cache_cells = (0..n)
+        .map(|i| Some(vec![Cell::default(); 4 + (i % 9) * 3]))
+        .collect();
+    view.msg_cache_text_regions = (0..n).map(|_| Some(Vec::new())).collect();
+    let per_entry: Vec<usize> = (0..n)
+        .map(|i| {
+            SessionView::cache_entry_bytes_of(
+                &view.msg_cache_cells[i],
+                &view.msg_cache_text_regions[i],
+            )
+        })
+        .collect();
+
+    // Scrolled to the bottom: messages whose bottom is at/before the guard
+    // top are the candidates.
+    view.scroll_y = 2199 - 40;
+    let vp_top = 0i32;
+    let vp_bottom = 40i32;
+    let guard_top = view.scroll_y - super::RENDER_CACHE_GUARD_ROWS;
+    let guard_bottom =
+        view.scroll_y + (vp_bottom - vp_top) + super::RENDER_CACHE_GUARD_ROWS;
+    let is_candidate: Vec<bool> = (0..n)
+        .map(|i| {
+            let top = (i * 11) as i32;
+            let bottom = top + 10;
+            bottom <= guard_top || top >= guard_bottom
+        })
+        .collect();
+
+    // Overshoot that only a handful of entries can cover → partial eviction
+    // inside a tie group.
+    let overshoot = per_entry.iter().take(3).sum::<usize>() + 1;
+    view.msg_cache_bytes = super::RENDER_CACHE_LOW_WATER + overshoot;
+    view.prune_render_cache(vp_top, vp_bottom);
+
+    // The crossing guarantees the counter ends at or under the mark.
+    assert!(
+        view.msg_cache_bytes <= super::RENDER_CACHE_LOW_WATER,
+        "bytes must end at or under the low-water mark"
+    );
+    // Only outside-guard candidates may be evicted; the guard interior is
+    // sacred regardless of how ties were broken.
+    let mut evicted = 0usize;
+    for idx in 0..n {
+        if view.msg_cache_cells[idx].is_none() {
+            evicted += 1;
+            assert!(is_candidate[idx], "msg {idx} evicted but inside the guard");
+        }
+    }
+    assert!(evicted > 0, "overshoot > 0 must evict at least one entry");
+    for idx in 0..n {
+        if !is_candidate[idx] {
+            assert!(
+                view.msg_cache_cells[idx].is_some(),
+                "msg {idx} inside the guard must survive"
+            );
+        }
+    }
+}

@@ -989,10 +989,13 @@ impl SessionView {
     /// entirely below it. The candidate scan is then limited to the two
     /// evictable ranges with a single cached-cell check per message (no
     /// position arithmetic), but it still scales with the number of messages
-    /// OUTSIDE the guard — eviction must examine each candidate's bytes for
-    /// the accounting, so when the viewport sits at the bottom of a long
+    /// OUTSIDE the guard — so when the viewport sits at the bottom of a long
     /// timeline the front range covers most of it. The win is the O(log n)
     /// boundaries, the O(1) per-item work, and skipping the guard interior.
+    /// The eviction then sizes and orders only the entries it will evict: a
+    /// partial selection finds the smallest recency-order window that covers
+    /// the overshoot and sorts that window alone, instead of sorting every
+    /// candidate.
     fn prune_render_cache(&mut self, vp_top: i32, vp_bottom: i32) {
         if self.msg_cache_tokens.is_empty() {
             return;
@@ -1051,9 +1054,50 @@ impl SessionView {
                 candidates.push(idx);
             }
         }
-        // Evict oldest-first until back under the low-water mark.
-        candidates.sort_by_key(|&i| self.msg_cache_last_used[i]);
-        for idx in candidates {
+        if candidates.is_empty() {
+            return;
+        }
+        let overshoot = self.msg_cache_bytes.saturating_sub(RENDER_CACHE_LOW_WATER);
+        if overshoot == 0 {
+            return;
+        }
+        // Evict oldest-first until back under the low-water mark. Only a
+        // prefix of the recency order is ever evicted (the byte crossing
+        // lands inside the first `m` candidates), so instead of sorting the
+        // whole candidate list (O(k log k)) find the smallest power-of-two
+        // window whose cumulative size covers the overshoot: each
+        // `select_nth_unstable_by_key` partitions so the `window` oldest
+        // candidates are up front (O(k) each), and the window doubles
+        // between probes. Only that window is then sorted and walked.
+        // With distinct stamps the result matches a stable full sort
+        // exactly; equal stamps (messages rendered in the same frame share
+        // the render-frame stamp) are broken arbitrarily by the partition,
+        // which is fine for an LRU — the guard, the outside-guard-only
+        // eviction and the crossing semantics are preserved either way.
+        // The window degrades to the full list only when nearly every
+        // candidate is evicted (covered == k).
+        let mut window = 1usize;
+        let covered = loop {
+            if window >= candidates.len() {
+                break candidates.len();
+            }
+            candidates.select_nth_unstable_by_key(window, |&i| self.msg_cache_last_used[i]);
+            let sum: usize = candidates[..window]
+                .iter()
+                .map(|&i| {
+                    Self::cache_entry_bytes_of(
+                        &self.msg_cache_cells[i],
+                        &self.msg_cache_text_regions[i],
+                    )
+                })
+                .sum();
+            if sum >= overshoot {
+                break window;
+            }
+            window *= 2;
+        };
+        candidates[..covered].sort_by_key(|&i| self.msg_cache_last_used[i]);
+        for &idx in &candidates[..covered] {
             if self.msg_cache_bytes <= RENDER_CACHE_LOW_WATER {
                 break;
             }
