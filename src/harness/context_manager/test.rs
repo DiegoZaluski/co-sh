@@ -2455,3 +2455,257 @@ async fn with_discovered_context_creates_valid_context_manager() {
         "Should have items after adding content"
     );
 }
+
+// ── Split-and-concatenate (the known-window contingency) ─────────────────
+//
+// The split processes the timeline in SEQUENTIAL CHUNKS of whole items in
+// historical order; each chunk's summary is staged into a buffer; only when
+// EVERY item has been consumed does commit_split replace the timeline with
+// the concatenated buffer — atomically. The timeline is untouched during the
+// whole process.
+
+// A single item larger than the chunk budget is still included WHOLE (never
+// cut mid-item); the next chunk starts after it, carrying the continuity
+// snippet so the final buffer reads seamlessly.
+#[test]
+fn split_chunks_whole_items_in_order_with_continuity_and_commits_atomically() {
+    let mut cm = cm(10_000);
+    // The first item alone vastly exceeds the chunk budget (window 10k →
+    // budget 2k) — it must still be included whole as the first chunk.
+    cm.add_user(&"abcd efgh ijkl mnop qrst uvwx yz12 3456 7890 ".repeat(2000)); // id 1
+    cm.add_assistant("short a", true); // id 2
+    cm.add_assistant("short b", true); // id 3
+    cm.close_loop(); // id 3 → LoopClosure
+    cm.add_user("short c"); // id 4
+
+    cm.begin_split(10_000);
+    let before = cm.items_snapshot().len();
+
+    // Chunk 1 = the giant first item alone (whole), historical order.
+    let first = cm.split_next_chunk().expect("chunk 1");
+    assert!(first.prompt.contains("[Conversation chunk to summarize]"));
+    assert!(
+        first.prompt.contains("abcd efgh"),
+        "the first item is included"
+    );
+    assert!(
+        first.prompt.contains("## Objective"),
+        "the first chunk embeds the anchored template"
+    );
+    assert!(
+        !first.prompt.contains("[Continuation context"),
+        "no continuity on the very first chunk"
+    );
+    assert!(
+        !first.prompt.contains("short a"),
+        "the chunk boundary never splits an item: item 2 stays out"
+    );
+
+    cm.advance_split("## Objective\n- the giant first part", first.chunk_end);
+    assert!(!cm.split_all_consumed(), "more items remain");
+    assert_eq!(
+        cm.items_snapshot().len(),
+        before,
+        "the timeline is untouched while the split is in progress"
+    );
+
+    // Chunk 2 = the remaining whole items + the continuity tail to glue on.
+    let second = cm.split_next_chunk().expect("chunk 2");
+    assert!(
+        second.prompt.contains("[Continuation context"),
+        "continuation chunks carry the tail of the previous summary"
+    );
+    assert!(second.prompt.contains("the giant first part"));
+    assert!(second.prompt.contains("short a") && second.prompt.contains("short c"));
+    assert!(
+        !second.prompt.contains("abcd efgh"),
+        "summarized items are never re-sent"
+    );
+    // The template is NOT restarted: the unique template instruction and its
+    // skeleton sections never reappear — only the continuity tail (which may
+    // legitimately start with "## Objective") is carried over.
+    assert!(
+        !second
+            .prompt
+            .contains("Output exactly the Markdown structure"),
+        "continuation chunks do not re-embed the template instruction"
+    );
+    assert!(
+        !second.prompt.contains("## Work State"),
+        "continuation chunks do not restart the template skeleton"
+    );
+
+    cm.advance_split("### Active\n- the rest", second.chunk_end);
+    assert!(cm.split_all_consumed(), "every item has been summarized");
+
+    // The atomic commit replaces the WHOLE timeline with the buffer.
+    assert!(cm.commit_split(), "the commit succeeds");
+    let items = cm.items_snapshot();
+    assert_eq!(items.len(), 1, "one Compaction anchor after the commit");
+    let ContextItem::Compaction { summary, .. } = &items[0] else {
+        panic!("expected a single Compaction anchor");
+    };
+    assert!(summary.contains("the giant first part"));
+    assert!(summary.contains("the rest"));
+    assert!(!cm.split_active(), "staging is cleared after the commit");
+}
+
+// The limit message is SILENT until the buffer accumulation becomes
+// concerning (the projection crosses the warning threshold); from then on it
+// carries a proportional target so the final buffer stays under the ceiling.
+#[test]
+fn split_warns_only_when_the_buffer_accumulation_is_concerning() {
+    let mut cm = cm(10_000);
+    cm.add_user(&"abcd efgh ijkl mnop qrst uvwx yz12 3456 7890 ".repeat(2000)); // id 1
+    cm.add_user("second prompt"); // id 2
+    cm.begin_split(10_000); // ceiling = 4000, warn_at = 3200
+
+    let projection = cm.split_projection();
+    assert_eq!(projection.ceiling, 4000, "40% of the window is the ceiling");
+    assert_eq!(
+        projection.warn_at, 3200,
+        "80% of the ceiling is the warning point"
+    );
+    assert!(!projection.should_warn, "an empty buffer never warns");
+
+    let first = cm.split_next_chunk().expect("chunk 1");
+    assert!(
+        !first.prompt.contains("TOKEN LIMIT"),
+        "the model is left to act naturally while the buffer is small"
+    );
+    // A bloated first summary crosses the threshold: the next chunk must ask
+    // the summarizer to be terse, with a computed target.
+    cm.advance_split(&"summary content ".repeat(3000), first.chunk_end);
+    assert!(
+        cm.split_projection().should_warn,
+        "a bloated buffer triggers the limit message"
+    );
+    let second = cm.split_next_chunk().expect("chunk 2");
+    assert!(second.prompt.contains("TOKEN LIMIT"));
+    assert!(
+        second.prompt.contains("AT MOST ~"),
+        "the limit carries a target"
+    );
+    cm.advance_split("concise summary", second.chunk_end);
+    assert!(cm.split_all_consumed());
+}
+
+// Atomicity: aborting a split leaves the timeline EXACTLY as it was — the
+// buffer and cursor are dropped, nothing is removed.
+#[test]
+fn split_abort_leaves_the_timeline_untouched() {
+    let mut cm = cm(10_000);
+    cm.add_user("keep me");
+    cm.add_assistant("draft", true);
+    let before = cm.items_snapshot();
+
+    cm.begin_split(10_000);
+    let request = cm.split_next_chunk().expect("a chunk");
+    cm.advance_split("partial summary", request.chunk_end);
+    assert!(cm.split_active());
+
+    cm.abort_split();
+    assert!(!cm.split_active(), "staging is dropped");
+    assert_eq!(
+        cm.items_snapshot().len(),
+        before.len(),
+        "the timeline is untouched"
+    );
+    assert!(
+        cm.items_snapshot().iter().any(|it| {
+            matches!(it, ContextItem::User { original, .. } if original == "keep me")
+        })
+    );
+}
+
+// The commit's hard limit is the KNOWN WINDOW (the ceiling is only the
+// planning target): a pathologically bloated anchor that overshoots the
+// window must NOT commit — the timeline stays exactly as it was (atomicity).
+#[test]
+fn commit_split_requires_the_buffer_to_fit_the_window() {
+    let mut cm = cm(10_000);
+    cm.add_user("keep me verbatim");
+    cm.begin_split(100); // tiny window: the hard limit is tiny too
+    let request = cm.split_next_chunk().expect("a chunk");
+    // A pathologically bloated summary overshoots the 100-token window.
+    cm.advance_split(&"overshoot ".repeat(200), request.chunk_end);
+    assert!(cm.split_all_consumed());
+
+    assert!(
+        !cm.commit_split(),
+        "an anchor larger than the window must not commit"
+    );
+    // Atomicity: nothing was replaced — the original timeline is intact.
+    assert_eq!(cm.items_snapshot().len(), 1);
+    assert!(
+        cm.items_snapshot().iter().any(|it| matches!(
+            it,
+            ContextItem::User { original, .. } if original == "keep me verbatim"
+        )),
+        "the timeline stays exactly as it was"
+    );
+}
+
+// Committing without a staged split — or with an empty buffer (nothing was
+// summarized) — is a no-op that leaves everything as it is.
+#[test]
+fn commit_split_without_work_returns_false() {
+    let mut cm = cm(10_000);
+    cm.add_user("hi");
+    assert!(!cm.commit_split(), "no active split → false");
+    cm.begin_split(10_000);
+    assert!(
+        !cm.commit_split(),
+        "an empty buffer (nothing summarized) must not wipe the timeline"
+    );
+    assert_eq!(cm.items_snapshot().len(), 1, "nothing was committed");
+}
+
+// The staging is persisted with the snapshot: an interrupted split resumes
+// EXACTLY where it stopped — the summarized chunk is never re-sent.
+#[test]
+fn split_staging_survives_save_restore_and_resumes() {
+    let mut cm = cm(10_000);
+    cm.add_user(&"abcd efgh ijkl mnop qrst uvwx yz12 3456 7890 ".repeat(2000)); // id 1
+    // Huge enough (≫ any chunk budget below the 10k window, whatever the
+    // overhead reserve is) to fill chunk 2 on its own, so the small third
+    // part forms a real final chunk.
+    cm.add_assistant(&"second part ".repeat(10_000), true); // id 2
+    cm.add_assistant("third part", true); // id 3
+    cm.begin_split(10_000);
+
+    let first = cm.split_next_chunk().expect("chunk 1");
+    cm.advance_split("summary of part one", first.chunk_end);
+    assert!(!cm.split_all_consumed());
+
+    // Persist mid-split and restore into a fresh manager.
+    let state = cm.save_state();
+    let mut restored = ContextManager::new(10_000);
+    restored.restore_state(&state);
+
+    assert!(restored.split_active(), "staging is restored");
+    assert_eq!(
+        restored.split_projection().buffer_tokens,
+        cm.split_projection().buffer_tokens
+    );
+    let next = restored
+        .split_next_chunk()
+        .expect("resumes where it stopped");
+    assert!(
+        !next.prompt.contains("abcd efgh"),
+        "the summarized chunk is not re-sent after a restore"
+    );
+    assert!(next.prompt.contains("second part"));
+    assert!(next.prompt.contains("[Continuation context"));
+    restored.advance_split("summary of part two", next.chunk_end);
+
+    let last = restored.split_next_chunk().expect("the final chunk");
+    assert!(last.prompt.contains("third part"));
+    restored.advance_split("summary of part three", last.chunk_end);
+    assert!(restored.split_all_consumed());
+    assert!(restored.commit_split());
+    let ContextItem::Compaction { summary, .. } = &restored.items_snapshot()[0] else {
+        panic!("expected the committed anchor");
+    };
+    assert!(summary.contains("part one") && summary.contains("part three"));
+}

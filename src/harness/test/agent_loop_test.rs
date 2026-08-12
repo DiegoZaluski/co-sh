@@ -936,6 +936,419 @@ async fn run_agent_loop_drains_chains_on_main_request_overflow() {
     );
 }
 
+// ── Split-and-concatenate (the known-window contingency) ────────────────
+//
+// When the ACTIVE model's window is KNOWN (discovery or a context-window
+// error that reported it) and the held context exceeds it — the
+// model-switch-to-a-smaller-window scenario — the harness drives the split
+// instead of the single-shot compaction: the timeline is summarized in
+// sequential chunks and committed ATOMICALLY as the new anchor. The legacy
+// drain would only remove tool chains and keep the protected items over
+// budget; the split shrinks the WHOLE timeline to fit the known window.
+#[tokio::test]
+async fn known_window_overflow_drives_split_and_commits_the_anchor() {
+    use crate::harness::context_manager::ContextManager;
+    use crate::harness::events::LlmCompactionEvent;
+
+    let mut h = Harness::new_test();
+    // The ACTIVE model's window is KNOWN (discovery succeeded) and far below
+    // the held context: the single-shot compaction transcript would overflow
+    // the provider, so the split path must fire instead.
+    h = h.with_discovered_window(600);
+    h.context_manager = ContextManager::new(2000); // trigger = 1600
+    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
+    // below): protected-only over the trigger (~2200 ≥ 1600) and > 600 — the
+    // known window.
+    h = h.with_history(&[
+        ("user".into(), "u ".repeat(1100)),
+        ("assistant".into(), "a ".repeat(1100)),
+    ]);
+    h.context_manager.close_loop();
+    // The mock CHAT response is the SPLIT summarizer — every chunk call gets
+    // the same summary (the driver advances the cursor with each one); the
+    // mock STREAM is the loop's final answer.
+    h = h
+        .with_mock_chat(Ok("## Objective\n- summarized chunk"))
+        .with_mock_stream(Ok(vec!["final answer"]));
+
+    // The harness (with its context manager) is moved into the task; the CM
+    // state after the loop is reported back through this channel.
+    let (state_tx, mut state_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(Vec<ContextItem>, usize)>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+        let info = h.context_manager.display_info();
+        let _ = state_tx.send((h.context_manager.items_snapshot(), info.total_tokens));
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    let (items, total_tokens) =
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), state_rx.recv())
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or((Vec::new(), 0));
+    handle.abort();
+
+    // The split surfaced the SAME continuous "Summarizing" box to the TUI.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Started
+            }
+        )),
+        "the split must emit LlmCompaction::Started; events={events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Finished
+            }
+        )),
+        "the split must emit LlmCompaction::Finished; events={events:?}"
+    );
+    // The chunk summaries streamed to the TUI as one continuous box.
+    let streamed: String = events
+        .iter()
+        .filter_map(|e| match e {
+            HarnessEvent::LlmCompactionToken { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        streamed.contains("summarized chunk"),
+        "the chunk summaries must stream as LlmCompactionToken; streamed={streamed:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the loop completes after the split; events={events:?}"
+    );
+
+    // The split committed ATOMICALLY: the whole timeline became a single
+    // Compaction anchor (the legacy drain would have kept the protected items
+    // over budget and marked the provider stuck instead).
+    assert!(
+        matches!(
+            &items[0],
+            ContextItem::Compaction { summary, .. }
+                if summary.contains("summarized chunk")
+        ),
+        "the buffer is committed as the new anchor; items={items:?}"
+    );
+    assert!(
+        !items.iter().any(|it| matches!(
+            it,
+            ContextItem::User { original, .. } | ContextItem::Assistant { original, .. }
+                if original.starts_with("u ") || original.starts_with("a ")
+        )),
+        "the giant history was folded into the anchor — nothing stays verbatim"
+    );
+    // The re-added in-flight input and the loop's final answer follow it.
+    assert!(
+        matches!(
+            &items[1],
+            ContextItem::User { original, .. } if original == "hi"
+        ),
+        "the in-flight input is re-added after the split; items={items:?}"
+    );
+    assert!(
+        matches!(
+            &items[2],
+            ContextItem::LoopClosure { content, .. } if content == "final answer"
+        ),
+        "the loop's final answer follows the anchor; items={items:?}"
+    );
+    // Contenção antecipada: the committed anchor fits the known window.
+    assert!(
+        total_tokens <= 600,
+        "the anchor must fit the known window; total_tokens={total_tokens}"
+    );
+}
+
+// The REACTIVE fork: when the single-shot compaction transcript itself
+// overflows with a REPORTED window, `llm_compact` drives the split instead of
+// the chain drain — the split shrinks the whole timeline (protected items
+// included) into a fitting anchor and the compaction resolves successfully
+// (Finished, never Failed; the provider is never marked stuck).
+#[tokio::test]
+async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() {
+    use crate::harness::context_manager::ContextManager;
+    use crate::harness::core::CONTEXT_WINDOW_MARKER;
+    use crate::harness::events::{LlmCompactionEvent, ToastVariant};
+
+    let mut h = Harness::new_test();
+    // NO discovered window: the loop-start PROACTIVE fork must NOT fire, so
+    // `llm_compact` runs the single-shot compaction — whose transcript then
+    // overflows WITH a reported window, triggering the reactive split.
+    h.context_manager = ContextManager::new(2000); // trigger = 1600
+    // Protected-only history over the trigger (~2200 ≥ 1600) and > 600 (the
+    // window the error will report).
+    h = h.with_history(&[
+        ("user".into(), "u ".repeat(1100)),
+        ("assistant".into(), "a ".repeat(1100)),
+    ]);
+    h.context_manager.close_loop();
+    // Mock CHAT queue: call 1 = the single-shot compaction summarizer, which
+    // fails with a ContextWindow that REPORTS the window (600); the rest =
+    // the split chunks, which succeed. The timeline at split time holds THREE
+    // items (the loaded history + the in-flight "hi" input); every chunk
+    // boundary is forced because each pair of remaining items together
+    // exceeds the tiny budget (window 600 − min(overhead, window/2) = 300)
+    // — so three chunks follow the overflow.
+    let overflow = format!("{CONTEXT_WINDOW_MARKER}:600");
+    h = h
+        .with_mock_chats(vec![
+            Err(overflow.as_str()),
+            Ok("## Objective\n- reactive chunk one"),
+            Ok("## Objective\n- reactive chunk two"),
+            Ok("## Objective\n- reactive chunk three"),
+        ])
+        .with_mock_stream(Ok(vec!["final answer"]));
+
+    let (state_tx, mut state_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(Vec<ContextItem>, bool)>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+        let _ = state_tx.send((
+            h.context_manager.items_snapshot(),
+            h.context_manager.overflow_stuck("openai"),
+        ));
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    let (items, stuck) = tokio::time::timeout(tokio::time::Duration::from_secs(2), state_rx.recv())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or((Vec::new(), false));
+    handle.abort();
+
+    // The single-shot overflow escalated into the split, which SUCCEEDED.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Finished
+            }
+        )),
+        "the reactive split must finish successfully; events={events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Failed
+            }
+        )),
+        "the compaction must NOT be reported as failed; events={events:?}"
+    );
+    // The legacy drain was NOT taken: no persistent overflow warning toast.
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::Toast {
+                variant: ToastVariant::Warning,
+                ..
+            }
+        )),
+        "the split resolves the overflow without the stuck-provider warning; events={events:?}"
+    );
+    // The split chunks streamed to the TUI as one continuous box.
+    let streamed: String = events
+        .iter()
+        .filter_map(|e| match e {
+            HarnessEvent::LlmCompactionToken { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        streamed.contains("reactive chunk one") && streamed.contains("reactive chunk three"),
+        "every split chunk must stream; streamed={streamed:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the loop completes; events={events:?}"
+    );
+
+    // Atomic commit: the whole timeline became the concatenated anchor.
+    assert!(
+        matches!(
+            &items[0],
+            ContextItem::Compaction { summary, .. }
+                if summary.contains("reactive chunk one")
+                    && summary.contains("reactive chunk three")
+        ),
+        "the concatenated buffer is the new anchor; items={items:?}"
+    );
+    assert!(
+        !items.iter().any(|it| matches!(
+            it,
+            ContextItem::User { original, .. } | ContextItem::Assistant { original, .. }
+                if original.starts_with("u ") || original.starts_with("a ")
+        )),
+        "the giant history was folded into the anchor"
+    );
+    // Unlike the legacy drain, the reactive split resolves WITHOUT marking
+    // the provider stuck.
+    assert!(
+        !stuck,
+        "the reactive split must not mark the provider stuck"
+    );
+}
+
+// All-or-nothing: an EMPTY chunk summary (the model returned nothing for a
+// chunk) is treated as a split failure — the split aborts and the timeline
+// stays exactly as it was. Nothing is silently dropped from the anchor.
+#[tokio::test]
+async fn split_aborts_on_an_empty_chunk_summary_and_keeps_the_context() {
+    use crate::harness::context_manager::ContextManager;
+    use crate::harness::events::LlmCompactionEvent;
+
+    let mut h = Harness::new_test();
+    h = h.with_discovered_window(600);
+    h.context_manager = ContextManager::new(2000); // trigger = 1600
+    // Protected-only history over the trigger AND over the known window.
+    h = h.with_history(&[
+        ("user".into(), "u ".repeat(1100)),
+        ("assistant".into(), "a ".repeat(1100)),
+    ]);
+    h.context_manager.close_loop();
+    // The SPLIT summarizer returns EMPTY for every chunk; the mock STREAM is
+    // the loop's final answer.
+    h = h
+        .with_mock_chat(Ok(""))
+        .with_mock_stream(Ok(vec!["final answer"]));
+
+    let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<ContextItem>>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+        let _ = state_tx.send(h.context_manager.items_snapshot());
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    let items = tokio::time::timeout(tokio::time::Duration::from_secs(2), state_rx.recv())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    handle.abort();
+
+    // The split was attempted and ABORTED — surfaced as a failed compaction.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Failed
+            }
+        )),
+        "the empty-summary split must report LlmCompaction::Failed; events={events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the loop completes after the abort; events={events:?}"
+    );
+    // Atomicity: the giant history was NOT folded — nothing was committed.
+    assert!(
+        items.iter().any(|it| matches!(
+            it,
+            ContextItem::User { original, .. } if original.starts_with("u ")
+        )),
+        "the timeline keeps the original protected history; items={items:?}"
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|it| matches!(it, ContextItem::Compaction { .. })),
+        "no anchor was committed — all or nothing; items={items:?}"
+    );
+}
+
 // The useless bridge: `result_is_useless` parses the find_grep result JSON
 // (which the tool serializes as its whole GrepOutput) and reads the `useless`
 // flag. This is the exact contract that turns a zero-match search into a

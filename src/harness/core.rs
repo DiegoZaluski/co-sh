@@ -193,9 +193,9 @@ enum CompactionErr {
 enum CompactionOutcome {
     /// A summary was produced and is ready to be applied.
     Applied,
-    /// Chain draining alone brought the total below the 80% trigger — the
-    /// compaction is no longer needed.
-    ResolvedByDrain,
+    /// A contingency (chain draining or the split-and-concatenate path)
+    /// brought the total down — the compaction is no longer needed.
+    ResolvedByContingency,
     /// The summarizer call failed or produced nothing.
     Failed,
 }
@@ -302,6 +302,14 @@ pub struct Harness {
     /// chain) until the estimate fits. Reset at the start of every stream.
     last_context_window: Option<usize>,
 
+    /// Window size (tokens) of the ACTIVE model from the last successful
+    /// context-window discovery. Together with [`Self::last_context_window`]
+    /// it forms the KNOWN window that drives the split-and-concatenate
+    /// contingency (see [`Self::known_split_window`]). Set at loop start and
+    /// on fallback switches; `None` when discovery failed (unknown window →
+    /// legacy drain path).
+    discovered_window: Option<usize>,
+
     /// When the persistent context-overflow toast was last shown, for the
     /// throttling cooldown (see [`Self::notify_context_overflow`]).
     last_overflow_toast: Option<tokio::time::Instant>,
@@ -312,6 +320,13 @@ pub struct Harness {
 
     #[cfg(test)]
     pub(crate) mock_chat_response: Option<Result<String, String>>,
+    /// Test-only queue of mock CHAT (summarizer) responses, consumed one per
+    /// call and falling back to [`Self::mock_chat_response`] when empty. Lets
+    /// a test drive a SEQUENCE of summarizer outcomes — e.g. a single-shot
+    /// compaction overflow that reports its window, followed by the split
+    /// chunks' successes (the reactive fork).
+    #[cfg(test)]
+    pub(crate) mock_chat_queue: VecDeque<Result<String, String>>,
     #[cfg(test)]
     pub(crate) mock_stream_queue: VecDeque<Result<Vec<String>, String>>,
     /// Per-stream mock `finish_reason` values, consumed one per stream so a
@@ -369,10 +384,13 @@ impl Harness {
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
             last_context_window: None,
+            discovered_window: None,
             last_overflow_toast: None,
             compaction_generic_retries: 0,
             #[cfg(test)]
             mock_chat_response: None,
+            #[cfg(test)]
+            mock_chat_queue: VecDeque::new(),
             #[cfg(test)]
             mock_stream_queue: VecDeque::new(),
             #[cfg(test)]
@@ -675,8 +693,8 @@ impl Harness {
     /// Returns an error if the connector call fails.
     pub async fn chat(&mut self, input: &str) -> Result<String, String> {
         #[cfg(test)]
-        if let Some(ref response) = self.mock_chat_response.clone() {
-            let raw = response.clone()?;
+        if let Some(response) = self.next_mock_chat() {
+            let raw = response?;
             let mut extractor = self.build_extractor();
             return Ok(self.process_extraction(&raw, &mut extractor));
         }
@@ -760,6 +778,17 @@ impl Harness {
                     break CompactionOutcome::Failed;
                 }
                 Err(CompactionErr::ContextWindow { window_tokens }) => {
+                    // Known-window contingency: the single-shot transcript
+                    // overflowed the provider. When the provider reported its
+                    // window, drive the split instead of draining — it
+                    // shrinks the whole timeline (protected items included).
+                    if let Some(w) = window_tokens {
+                        self.last_context_window = Some(w);
+                    }
+                    if window_tokens.is_some() && self.split_context(tx).await {
+                        self.compaction_generic_retries = 0;
+                        break CompactionOutcome::ResolvedByContingency;
+                    }
                     if self.context_manager.evict_tool_chain_for_overflow() {
                         // One chain per attempt. When the provider reported
                         // its window, drain LOCALLY (no HTTP round trip per
@@ -778,7 +807,7 @@ impl Harness {
                         // is resolved and there is nothing left to summarize.
                         match self.context_manager.llm_compaction_request() {
                             Some(rebuilt) => request = rebuilt,
-                            None => break CompactionOutcome::ResolvedByDrain,
+                            None => break CompactionOutcome::ResolvedByContingency,
                         }
                         continue;
                     }
@@ -808,10 +837,120 @@ impl Harness {
             CompactionOutcome::Applied if !summary.trim().is_empty() => self
                 .context_manager
                 .apply_llm_summary(summary.trim().to_string()),
-            // The drain alone resolved the overflow — a successful pass.
-            CompactionOutcome::ResolvedByDrain => true,
+            // A contingency (drain or split) resolved the overflow — a
+            // successful pass.
+            CompactionOutcome::ResolvedByContingency => true,
             CompactionOutcome::Applied | CompactionOutcome::Failed => false,
         };
+        let _ = tx.send(HarnessEvent::LlmCompaction {
+            event: if ok {
+                LlmCompactionEvent::Finished
+            } else {
+                LlmCompactionEvent::Failed
+            },
+        });
+        ok
+    }
+
+    /// The ACTIVE model's known context window for the split-and-concatenate
+    /// contingency: the window reported by the LAST context-window error (the
+    /// most precise) or the last successful discovery. `None` = unknown — the
+    /// legacy drain path applies instead.
+    fn known_split_window(&self) -> Option<usize> {
+        self.last_context_window.or(self.discovered_window)
+    }
+
+    /// Drive the split-and-concatenate contingency to completion.
+    ///
+    /// The timeline is summarized in sequential chunks (whole items, in
+    /// historical order) by the split summarizer; each returned summary is
+    /// appended to the staging buffer; when EVERYTHING is consumed the buffer
+    /// is committed as the new single anchor. The timeline is untouched until
+    /// that final commit, and a failure at any point aborts (everything
+    /// stays). Persisted staging is resumed exactly where it stopped.
+    ///
+    /// Returns whether the split was committed. `false` means the context is
+    /// unchanged — the caller falls back to the legacy behavior (chain drain,
+    /// stuck overflow).
+    async fn split_context(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) -> bool {
+        use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
+        // Resume an in-progress split without needing a fresh window (the
+        // window is persisted in the staging). A fresh split needs a KNOWN
+        // window and a context that actually exceeds it.
+        if !self.context_manager.split_active() {
+            let Some(window) = self.known_split_window() else {
+                return false;
+            };
+            if self.context_manager.display_info().total_tokens <= window {
+                return false;
+            }
+            self.context_manager.begin_split(window);
+        }
+        let _ = tx.send(HarnessEvent::LlmCompaction {
+            event: LlmCompactionEvent::Started,
+        });
+        let mut generic_retries = 0usize;
+        let ok = loop {
+            if self.context_manager.split_all_consumed() {
+                break self.context_manager.commit_split();
+            }
+            let Some(request) = self.context_manager.split_next_chunk() else {
+                break self.context_manager.commit_split();
+            };
+            let mut summary = String::new();
+            match self
+                .stream_summarize_for_compaction(&request.system, &request.prompt, |chunk| {
+                    summary.push_str(chunk);
+                    let _ = tx.send(HarnessEvent::LlmCompactionToken {
+                        text: chunk.to_string(),
+                    });
+                })
+                .await
+            {
+                Ok(()) => {
+                    // All-or-nothing: an empty chunk summary would silently
+                    // drop that chunk's content from the final anchor (the
+                    // cursor still advances) — treat it as a failure and
+                    // abort, keeping the timeline exactly as it was.
+                    if summary.trim().is_empty() {
+                        self.context_manager.abort_split();
+                        break false;
+                    }
+                    generic_retries = 0;
+                    self.context_manager
+                        .advance_split(&summary, request.chunk_end);
+                }
+                Err(CompactionErr::Interrupted) => {
+                    // Atomicity: abort — the timeline stays exactly as it was.
+                    self.context_manager.abort_split();
+                    break false;
+                }
+                Err(CompactionErr::ContextWindow { .. }) => {
+                    // A chunk sized to a KNOWN window should never overflow;
+                    // the window guess was wrong — abort and let the caller
+                    // fall back to the legacy drain.
+                    self.context_manager.abort_split();
+                    break false;
+                }
+                Err(CompactionErr::Other(e)) => {
+                    generic_retries += 1;
+                    if generic_retries >= MAX_COMPACTION_RETRIES {
+                        self.context_manager.abort_split();
+                        let _ = tx.send(HarnessEvent::Toast {
+                            message: format!("LLM compaction failed: {e}"),
+                            variant: ToastVariant::Error,
+                        });
+                        break false;
+                    }
+                    tokio::time::sleep(compaction_retry_backoff(generic_retries)).await;
+                    continue;
+                }
+            }
+        };
+        self.compaction_generic_retries = 0;
         let _ = tx.send(HarnessEvent::LlmCompaction {
             event: if ok {
                 LlmCompactionEvent::Finished
@@ -867,10 +1006,10 @@ impl Harness {
         mut on_token: impl FnMut(&str),
     ) -> Result<(), CompactionErr> {
         #[cfg(test)]
-        if let Some(ref response) = self.mock_chat_response.clone() {
+        if let Some(response) = self.next_mock_chat() {
             match response {
                 Ok(text) => {
-                    on_token(text);
+                    on_token(&text);
                     return Ok(());
                 }
                 Err(msg) => {
@@ -879,7 +1018,24 @@ impl Harness {
                         CONTEXT_WINDOW_MARKER => CompactionErr::ContextWindow {
                             window_tokens: None,
                         },
-                        other => CompactionErr::Other(other.to_string()),
+                        other => {
+                            // Test-only: "{CONTEXT_WINDOW_MARKER}:{window}"
+                            // reports the window along with the overflow, so
+                            // the mock can drive the REACTIVE split fork
+                            // inside `llm_compact` (an overflow error WITH a
+                            // reported window).
+                            if let Some(window) = other
+                                .strip_prefix(CONTEXT_WINDOW_MARKER)
+                                .and_then(|rest| rest.strip_prefix(':'))
+                                .and_then(|n| n.parse::<usize>().ok())
+                            {
+                                CompactionErr::ContextWindow {
+                                    window_tokens: Some(window),
+                                }
+                            } else {
+                                CompactionErr::Other(other.to_string())
+                            }
+                        }
                     });
                 }
             }
@@ -1493,8 +1649,17 @@ impl Harness {
         // Cached per model + timeout-bounded; on failure the current budget
         // (default or restored snapshot) is kept.
         #[cfg(not(test))]
-        if let Some(window) = discovered_context_window(self.connector.effective_model()).await {
-            self.context_manager.set_max_tokens(window);
+        {
+            // Remember the discovery outcome: it is the KNOWN window that
+            // drives the split-and-concatenate contingency when the held
+            // context exceeds it (see `known_split_window`). A failed
+            // discovery leaves it `None` — unknown window → legacy path.
+            self.discovered_window = None;
+            if let Some(window) = discovered_context_window(self.connector.effective_model()).await
+            {
+                self.discovered_window = Some(window);
+                self.context_manager.set_max_tokens(window);
+            }
         }
 
         // A model/provider switch clears a previously recorded stuck
@@ -1531,7 +1696,20 @@ impl Harness {
         // folded into the summary, so it is re-added for the model to see the
         // task verbatim.
         if matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction) {
-            self.llm_compact(&tx).await;
+            // Known-window contingency: when the ACTIVE model's window is
+            // known and the remaining context still exceeds it, the
+            // single-shot compaction transcript would itself overflow the
+            // provider — drive the split-and-concatenate path instead (a
+            // restored in-progress split is always resumed).
+            if self.context_manager.split_active()
+                || self
+                    .known_split_window()
+                    .is_some_and(|w| self.context_manager.display_info().total_tokens > w)
+            {
+                self.split_context(&tx).await;
+            } else {
+                self.llm_compact(&tx).await;
+            }
             if !self.context_manager.last_user_equals(input) {
                 self.context_manager.add_user(input);
             }
@@ -1591,6 +1769,14 @@ impl Harness {
                 if let Err(ref e) = attempt
                     && e == CONTEXT_WINDOW_MARKER
                 {
+                    // Known-window contingency: prefer the split path — it
+                    // shrinks the WHOLE timeline (protected items included)
+                    // into a fitting anchor, while draining only removes tool
+                    // chains. On success retry immediately; on failure fall
+                    // through to the legacy drain.
+                    if self.split_context(&tx).await {
+                        continue;
+                    }
                     let window = self.last_context_window.take();
                     if self.context_manager.evict_tool_chain_for_overflow() {
                         // One chain per attempt; when the provider
@@ -1657,6 +1843,23 @@ impl Harness {
                             // family — re-route the token encoding.
                             self.context_manager
                                 .set_model(self.connector.effective_model());
+                            // The fallback provider may have a DIFFERENT window
+                            // than the model that failed — re-discover it so
+                            // the budget (and the split trigger) match the
+                            // ACTIVE model. A stale window from the failed
+                            // provider must never size the new one.
+                            self.last_context_window = None;
+                            #[cfg(not(test))]
+                            {
+                                self.discovered_window = None;
+                                if let Some(window) =
+                                    discovered_context_window(self.connector.effective_model())
+                                        .await
+                                {
+                                    self.discovered_window = Some(window);
+                                    self.context_manager.set_max_tokens(window);
+                                }
+                            }
                             self.tool_issuer.clear();
                             log::debug!("switched to fallback: {provider}/{model}");
                             switched = true;
@@ -1669,6 +1872,17 @@ impl Harness {
                 }
 
                 if switched {
+                    // The fallback model may be smaller than the context we
+                    // hold: when its window is known and the estimate exceeds
+                    // it, drive the split contingency BEFORE retrying the
+                    // request (an in-progress split is always resumed).
+                    if self.context_manager.split_active()
+                        || self
+                            .known_split_window()
+                            .is_some_and(|w| self.context_manager.display_info().total_tokens > w)
+                    {
+                        self.split_context(&tx).await;
+                    }
                     continue;
                 }
 
@@ -2466,9 +2680,11 @@ impl Harness {
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
             last_context_window: None,
+            discovered_window: None,
             last_overflow_toast: None,
             compaction_generic_retries: 0,
             mock_chat_response: None,
+            mock_chat_queue: VecDeque::new(),
             mock_stream_queue: VecDeque::new(),
             mock_finish_reasons: VecDeque::new(),
             test_tools: Vec::new(),
@@ -2488,6 +2704,39 @@ impl Harness {
     /// `Err(msg)` simulates a connector failure.
     pub(crate) fn with_mock_chat(mut self, response: Result<&str, &str>) -> Self {
         self.mock_chat_response = Some(response.map(|s| s.to_string()).map_err(|s| s.to_string()));
+        self
+    }
+
+    /// Queue sequential mock CHAT (summarizer) responses, consumed one per
+    /// call; when the queue is empty the single [`Self::with_mock_chat`]
+    /// response is used. Lets a test simulate a SEQUENCE of summarizer
+    /// outcomes — e.g. a failing single-shot compaction that reports its
+    /// window (the `"{CONTEXT_WINDOW_MARKER}:{window}"` error convention
+    /// parsed in [`Self::stream_summarize_for_compaction`]) followed by the
+    /// successful split chunks of the reactive fork.
+    pub(crate) fn with_mock_chats(mut self, responses: Vec<Result<&str, &str>>) -> Self {
+        for response in responses {
+            self.mock_chat_queue
+                .push_back(response.map(|s| s.to_string()).map_err(|s| s.to_string()));
+        }
+        self
+    }
+
+    /// Resolve the next mock CHAT (summarizer) response: the queued one when
+    /// present, else the single repeated [`Self::mock_chat_response`].
+    #[cfg(test)]
+    fn next_mock_chat(&mut self) -> Option<Result<String, String>> {
+        if let Some(r) = self.mock_chat_queue.pop_front() {
+            return Some(r);
+        }
+        self.mock_chat_response.clone()
+    }
+
+    /// Set the KNOWN context window of the active model, as if discovery had
+    /// succeeded — lets tests drive the split-and-concatenate contingency (a
+    /// known window with a held context that exceeds it).
+    pub(crate) fn with_discovered_window(mut self, window: usize) -> Self {
+        self.discovered_window = Some(window);
         self
     }
 
