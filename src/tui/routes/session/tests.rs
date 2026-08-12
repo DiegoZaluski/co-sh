@@ -2080,3 +2080,418 @@ fn bench_render_memory_growth_is_bounded() {
         "heap grew pathologically during the final quarter: {last_heap} vs peak {peak_heap}"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Long-session accumulation probes (release benchmarks, run explicitly)
+//
+// The user-visible failure mode of a long agent session is a growing per-frame
+// cost: the UI janks harder the longer the session, until input feels frozen.
+// These probes are deliberately analogous to the way a 30+ minute session
+// degrades and are run with:
+//
+//   cargo test --release -- --ignored bench_render_frame_time_vs_session_size --nocapture
+//   cargo test --release -- --ignored bench_tool_state_expansion_maps_stay_small --nocapture
+//
+// The heap/RSS helpers live above (heap_in_use_bytes / rss_bytes).
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Build a session with `n` realistic message pairs (user prompt + assistant
+/// text or tool output), reusing the same message builders as the long-session
+/// memory benchmark so the shapes are comparable.
+fn bench_session_with_n_pairs(n: usize) -> Session {
+    let mut messages = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        messages.push(bench_user_message(i));
+        if i % 3 == 0 {
+            messages.push(bench_text_message(i, false));
+        } else {
+            messages.push(bench_tool_message(i, 8 * 1024));
+        }
+    }
+    Session {
+        id: format!("bench-{n}"),
+        title: "Bench".into(),
+        created_at: 0,
+        messages,
+    }
+}
+
+/// Frame-time scaling probe: with a warm render cache the per-frame cost must
+/// grow far slower than the message count (the cache makes the frame cost
+/// proportional to the VISIBLE rows, not the whole transcript). A frame cost
+/// that grows linearly with the message count proves the per-frame O(n) walk
+/// is dominating — the exact accumulation that janks long sessions.
+///
+/// Measures 40 warm frames at each size (median, not mean, to survive
+/// scheduler hiccups) and asserts the median does not grow linearly with n.
+/// Run in release with `--test-threads=1` for stable numbers.
+#[test]
+#[ignore = "long-running frame-time scaling benchmark; run explicitly in release"]
+fn bench_render_frame_time_vs_session_size() {
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 100, 50);
+
+    let sizes = [50usize, 200, 800, 3200];
+    let mut medians = Vec::with_capacity(sizes.len());
+    let mut prev_median_us = 0.0f64;
+
+    eprintln!("{:>7} {:>7} {:>10}", "pairs", "msgs", "median_frame_us");
+    for &n in &sizes {
+        let session = bench_session_with_n_pairs(n);
+        let n_msgs = session.messages.len();
+        let mut state = AppState::new();
+        state.add_session(session);
+        state.current_session_id = Some(format!("bench-{n}"));
+        state.status = SessionStatus::Idle;
+
+        let mut view = SessionView::new();
+        let mut buf = Buffer::empty(area);
+
+        // Warm the height + render caches (1 cold frame), then measure 40 warm.
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+        let mut times = Vec::with_capacity(40);
+        for _ in 0..40 {
+            let start = std::time::Instant::now();
+            view.render(&mut buf, area, &state, &theme, &config, 0.016);
+            times.push(start.elapsed().as_micros() as f64);
+        }
+        times.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = times[times.len() / 2];
+        medians.push(median);
+        eprintln!("{n:>7} {n_msgs:>7} {median:>10.1}");
+        if prev_median_us > 0.0 {
+            let growth = median / prev_median_us;
+            let n_ratio = n as f64 / prev_n(&sizes, n) as f64;
+            eprintln!("      growth {growth:.2}x vs {n_ratio:.1}x message growth");
+        }
+        prev_median_us = median;
+    }
+
+    // The decisive assertion: going from 50→3200 pairs (64x) must NOT raise
+    // the warm frame median anywhere near 64x. 8x is a generous ceiling — it
+    // catches a per-frame full re-render (cache broken / O(n) render dominating)
+    // while tolerating allocator and cache-guard noise.
+    let first = medians[0];
+    let last = medians[medians.len() - 1];
+    let total_growth = last / first.max(1.0);
+    eprintln!(
+        "[SCALING] 50 pairs → 3200 pairs: warm median {first:.1}us → {last:.1}us ({total_growth:.2}x for 64x messages)"
+    );
+    assert!(
+        total_growth < 8.0,
+        "warm frame median grew {total_growth:.2}x for 64x messages — per-frame cost \
+         scales with the transcript, not the viewport"
+    );
+
+    fn prev_n(sizes: &[usize], n: usize) -> usize {
+        sizes.iter().rev().find(|&&s| s < n).copied().unwrap_or(1)
+    }
+}
+
+/// The real long-session case: the agent is WORKING, so the transcript grows
+/// every frame and the streaming path (last message re-renders every frame,
+/// text-region generation changes) is hot. This measures the per-frame cost as
+/// the session grows under continuous streaming — the exact load that must not
+/// degrade toward the frame budget. Run in release with `--test-threads=1`
+/// for stable numbers.
+#[test]
+#[ignore = "streaming-scaling benchmark; run explicitly in release"]
+fn bench_streaming_frame_time_vs_session_size() {
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 100, 50);
+
+    let mut state = AppState::new();
+    let session = Session {
+        id: "bench-stream".into(),
+        title: "Bench".into(),
+        created_at: 0,
+        messages: vec![bench_user_message(0)],
+    };
+    state.add_session(session);
+    state.current_session_id = Some("bench-stream".into());
+    state.status = SessionStatus::Working;
+
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+    let mut msg_idx = 1usize;
+
+    // Warm up and sample at growing sizes.
+    let mut last_median = 0.0f64;
+    let mut baseline_real = 0.0f64; // first sample with a real transcript
+    for step in 0..=5 {
+        // Grow the session: 300 new pairs per step (user + assistant text),
+        // except the first step (initial transcript only).
+        if step > 0 {
+            for i in 0..300 {
+                let s = msg_idx + i;
+                if let Some(session) = state.current_session_mut() {
+                    session.messages.push(bench_user_message(s));
+                    session.messages.push(bench_text_message(s, false));
+                }
+            }
+            msg_idx += 300;
+        }
+        // 30 frames with the transcript frozen but Working status (last
+        // message streaming-cached, text regions stable) — steady cost.
+        let mut times = Vec::with_capacity(30);
+        for _ in 0..30 {
+            let start = std::time::Instant::now();
+            view.render(&mut buf, area, &state, &theme, &config, 0.016);
+            times.push(start.elapsed().as_micros() as f64);
+        }
+        times.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = times[times.len() / 2];
+        let n_msgs = state.current_session().map_or(0, |s| s.messages.len());
+        eprintln!("[STREAM] at {n_msgs} msgs: median frame {median:.1}us");
+        if step == 1 {
+            baseline_real = median; // first sample with a real transcript
+        }
+        last_median = median;
+    }
+
+    let n_msgs = state.current_session().map_or(0, |s| s.messages.len());
+    // The 1-message warm frame (step 0) is dominated by fixed startup cost, so
+    // the meaningful baseline is the first sample with a real transcript
+    // (601 msgs). From 601 → 3001 msgs (5x message growth), a healthy cache
+    // grows ~1.5x; a per-frame O(n) rebuild would grow ~5x.
+    let total_growth = last_median / baseline_real.max(1.0);
+    eprintln!(
+        "[STREAM] 601 msgs → {n_msgs} msgs: {baseline_real:.1}us → {last_median:.1}us \
+         ({total_growth:.2}x for 5x messages)"
+    );
+    // 5x the messages must not cost 5x per frame: the ceiling (3x) separates
+    // healthy sub-linear caching from a per-frame rebuild that scales with the
+    // whole transcript.
+    assert!(
+        total_growth < 3.0,
+        "streaming frame grew {total_growth:.2}x for 5x messages — per-frame \
+         rebuild scaling with the transcript"
+    );
+}
+
+/// The `unique_agents()` scan runs on EVERY render frame (it feeds the agent
+/// name → color mapping). It walks the whole transcript with a linear
+/// `seen.contains` per message — O(n·k) per frame even when nothing changed on
+/// screen. (The bench messages set no agent names, so `k ≈ 0` here and the
+/// clone cost is the cheap case; the iteration + lookup cost is the signal.)
+///
+/// This probe measures that cost at increasing transcript sizes and asserts it
+/// stays below a hard ceiling that would be noticeable at 30fps. Run in
+/// release with `--test-threads=1` for stable numbers.
+#[test]
+#[ignore = "allocation probe; run explicitly in release"]
+fn bench_unique_agents_scan_cost() {
+    use crate::state::AppState;
+
+    let eprintln_row = |pairs: usize, us: f64| eprintln!("[UNIQUE_AGENTS] {pairs:>7} pairs → {us:>8.2} us");
+
+    for &pairs in &[100usize, 500, 2000, 8000] {
+        let session = bench_session_with_n_pairs(pairs);
+        let mut state = AppState::new();
+        state.add_session(session);
+        state.current_session_id = Some(format!("bench-{pairs}"));
+
+        // Warm (allocs caches, etc.), then measure 200 scans.
+        let _ = state.unique_agents();
+        let mut total = 0.0f64;
+        for _ in 0..200 {
+            let start = std::time::Instant::now();
+            let _ = state.unique_agents();
+            total += start.elapsed().as_micros() as f64;
+        }
+        let avg = total / 200.0;
+        eprintln_row(pairs, avg);
+        // 8k pairs = 16k messages: even a naive implementation must stay well
+        // under 1ms; above that it is a frame-time component at 30fps.
+        assert!(
+            avg < 1000.0,
+            "unique_agents() took {avg:.1}us/frame at {pairs} pairs — O(n) per-frame scan dominating"
+        );
+    }
+}
+
+/// ToolRenderState holds three maps. The spinner map is swept every frame
+/// (bounded), but `expanded` / `error_expanded` only grow: every distinct tool
+/// call the user toggles adds a permanent entry. In a long session with many
+/// expand/collapse interactions these maps accumulate. This probe documents the
+/// growth and asserts the absolute footprint stays small (a hard cap would
+/// require an eviction policy; today there is none — this pins the current
+/// behavior so a regression that multiplies the footprint is caught).
+#[test]
+#[ignore = "map-growth probe; run explicitly"]
+fn bench_tool_state_expansion_maps_stay_small() {
+    use crate::routes::session::tool_render::ToolRenderState;
+
+    let mut ts = ToolRenderState::new();
+    const N: usize = 5000;
+    for i in 0..N {
+        ts.toggle_expanded(&format!("call-{i}"));
+        if i % 2 == 0 {
+            ts.toggle_error(&format!("call-{i}"));
+        }
+    }
+    let footprint = std::mem::size_of::<String>() + std::mem::size_of::<bool>();
+    let est_bytes = (ts.expanded.len() + ts.error_expanded.len()) * footprint;
+    eprintln!(
+        "[TOOL_STATE] after {N} toggles: expanded={} error_expanded={} ≈ {est_bytes} bytes \
+         (per-entry {footprint}B, no eviction)",
+        ts.expanded.len(),
+        ts.error_expanded.len()
+    );
+    assert_eq!(ts.expanded.len(), N, "every distinct tool id is a permanent entry");
+    // No unbounded blow-up: 5k toggles must not leave gigabytes behind.
+    assert!(
+        est_bytes < 10 * 1024 * 1024,
+        "expansion maps held {est_bytes} bytes after only {N} toggles"
+    );
+}
+
+/// End-to-end long-session accumulation probe: simulate a busy agent session
+/// (thousands of tool outputs appended over time, streaming alternation,
+/// scroll sweeps) and confirm the process heap and RSS stay bounded after the
+/// initial warm-up. This complements the existing 3000-frame benchmark by
+/// exercising the same render hot path but only for ~700 frames, so it can
+/// also be run under heaptrack in reasonable time:
+///
+///   heaptrack cargo test --release -- --ignored bench_render_memory_growth_short
+#[test]
+#[ignore = "short memory-growth benchmark; run explicitly (optionally under heaptrack)"]
+fn bench_render_memory_growth_short() {
+    use super::RENDER_CACHE_BUDGET;
+
+    const FRAMES: usize = 700;
+    const GROW_EVERY: usize = 2;
+    const TOOL_OUTPUT_BYTES: usize = 16 * 1024;
+    const SAMPLE_EVERY: usize = 50;
+
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 100, 40);
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+
+    let mut state = AppState::new();
+    let session = Session {
+        id: "bench-short".into(),
+        title: "Bench".into(),
+        created_at: 0,
+        messages: vec![bench_user_message(0)],
+    };
+    state.add_session(session);
+    state.current_session_id = Some("bench-short".into());
+    state.status = SessionStatus::Idle;
+
+    let mut msg_idx = 1usize;
+    let mut peak_heap = 0usize;
+    let mut samples = 0usize;
+    let mut first_heap = 0usize;
+
+    for frame in 0..FRAMES {
+        if frame % GROW_EVERY == 0 {
+            let step = msg_idx;
+            if let Some(session) = state.current_session_mut() {
+                session.messages.push(bench_text_message(step, false));
+                session.messages.push(bench_tool_message(step, TOOL_OUTPUT_BYTES));
+                session.messages.push(bench_user_message(step));
+            }
+            msg_idx += 1;
+        }
+        // Periodic scroll sweep (cold-cache miss on old content).
+        if frame % 250 == 0 {
+            view.scroll_y = (view.cached_total_height - 1000).max(0);
+            view.is_sticky_bottom = false;
+        } else if frame % 250 == 125 {
+            view.scroll_y = view.cached_total_height.max(0);
+            view.is_sticky_bottom = true;
+        }
+        state.status = if frame % 2 == 0 {
+            SessionStatus::Idle
+        } else {
+            SessionStatus::Working
+        };
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+        if frame % SAMPLE_EVERY == 0 {
+            let heap = heap_in_use_bytes();
+            let rss = rss_bytes();
+            if samples == 0 {
+                first_heap = heap;
+            }
+            peak_heap = peak_heap.max(heap);
+            eprintln!(
+                "[SHORT] frame={frame:>4} msgs={:>5} heap={heap:>11} rss={rss:>11} cache_acct={:>11}",
+                state.current_session().map_or(0, |s| s.messages.len()),
+                view.msg_cache_bytes
+            );
+            samples += 1;
+        }
+    }
+
+    let final_heap = heap_in_use_bytes();
+    eprintln!(
+        "[SHORT] done: first={first_heap} peak={peak_heap} final={final_heap} \
+         cache_budget={RENDER_CACHE_BUDGET}"
+    );
+    // The heap at the end must stay within the same order of magnitude as the
+    // peak (the transcript itself grows, but the retained heap must not
+    // explode while the render cache is bounded).
+    assert!(
+        final_heap < peak_heap.max(1) * 3,
+        "heap grew pathologically: final {final_heap} vs peak {peak_heap}"
+    );
+}
+
+/// Minimal heaptrack-friendly variant: only 6 frames and short messages. Under
+/// heaptrack every allocation is instrumented (each markdown render allocates
+/// tens of thousands of cells), so this intentionally stays tiny to produce a
+/// complete profile in a couple of minutes:
+///
+///   cargo test --release --bin tui bench_render_heaptrack_minimal -- --ignored
+///   heaptrack ./target/release/deps/tui-<hash> bench_render_heaptrack_minimal --ignored
+#[test]
+#[ignore = "minimal heaptrack profile; run explicitly under heaptrack"]
+fn bench_render_heaptrack_minimal() {
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 80, 30);
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+
+    let mut state = AppState::new();
+    let session = Session {
+        id: "bench-ht".into(),
+        title: "Bench".into(),
+        created_at: 0,
+        messages: vec![bench_user_message(0)],
+    };
+    state.add_session(session);
+    state.current_session_id = Some("bench-ht".into());
+    state.status = SessionStatus::Idle;
+
+    let mut msg_idx = 1usize;
+    for frame in 0..6 {
+        if frame % 2 == 0 {
+            let step = msg_idx;
+            if let Some(session) = state.current_session_mut() {
+                session.messages.push(bench_text_message(step, false));
+                session.messages.push(bench_tool_message(step, 4 * 1024));
+                session.messages.push(bench_user_message(step));
+            }
+            msg_idx += 1;
+        }
+        state.status = if frame % 2 == 0 {
+            SessionStatus::Idle
+        } else {
+            SessionStatus::Working
+        };
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    }
+    let final_heap = heap_in_use_bytes();
+    let final_real = real_cache_bytes(&view);
+    eprintln!(
+        "[HT] 6 frames, {} msgs: heap={final_heap} cache_real={final_real}",
+        state.current_session().map_or(0, |s| s.messages.len())
+    );
+}

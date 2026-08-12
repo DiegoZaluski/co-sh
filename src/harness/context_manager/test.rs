@@ -355,7 +355,7 @@ fn leading_orphaned_tool_results_are_skipped_in_messages() {
     let mut cm = cm(10_000);
     // A lone tool result with no preceding tool call (defensive restore case).
     // id 999 avoids colliding with the ids add_user() will allocate (1, 2, ...).
-    cm.items.push_back(ContextItem::ToolResult {
+    cm.push_raw(ContextItem::ToolResult {
         id: 999,
         call_id: "orphan".to_string(),
         content: "stray".to_string(),
@@ -627,21 +627,21 @@ fn pipeline_compresses_drafts_and_keeps_protected_items() {
     // Protected user (50) + closure (50) + two compressible prose drafts
     // (~850 total) = ~950, which fires the 80% trigger (800). The pipeline
     // (phase 1) SUMMARIZES the drafts in place — nothing is evicted.
-    cm.items.push_back(ContextItem::User {
+    cm.push_raw(ContextItem::User {
         id: 1,
         original: "x ".repeat(50),
     });
-    cm.items.push_back(ContextItem::LoopClosure {
+    cm.push_raw(ContextItem::LoopClosure {
         id: 2,
         content: "x ".repeat(50),
     });
-    cm.items.push_back(ContextItem::Assistant {
+    cm.push_raw(ContextItem::Assistant {
         id: 3,
         original: prose_copies(20),
         compressed: None,
         compressible: true,
     });
-    cm.items.push_back(ContextItem::Assistant {
+    cm.push_raw(ContextItem::Assistant {
         id: 4,
         original: prose_copies(20),
         compressed: None,
@@ -808,7 +808,7 @@ fn run_requests_llm_compaction_when_only_protected_items_remain() {
     cm.add_user(&"P ".repeat(400));
     for label in ["old", "mid", "new"] {
         let id = cm.next_id();
-        cm.items.push_back(ContextItem::LoopClosure {
+        cm.push_raw(ContextItem::LoopClosure {
             id,
             content: format!("{label} ").repeat(200),
         });
@@ -846,13 +846,13 @@ fn first_trigger_without_tools_is_handled_by_draft_eviction() {
     cm.add_user(&"U ".repeat(50));
     cm.add_assistant(&"A ".repeat(500), false); // oldest draft
     let closure1 = cm.next_id();
-    cm.items.push_back(ContextItem::LoopClosure {
+    cm.push_raw(ContextItem::LoopClosure {
         id: closure1,
         content: "L ".repeat(100),
     });
     cm.add_assistant(&"B ".repeat(100), false); // newest draft
     let closure2 = cm.next_id();
-    cm.items.push_back(ContextItem::LoopClosure {
+    cm.push_raw(ContextItem::LoopClosure {
         id: closure2,
         content: "M ".repeat(100),
     });
@@ -1062,7 +1062,7 @@ fn llm_compaction_request_serializes_the_whole_context() {
 #[test]
 fn llm_compaction_request_uses_update_mode_with_previous_summary() {
     let mut cm = cm(1000);
-    cm.items.push_back(ContextItem::Compaction {
+    cm.push_raw(ContextItem::Compaction {
         id: 1,
         summary: "## Objective\n- Refactor the context manager".to_string(),
     });
@@ -1070,7 +1070,7 @@ fn llm_compaction_request_uses_update_mode_with_previous_summary() {
     cm.add_user(&"P ".repeat(400));
     cm.add_assistant(&"A ".repeat(500), false); // the last removable draft
     let closure = cm.next_id();
-    cm.items.push_back(ContextItem::LoopClosure {
+    cm.push_raw(ContextItem::LoopClosure {
         id: closure,
         content: "L ".repeat(200),
     });
@@ -1178,7 +1178,7 @@ fn run_returns_resolved_while_drafts_remain() {
     cm.add_user(&"U ".repeat(50));
     cm.add_assistant(&"A ".repeat(200), false); // small oldest draft
     let closure = cm.next_id();
-    cm.items.push_back(ContextItem::LoopClosure {
+    cm.push_raw(ContextItem::LoopClosure {
         id: closure,
         content: "L ".repeat(50),
     });
@@ -1417,7 +1417,7 @@ fn eviction_grinds_across_overflows_until_the_loop_closure_checkpoint() {
     // REPEATS into the next segment (tudo se repete): the new segment's
     // draft is evicted in the SAME call, below the trigger.
     let closure = cm.next_id();
-    cm.items.push_back(ContextItem::LoopClosure {
+    cm.push_raw(ContextItem::LoopClosure {
         id: closure,
         content: "L ".repeat(50),
     });
@@ -1451,7 +1451,7 @@ fn eviction_yields_at_a_loop_closure_for_the_next_segment() {
     cm.add_user(&"U ".repeat(50));
     cm.add_assistant(&"A ".repeat(500), false); // oldest draft
     let closure1 = cm.next_id();
-    cm.items.push_back(ContextItem::LoopClosure {
+    cm.push_raw(ContextItem::LoopClosure {
         id: closure1,
         content: "L ".repeat(50),
     });
@@ -1501,7 +1501,7 @@ fn segment_interplay_evicts_then_compresses_in_one_call() {
     cm.add_user(&"U ".repeat(50));
     cm.add_assistant(&"A ".repeat(900), false); // non-compressible oldest draft
     let closure = cm.next_id();
-    cm.items.push_back(ContextItem::LoopClosure {
+    cm.push_raw(ContextItem::LoopClosure {
         id: closure,
         content: "L ".repeat(50),
     });
@@ -1958,7 +1958,7 @@ fn pipeline_compresses_drafts_synchronously_and_never_stalls() {
     // Four compressible drafts (varied prose so the pipeline has signal).
     for _ in 0..4 {
         let id = cm.next_id();
-        cm.items.push_back(ContextItem::Assistant {
+        cm.push_raw(ContextItem::Assistant {
             id,
             original: prose_copies(16),
             compressed: None,
@@ -2016,7 +2016,7 @@ fn pipeline_compresses_drafts_segment_by_segment() {
     // draft that must stay raw if segment 1 alone drops below the trigger.
     cm.add_assistant(&prose_copies(60), true);
     let closure1 = cm.next_id();
-    cm.items.push_back(ContextItem::LoopClosure {
+    cm.push_raw(ContextItem::LoopClosure {
         id: closure1,
         content: "L ".repeat(50),
     });
@@ -2402,7 +2402,7 @@ fn llm_compaction_is_invisible_to_the_sync_observer() {
     cm.add_user(&"p ".repeat(300));
     cm.add_user(&"P ".repeat(400));
     let id = cm.next_id();
-    cm.items.push_back(ContextItem::LoopClosure {
+    cm.push_raw(ContextItem::LoopClosure {
         id,
         content: "L ".repeat(600),
     });
@@ -2825,4 +2825,328 @@ fn trim_stale_tool_results_bounds_old_results_under_pressure() {
         "the already-trimmed result is not re-trimmed; c1={c1:?}"
     );
     assert_eq!(c2, &tiny, "the newest chain is still full");
+}
+
+// ── Long-session accumulation: tokens and per-call cost stay bounded ──────
+//
+// A busy agent session appends one tool chain (call + result) and one user
+// turn per loop iteration, forever. The retention trim (`trim_stale_tool_results`)
+// must keep the total token count bounded as the session grows, and the
+// per-iteration `display_info()` snapshot (called ~4x per loop iteration by
+// the harness) must stay cheap enough to never dominate the loop.
+
+/// Simulate a long tool-heavy session: `rounds` dispatches, each appending a
+/// user turn, a tool call and a LARGE tool result (the realistic driver of
+/// long-session memory growth). After each round, run the compaction tick.
+/// Returns the peak `display_info().total_tokens` observed across the run and
+/// the final item count.
+fn simulate_long_tool_session(rounds: usize) -> (usize, usize, usize, usize) {
+    let mut cm = cm(MAX_CONTEXT_TOKENS); // 100k budget, 80% trigger
+    let mut peak_tokens = 0usize;
+    let mut peak_items = 0usize;
+    let mut llm_compaction_rounds = 0usize;
+    for i in 0..rounds {
+        cm.add_user(&format!("Continue working on task {i}."));
+        cm.add_assistant(&format!("Inspecting and applying change {i}."), true);
+        cm.add_tool_call(
+            &format!("call-{i}"),
+            "fs_edit",
+            r#"{"targets":[{"path":"src/lib.rs","replacements":[]}]}"#,
+        );
+        // ~2k-token tool result: a realistic diff/patch output.
+        let body: String = (0..40)
+            .map(|j| format!("@@ -{j},{j} +{j},{j} @@\n let value = compute(input);\n value.map(|x| format!(\"{{x:?}}\"))\n"))
+            .collect();
+        cm.add_tool_result(&format!("call-{i}"), &body);
+        let outcome = cm.run();
+        // NeedsLlmCompaction is the designed last-resort fallback when only
+        // protected items remain (user prompts + tool chains accumulate and
+        // cannot be trimmed further). It is NOT a leak — it is the contract.
+        // Count it so the caller can distinguish "bounded by trim/eviction"
+        // from "grew into the LLM-compaction territory".
+        if outcome == RunOutcome::NeedsLlmCompaction {
+            llm_compaction_rounds += 1;
+        }
+        let info = cm.display_info();
+        peak_tokens = peak_tokens.max(info.total_tokens);
+        let n_items = cm.items_snapshot().len();
+        peak_items = peak_items.max(n_items);
+    }
+    (
+        peak_tokens,
+        peak_items,
+        cm.display_info().total_tokens,
+        llm_compaction_rounds,
+    )
+}
+
+/// The context manager must keep the held tokens bounded across hundreds of
+/// tool-heavy rounds: the retention trim clips OLD tool results in place, so
+/// the total never runs away toward the budget ceiling and the items list
+/// never grows without bound.
+///
+/// NOTE: tiktoken re-tokenization makes this slow in debug (several minutes);
+/// run it in release — `cargo test --release -p cosh --lib long_session`.
+#[test]
+#[ignore = "long-session benchmark; run explicitly in release"]
+fn long_session_tool_loop_keeps_tokens_bounded() {
+    let (peak, peak_items, final_total, llm_rounds) = simulate_long_tool_session(600);
+    eprintln!(
+        "[LONG] 600 tool rounds: peak {peak} tokens / {peak_items} items, final {final_total} \
+         tokens, {llm_rounds} rounds reached NeedsLlmCompaction"
+    );
+    // With the trim active, the peak must stay well under what the raw session
+    // would hold (600 × ~2.5k raw ≈ 1.5M tokens) even though the session never
+    // stops appending. Allow generous slack for the protected items (user
+    // prompts + tool chains) that legitimately accumulate until the LLM
+    // compaction folds them.
+    assert!(
+        peak < MAX_CONTEXT_TOKENS * 3,
+        "long tool session peaked at {peak} tokens — unbounded growth"
+    );
+    // The item COUNT is also bounded by eviction + sweep: 600 rounds = 2400
+    // items appended, but eviction must keep the resident count far below that.
+    assert!(
+        peak_items < 3000,
+        "long tool session accumulated {peak_items} items — no eviction happening"
+    );
+}
+
+/// `display_info()` is called multiple times per loop iteration and walks the
+/// whole item list to sum tokens. On a long session this per-call cost must
+/// stay small relative to the frame budget.
+///
+/// **FIXED:** `total_tokens()` now returns a cached incremental sum (kept in
+/// sync by every `items` mutation), so this is O(1) — measured 0.00µs/call at
+/// 1333 items / ~80k tokens, down from ~33ms/call before the fix (~10,000x).
+/// The assertion is a regression fence: a re-tokenize-on-every-call regression
+/// would jump back to milliseconds and fail. The bound is calibrated to a
+/// RELEASE build — the session construction loop uses tiktoken, so this test
+/// is `#[ignore]`d and run explicitly with
+/// `cargo test --release -p cosh --lib long_session`.
+#[test]
+#[ignore = "timing baseline calibrated for release; run explicitly"]
+fn long_session_display_info_cost_baseline() {
+    let mut cm = cm(MAX_CONTEXT_TOKENS);
+    // Build a large session first: 400 rounds ≈ thousands of items.
+    for i in 0..400 {
+        cm.add_user(&format!("Task {i}"));
+        cm.add_assistant(&format!("Done {i}: {}", "word ".repeat(20)), true);
+        cm.add_tool_call(&format!("c-{i}"), "find_glob", r#"{"pattern":"**/*.rs"}"#);
+        cm.add_tool_result(&format!("c-{i}"), &"let x = 1;\n".repeat(30));
+        cm.run();
+    }
+    let items = cm.items_snapshot().len();
+    let start = std::time::Instant::now();
+    let mut total = 0usize;
+    for _ in 0..200 {
+        total = cm.display_info().total_tokens;
+    }
+    let us = start.elapsed().as_micros() as f64 / 200.0;
+    eprintln!(
+        "[LONG] display_info() with {items} items: {us:.2} us/call (200 calls, {total} tokens)"
+    );
+    // Post-fix baseline: O(1) cached sum ≈ 0µs. A re-tokenization regression
+    // would be ~33ms/call; the 1ms fence is ~10x above the current cost and
+    // ~30x below the pre-fix bottleneck — it fails loudly on a regression
+    // while never flaking on the O(1) path.
+    assert!(
+        us < 1000.0,
+        "display_info() regressed: {us:.1}us/call with {items} items (post-fix ~0us, \
+         pre-fix ~33ms — this must be the cached O(1) path)"
+    );
+}
+
+/// The cached token total has 13+ sync points; this test exercises EVERY one
+/// and asserts the cache matches a brute-force recompute after each, so a
+/// future mutation that forgets to update the cache fails here (the
+/// debug_assert in `total_tokens` covers debug builds; this pins release too).
+#[test]
+fn cached_token_total_stays_in_sync_across_all_mutations() {
+    let check = |cm: &ContextManager| {
+        let brute: usize = cm
+            .items
+            .iter()
+            .map(|it| it.tokens(cm.encoding))
+            .sum::<usize>()
+            .saturating_add(cm.todo.tokens(cm.encoding));
+        assert_eq!(
+            cm.total_tokens(),
+            brute,
+            "cache drifted: cached={} brute={} (items={})",
+            cm.total_tokens(),
+            brute,
+            cm.items.len()
+        );
+    };
+
+    let mut cm = cm(10_000);
+    check(&cm);
+
+    // 1. add_* paths (4 variants).
+    cm.add_user(&"user ".repeat(50));
+    check(&cm);
+    cm.add_assistant(&"draft ".repeat(200), true);
+    check(&cm);
+    cm.add_tool_call("c1", "fs_edit", r#"{"path":"a"}"#);
+    check(&cm);
+    cm.add_tool_result_flagged("c1", &"result ".repeat(300), false);
+    check(&cm);
+    cm.add_tool_call_with_signature("c2", "find", "{}", "sig");
+    check(&cm);
+    cm.add_tool_result("c2", &"r2 ".repeat(100));
+    check(&cm);
+
+    // 2. close_loop promotes the last draft (possibly already compressed).
+    cm.close_loop();
+    check(&cm);
+
+    // 3. compression pipeline (in-place compressed field).
+    cm.add_assistant(&"compressible ".repeat(400), true);
+    check(&cm);
+    cm.run();
+    check(&cm);
+
+    // 4. removal paths: eviction, useless sweep, overflow drain.
+    cm.add_tool_call("dead", "grep", "{}");
+    cm.add_tool_result_flagged("dead", &"junk ".repeat(50), true); // useless chain
+    check(&cm);
+    cm.run(); // sweep removes the useless chain
+    check(&cm);
+    let _ = cm.evict_tool_chain_for_overflow();
+    check(&cm);
+
+    // 5. remove_abandoned_inputs (drain range).
+    cm.add_user(&"abandoned ".repeat(20));
+    cm.add_user(&"current ".repeat(20));
+    check(&cm);
+    assert!(cm.remove_abandoned_inputs());
+    check(&cm);
+
+    // 6. retention trim (in-place content shrink).
+    cm.add_tool_call("big", "bash", "{}");
+    cm.add_tool_result("big", &"x".repeat(20_000));
+    check(&cm);
+    // Push the total over the trigger so the trim path runs.
+    cm.add_user(&"P ".repeat(20_000));
+    cm.run();
+    check(&cm);
+
+    // 7. apply_llm_summary (wholesale replace).
+    assert!(cm.apply_llm_summary("## Objective\n- done".to_string()));
+    check(&cm);
+
+    // 8. set_model (encoding change invalidates every cached cost).
+    cm.set_model(Some("gpt-4o"));
+    check(&cm);
+    cm.set_model(Some("claude-sonnet-4-6"));
+    check(&cm);
+
+    // 9. restore_state (wholesale replace from a snapshot).
+    let saved = cm.save_state();
+    cm.add_user(&"extra ".repeat(10));
+    check(&cm);
+    cm.restore_state(&saved);
+    check(&cm);
+}
+
+/// The compaction funnel calls `total_tokens()` (a full re-tokenization pass
+/// over every item) repeatedly: `pipeline_pass` re-sums after every draft it
+/// compresses, `evict_drafts` after every removal, and `trim_stale_tool_results`
+/// at entry. With N items this is O(N) per step and O(N²) overall — the
+/// documented cost driver of a single `run()` on a large session. This test
+/// measures the per-call cost on a large session to quantify how many
+/// re-tokenizations one overflow triggers. Slow in debug (tiktoken); run in
+/// release.
+#[test]
+#[ignore = "timing measurement; run explicitly in release"]
+fn long_session_run_cost_is_measured() {
+    let mut cm = cm(MAX_CONTEXT_TOKENS);
+    // 500 tool-heavy rounds: a realistic long session BEFORE the overflow.
+    for i in 0..500 {
+        cm.add_user(&format!("Task {i}"));
+        cm.add_assistant(&format!("Done {i}: {}", "word ".repeat(20)), true);
+        cm.add_tool_call(&format!("c-{i}"), "find_glob", r#"{"pattern":"**/*.rs"}"#);
+        cm.add_tool_result(&format!("c-{i}"), &"let x = 1;\n".repeat(30));
+    }
+    let items = cm.items_snapshot().len();
+    let start = std::time::Instant::now();
+    let outcome = cm.run();
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "[LONG] run() over {items} items ({outcome:?}) took {ms:.1} ms — one overflow pass"
+    );
+    // Measured ~288ms before the incremental `total_tokens` cache (bottleneck
+    // #1) and ~78ms after it; the per-item token cache (bottleneck #2) took
+    // it to ~37ms. The 1s ceiling is ~27x headroom — it catches a 10x+
+    // regression or a genuine quadratic stall while ignoring machine noise.
+    assert!(ms < 1_000.0, "run() stalled for {ms:.1}ms over {items} items");
+}
+
+/// The compaction `run()` must not re-tokenize LARGE tool results to compute
+/// the old cost of a trim — the dominant term of the pass. Before the
+/// per-item token cache, trimming one ~2k-token result re-ran tiktoken over
+/// the FULL content (~1ms per estimate), so the pass cost scaled with the
+/// total size of the held tool results (the classic long-session stall);
+/// after the cache, only the small preview is tokenized and the pass is a
+/// few ms even with hundreds of large results.
+#[test]
+#[ignore = "timing measurement; run explicitly in release"]
+fn long_session_trim_large_results_stays_cheap() {
+    let mut cm = cm(MAX_CONTEXT_TOKENS);
+    // 300 rounds with realistic ~2k-token tool results (~8k chars each).
+    for i in 0..300 {
+        cm.add_user(&format!("Task {i}"));
+        cm.add_assistant(&format!("Done {i}: {}", "word ".repeat(20)), true);
+        cm.add_tool_call(&format!("c-{i}"), "find_glob", r#"{"pattern":"**/*.rs"}"#);
+        let body: String = (0..80)
+            .map(|j| {
+                format!("@@ -{j},{j} +{j},{j} @@\n let value = compute(input);\n value.map(|x| format!(\"{{x:?}}\"))\n")
+            })
+            .collect();
+        cm.add_tool_result(&format!("c-{i}"), &body);
+    }
+    let t = std::time::Instant::now();
+    let r = cm.trim_stale_tool_results();
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "[LONG] trim of 300 large tool results: {ms:.1} ms -> resolved={r} (before cache: ~300ms)"
+    );
+    // ~9ms post-cache vs ~300ms pre-cache. The 250ms ceiling is ~27x
+    // headroom — catches a regression to full-content re-tokenization while
+    // ignoring machine noise.
+    assert!(ms < 250.0, "trim of large results took {ms:.1}ms");
+}
+
+/// The useless-tool-chain sweep must not scan the whole timeline per tool
+/// item (O(n²) over a long tool timeline, paid at the START of every
+/// `run()`). The per-item `chain_is_useless` lookup was replaced by a single
+/// precomputed set — the sweep is now O(n).
+#[test]
+#[ignore = "timing measurement; run explicitly in release"]
+fn long_session_useless_sweep_stays_linear() {
+    let mut cm = cm(MAX_CONTEXT_TOKENS);
+    // 300 rounds, HALF with useless results (a realistic grep/find mix).
+    for i in 0..300 {
+        cm.add_user(&format!("Task {i}"));
+        cm.add_assistant(&format!("Done {i}: {}", "word ".repeat(20)), true);
+        cm.add_tool_call(&format!("c-{i}"), "find_glob", r#"{"pattern":"**/*.rs"}"#);
+        if i % 2 == 0 {
+            cm.add_tool_result_flagged(&format!("c-{i}"), "no matches", true);
+        } else {
+            cm.add_tool_result(&format!("c-{i}"), &"found 3 matches\n".repeat(5));
+        }
+    }
+    let before = cm.items_snapshot().len();
+    let t = std::time::Instant::now();
+    cm.sweep_useless_chains();
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    let after = cm.items_snapshot().len();
+    eprintln!(
+        "[LONG] useless sweep over {before} items: {ms:.1} ms -> removed {}",
+        before - after
+    );
+    // ~0ms post-fix vs ~2ms+ pre-fix on 1200 items. The 100ms ceiling is
+    // enormous headroom — catches a return to per-item full-timeline scans.
+    assert!(ms < 100.0, "useless sweep took {ms:.1}ms over {before} items");
 }

@@ -113,7 +113,7 @@ use cosh_sdk::connector::{
 };
 use cosh_tools::plan::types::TodoList;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use text_splitter::TextSplitter;
 use todo_ctxt::TodoContext;
 
@@ -734,6 +734,19 @@ pub struct ContextManager {
     /// Never compressed, evicted, drained or summarized — see [`todo_ctxt`]
     /// for the protection and removal rules.
     todo: TodoContext,
+    /// Running token total of `items` (excluding the TODO block), kept in sync
+    /// incrementally by every mutation so `total_tokens()` is O(1) instead of
+    /// re-tokenizing every item through tiktoken on each call (~33ms at 1300+
+    /// items). Rebuilt wholesale on restore and on encoding change.
+    cached_items_tokens: usize,
+    /// Per-item estimated token cost (`id -> tokens`), kept in sync with
+    /// `cached_items_tokens`. Lets an in-place edit (compression, tool-result
+    /// trim) read the OLD cost of the edited item without re-tokenizing the
+    /// whole timeline — the cost of the removed half of a big tool result was
+    /// proportional to the FULL content (~1ms for a ~2k-token result), the
+    /// dominant term of the `run()` compaction pass. Rebuilt wholesale on
+    /// restore and on encoding change.
+    item_tokens: HashMap<u64, usize>,
 }
 
 /// Build a plain assistant text message (no tool calls).
@@ -759,6 +772,8 @@ impl ContextManager {
             overflow_provider: None,
             split: None,
             todo: TodoContext::new(),
+            cached_items_tokens: 0,
+            item_tokens: HashMap::new(),
         }
     }
 
@@ -804,7 +819,17 @@ impl ContextManager {
     /// harness calls this whenever the connector/model changes (loop start,
     /// fallback switch).
     pub fn set_model(&mut self, model: Option<&str>) {
-        self.encoding = TokenEncoding::for_model(model);
+        let new = TokenEncoding::for_model(model);
+        if new == self.encoding {
+            // The harness calls this at every loop start; on a large session
+            // recomputing when nothing changed would re-pay the O(n) tiktoken
+            // pass this cache exists to avoid.
+            return;
+        }
+        self.encoding = new;
+        // A different tokenizer changes EVERY item's estimated cost — the
+        // cached total is stale.
+        self.recompute_cached_tokens();
     }
 
     /// Override the token budget, e.g. from context-window discovery for the
@@ -833,7 +858,7 @@ impl ContextManager {
     /// compaction (phase 3) folds it into the general summary.
     pub fn add_user(&mut self, text: &str) {
         let id = self.next_id();
-        self.items.push_back(ContextItem::User {
+        self.push_item(ContextItem::User {
             id,
             original: text.to_string(),
         });
@@ -854,7 +879,7 @@ impl ContextManager {
     /// fair game for the pipeline.
     pub fn add_assistant(&mut self, text: &str, compressible: bool) {
         let id = self.next_id();
-        self.items.push_back(ContextItem::Assistant {
+        self.push_item(ContextItem::Assistant {
             id,
             original: text.to_string(),
             compressed: None,
@@ -879,7 +904,7 @@ impl ContextManager {
         thought_signature: &str,
     ) {
         let id = self.next_id();
-        self.items.push_back(ContextItem::ToolCall {
+        self.push_item(ContextItem::ToolCall {
             id,
             call_id: call_id.to_string(),
             name: name.to_string(),
@@ -899,7 +924,7 @@ impl ContextManager {
     /// [`Self::add_tool_result`].
     pub fn add_tool_result_flagged(&mut self, call_id: &str, content: &str, useless: bool) {
         let id = self.next_id();
-        self.items.push_back(ContextItem::ToolResult {
+        self.push_item(ContextItem::ToolResult {
             id,
             call_id: call_id.to_string(),
             content: content.to_string(),
@@ -946,6 +971,16 @@ impl ContextManager {
         // Keep the NEWEST input (the last item); drop the rest of the run.
         let start = self.items.len() - trailing_users;
         let end = self.items.len() - 1;
+        for it in self.items.range(start..end) {
+            // Read the cost from the per-item cache instead of re-tokenizing
+            // (the abandoned inputs are dropped wholesale here).
+            let id = it.id();
+            let tokens = self
+                .item_tokens
+                .remove(&id)
+                .unwrap_or_else(|| it.tokens(self.encoding));
+            self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
+        }
         self.items.drain(start..end);
         // Scheduling bias only — the removed tail may hold the draft cursor
         // and the segment frontier; reset them so the next overflow starts
@@ -970,10 +1005,21 @@ impl ContextManager {
         if !last.is_assistant() {
             return;
         }
+        // Capture the draft's CURRENT token cost before the pop — if the
+        // pipeline already compressed it, that is the compressed cost (which
+        // the per-item cache holds); the LoopClosure then renders the
+        // original text, so the cache must move from draft-cost to
+        // closure-cost. Read from the cache — never re-tokenize the draft.
+        let draft_id = self.items.back().unwrap().id();
+        let draft_tokens = self
+            .item_tokens
+            .remove(&draft_id)
+            .unwrap_or_else(|| self.items.back().unwrap().tokens(self.encoding));
         let ContextItem::Assistant { id, original, .. } = self.items.pop_back().unwrap() else {
             return;
         };
-        self.items.push_back(ContextItem::LoopClosure {
+        self.cached_items_tokens = self.cached_items_tokens.saturating_sub(draft_tokens);
+        self.push_item(ContextItem::LoopClosure {
             id,
             content: original,
         });
@@ -1167,14 +1213,26 @@ impl ContextManager {
                 idx += 1;
                 continue;
             };
-            let old_tokens = self.items[idx].tokens(self.encoding);
+            // Read the draft's OLD cost from the per-item cache (its original
+            // text may be large — re-tokenizing it here would re-pay the
+            // whole draft); only the compressed copy is tokenized.
+            let draft_id = self.items[idx].id();
+            let old_tokens = self
+                .item_tokens
+                .get(&draft_id)
+                .copied()
+                .unwrap_or_else(|| self.items[idx].tokens(self.encoding));
             match &mut self.items[idx] {
                 ContextItem::Assistant { compressed: c, .. } => *c = Some(compressed),
                 _ => unreachable!(),
             }
-            total = total
+            let new_tokens = self.items[idx].tokens(self.encoding);
+            self.item_tokens.insert(draft_id, new_tokens);
+            total = total.saturating_sub(old_tokens).saturating_add(new_tokens);
+            self.cached_items_tokens = self
+                .cached_items_tokens
                 .saturating_sub(old_tokens)
-                .saturating_add(self.items[idx].tokens(self.encoding));
+                .saturating_add(new_tokens);
             idx += 1;
         }
         // End of the timeline — still over the trigger → not resolved.
@@ -1182,31 +1240,6 @@ impl ContextManager {
             self.emit(CompactionEvent::PipelineFinished);
         }
         total < trigger
-    }
-
-    /// True when the item `id` belongs to a tool chain whose RESULT is marked
-    /// `useless` — a call that produced no useful output, so its chain is dead
-    /// weight once the model has reacted to it.
-    fn chain_is_useless(&self, id: u64) -> bool {
-        let Some(idx) = self.items.iter().position(|it| it.id() == id) else {
-            return false;
-        };
-        let call_id = match &self.items[idx] {
-            ContextItem::ToolCall { call_id, .. } | ContextItem::ToolResult { call_id, .. } => {
-                call_id
-            }
-            _ => return false,
-        };
-        self.items.iter().any(|it| {
-            matches!(
-                it,
-                ContextItem::ToolResult {
-                    call_id: c,
-                    useless: true,
-                    ..
-                } if c == call_id
-            )
-        })
     }
 
     /// Automatic dead-weight cleanup, OUTSIDE the toggle: remove every tool
@@ -1229,6 +1262,22 @@ impl ContextManager {
                     | ContextItem::ToolResult { call_id, .. } => Some(call_id.clone()),
                     _ => None,
                 });
+        // Precompute the set of `useless` call ids in ONE pass. The previous
+        // per-item `chain_is_useless` scan (position + any, both O(n)) ran for
+        // EVERY tool item — O(n²) over a long tool timeline, paid at the
+        // start of every `run()`.
+        let useless_call_ids: HashSet<String> = self
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                ContextItem::ToolResult {
+                    call_id,
+                    useless: true,
+                    ..
+                } => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect();
         let ids: Vec<u64> = self
             .items
             .iter()
@@ -1236,10 +1285,10 @@ impl ContextManager {
             .filter(|it| match it {
                 ContextItem::ToolCall { call_id, .. } | ContextItem::ToolResult { call_id, .. } => {
                     newest_call_id.as_deref() != Some(call_id.as_str())
+                        && useless_call_ids.contains(call_id)
                 }
                 _ => true,
             })
-            .filter(|it| self.chain_is_useless(it.id()))
             .map(ContextItem::id)
             .collect();
         for id in ids {
@@ -1281,6 +1330,7 @@ impl ContextManager {
                 });
         let mut trimmed = false;
         for it in self.items.iter_mut() {
+            let item_id = it.id();
             if let ContextItem::ToolResult {
                 call_id, content, ..
             } = it
@@ -1294,9 +1344,25 @@ impl ContextManager {
                 if content.len() <= TOOL_RESULT_PREVIEW_CHARS {
                     continue;
                 }
+                // Read the OLD cost from the per-item cache instead of
+                // re-tokenizing the FULL content (a ~2k-token result costs
+                // ~1ms per estimate — the dominant term of the whole pass
+                // when the timeline holds many large results). Only the
+                // small preview is tokenized.
+                let old_tokens = self
+                    .item_tokens
+                    .get(&item_id)
+                    .copied()
+                    .unwrap_or_else(|| self.encoding.estimate(content));
                 let prefix: String = content.chars().take(TOOL_RESULT_PREVIEW_CHARS).collect();
                 let saved = content.len() - prefix.len();
                 *content = format!("{TOOL_RESULT_TRIM_MARKER}{saved} chars] {prefix}");
+                let new_tokens = self.encoding.estimate(content);
+                self.item_tokens.insert(item_id, new_tokens);
+                self.cached_items_tokens = self
+                    .cached_items_tokens
+                    .saturating_sub(old_tokens)
+                    .saturating_add(new_tokens);
                 trimmed = true;
             }
         }
@@ -1474,8 +1540,11 @@ impl ContextManager {
     pub fn apply_llm_summary(&mut self, summary: String) -> bool {
         let id = self.next_id();
         self.items.clear();
-        self.items
-            .push_back(ContextItem::Compaction { id, summary });
+        // The whole timeline is gone — reset both caches before pushing the
+        // single replacement item.
+        self.cached_items_tokens = 0;
+        self.item_tokens.clear();
+        self.push_item(ContextItem::Compaction { id, summary });
         self.draft_cursor = None;
         self.segment_start = None;
         // A successful compaction is proof the provider accepts the context
@@ -1974,6 +2043,8 @@ impl ContextManager {
         // surfaces a stale block — the harness re-syncs it at the next loop
         // start from the authoritative Plan.
         self.todo.clear();
+        // The items were replaced wholesale — rebuild the cached total.
+        self.recompute_cached_tokens();
     }
 
     // helpers
@@ -1984,16 +2055,95 @@ impl ContextManager {
         id
     }
 
+    /// Push an item and keep the cached token total in sync (O(1) instead of
+    /// re-tokenizing the whole timeline). The cache is the single source of
+    /// truth for `total_tokens()`; every mutation of `items` must update it.
+    fn push_item(&mut self, item: ContextItem) {
+        // The item is tokenized HERE for the running total — keep the
+        // per-item cost so a later in-place edit (compression, trim) can read
+        // the old cost without re-tokenizing it.
+        let tokens = item.tokens(self.encoding);
+        self.item_tokens.insert(item.id(), tokens);
+        self.cached_items_tokens = self.cached_items_tokens.saturating_add(tokens);
+        self.items.push_back(item);
+    }
+
+    /// Test-only insertion path: the test module builds scenarios by pushing
+    /// raw items directly (LoopClosures, Compactions, flagged drafts); those
+    /// must go through the cache-updating path so `total_tokens()` stays
+    /// correct in the tests.
+    ///
+    /// A manually-assigned id must never collide with a generated one: a
+    /// later `add_*` draws from the internal counter, so if a test pushed
+    /// `id: 1` while the counter still sat at 1, the next add would produce a
+    /// SECOND item with id 1 (invisible before the per-item token cache made
+    /// duplicate ids a correctness issue). Advance the counter past the
+    /// manual id so generated ids stay unique.
+    #[cfg(test)]
+    fn push_raw(&mut self, item: ContextItem) {
+        self.next_id = self.next_id.max(item.id().saturating_add(1));
+        self.push_item(item);
+    }
+
+    /// Rebuild the cached token total (and the per-item cache) from scratch.
+    /// Called when the encoding changes (every cached per-item cost is then
+    /// stale) and on restore.
+    fn recompute_cached_tokens(&mut self) {
+        self.item_tokens.clear();
+        self.cached_items_tokens = 0;
+        for it in self.items.iter() {
+            let tokens = it.tokens(self.encoding);
+            self.item_tokens.insert(it.id(), tokens);
+            self.cached_items_tokens = self.cached_items_tokens.saturating_add(tokens);
+        }
+    }
+
     /// Token count at which the 80% compaction trigger fires.
     fn trigger(&self) -> usize {
         self.max_tokens.saturating_mul(COMPACT_PCT) / 100
     }
 
     fn total_tokens(&self) -> usize {
-        self.items
-            .iter()
-            .map(|it| it.tokens(self.encoding))
-            .sum::<usize>()
+        // Debug-only invariant: the incremental caches have 13+ sync points,
+        // so a future mutation that forgets to update them would silently
+        // corrupt compaction timing (saturating arithmetic masks underflow).
+        // Every call to `total_tokens` — which the whole test suite makes
+        // constantly — cross-checks the cached total against a brute-force
+        // recompute AND the per-item map against the items themselves in
+        // debug builds, failing fast on drift. Compiled out in release: zero
+        // cost.
+        #[cfg(debug_assertions)]
+        {
+            let brute: usize = self
+                .items
+                .iter()
+                .map(|it| it.tokens(self.encoding))
+                .sum();
+            debug_assert_eq!(
+                self.cached_items_tokens, brute,
+                "cached token total drifted from items ({}, expected {})",
+                self.cached_items_tokens, brute
+            );
+            // The per-item map must mirror every item 1:1 — a stale entry
+            // would silently feed wrong deltas into pipeline/trim/eviction.
+            debug_assert_eq!(
+                self.item_tokens.len(),
+                self.items.len(),
+                "per-item token cache drifted: {} entries for {} items",
+                self.item_tokens.len(),
+                self.items.len()
+            );
+            for it in self.items.iter() {
+                let cached = self.item_tokens.get(&it.id());
+                debug_assert_eq!(
+                    cached,
+                    Some(&it.tokens(self.encoding)),
+                    "per-item token cache drifted for item {}",
+                    it.id()
+                );
+            }
+        }
+        self.cached_items_tokens
             .saturating_add(self.todo.tokens(self.encoding))
     }
 
@@ -2026,8 +2176,15 @@ impl ContextManager {
         };
 
         let Some(cid) = call_id else {
-            let tokens = self.items[idx].tokens(self.encoding);
+            // Read the cost from the per-item cache instead of re-tokenizing
+            // (removed content can be large — e.g. a whole tool result).
+            let id = self.items[idx].id();
+            let tokens = self
+                .item_tokens
+                .remove(&id)
+                .unwrap_or_else(|| self.items[idx].tokens(self.encoding));
             self.items.remove(idx);
+            self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
             return tokens;
         };
 
@@ -2044,16 +2201,31 @@ impl ContextManager {
             // valid; both token costs are summed.
             Some(p) => {
                 let (lo, hi) = (idx.min(p), idx.max(p));
-                let total =
-                    self.items[lo].tokens(self.encoding) + self.items[hi].tokens(self.encoding);
+                // Both halves' costs come from the cache (a tool result can
+                // be large — re-tokenizing it here would re-pay it).
+                let lo_tokens = self
+                    .item_tokens
+                    .remove(&self.items[lo].id())
+                    .unwrap_or_else(|| self.items[lo].tokens(self.encoding));
+                let hi_tokens = self
+                    .item_tokens
+                    .remove(&self.items[hi].id())
+                    .unwrap_or_else(|| self.items[hi].tokens(self.encoding));
+                let total = lo_tokens.saturating_add(hi_tokens);
                 self.items.remove(hi);
                 self.items.remove(lo);
+                self.cached_items_tokens = self.cached_items_tokens.saturating_sub(total);
                 total
             }
             // No partner (orphan) — remove just this item.
             None => {
-                let tokens = self.items[idx].tokens(self.encoding);
+                let id = self.items[idx].id();
+                let tokens = self
+                    .item_tokens
+                    .remove(&id)
+                    .unwrap_or_else(|| self.items[idx].tokens(self.encoding));
                 self.items.remove(idx);
+                self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
                 tokens
             }
         }
