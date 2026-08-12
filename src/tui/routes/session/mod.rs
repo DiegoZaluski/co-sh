@@ -2010,9 +2010,15 @@ impl SessionView {
                 self.cached_total_height += msg_h - old_last_h;
                 // Sync actual_total_height using .max() — see note above.
                 self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
-                log::debug!("[PERF] msg_height_cache: updated last msg (streaming)");
+                // Rate-limited: this fires on EVERY frame while streaming.
+                if self.render_frame.is_multiple_of(30) {
+                    log::debug!("[PERF] msg_height_cache: updated last msg (streaming)");
+                }
             } else {
-                log::debug!("[PERF] msg_height_cache: hit (cached)");
+                // Rate-limited: this fires on EVERY idle frame otherwise.
+                if self.render_frame.is_multiple_of(30) {
+                    log::debug!("[PERF] msg_height_cache: hit (cached)");
+                }
             }
             HeightCacheUpdate::default()
         }
@@ -2620,7 +2626,8 @@ impl SessionView {
                 "[PERF] text_regions: {}us (built)",
                 _regions_start.elapsed().as_micros()
             );
-        } else {
+        } else if self.render_frame.is_multiple_of(30) {
+            // Rate-limited: this fires on EVERY idle frame otherwise.
             log::debug!("[PERF] text_regions: skipped (no change)");
         }
 
@@ -3323,7 +3330,11 @@ impl SessionView {
         self.handle_auto_scroll(delta_time, total_height, visible_height);
 
         let _frame_us = _frame_start.elapsed().as_micros();
-        if _frame_us > 5000 {
+        // Rate-limited: during sustained slow phases (e.g. streaming a huge
+        // message) this would otherwise fire on every frame. Mildly-slow
+        // frames (>5ms) are sampled at 1/30; genuinely bad frames (>50ms) are
+        // always logged so an isolated freeze is never silently missed.
+        if _frame_us > 5000 && (_frame_us > 50_000 || self.render_frame.is_multiple_of(30)) {
             log::debug!(
                 "[PERF] session_render_total: {_frame_us}us msgs={} scroll_y={}",
                 session.messages.len(),

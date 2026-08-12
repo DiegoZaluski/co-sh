@@ -20,6 +20,26 @@ use crate::core::rgba::{ColorInput, parse_color};
 use super::context::{MarkdownContext, MarkdownElement};
 use super::styles::{MarkdownPalette, rgba_to_ratatui as rgba_to_color};
 
+/// Rate-limiter for the markdown renderer's PERF debug logs: at most one
+/// `[PERF] markdown_render_self` / `code_block_render` line per second across
+/// the whole renderer. Without this, every re-render of a huge message (a
+/// 7k-char markdown block takes 100ms+ to render) writes a log line through a
+/// mutex-guarded file — tens of thousands of lines during a single heavy
+/// frame, and a multi-hundred-MB debug log over a long session.
+static LAST_PERF_LOG_MS: AtomicU64 = AtomicU64::new(0);
+
+fn perf_log_allowed() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_PERF_LOG_MS.load(Ordering::Relaxed);
+    now.saturating_sub(last) >= 1000
+        && LAST_PERF_LOG_MS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+}
+
 /// Unicode bullet character for unordered list items.
 const LIST_BULLET: &str = "• ";
 /// Horizontal padding (left/right) inside code blocks.
@@ -840,7 +860,7 @@ impl Renderable for MarkdownRenderable {
         }
 
         let elapsed = start.elapsed().as_micros();
-        if elapsed > 500 {
+        if elapsed > 500 && perf_log_allowed() {
             log::debug!(
                 "[PERF] markdown_render_self: content_len={} area={}x{} elapsed={elapsed}us",
                 self.content.len(),
@@ -1044,7 +1064,7 @@ impl MarkdownRenderable {
         }
 
         let cb_us = cb_start.elapsed().as_micros();
-        if cb_us > 500 {
+        if cb_us > 500 && perf_log_allowed() {
             log::debug!(
                 "[PERF] code_block_render: text_len={} lang={} elapsed={cb_us}us",
                 text.len(),

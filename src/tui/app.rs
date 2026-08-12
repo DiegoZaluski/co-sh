@@ -183,6 +183,10 @@ pub struct App {
     live_requested: bool,
     /// Timestamp of the previous frame (for delta_time calculation).
     last_frame_time: std::time::Instant,
+    /// Per-frame counter — rate-limits the PERF debug logs in the render hot
+    /// path (bg_fill etc.) to one sample per ~30 frames (~1/sec) instead of
+    /// one write per frame.
+    perf_frame: u64,
     /// Last known mouse X position (for keyboard scroll targeting).
     last_mouse_x: u16,
     /// Timestamp of last scroll wheel event (for debouncing rapid scrolls).
@@ -286,6 +290,7 @@ impl App {
             drag_selection: None,
             live_requested: false,
             last_frame_time: std::time::Instant::now(),
+            perf_frame: 0,
             last_mouse_x: 0,
             last_scroll_time: Instant::now(),
             sidebar_focused: false,
@@ -1670,7 +1675,11 @@ impl App {
                 }
             }
             let _bg_us = _bg_start.elapsed().as_micros();
-            if _bg_us > 200 {
+            // Rate-limited: the fill always exceeds 200us, so without this the
+            // log would receive one line per frame for the whole session
+            // lifetime (a 400+ MB /tmp/tui_main.log in 8 hours).
+            self.perf_frame = self.perf_frame.wrapping_add(1);
+            if _bg_us > 200 && self.perf_frame.is_multiple_of(30) {
                 log::debug!(
                     "[PERF] bg_fill: {_bg_us}us area={}x{}",
                     area.width,
