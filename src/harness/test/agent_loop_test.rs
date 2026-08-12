@@ -1389,3 +1389,114 @@ fn result_is_useless_reads_find_grep_json_contract() {
     // The gate is per-tool: no other tool's JSON is ever interpreted.
     assert!(!result_is_useless("fs_read", r#"{"useless":true}"#));
 }
+
+// ── Incremental persistence: ContextSnapshot events ───────────────────────
+//
+// The harness emits a serialized context snapshot per tool dispatch (with a
+// test-zeroed cadence) so the TUI can write the `.ctx` companion file mid-run.
+// This test proves the snapshots (1) arrive during the run, (2) deserialize
+// into a valid [`ContextManagerState`], (3) reflect progress — each later
+// snapshot owns the tool call/result accumulated since — and (4) restore into
+// a fresh manager that keeps answering: exactly the round trip a crash/restart
+// resume performs through the `.ctx` file.
+#[tokio::test]
+async fn run_agent_loop_emits_resumable_incremental_context_snapshots() {
+    use crate::harness::context_manager::{ContextManager, ContextManagerState};
+
+    let mut h = Harness::new_test()
+        .with_snapshot_interval(std::time::Duration::ZERO)
+        .with_test_tool(
+            "test_tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "type": "string" } },
+                "required": ["x"]
+            }),
+        )
+        .with_mock_streams(vec![
+            Ok(vec![
+                "call 1 ",
+                r#"{"name": "test_tool", "arguments": {"x": "one"}}"#,
+            ]),
+            Ok(vec![
+                "call 2 ",
+                r#"{"name": "test_tool", "arguments": {"x": "two"}}"#,
+            ]),
+            Ok(vec!["final answer"]),
+        ]);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("incremental", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    handle.abort();
+
+    let raw_snapshots: Vec<&Vec<u8>> = events
+        .iter()
+        .filter_map(|e| match e {
+            HarnessEvent::ContextSnapshot { context_state } => Some(context_state),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        raw_snapshots.len() >= 2,
+        "a multi-dispatch run must snapshot per dispatch; got {}",
+        raw_snapshots.len()
+    );
+
+    // Every snapshot is a valid bincode round trip of the persisted state.
+    let states: Vec<ContextManagerState> = raw_snapshots
+        .iter()
+        .map(|raw| bincode::deserialize(raw).expect("a snapshot must deserialize"))
+        .collect();
+
+    // Progress: the snapshots accumulate the tool call/result pairs.
+    let sizes: Vec<usize> = states.iter().map(|s| s.items.len()).collect();
+    assert!(
+        sizes.windows(2).all(|w| w[0] < w[1]),
+        "each later snapshot must own strictly more accumulated context; sizes={sizes:?}"
+    );
+
+    // Resumability: restore the LAST snapshot into a fresh manager and keep
+    // answering — the exact `.ctx` round trip on restart.
+    let last = states.last().expect("non-empty snapshots");
+    let mut restored = ContextManager::new(last.max_tokens);
+    restored.restore_state(last);
+    let joined: String = restored
+        .build_messages("")
+        .into_iter()
+        .filter_map(|m| m.content)
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(
+        joined.contains("call 1 ") && joined.contains("call 2 "),
+        "the restored context must own the accumulated tool turns; joined={joined:?}"
+    );
+}

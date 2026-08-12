@@ -126,6 +126,18 @@ pub const MAX_CONTEXT_TOKENS: usize = 100_000;
 /// Percentage of the budget at which the compaction runs.
 const COMPACT_PCT: usize = 80;
 
+/// Retention preview: when the context is under budget pressure and the
+/// drafts are exhausted, OLD tool results are trimmed to this many leading
+/// characters instead of holding every full output for the rest of the
+/// session (the growth that drives long-session OOMs). The item stays a valid
+/// `tool` message — only the content is shortened.
+const TOOL_RESULT_PREVIEW_CHARS: usize = 300;
+
+/// Prefix that marks an already-trimmed tool result, so a later overflow
+/// never re-trims it: the trimmed text stays bounded and stable across the
+/// repeated `run()` calls of a busy tool loop.
+const TOOL_RESULT_TRIM_MARKER: &str = "[trimmed, was ";
+
 /// TF-IDF maximum document frequency filter for deterministic compression.
 const TFIDF_MAX_DF: f64 = 0.8;
 
@@ -1045,6 +1057,13 @@ impl ContextManager {
             if self.evict_drafts() {
                 return RunOutcome::Resolved;
             }
+            // Retention (context-window-aware): before the LLM compaction,
+            // trim the CONTENT of old tool results in place — the tool-chain
+            // contract stays intact and the long-session memory growth is
+            // bounded even when no draft can be compressed or evicted.
+            if self.trim_stale_tool_results() {
+                return RunOutcome::Resolved;
+            }
             // Both phases ran and the total is still over the trigger. The
             // deterministic grind is only exhausted when no draft remains —
             // then the LLM compaction is the only way down (phase 3, last
@@ -1228,6 +1247,65 @@ impl ContextManager {
                 self.remove_item(idx);
             }
         }
+    }
+
+    /// Retention under budget pressure: trim the CONTENT of old tool results
+    /// to a short preview instead of holding every full tool output for the
+    /// rest of the session (the growth that drives long-session OOMs).
+    ///
+    /// Contract-safe by construction: the item stays a `tool` message with its
+    /// `call_id` — only the content is shortened, so the native
+    /// `tool_call → tool` pairing the providers require never breaks. The
+    /// NEWEST chain is left intact (the model has not read that result yet);
+    /// older results are trimmed in one pass.
+    ///
+    /// Idempotent: an already-trimmed result is skipped, so a later overflow
+    /// costs one cheap scan and never re-mangles the text.
+    ///
+    /// Returns `true` when the trim brought the total below the 80% trigger.
+    fn trim_stale_tool_results(&mut self) -> bool {
+        if self.total_tokens() < self.trigger() {
+            return true;
+        }
+        // The newest chain (the one the model has not seen yet) is preserved:
+        // its CALL id is the chain identity, so its result stays full.
+        let newest_call_id: Option<String> =
+            self.items
+                .iter()
+                .rev()
+                .find(|it| it.is_tool())
+                .and_then(|it| match it {
+                    ContextItem::ToolCall { call_id, .. }
+                    | ContextItem::ToolResult { call_id, .. } => Some(call_id.clone()),
+                    _ => None,
+                });
+        let mut trimmed = false;
+        for it in self.items.iter_mut() {
+            if let ContextItem::ToolResult {
+                call_id,
+                content,
+                ..
+            } = it
+            {
+                if newest_call_id.as_deref() == Some(call_id.as_str()) {
+                    continue;
+                }
+                if content.starts_with(TOOL_RESULT_TRIM_MARKER) {
+                    continue;
+                }
+                if content.len() <= TOOL_RESULT_PREVIEW_CHARS {
+                    continue;
+                }
+                let prefix: String = content
+                    .chars()
+                    .take(TOOL_RESULT_PREVIEW_CHARS)
+                    .collect();
+                let saved = content.len() - prefix.len();
+                *content = format!("{TOOL_RESULT_TRIM_MARKER}{saved} chars] {prefix}");
+                trimmed = true;
+            }
+        }
+        trimmed && self.total_tokens() < self.trigger()
     }
 
     /// Phase 2 of the compaction: gradual draft eviction.

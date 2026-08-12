@@ -740,23 +740,53 @@ fn run_evicts_drafts_and_resumes_from_the_cursor() {
 
     // Trigger 2 — phase 2 RESUMES from the cursor: tool chains are skipped,
     // X (→ 1106) and Y (→ 856) are removed, and the end of the timeline is
-    // reached still over 800 with NO draft left. The deterministic grind is
-    // exhausted — the LLM compaction (phase 3) is requested, and BOTH tool
-    // chains survive (they are protected until the LLM folds them).
+    // reached still over 800 with NO draft left. The retention tier then
+    // trims the OLD chain's result content in place (c1 is no longer the
+    // newest chain), bringing the total under the trigger WITHOUT an LLM
+    // call. The NEWEST chain (c2) keeps its full result; both chains'
+    // structural halves survive — trimming never breaks the
+    // `tool_call → tool` pairing.
     let outcome = cm.run();
-    assert_eq!(outcome, RunOutcome::NeedsLlmCompaction);
-    assert!(cm.total_tokens() >= 800, "the LLM is the only way down");
+    assert_eq!(
+        outcome,
+        RunOutcome::Resolved,
+        "the retention trim resolves the overflow instead of the LLM compaction"
+    );
+    assert!(
+        cm.total_tokens() < 800,
+        "the retention trim brought the total under the trigger"
+    );
     assert!(
         cm.items
             .iter()
             .any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "c1")),
-        "the oldest tool chain survives — tool chains are protected"
+        "the oldest tool chain survives — retention trims content, never the chain"
     );
     assert!(
         cm.items
             .iter()
             .any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "c2")),
         "the newest tool chain survives too"
+    );
+    assert!(
+        cm.items
+            .iter()
+            .any(|it| matches!(
+                it,
+                ContextItem::ToolResult { call_id, content, .. }
+                    if call_id == "c1" && content.starts_with(TOOL_RESULT_TRIM_MARKER)
+            )),
+        "the old chain's result is trimmed in place"
+    );
+    assert!(
+        cm.items
+            .iter()
+            .any(|it| matches!(
+                it,
+                ContextItem::ToolResult { call_id, content, .. }
+                    if call_id == "c2" && content.starts_with("t ")
+            )),
+        "the newest chain's result stays full"
     );
     assert!(
         !cm.items.iter().any(|it| matches!(
@@ -2708,4 +2738,84 @@ fn split_staging_survives_save_restore_and_resumes() {
         panic!("expected the committed anchor");
     };
     assert!(summary.contains("part one") && summary.contains("part three"));
+}
+
+// ── Retention: old tool results are trimmed under budget pressure ────────
+//
+// A tool-heavy session accumulates every full tool output forever (tool
+// chains are protected structural items), so long sessions grow unbounded
+// until the LLM compaction. The retention pass trims the CONTENT of OLD tool
+// results in place — the chain stays a valid `tool` message with its
+// `call_id` — leaves the NEWEST chain full, and resolves the overflow without
+// an LLM call. Already-trimmed results are never re-trimmed.
+#[test]
+fn trim_stale_tool_results_bounds_old_results_under_pressure() {
+    let mut cm = cm(4000); // trigger = 3200
+    let huge = "A ".repeat(100_000); // far over the trigger on its own
+    let tiny = "B ".to_string();
+    cm.add_user("short prompt");
+    cm.add_tool_call("c1", "fs_read", "{}");
+    cm.add_tool_result("c1", &huge);
+    cm.add_tool_call("c2", "fs_read", "{}");
+    cm.add_tool_result("c2", &tiny);
+    // No compressible drafts (protected user prompt + structural tool chains):
+    // the funnel can only go pipeline → eviction → retention.
+    assert_eq!(cm.run(), RunOutcome::Resolved);
+
+    let items = cm.items_snapshot();
+    let c1 = items
+        .iter()
+        .find_map(|it| match it {
+            ContextItem::ToolResult { call_id, content, .. } if call_id == "c1" => Some(content),
+            _ => None,
+        })
+        .expect("chain 1 result still present");
+    let c2 = items
+        .iter()
+        .find_map(|it| match it {
+            ContextItem::ToolResult { call_id, content, .. } if call_id == "c2" => Some(content),
+            _ => None,
+        })
+        .expect("chain 2 result still present");
+    assert!(
+        c1.starts_with(TOOL_RESULT_TRIM_MARKER),
+        "the OLD result is trimmed in place; c1={c1:?}"
+    );
+    assert_eq!(c2, &tiny, "the NEWEST chain stays full");
+    // The structural halves of BOTH chains are intact: the native
+    // `tool_call → tool` pairing the providers require never breaks.
+    for cid in ["c1", "c2"] {
+        assert!(cm.items_snapshot().iter().any(|it| matches!(
+            it,
+            ContextItem::ToolCall { call_id, .. } if call_id == cid
+        )), "call {cid} still present");
+    }
+
+    // Idempotency + fall-through: push the total back over the trigger with a
+    // protected (incompressible) user prompt. The second `run()` finds the old
+    // result already trimmed (no re-trim), the newest chain still full and
+    // protected → only the LLM compaction can resolve it.
+    cm.add_user(&"P ".repeat(100_000));
+    assert_eq!(cm.run(), RunOutcome::NeedsLlmCompaction);
+
+    let items = cm.items_snapshot();
+    let c1 = items
+        .iter()
+        .find_map(|it| match it {
+            ContextItem::ToolResult { call_id, content, .. } if call_id == "c1" => Some(content),
+            _ => None,
+        })
+        .unwrap();
+    let c2 = items
+        .iter()
+        .find_map(|it| match it {
+            ContextItem::ToolResult { call_id, content, .. } if call_id == "c2" => Some(content),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        c1.starts_with(TOOL_RESULT_TRIM_MARKER),
+        "the already-trimmed result is not re-trimmed; c1={c1:?}"
+    );
+    assert_eq!(c2, &tiny, "the newest chain is still full");
 }

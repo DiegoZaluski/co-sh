@@ -314,6 +314,11 @@ pub struct Harness {
     /// throttling cooldown (see [`Self::notify_context_overflow`]).
     last_overflow_toast: Option<tokio::time::Instant>,
 
+    /// Cadence of the periodic [`HarnessEvent::ContextSnapshot`] emissions
+    /// (incremental persistence). A test setter shrinks it so a fast mock
+    /// run still produces a snapshot per tool dispatch.
+    snapshot_interval: std::time::Duration,
+
     /// How many consecutive generic (non-context-window) summarizer failures
     /// in the current compaction attempt — bounded by [`MAX_COMPACTION_RETRIES`].
     compaction_generic_retries: usize,
@@ -387,6 +392,7 @@ impl Harness {
             discovered_window: None,
             last_overflow_toast: None,
             compaction_generic_retries: 0,
+            snapshot_interval: std::time::Duration::from_secs(10),
             #[cfg(test)]
             mock_chat_response: None,
             #[cfg(test)]
@@ -1604,6 +1610,13 @@ impl Harness {
         let mut current_input = String::new();
         let mut iteration = 0u64;
 
+        // Throttle the periodic context snapshots so the TUI can persist the
+        // `.ctx` companion file incrementally without serializing the whole
+        // context on every tool dispatch. The snapshot itself is emitted on
+        // the agent thread (the expensive clone + bincode pass never touches
+        // the UI thread).
+        let mut last_snapshot = std::time::Instant::now();
+
         // Store the stop signal so stream_chat can check it mid-stream.
         self.stop_signal = Some(stop_signal.clone());
 
@@ -2519,6 +2532,17 @@ impl Harness {
             let _ = tx.send(HarnessEvent::ContextInfo {
                 info: self.context_manager.display_info(),
             });
+
+            // Incremental persistence: hand the TUI a serialized snapshot of
+            // the running context at a throttled cadence so a crash/restart
+            // mid-run does not lose the in-flight run's context.
+            if last_snapshot.elapsed() >= self.snapshot_interval {
+                last_snapshot = std::time::Instant::now();
+                let _ = tx.send(HarnessEvent::ContextSnapshot {
+                    context_state: bincode::serialize(&self.context_manager.save_state())
+                        .unwrap_or_default(),
+                });
+            }
         }
         log::debug!("run_agent_loop EXIT");
 
@@ -2683,6 +2707,7 @@ impl Harness {
             discovered_window: None,
             last_overflow_toast: None,
             compaction_generic_retries: 0,
+            snapshot_interval: std::time::Duration::from_secs(10),
             mock_chat_response: None,
             mock_chat_queue: VecDeque::new(),
             mock_stream_queue: VecDeque::new(),
@@ -2773,6 +2798,15 @@ impl Harness {
     #[cfg(test)]
     pub(crate) fn with_mock_finish_reason(mut self, reason: Option<&str>) -> Self {
         self.mock_finish_reasons.push_back(reason.map(String::from));
+        self
+    }
+
+    /// Shrink the incremental-persistence snapshot cadence so a fast mock run
+    /// emits a [`HarnessEvent::ContextSnapshot`] per tool dispatch. The real
+    /// default (10s) throttles the serialization cost on long runs.
+    #[cfg(test)]
+    pub(crate) fn with_snapshot_interval(mut self, interval: std::time::Duration) -> Self {
+        self.snapshot_interval = interval;
         self
     }
 

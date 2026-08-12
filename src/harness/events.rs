@@ -67,6 +67,14 @@ pub enum HarnessEvent {
         /// Current context budget usage info.
         info: super::context_manager::ContextDisplayInfo,
     },
+    /// Periodic serialized context snapshot during a long agent run, so the
+    /// TUI can persist the `.ctx` companion file incrementally. A crash or
+    /// restart mid-run then resumes from the latest snapshot instead of the
+    /// session-start state. Emitted from the agent loop at a throttled cadence.
+    ContextSnapshot {
+        /// Bincode-serialized [`ContextManagerState`](super::context_manager::ContextManagerState).
+        context_state: Vec<u8>,
+    },
     /// A compaction phase ran inside the context manager, emitted WHILE
     /// [`ContextManager::run`] executes so the TUI can show live feedback in
     /// the chat: the pipeline (phase 1) gets a running stopwatch (Started
