@@ -316,6 +316,50 @@ fn tool_call_with_signature_round_trips_through_messages() {
 }
 
 #[test]
+fn tool_call_thinking_blocks_round_trip_through_messages() {
+    use cosh_sdk::connector::ClaudeThinkingBlock;
+
+    let mut mgr = cm(10_000);
+    mgr.add_user("read it");
+    // Claude extended-thinking blocks that preceded the tool_use — carried
+    // VERBATIM (text + signature) so the Claude caller can replay them on
+    // the follow-up request (the Anthropic API validates the signature).
+    mgr.add_tool_call_with_thinking(
+        "toolu_1",
+        "bash",
+        r#"{"cmd":"ls"}"#,
+        "",
+        vec![ClaudeThinkingBlock {
+            thinking: "Let me reason about it".to_string(),
+            signature: "sig_replay_42".to_string(),
+        }],
+    );
+    mgr.add_tool_result("toolu_1", "README.md");
+
+    let msgs = mgr.build_messages("");
+    assert_eq!(msgs[1].role, "assistant");
+    let blocks = msgs[1]
+        .thinking_blocks
+        .as_ref()
+        .expect("thinking blocks must survive into the assistant message");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].thinking, "Let me reason about it");
+    assert_eq!(blocks[0].signature, "sig_replay_42");
+
+    // A plain tool call (no blocks) must keep thinking_blocks None — never an
+    // empty vec — so non-Claude providers never see the key on their wire
+    // format.
+    let mut plain = cm(10_000);
+    plain.add_user("read it");
+    plain.add_tool_call("fc_2", "fs_read", "{}");
+    let msgs_plain = plain.build_messages("");
+    assert!(
+        msgs_plain[1].thinking_blocks.is_none(),
+        "a plain tool call must not carry thinking_blocks"
+    );
+}
+
+#[test]
 fn tool_items_are_never_prose_compressed() {
     let mut cm = cm(10_000);
     cm.add_tool_call("c1", "read_file", "{}");

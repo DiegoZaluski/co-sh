@@ -3,7 +3,7 @@ use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
 #[cfg(not(test))]
 use cosh_sdk::connector::discover_context_window;
-use cosh_sdk::connector::{ChatMessage, Connector, ConnectorError, ToolDefinition};
+use cosh_sdk::connector::{ChatMessage, ClaudeThinkingBlock, Connector, ConnectorError, ToolDefinition};
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use cosh_tools::TOOL_FORMAT;
 use rmcp::ServiceExt;
@@ -238,6 +238,13 @@ pub struct Harness {
     /// Set by [`run_agent_loop`](Self::run_agent_loop); the stream loop uses
     /// it to emit [`HarnessEvent::Reasoning`] live while the model thinks.
     reasoning_tx: Option<tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>>,
+    /// Claude extended-thinking blocks captured from the CURRENT stream's
+    /// final chunk (the turn ended with a tool call). Taken by
+    /// [`Self::push_tool_history`] and attached to the tool-call turn so the
+    /// follow-up request can replay them verbatim (the Anthropic API
+    /// validates the signature and rejects missing blocks with 400). Reset at
+    /// the start of every stream.
+    pending_thinking_blocks: Vec<ClaudeThinkingBlock>,
     /// To stop the agent loop.
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
@@ -375,6 +382,7 @@ impl Harness {
             mode: Mode::Build,
             stop_signal: None,
             reasoning_tx: None,
+            pending_thinking_blocks: Vec::new(),
             stop: false,
             tool_issuer: VecDeque::new(),
             tool_call_synthetic: 0,
@@ -1138,8 +1146,10 @@ impl Harness {
         messages: &[ChatMessage],
         mut on_token: impl FnMut(&str),
     ) -> Result<String, String> {
-        // Reset the truncation signal for this stream before anything else.
+        // Reset the truncation signal and the thinking-block stash for this
+        // stream before anything else.
         self.last_finish_reason = None;
+        self.pending_thinking_blocks.clear();
 
         #[cfg(test)]
         if let Some(response) = self.mock_stream_queue.pop_front() {
@@ -1268,6 +1278,12 @@ impl Harness {
                 let _ = rtx.send(super::events::HarnessEvent::Reasoning {
                     text: reasoning.to_string(),
                 });
+            }
+            // Stash Claude thinking blocks (emitted at turn end when the turn
+            // ended with a tool call) so `push_tool_history` can replay them
+            // verbatim on the follow-up request.
+            if let Some(blocks) = chunk.thinking_blocks() {
+                self.pending_thinking_blocks = blocks.to_vec();
             }
         }
 
@@ -1554,8 +1570,16 @@ impl Harness {
         // `signature` is the Gemini 3.x thought signature (empty for every
         // other path) — carried so the follow-up request can replay the
         // native functionCall with its sibling thoughtSignature.
-        self.context_manager
-            .add_tool_call_with_signature(&tool_id, name, &args_str, signature);
+        // `thinking_blocks` are the Claude extended-thinking blocks that
+        // preceded this turn's tool call (empty for every other path) —
+        // replayed verbatim, signature included, on the follow-up request.
+        self.context_manager.add_tool_call_with_thinking(
+            &tool_id,
+            name,
+            &args_str,
+            signature,
+            std::mem::take(&mut self.pending_thinking_blocks),
+        );
         self.context_manager.add_tool_result_flagged(
             &tool_id,
             result,
@@ -2690,6 +2714,7 @@ impl Harness {
             mode: Mode::Build,
             stop_signal: None,
             reasoning_tx: None,
+            pending_thinking_blocks: Vec::new(),
             stop: false,
             tool_issuer: VecDeque::new(),
             tool_call_synthetic: 0,

@@ -108,8 +108,8 @@ pub mod todo_ctxt;
 
 use crate::util::TokenEncoding;
 use cosh_sdk::connector::{
-    ChatMessage, ToolCallFunctionMsg, ToolCallMsg, assistant_tool_call_message,
-    discover_context_window, tool_result_message, user_message,
+    ChatMessage, ClaudeThinkingBlock, ToolCallFunctionMsg, ToolCallMsg,
+    assistant_tool_call_message, discover_context_window, tool_result_message, user_message,
 };
 use cosh_tools::plan::types::TodoList;
 use serde::{Deserialize, Serialize};
@@ -291,6 +291,11 @@ pub enum ContextItem {
         /// the call without it). Empty for inline-JSON calls and for every
         /// other provider.
         thought_signature: String,
+        /// Claude extended-thinking blocks that preceded this tool call in the
+        /// original response — replayed VERBATIM (text + signature) at the
+        /// start of the assistant message in the next request (the API rejects
+        /// modified/missing blocks with 400). Empty for every other provider.
+        thinking_blocks: Vec<ClaudeThinkingBlock>,
     },
     /// A tool RESULT — structural, never prose-compressed. Renders as a
     /// `tool` message with the matching `tool_call_id`.
@@ -344,8 +349,17 @@ impl ContextItem {
                 name,
                 arguments,
                 thought_signature,
+                thinking_blocks,
                 ..
-            } => enc.estimate(name) + enc.estimate(arguments) + enc.estimate(thought_signature),
+            } => {
+                enc.estimate(name)
+                    + enc.estimate(arguments)
+                    + enc.estimate(thought_signature)
+                    + thinking_blocks
+                        .iter()
+                        .map(|b| enc.estimate(&b.thinking) + enc.estimate(&b.signature))
+                        .sum::<usize>()
+            }
             ContextItem::ToolResult { content, .. } => enc.estimate(content),
             ContextItem::LoopClosure { content, .. } => enc.estimate(content),
             ContextItem::Compaction { summary, .. } => enc.estimate(summary),
@@ -756,6 +770,7 @@ fn assistant_message(text: &str) -> ChatMessage {
         content: Some(text.to_string()),
         tool_calls: None,
         tool_call_id: None,
+        thinking_blocks: None,
     }
 }
 
@@ -903,6 +918,22 @@ impl ContextManager {
         arguments: &str,
         thought_signature: &str,
     ) {
+        self.add_tool_call_with_thinking(call_id, name, arguments, thought_signature, Vec::new());
+    }
+
+    /// Add a tool CALL carrying the Claude extended-thinking blocks that
+    /// preceded it in the original response (replayed verbatim — text +
+    /// signature — in the next request's history; the API rejects modified or
+    /// missing blocks with 400). Structural, never prose-compressed. Every
+    /// non-Claude path passes an empty list.
+    pub fn add_tool_call_with_thinking(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        arguments: &str,
+        thought_signature: &str,
+        thinking_blocks: Vec<ClaudeThinkingBlock>,
+    ) {
         let id = self.next_id();
         self.push_item(ContextItem::ToolCall {
             id,
@@ -910,6 +941,7 @@ impl ContextManager {
             name: name.to_string(),
             arguments: arguments.to_string(),
             thought_signature: thought_signature.to_string(),
+            thinking_blocks,
         });
     }
 
@@ -1939,9 +1971,10 @@ impl ContextManager {
                     name,
                     arguments,
                     thought_signature,
+                    thinking_blocks,
                     ..
                 } => {
-                    messages.push(assistant_tool_call_message(vec![ToolCallMsg {
+                    let mut msg = assistant_tool_call_message(vec![ToolCallMsg {
                         id: call_id.clone(),
                         kind: "function".to_string(),
                         function: ToolCallFunctionMsg {
@@ -1950,7 +1983,14 @@ impl ContextManager {
                         },
                         thought_signature: (!thought_signature.is_empty())
                             .then(|| thought_signature.clone()),
-                    }]));
+                    }]);
+                    // Claude extended-thinking blocks travel with the tool
+                    // call they preceded (the Claude caller replays them
+                    // verbatim at the start of the assistant message).
+                    if !thinking_blocks.is_empty() {
+                        msg.thinking_blocks = Some(thinking_blocks.clone());
+                    }
+                    messages.push(msg);
                 }
                 ContextItem::ToolResult {
                     call_id, content, ..
