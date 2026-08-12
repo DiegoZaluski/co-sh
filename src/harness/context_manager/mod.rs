@@ -1282,9 +1282,7 @@ impl ContextManager {
         let mut trimmed = false;
         for it in self.items.iter_mut() {
             if let ContextItem::ToolResult {
-                call_id,
-                content,
-                ..
+                call_id, content, ..
             } = it
             {
                 if newest_call_id.as_deref() == Some(call_id.as_str()) {
@@ -1296,10 +1294,7 @@ impl ContextManager {
                 if content.len() <= TOOL_RESULT_PREVIEW_CHARS {
                     continue;
                 }
-                let prefix: String = content
-                    .chars()
-                    .take(TOOL_RESULT_PREVIEW_CHARS)
-                    .collect();
+                let prefix: String = content.chars().take(TOOL_RESULT_PREVIEW_CHARS).collect();
                 let saved = content.len() - prefix.len();
                 *content = format!("{TOOL_RESULT_TRIM_MARKER}{saved} chars] {prefix}");
                 trimmed = true;

@@ -4309,7 +4309,7 @@ impl App {
                     {
                         self.question_dialog.scroll_up();
                     } else if matches!(self.mode(), AppMode::Session) {
-                        self.session_view.scroll_y = (self.session_view.scroll_y - 3).max(0);
+                        self.session_view.scroll_by(-1.0);
                     } else if matches!(self.mode(), AppMode::Home) {
                         self.home_view.select_prev();
                     } else if matches!(self.mode(), AppMode::InternalTools) {
@@ -4354,7 +4354,7 @@ impl App {
                     {
                         self.question_dialog.scroll_down();
                     } else if matches!(self.mode(), AppMode::Session) {
-                        self.session_view.scroll_y = (self.session_view.scroll_y + 3).max(0);
+                        self.session_view.scroll_by(1.0);
                     } else if matches!(self.mode(), AppMode::Home) {
                         self.home_view.select_next();
                     } else if matches!(self.mode(), AppMode::InternalTools) {

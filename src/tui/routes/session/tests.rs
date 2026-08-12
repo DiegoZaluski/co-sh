@@ -1985,7 +1985,6 @@ fn bench_render_memory_growth_is_bounded() {
     let mut msg_idx = 1usize;
     let mut last_heap = 0usize;
     let mut last_cache_accounted = 0usize;
-    let mut last_cache_real = 0usize;
     let mut peak_heap = 0usize;
 
     eprintln!(
@@ -1997,12 +1996,14 @@ fn bench_render_memory_growth_is_bounded() {
         // ── Agent works: append messages on a cadence. ─────────────────────
         if frame % GROW_EVERY == 0 {
             let step = msg_idx;
-            let big = step % BIG_TEXT_EVERY == 0;
+            let big = step.is_multiple_of(BIG_TEXT_EVERY);
             if let Some(session) = state.current_session_mut() {
-                if step % 2 == 0 {
+                if step.is_multiple_of(2) {
                     session.messages.push(bench_text_message(step, big));
                 } else {
-                    session.messages.push(bench_tool_message(step, TOOL_OUTPUT_BYTES));
+                    session
+                        .messages
+                        .push(bench_tool_message(step, TOOL_OUTPUT_BYTES));
                 }
                 session.messages.push(bench_user_message(step));
             }
@@ -2044,7 +2045,6 @@ fn bench_render_memory_growth_is_bounded() {
             );
             last_heap = heap;
             last_cache_accounted = view.msg_cache_bytes;
-            last_cache_real = real;
         }
     }
 

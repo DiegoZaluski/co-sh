@@ -769,23 +769,19 @@ fn run_evicts_drafts_and_resumes_from_the_cursor() {
         "the newest tool chain survives too"
     );
     assert!(
-        cm.items
-            .iter()
-            .any(|it| matches!(
-                it,
-                ContextItem::ToolResult { call_id, content, .. }
-                    if call_id == "c1" && content.starts_with(TOOL_RESULT_TRIM_MARKER)
-            )),
+        cm.items.iter().any(|it| matches!(
+            it,
+            ContextItem::ToolResult { call_id, content, .. }
+                if call_id == "c1" && content.starts_with(TOOL_RESULT_TRIM_MARKER)
+        )),
         "the old chain's result is trimmed in place"
     );
     assert!(
-        cm.items
-            .iter()
-            .any(|it| matches!(
-                it,
-                ContextItem::ToolResult { call_id, content, .. }
-                    if call_id == "c2" && content.starts_with("t ")
-            )),
+        cm.items.iter().any(|it| matches!(
+            it,
+            ContextItem::ToolResult { call_id, content, .. }
+                if call_id == "c2" && content.starts_with("t ")
+        )),
         "the newest chain's result stays full"
     );
     assert!(
@@ -2766,14 +2762,18 @@ fn trim_stale_tool_results_bounds_old_results_under_pressure() {
     let c1 = items
         .iter()
         .find_map(|it| match it {
-            ContextItem::ToolResult { call_id, content, .. } if call_id == "c1" => Some(content),
+            ContextItem::ToolResult {
+                call_id, content, ..
+            } if call_id == "c1" => Some(content),
             _ => None,
         })
         .expect("chain 1 result still present");
     let c2 = items
         .iter()
         .find_map(|it| match it {
-            ContextItem::ToolResult { call_id, content, .. } if call_id == "c2" => Some(content),
+            ContextItem::ToolResult {
+                call_id, content, ..
+            } if call_id == "c2" => Some(content),
             _ => None,
         })
         .expect("chain 2 result still present");
@@ -2785,10 +2785,13 @@ fn trim_stale_tool_results_bounds_old_results_under_pressure() {
     // The structural halves of BOTH chains are intact: the native
     // `tool_call → tool` pairing the providers require never breaks.
     for cid in ["c1", "c2"] {
-        assert!(cm.items_snapshot().iter().any(|it| matches!(
-            it,
-            ContextItem::ToolCall { call_id, .. } if call_id == cid
-        )), "call {cid} still present");
+        assert!(
+            cm.items_snapshot().iter().any(|it| matches!(
+                it,
+                ContextItem::ToolCall { call_id, .. } if call_id == cid
+            )),
+            "call {cid} still present"
+        );
     }
 
     // Idempotency + fall-through: push the total back over the trigger with a
@@ -2802,14 +2805,18 @@ fn trim_stale_tool_results_bounds_old_results_under_pressure() {
     let c1 = items
         .iter()
         .find_map(|it| match it {
-            ContextItem::ToolResult { call_id, content, .. } if call_id == "c1" => Some(content),
+            ContextItem::ToolResult {
+                call_id, content, ..
+            } if call_id == "c1" => Some(content),
             _ => None,
         })
         .unwrap();
     let c2 = items
         .iter()
         .find_map(|it| match it {
-            ContextItem::ToolResult { call_id, content, .. } if call_id == "c2" => Some(content),
+            ContextItem::ToolResult {
+                call_id, content, ..
+            } if call_id == "c2" => Some(content),
             _ => None,
         })
         .unwrap();
