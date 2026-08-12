@@ -2495,3 +2495,78 @@ fn bench_render_heaptrack_minimal() {
         state.current_session().map_or(0, |s| s.messages.len())
     );
 }
+
+/// The prefix-y array must stay consistent with the height cache through ALL
+/// of its growth paths (full rebuild, incremental extend, last-message
+/// streaming update): every entry must equal the linear walk's y position,
+/// and `find_first_visible` must agree with the brute-force scan for any
+/// scroll position. This guards the O(log n) render/mouse/text-regions walk
+/// against silent layout drift (wrong message positions, skipped messages).
+#[test]
+fn prefix_y_matches_linear_walk_and_binary_search() {
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 90, 40);
+    let mut state = AppState::new();
+
+    // Grow a session across the three cache paths: messages appear over
+    // frames (extend), then one keeps streaming (last-msg update).
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+    let mut step = 0usize;
+    for frame in 0..12 {
+        if frame % 3 == 0 {
+            let session = bench_session_with_n_pairs(20 + step);
+            step += 1;
+            state.add_session(session);
+            state.current_session_id = Some(format!("bench-{}", 20 + step - 1));
+            state.status = SessionStatus::Idle;
+        }
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+        let session = state.current_session().unwrap();
+        let n = session.messages.len();
+        assert_eq!(view.prefix_y.len(), n + 1, "prefix_y len at frame {frame}");
+        assert_eq!(
+            view.msg_height_cache.len(),
+            n,
+            "height cache len at frame {frame}"
+        );
+        // Linear walk positions vs prefix_y. The render walk puts the 1-row
+        // gap BEFORE every message except the first (its `idx > 0` logic),
+        // so `prefix_y[i]` must equal `sum(heights[..i]) + i` for i >= 1.
+        let mut y = 0i32;
+        for i in 0..n {
+            if i > 0 {
+                y += 1; // gap before this message
+            }
+            assert_eq!(
+                view.prefix_y[i], y,
+                "prefix_y[{i}] vs walk at frame {frame}"
+            );
+            y += view.msg_height_cache[i];
+        }
+        assert_eq!(view.prefix_y[n], y, "total vs walk at frame {frame}");
+        assert_eq!(view.cached_total_height, y, "cached total at frame {frame}");
+        // find_first_visible vs brute force over the whole scroll range.
+        let total = y;
+        let vh = i32::from(area.height);
+        let max_scroll = (total - vh).max(0);
+        let mut scroll = 0;
+        loop {
+            let bs = view.find_first_visible(scroll);
+            let brute = (0..n)
+                .find(|&i| {
+                    view.prefix_y[i] + view.msg_height_cache[i] > scroll
+                })
+                .unwrap_or(n);
+            assert_eq!(
+                bs, brute,
+                "find_first_visible({scroll}) at frame {frame}: {bs} != {brute}"
+            );
+            if scroll >= max_scroll {
+                break;
+            }
+            scroll = (scroll + 7).min(max_scroll);
+        }
+    }
+}

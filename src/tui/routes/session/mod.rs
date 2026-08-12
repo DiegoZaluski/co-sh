@@ -366,6 +366,14 @@ pub struct SessionView {
 
     // ── Height cache (avoids duplicate pulldown_cmark parses) ──────────────────
     msg_height_cache: Vec<i32>,
+    /// Prefix sum of message start positions in content space:
+    /// `prefix_y[i]` = the content row where message `i` starts (gap of 1 row
+    /// between messages). `prefix_y[n]` = the total content height. Kept in
+    /// sync with `msg_height_cache` so `find_first_visible` can locate the
+    /// viewport's first message in O(log n) instead of walking the whole
+    /// timeline every frame (the O(n) per-frame walk that dominated frame
+    /// cost on 500+ message sessions).
+    prefix_y: Vec<i32>,
     part_heights_cache: Vec<Vec<u16>>,
     cache_max_w: u16,
     cache_config_token: u64,
@@ -474,6 +482,7 @@ impl SessionView {
             scroll_accumulator_y: 0.0,
             scroll_accel: 3.0,
             msg_height_cache: Vec::new(),
+            prefix_y: Vec::new(),
             part_heights_cache: Vec::new(),
             cache_max_w: 0,
             cache_config_token: 0,
@@ -1017,6 +1026,33 @@ impl SessionView {
             self.msg_cache_cells[idx] = None;
             self.msg_cache_text_regions[idx] = None;
         }
+    }
+
+    /// Index of the first message that can intersect the viewport, found with
+    /// a binary search over `prefix_y` instead of walking the whole timeline:
+    /// the smallest `i` whose content bottom (`prefix_y[i] + msg_height_cache[i]`)
+    /// is strictly below the viewport top (`scroll_y` in content space). The
+    /// per-frame message walk then starts here and stops once `msg_top` passes
+    /// `vp_bottom`, so the frame cost is O(log n + visible) instead of O(n).
+    ///
+    /// Messages whose estimated height is 0 occupy no content rows and can
+    /// never satisfy the render overlap test (`msg_bottom > vp_top &&
+    /// msg_top < vp_bottom` with `msg_bottom == msg_top`), so skipping them is
+    /// safe — the walk would have skipped them anyway.
+    fn find_first_visible(&self, scroll_y: i32) -> usize {
+        let n = self.msg_height_cache.len();
+        let mut lo = 0usize;
+        let mut hi = n;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let bottom = self.prefix_y[mid].saturating_add(self.msg_height_cache[mid]);
+            if bottom > scroll_y {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        lo
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1649,26 +1685,17 @@ impl SessionView {
 
         self.ensure_height_caches_fresh(session, max_w, config);
 
-        // 1. Precompute Y positions for each message
-        let mut msg_y_position = Vec::with_capacity(session.messages.len());
-        let mut current_y = vp_top - self.scroll_y;
-
-        for (idx, _) in session.messages.iter().enumerate() {
-            if idx > 0 {
-                // space between messages
-                current_y += 1;
-            }
-            msg_y_position.push(current_y);
-            current_y += self.msg_height_cache[idx];
-        }
-
-        // 2. Binary search for the message that contains the click position
+        // Binary search for the message that contains the click position,
+        // using the prefix-y array directly (no O(n) per-click allocation of
+        // a position vector). Message `i` starts at
+        // `vp_top - scroll_y + prefix_y[i]` in screen space — the same layout
+        // the render walk produces.
         let mut low = 0;
         let mut high = session.messages.len();
         let mut target_msg_idx = None;
         while low < high {
             let mid = low + (high - low) / 2;
-            let msg_top = msg_y_position[mid];
+            let msg_top = vp_top - self.scroll_y + self.prefix_y[mid];
             let msg_h = self.msg_height_cache[mid];
             let msg_bottom = msg_top + msg_h;
 
@@ -1686,7 +1713,7 @@ impl SessionView {
         if let Some(idx) = target_msg_idx {
             let msg = &session.messages[idx];
             let msg_h = self.msg_height_cache[idx];
-            let msg_top = msg_y_position[idx];
+            let msg_top = vp_top - self.scroll_y + self.prefix_y[idx];
             let msg_bottom = msg_top + msg_h;
 
             // Check if click is within this message and message is visible
@@ -1822,14 +1849,28 @@ impl SessionView {
         border_h + parts_h + padding_bottom
     }
 
-    /// Recompute total_content height from the height cache.
-    fn recompute_total_height(&self, session: &crate::types::Session) -> i32 {
-        let mut h: i32 = 0;
-        for (idx, _m) in session.messages.iter().enumerate() {
-            let gap = i32::from(idx > 0);
-            h += gap + self.msg_height_cache[idx];
+    /// Rebuild `prefix_y` from the height cache and return the total content
+    /// height. The walk places message `i` at
+    /// `sum(msg_height_cache[..i]) + i` (each message after the first is
+    /// preceded by a 1-row gap, exactly like the render walk's `idx > 0`
+    /// logic), so `prefix_y[i]` = that position and `prefix_y[n]` = the total
+    /// (last message's height, no trailing gap).
+    fn rebuild_prefix_y(&mut self) -> i32 {
+        self.prefix_y.clear();
+        let n = self.msg_height_cache.len();
+        if n == 0 {
+            self.prefix_y.push(0);
+            return 0;
         }
-        h
+        let mut y: i32 = 0;
+        self.prefix_y.push(0); // position of message 0
+        for idx in 1..n {
+            y += 1 + self.msg_height_cache[idx - 1];
+            self.prefix_y.push(y);
+        }
+        y += self.msg_height_cache[n - 1]; // final height, no trailing gap
+        self.prefix_y.push(y);
+        y
     }
 
     /// Ensure height caches match the current session. Performs a full rebuild
@@ -1889,7 +1930,7 @@ impl SessionView {
                     session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.last_session_id = Some(session.id.clone());
                 self.last_tool_state_version = self.tool_state.version;
-                self.cached_total_height = self.recompute_total_height(session);
+                self.cached_total_height = self.rebuild_prefix_y();
                 // When the session, expansion state, terminal width, or config
                 // changed, the previous actual_total_height was computed for a
                 // DIFFERENT layout and is NOT comparable to the new cached
@@ -1958,6 +1999,24 @@ impl SessionView {
                 let new_count = self.msg_height_cache.len() - prev_len;
                 let added_heights: i32 = self.msg_height_cache[prev_len..].iter().sum();
                 self.cached_total_height += added_heights + new_count as i32;
+                // Extend prefix_y: the previous last entry is the OLD total
+                // (= the end of the last old message) — pop it, then each new
+                // message starts one row below its predecessor's end (the
+                // 1-row gap, except for the very first message of the
+                // timeline) and ends after its own height. The final pushed
+                // value is the new total.
+                if self.prefix_y.is_empty() {
+                    self.prefix_y.push(0);
+                }
+                let mut y = self.prefix_y.pop().unwrap_or(0);
+                for (k, h) in self.msg_height_cache[prev_len..].iter().enumerate() {
+                    if prev_len + k > 0 {
+                        y += 1; // gap before this message
+                    }
+                    self.prefix_y.push(y); // its start position
+                    y += h; // its end
+                }
+                self.prefix_y.push(y); // new total (no trailing gap)
                 // Sync actual_total_height using .max() — see note above.
                 self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
                 log::debug!(
@@ -2008,6 +2067,11 @@ impl SessionView {
                 // Incremental: update cached total by the height difference.
                 // Message count is unchanged, so no gap adjustment needed.
                 self.cached_total_height += msg_h - old_last_h;
+                // The LAST message's start position never changes (only its
+                // height), so only the final prefix_y entry (the total) moves.
+                if let Some(last) = self.prefix_y.last_mut() {
+                    *last += msg_h - old_last_h;
+                }
                 // Sync actual_total_height using .max() — see note above.
                 self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
                 // Rate-limited: this fires on EVERY frame while streaming.
@@ -2033,6 +2097,24 @@ impl SessionView {
         config: &TuiConfig,
         theme: &Theme,
     ) {
+        let scroll = self.scroll_y;
+        let x_off = inner_area.x + 3;
+        let vp_top = i32::from(inner_area.y);
+        let vp_bottom = i32::from(inner_area.bottom());
+
+        // Same O(log n + visible) walk as the render: start at the first
+        // message that can intersect the viewport and stop past its bottom.
+        // Off-screen messages contribute no regions, so skipping them is
+        // identical to the old full walk — just without the per-frame O(n)
+        // scan of the whole timeline. Computed BEFORE the field borrows
+        // below (`find_first_visible` needs `&self`).
+        let first_vis = self.find_first_visible(scroll);
+        let walk_start = if self.msg_height_cache.is_empty() {
+            vp_top - scroll
+        } else {
+            vp_top - scroll + self.prefix_y[first_vis]
+        };
+
         // Direct field borrows keep the reusable scratch buffer (a `&mut`
         // borrow of `self.scratch`) disjoint from `self.text_regions` pushes
         // and the other fields touched inside the per-part loop.
@@ -2040,20 +2122,18 @@ impl SessionView {
         let scratch = &mut self.scratch;
         text_regions.clear();
 
-        let scroll = self.scroll_y;
-        let x_off = inner_area.x + 3;
-        let vp_top = i32::from(inner_area.y);
-        let vp_bottom = i32::from(inner_area.bottom());
+        let mut y = walk_start;
 
-        let mut y = vp_top - scroll;
-
-        for (idx, msg) in session.messages.iter().enumerate() {
-            if idx > 0 {
+        for (idx, msg) in session.messages.iter().enumerate().skip(first_vis) {
+            if idx > first_vis {
                 y += 1;
             }
 
             let msg_h = self.msg_height_cache[idx];
             let msg_top = y;
+            if msg_top >= vp_bottom {
+                break;
+            }
             let msg_bottom = y + msg_h;
 
             // Only process messages that overlap with the viewport
@@ -2647,6 +2727,34 @@ impl SessionView {
             scrollbar.render_self(buf, scrollbar_area);
         }
 
+        let vp_top = i32::from(inner_area.y);
+        let vp_bottom = i32::from(inner_area.bottom());
+
+        // Start the message walk at the FIRST message that can intersect the
+        // viewport (binary search over `prefix_y`, O(log n)) instead of
+        // walking the whole timeline from message 0: on sessions with 500+
+        // messages the old per-frame O(n) walk — thousands of tight
+        // iterations per frame just to skip off-screen messages — was the
+        // dominant frame cost even with the render cache hot. The walk below
+        // then STOPS once `msg_top` passes the viewport bottom, so the frame
+        // cost is O(log n + visible) instead of O(n). Computed BEFORE the
+        // `scratch` field borrow below (`find_first_visible` needs `&self`).
+        let first_vis = self.find_first_visible(self.scroll_y);
+        let walk_start = if self.msg_height_cache.is_empty() {
+            i32::from(inner_area.y) - self.scroll_y
+        } else {
+            // `prefix_y[first_vis]` already accounts for the 1-row gaps
+            // before it; the walk's own `idx > 0` gap logic resumes exactly
+            // like the full walk would.
+            i32::from(inner_area.y) - self.scroll_y + self.prefix_y[first_vis]
+        };
+
+        // When the walk stops past the viewport bottom, the remaining
+        // (invisible) messages still contribute their cached heights to the
+        // total; `prefix_y[n] - prefix_y[idx]` is exactly that remainder.
+        let n_msgs = session.messages.len();
+        let mut broke_at: Option<usize> = None;
+
         // Reuse one scratch buffer across all temp renders in this frame (and
         // across frames — `Buffer::resize` keeps the allocation). Removes the
         // per-frame large allocations that accumulated heap churn and
@@ -2654,17 +2762,22 @@ impl SessionView {
         // keeps `scratch` disjoint from the `tool_state`/cache writes below.
         let scratch = &mut self.scratch;
 
-        let mut y = i32::from(inner_area.y) - self.scroll_y;
-        let vp_top = i32::from(inner_area.y);
-        let vp_bottom = i32::from(inner_area.bottom());
+        let mut y = walk_start;
 
-        for (idx, msg) in session.messages.iter().enumerate() {
-            if idx > 0 {
+        for (idx, msg) in session.messages.iter().enumerate().skip(first_vis) {
+            // `prefix_y[first_vis]` already includes the 1-row gaps before the
+            // first visited message, so the walk adds gaps only AFTER it.
+            if idx > first_vis {
                 y += 1;
             }
 
             let msg_h = self.msg_height_cache[idx];
             let msg_top = y;
+            if msg_top >= vp_bottom {
+                // Nothing below can intersect the viewport — stop the walk.
+                broke_at = Some(idx);
+                break;
+            }
             let msg_bottom = y + msg_h;
             let is_assistant_non_error =
                 matches!(msg.role, MessageRole::Assistant) && !msg.id.starts_with("msg-err-");
@@ -3253,7 +3366,17 @@ impl SessionView {
         // cause total_height != last_content_height on the next frame, triggering
         // recalculate_bar_props which changes scroll_y and creates visible
         // scroll jumps mid-stream.
-        let actual_total = y - (vp_top - self.scroll_y);
+        //
+        // When the walk stopped past the viewport bottom, the invisible
+        // messages below it never render (render_actual_h stays = msg_h), so
+        // they contribute exactly their cached heights + gaps: the prefix-y
+        // span from the stop index to the end. The messages before the stop
+        // already contributed their real (possibly diverging) heights to `y`.
+        let actual_total = match broke_at {
+            Some(idx) => (y - (vp_top - self.scroll_y))
+                .saturating_add(self.prefix_y[n_msgs] - self.prefix_y[idx]),
+            None => y - (vp_top - self.scroll_y),
+        };
         self.actual_total_height = actual_total;
         self.total_height = self.cached_total_height;
         self.last_content_height = self.cached_total_height;
