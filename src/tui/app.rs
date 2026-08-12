@@ -70,6 +70,20 @@ fn render_budget_bar(pct: u8) -> String {
         .collect()
 }
 
+/// Format an integer with thousands separators (e.g. `9612` → `9,612`) so
+/// large token counts stay readable at a glance in the header bar.
+fn format_tokens(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 const SIDEBAR_WIDTH: u16 = 22;
 const FOOTER_HEIGHT: u16 = 1;
 
@@ -1690,7 +1704,9 @@ impl App {
             );
 
             // Context info bar — only after the user has sent at least one
-            // message. Shows the live token count to the left of the budget bar.
+            // message. Shows the agent's current context against the model
+            // window to the left of the budget bar, with thousands separators
+            // so large token counts are readable at a glance.
             let has_content = self
                 .state
                 .current_session()
@@ -1701,8 +1717,15 @@ impl App {
                     .context_info
                     .as_ref()
                     .map_or(0, |info| info.total_tokens);
+                let max = self.context_info.as_ref().map_or(0, |info| info.max_tokens);
 
-                let token_str = format!("{tokens} tok");
+                // "9,612 / 100,000 tok" — current context vs the model
+                // window; without a known window only the count is shown.
+                let token_str = if max > 0 {
+                    format!("{} / {} tok", format_tokens(tokens), format_tokens(max))
+                } else {
+                    format!("{} tok", format_tokens(tokens))
+                };
                 let budget_str = format!("{}{:>3}%", render_budget_bar(pct), pct);
                 let gap: u16 = 2;
 
@@ -5011,4 +5034,33 @@ fn create_cloud_embedder(
     _dim: usize,
 ) -> Result<cosh_recall::embed::Embedder, String> {
     Err("Cloud embedding requires the 'cloud' feature (enable with --features cloud)".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_tokens;
+
+    #[test]
+    fn format_tokens_small_values_have_no_separator() {
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(9), "9");
+        assert_eq!(format_tokens(999), "999");
+    }
+
+    #[test]
+    fn format_tokens_groups_thousands() {
+        assert_eq!(format_tokens(1_000), "1,000");
+        assert_eq!(format_tokens(9_612), "9,612");
+        assert_eq!(format_tokens(100_000), "100,000");
+        assert_eq!(format_tokens(1_000_000), "1,000,000");
+        assert_eq!(format_tokens(1_234_567), "1,234,567");
+        assert_eq!(format_tokens(12_345_678), "12,345,678");
+    }
+
+    #[test]
+    fn format_tokens_handles_large_values() {
+        assert_eq!(format_tokens(123_456), "123,456");
+        assert_eq!(format_tokens(9_876_543_210), "9,876,543,210");
+        assert_eq!(format_tokens(usize::MAX), "18,446,744,073,709,551,615");
+    }
 }
