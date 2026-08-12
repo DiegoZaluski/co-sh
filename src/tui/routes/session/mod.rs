@@ -981,11 +981,32 @@ impl SessionView {
     /// ordinary scrolling stays re-render-free; only old content far from the
     /// current position sheds its cached cells. The transcript is untouched —
     /// an evicted message simply re-renders if the user scrolls back to it.
+    ///
+    /// The guard window is located with two binary searches over `prefix_y`
+    /// (O(log n)) instead of a full timeline walk with a running row counter:
+    /// [`find_first_visible`](Self::find_first_visible) bounds the messages
+    /// entirely above the guard and a mirror search bounds the messages
+    /// entirely below it. The candidate scan is then limited to the two
+    /// evictable ranges with a single cached-cell check per message (no
+    /// position arithmetic), but it still scales with the number of messages
+    /// OUTSIDE the guard — eviction must examine each candidate's bytes for
+    /// the accounting, so when the viewport sits at the bottom of a long
+    /// timeline the front range covers most of it. The win is the O(log n)
+    /// boundaries, the O(1) per-item work, and skipping the guard interior.
     fn prune_render_cache(&mut self, vp_top: i32, vp_bottom: i32) {
         if self.msg_cache_tokens.is_empty() {
             return;
         }
         let n = self.msg_cache_tokens.len();
+        // The render path resizes every render-cache vector and `prefix_y`
+        // together, but guard cheaply against direct use elsewhere. The
+        // assert surfaces invariant drift in debug builds instead of the
+        // early return masking it silently.
+        debug_assert_eq!(self.msg_height_cache.len(), n);
+        debug_assert_eq!(self.prefix_y.len(), n + 1);
+        if self.msg_height_cache.len() != n || self.prefix_y.len() != n + 1 {
+            return;
+        }
         // Content-space guard: the visible content window is
         // [scroll_y, scroll_y + viewport_height], and the message walk below
         // is in content rows. `vp_top`/`vp_bottom` are SCREEN rows — only
@@ -994,21 +1015,43 @@ impl SessionView {
         let guard_top = self.scroll_y - RENDER_CACHE_GUARD_ROWS;
         let guard_bottom = self.scroll_y + visible_h + RENDER_CACHE_GUARD_ROWS;
 
-        // Content-row walk (mirrors the render loop: 1 gap row between messages).
-        let mut y = 0i32;
-        let mut candidates: Vec<usize> = Vec::new();
-        for idx in 0..n {
-            if idx > 0 {
-                y += 1;
+        // Guard window via binary search over `prefix_y` (both O(log n)):
+        // `above_guard_end` is the first message whose bottom crosses
+        // `guard_top` (messages [0, above_guard_end) sit entirely above the
+        // guard); `below_guard_start` is the first message whose top is at or
+        // after `guard_bottom` (messages [below_guard_start, n) sit entirely
+        // below). Messages in [above_guard_end, below_guard_start) intersect
+        // the guard and are never evicted. `prefix_y` is monotonic (heights
+        // are non-negative), so the two boundaries never cross.
+        let above_guard_end = self.find_first_visible(guard_top);
+        let mut lo = 0usize;
+        let mut hi = n;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.prefix_y[mid] >= guard_bottom {
+                hi = mid;
+            } else {
+                lo = mid + 1;
             }
-            let msg_top = y;
-            y += self.msg_height_cache.get(idx).copied().unwrap_or(0);
-            let msg_bottom = y;
-            let outside_guard = msg_bottom <= guard_top || msg_top >= guard_bottom;
-            if outside_guard && self.msg_cache_cells[idx].is_some() {
+        }
+        let below_guard_start = lo;
+
+        // Only the two evictable ranges are scanned, with the guard test
+        // already baked into the boundaries — per-message work is a single
+        // cached-cell check (no position arithmetic).
+        let mut candidates: Vec<usize> =
+            Vec::with_capacity(above_guard_end + (n - below_guard_start));
+        for idx in 0..above_guard_end {
+            if self.msg_cache_cells[idx].is_some() {
                 candidates.push(idx);
             }
-        } // Evict oldest-first until back under the low-water mark.
+        }
+        for idx in below_guard_start..n {
+            if self.msg_cache_cells[idx].is_some() {
+                candidates.push(idx);
+            }
+        }
+        // Evict oldest-first until back under the low-water mark.
         candidates.sort_by_key(|&i| self.msg_cache_last_used[i]);
         for idx in candidates {
             if self.msg_cache_bytes <= RENDER_CACHE_LOW_WATER {

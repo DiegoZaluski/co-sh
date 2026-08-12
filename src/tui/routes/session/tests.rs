@@ -1724,6 +1724,12 @@ fn render_cache_prunes_oldest_entries_outside_the_viewport_guard() {
     let mut view = SessionView::new();
     // 10 tall messages: message i occupies content rows [i*201, i*201+200].
     view.msg_height_cache = vec![200; 10];
+    // The prefix-y array mirrors that layout: message i starts at i*201 and
+    // the total is 2000 + 9 gaps = 2009 (prune_render_cache reads it via
+    // binary search — the render path keeps it in sync automatically).
+    let mut prefix_y: Vec<i32> = (0..10).map(|i| i * 201).collect();
+    prefix_y.push(2009);
+    view.prefix_y = prefix_y;
     // Seed the render-cache vectors as if every message had been rendered.
     let entry = || Some(vec![Cell::default(); 100]);
     view.msg_cache_tokens = (1u64..=10).collect();
@@ -2568,5 +2574,138 @@ fn prefix_y_matches_linear_walk_and_binary_search() {
             }
             scroll = (scroll + 7).min(max_scroll);
         }
+    }
+}
+
+/// `prune_render_cache` must evict only cached messages OUTSIDE the viewport
+/// guard, in recency order (oldest first), and never touch messages inside
+/// the guard. The expected eviction set is computed by an independent
+/// brute-force walk (the pre-prefix_y algorithm), so the binary-searched
+/// guard window and the `prefix_y` reads are cross-checked against a
+/// reference — catching boundary off-by-ones and prefix-y sync drift.
+#[test]
+fn prune_render_cache_evicts_only_outside_guard_in_recency_order() {
+    use ratatui::buffer::Cell;
+    let mut view = SessionView::new();
+    let n = 400usize;
+
+    // Varied heights (incl. zero-height messages) so the prefix-y layout is
+    // non-trivial, and the timeline is far taller than the guard window so
+    // plenty of messages sit outside it.
+    let heights: Vec<i32> = (0..n).map(|i| 3 + (i % 13) as i32).collect();
+    let mut prefix_y = Vec::with_capacity(n + 1);
+    let mut y = 0i32;
+    prefix_y.push(0);
+    for idx in 1..n {
+        y += 1 + heights[idx - 1];
+        prefix_y.push(y);
+    }
+    y += heights[n - 1];
+    prefix_y.push(y);
+
+    view.msg_height_cache = heights.clone();
+    view.prefix_y = prefix_y.clone();
+    view.msg_cache_tokens = vec![0; n];
+    view.msg_cache_w = vec![0; n];
+    view.msg_cache_h = vec![0; n];
+    // Recency stamps are deliberately anti-index-ordered so the eviction
+    // must follow the stamp, not the array position.
+    view.msg_cache_last_used = (0..n as u64).rev().collect();
+    view.msg_cache_cells = (0..n)
+        .map(|i| Some(vec![Cell::default(); 3 + (i % 5) * 4]))
+        .collect();
+    view.msg_cache_text_regions = (0..n).map(|_| Some(Vec::new())).collect();
+    let per_entry: Vec<usize> = (0..n)
+        .map(|i| {
+            SessionView::cache_entry_bytes_of(&view.msg_cache_cells[i], &view.msg_cache_text_regions[i])
+        })
+        .collect();
+
+    // Scroll to a mid-session position; the guard is 400 rows (plus the
+    // viewport) on each side.
+    view.scroll_y = prefix_y[n] / 2;
+    let vp_top = 0i32;
+    let vp_bottom = 40i32;
+    let guard_top = view.scroll_y - super::RENDER_CACHE_GUARD_ROWS;
+    let guard_bottom =
+        view.scroll_y + (vp_bottom - vp_top) + super::RENDER_CACHE_GUARD_ROWS;
+
+    // Reference: the pre-prefix_y walk computes the outside-guard set...
+    let mut outside: Vec<usize> = Vec::new();
+    let mut wy = 0i32;
+    for idx in 0..n {
+        if idx > 0 {
+            wy += 1;
+        }
+        let msg_top = wy;
+        wy += heights[idx];
+        let msg_bottom = wy;
+        if (msg_bottom <= guard_top || msg_top >= guard_bottom)
+            && view.msg_cache_cells[idx].is_some()
+        {
+            outside.push(idx);
+        }
+    }
+    // ...and the reference eviction sheds oldest-first until back under the
+    // low-water mark. The byte counter starts slightly ABOVE the mark so the
+    // eviction is partial and the recency ORDER is actually exercised.
+    let initial_bytes = super::RENDER_CACHE_LOW_WATER + 4096;
+    let mut ref_bytes = initial_bytes;
+    let mut expected_evicted: Vec<usize> = Vec::new();
+    outside.sort_by_key(|&i| view.msg_cache_last_used[i]);
+    for &idx in &outside {
+        if ref_bytes <= super::RENDER_CACHE_LOW_WATER {
+            break;
+        }
+        ref_bytes -= per_entry[idx];
+        expected_evicted.push(idx);
+    }
+
+    view.msg_cache_bytes = initial_bytes;
+    view.prune_render_cache(vp_top, vp_bottom);
+
+    // Byte accounting must match the reference exactly.
+    assert_eq!(
+        view.msg_cache_bytes, ref_bytes,
+        "byte accounting diverged from the reference"
+    );
+    // Every reference-evicted entry is gone and its invalidation markers set.
+    for &idx in &expected_evicted {
+        assert!(
+            view.msg_cache_cells[idx].is_none(),
+            "msg {idx} should have been evicted"
+        );
+        assert_eq!(
+            view.msg_cache_tokens[idx], !0,
+            "msg {idx} token not invalidated"
+        );
+        assert_eq!(view.msg_cache_w[idx], 0);
+        assert_eq!(view.msg_cache_h[idx], 0);
+        assert!(view.msg_cache_text_regions[idx].is_none());
+    }
+    // Nothing outside the reference set was evicted.
+    for idx in 0..n {
+        if !expected_evicted.contains(&idx) {
+            assert!(
+                view.msg_cache_cells[idx].is_some(),
+                "msg {idx} should NOT have been evicted"
+            );
+        }
+    }
+
+    // The guard is sacred: every cached message intersecting it survives.
+    let inside_guard: Vec<usize> = (0..n)
+        .filter(|&i| {
+            let msg_top = prefix_y[i];
+            let msg_bottom = msg_top + heights[i];
+            msg_bottom > guard_top && msg_top < guard_bottom
+        })
+        .collect();
+    assert!(!inside_guard.is_empty(), "test should exercise guard messages");
+    for idx in inside_guard {
+        assert!(
+            view.msg_cache_cells[idx].is_some(),
+            "msg {idx} is inside the guard and must not be evicted"
+        );
     }
 }
