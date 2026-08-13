@@ -9,6 +9,7 @@ use ratatui::style::Color;
 use ratatui::style::Style;
 
 use crate::theme::Theme;
+use crate::util::text_region::TextRegion;
 
 pub mod pty;
 pub mod todo;
@@ -94,7 +95,7 @@ fn natural_section_height(
             // The wrap width must match the renderer's (section width minus
             // the left+right padding), otherwise the natural height would
             // disagree with the drawn body and the box would clip or overhang.
-            let wrap_w = inner_w.saturating_sub(3);
+            let wrap_w = inner_w.saturating_sub(2);
             let rows: i32 = state
                 .subagent_section_rows(wrap_w)
                 .iter()
@@ -114,6 +115,9 @@ pub fn render_right_panel(
     terminal_width: u16,
 ) {
     if !should_show_right_panel(terminal_width, state) {
+        // The panel is hidden: drop the last frame's section bounds so mouse
+        // events never target sections that are not on screen.
+        state.clear_section_layouts();
         return;
     }
 
@@ -197,10 +201,18 @@ pub fn render_right_panel(
     });
 
     // ── Phase 4: render sections in activity order ──
+    // Refresh the screen bounds used by mouse events (wheel/keyboard scroll
+    // and drag selection) and decide whether the text regions (selection
+    // extraction) must be rebuilt from the latest content.
+    state.clear_section_layouts();
+    let rebuild_regions =
+        state.pty_gen != state.text_regions_gen || inner_w != state.text_regions_w;
     let mut cur_y = viewport_top;
     for (pos, &idx) in render_order.iter().enumerate() {
         let (kind, natural_h) = visible[idx];
         let allocated = allocations[idx].max(1) as u16;
+
+        state.push_section_layout(kind, cur_y, cur_y + i32::from(allocated));
 
         match kind {
             types::SectionKind::Todo => {
@@ -222,7 +234,16 @@ pub fn render_right_panel(
                 );
             }
             types::SectionKind::Bash => {
-                render_bash_section(buf, inner_x, cur_y as u16, inner_w, allocated, state, theme);
+                render_bash_section(
+                    buf,
+                    inner_x,
+                    cur_y as u16,
+                    inner_w,
+                    allocated,
+                    state,
+                    theme,
+                    rebuild_regions,
+                );
             }
             types::SectionKind::Subagent => {
                 render_subagent_section(
@@ -233,6 +254,7 @@ pub fn render_right_panel(
                     allocated,
                     state,
                     theme,
+                    rebuild_regions,
                 );
             }
         }
@@ -242,9 +264,14 @@ pub fn render_right_panel(
             cur_y += SECTION_GAP;
         }
     }
+    if rebuild_regions {
+        state.text_regions_gen = state.pty_gen;
+        state.text_regions_w = inner_w;
+    }
 }
 
 /// Render all bash PTYs as a single continuous text buffer with line-based scroll.
+#[allow(clippy::too_many_arguments)]
 fn render_bash_section(
     buf: &mut Buffer,
     x: u16,
@@ -253,6 +280,7 @@ fn render_bash_section(
     max_h: u16,
     state: &mut RightPanelState,
     theme: &Theme,
+    rebuild_regions: bool,
 ) {
     const LEFT_PAD: u16 = 1;
     const TOP_GAP: u16 = 1;
@@ -277,12 +305,35 @@ fn render_bash_section(
     let inner_w = max_w.saturating_sub(LEFT_PAD);
 
     let has_scroll = total_lines > inner_h as i32;
+    // Normalize the stored offset every render: `scroll_to_bottom()` leaves an
+    // `i32::MAX` sentinel which is only clamped when content overflows. When
+    // the content fits, the sentinel must be reset to 0, otherwise it leaks
+    // into the selection content mapping and overflows the highlight math.
     let scroll_y = if has_scroll {
         state.bash_scroll_y = state.bash_scroll_y.min(total_lines - inner_h as i32);
         state.bash_scroll_y
     } else {
+        state.bash_scroll_y = 0;
         0
     };
+
+    // Rebuild the selection text regions when content or width changed.
+    // `bash_buffer` borrows `&mut state`, so collect the lines first.
+    if rebuild_regions {
+        state.bash_text_regions.clear();
+        let lines: Vec<String> = state.bash_buffer().to_vec();
+        let text_max_w = max_w.saturating_sub(LEFT_PAD);
+        for (i, line) in lines.iter().enumerate() {
+            let truncated: String = line.chars().take(text_max_w as usize).collect();
+            state.bash_text_regions.push(TextRegion {
+                y1: i as i32,
+                y2: i as i32 + 1,
+                x1: x + LEFT_PAD,
+                x2: x + LEFT_PAD + text_max_w,
+                text: truncated,
+            });
+        }
+    }
 
     let start_line = scroll_y as usize;
     let visible = inner_h as usize;
@@ -300,9 +351,15 @@ fn render_bash_section(
         draw_text(buf, &truncated, x + LEFT_PAD, line_y, inner_w, line_style);
     }
 
-    if has_scroll {
-        draw_section_scrollbar(buf, x + max_w, y, max_h, total_lines, scroll_y, theme);
-    }
+    highlight_section_selection(
+        buf,
+        state,
+        x + LEFT_PAD,
+        x + LEFT_PAD + inner_w,
+        inner_y,
+        inner_h,
+        scroll_y,
+    );
 }
 
 /// Render all subagent PTYs as one scrollable markdown document.
@@ -317,8 +374,9 @@ fn render_bash_section(
 /// buffer, since the markdown renderer always lays out from content row 0.
 ///
 /// The content reserves padding on BOTH sides (1 column each) so wrapped
-/// markdown lines and the scrollbar never touch the box's right edge
-/// (flush-right content read as a leak past the box).
+/// markdown lines never touch the box's right edge (flush-right content read
+/// as a leak past the box).
+#[allow(clippy::too_many_arguments)]
 fn render_subagent_section(
     buf: &mut Buffer,
     x: u16,
@@ -327,12 +385,13 @@ fn render_subagent_section(
     max_h: u16,
     state: &mut RightPanelState,
     theme: &Theme,
+    rebuild_regions: bool,
 ) {
-    // The right side gets EXTRA clearance (2 cols vs 1 on the left):
-    // table borders and the scrollbar sit on that side, and a single
-    // column still read as flush against the box edge.
+    // Table borders and the old scrollbar used to sit on this side; with the
+    // scrollbar gone, 1 column of clearance on each side keeps content off
+    // the box edge.
     const LEFT_PAD: u16 = 1;
-    const RIGHT_PAD: u16 = 2;
+    const RIGHT_PAD: u16 = 1;
     const TOP_GAP: u16 = 1;
     const TOP_PAD: u16 = 1;
     const BOTTOM_PAD: u16 = 1;
@@ -372,11 +431,15 @@ fn render_subagent_section(
     // and the scroll offset (mutable) at once.
     let subagent_scratch = &mut state.subagent_scratch;
     let subagent_scroll_y = &mut state.subagent_scroll_y;
+    // Normalize the stored offset every render (same rationale as the bash
+    // section): the `i32::MAX` scroll-to-bottom sentinel must not survive a
+    // render that fits the content, or it leaks into selection math.
     let scroll_y = if has_scroll {
         let max_scroll = total_rows - i32::from(inner_h);
         *subagent_scroll_y = (*subagent_scroll_y).min(max_scroll);
         *subagent_scroll_y
     } else {
+        *subagent_scroll_y = 0;
         0
     };
 
@@ -409,6 +472,28 @@ fn render_subagent_section(
             if row >= scroll_y && row < content_bottom {
                 let line_y = inner_y + (row - scroll_y) as u16;
                 draw_text(buf, input, x + LEFT_PAD, line_y, wrap_w, text_style);
+            }
+        }
+        // Selection text regions: header + input rows (rebuilt only when
+        // content or width changed).
+        if rebuild_regions {
+            let header_text: String = session.command.chars().take(wrap_w as usize).collect();
+            state.subagent_text_regions.push(TextRegion {
+                y1: content_row,
+                y2: content_row + 1,
+                x1: x + LEFT_PAD,
+                x2: x + LEFT_PAD + wrap_w,
+                text: header_text,
+            });
+            if let Some(input) = input_line {
+                let input_text: String = input.chars().take(wrap_w as usize).collect();
+                state.subagent_text_regions.push(TextRegion {
+                    y1: content_row + 1,
+                    y2: content_row + 2,
+                    x1: x + LEFT_PAD,
+                    x2: x + LEFT_PAD + wrap_w,
+                    text: input_text,
+                });
             }
         }
         // Markdown body: blit the visible slice of the previously rendered
@@ -495,23 +580,46 @@ fn render_subagent_section(
                         }
                     }
                 }
+
+                // Selection text regions: body rows from the same cached cells
+                // that were blitted, so extraction matches the display.
+                if rebuild_regions {
+                    for body_row in 0..body_h_u {
+                        let base = body_row as usize * wrap_w as usize;
+                        let mut line_text = String::with_capacity(wrap_w as usize);
+                        for dx in 0..wrap_w {
+                            line_text.push(
+                                cached.cells[base + dx as usize]
+                                    .symbol()
+                                    .chars()
+                                    .next()
+                                    .unwrap_or(' '),
+                            );
+                        }
+                        let trimmed = line_text.trim_end().to_string();
+                        state.subagent_text_regions.push(TextRegion {
+                            y1: body_start + i32::from(body_row),
+                            y2: body_start + i32::from(body_row) + 1,
+                            x1: x + LEFT_PAD,
+                            x2: x + LEFT_PAD + wrap_w,
+                            text: trimmed,
+                        });
+                    }
+                }
             }
         }
         content_row = sess_end;
     }
 
-    if has_scroll {
-        // Scrollbar on the box's right-padding column (clear of the edge).
-        draw_section_scrollbar(
-            buf,
-            x.saturating_add(max_w).saturating_sub(RIGHT_PAD),
-            y,
-            max_h,
-            total_rows,
-            scroll_y,
-            theme,
-        );
-    }
+    highlight_section_selection(
+        buf,
+        state,
+        x + LEFT_PAD,
+        x + LEFT_PAD + wrap_w,
+        inner_y,
+        inner_h,
+        scroll_y,
+    );
 }
 
 /// Simple text drawing helper (filters ASCII control chars to prevent ratatui panics).
@@ -534,44 +642,77 @@ fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: St
     }
 }
 
-/// Draw a scrollbar within a section (not the full panel).
-fn draw_section_scrollbar(
+/// Invert fg/bg of the cells inside a section's drag-selection rectangle.
+///
+/// Mirrors the chat's flow-based highlight: the anchor/focus are stored in
+/// CONTENT rows (so the highlight follows content during drag auto-scroll),
+/// converted back to screen rows with the current scroll offset and clamped
+/// to the section's visible content band. Rows between the band edges are
+/// selected full-width, the first/last row only from the drag x positions.
+fn highlight_section_selection(
     buf: &mut Buffer,
-    sb_x: u16,
-    sb_y: u16,
-    sb_h: u16,
-    content_h: i32,
+    state: &RightPanelState,
+    content_min_x: u16,
+    content_max_x: u16,
+    inner_y: u16,
+    inner_h: u16,
     scroll_y: i32,
-    theme: &Theme,
 ) {
-    let sb_h = sb_h as i32;
-    if sb_h <= 0 || content_h <= 0 {
+    let Some((anchor_x, _anchor_sy, focus_x, _focus_sy)) = state.drag_selection else {
+        return;
+    };
+    if state.selection_section.is_none() || inner_h == 0 {
         return;
     }
-    let thumb_size = (sb_h as f64 * sb_h as f64 / content_h as f64)
-        .max(1.0)
-        .min(sb_h as f64) as i32;
 
-    let max_thumb_pos = sb_h - thumb_size;
-    let scroll_ratio = if content_h > sb_h {
-        scroll_y as f64 / (content_h - sb_h) as f64
+    let content_top = i32::from(inner_y);
+    let band_bottom = content_top + i32::from(inner_h) - 1;
+    // Saturating: content rows can transiently carry the `i32::MAX`
+    // scroll-to-bottom sentinel (e.g. a click racing a render that clamps
+    // it), which would overflow a plain `- scroll_y + content_top`.
+    let anchor_screen_y = state
+        .selection_anchor_content_y
+        .saturating_sub(scroll_y)
+        .saturating_add(content_top)
+        .clamp(content_top, band_bottom) as u16;
+    let focus_screen_y = state
+        .selection_focus_content_y
+        .saturating_sub(scroll_y)
+        .saturating_add(content_top)
+        .clamp(content_top, band_bottom) as u16;
+
+    let start_y = anchor_screen_y.min(focus_screen_y);
+    let end_y = anchor_screen_y.max(focus_screen_y);
+    let (start_x, end_x) = if anchor_screen_y == start_y {
+        (anchor_x, focus_x)
     } else {
-        0.0
+        (focus_x, anchor_x)
     };
-    let thumb_pos = (scroll_ratio * max_thumb_pos as f64) as i32;
 
-    let sb_style = Style::default().fg(rgba_color(theme.text_muted));
-
-    for row in 0..sb_h {
-        let Some(y) = sb_y.checked_add(row as u16) else {
-            break;
+    for cy in start_y..=end_y {
+        let (lx1, lx2) = if start_y == end_y {
+            (start_x.min(end_x), start_x.max(end_x))
+        } else if cy == start_y {
+            (start_x, content_max_x)
+        } else if cy == end_y {
+            (content_min_x, end_x)
+        } else {
+            (content_min_x, content_max_x)
         };
-        if let Some(cell) = buf.cell_mut((sb_x, y))
-            && row >= thumb_pos
-            && row < thumb_pos + thumb_size
-        {
-            cell.set_char('█');
-            cell.set_style(sb_style);
+
+        let lx1 = lx1.max(content_min_x);
+        let lx2 = lx2.min(content_max_x);
+        if lx1 > lx2 {
+            continue;
+        }
+
+        for cx in lx1..=lx2 {
+            if let Some(cell) = buf.cell_mut((cx, cy)) {
+                let fg = cell.fg;
+                let bg = cell.bg;
+                cell.set_fg(bg);
+                cell.set_bg(fg);
+            }
         }
     }
 }
@@ -611,7 +752,7 @@ mod tests {
         let theme = test_theme();
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
 
-        render_subagent_section(&mut buf, 0, 0, 50, 30, &mut state, &theme);
+        render_subagent_section(&mut buf, 0, 0, 50, 30, &mut state, &theme, true);
 
         let all: String = (0..30)
             .map(|y| row_text(&buf, y))
@@ -626,11 +767,10 @@ mod tests {
         );
         assert!(!all.contains("**"), "raw emphasis markers leaked: {all:?}");
     }
-    /// The content keeps clear of the box's right edge: wrapped markdown
-    /// lines (e.g. a long code word) end 2 columns before the edge, and the
-    /// rightmost box column stays blank even with a line long enough to wrap
-    /// to the full width. The box is [0, 50), so columns 48 and 49 (the
-    /// right padding and the box edge) must both stay blank.
+    /// The content keeps clear of the box's right edge: the rightmost box
+    /// column stays blank even with a line long enough to wrap to the full
+    /// width. The box is [0, 50), so column 49 (the box edge) must stay blank
+    /// — content may reach column 48 (the last inner column).
     #[test]
     fn subagent_section_content_does_not_reach_box_right_edge() {
         let mut state = RightPanelState::new();
@@ -642,17 +782,15 @@ mod tests {
         let theme = test_theme();
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
 
-        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme);
+        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme, true);
 
         for y in 0..12 {
-            for col in [48u16, 49u16] {
-                if let Some(c) = buf.cell((col, y)) {
-                    assert_eq!(
-                        c.symbol().chars().next().unwrap_or(' '),
-                        ' ',
-                        "column {col} (box right padding/edge) must stay blank on row {y}"
-                    );
-                }
+            if let Some(c) = buf.cell((49, y)) {
+                assert_eq!(
+                    c.symbol().chars().next().unwrap_or(' '),
+                    ' ',
+                    "column 49 (box edge) must stay blank on row {y}"
+                );
             }
         }
     }
@@ -669,7 +807,7 @@ mod tests {
         let theme = test_theme();
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 20));
 
-        render_subagent_section(&mut buf, 0, 0, 50, 20, &mut state, &theme);
+        render_subagent_section(&mut buf, 0, 0, 50, 20, &mut state, &theme, true);
 
         let entry = state
             .subagent_body_cache
@@ -680,11 +818,11 @@ mod tests {
             (entry.id.clone(), entry.layout_gen, entry.wrap_w, entry.h);
         assert_eq!(id, "pty-1");
         assert_eq!(layout_gen, state.subagent_layout_gen);
-        assert_eq!(wrap_w, 50 - 3, "box width minus left+right padding");
+        assert_eq!(wrap_w, 50 - 2, "box width minus left+right padding");
         assert_eq!(h, entry.cells.len() as u16 / wrap_w);
 
         let mut buf2 = Buffer::empty(Rect::new(0, 0, 50, 20));
-        render_subagent_section(&mut buf2, 0, 0, 50, 20, &mut state, &theme);
+        render_subagent_section(&mut buf2, 0, 0, 50, 20, &mut state, &theme, true);
 
         let served = state
             .subagent_body_cache
@@ -697,7 +835,7 @@ mod tests {
 
     /// A table's border glyphs (which read as a hard "edge") stay clear of
     /// the box's right edge too — the border of a wide table never lands on
-    /// columns 48/49 of a [0, 50) box.
+    /// column 49 of a [0, 50) box.
     #[test]
     fn subagent_section_table_stays_inside_box() {
         let mut state = RightPanelState::new();
@@ -709,17 +847,15 @@ mod tests {
         let theme = test_theme();
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
 
-        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme);
+        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme, true);
 
         for y in 0..12 {
-            for col in [48u16, 49u16] {
-                if let Some(c) = buf.cell((col, y)) {
-                    assert_eq!(
-                        c.symbol().chars().next().unwrap_or(' '),
-                        ' ',
-                        "table border must not reach column {col} on row {y}"
-                    );
-                }
+            if let Some(c) = buf.cell((49, y)) {
+                assert_eq!(
+                    c.symbol().chars().next().unwrap_or(' '),
+                    ' ',
+                    "table border must not reach column 49 on row {y}"
+                );
             }
         }
     }
@@ -740,7 +876,7 @@ mod tests {
         let theme = test_theme();
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
 
-        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme);
+        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme, true);
 
         let all: String = (0..12)
             .map(|y| row_text(&buf, y))
@@ -756,5 +892,74 @@ mod tests {
         );
         // The sentinel was clamped to a real row offset.
         assert!(state.subagent_scroll_y < i32::MAX);
+    }
+
+    /// Regression: a bash PTY appearing while a subagent is present must not
+    /// panic. Exercises the full panel render (layout + region rebuild +
+    /// highlight) plus the cursor-targeted scroll and drag-selection paths
+    /// against a section that just appeared.
+    #[test]
+    fn bash_appearing_alongside_subagent_does_not_panic() {
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+
+        // Subagent first (streaming markdown body).
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty("# Report\n\nSome body text.\n".to_string());
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
+        render_right_panel(&mut buf, Rect::new(0, 0, 50, 30), &mut state, &theme, 120);
+
+        // The bash `ls` runs: a new bash PTY appears alongside the subagent.
+        state.start_pty("ls".to_string(), None);
+        state.complete_last_pty(
+            "total 8\ndrwxr-xr-x 2 inky inky 4096 Aug 13 16:40 src\ndrwxr-xr-x 2 inky inky 4096 Aug 13 16:40 target\n"
+                .to_string(),
+        );
+        buf = Buffer::empty(Rect::new(0, 0, 50, 30));
+        render_right_panel(&mut buf, Rect::new(0, 0, 50, 30), &mut state, &theme, 120);
+
+        // Cursor-targeted scroll over the bash section.
+        state.scroll_down_at(25, 3);
+        state.scroll_up_at(25, 3);
+
+        // Drag a selection inside the bash section (anchor then spill past the
+        // section edges), extract it, and let auto-scroll run a frame.
+        state.begin_selection(2, 25);
+        state.update_drag_selection(40, 5);
+        let _text = state.extract_selected_text();
+        state.cancel_selection();
+
+        // Re-render after the interaction.
+        buf = Buffer::empty(Rect::new(0, 0, 50, 30));
+        render_right_panel(&mut buf, Rect::new(0, 0, 50, 30), &mut state, &theme, 120);
+    }
+
+    /// Regression: the `i32::MAX` scroll-to-bottom sentinel must not leak into
+    /// the drag-selection content mapping and overflow when a bash section
+    /// whose content fits (no scrollbar) is clicked right after a
+    /// `scroll_to_bottom()`.
+    #[test]
+    fn selection_after_scroll_to_bottom_on_short_content_does_not_overflow() {
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.start_pty("ls".to_string(), None);
+        state.complete_last_pty("file_a\nfile_b\n".to_string());
+
+        // scroll_to_bottom() leaves the i32::MAX sentinel; the render clamps it
+        // only when the content overflows. With short content the render must
+        // normalize it to 0 so it never leaks into the selection math.
+        state.scroll_to_bottom();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
+        render_right_panel(&mut buf, Rect::new(0, 0, 50, 30), &mut state, &theme, 120);
+        assert_eq!(
+            state.bash_scroll_y, 0,
+            "sentinel normalized when content fits"
+        );
+
+        // Click inside the bash section → begin_selection reads the scroll.
+        assert!(state.begin_selection(2, 4));
+        // Rendering with an active selection exercises the highlight path.
+        buf = Buffer::empty(Rect::new(0, 0, 50, 30));
+        render_right_panel(&mut buf, Rect::new(0, 0, 50, 30), &mut state, &theme, 120);
     }
 }

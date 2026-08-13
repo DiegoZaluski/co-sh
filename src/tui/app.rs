@@ -197,6 +197,8 @@ pub struct App {
     perf_frame: u64,
     /// Last known mouse X position (for keyboard scroll targeting).
     last_mouse_x: u16,
+    /// Last known mouse Y position (for keyboard scroll targeting).
+    last_mouse_y: u16,
     /// Timestamp of last scroll wheel event (for debouncing rapid scrolls).
     last_scroll_time: Instant,
     /// Whether the sidebar is focused to receive scroll events.
@@ -303,6 +305,7 @@ impl App {
             last_frame_time: std::time::Instant::now(),
             perf_frame: 0,
             last_mouse_x: 0,
+            last_mouse_y: 0,
             last_scroll_time: Instant::now(),
             sidebar_focused: false,
         }
@@ -1658,6 +1661,7 @@ impl App {
             .iter()
             .any(|(_, s)| !s.is_idle());
         let mut live = self.session_view.is_auto_scrolling
+            || self.state.right_panel.is_auto_scrolling
             || (self.state.status == crate::types::SessionStatus::Working
                 && self.session_view.is_sticky_bottom);
         live = live || self.rag_spinner_active();
@@ -1792,6 +1796,7 @@ impl App {
                     &self.theme,
                     area.width,
                 );
+                self.state.right_panel.handle_auto_scroll(delta_time);
             }
 
             if self.sidebar.open {
@@ -3093,7 +3098,7 @@ impl App {
                                 self.last_mouse_x,
                                 self.terminal_size(),
                             ) {
-                                self.state.right_panel.scroll_up(3);
+                                self.state.right_panel.scroll_up_at(self.last_mouse_y, 3);
                             } else {
                                 let vh = self.session_view.visible_height.max(1);
                                 let delta = -(vh as f64 / 5.0);
@@ -3108,7 +3113,7 @@ impl App {
                                 self.last_mouse_x,
                                 self.terminal_size(),
                             ) {
-                                self.state.right_panel.scroll_down(3);
+                                self.state.right_panel.scroll_down_at(self.last_mouse_y, 3);
                             } else {
                                 let vh = self.session_view.visible_height.max(1);
                                 let delta = vh as f64 / 5.0;
@@ -3125,7 +3130,9 @@ impl App {
                                 self.terminal_size(),
                             ) {
                                 let vh = self.state.right_panel.visible_height.max(1);
-                                self.state.right_panel.scroll_up(vh / 2);
+                                self.state
+                                    .right_panel
+                                    .scroll_up_at(self.last_mouse_y, vh / 2);
                             } else {
                                 let vh = self.session_view.visible_height.max(1);
                                 let delta = -(vh as f64 / 2.0);
@@ -3141,7 +3148,9 @@ impl App {
                                 self.terminal_size(),
                             ) {
                                 let vh = self.state.right_panel.visible_height.max(1);
-                                self.state.right_panel.scroll_down(vh / 2);
+                                self.state
+                                    .right_panel
+                                    .scroll_down_at(self.last_mouse_y, vh / 2);
                             } else {
                                 let vh = self.session_view.visible_height.max(1);
                                 let delta = vh as f64 / 2.0;
@@ -3429,7 +3438,9 @@ impl App {
                                             self.last_mouse_x,
                                             self.terminal_size(),
                                         ) {
-                                            self.state.right_panel.scroll_up(3);
+                                            self.state
+                                                .right_panel
+                                                .scroll_up_at(self.last_mouse_y, 3);
                                         } else {
                                             let vh = self.session_view.visible_height.max(1);
                                             let delta = -(vh as f64 / 5.0);
@@ -3458,7 +3469,9 @@ impl App {
                                             self.last_mouse_x,
                                             self.terminal_size(),
                                         ) {
-                                            self.state.right_panel.scroll_down(3);
+                                            self.state
+                                                .right_panel
+                                                .scroll_down_at(self.last_mouse_y, 3);
                                         } else {
                                             let vh = self.session_view.visible_height.max(1);
                                             let delta = vh as f64 / 5.0;
@@ -3512,7 +3525,9 @@ impl App {
                                             self.terminal_size(),
                                         ) {
                                             let vh = self.state.right_panel.visible_height.max(1);
-                                            self.state.right_panel.scroll_up(vh / 2);
+                                            self.state
+                                                .right_panel
+                                                .scroll_up_at(self.last_mouse_y, vh / 2);
                                         } else {
                                             let vh = self.session_view.visible_height.max(1);
                                             let delta = -(vh as f64 / 2.0);
@@ -3526,7 +3541,9 @@ impl App {
                                             self.terminal_size(),
                                         ) {
                                             let vh = self.state.right_panel.visible_height.max(1);
-                                            self.state.right_panel.scroll_down(vh / 2);
+                                            self.state
+                                                .right_panel
+                                                .scroll_down_at(self.last_mouse_y, vh / 2);
                                         } else {
                                             let vh = self.session_view.visible_height.max(1);
                                             let delta = vh as f64 / 2.0;
@@ -4373,6 +4390,7 @@ impl App {
         let x = evt.column;
         let y = evt.row;
         self.last_mouse_x = x;
+        self.last_mouse_y = y;
 
         let modifiers = MouseModifiers {
             shift: evt.modifiers.contains(KeyModifiers::SHIFT),
@@ -4418,6 +4436,9 @@ impl App {
                 self.mouse_drag_active = false;
                 self.drag_selection = None;
 
+                // Clear any leftover right-panel selection from a previous drag.
+                self.state.right_panel.cancel_selection();
+
                 // Reset session selection values until we know this is NOT a prompt click.
                 // They will be set below for non-prompt clicks.
                 self.session_view.selection_anchor_content_y = 0;
@@ -4450,6 +4471,16 @@ impl App {
                     self.prompt_view.blur();
                 }
 
+                // Click in the visible right panel → start a drag selection on
+                // the bash / subagent section under the cursor.
+                if matches!(self.mode(), AppMode::Session)
+                    && should_show_right_panel(self.terminal_size().width, &self.state.right_panel)
+                    && Self::is_in_right_panel(x, self.terminal_size())
+                {
+                    self.state.right_panel.begin_selection(x, y);
+                    return Ok(true);
+                }
+
                 // Store anchor and focus in content space so the visual highlight
                 // moves with content during auto-scroll drag.  Only reached when
                 // the click is NOT inside the prompt area.
@@ -4461,6 +4492,10 @@ impl App {
                 }
             }
             (MouseEventType::Drag, MouseButton::Left) => {
+                if self.state.right_panel.has_selection() {
+                    self.state.right_panel.update_drag_selection(x, y);
+                    return Ok(true);
+                }
                 if self.mouse_down_pos.is_some() {
                     self.mouse_drag_active = true;
 
@@ -4507,6 +4542,7 @@ impl App {
             (MouseEventType::Up, MouseButton::Left) => {
                 // Stop auto-scroll on any mouse up.
                 self.session_view.stop_auto_scroll();
+                self.state.right_panel.stop_auto_scroll();
                 let _rect = self.drag_selection.take();
                 let drag_start = self.mouse_down_pos.take();
                 let is_drag =
@@ -4519,6 +4555,18 @@ impl App {
                         let text = self.prompt_view.selected_text();
                         selection::copy_selection(&text, &mut self.toast_state);
                         self.prompt_view.clear_selection();
+                        return Ok(true);
+                    }
+
+                    // Auto-copy a right-panel (bash / subagent) drag selection.
+                    if matches!(self.mode(), AppMode::Session)
+                        && self.state.right_panel.has_selection()
+                    {
+                        let text = self.state.right_panel.extract_selected_text();
+                        self.state.right_panel.cancel_selection();
+                        if !text.is_empty() {
+                            selection::copy_selection(&text, &mut self.toast_state);
+                        }
                         return Ok(true);
                     }
 
@@ -4588,6 +4636,10 @@ impl App {
                         }
                     }
                 }
+                // A plain click (down+up without moving) on a right-panel
+                // section leaves a stale single-cell selection highlighted;
+                // clear it (drag-copy paths already returned above).
+                self.state.right_panel.cancel_selection();
             }
             _ => {}
         }
@@ -4595,6 +4647,7 @@ impl App {
         // Auto-scroll stops on any mouse action (up, scroll, etc.) outside of drag.
         if event_type != MouseEventType::Drag {
             self.session_view.stop_auto_scroll();
+            self.state.right_panel.stop_auto_scroll();
         }
 
         // Mouse wheel scrolling
@@ -4609,8 +4662,10 @@ impl App {
         // and get dropped — the visible "lag" when starting to scroll after idle.
         let now = Instant::now();
         let scroll_elapsed = now.duration_since(self.last_scroll_time);
-        if matches!(event_type, MouseEventType::ScrollUp | MouseEventType::ScrollDown)
-            && scroll_elapsed >= Duration::from_millis(50)
+        if matches!(
+            event_type,
+            MouseEventType::ScrollUp | MouseEventType::ScrollDown
+        ) && scroll_elapsed >= Duration::from_millis(50)
         {
             self.last_scroll_time = now;
             match event_type {
@@ -4633,7 +4688,7 @@ impl App {
                     } else if matches!(self.mode(), AppMode::Session)
                         && Self::is_in_right_panel(x, self.terminal_size())
                     {
-                        self.state.right_panel.scroll_up(3);
+                        self.state.right_panel.scroll_up_at(y, 3);
                     } else if matches!(self.mode(), AppMode::Session)
                         && self.question_dialog.visible
                     {
@@ -4678,7 +4733,7 @@ impl App {
                     } else if matches!(self.mode(), AppMode::Session)
                         && Self::is_in_right_panel(x, self.terminal_size())
                     {
-                        self.state.right_panel.scroll_down(3);
+                        self.state.right_panel.scroll_down_at(y, 3);
                     } else if matches!(self.mode(), AppMode::Session)
                         && self.question_dialog.visible
                     {

@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use cosh_tui::core::renderables::markdown::estimate_height;
 use ratatui::buffer::{Buffer, Cell};
 
+use crate::util::text_region::{TextRegion, extract_text_in_region};
+
 /// Minimum gap between subagent layout rebuilds (heights + rendered body
 /// cells). During streaming, chunks arrive far more often than the eye can
 /// track; rebuilding the whole accumulated body on EVERY chunk re-parses up
@@ -110,6 +112,28 @@ pub(crate) const fn section_kind_index(kind: SectionKind) -> usize {
     }
 }
 
+/// Screen-space layout of one visible right-panel section, populated on every
+/// render so mouse events can resolve which section the cursor is over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionLayout {
+    pub kind: SectionKind,
+    /// First screen row of the section band (inclusive).
+    pub top: i32,
+    /// Last screen row of the section band (exclusive).
+    pub bottom: i32,
+    /// First screen row where the section's CONTENT is drawn (box top +
+    /// internal top padding). Maps a cursor row to content rows via
+    /// `content_row = (screen_y - content_top) + section_scroll`.
+    pub content_top: i32,
+}
+
+/// Distance from a section edge (in rows) that triggers drag auto-scroll.
+const AUTO_SCROLL_THRESHOLD: i32 = 3;
+/// Drag auto-scroll speeds (rows/sec), mirroring the chat's values.
+const AUTO_SCROLL_SPEED_SLOW: f64 = 6.0;
+const AUTO_SCROLL_SPEED_MEDIUM: f64 = 36.0;
+const AUTO_SCROLL_SPEED_FAST: f64 = 72.0;
+
 /// State for the right panel.
 #[derive(Debug, Clone)]
 pub struct RightPanelState {
@@ -188,6 +212,39 @@ pub struct RightPanelState {
     /// to decide whether to auto-scroll on new output.
     pub user_scrolled_away: bool,
 
+    // ── Section layout (populated on render, consumed by mouse events) ──
+    /// Screen bounds of each visible section from the last render. Cleared
+    /// when the panel is hidden. Mouse wheel/keyboard scroll and drag
+    /// selection resolve the target section through this.
+    pub section_layouts: Vec<SectionLayout>,
+
+    // ── Drag selection (bash/subagent) ──────────────────────────────
+    /// Screen-space selection rectangle (anchor x, anchor y, focus x, focus y).
+    pub drag_selection: Option<(u16, u16, u16, u16)>,
+    /// Section the current drag selection belongs to.
+    pub selection_section: Option<SectionKind>,
+    /// Anchor/focus in the section's CONTENT rows (set at mouse-down / on
+    /// each drag), so the highlight follows content during auto-scroll.
+    pub selection_anchor_content_y: i32,
+    pub selection_focus_content_y: i32,
+    /// The section's scroll offset when the drag started.
+    pub selection_mouse_down_scroll_y: i32,
+    /// Whether a selection drag is auto-scrolling near a section edge.
+    pub is_auto_scrolling: bool,
+    auto_scroll_accumulator: f64,
+    auto_scroll_speed: f64,
+
+    // ── Text regions (selection extraction) ─────────────────────────
+    /// One region per bash content row (`bash_buffer()` line). Keyed to
+    /// `pty_gen` + width via `text_regions_gen`/`text_regions_w`.
+    pub(crate) bash_text_regions: Vec<TextRegion>,
+    /// One region per subagent content row (header + input + body rows).
+    pub(crate) subagent_text_regions: Vec<TextRegion>,
+    /// `pty_gen` the text regions were last rebuilt for.
+    pub(crate) text_regions_gen: u64,
+    /// Wrap width the subagent regions were laid out at.
+    pub(crate) text_regions_w: u16,
+
     // ── Legacy (kept for external consumers) ───────────────────────
     pub scroll_y: i32,
     pub content_height: i32,
@@ -221,6 +278,19 @@ impl RightPanelState {
             subagent_rebuild_interval: SUBAGENT_REBUILD_INTERVAL,
             subagent_scratch: None,
             user_scrolled_away: false,
+            section_layouts: Vec::new(),
+            drag_selection: None,
+            selection_section: None,
+            selection_anchor_content_y: 0,
+            selection_focus_content_y: 0,
+            selection_mouse_down_scroll_y: 0,
+            is_auto_scrolling: false,
+            auto_scroll_accumulator: 0.0,
+            auto_scroll_speed: 0.0,
+            bash_text_regions: Vec::new(),
+            subagent_text_regions: Vec::new(),
+            text_regions_gen: 0,
+            text_regions_w: 0,
             scroll_y: 0,
             content_height: 0,
             visible_height: 0,
@@ -241,54 +311,302 @@ impl RightPanelState {
         self.section_activity_order[idx]
     }
 
-    /// Scroll the first section with overflow (prefers bash > subagent > todo) up by `delta` lines.
-    ///
-    /// Uses saturating arithmetic: the stored offsets may hold the `i32::MAX`
-    /// sentinel set by [`scroll_to_bottom`](Self::scroll_to_bottom) until the
-    /// render path clamps them (which only happens when content overflows).
-    /// A raw `+ delta` would overflow and panic in debug builds.
-    pub fn scroll_up(&mut self, delta: i32) {
-        self.user_scrolled_away = true;
-        if self
-            .pty_sessions
+    // ── Section layout (for cursor-based targeting) ──────────────────
+    /// Reset the section layout list (call when the panel is hidden).
+    pub fn clear_section_layouts(&mut self) {
+        self.section_layouts.clear();
+    }
+
+    /// Record the layout of one visible section (called by the renderer).
+    pub fn push_section_layout(&mut self, kind: SectionKind, top: i32, bottom: i32) {
+        let content_top = top + 2; // TOP_GAP (1) + TOP_PAD (1), same for every section
+        self.section_layouts.push(SectionLayout {
+            kind,
+            top,
+            bottom,
+            content_top,
+        });
+    }
+
+    /// The section whose band contains screen row `y`, if any.
+    pub fn section_at(&self, y: u16) -> Option<SectionKind> {
+        let y = i32::from(y);
+        self.section_layouts
             .iter()
-            .any(|p| !p.command.starts_with("subagent:"))
-        {
-            self.bash_scroll_y = self.bash_scroll_y.saturating_sub(delta).max(0);
-        } else if self
-            .pty_sessions
-            .iter()
-            .any(|p| p.command.starts_with("subagent:"))
-        {
-            self.subagent_scroll_y = self.subagent_scroll_y.saturating_sub(delta).max(0);
-        } else if !self.todos.is_empty() {
-            self.todo_scroll_y = self.todo_scroll_y.saturating_sub(delta).max(0);
+            .find(|l| y >= l.top && y < l.bottom)
+            .map(|l| l.kind)
+    }
+
+    fn section_layout(&self, kind: SectionKind) -> Option<&SectionLayout> {
+        self.section_layouts.iter().find(|l| l.kind == kind)
+    }
+
+    fn section_scroll(&self, kind: SectionKind) -> i32 {
+        match kind {
+            SectionKind::Todo => self.todo_scroll_y,
+            SectionKind::Bash => self.bash_scroll_y,
+            SectionKind::Subagent => self.subagent_scroll_y,
         }
     }
 
-    /// Scroll the first section with overflow (prefers bash > subagent > todo) down by `delta` lines.
+    fn set_section_scroll(&mut self, kind: SectionKind, value: i32) {
+        match kind {
+            SectionKind::Todo => self.todo_scroll_y = value,
+            SectionKind::Bash => self.bash_scroll_y = value,
+            SectionKind::Subagent => self.subagent_scroll_y = value,
+        }
+    }
+
+    /// Scroll ONLY the section under screen row `y`. Returns `false` when no
+    /// section owns that row (e.g. the panel is hidden), leaving the offset
+    /// untouched.
+    pub fn scroll_up_at(&mut self, y: u16, delta: i32) -> bool {
+        let Some(kind) = self.section_at(y) else {
+            return false;
+        };
+        self.scroll_section_by(kind, -delta);
+        true
+    }
+
+    /// Scroll ONLY the section under screen row `y`. Returns `false` when no
+    /// section owns that row (e.g. the panel is hidden), leaving the offset
+    /// untouched.
+    pub fn scroll_down_at(&mut self, y: u16, delta: i32) -> bool {
+        let Some(kind) = self.section_at(y) else {
+            return false;
+        };
+        self.scroll_section_by(kind, delta);
+        true
+    }
+
+    /// Apply a signed delta to one section's scroll offset.
     ///
     /// Uses saturating arithmetic: the stored offsets may hold the `i32::MAX`
     /// sentinel set by [`scroll_to_bottom`](Self::scroll_to_bottom) until the
     /// render path clamps them (which only happens when content overflows).
     /// A raw `+ delta` would overflow and panic in debug builds.
-    pub fn scroll_down(&mut self, delta: i32) {
+    fn scroll_section_by(&mut self, kind: SectionKind, delta: i32) {
         self.user_scrolled_away = true;
-        if self
-            .pty_sessions
-            .iter()
-            .any(|p| !p.command.starts_with("subagent:"))
-        {
-            self.bash_scroll_y = self.bash_scroll_y.saturating_add(delta).max(0);
-        } else if self
-            .pty_sessions
-            .iter()
-            .any(|p| p.command.starts_with("subagent:"))
-        {
-            self.subagent_scroll_y = self.subagent_scroll_y.saturating_add(delta).max(0);
-        } else if !self.todos.is_empty() {
-            self.todo_scroll_y = self.todo_scroll_y.saturating_add(delta).max(0);
+        let next = match kind {
+            SectionKind::Todo => self.todo_scroll_y.saturating_add(delta).max(0),
+            SectionKind::Bash => self.bash_scroll_y.saturating_add(delta).max(0),
+            SectionKind::Subagent => self.subagent_scroll_y.saturating_add(delta).max(0),
+        };
+        self.set_section_scroll(kind, next);
+    }
+
+    // ── Drag selection (bash/subagent) ───────────────────────────────
+    /// Start a drag selection at screen position `(x, y)`. Returns `true` if
+    /// the click landed on a selectable section (bash/subagent); TODO rows
+    /// and empty areas cancel any existing selection.
+    pub fn begin_selection(&mut self, x: u16, y: u16) -> bool {
+        let Some(kind) = self.section_at(y) else {
+            self.cancel_selection();
+            return false;
+        };
+        if kind == SectionKind::Todo {
+            self.cancel_selection();
+            return false;
         }
+        let Some(layout) = self.section_layout(kind) else {
+            self.cancel_selection();
+            return false;
+        };
+        let scroll = self.section_scroll(kind);
+        let content_y = (i32::from(y) - layout.content_top).saturating_add(scroll);
+        self.selection_section = Some(kind);
+        self.selection_anchor_content_y = content_y;
+        self.selection_focus_content_y = content_y;
+        self.selection_mouse_down_scroll_y = scroll;
+        self.drag_selection = Some((x, y, x, y));
+        self.stop_auto_scroll();
+        true
+    }
+
+    /// Extend the active drag selection to `(x, y)`, clamped to the anchor's
+    /// section band so the selection never leaks into a neighbouring section.
+    pub fn update_drag_selection(&mut self, x: u16, y: u16) {
+        let Some(kind) = self.selection_section else {
+            return;
+        };
+        let Some(layout) = self.section_layout(kind) else {
+            return;
+        };
+        let clamped_y = (i32::from(y)).clamp(layout.top, layout.bottom.saturating_sub(1)) as u16;
+        let scroll = self.section_scroll(kind);
+        self.selection_focus_content_y =
+            (i32::from(clamped_y) - layout.content_top).saturating_add(scroll);
+        if let Some((sx, sy, _, _)) = self.drag_selection {
+            self.drag_selection = Some((sx, sy, x, clamped_y));
+        }
+        self.update_auto_scroll(y);
+    }
+
+    /// Whether a drag selection is currently active.
+    pub fn has_selection(&self) -> bool {
+        self.drag_selection.is_some() && self.selection_section.is_some()
+    }
+
+    /// Drop the active selection without copying.
+    pub fn cancel_selection(&mut self) {
+        self.drag_selection = None;
+        self.selection_section = None;
+        self.selection_anchor_content_y = 0;
+        self.selection_focus_content_y = 0;
+        self.selection_mouse_down_scroll_y = 0;
+        self.stop_auto_scroll();
+    }
+
+    /// Extract the text spanned by the active selection (same flow-based
+    /// algorithm as the chat). Returns an empty string when there is no
+    /// selection or it falls on a non-selectable section.
+    pub fn extract_selected_text(&self) -> String {
+        let Some(kind) = self.selection_section else {
+            return String::new();
+        };
+        let Some((sx, sy, fx, fy)) = self.drag_selection else {
+            return String::new();
+        };
+        let regions = match kind {
+            SectionKind::Bash => &self.bash_text_regions,
+            SectionKind::Subagent => &self.subagent_text_regions,
+            SectionKind::Todo => return String::new(),
+        };
+        let Some(layout) = self.section_layout(kind) else {
+            return String::new();
+        };
+        // Convert the screen-space anchor/focus to content rows. The anchor
+        // used the scroll at mouse-down, the focus the current scroll, so the
+        // selection survives auto-scroll during the drag (like the chat).
+        let content_anchor =
+            (i32::from(sy) - layout.content_top).saturating_add(self.selection_mouse_down_scroll_y);
+        let content_focus =
+            (i32::from(fy) - layout.content_top).saturating_add(self.section_scroll(kind));
+        let start_content_y = content_anchor.min(content_focus);
+        let end_content_y = content_anchor.max(content_focus);
+        let (start_x, end_x) = if content_anchor <= content_focus {
+            (sx, fx)
+        } else {
+            (fx, sx)
+        };
+        extract_text_in_region(regions, start_content_y, end_content_y, start_x, end_x)
+    }
+
+    // ── Drag auto-scroll (mirrors the chat) ─────────────────────────
+    fn auto_scroll_direction(&self, y: u16) -> i32 {
+        let Some(kind) = self.selection_section else {
+            return 0;
+        };
+        let Some(layout) = self.section_layout(kind) else {
+            return 0;
+        };
+        let scroll = self.section_scroll(kind);
+        if i32::from(y) <= layout.top + AUTO_SCROLL_THRESHOLD && scroll > 0 {
+            return -1;
+        }
+        if i32::from(y) >= layout.bottom.saturating_sub(AUTO_SCROLL_THRESHOLD) {
+            return 1;
+        }
+        0
+    }
+
+    fn auto_scroll_speed_for(&self, y: u16) -> f64 {
+        let Some(layout) = self.selection_section.and_then(|k| self.section_layout(k)) else {
+            return 0.0;
+        };
+        let rel = (i32::from(y)).clamp(layout.top, layout.bottom.saturating_sub(1)) - layout.top;
+        let h = (layout.bottom - layout.top).max(1);
+        let min_dist = rel.min(h - rel);
+        if min_dist <= 1 {
+            AUTO_SCROLL_SPEED_FAST
+        } else if min_dist <= 2 {
+            AUTO_SCROLL_SPEED_MEDIUM
+        } else {
+            AUTO_SCROLL_SPEED_SLOW
+        }
+    }
+
+    /// Called on every drag: arm auto-scroll when the cursor is near a
+    /// section edge, or stop it otherwise.
+    pub fn update_auto_scroll(&mut self, y: u16) {
+        let dir = self.auto_scroll_direction(y);
+        if dir == 0 {
+            self.stop_auto_scroll();
+        } else if !self.is_auto_scrolling {
+            self.is_auto_scrolling = true;
+            self.auto_scroll_accumulator = 0.0;
+            self.auto_scroll_speed = self.auto_scroll_speed_for(y);
+        }
+    }
+
+    /// Advance drag auto-scroll by `delta_time` (called once per render
+    /// frame). Clamps the section scroll and stops at the content bounds.
+    pub fn handle_auto_scroll(&mut self, delta_time: f64) {
+        if !self.is_auto_scrolling {
+            return;
+        }
+        let Some(kind) = self.selection_section else {
+            self.stop_auto_scroll();
+            return;
+        };
+        let dir = if let Some((_, _, _, fy)) = self.drag_selection {
+            self.auto_scroll_direction(fy)
+        } else {
+            0
+        };
+        if dir == 0 {
+            self.stop_auto_scroll();
+            return;
+        }
+        self.auto_scroll_accumulator += self.auto_scroll_speed * delta_time * f64::from(dir);
+        let int_scroll = self.auto_scroll_accumulator.trunc() as i32;
+        if int_scroll == 0 {
+            return;
+        }
+        self.auto_scroll_accumulator -= int_scroll as f64;
+        let max_scroll = self.section_max_scroll(kind);
+        let cur = self.section_scroll(kind);
+        // Saturating: `cur` may transiently hold the `i32::MAX` scroll-to-
+        // bottom sentinel before the render clamps it; a raw `+` would
+        // overflow when auto-scrolling downward.
+        let next = (cur.saturating_add(int_scroll)).clamp(0, max_scroll);
+        if next == cur {
+            self.stop_auto_scroll();
+            return;
+        }
+        self.set_section_scroll(kind, next);
+        // Keep the focus content row tracking the moved content.
+        self.selection_focus_content_y = self.selection_focus_content_y.saturating_add(int_scroll);
+    }
+
+    pub fn stop_auto_scroll(&mut self) {
+        if self.is_auto_scrolling {
+            self.is_auto_scrolling = false;
+            self.auto_scroll_accumulator = 0.0;
+            self.auto_scroll_speed = 0.0;
+        }
+    }
+
+    /// Maximum scroll offset of a section: total content rows minus the
+    /// visible inner height. `inner_h = band_height - 3` (TOP_GAP + TOP_PAD +
+    /// BOTTOM_PAD, identical for every section).
+    pub(crate) fn section_max_scroll(&mut self, kind: SectionKind) -> i32 {
+        let Some(layout) = self.section_layout(kind).copied() else {
+            return 0;
+        };
+        let inner_h = (layout.bottom - layout.top).saturating_sub(3).max(1);
+        let total = match kind {
+            SectionKind::Todo => self.todos.len() as i32,
+            SectionKind::Bash => self.bash_buffer().len() as i32,
+            SectionKind::Subagent => {
+                let wrap_w = self.text_regions_w.max(1);
+                self.subagent_section_rows(wrap_w)
+                    .iter()
+                    .map(|&r| i32::from(r))
+                    .sum()
+            }
+        };
+        (total - inner_h).max(0)
     }
 
     /// Scroll sections to bottom (auto-scroll on new output).
@@ -306,6 +624,7 @@ impl RightPanelState {
         self.subagent_scroll_y = 0;
         self.todo_scroll_y = 0;
         self.scroll_y = 0;
+        self.cancel_selection();
     }
 
     /// Set the viewport height (called from render). The per-section scrolls
@@ -585,20 +904,21 @@ mod tests {
     fn scroll_down_after_scroll_to_bottom_does_not_overflow() {
         let mut state = RightPanelState::new();
         state.start_pty("echo hi".to_string(), None);
+        state.push_section_layout(SectionKind::Bash, 0, 30);
         state.scroll_to_bottom();
 
         // Reproduce the post-resize scroll: offset is still i32::MAX because
         // the content fits the viewport, so no render clamp has run.
         // Scrolling down while pinned to the bottom must be a no-op
         // (saturating), never an overflow panic.
-        state.scroll_down(3);
+        state.scroll_down_at(5, 3);
         assert_eq!(state.bash_scroll_y, i32::MAX);
 
-        state.scroll_down(20);
+        state.scroll_down_at(5, 20);
         assert_eq!(state.bash_scroll_y, i32::MAX);
 
         // And scrolling up from the bottom sentinel must work normally.
-        state.scroll_up(5);
+        state.scroll_up_at(5, 5);
         assert_eq!(state.bash_scroll_y, i32::MAX - 5);
     }
 
@@ -610,10 +930,11 @@ mod tests {
         // Subagent branch: only subagent PTYs present.
         let mut sub = RightPanelState::new();
         sub.start_pty("subagent: opencode".to_string(), None);
+        sub.push_section_layout(SectionKind::Subagent, 0, 30);
         sub.scroll_to_bottom();
-        sub.scroll_down(3);
+        sub.scroll_down_at(5, 3);
         assert_eq!(sub.subagent_scroll_y, i32::MAX);
-        sub.scroll_up(5);
+        sub.scroll_up_at(5, 5);
         assert_eq!(sub.subagent_scroll_y, i32::MAX - 5);
 
         // Todo branch: only todos present, no PTYs.
@@ -622,10 +943,11 @@ mod tests {
             status: "pending".to_string(),
             content: "do the thing".to_string(),
         }]);
+        todos.push_section_layout(SectionKind::Todo, 0, 30);
         todos.scroll_to_bottom();
-        todos.scroll_down(3);
+        todos.scroll_down_at(5, 3);
         assert_eq!(todos.todo_scroll_y, i32::MAX);
-        todos.scroll_up(5);
+        todos.scroll_up_at(5, 5);
         assert_eq!(todos.todo_scroll_y, i32::MAX - 5);
     }
 
@@ -832,5 +1154,170 @@ mod tests {
         let rebuilt = state.subagent_section_rows(30).to_vec();
         assert_ne!(rebuilt, rows, "rebuild must pick up the new output");
         assert_eq!(state.subagent_layout_gen, state.pty_gen);
+    }
+
+    // ── Section layout / cursor-targeted scroll ────────────────────
+
+    /// The cursor's screen row resolves to the owning section band; gaps and
+    /// rows outside any band resolve to `None`.
+    #[test]
+    fn section_at_resolves_by_screen_row() {
+        let mut state = RightPanelState::new();
+        state.push_section_layout(SectionKind::Bash, 2, 12);
+        state.push_section_layout(SectionKind::Subagent, 13, 30);
+
+        assert_eq!(state.section_at(2), Some(SectionKind::Bash));
+        assert_eq!(state.section_at(11), Some(SectionKind::Bash));
+        assert_eq!(state.section_at(12), None, "band end is exclusive");
+        assert_eq!(state.section_at(15), Some(SectionKind::Subagent));
+        assert_eq!(state.section_at(31), None);
+    }
+
+    /// `scroll_up_at`/`scroll_down_at` scroll ONLY the section under the row;
+    /// rows in a gap or outside the panel leave every offset untouched.
+    #[test]
+    fn scroll_at_targets_only_the_section_under_the_cursor() {
+        let mut state = RightPanelState::new();
+        state.push_section_layout(SectionKind::Bash, 0, 10);
+        state.push_section_layout(SectionKind::Subagent, 11, 30);
+        state.bash_scroll_y = 0;
+        state.subagent_scroll_y = 0;
+
+        state.scroll_down_at(3, 5);
+        assert_eq!(state.bash_scroll_y, 5);
+        assert_eq!(state.subagent_scroll_y, 0, "other section untouched");
+
+        state.scroll_down_at(20, 5);
+        assert_eq!(state.bash_scroll_y, 5, "other section untouched");
+        assert_eq!(state.subagent_scroll_y, 5);
+
+        state.scroll_up_at(20, 2);
+        assert_eq!(state.bash_scroll_y, 5, "other section untouched");
+        assert_eq!(state.subagent_scroll_y, 3);
+
+        // A row inside the gap scrolls nothing.
+        state.scroll_down_at(10, 9);
+        assert_eq!(state.bash_scroll_y, 5);
+        assert_eq!(state.subagent_scroll_y, 3);
+    }
+
+    // ── Drag selection ─────────────────────────────────────────────
+
+    /// A click on a bash/subagent content row starts a selection; a click on
+    /// a TODO row or a gap cancels any active selection.
+    #[test]
+    fn begin_selection_accepts_bash_and_subagent_only() {
+        let mut state = RightPanelState::new();
+        state.push_section_layout(SectionKind::Todo, 0, 10);
+        state.push_section_layout(SectionKind::Bash, 11, 20);
+        state.push_section_layout(SectionKind::Subagent, 21, 30);
+
+        assert!(state.begin_selection(5, 14));
+        assert_eq!(state.selection_section, Some(SectionKind::Bash));
+        assert_eq!(
+            state.selection_anchor_content_y, 1,
+            "row 14 maps to bash content row 1 (content_top = 13)"
+        );
+        assert!(state.has_selection());
+
+        assert!(state.begin_selection(5, 25));
+        assert_eq!(state.selection_section, Some(SectionKind::Subagent));
+
+        // TODO rows never select; the old selection is dropped.
+        assert!(!state.begin_selection(5, 3));
+        assert!(!state.has_selection());
+        assert!(state.selection_section.is_none());
+
+        // Rows outside any band cancel too.
+        assert!(!state.begin_selection(5, 50));
+    }
+
+    /// Dragging clamps the focus to the anchor's section band, so a drag
+    /// that spills into the neighbouring section does not leak rows.
+    #[test]
+    fn drag_selection_is_clamped_to_the_anchor_section() {
+        let mut state = RightPanelState::new();
+        state.push_section_layout(SectionKind::Bash, 0, 10);
+        state.push_section_layout(SectionKind::Subagent, 11, 30);
+        state.bash_scroll_y = 0;
+
+        state.begin_selection(3, 4); // bash band, content row 2
+        state.update_drag_selection(9, 25); // drag far below the band
+        let (_, _, _, fy) = state.drag_selection.unwrap();
+        assert_eq!(fy, 9, "focus clamped to the bash band bottom");
+        assert_eq!(state.selection_focus_content_y, 7);
+
+        // Dragging back to the top clamps to the band top; the content row
+        // goes negative (row 0 sits above the content area's first row).
+        state.update_drag_selection(9, 0);
+        let (_, _, _, fy) = state.drag_selection.unwrap();
+        assert_eq!(fy, 0);
+        assert_eq!(state.selection_focus_content_y, -2);
+    }
+
+    /// `extract_selected_text` walks the flow-based algorithm over the
+    /// section's text regions and returns the spanned text, joining rows.
+    #[test]
+    fn extract_selected_text_slices_the_region_rows() {
+        let mut state = RightPanelState::new();
+        state.push_section_layout(SectionKind::Bash, 0, 10);
+        state.bash_scroll_y = 0;
+        state.bash_text_regions = vec![
+            TextRegion {
+                y1: 0,
+                y2: 1,
+                x1: 0,
+                x2: 8,
+                text: "alpha".to_string(),
+            },
+            TextRegion {
+                y1: 1,
+                y2: 2,
+                x1: 0,
+                x2: 8,
+                text: "bravo".to_string(),
+            },
+        ];
+
+        state.begin_selection(1, 3); // content row 1 (content_top = 2), x=1
+        state.update_drag_selection(5, 4); // content row 2, x=5
+        let text = state.extract_selected_text();
+        assert_eq!(text, "ravo");
+
+        // Single-row selection keeps both x bounds on that row.
+        state.begin_selection(1, 3);
+        state.update_drag_selection(3, 3);
+        assert_eq!(state.extract_selected_text(), "ra");
+
+        // A click on a TODO row cancels the selection → empty text.
+        state.push_section_layout(SectionKind::Todo, 20, 30);
+        state.begin_selection(2, 22);
+        assert_eq!(state.extract_selected_text(), "");
+    }
+
+    /// Selection content rows use the scroll at mouse-down; auto-scroll
+    /// during the drag keeps the extracted rows tracking the moved content.
+    #[test]
+    fn extract_selected_text_tracks_content_during_auto_scroll() {
+        let mut state = RightPanelState::new();
+        state.push_section_layout(SectionKind::Bash, 0, 10);
+        state.bash_scroll_y = 0;
+        state.bash_text_regions = (0..20)
+            .map(|i| TextRegion {
+                y1: i,
+                y2: i + 1,
+                x1: 0,
+                x2: 8,
+                text: format!("line{i}"),
+            })
+            .collect();
+
+        state.begin_selection(0, 2); // content row 0
+        state.update_drag_selection(0, 4); // content row 2
+        // Content scrolls down by 2 while dragging (mouse near the edge).
+        state.set_section_scroll(SectionKind::Bash, 2);
+        state.selection_focus_content_y += 2;
+        let text = state.extract_selected_text();
+        assert_eq!(text, "line0\nline1\nline2\nline3");
     }
 }

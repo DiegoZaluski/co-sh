@@ -297,19 +297,7 @@ fn msg_content_token(
     h
 }
 
-/// A run of rendered text at a given content position.
-/// Coordinates are in **content space** (absolute row from start of session content),
-/// so they remain valid regardless of the current scroll position.
-#[derive(Clone)]
-struct TextRegion {
-    /// First content row (inclusive).
-    y1: i32,
-    /// Last content row (exclusive).
-    y2: i32,
-    x1: u16,
-    x2: u16,
-    text: String,
-}
+use crate::util::text_region::{TextRegion, extract_text_in_region};
 
 /// Cached heights per message (avoids duplicate pulldown_cmark parses).
 /// Messages are immutable after receipt, so results are valid until
@@ -917,24 +905,14 @@ impl SessionView {
         x_off: u16,
         text_max_w: u16,
     ) -> Vec<TextRegion> {
-        let mut regions = Vec::with_capacity(h as usize);
-        for dy in 0..h as usize {
-            let mut line_text = String::with_capacity(w);
-            let base = dy * w;
-            for dx in 0..w {
-                line_text.push(cells[base + dx].symbol().chars().next().unwrap_or(' '));
-            }
-            let trimmed = line_text.trim_end().to_string();
-            let cy = content_start_y + dy as i32;
-            regions.push(TextRegion {
-                y1: cy,
-                y2: cy + 1,
-                x1: x_off,
-                x2: x_off + text_max_w,
-                text: trimmed,
-            });
-        }
-        regions
+        crate::util::text_region::cells_to_text_regions(
+            cells,
+            w,
+            h,
+            content_start_y,
+            x_off,
+            text_max_w,
+        )
     }
 
     /// Scan a buffer rectangle [x, x+w) × [y, y+h) and return the
@@ -2654,50 +2632,13 @@ impl SessionView {
             (focus_x, anchor_x)
         };
 
-        let mut result = String::new();
-        for region in &self.text_regions {
-            if region.y1 > end_content_y || region.y2 <= start_content_y {
-                continue;
-            }
-
-            let line_y = region.y1;
-
-            let (lx1, lx2) = if start_content_y == end_content_y {
-                (start_x.min(end_x), start_x.max(end_x))
-            } else if line_y == start_content_y {
-                (start_x, region.x2)
-            } else if line_y == end_content_y {
-                (region.x1, end_x)
-            } else {
-                (region.x1, region.x2)
-            };
-
-            let ox1 = region.x1.max(lx1);
-            let ox2 = region.x2.min(lx2);
-            if ox1 >= ox2 {
-                continue;
-            }
-
-            let col_start = (ox1 - region.x1) as usize;
-            let col_end = (ox2 - region.x1) as usize;
-
-            let chars: Vec<char> = region.text.chars().collect();
-            let line_len = chars.len();
-
-            if col_start >= line_len {
-                continue;
-            }
-            let end = col_end.min(line_len);
-
-            let sliced: String = chars[col_start..end].iter().collect();
-            if !sliced.is_empty() {
-                if !result.is_empty() {
-                    result.push('\n');
-                }
-                result.push_str(&sliced);
-            }
-        }
-        result
+        extract_text_in_region(
+            &self.text_regions,
+            start_content_y,
+            end_content_y,
+            start_x,
+            end_x,
+        )
     }
 
     #[allow(
