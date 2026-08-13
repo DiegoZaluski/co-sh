@@ -2447,9 +2447,10 @@ impl App {
     }
 
     /// Render the pending queued messages above the prompt, color-coded per
-    /// queue: "next agent loop" rows on top (amber), "next request"
-    /// rows below (cyan), each preserving FIFO order. No explicit labels —
-    /// the background color IS the identity of the queue.
+    /// queue: "next agent loop" rows on top (warm amber background), "next
+    /// request" rows below (cool cyan/blue background), each preserving FIFO
+    /// order. The two dedicated theme colors switch with the active theme. No
+    /// explicit labels — the background color IS the identity of the queue.
     fn render_pending_queues(&self, buf: &mut ratatui::buffer::Buffer, area: Rect) {
         let Some(queues) = self.state.current_pending_queues() else {
             return;
@@ -2467,7 +2468,7 @@ impl App {
                 area.x,
                 y,
                 area.width,
-                self.theme.warning,
+                self.theme.queue_next_loop,
                 panel,
                 border,
             );
@@ -2480,7 +2481,7 @@ impl App {
                 area.x,
                 y,
                 area.width,
-                self.theme.info,
+                self.theme.queue_next_request,
                 panel,
                 border,
             );
