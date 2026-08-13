@@ -9,7 +9,11 @@ pub struct SubAgentCallInput {
     /// Must be one of the supported agents listed in the tool description.
     pub agent: String,
     /// The message to send to the sub-agent.
-    pub input: String,
+    ///
+    /// Optional: if omitted (or empty), the last message sent to a sub-agent
+    /// in this session is reused automatically. If no sub-agent has been
+    /// called yet, an error is returned telling the caller to provide one.
+    pub input: Option<String>,
 }
 
 /// Output from calling a sub-agent CLI.

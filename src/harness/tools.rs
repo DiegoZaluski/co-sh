@@ -910,7 +910,10 @@ impl Tools for CoshTools {
                 let input: SubAgentCallInput =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let agent = input.agent.clone();
-                let call_input = input.input.clone();
+                // Resolve the effective input before spawning the blocking
+                // call: when `input` is omitted, reuse the last message sent
+                // to a sub-agent in this session (stored on `self.subagent`).
+                let call_input = self.subagent.resolve_input(input.input)?;
                 let event_tx_during = self.event_tx.clone();
 
                 let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();

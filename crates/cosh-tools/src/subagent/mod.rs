@@ -36,13 +36,23 @@
 pub mod call;
 pub mod types;
 
+use std::sync::Mutex;
+
 use crate::ToolDescription;
 pub use types::{SubAgentCallInput, SubAgentCallOutput};
 
 /// Tool for calling sub-agent CLIs.
+///
+/// Each instance keeps the last input message sent to a sub-agent, so a
+/// retry after a failed call does not require re-writing the whole prompt.
+/// The harness creates one instance per agent loop, so the stored message
+/// never leaks across sessions and no explicit `clean()` is needed.
 pub struct SubAgent {
     /// MCP Tool description for `call`.
     pub description_call: ToolDescription,
+    /// Last input message sent to a sub-agent in this session, reused when
+    /// a call omits `input`.
+    last_input: Mutex<Option<String>>,
 }
 
 impl Default for SubAgent {
@@ -78,10 +88,16 @@ impl SubAgent {
                 common = "Call a supported agent CLI with the given input message and \
                           return its output. The agent runs as a child process; output \
                           is streamed in real time. All agents are configured with \
-                          auto-approval flags for headless operation.",
+                          auto-approval flags for headless operation.\n\
+                          `input` is optional: if omitted, the last message sent \
+                          to a sub-agent in this session is reused automatically, \
+                          so a failed call can be retried without re-writing the \
+                          prompt. If no sub-agent has been called yet, an error \
+                          is returned.",
                 usage = "## When to use\n\
-                         - Use `subagent_call` with `agent` and `input` to delegate \
-                         a task to another agent CLI.\n\
+                         - Use `subagent_call` with `agent` (and optionally `input`) \
+                         to delegate a task to another agent CLI.\n\
+                         - Omit `input` to reuse the last message sent to a sub-agent.\n\
                          - Use `bash_run` for regular shell commands. \
                          These are separate tools with different purposes.",
             )
@@ -109,10 +125,16 @@ impl SubAgent {
                 common = "Call a supported agent CLI with the given input message and \
                           return its output. The agent runs as a child process; output \
                           is streamed in real time. All agents are configured with \
-                          auto-approval flags for headless operation.",
+                          auto-approval flags for headless operation.\n\
+                          `input` is optional: if omitted, the last message sent \
+                          to a sub-agent in this session is reused automatically, \
+                          so a failed call can be retried without re-writing the \
+                          prompt. If no sub-agent has been called yet, an error \
+                          is returned.",
                 usage = "## When to use\n\
-                         - Use `subagent_call` with `agent` and `input` to delegate \
-                         a task to another agent CLI.\n\
+                         - Use `subagent_call` with `agent` (and optionally `input`) \
+                         to delegate a task to another agent CLI.\n\
+                         - Omit `input` to reuse the last message sent to a sub-agent.\n\
                          - Use `bash_run` for regular shell commands. \
                          These are separate tools with different purposes.",
             )
@@ -145,13 +167,134 @@ impl SubAgent {
                     },
                     "input": {
                         "type": "string",
-                        "description": "The message to send to the agent CLI as input.",
+                        "description": "The message to send to the agent CLI as input. Optional: if omitted (or empty), the last message sent to a sub-agent in this session is reused automatically, so a failed call can be retried without re-writing the prompt. If no sub-agent has been called yet, an error is returned.",
                     },
                 },
-                "required": ["agent", "input"],
+                "required": ["agent"],
             },
         });
 
-        Self { description_call }
+        Self {
+            description_call,
+            last_input: Mutex::new(None),
+        }
+    }
+
+    /// Resolve the effective input message for a sub-agent call.
+    ///
+    /// When `input` is provided (and non-empty), it is stored as the last
+    /// message sent to a sub-agent in this session and returned. When
+    /// omitted, the stored message is reused so the calling agent does not
+    /// have to re-write a long prompt after a failed call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `input` is omitted and no message is stored yet
+    /// (i.e. no sub-agent has been called in this session).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (only possible if another
+    /// thread panicked while holding the lock).
+    #[allow(clippy::unwrap_used)]
+    pub fn resolve_input(&self, input: Option<String>) -> Result<String, String> {
+        match input {
+            Some(text) => {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    self.stored_input()
+                } else {
+                    *self.last_input.lock().unwrap() = Some(text.clone());
+                    Ok(text)
+                }
+            }
+            None => self.stored_input(),
+        }
+    }
+
+    /// Return the stored last input message, or an error explaining that
+    /// there is no message in sub-agent storage yet.
+    fn stored_input(&self) -> Result<String, String> {
+        self.last_input.lock().unwrap().clone().ok_or_else(|| {
+            "subagent_call was called without an 'input' argument, but there is \
+                 no stored sub-agent message in this session yet. Provide an 'input' \
+                 argument to send the first message."
+                .to_string()
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SubAgent;
+
+    #[test]
+    fn fresh_instance_without_input_errors() {
+        let sub = SubAgent::new();
+        let err = sub.resolve_input(None).unwrap_err();
+        assert!(err.contains("no stored sub-agent message"), "{err}");
+    }
+
+    #[test]
+    fn fresh_instance_with_empty_input_errors() {
+        let sub = SubAgent::new();
+        let err = sub.resolve_input(Some(String::new())).unwrap_err();
+        assert!(err.contains("no stored sub-agent message"), "{err}");
+    }
+
+    #[test]
+    fn first_call_stores_input_and_returns_it() {
+        let sub = SubAgent::new();
+        let resolved = sub
+            .resolve_input(Some("review this PR".to_string()))
+            .unwrap();
+        assert_eq!(resolved, "review this PR");
+    }
+
+    #[test]
+    fn omitted_input_reuses_last_message() {
+        let sub = SubAgent::new();
+        let first = sub
+            .resolve_input(Some("review this PR".to_string()))
+            .unwrap();
+        assert_eq!(first, "review this PR");
+
+        let reused = sub.resolve_input(None).unwrap();
+        assert_eq!(reused, "review this PR");
+    }
+
+    #[test]
+    fn empty_input_after_a_call_reuses_last_message() {
+        let sub = SubAgent::new();
+        sub.resolve_input(Some("review this PR".to_string()))
+            .unwrap();
+
+        let reused = sub.resolve_input(Some(String::new())).unwrap();
+        assert_eq!(reused, "review this PR");
+    }
+
+    #[test]
+    fn new_input_overwrites_stored_message() {
+        let sub = SubAgent::new();
+        sub.resolve_input(Some("first message".to_string()))
+            .unwrap();
+        sub.resolve_input(Some("second message".to_string()))
+            .unwrap();
+
+        let reused = sub.resolve_input(None).unwrap();
+        assert_eq!(reused, "second message");
+    }
+
+    #[test]
+    fn instances_do_not_share_stored_input() {
+        // Each session owns its SubAgent, so stored input never leaks
+        // across instances (no .clean() needed).
+        let first = SubAgent::new();
+        let second = SubAgent::new();
+        first
+            .resolve_input(Some("first session".to_string()))
+            .unwrap();
+
+        assert!(second.resolve_input(None).is_err());
     }
 }
