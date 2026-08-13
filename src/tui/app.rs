@@ -4602,9 +4602,16 @@ impl App {
         // Different terminal emulators emit different numbers of events per physical
         // scroll tick (e.g. tmux/kitty emit 2-3, gnome-terminal emits 1). Without
         // debouncing, fast-emitters cause list navigation to skip items.
+        //
+        // NOTE: `last_scroll_time` must only be reset when a scroll is actually
+        // processed. Resetting it on ANY mouse event (Move/Down/Up) made the
+        // first wheel notch after moving the mouse land inside the 50ms window
+        // and get dropped — the visible "lag" when starting to scroll after idle.
         let now = Instant::now();
         let scroll_elapsed = now.duration_since(self.last_scroll_time);
-        if scroll_elapsed >= Duration::from_millis(50) {
+        if matches!(event_type, MouseEventType::ScrollUp | MouseEventType::ScrollDown)
+            && scroll_elapsed >= Duration::from_millis(50)
+        {
             self.last_scroll_time = now;
             match event_type {
                 MouseEventType::ScrollUp => {
