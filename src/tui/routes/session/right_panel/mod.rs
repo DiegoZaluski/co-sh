@@ -1,6 +1,7 @@
-use cosh_tui::core::lib::rgba::RGBA;
+use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
+use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -14,7 +15,7 @@ pub mod todo;
 pub mod types;
 
 use todo::{render_todo_section, todo_section_height};
-use types::RightPanelState;
+use types::{PtySession, RightPanelState, sanitize_subagent_text, split_subagent_output};
 
 pub fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
@@ -74,8 +75,16 @@ fn natural_section_height(
             if lines == 0 { 0 } else { BOX_OVERHEAD + lines }
         }
         types::SectionKind::Subagent => {
-            let lines = state.subagent_buffer().len() as i32;
-            if lines == 0 { 0 } else { BOX_OVERHEAD + lines }
+            // The wrap width must match the renderer's (section width minus
+            // the left+right padding), otherwise the natural height would
+            // disagree with the drawn body and the box would clip or overhang.
+            let wrap_w = inner_w.saturating_sub(3);
+            let rows: i32 = state
+                .subagent_section_rows(wrap_w)
+                .iter()
+                .map(|&r| i32::from(r))
+                .sum();
+            if rows == 0 { 0 } else { BOX_OVERHEAD + rows }
         }
     }
 }
@@ -280,12 +289,20 @@ fn render_bash_section(
     }
 }
 
-/// Render all subagent PTYs as a single continuous text buffer with line-based scroll.
+/// Render all subagent PTYs as one scrollable markdown document.
 ///
 /// Different agent CLIs (e.g. opencode + kilo) stack; the same agent called
-/// again replaces its previous entry (handled in `app.rs` via `retain`).
-/// Lines with "→ cosh:" prefix are the main agent's input (normal style);
-/// all other output lines use muted style.
+/// again replaces its previous entry (handled in `app.rs` via `retain`). Each
+/// session renders as: the command header line (normal text), the optional
+/// "→ cosh:" main-agent input line (normal text), then the subagent body as    /// **markdown** — the same renderer the chat uses for its content, so the
+/// report's headings/code/lists survive inside the box. Scrolling is in
+/// markdown layout rows (matching [`RightPanelState::subagent_section_rows`])
+/// and the visible slice of each body is blitted from a reusable scratch
+/// buffer, since the markdown renderer always lays out from content row 0.
+///
+/// The content reserves padding on BOTH sides (1 column each) so wrapped
+/// markdown lines and the scrollbar never touch the box's right edge
+/// (flush-right content read as a leak past the box).
 fn render_subagent_section(
     buf: &mut Buffer,
     x: u16,
@@ -295,15 +312,14 @@ fn render_subagent_section(
     state: &mut RightPanelState,
     theme: &Theme,
 ) {
+    // The right side gets EXTRA clearance (2 cols vs 1 on the left):
+    // table borders and the scrollbar sit on that side, and a single
+    // column still read as flush against the box edge.
     const LEFT_PAD: u16 = 1;
+    const RIGHT_PAD: u16 = 2;
     const TOP_GAP: u16 = 1;
     const TOP_PAD: u16 = 1;
     const BOTTOM_PAD: u16 = 1;
-
-    let total_lines = state.subagent_buffer().len() as i32;
-    if total_lines == 0 {
-        return;
-    }
 
     let box_y = y + TOP_GAP;
     let box_h = max_h.saturating_sub(TOP_GAP);
@@ -315,35 +331,119 @@ fn render_subagent_section(
 
     let inner_y = box_y + TOP_PAD;
     let inner_h = box_h.saturating_sub(TOP_PAD + BOTTOM_PAD);
-    let inner_w = max_w.saturating_sub(LEFT_PAD);
+    // The wrap width must match `natural_section_height` exactly: table
+    // borders and the scrollbar stay clear of the box's right edge.
+    let wrap_w = max_w.saturating_sub(LEFT_PAD + RIGHT_PAD);
+    if inner_h == 0 || wrap_w == 0 {
+        return;
+    }
 
-    let has_scroll = total_lines > inner_h as i32;
+    // Heights first (needs `&mut self`), then the sessions borrow: holding
+    // the session references across the cache call would conflict.
+    let rows: Vec<u16> = state.subagent_section_rows(wrap_w).to_vec();
+    let total_rows: i32 = rows.iter().map(|&r| i32::from(r)).sum();
+    if total_rows == 0 {
+        return;
+    }
+    let sessions: Vec<&PtySession> = state
+        .pty_sessions
+        .iter()
+        .filter(|p| p.command.starts_with("subagent:"))
+        .collect();
+
+    let has_scroll = total_rows > i32::from(inner_h);
+    // Disjoint field borrows: the loop needs the reusable scratch (mutable)
+    // and the scroll offset (mutable) at once.
+    let subagent_scratch = &mut state.subagent_scratch;
+    let subagent_scroll_y = &mut state.subagent_scroll_y;
     let scroll_y = if has_scroll {
-        state.subagent_scroll_y = state.subagent_scroll_y.min(total_lines - inner_h as i32);
-        state.subagent_scroll_y
+        let max_scroll = total_rows - i32::from(inner_h);
+        *subagent_scroll_y = (*subagent_scroll_y).min(max_scroll);
+        *subagent_scroll_y
     } else {
         0
     };
 
-    let start_line = scroll_y as usize;
-    let visible = inner_h as usize;
-    let buffer = state.subagent_buffer();
+    let text_style = Style::default().fg(rgba_color(theme.text));
+    let content_bottom = scroll_y + i32::from(inner_h);
+    let mut content_row: i32 = 0;
 
-    for (i, line) in buffer.iter().skip(start_line).take(visible).enumerate() {
-        let line_y = inner_y + i as u16;
-        // Command headers and "→ cosh:" input lines in normal text;
-        // subagent response lines in muted text.
-        let line_style = if line.starts_with("subagent:") || line.starts_with("→ cosh:") {
-            Style::default().fg(rgba_color(theme.text))
-        } else {
-            Style::default().fg(rgba_color(theme.text_muted))
-        };
-        let truncated: String = line.chars().take(inner_w as usize).collect();
-        draw_text(buf, &truncated, x + LEFT_PAD, line_y, inner_w, line_style);
+    for (session, &sess_rows) in sessions.iter().zip(rows.iter()) {
+        let sess_rows = i32::from(sess_rows);
+        let (input_line, body) = split_subagent_output(&session.output);
+        let body_start = content_row + 1 + i32::from(input_line.is_some());
+        let sess_end = content_row + sess_rows;
+
+        // Command header row.
+        if content_row >= scroll_y && content_row < content_bottom {
+            let line_y = inner_y + (content_row - scroll_y) as u16;
+            draw_text(
+                buf,
+                &session.command,
+                x + LEFT_PAD,
+                line_y,
+                wrap_w,
+                text_style,
+            );
+        }
+        // Main-agent input line (plain text, normal style).
+        if let Some(input) = input_line {
+            let row = content_row + 1;
+            if row >= scroll_y && row < content_bottom {
+                let line_y = inner_y + (row - scroll_y) as u16;
+                draw_text(buf, input, x + LEFT_PAD, line_y, wrap_w, text_style);
+            }
+        }
+        // Markdown body: render the full body into the scratch and blit only
+        // the rows that intersect the visible window.
+        let body_h = sess_rows - 1 - i32::from(input_line.is_some());
+        if body_h > 0 && body_start < content_bottom && sess_end > scroll_y {
+            let clean = sanitize_subagent_text(body);
+            if !clean.trim().is_empty() {
+                let body_h_u = body_h as u16;
+                let area = Rect::new(0, 0, wrap_w, body_h_u);
+                let scratch = subagent_scratch.get_or_insert_with(|| Buffer::empty(area));
+                if *scratch.area() != area {
+                    scratch.resize(area);
+                }
+                let mut md = MarkdownRenderable::new(Some(clean));
+                md.set_fg(Some(ColorInput::RGBA(theme.text)));
+                md.set_bg(Some(ColorInput::RGBA(theme.background_element)));
+                md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(
+                    255, 200, 0, 255,
+                ))));
+                md.render_self(scratch, area);
+
+                let first_vis = scroll_y.max(body_start);
+                let last_vis = content_bottom.min(sess_end);
+                for cr in first_vis..last_vis {
+                    let body_row = (cr - body_start) as u16;
+                    let dst_y = inner_y + (cr - scroll_y) as u16;
+                    for dx in 0..wrap_w {
+                        if let Some(src) = scratch.cell((dx, body_row))
+                            && let Some(dst) = buf.cell_mut((x + LEFT_PAD + dx, dst_y))
+                        {
+                            dst.set_symbol(src.symbol());
+                            dst.set_style(src.style());
+                        }
+                    }
+                }
+            }
+        }
+        content_row = sess_end;
     }
 
     if has_scroll {
-        draw_section_scrollbar(buf, x + max_w, y, max_h, total_lines, scroll_y, theme);
+        // Scrollbar on the box's right-padding column (clear of the edge).
+        draw_section_scrollbar(
+            buf,
+            x.saturating_add(max_w).saturating_sub(RIGHT_PAD),
+            y,
+            max_h,
+            total_rows,
+            scroll_y,
+            theme,
+        );
     }
 }
 
@@ -406,5 +506,150 @@ fn draw_section_scrollbar(
             cell.set_char('█');
             cell.set_style(sb_style);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::ThemeRegistry;
+
+    fn test_theme() -> Theme {
+        ThemeRegistry::new().default_theme().clone()
+    }
+
+    /// Read a row of the buffer back as a string (for assertions).
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        let w = buf.area().width;
+        let mut s = String::new();
+        for x in 0..w {
+            if let Some(c) = buf.cell((x, y)) {
+                s.push(c.symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        s
+    }
+
+    /// The subagent body is rendered as markdown (like the chat content):
+    /// heading text appears without the `#` markers, `**` emphasis is
+    /// consumed by the renderer, and the header + input lines survive as
+    /// plain text.
+    #[test]
+    fn subagent_section_renders_markdown_body() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty(
+            "→ cosh: review this\n# Title\n\nSome **bold** text here.\n".to_string(),
+        );
+        let theme = test_theme();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
+
+        render_subagent_section(&mut buf, 0, 0, 50, 30, &mut state, &theme);
+
+        let all: String = (0..30)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("subagent: opencode"), "command header missing");
+        assert!(all.contains("→ cosh: review this"), "input line missing");
+        assert!(all.contains("Title"), "heading text missing: {all:?}");
+        assert!(
+            !all.contains("# Title"),
+            "raw heading marker leaked: {all:?}"
+        );
+        assert!(!all.contains("**"), "raw emphasis markers leaked: {all:?}");
+    }
+    /// The content keeps clear of the box's right edge: wrapped markdown
+    /// lines (e.g. a long code word) end 2 columns before the edge, and the
+    /// rightmost box column stays blank even with a line long enough to wrap
+    /// to the full width. The box is [0, 50), so columns 48 and 49 (the
+    /// right padding and the box edge) must both stay blank.
+    #[test]
+    fn subagent_section_content_does_not_reach_box_right_edge() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty(
+            "```\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n```\n"
+                .to_string(),
+        );
+        let theme = test_theme();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
+
+        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme);
+
+        for y in 0..12 {
+            for col in [48u16, 49u16] {
+                if let Some(c) = buf.cell((col, y)) {
+                    assert_eq!(
+                        c.symbol().chars().next().unwrap_or(' '),
+                        ' ',
+                        "column {col} (box right padding/edge) must stay blank on row {y}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A table's border glyphs (which read as a hard "edge") stay clear of
+    /// the box's right edge too — the border of a wide table never lands on
+    /// columns 48/49 of a [0, 50) box.
+    #[test]
+    fn subagent_section_table_stays_inside_box() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty(
+            "| col one | col two | col three | col four |\n|---|---|---|---|\n| a | b | c | d |\n"
+                .to_string(),
+        );
+        let theme = test_theme();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
+
+        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme);
+
+        for y in 0..12 {
+            for col in [48u16, 49u16] {
+                if let Some(c) = buf.cell((col, y)) {
+                    assert_eq!(
+                        c.symbol().chars().next().unwrap_or(' '),
+                        ' ',
+                        "table border must not reach column {col} on row {y}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Scrolling is in markdown layout rows: with the `scroll_to_bottom`
+    /// sentinel (i32::MAX) the render clamps to the last rows, so the start
+    /// of the report is clipped and the end is visible.
+    #[test]
+    fn subagent_section_scrolls_in_markdown_rows() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        // ~30 markdown rows at the box width.
+        let body = (0..30)
+            .map(|i| format!("Line {i} of a long report\n"))
+            .collect::<String>();
+        state.update_last_pty(body);
+        state.subagent_scroll_y = i32::MAX; // sentinel from scroll_to_bottom()
+        let theme = test_theme();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
+
+        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme);
+
+        let all: String = (0..12)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !all.contains("Line 0"),
+            "start of the report clipped when scrolled to bottom"
+        );
+        assert!(
+            all.contains("Line 29"),
+            "end of the report visible at the bottom"
+        );
+        // The sentinel was clamped to a real row offset.
+        assert!(state.subagent_scroll_y < i32::MAX);
     }
 }

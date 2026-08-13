@@ -8,6 +8,33 @@ const MAX_PTY_SESSIONS: usize = 20;
 /// Only the TAIL is kept, since the panel renders the most recent output.
 const MAX_PTY_OUTPUT_CHARS: usize = 60_000;
 
+use cosh_tui::core::renderables::markdown::estimate_height;
+use ratatui::buffer::Buffer;
+
+/// Split a subagent PTY output into the optional main-agent input line
+/// (`→ cosh: ...`, prepended by `app.rs` when the tool call carries an
+/// `input`) and the remaining subagent body. When the output was truncated
+/// (tail-only retention) the prefix may be gone — then everything is body.
+pub(crate) fn split_subagent_output(output: &str) -> (Option<&str>, &str) {
+    if !output.starts_with("→ cosh:") {
+        return (None, output);
+    }
+    match output.find('\n') {
+        Some(i) => (Some(&output[..i]), &output[i + 1..]),
+        None => (Some(output), ""),
+    }
+}
+
+/// Filter control characters (keeping `\n`) so raw bytes can never reach
+/// ratatui buffer cells (cell_width panic). Same contract as the chat's
+/// markdown rendering — both the height estimate and the render use the
+/// sanitized body so they stay in lockstep.
+pub(crate) fn sanitize_subagent_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_control() || *ch == '\n')
+        .collect()
+}
+
 /// A single todo item from the LLM's plan_todo_write tool.
 #[derive(Debug, Clone)]
 pub struct TodoItem {
@@ -86,6 +113,22 @@ pub struct RightPanelState {
     /// Scroll offset within the subagent section (shared across all subagent PTYs).
     pub subagent_scroll_y: i32,
 
+    // ── Subagent markdown layout cache ────────────────────────────
+    /// Cached per-session content rows (command header + optional input
+    /// line + markdown body rows) for the subagent section, keyed to
+    /// `pty_gen` and the wrap width. Rebuilt only when output or width
+    /// changes — `estimate_height` (a pulldown_cmark parse) is too
+    /// expensive to run on every frame.
+    subagent_rows_cache: Vec<u16>,
+    subagent_rows_cache_gen: u64,
+    subagent_rows_cache_w: u16,
+    /// Reusable scratch buffer for blitting the visible slice of a session's
+    /// markdown body: the markdown renderer lays out from content row 0, so
+    /// the full body is rendered here and only the visible rows are copied
+    /// into the panel. Kept across frames — `Buffer::resize` retains the
+    /// allocation, so streaming never allocates a large buffer per frame.
+    pub(crate) subagent_scratch: Option<Buffer>,
+
     // ── Auto-scroll tracking ────────────────────────────────────────
     /// Set to `true` when the user manually scrolls (up/down);
     /// set to `false` by `scroll_to_bottom()`. Used by `is_scrolled_up()`
@@ -115,6 +158,10 @@ impl RightPanelState {
             todo_scroll_y: 0,
             bash_scroll_y: 0,
             subagent_scroll_y: 0,
+            subagent_rows_cache: Vec::new(),
+            subagent_rows_cache_gen: 0,
+            subagent_rows_cache_w: 0,
+            subagent_scratch: None,
             user_scrolled_away: false,
             scroll_y: 0,
             content_height: 0,
@@ -362,6 +409,36 @@ impl RightPanelState {
         &self.subagent_buffer_cache
     }
 
+    /// Total content rows (command header + optional input line + markdown
+    /// body) per subagent session, cached against `pty_gen` and `wrap_w` so
+    /// the markdown parse only runs when the output or the wrap width
+    /// actually changed. Mirrors the render exactly: the body width used
+    /// here is the same `wrap_w` the section renderer passes to
+    /// [`MarkdownRenderable`](cosh_tui::core::renderables::markdown::MarkdownRenderable).
+    pub(crate) fn subagent_section_rows(&mut self, wrap_w: u16) -> &[u16] {
+        if self.pty_gen != self.subagent_rows_cache_gen || wrap_w != self.subagent_rows_cache_w {
+            self.subagent_rows_cache.clear();
+            for pty in &self.pty_sessions {
+                if !pty.command.starts_with("subagent:") {
+                    continue;
+                }
+                let (input, body) = split_subagent_output(&pty.output);
+                let mut rows: u16 = 1; // command header
+                if input.is_some() {
+                    rows += 1;
+                }
+                let clean = sanitize_subagent_text(body);
+                if !clean.trim().is_empty() {
+                    rows = rows.saturating_add(estimate_height(&clean, wrap_w));
+                }
+                self.subagent_rows_cache.push(rows);
+            }
+            self.subagent_rows_cache_gen = self.pty_gen;
+            self.subagent_rows_cache_w = wrap_w;
+        }
+        &self.subagent_rows_cache
+    }
+
     /// Check if there's any content to show in the panel.
     pub fn has_content(&self) -> bool {
         !self.todos.is_empty() || !self.pty_sessions.is_empty()
@@ -572,5 +649,86 @@ mod tests {
             state.subagent_buffer().to_vec(),
             vec!["subagent: opencode".to_string(), "agent output".to_string()]
         );
+    }
+
+    /// The first "→ cosh:" line of a subagent output is the main agent's
+    /// input; everything after it is the subagent body. Outputs without the
+    /// prefix (e.g. after tail truncation) are all body.
+    #[test]
+    fn split_subagent_output_extracts_input_line() {
+        assert_eq!(
+            split_subagent_output("plain body\n"),
+            (None, "plain body\n")
+        );
+        assert_eq!(
+            split_subagent_output("→ cosh: review this\nbody\n"),
+            (Some("→ cosh: review this"), "body\n")
+        );
+        assert_eq!(
+            split_subagent_output("→ cosh: hi"),
+            (Some("→ cosh: hi"), "")
+        );
+    }
+
+    /// The subagent section rows add up the command header, the optional
+    /// input line and the markdown body rows, so the box height matches the
+    /// laid-out markdown (never clips the report).
+    #[test]
+    fn subagent_rows_reflect_markdown_height() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty(
+            "→ cosh: review this\n# Title\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n"
+                .to_string(),
+        );
+
+        let w = 20u16;
+        let rows = state.subagent_section_rows(w);
+        assert_eq!(rows.len(), 1, "one subagent session");
+        let (input, body) = split_subagent_output(
+            "→ cosh: review this\n# Title\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n",
+        );
+        assert_eq!(input, Some("→ cosh: review this"));
+        let expected = 1 + 1 + estimate_height(&sanitize_subagent_text(body), w);
+        assert_eq!(
+            rows[0], expected,
+            "header + input line + markdown body rows"
+        );
+        // A code block is taller than its raw line count (padding rows).
+        assert!(u32::from(rows[0]) > body.lines().count() as u32 + 2);
+    }
+
+    /// The height cache is rebuilt only when output (`pty_gen`) or the wrap
+    /// width changes; a narrower box wraps more and yields more rows.
+    #[test]
+    fn subagent_rows_cache_invalidates_on_width_and_gen_change() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty(
+            "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee ffffffffff\n".to_string(),
+        );
+
+        let narrow = state.subagent_section_rows(10)[0];
+        // Same gen + same width → cached slice, no rebuild.
+        assert_eq!(state.subagent_section_rows(10)[0], narrow);
+        // Wider box → fewer rows.
+        let wide = state.subagent_section_rows(60)[0];
+        assert!(
+            narrow > wide,
+            "{narrow} rows at w=10 should exceed {wide} at w=60"
+        );
+        // New output → rebuilt at the current width.
+        state.update_last_pty("more output that wraps\n".to_string());
+        let grown = state.subagent_section_rows(60)[0];
+        assert!(grown > wide, "growing output must increase the cached rows");
+    }
+
+    /// A session with no output yet still occupies one row (the command
+    /// header) so the section is visible while the agent runs.
+    #[test]
+    fn subagent_rows_header_only_for_empty_output() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        assert_eq!(state.subagent_section_rows(30), &[1]);
     }
 }
