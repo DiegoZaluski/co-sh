@@ -1341,7 +1341,7 @@ impl QuestionDialog {
                         .state
                         .get(self.current_tab)
                         .is_some_and(|s| s.single_selection == Some(i));
-                    let ind = if is_selected { "◉ " } else { "○ " };
+                    let ind = if is_selected { "🞴" } else { "  " };
                     let col = if is_selected {
                         theme.accent
                     } else if is_active {

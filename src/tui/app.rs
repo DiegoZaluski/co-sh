@@ -1699,7 +1699,7 @@ impl App {
             }
 
             let header_style = Style::default().fg(rgba_color(self.theme.text_muted));
-            let title_chars: Vec<char> = "cosh".chars().collect();
+            let title_chars: Vec<char> = "~$co-sh".chars().collect();
             for (i, ch) in title_chars.iter().enumerate() {
                 if let Some(cell) = buf.cell_mut((area.x + 1 + i as u16, area.y)) {
                     cell.set_char(*ch);
@@ -2190,9 +2190,9 @@ impl App {
         // next message tries the provider that actually worked before wasting
         // time on failing ones. Rotation is in-memory only (not persisted).
         let fallbacks = if model.as_deref() == Some("auto") {
-            let working = fallbacks.iter().position(|fb| {
-                cosh_sdk::connector::Connector::new(&fb.provider).is_ok()
-            });
+            let working = fallbacks
+                .iter()
+                .position(|fb| cosh_sdk::connector::Connector::new(&fb.provider).is_ok());
             match working {
                 Some(0) | None => fallbacks,
                 Some(idx) => {
@@ -2246,9 +2246,7 @@ impl App {
 
         // 2) DB registry (what the dispatch uses to resolve db_name → connect)
         #[cfg(feature = "embed")]
-        let recall_dbs: Vec<
-            cosh::harness::tools::RecallDb,
-        > = self.recall_dbs_vec();
+        let recall_dbs: Vec<cosh::harness::tools::RecallDb> = self.recall_dbs_vec();
         #[cfg(not(feature = "embed"))]
         let _recall_dbs = std::vec::Vec::<()>::new();
 
@@ -2358,9 +2356,8 @@ impl App {
                                 };
                             }
                             Err(e) => {
-                                let _ = event_tx.send(HarnessEvent::Error(format!(
-                                    "connector: {e}"
-                                )));
+                                let _ =
+                                    event_tx.send(HarnessEvent::Error(format!("connector: {e}")));
                                 return;
                             }
                         }
@@ -2374,9 +2371,7 @@ impl App {
                     // Restore compressed context state from .ctx companion file
                     if let Some(ref ctx_bytes) = ctx_bytes {
                         use cosh::harness::ContextManagerState;
-                        if let Ok(state) =
-                            bincode::deserialize::<ContextManagerState>(ctx_bytes)
-                        {
+                        if let Ok(state) = bincode::deserialize::<ContextManagerState>(ctx_bytes) {
                             harness.context_manager.restore_state(&state);
                         }
                     }
@@ -2518,7 +2513,11 @@ impl App {
         // right after the border, so the background never covers the glyph.
         if let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_char('┃');
-            cell.set_style(Style::default().fg(rgba_color(border)).bg(rgba_color(panel)));
+            cell.set_style(
+                Style::default()
+                    .fg(rgba_color(border))
+                    .bg(rgba_color(panel)),
+            );
         }
         // Queue-colored background for the rest of the row.
         let band_style = Style::default().bg(bg_color);
@@ -2648,8 +2647,7 @@ impl App {
 
                     // Check the queue-choice dialog (inline, shown when the user
                     // sends a message while the agent loop is running).
-                    if self.queue_choice_dialog.visible && matches!(self.mode(), AppMode::Session)
-                    {
+                    if self.queue_choice_dialog.visible && matches!(self.mode(), AppMode::Session) {
                         let consumed = self.queue_choice_dialog.handle_key_event(key);
                         if consumed {
                             if self.queue_choice_dialog.submitted {
@@ -4958,9 +4956,9 @@ impl App {
                 queue_choice_h,
             );
             if !self.mouse_drag_active && self.drag_selection.is_none() {
-                let consumed =
-                    self.queue_choice_dialog
-                        .handle_mouse(&mouse, queue_choice_area);
+                let consumed = self
+                    .queue_choice_dialog
+                    .handle_mouse(&mouse, queue_choice_area);
                 if consumed && self.queue_choice_dialog.submitted {
                     let text = self.prompt_view.send_message();
                     let target = self.queue_choice_dialog.choice();
@@ -5510,7 +5508,10 @@ mod tests {
         );
         assert_eq!(
             queues.next_loop,
-            vec!["secondary msg".to_string(), "leftover request msg".to_string()],
+            vec![
+                "secondary msg".to_string(),
+                "leftover request msg".to_string()
+            ],
             "promoted message joins the back of the next-loop queue (FIFO)"
         );
         // The sender channel is dropped at loop end so nothing can be injected
