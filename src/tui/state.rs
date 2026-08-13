@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 
 use lru::LruCache;
@@ -12,11 +13,30 @@ use cosh::harness::Mode;
 
 const SESSION_CACHE_SIZE: usize = 10;
 
+/// In-memory pending user messages for one session, waiting to be delivered.
+///
+/// - [`Self::next_request`] messages enter the NEXT REQUEST of the currently
+///   running agent loop (the "next request" queue).
+/// - [`Self::next_loop`] messages wait for the current loop to end and then
+///   start a fresh loop (the "next agent loop" queue).
+///
+/// Deliberately kept out of the persisted session model — this is transient
+/// UI state that lives for the app's lifetime only.
+#[derive(Debug, Clone, Default)]
+pub struct PendingQueues {
+    /// FIFO of messages for the next request of the running loop.
+    pub next_request: VecDeque<String>,
+    /// FIFO of messages for the next agent loop.
+    pub next_loop: VecDeque<String>,
+}
+
 pub struct AppState {
     /// Header-only session summaries (always in RAM, sidebar uses these).
     pub session_summaries: Vec<SessionSummary>,
     /// Full session cache (LRU eviction, only recently accessed sessions stored).
     pub session_cache: LruCache<String, Session>,
+    /// Pending queued messages per session id (in-memory only).
+    pub pending_queues: HashMap<String, PendingQueues>,
     pub current_session_id: Option<String>,
     pub status: SessionStatus,
     pub scroll_y: i32,
@@ -37,6 +57,7 @@ impl AppState {
         Self {
             session_summaries: vec![],
             session_cache: LruCache::new(NonZeroUsize::new(SESSION_CACHE_SIZE).unwrap()),
+            pending_queues: HashMap::new(),
             current_session_id: None,
             status: SessionStatus::Idle,
             scroll_y: 0,
@@ -52,11 +73,26 @@ impl AppState {
         }
     }
 
+    /// Pending queues for the current session (if one is selected).
+    pub fn current_pending_queues(&self) -> Option<&PendingQueues> {
+        self.current_session_id
+            .as_ref()
+            .and_then(|id| self.pending_queues.get(id))
+    }
+
+    /// Mutable pending queues for the current session (creating an empty
+    /// entry when missing). `None` when no session is selected.
+    pub fn current_pending_queues_mut(&mut self) -> Option<&mut PendingQueues> {
+        let id = self.current_session_id.clone()?;
+        Some(self.pending_queues.entry(id).or_default())
+    }
+
     /// Remove a session by ID. Clears `current_session_id` if it matches.
     pub fn remove_session(&mut self, session_id: &str) {
         self.session_summaries
             .retain(|s| s.session_id != session_id);
         self.session_cache.pop(session_id);
+        self.pending_queues.remove(session_id);
         if self
             .current_session_id
             .as_deref()
@@ -77,6 +113,7 @@ impl AppState {
             model: None,
         };
         self.session_summaries.push(summary);
+        self.pending_queues.entry(session.id.clone()).or_default();
         self.session_cache.put(session.id.clone(), session);
     }
 
@@ -84,6 +121,7 @@ impl AppState {
     /// the session only appears in the sidebar once it has been persisted (i.e.,
     /// it has valid content and has been saved to disk).
     pub fn add_empty_session(&mut self, id: String, title: String, created_at: u64) {
+        self.pending_queues.entry(id.clone()).or_default();
         self.session_cache.put(
             id.clone(),
             Session {

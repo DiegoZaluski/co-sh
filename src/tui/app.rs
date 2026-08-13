@@ -37,6 +37,7 @@ use crate::routes::session::SessionView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
+use crate::routes::session::queue_choice::{QueueChoiceDialog, QueueTarget};
 use crate::routes::session::right_panel::{
     RIGHT_PANEL_WIDTH, render_right_panel, should_show_right_panel,
 };
@@ -113,6 +114,7 @@ pub struct App {
     pub dialog: DialogState,
     pub permission_dialog: PermissionDialog,
     pub question_dialog: QuestionDialog,
+    pub queue_choice_dialog: QueueChoiceDialog,
     pub home_view: HomeView,
     pub internal_tools_view: InternalToolsView,
     pub show_internal_tools: bool,
@@ -137,6 +139,12 @@ pub struct App {
     answer_tx: mpsc::UnboundedSender<Result<Vec<cosh_tools::question::types::AnswerItem>, String>>,
     /// Sender for permission responses back to the harness.
     perm_tx: mpsc::UnboundedSender<cosh::harness::PermissionAction>,
+    /// Sender for user messages queued for the NEXT REQUEST of the running
+    /// agent loop (the "next request" queue). `None` while no loop runs.
+    queued_input_tx: Option<mpsc::UnboundedSender<String>>,
+    /// Session id that owns the currently running agent loop — guards the
+    /// queue auto-start against mid-run session switches.
+    active_loop_session_id: Option<String>,
     llm_config: LlmConfig,
     stop_signal: Arc<AtomicBool>,
     terminal_focused: bool,
@@ -256,6 +264,7 @@ impl App {
             dialog: DialogState::new(),
             permission_dialog: PermissionDialog::new(),
             question_dialog: QuestionDialog::new(),
+            queue_choice_dialog: QueueChoiceDialog::new(),
             keymap: KeyMap::default_vim(),
             config: TuiConfig::default(),
             toast_state: ToastState::new(),
@@ -280,6 +289,8 @@ impl App {
             event_rx,
             answer_tx,
             perm_tx,
+            queued_input_tx: None,
+            active_loop_session_id: None,
             llm_config: LlmConfig::from_env(),
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
@@ -1795,9 +1806,12 @@ impl App {
             let footer_y = main_area.bottom().saturating_sub(1);
             let is_session = matches!(self.mode(), AppMode::Session);
 
-            // When question or permission dialog is visible, hide prompt and spinner (like OpenCode)
-            let hide_prompt_and_spinner =
-                is_session && (self.question_dialog.visible || self.permission_dialog.visible);
+            // When question, permission or queue-choice dialog is visible, hide
+            // prompt and spinner (like OpenCode).
+            let hide_prompt_and_spinner = is_session
+                && (self.question_dialog.visible
+                    || self.permission_dialog.visible
+                    || self.queue_choice_dialog.visible);
 
             // Detect empty session — no messages yet (like OpenCode initial state)
             let is_empty_session = is_session
@@ -1839,6 +1853,21 @@ impl App {
             } else {
                 0
             };
+            // Pending queued-message region (color-coded rows above the prompt).
+            let pending_h = if is_session && !hide_prompt_and_spinner {
+                self.state
+                    .current_pending_queues()
+                    .map_or(0, |q| (q.next_request.len() + q.next_loop.len()) as u16)
+            } else {
+                0
+            };
+            // Queue-choice dialog (same position as question/permission).
+            let queue_choice_h = if is_session && self.queue_choice_dialog.visible {
+                self.queue_choice_dialog
+                    .required_height(main_area.width.saturating_sub(4))
+            } else {
+                0
+            };
 
             // Logo block: logo (6 rows) + gap before prompt (1)
             let logo_block_h = if is_empty_session {
@@ -1865,20 +1894,43 @@ impl App {
                     && self.state.status == crate::types::SessionStatus::Working
                     && self.agent_spinner.is_some(),
             );
-            let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
 
-            // The dialogs grow upward from the prompt; clamp their height so
-            // they never cover the header row (area.y + 1) or run off-screen.
-            // Long content inside the question dialog scrolls instead.
-            let max_dialog_h = spinner_area_y.saturating_sub(area.y + 1);
+            // The pending region and the dialogs grow upward from the prompt;
+            // clamp their heights so they never cover the header row (area.y + 1)
+            // or run off-screen. Long content scrolls instead.
+            let pending_area_y = prompt_area_y.saturating_sub(pending_h);
+            // The spinner sits ABOVE the pending queues when they are shown;
+            // with no queues (pending_h = 0) it stays in exactly the same spot
+            // (directly above the prompt).
+            let spinner_area_y = pending_area_y.saturating_sub(spinner_h);
+            let max_dialog_h = pending_area_y.saturating_sub(area.y + 1);
             let question_h = question_h.min(max_dialog_h);
             let permission_h = permission_h.min(max_dialog_h);
-            let question_area_y = spinner_area_y.saturating_sub(question_h);
-            let permission_area_y = spinner_area_y.saturating_sub(permission_h);
+            let queue_choice_h = queue_choice_h.min(max_dialog_h);
+            let question_area_y = pending_area_y.saturating_sub(question_h);
+            let permission_area_y = pending_area_y.saturating_sub(permission_h);
+            let queue_choice_area_y = pending_area_y.saturating_sub(queue_choice_h);
+            let pending_area = Rect::new(
+                main_area.x + 2,
+                pending_area_y,
+                main_area.width.saturating_sub(4),
+                pending_h,
+            );
+            let queue_choice_area = Rect::new(
+                main_area.x + 2,
+                queue_choice_area_y,
+                main_area.width.saturating_sub(4),
+                queue_choice_h,
+            );
             let prompt_padding: u16 = 1;
-            // session bottom is below whichever dialog is visible (mutually exclusive, never both)
+            // Session bottom is below whichever dialog is visible (mutually
+            // exclusive, never both), below the pending region and below the
+            // spinner (which sits above the queues when they are shown).
             let session_bottom = question_area_y
                 .min(permission_area_y)
+                .min(queue_choice_area_y)
+                .min(pending_area_y)
+                .min(spinner_area_y)
                 .saturating_sub(prompt_padding);
 
             let prompt_area = Rect::new(prompt_area_x, prompt_area_y, prompt_area_w, prompt_h);
@@ -1957,8 +2009,11 @@ impl App {
                     self.render_rag_view(buf, session_area);
                 }
                 AppMode::Session => {
-                    // Blur prompt when question/permission dialog is visible (like OpenCode)
-                    if self.question_dialog.visible || self.permission_dialog.visible {
+                    // Blur prompt when a dialog is visible (like OpenCode)
+                    if self.question_dialog.visible
+                        || self.permission_dialog.visible
+                        || self.queue_choice_dialog.visible
+                    {
                         self.prompt_view.blur();
                     }
 
@@ -2004,7 +2059,8 @@ impl App {
                         &self.config,
                         delta_time,
                     );
-                    // Question/permission dialog rendered inline between messages and prompt
+                    // Question/permission/queue-choice dialogs rendered inline
+                    // between messages and prompt (mutually exclusive).
                     if self.question_dialog.visible {
                         let now = std::time::SystemTime::now();
                         // Sync focus so the answer input's cursor blurs when the
@@ -2015,9 +2071,20 @@ impl App {
                     } else if self.permission_dialog.visible {
                         self.permission_dialog
                             .render(buf, permission_area, &self.theme);
+                    } else if self.queue_choice_dialog.visible {
+                        self.queue_choice_dialog
+                            .render(buf, queue_choice_area, &self.theme);
+                    }
+                    // Pending queued messages, color-coded per queue, above the
+                    // prompt (never rendered while a dialog covers that spot).
+                    if !hide_prompt_and_spinner && pending_h > 0 {
+                        self.render_pending_queues(buf, pending_area);
                     }
                     // Hide spinner and prompt when dialog is visible (like OpenCode)
-                    if !self.question_dialog.visible && !self.permission_dialog.visible {
+                    if !self.question_dialog.visible
+                        && !self.permission_dialog.visible
+                        && !self.queue_choice_dialog.visible
+                    {
                         // Agent spinner rendered above the prompt when the loop is active
                         if let Some(spinner) = &self.agent_spinner
                             && self.state.status == crate::types::SessionStatus::Working
@@ -2045,7 +2112,9 @@ impl App {
                     HomeFooterView::render(buf, footer_area, &self.theme);
                 }
                 AppMode::Session => {
-                    let hide_text = self.question_dialog.visible || self.permission_dialog.visible;
+                    let hide_text = self.question_dialog.visible
+                        || self.permission_dialog.visible
+                        || self.queue_choice_dialog.visible;
                     FooterView::render_with_mode(
                         buf,
                         footer_area,
@@ -2067,6 +2136,426 @@ impl App {
 
             self.command_palette.render(buf, area, &self.theme);
             self.slash_menu.render(buf, prompt_area, &self.theme);
+        }
+    }
+
+    /// Start a full agent loop for `msg` (a user message that was just sent
+    /// or dequeued from the pending "next agent loop" queue). Creates the
+    /// session + history entry, spins the working state, and spawns the
+    /// harness thread. Messages still pending in the "next request" queue
+    /// are handed to the new loop's queued-input channel so they enter its
+    /// first request.
+    fn start_agent_loop(&mut self, msg: String) {
+        if self.state.current_session_id.is_none() {
+            let id = generate_session_id();
+            let title: String = msg.chars().take(40).collect();
+            self.state.add_empty_session(
+                id.clone(),
+                title,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            );
+            self.state.current_session_id = Some(id);
+        }
+
+        if let Some(session) = self.state.current_session_mut() {
+            session.messages.push(crate::types::Message {
+                id: format!("msg-{}", session.messages.len()),
+                role: crate::types::MessageRole::User,
+                parts: vec![crate::types::Part::Text(crate::types::TextPart {
+                    text: msg.clone(),
+                    synthetic: false,
+                })],
+                created_at: 0,
+                agent: None,
+                model: None,
+            });
+
+            // Scroll to bottom when user sends a message (matches OpenCode's `toBottom()` on submit)
+            self.session_view.scroll_to_bottom();
+        }
+
+        self.stop_signal.store(false, Ordering::Relaxed);
+        self.state.status = crate::types::SessionStatus::Working;
+        self.agent_spinner = Some(AgentSpinner::new("Working", &self.theme));
+
+        let event_tx = self.event_tx.clone();
+        let provider = self.llm_config.provider.clone();
+        let model = self.llm_config.model.clone();
+        let reasoning = self.llm_config.reasoning.clone();
+        let fallbacks = self.router_view.fallbacks.clone();
+        // Auto-rotate: move the first working fallback to the front so the
+        // next message tries the provider that actually worked before wasting
+        // time on failing ones. Rotation is in-memory only (not persisted).
+        let fallbacks = if model.as_deref() == Some("auto") {
+            let working = fallbacks.iter().position(|fb| {
+                cosh_sdk::connector::Connector::new(&fb.provider).is_ok()
+            });
+            match working {
+                Some(0) | None => fallbacks,
+                Some(idx) => {
+                    let mut rotated = fallbacks;
+                    rotated.rotate_left(idx);
+                    self.router_view.fallbacks = rotated.clone();
+                    rotated
+                }
+            }
+        } else {
+            fallbacks
+        };
+        let stop_signal = self.stop_signal.clone();
+        let input = msg;
+        let cwd = self.state.working_directory.clone();
+        let mode = self.state.mode;
+
+        // Create a fresh answer channel for this agent loop invocation
+        let (answer_tx, answer_rx) = mpsc::unbounded_channel();
+        self.answer_tx = answer_tx;
+
+        // Create a fresh permission channel for this agent loop invocation
+        let (perm_tx, perm_rx) = mpsc::unbounded_channel();
+        self.perm_tx = perm_tx;
+
+        // Create a fresh queued-input channel for the "next request" queue.
+        // The harness drains it before every request of THIS loop.
+        let (queued_tx, queued_rx) = mpsc::unbounded_channel();
+        self.queued_input_tx = Some(queued_tx.clone());
+        self.active_loop_session_id = self.state.current_session_id.clone();
+
+        // Carry over messages that were queued for the next request while no
+        // loop was running (e.g. the previous run ended in an error and the
+        // user typed a fresh message): they enter this loop's first request.
+        if let Some(id) = self.state.current_session_id.clone()
+            && let Some(queues) = self.state.pending_queues.get(&id)
+        {
+            for text in &queues.next_request {
+                let _ = queued_tx.send(text.clone());
+            }
+        }
+
+        let mut disabled_tools = self.internal_tools_view.disabled.clone();
+
+        // RAG recall context
+        // 1) Description suffix (what the model sees in the tool doc)
+        #[cfg(feature = "embed")]
+        let recall_suffix = self.recall_suffix();
+        #[cfg(not(feature = "embed"))]
+        let _recall_suffix = String::new();
+
+        // 2) DB registry (what the dispatch uses to resolve db_name → connect)
+        #[cfg(feature = "embed")]
+        let recall_dbs: Vec<
+            cosh::harness::tools::RecallDb,
+        > = self.recall_dbs_vec();
+        #[cfg(not(feature = "embed"))]
+        let _recall_dbs = std::vec::Vec::<()>::new();
+
+        // 3) Auto-exclude tool if no databases exist at all
+        self.maybe_disable_recall_tool(&mut disabled_tools);
+
+        let event_tx_panic = event_tx.clone();
+        // Build conversation history from existing session messages
+        let history: Vec<(String, String)> = self
+            .state
+            .current_session()
+            .map(|s| {
+                s.messages
+                    .iter()
+                    .filter_map(|m| {
+                        let role = match m.role {
+                            crate::types::MessageRole::User => "user",
+                            crate::types::MessageRole::Assistant => "assistant",
+                        };
+                        let text: String = m
+                            .parts
+                            .iter()
+                            .filter_map(|p| match p {
+                                crate::types::Part::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if text.is_empty() {
+                            None
+                        } else {
+                            Some((role.to_owned(), text))
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Load companion context state (.ctx file) for session resumption
+        let ctx_bytes: Option<Vec<u8>> = self
+            .state
+            .current_session_id
+            .as_ref()
+            .and_then(|id| self.session_store.load_ctx(id));
+
+        std::thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
+            use tokio::runtime::Builder;
+
+            let rt = match Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = event_tx.send(HarnessEvent::Error(format!("runtime: {e}")));
+                    return;
+                }
+            };
+
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                rt.block_on(async {
+                    use cosh::harness::Harness;
+                    use cosh_sdk::connector::Connector;
+
+                    let connector;
+                    let mut remaining: Vec<(String, String)> = Vec::new();
+                    if model.as_deref() == Some("auto") {
+                        let mut last_err = String::new();
+                        let mut found = None;
+                        for (i, fb) in fallbacks.iter().enumerate() {
+                            match Connector::new(&fb.provider) {
+                                Ok(c) => {
+                                    let c = c.with_model(&fb.model);
+                                    found = Some((c, i));
+                                    break;
+                                }
+                                Err(e) => {
+                                    last_err = format!("connector for {}: {e}", fb.provider);
+                                }
+                            }
+                        }
+                        match found {
+                            Some((c, idx)) => {
+                                remaining = fallbacks[idx + 1..]
+                                    .iter()
+                                    .map(|fb| (fb.provider.clone(), fb.model.clone()))
+                                    .collect();
+                                connector = c;
+                            }
+                            None => {
+                                let _ = event_tx.send(HarnessEvent::Error(format!(
+                                    "auto: no fallback available ({last_err})"
+                                )));
+                                return;
+                            }
+                        }
+                    } else {
+                        match Connector::new(&provider) {
+                            Ok(c) => {
+                                let with_model = if let Some(ref m) = model {
+                                    c.with_model(m)
+                                } else {
+                                    c
+                                };
+                                connector = if let Some(ref r) = reasoning {
+                                    with_model.with_reasoning_effort(r)
+                                } else {
+                                    with_model
+                                };
+                            }
+                            Err(e) => {
+                                let _ = event_tx.send(HarnessEvent::Error(format!(
+                                    "connector: {e}"
+                                )));
+                                return;
+                            }
+                        }
+                    }
+
+                    let mut harness = Harness::new(connector, &cwd, disabled_tools)
+                        .with_mode(mode)
+                        .with_history(&history)
+                        .with_fallbacks(remaining);
+
+                    // Restore compressed context state from .ctx companion file
+                    if let Some(ref ctx_bytes) = ctx_bytes {
+                        use cosh::harness::ContextManagerState;
+                        if let Ok(state) =
+                            bincode::deserialize::<ContextManagerState>(ctx_bytes)
+                        {
+                            harness.context_manager.restore_state(&state);
+                        }
+                    }
+                    #[cfg(feature = "embed")]
+                    harness.set_recall_context(recall_suffix);
+                    #[cfg(feature = "embed")]
+                    harness.set_recall_dbs(recall_dbs);
+                    harness.format_header_context();
+                    harness
+                        .run_agent_loop_with_queued_input(
+                            &input,
+                            event_tx,
+                            answer_rx,
+                            perm_rx,
+                            stop_signal,
+                            queued_rx,
+                        )
+                        .await;
+                });
+            }));
+
+            if let Err(panic) = result {
+                let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                let _ = event_tx_panic.send(HarnessEvent::Error(format!("panic: {msg}")));
+            }
+        });
+    }
+
+    /// Called when an agent loop terminates. Leftover "next request"
+    /// messages that were never injected are promoted to the "next agent
+    /// loop" queue (they behave like it: they wait for the next run). When
+    /// `start_next` is true (the run ended cleanly — Done or Stopped) the
+    /// first queued next-loop message starts a fresh loop. On Error the queues
+    /// stay parked: the user decides when to resend (e.g. after switching the
+    /// model) — a later manual message rolls them in.
+    fn handle_loop_end(&mut self, start_next: bool) {
+        self.queued_input_tx = None;
+        let Some(id) = self.state.current_session_id.clone() else {
+            return;
+        };
+        if self.active_loop_session_id.is_some()
+            && self.active_loop_session_id.as_deref() != Some(id.as_str())
+        {
+            // The user switched sessions while the loop ran — leave the queues
+            // untouched for the session that owns them.
+            return;
+        }
+        let next: Option<String> = {
+            let queues = self.state.pending_queues.entry(id).or_default();
+            while let Some(text) = queues.next_request.pop_front() {
+                queues.next_loop.push_back(text);
+            }
+            if start_next {
+                queues.next_loop.pop_front()
+            } else {
+                None
+            }
+        };
+        if let Some(msg) = next {
+            self.start_agent_loop(msg);
+        }
+    }
+
+    /// Render the pending queued messages above the prompt, color-coded per
+    /// queue: "next agent loop" rows on top (amber), "next request"
+    /// rows below (cyan), each preserving FIFO order. No explicit labels —
+    /// the background color IS the identity of the queue.
+    fn render_pending_queues(&self, buf: &mut ratatui::buffer::Buffer, area: Rect) {
+        let Some(queues) = self.state.current_pending_queues() else {
+            return;
+        };
+        if queues.next_loop.is_empty() && queues.next_request.is_empty() {
+            return;
+        }
+        let mut y = area.y;
+        let panel = self.theme.background_panel;
+        let border = self.theme.accent;
+        for text in &queues.next_loop {
+            Self::draw_pending_row(
+                buf,
+                text,
+                area.x,
+                y,
+                area.width,
+                self.theme.warning,
+                panel,
+                border,
+            );
+            y += 1;
+        }
+        for text in &queues.next_request {
+            Self::draw_pending_row(
+                buf,
+                text,
+                area.x,
+                y,
+                area.width,
+                self.theme.info,
+                panel,
+                border,
+            );
+            y += 1;
+        }
+    }
+
+    /// Draw one pending-message row: the app's standard `┃` left border (in the
+    /// accent color, like the question/permission dialogs) on the neutral panel
+    /// background, the queue color as the background of the rest of the row
+    /// (starting right after the border, at `x + 1`, so it never covers the
+    /// `┃` glyph), and the message text starting 3 columns in — like a normal
+    /// user message, so queued rows stay visually consistent with the chat. The
+    /// queue identity is carried by the background color only; no marker glyph
+    /// is used on these rows.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_pending_row(
+        buf: &mut ratatui::buffer::Buffer,
+        text: &str,
+        x: u16,
+        y: u16,
+        width: u16,
+        bg: RGBA,
+        panel: RGBA,
+        border: RGBA,
+    ) {
+        if width < 4 {
+            return;
+        }
+        let fg = Self::contrast_on(bg);
+        let bg_color = rgba_color(bg);
+        // Standard app left border (┃) in the app's accent color on the
+        // neutral panel background — the queue-colored band starts at `x + 1`,
+        // right after the border, so the background never covers the glyph.
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_char('┃');
+            cell.set_style(Style::default().fg(rgba_color(border)).bg(rgba_color(panel)));
+        }
+        // Queue-colored background for the rest of the row.
+        let band_style = Style::default().bg(bg_color);
+        for cx in x + 1..x + width {
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                cell.set_char(' ');
+                cell.set_style(band_style);
+            }
+        }
+        // Message text starts 3 columns in (┃ + 2 pad), like a user message.
+        let text_x = x + 3;
+        let visible: String = text
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(width.saturating_sub(4) as usize)
+            .collect();
+        let text_style = Style::default().fg(fg).bg(bg_color);
+        for (i, ch) in visible.chars().enumerate() {
+            let cx = text_x + i as u16;
+            if cx >= x + width {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                cell.set_char(ch);
+                cell.set_style(text_style);
+            }
+        }
+    }
+
+    /// Black or white depending on the background luminance (for readable
+    /// text on the colored pending-queue rows).
+    fn contrast_on(bg: RGBA) -> Color {
+        let (r, g, b, _) = bg.to_ints();
+        let lum = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
+        if lum > 128.0 {
+            Color::Rgb(0, 0, 0)
+        } else {
+            Color::Rgb(255, 255, 255)
         }
     }
 
@@ -2150,6 +2639,41 @@ impl App {
                                 let _ = self
                                     .answer_tx
                                     .send(Err("User dismissed the question dialog".into()));
+                                self.prompt_view.focus();
+                            }
+                            return Ok(false);
+                        }
+                    }
+
+                    // Check the queue-choice dialog (inline, shown when the user
+                    // sends a message while the agent loop is running).
+                    if self.queue_choice_dialog.visible && matches!(self.mode(), AppMode::Session)
+                    {
+                        let consumed = self.queue_choice_dialog.handle_key_event(key);
+                        if consumed {
+                            if self.queue_choice_dialog.submitted {
+                                let text = self.prompt_view.send_message();
+                                let target = self.queue_choice_dialog.choice();
+                                self.queue_choice_dialog.hide();
+                                if let Some(queues) = self.state.current_pending_queues_mut() {
+                                    match target {
+                                        QueueTarget::NextRequest => {
+                                            queues.next_request.push_back(text.clone());
+                                            // Hand it to the running loop immediately: it
+                                            // enters the model context before the next request.
+                                            if let Some(tx) = &self.queued_input_tx {
+                                                let _ = tx.send(text);
+                                            }
+                                        }
+                                        QueueTarget::NextLoop => {
+                                            queues.next_loop.push_back(text);
+                                        }
+                                    }
+                                }
+                                self.prompt_view.focus();
+                            } else if !self.queue_choice_dialog.visible {
+                                // Dismissed via Esc: re-focus the prompt (the
+                                // message stays in the input, nothing was queued).
                                 self.prompt_view.focus();
                             }
                             return Ok(false);
@@ -2668,6 +3192,13 @@ impl App {
                             }
                             self.prompt_view.note_activity();
                             if self.state.status == crate::types::SessionStatus::Working {
+                                // The agent loop is running: ask which queue the
+                                // message should join instead of sending it now.
+                                let preview = self.prompt_view.input.clone();
+                                if preview.trim().is_empty() {
+                                    return Ok(false);
+                                }
+                                self.queue_choice_dialog.open(preview);
                                 return Ok(false);
                             }
 
@@ -2675,259 +3206,14 @@ impl App {
                             if msg.trim().is_empty() {
                                 return Ok(false);
                             }
-
-                            if self.state.current_session_id.is_none() {
-                                let id = generate_session_id();
-                                let title: String = msg.chars().take(40).collect();
-                                self.state.add_empty_session(
-                                    id.clone(),
-                                    title,
-                                    std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis() as u64,
-                                );
-                                self.state.current_session_id = Some(id);
-                            }
-
-                            if let Some(session) = self.state.current_session_mut() {
-                                session.messages.push(crate::types::Message {
-                                    id: format!("msg-{}", session.messages.len()),
-                                    role: crate::types::MessageRole::User,
-                                    parts: vec![crate::types::Part::Text(crate::types::TextPart {
-                                        text: msg.clone(),
-                                        synthetic: false,
-                                    })],
-                                    created_at: 0,
-                                    agent: None,
-                                    model: None,
-                                });
-
-                                // Scroll to bottom when user sends a message (matches OpenCode's `toBottom()` on submit)
-                                self.session_view.scroll_to_bottom();
-                            }
-
-                            self.stop_signal.store(false, Ordering::Relaxed);
-                            self.state.status = crate::types::SessionStatus::Working;
-                            self.agent_spinner = Some(AgentSpinner::new("Working", &self.theme));
-
-                            let event_tx = self.event_tx.clone();
-                            let provider = self.llm_config.provider.clone();
-                            let model = self.llm_config.model.clone();
-                            let reasoning = self.llm_config.reasoning.clone();
-                            let fallbacks = self.router_view.fallbacks.clone();
-                            // Auto-rotate: move the first working fallback to the front so the
-                            // next message tries the provider that actually worked before wasting
-                            // time on failing ones. Rotation is in-memory only (not persisted).
-                            let fallbacks = if model.as_deref() == Some("auto") {
-                                let working = fallbacks.iter().position(|fb| {
-                                    cosh_sdk::connector::Connector::new(&fb.provider).is_ok()
-                                });
-                                match working {
-                                    Some(0) | None => fallbacks,
-                                    Some(idx) => {
-                                        let mut rotated = fallbacks;
-                                        rotated.rotate_left(idx);
-                                        self.router_view.fallbacks = rotated.clone();
-                                        rotated
-                                    }
-                                }
-                            } else {
-                                fallbacks
-                            };
-                            let stop_signal = self.stop_signal.clone();
-                            let input = msg;
-                            let cwd = self.state.working_directory.clone();
-                            let mode = self.state.mode;
-
-                            // Create a fresh answer channel for this agent loop invocation
-                            let (answer_tx, answer_rx) = mpsc::unbounded_channel();
-                            self.answer_tx = answer_tx;
-
-                            // Create a fresh permission channel for this agent loop invocation
-                            let (perm_tx, perm_rx) = mpsc::unbounded_channel();
-                            self.perm_tx = perm_tx;
-
-                            let mut disabled_tools = self.internal_tools_view.disabled.clone();
-
-                            // RAG recall context
-                            // 1) Description suffix (what the model sees in the tool doc)
-                            #[cfg(feature = "embed")]
-                            let recall_suffix = self.recall_suffix();
-                            #[cfg(not(feature = "embed"))]
-                            let _recall_suffix = String::new();
-
-                            // 2) DB registry (what the dispatch uses to resolve db_name → connect)
-                            #[cfg(feature = "embed")]
-                            let recall_dbs: Vec<
-                                cosh::harness::tools::RecallDb,
-                            > = self.recall_dbs_vec();
-                            #[cfg(not(feature = "embed"))]
-                            let _recall_dbs = std::vec::Vec::<()>::new();
-
-                            // 3) Auto-exclude tool if no databases exist at all
-                            self.maybe_disable_recall_tool(&mut disabled_tools);
-
-                            let event_tx_panic = event_tx.clone();
-                            // Build conversation history from existing session messages
-                            let history: Vec<(String, String)> = self
-                                .state
-                                .current_session()
-                                .map(|s| {
-                                    s.messages
-                                        .iter()
-                                        .filter_map(|m| {
-                                            let role = match m.role {
-                                                crate::types::MessageRole::User => "user",
-                                                crate::types::MessageRole::Assistant => "assistant",
-                                            };
-                                            let text: String = m
-                                                .parts
-                                                .iter()
-                                                .filter_map(|p| match p {
-                                                    crate::types::Part::Text(t) => {
-                                                        Some(t.text.as_str())
-                                                    }
-                                                    _ => None,
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
-                                            if text.is_empty() {
-                                                None
-                                            } else {
-                                                Some((role.to_owned(), text))
-                                            }
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-
-                            // Load companion context state (.ctx file) for session resumption
-                            let ctx_bytes: Option<Vec<u8>> = self
-                                .state
-                                .current_session_id
-                                .as_ref()
-                                .and_then(|id| self.session_store.load_ctx(id));
-
-                            std::thread::spawn(move || {
-                                use std::panic::AssertUnwindSafe;
-                                use tokio::runtime::Builder;
-
-                                let rt = match Builder::new_current_thread().enable_all().build() {
-                                    Ok(rt) => rt,
-                                    Err(e) => {
-                                        let _ = event_tx
-                                            .send(HarnessEvent::Error(format!("runtime: {e}")));
-                                        return;
-                                    }
-                                };
-
-                                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                                    rt.block_on(async {
-                                        use cosh::harness::Harness;
-                                        use cosh_sdk::connector::Connector;
-
-                                            let connector;
-                                            let mut remaining: Vec<(String, String)> = Vec::new();
-                                            if model.as_deref() == Some("auto") {
-                                                let mut last_err = String::new();
-                                                let mut found = None;
-                                                for (i, fb) in fallbacks.iter().enumerate() {
-                                                    match Connector::new(&fb.provider) {
-                                                        Ok(c) => {
-                                                            let c = c.with_model(&fb.model);
-                                                            found = Some((c, i));
-                                                            break;
-                                                        }
-                                                        Err(e) => {
-                                                            last_err = format!("connector for {}: {e}", fb.provider);
-                                                        }
-                                                    }
-                                                }
-                                                match found {
-                                                    Some((c, idx)) => {
-                                                        remaining = fallbacks[idx + 1..]
-                                                            .iter()
-                                                            .map(|fb| (fb.provider.clone(), fb.model.clone()))
-                                                            .collect();
-                                                        connector = c;
-                                                    }
-                                                    None => {
-                                                        let _ = event_tx.send(HarnessEvent::Error(
-                                                            format!("auto: no fallback available ({last_err})"),
-                                                        ));
-                                                        return;
-                                                    }
-                                                }
-                                            } else {
-                                                match Connector::new(&provider) {
-                                                    Ok(c) => {
-                                                        let with_model = if let Some(ref m) = model {
-                                                            c.with_model(m)
-                                                        } else {
-                                                            c
-                                                        };
-                                                        connector = if let Some(ref r) = reasoning {
-                                                            with_model.with_reasoning_effort(r)
-                                                        } else {
-                                                            with_model
-                                                        };
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = event_tx.send(HarnessEvent::Error(
-                                                            format!("connector: {e}"),
-                                                        ));
-                                                        return;
-                                                    }
-                                                }
-                                            }
-
-                                        let mut harness =
-                                            Harness::new(connector, &cwd, disabled_tools)
-                                                .with_mode(mode)
-                                                .with_history(&history)
-                                                .with_fallbacks(remaining);
-
-                                        // Restore compressed context state from .ctx companion file
-                                        if let Some(ref ctx_bytes) = ctx_bytes {
-                                            use cosh::harness::ContextManagerState;
-                                            if let Ok(state) = bincode::deserialize::<ContextManagerState>(ctx_bytes) {
-                                                harness.context_manager.restore_state(&state);
-                                            }
-                                        }
-                                        #[cfg(feature = "embed")]
-                                        harness.set_recall_context(recall_suffix);
-                                        #[cfg(feature = "embed")]
-                                        harness.set_recall_dbs(recall_dbs);
-                                        harness.format_header_context();
-                                        harness
-                                            .run_agent_loop(
-                                                &input,
-                                                event_tx,
-                                                answer_rx,
-                                                perm_rx,
-                                                stop_signal,
-                                            )
-                                            .await;
-                                    });
-                                }));
-
-                                if let Err(panic) = result {
-                                    let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                                        s.to_string()
-                                    } else if let Some(s) = panic.downcast_ref::<String>() {
-                                        s.clone()
-                                    } else {
-                                        "unknown panic".to_string()
-                                    };
-                                    let _ = event_tx_panic
-                                        .send(HarnessEvent::Error(format!("panic: {msg}")));
-                                }
-                            });
+                            self.start_agent_loop(msg);
                         }
                         Some(crate::keymap::Action::Interrupt) => {
                             if self.state.status == crate::types::SessionStatus::Working {
                                 self.stop_signal.store(true, Ordering::Relaxed);
+                            } else if self.queue_choice_dialog.visible {
+                                self.queue_choice_dialog.hide();
+                                self.prompt_view.focus();
                             } else if self.question_dialog.visible {
                                 self.question_dialog.visible = false;
                                 let _ = self
@@ -2945,7 +3231,10 @@ impl App {
                                 self.stop_signal.store(true, Ordering::Relaxed);
                                 return Ok(false);
                             }
-                            if self.question_dialog.visible {
+                            if self.queue_choice_dialog.visible {
+                                self.queue_choice_dialog.hide();
+                                self.prompt_view.focus();
+                            } else if self.question_dialog.visible {
                                 self.question_dialog.visible = false;
                                 let _ = self
                                     .answer_tx
@@ -3865,6 +4154,34 @@ impl App {
                         self.session_store.save_ctx(&id, &context_state);
                         self.state.ensure_session_summary(&id);
                     }
+
+                    // The loop ended: leftover "next request" messages become
+                    // "next agent loop" candidates, and the first one starts a
+                    // fresh loop (FIFO).
+                    self.handle_loop_end(true);
+                }
+
+                HarnessEvent::UserMessageInjected { text } => {
+                    // The running loop consumed a "next request" message:
+                    // move it out of the pending area (FIFO — the harness
+                    // drains in order) into the normal history.
+                    if let Some(queues) = self.state.current_pending_queues_mut() {
+                        queues.next_request.pop_front();
+                    }
+                    if let Some(session) = self.state.current_session_mut() {
+                        session.messages.push(Message {
+                            id: format!("msg-{}", session.messages.len()),
+                            role: MessageRole::User,
+                            parts: vec![Part::Text(TextPart {
+                                text,
+                                synthetic: false,
+                            })],
+                            created_at: 0,
+                            agent: None,
+                            model: None,
+                        });
+                        self.session_view.scroll_to_bottom();
+                    }
                 }
 
                 HarnessEvent::Stopped { context_state } => {
@@ -3887,6 +4204,8 @@ impl App {
                         self.session_store.save_ctx(&id, &context_state);
                         self.state.ensure_session_summary(&id);
                     }
+
+                    self.handle_loop_end(true);
                 }
                 HarnessEvent::ContextInfo { info } => {
                     self.context_info = Some(info);
@@ -3954,6 +4273,11 @@ impl App {
                             model: self.llm_config.model.clone(),
                         });
                     }
+
+                    // The run failed: leave the queues parked (promote leftover
+                    // next-request messages to next-loop semantics but never
+                    // auto-start — the user decides when to resend).
+                    self.handle_loop_end(false);
                 }
 
                 HarnessEvent::ModelsLoaded { models, current } => {
@@ -4610,6 +4934,55 @@ impl App {
             }
         }
 
+        // 4b. Queue-choice dialog (inline, shown while the agent loop runs)
+        if self.queue_choice_dialog.visible && matches!(self.mode(), AppMode::Session) {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let queue_choice_h = self
+                .queue_choice_dialog
+                .required_height(main_area.width.saturating_sub(4));
+            let queue_choice_h = queue_choice_h.min(footer_y.saturating_sub(area.y + 1));
+            let queue_choice_area_y = footer_y.saturating_sub(queue_choice_h);
+            let queue_choice_area = Rect::new(
+                main_area.x + 2,
+                queue_choice_area_y,
+                main_area.width.saturating_sub(4),
+                queue_choice_h,
+            );
+            if !self.mouse_drag_active && self.drag_selection.is_none() {
+                let consumed =
+                    self.queue_choice_dialog
+                        .handle_mouse(&mouse, queue_choice_area);
+                if consumed && self.queue_choice_dialog.submitted {
+                    let text = self.prompt_view.send_message();
+                    let target = self.queue_choice_dialog.choice();
+                    self.queue_choice_dialog.hide();
+                    if let Some(queues) = self.state.current_pending_queues_mut() {
+                        match target {
+                            QueueTarget::NextRequest => {
+                                queues.next_request.push_back(text.clone());
+                                if let Some(tx) = &self.queued_input_tx {
+                                    let _ = tx.send(text);
+                                }
+                            }
+                            QueueTarget::NextLoop => {
+                                queues.next_loop.push_back(text);
+                            }
+                        }
+                    }
+                    self.prompt_view.focus();
+                }
+                return Ok(true);
+            }
+        }
+
         // 5. Permission dialog
         if self.permission_dialog.visible {
             let area = self.terminal_size();
@@ -5074,7 +5447,7 @@ fn create_cloud_embedder(
 
 #[cfg(test)]
 mod tests {
-    use super::format_tokens;
+    use super::{App, format_tokens};
 
     #[test]
     fn format_tokens_small_values_have_no_separator() {
@@ -5098,5 +5471,88 @@ mod tests {
         assert_eq!(format_tokens(123_456), "123,456");
         assert_eq!(format_tokens(9_876_543_210), "9,876,543,210");
         assert_eq!(format_tokens(usize::MAX), "18,446,744,073,709,551,615");
+    }
+
+    /// When the agent loop ends (Done/Stopped) before a "next request" message
+    /// was consumed, it must be promoted to the "next agent loop" queue so it
+    /// starts a fresh loop instead of being lost. FIFO order is preserved: the
+    /// promoted message joins the back of the secondary queue.
+    #[tokio::test]
+    async fn loop_end_promotes_unconsumed_next_request_to_next_loop() {
+        let mut app = App::new("/tmp".to_string());
+        let id = super::generate_session_id();
+        app.state.add_empty_session(
+            id.clone(),
+            "promotion test".into(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        );
+        app.state.current_session_id = Some(id.clone());
+        app.active_loop_session_id = Some(id.clone());
+        {
+            let queues = app.state.pending_queues.entry(id.clone()).or_default();
+            queues.next_request.push_back("leftover request msg".into());
+            queues.next_loop.push_back("secondary msg".into());
+        }
+
+        // Simulate the loop ending WITHOUT consuming the next-request message
+        // (e.g. user stopped it before the harness drained the channel). The
+        // `start_next` flag mirrors Done/Stopped; Error passes false.
+        app.handle_loop_end(false);
+
+        let queues = app.state.pending_queues.get(&id).expect("queues exist");
+        assert!(
+            queues.next_request.is_empty(),
+            "unconsumed next-request message must be promoted"
+        );
+        assert_eq!(
+            queues.next_loop,
+            vec!["secondary msg".to_string(), "leftover request msg".to_string()],
+            "promoted message joins the back of the next-loop queue (FIFO)"
+        );
+        // The sender channel is dropped at loop end so nothing can be injected
+        // into the finished loop.
+        assert!(app.queued_input_tx.is_none());
+    }
+
+    /// The user's exact scenario: a "next request" message that the loop
+    /// stopped before consuming must become the FIRST "next agent loop"
+    /// candidate when no secondary queue message exists. This verifies the
+    /// promotion state that precedes auto-start: with `start_next = true`
+    /// (Done/Stopped) `handle_loop_end` pops this front message and starts a
+    /// fresh loop with it (FIFO). We use `false` here because `true` would
+    /// spawn a real agent loop.
+    #[tokio::test]
+    async fn loop_end_orphaned_next_request_becomes_first_next_loop_candidate() {
+        let mut app = App::new("/tmp".to_string());
+        let id = super::generate_session_id();
+        app.state.add_empty_session(
+            id.clone(),
+            "orphan test".into(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        );
+        app.state.current_session_id = Some(id.clone());
+        app.active_loop_session_id = Some(id.clone());
+        {
+            let queues = app.state.pending_queues.entry(id.clone()).or_default();
+            queues.next_request.push_back("orphaned request msg".into());
+        }
+
+        // Done/Stopped path (start_next = true): promotion happens first, so
+        // the orphaned message lands at the FRONT of the next-loop queue and
+        // would be the message that starts the fresh loop.
+        app.handle_loop_end(false);
+        let queues = app.state.pending_queues.get(&id).expect("queues exist");
+        assert_eq!(
+            queues.next_loop,
+            vec!["orphaned request msg".to_string()],
+            "orphaned message is the first next-loop candidate"
+        );
+        assert!(queues.next_request.is_empty());
     }
 }

@@ -100,6 +100,16 @@ pub enum HarnessEvent {
         /// The next chunk of the summary text.
         text: String,
     },
+    /// A user message queued for the NEXT REQUEST (the TUI's "next
+    /// request" queue) was injected into the model context mid-loop. The
+    /// harness drains the queued-input channel before every request and adds
+    /// each message as a regular protected user turn; the TUI uses this
+    /// acknowledgment to move the message out of its pending area into the
+    /// normal session history. Emitted in FIFO order.
+    UserMessageInjected {
+        /// The injected message text.
+        text: String,
+    },
     /// A user-visible notification, rendered by the TUI through its existing
     /// toast system. Emitted when the context-window overflow could not be
     /// relieved (every tool chain drained) or a provider error survived its

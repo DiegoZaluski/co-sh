@@ -1500,3 +1500,148 @@ async fn run_agent_loop_emits_resumable_incremental_context_snapshots() {
         "the restored context must own the accumulated tool turns; joined={joined:?}"
     );
 }
+
+// ── Proof: user messages queued for the NEXT REQUEST are injected ────────
+//
+// The "next request" queue enters the loop via `run_agent_loop_with_queued_input`:
+// messages waiting on the channel before a request are recorded as regular
+// protected user turns and acknowledged with `UserMessageInjected` (FIFO),
+// so the TUI can move them out of its pending area into normal history.
+#[tokio::test]
+async fn queued_next_request_messages_are_injected_into_context() {
+    let mut h = Harness::new_test().with_mock_stream(Ok(vec!["ok"]));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    // Pre-queue two messages (FIFO) before the loop starts.
+    let (queued_tx, queued_rx) = tokio::sync::mpsc::unbounded_channel();
+    queued_tx.send("fix the test".to_string()).unwrap();
+    queued_tx.send("and the docs".to_string()).unwrap();
+
+    // Run directly (like bug_hunt::run_loop_and_collect) so `h` is still
+    // owned by this test after the loop terminates; the mock stream makes the
+    // run deterministic and fast.
+    h.run_agent_loop_with_queued_input(
+        "hello",
+        tx,
+        answer_rx,
+        perm_rx,
+        stop_signal,
+        queued_rx,
+    )
+    .await;
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    // Both queued messages acknowledged in FIFO order.
+    let injected: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            HarnessEvent::UserMessageInjected { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(injected, vec!["fix the test", "and the docs"]);
+
+    // And they landed in the context manager as protected user turns, in
+    // order, right after the loop input.
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    let users: Vec<&str> = items
+        .iter()
+        .filter_map(|i| match i {
+            ContextItem::User { original, .. } => Some(original.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(users, vec!["hello", "fix the test", "and the docs"]);
+}
+
+// ── Proof: an injected message is part of the NEXT request ───────────────
+//
+// A message queued before the loop starts is drained at iteration 1 and so
+// appears in the SAME request that carries the tool call (the model sees it
+// before it acts), and the loop still continues through its tool chain to a
+// normal finish.
+#[tokio::test]
+async fn queued_next_request_message_enters_the_next_request_with_tool_work() {
+    let mut h = Harness::new_test()
+        .with_test_tool(
+            "test_tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "type": "string" } },
+                "required": ["x"]
+            }),
+        )
+        .with_mock_streams(vec![
+            Ok(vec![r#"{"name": "test_tool", "arguments": {"x": "1"}}"#]),
+            Ok(vec!["all done"]),
+        ]);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let (queued_tx, queued_rx) = tokio::sync::mpsc::unbounded_channel();
+    queued_tx.send("follow up".to_string()).unwrap();
+
+    h.run_agent_loop_with_queued_input(
+        "use tool",
+        tx,
+        answer_rx,
+        perm_rx,
+        stop_signal,
+        queued_rx,
+    )
+    .await;
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    // The queued message was injected (acknowledged) and the loop finished.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::UserMessageInjected { text } if text == "follow up"
+        )),
+        "expected a UserMessageInjected event; events={events:?}"
+    );
+    assert!(events.iter().any(|e| matches!(e, HarnessEvent::Done { .. })));
+
+    // The context sequence places the injected user turn in the SAME request
+    // as the tool call — before it — and the loop still completes normally.
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    let user_positions: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| {
+            matches!(it, ContextItem::User { original, .. } if original == "follow up")
+                .then_some(i)
+        })
+        .collect();
+    assert_eq!(
+        user_positions.len(),
+        1,
+        "the injected message must appear exactly once; items={items:?}"
+    );
+    let toolcall_pos = items
+        .iter()
+        .position(|it| matches!(it, ContextItem::ToolCall { .. }));
+    assert!(
+        toolcall_pos.is_some_and(|t| user_positions[0] < t),
+        "the injected message must be delivered before the tool call it precedes; items={items:?}"
+    );
+    assert!(matches!(
+        items.last(),
+        Some(ContextItem::LoopClosure { content, .. }) if content == "all done"
+    ));
+}

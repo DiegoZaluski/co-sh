@@ -3,6 +3,7 @@ pub mod tool_render;
 
 pub mod permission;
 pub mod question;
+pub mod queue_choice;
 pub mod right_panel;
 pub mod sidebar;
 pub mod subagent_footer;
