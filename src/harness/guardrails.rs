@@ -192,13 +192,16 @@ pub fn check_tool_permission(
             });
         }
         "subagent_call" => {
+            // The merged tool routes to an INTERNAL agent when `agent` is
+            // omitted/empty; show that in the dialog instead of "unknown".
             let agent = args
                 .get("agent")
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+                .filter(|a| !a.trim().is_empty())
+                .unwrap_or("internal");
             return PermissionCheck::NeedsApproval(PermissionRequest {
                 tool: "subagent_call".to_string(),
-                description: "call an external AI sub-agent".to_string(),
+                description: "call a sub-agent (external CLI or internal agent)".to_string(),
                 args: format!("agent: {agent}"),
             });
         }

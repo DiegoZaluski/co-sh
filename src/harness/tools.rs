@@ -210,6 +210,38 @@ impl CoshTools {
         self.event_tx = Some(tx);
     }
 
+    /// Clone of the event sender, if one was set (streaming tool output to
+    /// the TUI). The internal sub-agent path uses it to bridge its stream
+    /// without touching the harness's own context.
+    #[must_use]
+    pub fn event_tx(&self) -> Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>> {
+        self.event_tx.clone()
+    }
+
+    /// Interpolate an informational chunk into the `subagent_call` tool
+    /// description (the harness tells the model that omitting `agent`
+    /// routes the call to an internal agent).
+    pub fn set_subagent_note(&mut self, note: impl Into<String>) {
+        self.subagent.set_note(note);
+    }
+
+    /// Resolve the effective input message for a sub-agent call (external
+    /// CLI or internal agent): reuse the last message when `input` is
+    /// omitted/empty, error when nothing is stored yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `input` is omitted and no sub-agent message is
+    /// stored in this session yet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    #[allow(clippy::unwrap_used)]
+    pub fn resolve_subagent_input(&self, input: Option<String>) -> Result<String, String> {
+        self.subagent.resolve_input(input)
+    }
+
     /// Set the list of RAG databases for the `recall_search` dispatch.
     #[cfg(feature = "embed")]
     pub fn set_recall_dbs(&mut self, dbs: Vec<RecallDb>) {
@@ -909,7 +941,13 @@ impl Tools for CoshTools {
             "subagent_call" => {
                 let input: SubAgentCallInput =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let agent = input.agent.clone();
+                // The harness routes `subagent_call` calls with a missing or
+                // empty `agent` to the INTERNAL sub-agent before reaching this
+                // arm, so reaching here means an external CLI was requested.
+                let agent = input
+                    .agent
+                    .clone()
+                    .ok_or_else(|| "missing 'agent'".to_string())?;
                 // Resolve the effective input before spawning the blocking
                 // call: when `input` is omitted, reuse the last message sent
                 // to a sub-agent in this session (stored on `self.subagent`).

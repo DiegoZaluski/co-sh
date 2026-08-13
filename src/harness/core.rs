@@ -1,9 +1,11 @@
 use super::context_manager::{ContextManager, MAX_CONTEXT_TOKENS, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
+use cosh_sdk::connector::{
+    ChatMessage, ClaudeThinkingBlock, Connector, ConnectorError, ToolDefinition,
+};
 #[cfg(not(test))]
 use cosh_sdk::connector::{discover_context_window, effective_context_window};
-use cosh_sdk::connector::{ChatMessage, ClaudeThinkingBlock, Connector, ConnectorError, ToolDefinition};
 use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
 use cosh_tools::TOOL_FORMAT;
 use rmcp::ServiceExt;
@@ -84,6 +86,38 @@ pub const INSTRUCTIONS_ASK: &str = concat!(
     "- If a tool returns an error, consider a different approach instead of retrying the same call.\n"
 );
 
+/// Base instructions for the INTERNAL sub-agent (the merged
+/// `subagent_call` internal path): a nested harness that runs the task
+/// with an empty context in Yolo mode. Deliberately does NOT mention
+/// sub-agents or `subagent_call` at all — the main agent's instructions
+/// mandate a code-review sub-agent loop, and exposing that here would
+/// make the sub-agent nest itself indefinitely. The sub-agent calls
+/// other sub-agents only if it decides to on its own.
+///
+/// `stop_agent_loop` is NOT available to the sub-agent (see
+/// [`SUBAGENT_BLOCKED_TOOLS`]): its only deliverable is the final text
+/// report, so the loop must end with a written answer — never a silent
+/// stop.
+pub const INSTRUCTIONS_SUBAGENT: &str = concat!(
+    "## Identity\n",
+    "You are Cosh, an expert software engineering agent executing a task delegated to you.\n\n",
+    "## Capabilities\n",
+    "- You have access to external tools for file operations, code execution, web search, and more.\n",
+    "- Tool invocation is defined entirely by each tool specification.\n",
+    "- The available tools and their specifications are listed below.\n\n",
+    "## Constraints\n",
+    "- Complete the delegated task directly and efficiently.\n",
+    "- Do not introduce yourself or volunteer information about your internal capabilities or available tools.\n",
+    "- Use a tool only when it is required to produce or verify the requested result.\n",
+    "- If the request can be completed correctly without using any tool, answer directly.\n",
+    "- Avoid unnecessary narration or descriptions of obvious actions.\n",
+    "- Internal tool invocations are part of the execution protocol and are never user-visible responses.\n",
+    "- Your ONLY deliverable is your final text response: the caller receives nothing but that text, so ALWAYS end by writing the complete answer/report of what you did as a normal text message.\n",
+    "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
+    "  Use that result to continue your response — do not call the same tool again with the same arguments.\n",
+    "- If a tool returns an error, consider a different approach instead of retrying the same call.\n"
+);
+
 /// Maximum consecutive tool-call failures before aborting the agent loop.
 const MAX_TOOL_RETRIES: usize = 3;
 
@@ -93,6 +127,29 @@ const MAX_TOOL_RETRIES: usize = 3;
 /// 20 was too low for real multi-step work (editing files, running tests,
 /// searching) — the loop force-stopped mid-task with a misleading `Done`.
 pub(crate) const MAX_ITERATIONS: u64 = 100;
+
+/// Tools disabled inside the internal sub-agent harness (the merged
+/// `subagent_call` internal path). The tools are removed from the
+/// sub-agent's schema AND extractor, so the model never even sees them:
+/// - `ask_questions` — needs a human in the loop; the sub-agent is headless
+///   and would hang waiting for an answer;
+/// - `vision_terminal` — needs a live terminal; the sub-agent is headless;
+/// - `stop_agent_loop` — the sub-agent's ONLY deliverable is its final text
+///   report. If it could stop the loop directly, a model might call it as
+///   its last action without writing the report (the caller would receive
+///   nothing). Blocked so the loop can only end with a written answer.
+///
+/// Add future blocklist entries here.
+pub(crate) const SUBAGENT_BLOCKED_TOOLS: &[&str] =
+    &["ask_questions", "vision_terminal", "stop_agent_loop"];
+
+/// Chunk interpolated into the `subagent_call` tool description (via
+/// [`SubAgent::set_note`]) so the model learns — naturally, inside the
+/// description prose — that omitting `agent` routes the call to an
+/// internal agent instead of an external CLI.
+const SUBAGENT_INTERNAL_NOTE: &str = "When the `agent` argument is omitted or empty, an internal agent runs \
+     the task instead — it starts with an empty context, runs in auto-approve \
+     mode, persists nothing, and returns only its final report.";
 
 /// Internal marker returned by stream functions when the user presses Esc
 /// to stop the current generation. Compared by identity (constant), not by
@@ -234,6 +291,10 @@ pub struct Harness {
     harness_tools: Vec<HarnessTool>,
     cosh_tools: Option<CoshTools>,
     mode: Mode,
+    /// Override for the mode-based base instructions (see
+    /// [`Self::with_instructions`]). The internal sub-agent uses its own
+    /// prompt so it never inherits the main agent's review-loop mandate.
+    instructions: Option<&'static str>,
     /// Shared stop signal from the TUI, checked during streaming.
     stop_signal: Option<Arc<AtomicBool>>,
     /// Event channel for streaming reasoning/thinking tokens to the TUI.
@@ -373,6 +434,11 @@ pub(crate) fn result_is_useless(name: &str, result: &str) -> bool {
 impl Harness {
     #[must_use]
     pub fn new(connector: Connector, cwd: &str, disabled_tools: HashSet<String>) -> Self {
+        let mut cosh_tools = CoshTools::new(cwd);
+        // Interpolate the internal-sub-agent note into the `subagent_call`
+        // tool description BEFORE the header is built: omitting `agent`
+        // routes the call to an internal agent instead of an external CLI.
+        cosh_tools.set_subagent_note(SUBAGENT_INTERNAL_NOTE);
         Self {
             connector,
             sessions: Vec::new(),
@@ -380,8 +446,9 @@ impl Harness {
             header_context: String::new(),
             system_prompts: Vec::new(),
             harness_tools: default_harness_tools(),
-            cosh_tools: Some(CoshTools::new(cwd)),
+            cosh_tools: Some(cosh_tools),
             mode: Mode::Build,
+            instructions: None,
             stop_signal: None,
             reasoning_tx: None,
             pending_thinking_blocks: Vec::new(),
@@ -501,6 +568,16 @@ impl Harness {
         self
     }
 
+    /// Override the mode-based base instructions (e.g. the internal
+    /// sub-agent prompt). When set,
+    /// [`format_header_context`](Self::format_header_context) uses this text
+    /// instead of `INSTRUCTIONS_BUILD`/`INSTRUCTIONS_ASK`.
+    #[must_use]
+    pub const fn with_instructions(mut self, instructions: &'static str) -> Self {
+        self.instructions = Some(instructions);
+        self
+    }
+
     /// Inject the RAG database context into the `recall_search` tool description.
     ///
     /// The `suffix` describes which knowledge bases are available so the
@@ -538,9 +615,12 @@ impl Harness {
     pub fn format_header_context(&mut self) -> &str {
         let mut out = String::new();
 
-        let instructions = match self.mode {
-            Mode::Build | Mode::Yolo => INSTRUCTIONS_BUILD,
-            Mode::Ask => INSTRUCTIONS_ASK,
+        let instructions = match self.instructions {
+            Some(ins) => ins,
+            None => match self.mode {
+                Mode::Build | Mode::Yolo => INSTRUCTIONS_BUILD,
+                Mode::Ask => INSTRUCTIONS_ASK,
+            },
         };
         let _ = write!(out, "{instructions}");
         // All providers officially recommend native function calling and warn
@@ -1747,7 +1827,8 @@ impl Harness {
                 // spot" sizing, see `effective_context_window`). The RAW
                 // window is kept above in `discovered_window`, where it still
                 // drives the split-and-concatenate contingency.
-                self.context_manager.set_max_tokens(effective_context_window(window));
+                self.context_manager
+                    .set_max_tokens(effective_context_window(window));
             }
         }
 
@@ -2713,6 +2794,36 @@ impl Harness {
             (tc.name.clone(), args_map.clone())
         };
 
+        // The merged `subagent_call` tool has TWO dispatch paths behind one
+        // visible definition: `agent` present → external CLI (the CoshTools
+        // arm below); `agent` omitted or empty → INTERNAL sub-agent (a nested
+        // harness that reuses this connector, starts with an empty context,
+        // runs in Yolo mode, persists nothing, and reports only its final
+        // answer). The internal path needs this harness's connector and stop
+        // signal, so it is routed here, at harness level, before Tier 1.
+        if tool_name == "subagent_call" {
+            let agent_empty = args_map
+                .get("agent")
+                .and_then(|v| v.as_str())
+                .is_none_or(|a| a.trim().is_empty());
+            if agent_empty {
+                // Pop BEFORE any fallible step: dispatch_next consumes the
+                // item on both success and error, so the caller never
+                // re-dispatches a failed internal call.
+                self.tool_issuer.pop_front();
+                let input = args_map
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let call_input = self
+                    .cosh_tools
+                    .as_ref()
+                    .ok_or_else(|| "internal sub-agent unavailable".to_string())?
+                    .resolve_subagent_input(input)?;
+                return self.run_internal_subagent(call_input).await;
+            }
+        }
+
         // Tier 1: cosh tools
         let mut dispatched: Option<String> = None;
         if let Some(ref cosh) = self.cosh_tools {
@@ -2769,6 +2880,179 @@ impl Harness {
 
         Ok(text)
     }
+
+    /// Run the INTERNAL sub-agent path of the merged `subagent_call` tool:
+    /// a nested [`Harness`] that reuses this connector (same provider/model),
+    /// starts with an EMPTY context (no history, no `.ctx`), runs in
+    /// [`Mode::Yolo`] (approval was already asked at the parent tool gate),
+    /// and persists nothing. It runs on its OWN THREAD with a dedicated
+    /// current-thread runtime (the same pattern the TUI uses): a nested
+    /// harness is itself a full agent loop, and awaiting it inline would
+    /// make `run_agent_loop`'s future recursive (an infinitely sized type),
+    /// while the harness type is not `Send` (it owns the MCP client). Its
+    /// events are bridged to the TUI as a plain `ToolOutput` stream — the
+    /// tools it calls and any snapshot/summary events are dropped, so the
+    /// main agent never sees its intermediate work and nothing is written
+    /// to disk. Only the final report (the nested loop's `LoopClosure`) is
+    /// returned as the tool result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the nested harness ends WITHOUT a final text
+    /// report (connector error, user stop, model never answering), when its
+    /// thread panicked, or when the channel closed — the real reason is
+    /// surfaced instead of a silent empty result.
+    #[allow(clippy::unwrap_used)]
+    async fn run_internal_subagent(&mut self, input: String) -> Result<String, String> {
+        // The sub-agent cannot ask the user questions, capture the live
+        // terminal, or stop the loop on its own (it must end with a written
+        // report — see SUBAGENT_BLOCKED_TOOLS); those tools are disabled so
+        // the model never sees them.
+        let mut disabled = self.disabled_tools.clone();
+        disabled.extend(SUBAGENT_BLOCKED_TOOLS.iter().map(|t| t.to_string()));
+
+        let cwd = self
+            .cosh_tools
+            .as_ref()
+            .map(|c| c.project_root().to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        let connector = self.connector.clone();
+        let fallbacks = self.fallbacks.clone();
+        let parent_tx = self.cosh_tools.as_ref().and_then(|c| c.event_tx());
+        let stop_signal = self
+            .stop_signal
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        // Clone used only to distinguish "user stopped" after the loop
+        // (the original is moved into the nested harness).
+        let stop_check = stop_signal.clone();
+
+        let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        std::thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
+
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = result_tx.send(Err(format!("internal sub-agent runtime: {e}")));
+                    return;
+                }
+            };
+            // A panic in the nested loop must not take down the parent:
+            // catch it and surface it as a tool error instead.
+            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                rt.block_on(async move {
+                    let mut nested = Harness::new(connector, &cwd, disabled)
+                        .with_mode(Mode::Yolo)
+                        .with_instructions(INSTRUCTIONS_SUBAGENT)
+                        .with_fallbacks(fallbacks);
+                    // The header (instructions + tool list) is NOT built by
+                    // run_agent_loop itself — the TUI does it before every
+                    // loop. Build it here so the sub-agent sees its own
+                    // prompt and its own (blocklisted) tool set.
+                    nested.format_header_context();
+
+                    // Bridge: forward ONLY the sub-agent's text stream to
+                    // the TUI (as `ToolOutput` under the shared tool name).
+                    // Tool calls/results, snapshots, compaction and Done are
+                    // dropped; the loop's fatal Error (if any) is captured
+                    // so a failure is surfaced instead of masked.
+                    let (nested_tx, mut nested_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<super::events::HarnessEvent>();
+                    let bridge_tx = parent_tx.clone();
+                    let last_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+                    let err_capture = last_error.clone();
+                    let bridge = tokio::spawn(async move {
+                        while let Some(event) = nested_rx.recv().await {
+                            match event {
+                                super::events::HarnessEvent::Token { text }
+                                | super::events::HarnessEvent::Reasoning { text } => {
+                                    if let Some(tx) = &bridge_tx {
+                                        let _ = tx.send(super::events::HarnessEvent::ToolOutput {
+                                            tool: "subagent_call".to_string(),
+                                            output: text,
+                                            finished: false,
+                                        });
+                                    }
+                                }
+                                super::events::HarnessEvent::Error(e) => {
+                                    *err_capture.lock().unwrap() = Some(e);
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+
+                    nested
+                        .run_agent_loop(&input, nested_tx, answer_rx, perm_rx, stop_signal)
+                        .await;
+
+                    // The nested loop already closes its own context on every
+                    // normal exit; the defensive call is idempotent (a no-op
+                    // when the last item is not an assistant draft). The
+                    // report is the LoopClosure content.
+                    nested.context_manager.close_loop();
+                    let final_answer = nested.context_manager.final_answer();
+                    // Release the nested harness (and its event-tx clones) so
+                    // the bridge drains every buffered event, then join it.
+                    drop(nested);
+                    let _ = bridge.await;
+
+                    match final_answer {
+                        Some(report) => {
+                            if let Some(tx) = &parent_tx {
+                                let _ = tx.send(super::events::HarnessEvent::ToolOutput {
+                                    tool: "subagent_call".to_string(),
+                                    output: report.clone(),
+                                    finished: true,
+                                });
+                            }
+                            Ok(report)
+                        }
+                        None => {
+                            // The loop ended WITHOUT a final text (e.g. a
+                            // connector error, a user stop, or the model
+                            // never writing an answer). Surface the real
+                            // reason instead of silently returning an empty
+                            // result — the caller must be able to adapt.
+                            let reason = last_error.lock().unwrap().clone().unwrap_or_else(|| {
+                                if stop_check.load(Ordering::Relaxed) {
+                                    "the internal sub-agent was stopped by the user".to_string()
+                                } else {
+                                    "the internal sub-agent ended without producing a \
+                                         final report"
+                                        .to_string()
+                                }
+                            });
+                            Err(format!("internal sub-agent failed: {reason}"))
+                        }
+                    }
+                })
+            }));
+            let _ = result_tx.send(match outcome {
+                Ok(report) => report,
+                Err(panic) => {
+                    let msg = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    Err(format!("internal sub-agent panicked: {msg}"))
+                }
+            });
+        });
+
+        let report = result_rx
+            .await
+            .map_err(|_| "internal sub-agent thread ended without a result".to_string())??;
+        Ok(report)
+    }
 }
 
 #[cfg(test)]
@@ -2785,6 +3069,7 @@ impl Harness {
             harness_tools: default_harness_tools(),
             cosh_tools: None,
             mode: Mode::Build,
+            instructions: None,
             stop_signal: None,
             reasoning_tx: None,
             pending_thinking_blocks: Vec::new(),

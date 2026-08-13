@@ -378,3 +378,102 @@ async fn dispatch_next_multiple_calls_sequential() {
     drop(h);
     let _ = server_handle.await;
 }
+
+// ── Merged subagent_call routing ──────────────────────────────────
+//
+// `subagent_call` is ONE visible tool with TWO dispatch paths: an external
+// agent CLI when `agent` is provided, or an INTERNAL sub-agent (nested
+// harness) when `agent` is omitted/empty. Routing happens in
+// `dispatch_next` before the cosh-tools tier.
+
+#[tokio::test]
+async fn dispatch_next_routes_empty_agent_subagent_call_to_internal_path() {
+    let mut h = make_harness();
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "subagent_call".into(),
+        // No `agent` → must take the INTERNAL path (new_test has no
+        // CoshTools, so the internal path reports it is unavailable).
+        arguments: json!({ "input": "review this" }),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(err.contains("internal sub-agent"), "got: {err}");
+    // Dispatch contract: the item is consumed even on error, so the caller
+    // never re-dispatches the same failed call.
+    assert!(
+        h.dispatch_next().await.unwrap_err().contains("no pending"),
+        "the routed item must be consumed even on error"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_next_routes_empty_string_agent_subagent_call_to_internal_path() {
+    let mut h = make_harness();
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "subagent_call".into(),
+        // `agent: ""` is treated exactly like omitting it.
+        arguments: json!({ "agent": "", "input": "x" }),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(err.contains("internal sub-agent"), "got: {err}");
+}
+
+#[tokio::test]
+async fn dispatch_next_keeps_external_subagent_path_with_agent() {
+    let mut h = make_harness();
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "subagent_call".into(),
+        arguments: json!({ "agent": "opencode", "input": "x" }),
+        thought_signature: String::new(),
+    });
+    // Agent present → NOT intercepted: falls through to the tiers (new_test
+    // has no cosh tools or sessions, so it reaches the MCP tier).
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(err.contains("no server found"), "got: {err}");
+}
+
+#[test]
+fn internal_subagent_note_is_interpolated_into_the_tool_description() {
+    use std::collections::HashSet;
+
+    use cosh_sdk::connector::Connector;
+
+    // `Harness::new` (not the test constructor) sets the internal-sub-agent
+    // note on the `subagent_call` description.
+    let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
+    let header = h.format_header_context();
+    assert!(
+        header.contains("an internal agent runs the task instead"),
+        "the internal-sub-agent note must be interpolated into the description"
+    );
+}
+
+#[test]
+fn internal_subagent_header_hides_blocked_tools_and_uses_subagent_prompt() {
+    use std::collections::HashSet;
+
+    use super::super::core::{INSTRUCTIONS_SUBAGENT, Mode, SUBAGENT_BLOCKED_TOOLS};
+    use cosh_sdk::connector::Connector;
+
+    // Mirror the nested harness construction: parent disabled set + the
+    // sub-agent blocklist, Yolo mode, and the sub-agent instructions.
+    let mut disabled: HashSet<String> = HashSet::new();
+    disabled.extend(SUBAGENT_BLOCKED_TOOLS.iter().map(|t| t.to_string()));
+    let mut h = Harness::new(Connector::new("openai").unwrap(), ".", disabled)
+        .with_mode(Mode::Yolo)
+        .with_instructions(INSTRUCTIONS_SUBAGENT);
+    let header = h.format_header_context();
+    for blocked in SUBAGENT_BLOCKED_TOOLS {
+        assert!(
+            !header.contains(blocked),
+            "blocked tool `{blocked}` must not appear in the sub-agent header"
+        );
+    }
+    // The sub-agent must never inherit the main agent's review-loop mandate
+    // (that is what would make it nest sub-agents indefinitely).
+    assert!(!header.contains("Self-Review Loop"));
+}

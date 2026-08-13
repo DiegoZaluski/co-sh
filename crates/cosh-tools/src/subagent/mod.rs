@@ -1,8 +1,11 @@
-//! Tool for calling sub-agent CLIs.
+//! Tool for calling sub-agents.
 //!
-//! Each call spawns the agent CLI as a child process with the input passed
-//! as a command-line argument, streams output in real time, and returns
-//! the accumulated result when the process exits.
+//! The model sees a single `subagent_call` tool, but the harness dispatches
+//! it to two implementations (see [`SubAgent`]): an external agent CLI —
+//! spawned as a child process with the input passed as a command-line
+//! argument, streamed in real time, accumulating the result until exit —
+//! or, when `agent` is omitted/empty, an internal agent (a nested harness
+//! that reports only its final answer).
 //!
 //! # Supported agents
 //!
@@ -41,7 +44,15 @@ use std::sync::Mutex;
 use crate::ToolDescription;
 pub use types::{SubAgentCallInput, SubAgentCallOutput};
 
-/// Tool for calling sub-agent CLIs.
+/// Tool for calling sub-agents.
+///
+/// A SINGLE visible tool dispatches to two implementations — the model
+/// sees only one: an external agent CLI when `agent` is provided, or an
+/// internal agent (a nested harness: fresh empty context, auto-approve,
+/// no persistence, final report only) when `agent` is omitted or empty.
+/// The harness routes the call; this struct owns the visible schema, the
+/// optional description `note` (see [`set_note`](Self::set_note)) and the
+/// last-input storage.
 ///
 /// Each instance keeps the last input message sent to a sub-agent, so a
 /// retry after a failed call does not require re-writing the whole prompt.
@@ -50,6 +61,9 @@ pub use types::{SubAgentCallInput, SubAgentCallOutput};
 pub struct SubAgent {
     /// MCP Tool description for `call`.
     pub description_call: ToolDescription,
+    /// Optional informational chunk interpolated naturally into the tool
+    /// description (see [`set_note`](Self::set_note)).
+    note: String,
     /// Last input message sent to a sub-agent in this session, reused when
     /// a call omits `input`.
     last_input: Mutex<Option<String>>,
@@ -65,16 +79,68 @@ impl SubAgent {
     /// Create a new `SubAgent` with a tool description tailored to
     /// only the agent CLIs that are actually installed in PATH.
     /// Detection runs once per process (cached by `detect_installed()`).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            description_call: Self::build_tool_description(""),
+            note: String::new(),
+            last_input: Mutex::new(None),
+        }
+    }
+
+    /// Set an informational chunk that is interpolated NATURALLY into the
+    /// tool description (inside the description prose — not prepended as a
+    /// notice). The harness uses this to tell the model that omitting
+    /// `agent` routes the call to an internal agent instead of an external
+    /// CLI.
+    ///
+    /// Rebuilds [`Self::description_call`] with the new chunk; an empty
+    /// chunk keeps the original description byte-for-byte.
+    pub fn set_note(&mut self, note: impl Into<String>) {
+        self.note = note.into().trim().to_string();
+        self.description_call = Self::build_tool_description(&self.note);
+    }
+
+    /// Build the full tool description (prose + input schema), tailoring the
+    /// agent list to the CLIs actually installed in PATH, and interpolating
+    /// the given `note` into the description's natural flow.
     ///
     /// # Panics
     ///
     /// Panics if an agent returned by `detect_installed()` is not present
     /// in [`AGENTS`](call::AGENTS). This is a logic invariant — detection
     /// only returns names that exist in the table.
-    #[must_use]
     #[allow(clippy::expect_used, clippy::format_collect)]
-    pub fn new() -> Self {
+    fn build_tool_description(note: &str) -> ToolDescription {
         let installed = call::detect_installed();
+
+        // The note lands as the tail of the FIRST paragraph, so it reads as
+        // part of the instructions ("...headless operation. When the `agent`
+        // argument is omitted or empty, ...") instead of a prepended notice.
+        // An empty note reproduces the original text exactly.
+        let note = if note.is_empty() {
+            String::new()
+        } else {
+            format!(" {note}")
+        };
+        let common = format!(
+            "Call a supported agent CLI with the given input message and \
+             return its output. The agent runs as a child process; output \
+             is streamed in real time. All agents are configured with \
+             auto-approval flags for headless operation.{note}\n\
+             `input` is optional: if omitted, the last message sent to a \
+             sub-agent in this session is reused automatically, so a failed \
+             call can be retried without re-writing the prompt. If no \
+             sub-agent has been called yet, an error is returned."
+        );
+        let usage = "## When to use\n\
+                     - Use `subagent_call` with `agent` (and optionally `input`) \
+                     to delegate a task to another agent CLI.\n\
+                     - Omit `input` to reuse the last message sent to a sub-agent.\n\
+                     - Omit `agent` (or pass an empty string) to call the internal \
+                     agent instead of an external CLI.\n\
+                     - Use `bash_run` for regular shell commands. \
+                     These are separate tools with different purposes.";
 
         let description = if installed.is_empty() {
             // No agents installed — the LLM will see this and likely
@@ -84,22 +150,7 @@ impl SubAgent {
                  ## Supported agents\n\
                  (None detected — install one of: opencode, claude, aider, etc.\n\
                   and restart cosh.)\n\
-                 {usage}",
-                common = "Call a supported agent CLI with the given input message and \
-                          return its output. The agent runs as a child process; output \
-                          is streamed in real time. All agents are configured with \
-                          auto-approval flags for headless operation.\n\
-                          `input` is optional: if omitted, the last message sent \
-                          to a sub-agent in this session is reused automatically, \
-                          so a failed call can be retried without re-writing the \
-                          prompt. If no sub-agent has been called yet, an error \
-                          is returned.",
-                usage = "## When to use\n\
-                         - Use `subagent_call` with `agent` (and optionally `input`) \
-                         to delegate a task to another agent CLI.\n\
-                         - Omit `input` to reuse the last message sent to a sub-agent.\n\
-                         - Use `bash_run` for regular shell commands. \
-                         These are separate tools with different purposes.",
+                 {usage}"
             )
         } else {
             let agents_desc = installed
@@ -121,22 +172,7 @@ impl SubAgent {
                 "{common}\n\
                  ## Supported agents\n\
                  {agents_desc}\n\
-                 {usage}",
-                common = "Call a supported agent CLI with the given input message and \
-                          return its output. The agent runs as a child process; output \
-                          is streamed in real time. All agents are configured with \
-                          auto-approval flags for headless operation.\n\
-                          `input` is optional: if omitted, the last message sent \
-                          to a sub-agent in this session is reused automatically, \
-                          so a failed call can be retried without re-writing the \
-                          prompt. If no sub-agent has been called yet, an error \
-                          is returned.",
-                usage = "## When to use\n\
-                         - Use `subagent_call` with `agent` (and optionally `input`) \
-                         to delegate a task to another agent CLI.\n\
-                         - Omit `input` to reuse the last message sent to a sub-agent.\n\
-                         - Use `bash_run` for regular shell commands. \
-                         These are separate tools with different purposes.",
+                 {usage}"
             )
         };
 
@@ -154,7 +190,7 @@ impl SubAgent {
                 .collect()
         };
 
-        let description_call: ToolDescription = serde_json::json!({
+        serde_json::json!({
             "name": "subagent_call",
             "description": description,
             "inputSchema": {
@@ -162,22 +198,17 @@ impl SubAgent {
                 "properties": {
                     "agent": {
                         "type": "string",
-                        "description": "The agent CLI to call.",
+                        "description": "The agent CLI to call. Optional: if omitted (or empty), an internal agent runs the task instead — a fresh nested harness with an empty context, in auto-approve mode, that persists nothing and returns only its final report.",
                         "enum": enum_values,
                     },
                     "input": {
                         "type": "string",
-                        "description": "The message to send to the agent CLI as input. Optional: if omitted (or empty), the last message sent to a sub-agent in this session is reused automatically, so a failed call can be retried without re-writing the prompt. If no sub-agent has been called yet, an error is returned.",
+                        "description": "The message to send to the sub-agent as input. Optional: if omitted (or empty), the last message sent to a sub-agent in this session is reused automatically, so a failed call can be retried without re-writing the prompt. If no sub-agent has been called yet, an error is returned.",
                     },
                 },
-                "required": ["agent"],
+                "required": [],
             },
-        });
-
-        Self {
-            description_call,
-            last_input: Mutex::new(None),
-        }
+        })
     }
 
     /// Resolve the effective input message for a sub-agent call.
@@ -296,5 +327,84 @@ mod tests {
             .unwrap();
 
         assert!(second.resolve_input(None).is_err());
+    }
+
+    #[test]
+    fn empty_note_keeps_original_description() {
+        let fresh = SubAgent::new();
+        let mut with_note = SubAgent::new();
+        with_note.set_note("");
+        assert_eq!(with_note.description_call, fresh.description_call);
+    }
+
+    #[test]
+    fn note_is_interpolated_inside_the_description_flow() {
+        let mut sub = SubAgent::new();
+        let fresh = sub.description_call.clone();
+        let before = fresh["description"].as_str().unwrap();
+        assert!(
+            !before.contains("internal agent runs the task instead"),
+            "the note must be absent by default"
+        );
+
+        sub.set_note(
+            "When the `agent` argument is omitted or empty, an internal \
+             agent runs the task instead.",
+        );
+        let after = sub.description_call["description"].as_str().unwrap();
+
+        // Interpolated as the tail of the FIRST paragraph: right after the
+        // headless-operation sentence and BEFORE the `input` paragraph — not
+        // prepended at the top.
+        assert!(after.contains(
+            "headless operation. When the `agent` argument is omitted or \
+             empty, an internal agent runs the task instead.\n`input` is \
+             optional"
+        ));
+        assert!(
+            after.starts_with("Call a supported agent CLI"),
+            "the description must still start with the original prose"
+        );
+    }
+
+    #[test]
+    fn schema_agent_is_optional_and_required_is_empty() {
+        let sub = SubAgent::new();
+        let schema = &sub.description_call["inputSchema"];
+        let required = schema["required"].as_array().unwrap();
+        assert!(
+            required.is_empty(),
+            "neither `agent` nor `input` is required (empty required array)"
+        );
+        assert!(
+            schema["properties"]["agent"]["enum"].is_array(),
+            "the agent enum (installed CLIs) must still be present"
+        );
+    }
+
+    #[test]
+    fn input_parses_without_agent_as_none() {
+        let input: super::SubAgentCallInput =
+            serde_json::from_value(serde_json::json!({ "input": "hi" })).unwrap();
+        assert!(input.agent.is_none());
+        assert_eq!(input.input.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn input_parses_empty_agent_as_some_empty() {
+        let input: super::SubAgentCallInput =
+            serde_json::from_value(serde_json::json!({ "agent": "" })).unwrap();
+        assert_eq!(input.agent.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn input_parses_with_agent() {
+        let input: super::SubAgentCallInput = serde_json::from_value(serde_json::json!({
+            "agent": "opencode",
+            "input": "review this"
+        }))
+        .unwrap();
+        assert_eq!(input.agent.as_deref(), Some("opencode"));
+        assert_eq!(input.input.as_deref(), Some("review this"));
     }
 }

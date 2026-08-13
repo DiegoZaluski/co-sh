@@ -1071,6 +1071,18 @@ impl ContextManager {
         });
     }
 
+    /// The final text of a completed agent loop: the `LoopClosure` content
+    /// of the last item, set by [`Self::close_loop`]. `None` when the loop
+    /// was not closed or the last item is not the loop closure (e.g. the
+    /// last turn ended in a tool call).
+    #[must_use]
+    pub fn final_answer(&self) -> Option<String> {
+        match self.items.back() {
+            Some(ContextItem::LoopClosure { content, .. }) => Some(content.clone()),
+            _ => None,
+        }
+    }
+
     // Compaction
 
     /// Per-iteration tick: run the 80% compaction when the held context
@@ -2168,11 +2180,7 @@ impl ContextManager {
         // cost.
         #[cfg(debug_assertions)]
         {
-            let brute: usize = self
-                .items
-                .iter()
-                .map(|it| it.tokens(self.encoding))
-                .sum();
+            let brute: usize = self.items.iter().map(|it| it.tokens(self.encoding)).sum();
             debug_assert_eq!(
                 self.cached_items_tokens, brute,
                 "cached token total drifted from items ({}, expected {})",
