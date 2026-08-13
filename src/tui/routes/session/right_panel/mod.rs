@@ -15,7 +15,9 @@ pub mod todo;
 pub mod types;
 
 use todo::{render_todo_section, todo_section_height};
-use types::{PtySession, RightPanelState, sanitize_subagent_text, split_subagent_output};
+use types::{
+    PtySession, RightPanelState, SubagentBodyCache, sanitize_subagent_text, split_subagent_output,
+};
 
 pub fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
@@ -26,6 +28,20 @@ pub fn rgba_color(rgba: RGBA) -> Color {
 pub const RIGHT_PANEL_WIDTH: u16 = 42;
 /// Gap (in rows) between consecutive sections.
 const SECTION_GAP: i32 = 1;
+
+/// Total byte budget for the cached rendered subagent bodies. Real sessions
+/// hold 1-3 entries (a few MB); when the accumulated output of many sessions
+/// exceeds this, the whole cache is dropped and simply re-rendered (rare).
+const SUBAGENT_BODY_CACHE_BUDGET: usize = 16 * 1024 * 1024;
+
+/// Stable key for the body cache across theme switches: the markdown palette
+/// derives from the text fg and the box bg, so a live theme change must
+/// invalidate the cached cells (which carry concrete colors).
+fn subagent_theme_key(theme: &Theme) -> u64 {
+    let (tr, tg, tb, _) = theme.text.to_ints();
+    let (br, bg, bb, _) = theme.background_element.to_ints();
+    u64::from_le_bytes([tr, tg, tb, br, bg, bb, 0, 0])
+}
 
 /// Determine whether the right panel should be visible based on terminal width and content.
 pub fn should_show_right_panel(terminal_width: u16, state: &RightPanelState) -> bool {
@@ -365,10 +381,11 @@ fn render_subagent_section(
     };
 
     let text_style = Style::default().fg(rgba_color(theme.text));
+    let theme_key = subagent_theme_key(theme);
     let content_bottom = scroll_y + i32::from(inner_h);
     let mut content_row: i32 = 0;
 
-    for (session, &sess_rows) in sessions.iter().zip(rows.iter()) {
+    for (session_idx, (session, &sess_rows)) in sessions.iter().zip(rows.iter()).enumerate() {
         let sess_rows = i32::from(sess_rows);
         let (input_line, body) = split_subagent_output(&session.output);
         let body_start = content_row + 1 + i32::from(input_line.is_some());
@@ -394,37 +411,87 @@ fn render_subagent_section(
                 draw_text(buf, input, x + LEFT_PAD, line_y, wrap_w, text_style);
             }
         }
-        // Markdown body: render the full body into the scratch and blit only
-        // the rows that intersect the visible window.
+        // Markdown body: blit the visible slice of the previously rendered
+        // cells (cache hit), or re-render the full body into the scratch and
+        // store the cells when the content, wrap width or theme changed. The
+        // renderer lays out from content row 0, so the full body must be
+        // rendered on a miss — but that happens once per streamed chunk, not
+        // every frame (re-rendering the whole body per frame was the
+        // right-panel frame bottleneck).
         let body_h = sess_rows - 1 - i32::from(input_line.is_some());
         if body_h > 0 && body_start < content_bottom && sess_end > scroll_y {
             let clean = sanitize_subagent_text(body);
             if !clean.trim().is_empty() {
                 let body_h_u = body_h as u16;
-                let area = Rect::new(0, 0, wrap_w, body_h_u);
-                let scratch = subagent_scratch.get_or_insert_with(|| Buffer::empty(area));
-                if *scratch.area() != area {
-                    scratch.resize(area);
-                }
-                let mut md = MarkdownRenderable::new(Some(clean));
-                md.set_fg(Some(ColorInput::RGBA(theme.text)));
-                md.set_bg(Some(ColorInput::RGBA(theme.background_element)));
-                md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(
-                    255, 200, 0, 255,
-                ))));
-                md.render_self(scratch, area);
+                let hit = state
+                    .subagent_body_cache
+                    .get(session_idx)
+                    .and_then(|e| e.as_ref())
+                    .is_some_and(|e| {
+                        e.id == session.id
+                            && e.layout_gen == state.subagent_layout_gen
+                            && e.wrap_w == wrap_w
+                            && e.h == body_h_u
+                            && e.theme_key == theme_key
+                    });
+                if !hit {
+                    let area = Rect::new(0, 0, wrap_w, body_h_u);
+                    let scratch = subagent_scratch.get_or_insert_with(|| Buffer::empty(area));
+                    if *scratch.area() != area {
+                        scratch.resize(area);
+                    }
+                    let mut md = MarkdownRenderable::new(Some(clean));
+                    md.set_fg(Some(ColorInput::RGBA(theme.text)));
+                    md.set_bg(Some(ColorInput::RGBA(theme.background_element)));
+                    md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(
+                        255, 200, 0, 255,
+                    ))));
+                    md.render_self(scratch, area);
 
+                    // Keep the rendered cells for the next frames (row-major).
+                    let mut cells = Vec::with_capacity(wrap_w as usize * body_h_u as usize);
+                    for dy in 0..body_h_u {
+                        for dx in 0..wrap_w {
+                            cells.push(scratch.cell((dx, dy)).cloned().unwrap_or_default());
+                        }
+                    }
+                    // Bound the total cache: on overflow, drop everything
+                    // (re-render is correct, just rare).
+                    let bytes = cells.len() * std::mem::size_of::<ratatui::buffer::Cell>();
+                    let total: usize = state
+                        .subagent_body_cache
+                        .iter()
+                        .flatten()
+                        .map(|e| e.cells.len() * std::mem::size_of::<ratatui::buffer::Cell>())
+                        .sum::<usize>()
+                        .saturating_add(bytes);
+                    if total > SUBAGENT_BODY_CACHE_BUDGET {
+                        state.subagent_body_cache.clear();
+                    }
+                    while state.subagent_body_cache.len() <= session_idx {
+                        state.subagent_body_cache.push(None);
+                    }
+                    state.subagent_body_cache[session_idx] = Some(SubagentBodyCache {
+                        id: session.id.clone(),
+                        layout_gen: state.subagent_layout_gen,
+                        wrap_w,
+                        h: body_h_u,
+                        theme_key,
+                        cells,
+                    });
+                }
+
+                // Blit the visible slice from the cached cells.
+                let cached = state.subagent_body_cache[session_idx].as_ref().unwrap();
                 let first_vis = scroll_y.max(body_start);
                 let last_vis = content_bottom.min(sess_end);
                 for cr in first_vis..last_vis {
                     let body_row = (cr - body_start) as u16;
                     let dst_y = inner_y + (cr - scroll_y) as u16;
+                    let base = body_row as usize * wrap_w as usize;
                     for dx in 0..wrap_w {
-                        if let Some(src) = scratch.cell((dx, body_row))
-                            && let Some(dst) = buf.cell_mut((x + LEFT_PAD + dx, dst_y))
-                        {
-                            dst.set_symbol(src.symbol());
-                            dst.set_style(src.style());
+                        if let Some(dst) = buf.cell_mut((x + LEFT_PAD + dx, dst_y)) {
+                            *dst = cached.cells[base + dx as usize].clone();
                         }
                     }
                 }
@@ -588,6 +655,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The rendered body cells are cached per session: after the first
+    /// render the entry matches the layout generation and wrap width, and a
+    /// second render (no content change) serves the same cells — the blit
+    /// must produce a byte-identical buffer to the fresh render.
+    #[test]
+    fn subagent_body_cache_is_populated_and_served() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty("# Title\n\nSome **bold** body.\n".to_string());
+        let theme = test_theme();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 20));
+
+        render_subagent_section(&mut buf, 0, 0, 50, 20, &mut state, &theme);
+
+        let entry = state
+            .subagent_body_cache
+            .first()
+            .and_then(|e| e.as_ref())
+            .expect("body cache entry after first render");
+        let (id, layout_gen, wrap_w, h) =
+            (entry.id.clone(), entry.layout_gen, entry.wrap_w, entry.h);
+        assert_eq!(id, "pty-1");
+        assert_eq!(layout_gen, state.subagent_layout_gen);
+        assert_eq!(wrap_w, 50 - 3, "box width minus left+right padding");
+        assert_eq!(h, entry.cells.len() as u16 / wrap_w);
+
+        let mut buf2 = Buffer::empty(Rect::new(0, 0, 50, 20));
+        render_subagent_section(&mut buf2, 0, 0, 50, 20, &mut state, &theme);
+
+        let served = state
+            .subagent_body_cache
+            .first()
+            .and_then(|e| e.as_ref())
+            .expect("body cache entry after second render");
+        assert_eq!(served.layout_gen, layout_gen, "cache served, not rebuilt");
+        assert_eq!(buf, buf2, "cached-cell blit must match the fresh render");
     }
 
     /// A table's border glyphs (which read as a hard "edge") stay clear of

@@ -8,8 +8,19 @@ const MAX_PTY_SESSIONS: usize = 20;
 /// Only the TAIL is kept, since the panel renders the most recent output.
 const MAX_PTY_OUTPUT_CHARS: usize = 60_000;
 
+use std::time::{Duration, Instant};
+
 use cosh_tui::core::renderables::markdown::estimate_height;
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, Cell};
+
+/// Minimum gap between subagent layout rebuilds (heights + rendered body
+/// cells). During streaming, chunks arrive far more often than the eye can
+/// track; rebuilding the whole accumulated body on EVERY chunk re-parses up
+/// to 60k chars per frame and stalls the TUI (especially in debug builds).
+/// Rebuilds are coalesced to at most one per interval — frames in between
+/// serve the previous cells, stale by less than one interval, which is
+/// invisible in a streaming panel.
+pub(crate) const SUBAGENT_REBUILD_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Split a subagent PTY output into the optional main-agent input line
 /// (`→ cosh: ...`, prepended by `app.rs` when the tool call carries an
@@ -33,6 +44,29 @@ pub(crate) fn sanitize_subagent_text(text: &str) -> String {
     text.chars()
         .filter(|ch| !ch.is_control() || *ch == '\n')
         .collect()
+}
+
+/// Cached rendered markdown cells of one subagent body. Frames between
+/// streamed chunks blit these cells instead of re-running the markdown
+/// renderer over the whole (up to 60k-char) body every frame.
+#[derive(Debug, Clone)]
+pub(crate) struct SubagentBodyCache {
+    /// Session id the entry belongs to — entries are matched by id, not
+    /// index, so session eviction never serves stale cells.
+    pub(crate) id: String,
+    /// `subagent_layout_gen` the cells were rendered for — the shared layout
+    /// generation that keeps heights and bodies consistent (see
+    /// [`RightPanelState::subagent_layout_gen`]).
+    pub(crate) layout_gen: u64,
+    /// Wrap width the cells were laid out at.
+    pub(crate) wrap_w: u16,
+    /// Body rows (`cells.len() == wrap_w as usize * h as usize`).
+    pub(crate) h: u16,
+    /// Theme colors the cells were styled with (fg + box bg) — the palette
+    /// derives from these, so a live theme switch must invalidate.
+    pub(crate) theme_key: u64,
+    /// Row-major rendered cells, `wrap_w` × `h`.
+    pub(crate) cells: Vec<Cell>,
 }
 
 /// A single todo item from the LLM's plan_todo_write tool.
@@ -90,14 +124,13 @@ pub struct RightPanelState {
     /// Monotonically increasing counter for section activation order.
     /// Higher value = more recently activated.
     next_activity_id: u64,
+    /// Current PTY mutation generation. Bumped on every output change; used
+    /// to invalidate the derived caches (heights + rendered bodies).
+    pub(crate) pty_gen: u64,
     /// Per-section activation order values. Index by `section_kind_index()`.
     section_activity_order: [u64; 3],
 
     // ── Derived buffer caches (avoid rebuilding all accumulated output per frame) ──
-    /// Bumped on every PTY mutation; the derived text buffers are rebuilt only
-    /// when this changes. Without this, every frame rebuilt the FULL output of
-    /// every bash/subagent session twice (height calc + render).
-    pty_gen: u64,
     /// Cached bash line buffer (`$ command` + output lines), keyed to `pty_gen`.
     bash_buffer_cache: Vec<String>,
     bash_cache_gen: u64,
@@ -116,17 +149,37 @@ pub struct RightPanelState {
     // ── Subagent markdown layout cache ────────────────────────────
     /// Cached per-session content rows (command header + optional input
     /// line + markdown body rows) for the subagent section, keyed to
-    /// `pty_gen` and the wrap width. Rebuilt only when output or width
-    /// changes — `estimate_height` (a pulldown_cmark parse) is too
+    /// `subagent_layout_gen` and the wrap width. Rebuilt only when output or
+    /// width changes — `estimate_height` (a pulldown_cmark parse) is too
     /// expensive to run on every frame.
     subagent_rows_cache: Vec<u16>,
-    subagent_rows_cache_gen: u64,
     subagent_rows_cache_w: u16,
+    /// The `pty_gen` the subagent layout caches (rows + rendered body cells)
+    /// were last rebuilt for. When `pty_gen` moves ahead but the rebuild is
+    /// throttled, BOTH caches keep serving their previous values, so heights
+    /// and bodies always agree — they are never rebuilt on different gens.
+    pub(crate) subagent_layout_gen: u64,
+    /// When the last subagent layout rebuild happened — rebuilds are
+    /// coalesced to at most one per [`Self::subagent_rebuild_interval`].
+    last_subagent_rebuild: Instant,
+    /// Minimum gap between subagent layout rebuilds (default
+    /// [`SUBAGENT_REBUILD_INTERVAL`]). Tests set this to `Duration::ZERO`
+    /// to disable the throttle.
+    pub(crate) subagent_rebuild_interval: Duration,
+    /// Cached RENDERED cells of each subagent body, keyed to the session id,
+    /// the shared layout generation, the wrap width and the theme colors
+    /// (see [`SubagentBodyCache`]). Frames between streamed chunks — the
+    /// common case — blit these cells instead of re-parsing and re-rendering
+    /// the whole body, which was the right-panel frame bottleneck. Entries
+    /// are matched by session id, so evicted sessions never serve stale
+    /// cells.
+    pub(crate) subagent_body_cache: Vec<Option<SubagentBodyCache>>,
     /// Reusable scratch buffer for blitting the visible slice of a session's
     /// markdown body: the markdown renderer lays out from content row 0, so
-    /// the full body is rendered here and only the visible rows are copied
-    /// into the panel. Kept across frames — `Buffer::resize` retains the
-    /// allocation, so streaming never allocates a large buffer per frame.
+    /// the full body is rendered here, copied into the body cache, and only
+    /// the visible rows are copied into the panel. Kept across frames —
+    /// `Buffer::resize` retains the allocation, so streaming never allocates
+    /// a large buffer per frame.
     pub(crate) subagent_scratch: Option<Buffer>,
 
     // ── Auto-scroll tracking ────────────────────────────────────────
@@ -151,6 +204,7 @@ impl RightPanelState {
             next_activity_id: 1,
             section_activity_order: [0; 3],
             pty_gen: 0,
+            subagent_body_cache: Vec::new(),
             bash_buffer_cache: Vec::new(),
             bash_cache_gen: 0,
             subagent_buffer_cache: Vec::new(),
@@ -159,8 +213,12 @@ impl RightPanelState {
             bash_scroll_y: 0,
             subagent_scroll_y: 0,
             subagent_rows_cache: Vec::new(),
-            subagent_rows_cache_gen: 0,
             subagent_rows_cache_w: 0,
+            subagent_layout_gen: 0,
+            last_subagent_rebuild: Instant::now()
+                .checked_sub(SUBAGENT_REBUILD_INTERVAL)
+                .unwrap_or_else(Instant::now),
+            subagent_rebuild_interval: SUBAGENT_REBUILD_INTERVAL,
             subagent_scratch: None,
             user_scrolled_away: false,
             scroll_y: 0,
@@ -410,13 +468,26 @@ impl RightPanelState {
     }
 
     /// Total content rows (command header + optional input line + markdown
-    /// body) per subagent session, cached against `pty_gen` and `wrap_w` so
-    /// the markdown parse only runs when the output or the wrap width
-    /// actually changed. Mirrors the render exactly: the body width used
-    /// here is the same `wrap_w` the section renderer passes to
+    /// body) per subagent session, cached against `subagent_layout_gen` and
+    /// `wrap_w` so the markdown parse only runs when needed. During
+    /// streaming, rebuilds are coalesced to at most one per
+    /// [`SUBAGENT_REBUILD_INTERVAL`] — when throttled, the previous rows are
+    /// served (and `subagent_layout_gen` stays behind `pty_gen`, so the
+    /// body cache keeps agreeing with them). A wrap-width change always
+    /// rebuilds immediately. Mirrors the render exactly: the body width here
+    /// is the same `wrap_w` the section renderer passes to
     /// [`MarkdownRenderable`](cosh_tui::core::renderables::markdown::MarkdownRenderable).
     pub(crate) fn subagent_section_rows(&mut self, wrap_w: u16) -> &[u16] {
-        if self.pty_gen != self.subagent_rows_cache_gen || wrap_w != self.subagent_rows_cache_w {
+        let width_changed = wrap_w != self.subagent_rows_cache_w;
+        let gen_changed = self.pty_gen != self.subagent_layout_gen;
+        let rebuild_due = width_changed
+            || (gen_changed
+                && self.last_subagent_rebuild.elapsed() >= self.subagent_rebuild_interval);
+        if rebuild_due {
+            if !width_changed {
+                self.last_subagent_rebuild = Instant::now();
+            }
+            self.subagent_layout_gen = self.pty_gen;
             self.subagent_rows_cache.clear();
             for pty in &self.pty_sessions {
                 if !pty.command.starts_with("subagent:") {
@@ -433,7 +504,6 @@ impl RightPanelState {
                 }
                 self.subagent_rows_cache.push(rows);
             }
-            self.subagent_rows_cache_gen = self.pty_gen;
             self.subagent_rows_cache_w = wrap_w;
         }
         &self.subagent_rows_cache
@@ -703,6 +773,7 @@ mod tests {
     #[test]
     fn subagent_rows_cache_invalidates_on_width_and_gen_change() {
         let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = Duration::ZERO; // no throttle in tests
         state.start_pty("subagent: opencode".to_string(), None);
         state.update_last_pty(
             "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee ffffffffff\n".to_string(),
@@ -730,5 +801,36 @@ mod tests {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
         assert_eq!(state.subagent_section_rows(30), &[1]);
+    }
+
+    /// During streaming, layout rebuilds are coalesced to at most one per
+    /// `subagent_rebuild_interval`: a gen change within the interval serves
+    /// the previous (stale) rows and keeps `subagent_layout_gen` behind
+    /// `pty_gen`, so heights and bodies always agree on the same generation.
+    #[test]
+    fn subagent_rebuild_is_throttled_by_interval() {
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = Duration::from_secs(60);
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty("short body\n".to_string());
+
+        let rows = state.subagent_section_rows(30).to_vec();
+        let layout_gen_snapshot = state.subagent_layout_gen;
+        assert_eq!(rows, vec![2], "header + 1 body row");
+
+        // New output arrives within the interval: no rebuild (stale rows).
+        state.update_last_pty(
+            "a much longer line that wraps around and needs more rows to display\n".to_string(),
+        );
+        assert_eq!(state.subagent_section_rows(30), rows);
+        assert_eq!(state.subagent_layout_gen, layout_gen_snapshot);
+
+        // Once the interval passes, the rebuild happens and picks the change.
+        state.last_subagent_rebuild = Instant::now()
+            .checked_sub(Duration::from_secs(61))
+            .unwrap_or_else(Instant::now);
+        let rebuilt = state.subagent_section_rows(30).to_vec();
+        assert_ne!(rebuilt, rows, "rebuild must pick up the new output");
+        assert_eq!(state.subagent_layout_gen, state.pty_gen);
     }
 }
