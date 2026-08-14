@@ -2701,7 +2701,7 @@ impl App {
                     // Check Shortcuts dialog for scrolling
                     if self.is_shortcuts_dialog_visible() {
                         match key.code {
-                            KeyCode::Up | KeyCode::Char('k') => {
+                            KeyCode::Up => {
                                 if let Some(d) = self.dialog.current_mut()
                                     && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
                                 {
@@ -2709,12 +2709,38 @@ impl App {
                                 }
                                 return Ok(false);
                             }
-                            KeyCode::Down | KeyCode::Char('j') => {
+                            KeyCode::Down => {
                                 if let Some(d) = self.dialog.current_mut()
                                     && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
                                 {
                                     *scroll = scroll.saturating_add(1);
                                 }
+                                return Ok(false);
+                            }
+                            KeyCode::Char('k') => {
+                                // Only handle 'k' for scrolling if not Ctrl+K (which toggles the dialog)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    if let Some(d) = self.dialog.current_mut()
+                                        && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
+                                    {
+                                        *scroll = scroll.saturating_sub(1);
+                                    }
+                                }
+                                // Let Ctrl+K pass through to the action handler
+                                if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    return Ok(false);
+                                }
+                            }
+                            KeyCode::Char('j') => {
+                                if let Some(d) = self.dialog.current_mut()
+                                    && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
+                                {
+                                    *scroll = scroll.saturating_add(1);
+                                }
+                                return Ok(false);
+                            }
+                            KeyCode::Esc => {
+                                // Don't close shortcuts dialog with Esc - use Ctrl+K to toggle
                                 return Ok(false);
                             }
                             _ => {}
@@ -3162,7 +3188,11 @@ impl App {
                             self.sidebar.open = !self.sidebar.open;
                         }
                         Some(crate::keymap::Action::ToggleHelp) => {
-                            self.dialog.show(DialogType::Shortcuts { scroll: 0 });
+                            if self.dialog.visible() && matches!(self.dialog.current(), Some(d) if matches!(d.dialog_type, DialogType::Shortcuts { .. })) {
+                                self.dialog.clear();
+                            } else {
+                                self.dialog.show(DialogType::Shortcuts { scroll: 0 });
+                            }
                         }
                         Some(
                             crate::keymap::Action::NextSession
@@ -3295,9 +3325,6 @@ impl App {
                         Some(crate::keymap::Action::ToggleGenericToolOutput) => {
                             self.config.show_generic_tool_output =
                                 !self.config.show_generic_tool_output;
-                        }
-                        Some(crate::keymap::Action::ToggleTimestamps) => {
-                            self.config.show_timestamps = !self.config.show_timestamps;
                         }
                         Some(crate::keymap::Action::ToggleMode) => {
                             if matches!(self.mode(), AppMode::Session) {
@@ -3696,7 +3723,10 @@ impl App {
                     parts: vec![Part::Compaction(CompactionPart::running(
                         CompactionPhase::Pipeline,
                     ))],
-                    created_at: 0,
+                    created_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
                     agent: None,
                     model: None,
                 });
@@ -3746,7 +3776,10 @@ impl App {
                     parts: vec![Part::Compaction(CompactionPart::running(
                         CompactionPhase::Llm,
                     ))],
-                    created_at: 0,
+                    created_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
                     agent: None,
                     model: None,
                 });
@@ -3845,7 +3878,10 @@ impl App {
                                 text: text.clone(),
                                 synthetic: false,
                             })],
-                            created_at: 0,
+                            created_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
                             agent: None,
                             model: None,
                         }),
@@ -3912,7 +3948,10 @@ impl App {
                             id: format!("msg-{}", session.messages.len()),
                             role: MessageRole::Assistant,
                             parts: vec![part],
-                            created_at: 0,
+                            created_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
                             agent: None,
                             model: None,
                         }),
@@ -4147,7 +4186,10 @@ impl App {
                                 text: text.clone(),
                                 collapsed: true,
                             })],
-                            created_at: 0,
+                            created_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
                             agent: None,
                             model: None,
                         }),
@@ -4192,7 +4234,10 @@ impl App {
                                 text,
                                 synthetic: false,
                             })],
-                            created_at: 0,
+                            created_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
                             agent: None,
                             model: None,
                         });
@@ -4284,7 +4329,10 @@ impl App {
                                 text: error_text,
                                 synthetic: false,
                             })],
-                            created_at: 0,
+                            created_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
                             agent: None,
                             model: self.llm_config.model.clone(),
                         });

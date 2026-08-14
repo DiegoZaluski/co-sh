@@ -80,14 +80,6 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
-fn format_timestamp(ms: u64) -> String {
-    let secs = ms / 1000;
-    let h = (secs / 3600) % 24;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{h:02}:{m:02}:{s:02}")
-}
-
 const fn concealed_char(ch: char) -> char {
     if ch == ' ' { ' ' } else { '\u{2588}' }
 }
@@ -1533,12 +1525,6 @@ impl SessionView {
         draw_text_line(buf, label, label_x, y, label.len() as u16, label_style);
     }
 
-    fn render_timestamp(buf: &mut Buffer, x: u16, y: u16, ts: u64, theme: &Theme) {
-        let ts_str = format_timestamp(ts);
-        let ts_style = Style::default().fg(rgba_color(theme.text_muted));
-        draw_text_line(buf, &format!(" [{ts_str}]"), x, y, 12, ts_style);
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn render_user_message(
         buf: &mut Buffer,
@@ -1598,10 +1584,6 @@ impl SessionView {
 
         if is_queued {
             Self::render_queued_badge(buf, x_off, area.y, theme);
-        }
-
-        if config.show_timestamps {
-            Self::render_timestamp(buf, x_off, area.y, msg.created_at, theme);
         }
     }
 
@@ -1713,10 +1695,6 @@ impl SessionView {
 
         if is_queued {
             Self::render_queued_badge(buf, x_off, area.y, theme);
-        }
-
-        if config.show_timestamps {
-            Self::render_timestamp(buf, x_off, area.y, msg.created_at, theme);
         }
 
         banner_h + parts_h

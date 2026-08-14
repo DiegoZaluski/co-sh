@@ -25,19 +25,13 @@ enum VisualItem {
 /// Only non-obvious compound shortcuts — basic nav/enter/esc are excluded
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Tab", "Toggle mode (Build/Ask)"),
-    ("PageUp/Down", "Scroll page up/down"),
-    ("Home/End", "Go to start/end of input"),
-    ("Ctrl+B", "Toggle sidebar"),
-    ("Ctrl+C", "Copy selection / Quit"),
-    ("Ctrl+T", "Toggle thinking"),
-    ("Ctrl+D", "Toggle tool details"),
-    ("Ctrl+G", "Toggle generic output"),
-    ("Ctrl+Y", "Toggle timestamps"),
-    ("Ctrl+P", "Command palette"),
+    ("Ctrl+B", "Toggle sidebar (session history)"),
+    ("Ctrl+C", "Toggle conceal (hide assistant text)"),
+    ("Ctrl+T", "Toggle thinking (show/hide reasoning)"),
+    ("Ctrl+D", "Toggle tool details (show/hide completed)"),
+    ("Ctrl+G", "Toggle generic tool output"),
+    ("Ctrl+P", "Open command palette"),
     ("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
-    ("Ctrl+J", "Insert newline"),
-    ("j/k", "Vim-style scroll (prompt empty)"),
-    ("Ctrl+K", "Show keyboard shortcuts"),
 ];
 
 fn rgba_color(rgba: RGBA) -> Color {
@@ -352,12 +346,12 @@ impl DialogState {
                 DialogAction::Consumed
             }
             DialogType::Shortcuts { scroll } => {
-                let max_w = 46u16.min(area.width.saturating_sub(6)).max(30);
+                let max_w = 59u16.min(area.width.saturating_sub(6)).max(30);
                 let entries = SHORTCUTS.len();
                 let max_visible = (area.height.saturating_sub(4)) as usize;
                 let max_visible = max_visible.min(entries).max(1).clamp(1, 20);
                 let list_h = max_visible as u16;
-                let dialog_h = 1 + list_h;
+                let dialog_h = 1 + list_h + 2;
                 let dialog_w = max_w;
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
                 let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
@@ -371,17 +365,8 @@ impl DialogState {
                     return DialogAction::Dismissed;
                 }
 
-                // Check esc label click (title row)
-                let esc_x = dialog_x
-                    + dialog_w
-                        .saturating_sub(4)
-                        .saturating_sub("esc".len() as u16);
-                if y_click == dialog_y && x >= esc_x && x < esc_x + "esc".len() as u16 {
-                    return DialogAction::Dismissed;
-                }
-
                 // Scroll on click inside list area
-                let list_top = dialog_y + 1;
+                let list_top = dialog_y + 2;
                 if y_click >= list_top {
                     let row = (y_click - list_top) as usize;
                     if row < max_visible {
@@ -975,13 +960,13 @@ impl DialogState {
             }
             DialogType::Shortcuts { scroll } => {
                 // Shortcuts overlay - scrollable list of keyboard shortcuts (no border)
-                let max_w = 46u16.min(area.width.saturating_sub(6)).max(30);
+                let max_w = 59u16.min(area.width.saturating_sub(6)).max(30);
                 let entries = SHORTCUTS.len();
                 let max_visible = (area.height.saturating_sub(4)) as usize;
                 let max_visible = max_visible.min(entries).max(1).clamp(1, 20);
                 let list_h = max_visible as u16;
-                // Title row + list rows (no border)
-                let dialog_h = 1 + list_h;
+                // Title row + list rows + padding top/bottom (no border)
+                let dialog_h = 1 + list_h + 2;
                 let dialog_w = max_w;
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
                 let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
@@ -1004,32 +989,17 @@ impl DialogState {
                     }
                 }
 
-                // Title line with inline "esc" label
+                // Title line 
                 let title_text = "Keyboard Shortcuts";
                 draw_text_line(
                     buf,
                     title_text,
                     dialog_x + 2,
-                    dialog_y,
+                    dialog_y + 1,
                     dialog_w.saturating_sub(4),
                     Style::default()
                         .fg(rgba_color(theme.text))
                         .add_modifier(Modifier::BOLD),
-                );
-
-                // "esc" label right-aligned on same line as title
-                let esc_label = "esc";
-                let esc_x = dialog_x
-                    + dialog_w
-                        .saturating_sub(4)
-                        .saturating_sub(esc_label.len() as u16);
-                draw_text_line(
-                    buf,
-                    esc_label,
-                    esc_x,
-                    dialog_y,
-                    dialog_w.saturating_sub(2),
-                    Style::default().fg(rgba_color(theme.text_muted)),
                 );
 
                 // Ensure scroll is within bounds
@@ -1041,12 +1011,12 @@ impl DialogState {
 
                 // Draw each visible shortcut
                 for (i, entry) in SHORTCUTS.iter().enumerate().skip(scroll).take(max_visible) {
-                    let ry = dialog_y + 1 + (i - scroll) as u16;
+                    let ry = dialog_y + 2 + (i - scroll) as u16;
                     let (key_str, desc) = (entry.0, entry.1);
 
                     // Key column (left-aligned, accent color, fixed width)
                     let key_x = dialog_x + 2;
-                    let key_w = 14u16;
+                    let key_w = 15u16;
                     draw_text_line(buf, key_str, key_x, ry, key_w, Style::default().fg(accent));
 
                     // Description column

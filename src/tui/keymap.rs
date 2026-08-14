@@ -17,7 +17,6 @@ pub enum Action {
     ToggleThinking,
     ToggleToolDetails,
     ToggleGenericToolOutput,
-    ToggleTimestamps,
     Confirm,
     Cancel,
     Interrupt,
@@ -108,13 +107,6 @@ impl KeyMap {
                     Action::ToggleGenericToolOutput,
                     KeyBinding {
                         key: Char('g'),
-                        modifiers: KeyModifiers::CONTROL,
-                    },
-                ),
-                (
-                    Action::ToggleTimestamps,
-                    KeyBinding {
-                        key: Char('y'),
                         modifiers: KeyModifiers::CONTROL,
                     },
                 ),

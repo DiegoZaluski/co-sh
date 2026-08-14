@@ -49,27 +49,23 @@ impl CommandPalette {
             commands: vec![
                 CommandItem {
                     key: "Ctrl+B".into(),
-                    description: "Toggle sidebar".into(),
+                    description: "Toggle sidebar (session history)".into(),
                 },
                 CommandItem {
                     key: "Ctrl+C".into(),
-                    description: "Toggle conceal mode".into(),
+                    description: "Toggle conceal (hide assistant text)".into(),
                 },
                 CommandItem {
                     key: "Ctrl+T".into(),
-                    description: "Toggle thinking mode".into(),
+                    description: "Toggle thinking (show/hide reasoning)".into(),
                 },
                 CommandItem {
                     key: "Ctrl+D".into(),
-                    description: "Toggle tool details".into(),
+                    description: "Toggle tool details (show/hide completed)".into(),
                 },
                 CommandItem {
                     key: "Ctrl+G".into(),
                     description: "Toggle generic tool output".into(),
-                },
-                CommandItem {
-                    key: "Ctrl+Y".into(),
-                    description: "Toggle timestamps".into(),
                 },
                 CommandItem {
                     key: "?".into(),
