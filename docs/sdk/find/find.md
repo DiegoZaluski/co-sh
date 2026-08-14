@@ -47,6 +47,8 @@ The two engines share three building blocks:
 3. **[`glob_util`](glob_util.md)** — pattern compilation helpers shared by
    both engines (including the `**/` recursive prefix and brace fixing).
 
+> See [`glob.md`](glob.md) for name-based searching and [`grep.md`](grep.md) for content-based searching.
+
 ## The timeout contract (read this once)
 
 Timeouts are handled with a single consistent rule across the module:
@@ -92,3 +94,15 @@ output modes and the scan cache, and shows the error paths.
 
 Next: [glob — searching by name](glob.md), then [grep — searching by
 content](grep.md).
+
+---
+
+## Summary
+
+- `find` is the search engine layer with two engines: `glob` (search by name) and `grep` (search by content), backed by shared filesystem scan cache and cancellation model.
+- Both engines are synchronous and return complete results; timeouts mid-walk return partial results with `timed_out: true`, timeouts before work starts are hard errors.
+- `glob` matches file/dir names using glob patterns, defaults `hidden` to `false` (excludes `.`-prefixed entries unless opted in).
+- `grep` matches file contents using ripgrep's regex engine, defaults `hidden` to `true` (exhaustive content search), supports three output modes: Content, Count, FilesWithMatches.
+- Shared machinery: `fs_cache` (TTL-based directory entry cache), `task` (cooperative cancellation with CancelToken), and `glob_util` (pattern compilation helpers).
+- Timeout contract: partial results are returned when timeout trips mid-walk (incomplete scan, not proof of absence); no work salvaged = hard error.
+- Visibility defaults differ: `glob` excludes hidden files by default, `grep` includes them; both prune `node_modules` unless pattern mentions it, `.git` is always skipped.

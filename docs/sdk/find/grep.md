@@ -31,6 +31,33 @@ pub struct GrepOptions {
     pub timeout_ms: Option<u32>,
     pub on_match: Option<Arc<GrepMatchCallback>>,  // live streaming
 }
+
+// Example: Basic content search
+let result = grep(GrepOptions {
+    pattern: "fn main".to_string(),
+    path: "/path/to/project".to_string(),
+    r#type: Some("rust".to_string()),
+    ..Default::default()
+}).unwrap();
+
+// Example: Count mode with pagination
+let result = grep(GrepOptions {
+    pattern: "TODO".to_string(),
+    path: "/path/to/project".to_string(),
+    mode: Some(GrepOutputMode::Count),
+    offset: Some(20),  // skip first 20 matches
+    max_count: Some(20),  // return next 20
+    ..Default::default()
+}).unwrap();
+
+// Example: File search with glob filter
+let result = grep(GrepOptions {
+    pattern: "import.*react".to_string(),
+    path: "/path/to/project".to_string(),
+    glob: Some("*.{ts,tsx}".to_string()),
+    ignore_case: Some(true),
+    ..Default::default()
+}).unwrap();
 ```
 
 ## Output modes
@@ -110,3 +137,15 @@ skipped and counted in `skipped_oversized` rather than silently missing.
 
 Next: [fs_cache — the shared scan cache](fs_cache.md), or [task —
 cancellation](task.md).
+
+---
+
+## Summary
+
+- `grep` searches file contents with ripgrep's regex engine across directories (parallel walk) or single files (in-memory search).
+- Output modes: Content (matched lines with context), Count (one row per matched file with match count), FilesWithMatches (one row per matched file, no content).
+- Limiting and pagination: `max_count` caps global matches, `offset` skips first N matches (combined gives paging), `max_count_per_file` caps matches per file before global budget.
+- Type and glob filters: `glob` compiles through glob_util (recursive prefix applies), `r#type` maps well-known names to extension sets (js→js,jsx,mjs,cjs; py→py,pyi; etc.).
+- Pattern tolerances: invalid repetition quantifiers are escaped, trailing parentheses from snippets are treated as literals.
+- Result: `GrepResult` with matches (path, line_number, line, context, truncated, match_count), total_matches, files_with_matches, files_searched, limit_reached, skipped_oversized, timed_out.
+- Errors: path missing, invalid regex, regex engine failure, timeout before walk starts (hard error), mid-walk timeout (partial result), special file (empty result, no error).

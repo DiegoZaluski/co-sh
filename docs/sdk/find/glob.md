@@ -85,3 +85,14 @@ added (unlike the cosh-tools wrapper, which renders one).
 
 Next: [glob_util — pattern helpers](glob_util.md), or [grep — searching by
 content](grep.md).
+
+---
+
+## Summary
+
+- `glob` finds filesystem entries whose names match a glob pattern using `GlobOptions`.
+- Pattern interpretation: simple patterns get `**/` prefix (recursive), patterns with `/` stay shallow, `recursive: false` disables prefix, unclosed `{` alternation groups are auto-closed.
+- Filtering semantics: `file_type` (File/Dir/Symlink), `hidden` (default false, include `.`-prefixed), `gitignore` (default true), `include_node_modules` (depends on pattern), `sort_by_mtime` (rank by modification time), `max_results` (cap result count).
+- `on_match` callback fires for every match as the walk finds it (before mtime ranking and limit), on worker threads — keep it cheap and Sync.
+- Result: `GlobResult` with matches (path relative to searched directory, forward slashes, file_type, mtime, size), total_matches, and timed_out flag.
+- Errors: path missing/unresolvable, path not a directory, invalid glob pattern, timeout before walk starts (hard error), mid-walk timeout (partial result).
