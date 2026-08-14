@@ -139,3 +139,7 @@ workspace = true
 [[example]]
 name = "hashline-patcher"
 path = "examples/hashline/patcher.rs"
+
+[[example]]
+name = "rollback"
+path = "examples/rollback/core.rs"
