@@ -95,7 +95,7 @@ impl Bash {
     ///
     /// When the timeout elapses, the child process is killed and the stream
     /// yields a final item with `signal: Some(-1)` and `exit_code: None`.
-    /// Pass `None` via [`env`](Self::env) or leave unset for no timeout.
+    /// Leave unset for no timeout.
     #[must_use]
     pub const fn timeout(mut self, ms: u64) -> Self {
         self.timeout = Some(ms);
