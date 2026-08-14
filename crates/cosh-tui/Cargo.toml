@@ -20,5 +20,9 @@ unicode-width = "0.2"
 lru = "0.18"
 log = { version = "0.4", features = ["std"] }
 
+[[example]]
+name = "core"
+path = "examples/core/core.rs"
+
 [lints]
 workspace = true
