@@ -53,6 +53,12 @@ layout.
 there is no border and no visible fill, it draws nothing — so a bare
 `BoxRenderable` with no children is an invisible container.
 
+> **Children are not drawn by `render_self`.** Like all container widgets,
+> `BoxRenderable` draws only its own frame in `render_self`; its children
+> are rendered by the managed [`Renderer`](../renderer.md), which walks the
+> whole tree and calls each child's `render_self` with its laid-out area.
+> If you render directly (the buffer path), draw each child yourself.
+
 ## Example
 
 ```rust,ignore

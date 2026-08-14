@@ -24,5 +24,9 @@ log = { version = "0.4", features = ["std"] }
 name = "core"
 path = "examples/core/core.rs"
 
+[[example]]
+name = "solid"
+path = "examples/solid/solid.rs"
+
 [lints]
 workspace = true
