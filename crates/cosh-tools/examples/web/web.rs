@@ -7,7 +7,7 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo run --example web-run
+//! cargo run --example web
 //! ```
 
 use cosh_tools::web::{Web, WebFetch, WebSearch};

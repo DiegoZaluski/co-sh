@@ -7,7 +7,7 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo run --example skills-run
+//! cargo run --example skills
 //! ```
 
 use cosh_tools::skills::{EmbeddedSkill, SkillOutput, Skills, SkillSource};

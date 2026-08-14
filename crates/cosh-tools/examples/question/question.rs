@@ -6,7 +6,7 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo run --example question-run
+//! cargo run --example question
 //! ```
 
 use cosh_tools::question::Question;

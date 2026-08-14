@@ -11,7 +11,7 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo run --example subagent-run
+//! cargo run --example subagent
 //! ```
 
 use cosh_tools::subagent::SubAgent;

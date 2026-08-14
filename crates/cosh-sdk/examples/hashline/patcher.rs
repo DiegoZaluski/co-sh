@@ -6,7 +6,7 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo run --example hashline-run
+//! cargo run --example hashline-patcher
 //! ```
 
 use cosh_sdk::hashline::format::{

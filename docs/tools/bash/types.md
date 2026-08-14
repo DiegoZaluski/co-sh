@@ -5,7 +5,7 @@ The bash module has one request type and a small set of stream / error types.
 All stream/error types below live in `cosh_tools::bash::bsh` — only
 `BashRunInput` is re-exported at the `bash` root. `Bash::run`'s signature
 uses them, so import from `bash::bsh::…` when you need to name a concrete
-type (the [example](../../../crates/cosh-tools/examples/bash/run.rs) does).
+type (the [example](../../../crates/cosh-tools/examples/bash/bash.rs) does).
 
 ---
 

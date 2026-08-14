@@ -7,7 +7,7 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo run --example plan-run
+//! cargo run --example plan
 //! ```
 
 use cosh_tools::plan::{

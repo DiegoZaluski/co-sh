@@ -7,7 +7,7 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo run --example bash-run
+//! cargo run --example bash
 //! ```
 
 use cosh_tools::bash::Bash;

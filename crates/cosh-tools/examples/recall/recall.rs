@@ -5,7 +5,7 @@
 //! example requires it:
 //!
 //! ```bash
-//! cargo run --example recall-run --features embed
+//! cargo run --example recall --features embed
 //! ```
 
 use cosh_tools::recall::{Recall, RecallSearchInput};

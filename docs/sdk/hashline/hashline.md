@@ -121,7 +121,7 @@ directory, a database, or an in-memory map looks identical to the parser.
 ## Example
 
 A complete, runnable walkthrough lives at
-[`examples/hashline/run.rs`](../../../crates/cosh-sdk/examples/hashline/run.rs):
+[`examples/hashline/patcher.rs`](../../../crates/cosh-sdk/examples/hashline/patcher.rs):
 it hashes content, parses a multi-section patch, applies edits in memory,
 records snapshots, demonstrates 3-way-merge recovery when the file drifts
 (external edit at the tail survives the merge), shows a hard mismatch
