@@ -54,6 +54,8 @@ pub trait Renderable {
 Because children are stored as `Box<dyn Renderable>`, callers that know a
 widget's concrete type downcast through `Any`:
 
+> **Why type erasure is needed:** The renderable tree needs to hold heterogeneous widget types (boxes, text, markdown, inputs, etc.) in a single collection. Rust's trait objects (`Box<dyn Renderable>`) provide this polymorphism while maintaining type safety. The `as_any` mechanism allows downcasting back to concrete types when needed (e.g., accessing widget-specific methods), balancing the flexibility of a mixed-type tree with the safety of Rust's type system.
+
 ```rust,ignore
 let box_widget = widget.as_any().downcast_ref::<BoxRenderable>();
 ```
@@ -218,3 +220,19 @@ markdown, inputs, selects, scrollbars, tables, and more, and `RenderableNode`
 handles the bookkeeping if you do.
 
 Next: [types — attributes, mouse events, selection](types.md).
+
+---
+
+## Summary
+
+- `Renderable` trait: every screen element implements it with identity (`id`, `num`, `parent_num`), lifecycle flags (`is_visible`, `is_focusable`, `is_destroyed`), type erasure (`as_any`/`as_any_mut`), drawing (`render_self`), and child management.
+- Identity: `id()` is stable string identifier unique among siblings, `num()` is globally unique `u64` for parent-link currency, `parent_num()` tracks adoption.
+- Lifecycle flags: `is_visible()` (whether to draw), `is_focusable()` (interactive widgets), `is_destroyed()` (torn down).
+- Type erasure: children stored as `Box<dyn Renderable>`, downcast via `as_any().downcast_ref::<ConcreteType>()`.
+- Drawing: `render_self(&self, buf, area)` writes visuals into ratatui `Buffer` within `area`; `render(buf, area, delta_time)` is per-frame wrapper for animation.
+- Children: `add_child` returns insertion index, `remove_child` removes by id, `insert_child_before` inserts before anchor id; default `children_mut` returns empty slice.
+- Layout hooks: `build_style()` (widget's flexbox style), `layout_node()`/`set_layout_node()` (taffy node id), `apply_layout()` (store computed position/size).
+- Focus & interaction: `focus()`/`blur()`, `process_mouse_event()` (return true if consumed), `request_render()`, opacity/z-index/live flags, `on_update`/`on_resize`/`destroy` hooks.
+- Free helpers: `adopt_child`/`adopt_child_before` set parent link and push child; widgets typically delegate to these.
+- `RenderableNode`: concrete reusable implementation of bookkeeping (identity, flags, parent link, children, layout node); widgets can embed it or replicate the pattern.
+- `RootRenderable`: top of tree with `render_self` that does nothing — parent for all top-level widgets so renderer has single root to walk.

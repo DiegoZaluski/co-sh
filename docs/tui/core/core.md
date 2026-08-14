@@ -51,6 +51,22 @@ RootRenderable
         └── MarkdownRenderable  (formatted markdown content)
 ```
 
+```rust,ignore
+// Example: Building a simple UI tree
+let mut root = RootRenderable::new();
+let box_panel = BoxRenderable::new("Output".to_string());
+let scroll_area = ScrollBoxRenderable::new();
+let markdown_content = MarkdownRenderable::new("# Hello World".to_string());
+
+scroll_area.add_child(Box::new(markdown_content));
+box_panel.add_child(Box::new(scroll_area));
+root.add_child(Box::new(box_panel));
+
+// Render the tree
+let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 24));
+root.render_self(&mut buffer, buffer.area());
+```
+
 ## The two render paths
 
 1. **Direct** — call `widget.render_self(&mut buffer, area)` yourself, e.g.
@@ -78,3 +94,15 @@ adds automatic layout via `taffy` and a fixed render loop.
   building blocks.
 - [renderables/ — the widget library](renderables/renderables.md) — ready-made
   widgets you can drop into a tree.
+
+---
+
+## Summary
+
+- `core` is the rendering engine providing the `Renderable` trait, widget library, layout engine (`LayoutTree`), screen driver (`Renderer`), and low-level building blocks.
+- UIs are trees of renderables: every widget implements `Renderable` with identity, lifecycle flags, parent link, children, and `render_self` drawing method.
+- Two render paths: direct (call `widget.render_self(&mut buffer, area)` yourself, e.g., from ratatui `Frame`) and managed (hand `RootRenderable` to `Renderer`, call `render_frame()` for automatic layout).
+- Everything renders into `ratatui::buffer::Buffer` — cosh-tui widgets can be drawn through full `Renderer` loop or dropped into existing ratatui applications.
+- Widget library: ready-made widgets like `BoxRenderable`, `ScrollBoxRenderable`, `MarkdownRenderable`, `SelectRenderable`, etc., that compose by nesting.
+- Layout: automatic layout via `taffy` (flexbox/grid engine) through `LayoutTree` wrapper in managed path.
+- Low-level building blocks in `lib/`: colors, borders, styled text, unicode width, syntax styles, terminal palette detection.

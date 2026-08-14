@@ -6,6 +6,8 @@ the tree's root node. It answers "where does each widget go and how big is
 it?" given a fixed viewport, so the renderer can position widgets without
 hand-placing every rectangle.
 
+> **Why taffy for layout:** Manual layout calculation in terminal UIs is error-prone and tedious. Each widget needs to account for borders, padding, available space, and responsive resizing. Taffy brings the battle-tested flexbox/grid layout model from web development to terminal UIs, enabling declarative layout ("this panel should take 30% width, that one should fill remaining space") rather than imperative pixel/position math. This makes UI code more maintainable and responsive to terminal size changes.
+
 ```rust
 pub struct LayoutTree {
     pub taffy: TaffyTree,
@@ -98,3 +100,14 @@ println!("top at {:?} size {:?}", top_layout.location, top_layout.size);
 ```
 
 Next: [renderer — driving the frame loop](renderer.md).
+
+---
+
+## Summary
+
+- `LayoutTree` is a thin wrapper around taffy (flexbox/grid layout engine) that owns the tree's root node and answers "where does each widget go and how big is it?".
+- Building methods: `new()` (default root), `new_leaf(style)` (leaf node), `new_container(style, children)` (wrap existing children), `add_child`/`remove_child`/`remove` (tree manipulation), `set_style`/`mark_dirty` (style updates).
+- Computing and reading: `compute_layout(width, height)` solves the whole tree at a fixed size (viewport), `layout(node)` reads a node's solved position/size (taffy's `Layout` with location + size).
+- Style helpers: `border_rect` converts four border flags into taffy border rect (each active side contributes 1.0 cell), `default_box_style` is the default flex container style used by `BoxRenderable`.
+- Every method panics if given a non-existent node or invalid parent/child relationship; node ids are opaque `taffy::NodeId` values from `new_leaf`/`new_container`.
+- Usually not constructed directly — the `Renderer` builds one per frame from the renderable tree, but the type is public for custom tree layout.
