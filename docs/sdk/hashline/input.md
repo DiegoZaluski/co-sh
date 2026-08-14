@@ -150,3 +150,15 @@ variants: a trailing in-flight op (no payload yet) or a per-token parse
 error mid-stream becomes a **warning**, never a hard error or a phantom
 empty-payload edit. The authoritative writer path should always use the
 strict `parse_patch` / `apply_to`.
+
+---
+
+## Summary
+
+- Section headers: `¶` + path (no embedded whitespace) + `#` + 4-hex uppercase content tag; quoted paths are unquoted, leading `***` and apply_patch noise stripped.
+- Operations: `replace 5..7:`/`replace 5:` (required body), `delete 5..7`/`delete 5` (no body), `insert before 5:`/`insert after 5:`/`insert head:`/`insert tail:` (required body), `replace block 5:` (required body), `delete block 5` (no body).
+- Payload rows: every literal row begins with `+`; bare rows auto-convert with warning; `-` rows are hard error (use `+-…` for literal `-`); body without preceding op header is error.
+- Contamination detection: parser actively rejects other patch formats (apply_patch sentinels, unified-diff headers, malformed delete colons, bare numbers/ranges) with targeted messages.
+- Envelope markers: `*** Begin Patch`/`*** End Patch` optional envelope (begin consumed, end terminates parsing), `*** Abort` recovery sentinel, `#` lines between hunks treated as comments.
+- Splitting: `Patch::parse` requires first non-blank line to be valid header, splits on subsequent headers, merges consecutive sections for same path (conflicting hash tags panic), parses diffs lazily.
+- Streaming-tolerant parsing: `parse_patch_streaming` and `apply_partial_to` turn in-flight ops and parse errors into warnings instead of hard errors; authoritative path uses strict `parse_patch`/`apply_to`.

@@ -66,6 +66,8 @@ for edit to …`). New files are created with `write`, not `edit`.
 | Replace block | `replace block 5:` + `+rows` | Resolve line 5 to a syntactic block, then replace it (see [block](block.md)) |
 | Delete block | `delete block 5` | Delete the syntactic block beginning on line 5 |
 
+> See [input.md](input.md) for the complete syntax reference and error messages, and [apply.md](apply.md) for how edits are executed.
+
 Every body row starts with `+`; a bare `-` row is rejected (`-` rows are not
 valid … write `+-…` to insert a literal line starting with `-`). Ranges use
 1-indexed, inclusive numbers, and `replace`/`delete` accept a single line
@@ -129,3 +131,14 @@ rejection for an unrecognized tag, and runs a real `Patcher` + disk apply.
 
 Next: the [types](types.md) the pipeline passes around, then the
 [syntax](input.md) and the [patcher](patcher.md).
+
+---
+
+## Summary
+
+- `hashline` is the edit engine behind `cosh-tools`' `fs_edit` tool, parsing a line-anchored patch language and applying edits with content-hash validation and 3-way-merge recovery.
+- Core design: anchored edits (line numbers + content-hash tag) instead of diffs — no searching, staleness detectable, stale edits often rescueable via 3-way merge.
+- Language constructs: section headers (`¶path#TAG`), replace/delete/insert operations (with line ranges), and block operations (resolve syntactic blocks).
+- Pipeline stages: tokenize → parse → split → resolve blocks → apply → normalize → store snapshots → validate + write → recover.
+- Pure parsing/I/O boundary: `Patch::parse` and `apply_edits` never touch filesystem (testable, memory-only); `Patcher` is the only I/O stage through `Filesystem` trait.
+- The module does not read/write files directly (uses `Filesystem` trait), does not create files (use `write` tool), and does not embed a language model (deterministic parsing, algorithmic recovery).

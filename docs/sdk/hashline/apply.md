@@ -13,6 +13,8 @@ pub fn apply_edits(text: &str, edits: &[Edit]) -> ApplyResult
 Edits are bucketed by anchor line and applied **bottom-up** (highest line
 first), so earlier anchors are never shifted out from under later ones:
 
+> **Why bottom-up application:** If we applied edits from top to bottom, deleting or inserting lines would shift the line numbers of subsequent edits, causing them to target the wrong lines. By applying from bottom to top, we ensure that earlier edits (with lower line numbers) are never affected by the line shifts caused by later edits. This guarantees that each edit targets exactly the lines it was intended to modify.
+
 1. **Boundary-balance repair** runs first (see below).
 2. `insert head:` rows are collected and spliced at the top; `insert tail:`
    rows at the bottom (respecting a trailing-newline sentinel line).
@@ -72,3 +74,14 @@ together: parse (cached) → resolve blocks (with your
 streaming-tolerant counterpart: it parses with the tolerant parser and
 drops unresolvable blocks instead of throwing, so a half-written file does
 not blow up a live preview.
+
+---
+
+## Summary
+
+- `apply_edits(text, &edits)` is the pure executor: given text body and flat list of edits, returns post-edit text (no filesystem, no I/O).
+- Application order: edits bucketed by anchor line and applied bottom-up (highest line first) so earlier anchors never shift out from under later ones.
+- Boundary-balance repair: automatically fixes delimiter mismatches when payload's delimiter balance differs from deleted region's, under strict conditions (one boundary operation drives difference to zero).
+- Repair fires when: payload delimiter balance ≠ deleted region balance AND one boundary operation (dropping duplicated closer or sparing deleted closer) drives difference to zero while keeping surrounding text byte-identical.
+- Errors: out-of-bounds anchor (panic: "Line N does not exist"), unresolved `Block` edit (panic: "internal error: unresolved replace block edit reached the applier").
+- `PatchSection::apply_to` is the convenient path tying pure pipeline together (parse → resolve blocks → apply); `apply_partial_to` is streaming-tolerant (tolerant parser, drops unresolvable blocks).

@@ -15,6 +15,13 @@ pub struct ParsedRange {
     pub start: Anchor,
     pub end: Anchor,
 }
+
+// Example: Creating line references
+let line_5 = Anchor { line: 5 };
+let range_5_to_7 = ParsedRange {
+    start: Anchor { line: 5 },
+    end: Anchor { line: 7 },
+};  // includes lines 5, 6, and 7
 ```
 
 Line numbers are **1-indexed and inclusive**. `replace 5..7:` names lines 5,
@@ -165,3 +172,15 @@ pub struct CompactDiffOptions { pub max_unchanged_run: Option<u32> }  // default
 
 Produced by `build_compact_diff_preview` — a bounded
 preview of the change with unchanged-run truncation.
+
+---
+
+## Summary
+
+- Pure data types passed through the hashline pipeline: `Anchor`/`ParsedRange` (line references, 1-indexed inclusive), `Cursor` (insert positions), `Edit` (low-level operations), `ApplyResult` (apply output).
+- `Cursor` has position-stable variants (`Bof`/`Eof`) safe for stale edits and anchor forms (`BeforeAnchor`/`AfterAnchor`) that require drift-free context.
+- `Edit` enum: `Insert` (cursor + text), `Delete` (anchor), `Block` (deferred resolution); multi-line replacements decompose into inserts + deletes, `Block` edits must be resolved before application.
+- `ApplyResult` carries post-edit text, `first_changed_line` (for diff previews), and warnings; `first_changed_line: None` signals no-op.
+- `BlockResolver` is the contract for syntactic block resolution: given file text and line, return block span; `None` means unresolvable (unsupported language, blank line, no node, syntax error).
+- Small markers: `Replacement` tags replacement-mode inserts, `ResolveAction` (Throw/Drop) controls unresolvable block behavior (hard error vs silent skip).
+- Input knobs: `SplitOptions` (cwd, path fallback) for parsing, `StreamOptions` (start_line, chunk limits) for streaming, `CompactDiffOptions` for diff previews.
