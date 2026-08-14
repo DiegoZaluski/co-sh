@@ -80,3 +80,14 @@ directly.
 
 Next: [extract — the extractor](extract.md), then [jsonish — the tolerant
 parser](jsonish.md).
+
+---
+
+## Summary
+
+- `extract_action` turns raw LLM output into structured tool calls by finding JSON objects, validating them against registered tool schemas, and yielding clean typed call data.
+- Supports batch mode (`extract_batch`) over full responses and streaming mode (`extract_stream`) for incremental processing as tokens arrive.
+- Built for LLM reality: tolerant JSON parsing through [`jsonish`](jsonish.md), flexible envelope shapes (name/tool/function, arguments/input/args/parameters), and fence awareness (JSON inside real markdown fences is display text, never tool calls).
+- Schema validation: candidates must match registered tool's input schema (required fields, type/const/oneOf checks) before being surfaced as calls.
+- Failure handling: invalid tool calls become failure warning text and are counted; `take_tool_failures()` and `take_last_failed_raw()` provide feedback for correction.
+- The module is self-contained with re-exports from both `extract_action` and `jsonish`; the jsonish parser is a direct port of BoundaryML's baml (Apache 2.0).

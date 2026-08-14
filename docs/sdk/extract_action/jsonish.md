@@ -34,6 +34,8 @@ pub struct JsonishError(pub String);
 
 `parse` tries strategies **in order** and returns the first that succeeds:
 
+> **Why multiple strategies:** LLM output is notoriously messy. Models might wrap JSON in markdown fences, split it across stream chunks, forget trailing commas, use unquoted keys, or mix JSON with explanatory prose. Rather than failing on the first sign of malformed input, we try progressively more lenient parsing strategies. This cascading approach maximizes the chance of extracting useful structured data from imperfect model output while still preferring clean JSON when available.
+
 1. **Strict JSON** (`serde_json`). Top-level numbers are marked `Incomplete`
    (a bare number may be a truncated prefix); strings, objects, and arrays
    are necessarily complete.
@@ -106,3 +108,14 @@ tolerance you get through `ExtractAction` is exactly what `jsonish` provides.
 ---
 
 Back to the [module overview](extract_action.md).
+
+---
+
+## Summary
+
+- `jsonish` parses JSON that is "not quite JSON" — a direct port of BoundaryML/baml's jsonish parser (Apache 2.0) for handling LLM output with trailing commas, unquoted keys, markdown fences, truncated tails, and stray prose.
+- `parse(str, options, is_done)` tries strategies in order: strict JSON → markdown-aware parsing → multiple-object extraction → fixing parser.
+- `Value` enum includes `AnyOf` (uncertainty wrapper with multiple plausible readings), `Markdown` (fenced block with language tag), `FixedJson` (repaired value with fixes recorded), and standard types with `CompletionState` (Complete/Incomplete).
+- `ParseOptions` controls four flags (all default to true): `all_finding_all_json_objects`, `allow_markdown_json`, `allow_fixes`, `allow_as_string`, plus recursion depth limit (100).
+- Inside `extract_action`, `parse_and_validate` calls `jsonish::parse` with default options and converts the result to `serde_json::Value` before schema validation.
+- The parser is designed for streaming callers; `is_done` indicates whether the input is final or a stream prefix, and `CompletionState` tracks whether containers look cut off.
