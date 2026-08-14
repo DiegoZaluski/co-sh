@@ -114,3 +114,8 @@ path = "examples/web/run.rs"
 [[example]]
 name = "question-run"
 path = "examples/question/run.rs"
+
+[[example]]
+name = "recall-run"
+path = "examples/recall/run.rs"
+required-features = ["embed"]
