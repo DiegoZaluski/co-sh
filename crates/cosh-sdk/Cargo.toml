@@ -158,6 +158,10 @@ name = "connector"
 path = "examples/connector/client.rs"
 
 [[example]]
+name = "term-screen"
+path = "examples/term_screen/term_screen.rs"
+
+[[example]]
 name = "tree-sitter"
 path = "examples/tree_sitter/tree_sitter.rs"
 
