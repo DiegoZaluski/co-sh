@@ -98,3 +98,7 @@ path = "examples/bash/run.rs"
 [[example]]
 name = "plan-run"
 path = "examples/plan/run.rs"
+
+[[example]]
+name = "skills-run"
+path = "examples/skills/run.rs"
