@@ -170,6 +170,8 @@ default for granting read-only visibility.
 editing engines that solve different problems. Which engine runs is controlled
 by the `EditEngine` enum:
 
+> See [`edit.md`](edit.md) for the hashline replace engine and [`ast_edit.md`](ast_edit.md) for the AST structural engine.
+
 | Variant | Behavior |
 |---|---|
 | `EditEngine::Auto` (default) | Inspect the tool arguments and pick the engine. |
