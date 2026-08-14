@@ -81,8 +81,9 @@ pub struct Glob {
     /// Search subdirectories recursively (default: `true`).
     pub recursive: Option<bool>,
     /// Include hidden files and directories whose names start with `.`.
-    /// Omitted: the tool defaults to `true` (reference-tool behavior); the
-    /// walker ALWAYS skips `.git` regardless.
+    /// Left `None`, the free function falls through to the SDK default
+    /// (`false`); the `Find` wrapper defaults this to `true` (reference-tool
+    /// behavior). The walker ALWAYS skips `.git` regardless.
     pub hidden: Option<bool>,
     /// Maximum number of entries to return.
     pub max_results: Option<u32>,

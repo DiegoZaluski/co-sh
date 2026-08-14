@@ -82,3 +82,11 @@ path = "examples/fs/ast_edit.rs"
 [[example]]
 name = "fs-rollback"
 path = "examples/fs/rollback.rs"
+
+[[example]]
+name = "find-glob"
+path = "examples/find/glob.rs"
+
+[[example]]
+name = "find-grep"
+path = "examples/find/grep.rs"
