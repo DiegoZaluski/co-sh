@@ -150,6 +150,10 @@ name = "find"
 path = "examples/find/find.rs"
 
 [[example]]
+name = "extract-action"
+path = "examples/extract_action/extract.rs"
+
+[[example]]
 name = "tree-sitter"
 path = "examples/tree_sitter/tree_sitter.rs"
 
