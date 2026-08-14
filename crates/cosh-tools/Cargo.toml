@@ -60,3 +60,25 @@ version = "0.25"
 
 [lints]
 workspace = true
+
+# Examples are organized in subdirectories that mirror the module layout
+# (e.g. examples/fs/read.rs), so they need explicit targets.
+[[example]]
+name = "fs-read"
+path = "examples/fs/read.rs"
+
+[[example]]
+name = "fs-write"
+path = "examples/fs/write.rs"
+
+[[example]]
+name = "fs-edit"
+path = "examples/fs/edit.rs"
+
+[[example]]
+name = "fs-ast-edit"
+path = "examples/fs/ast_edit.rs"
+
+[[example]]
+name = "fs-rollback"
+path = "examples/fs/rollback.rs"

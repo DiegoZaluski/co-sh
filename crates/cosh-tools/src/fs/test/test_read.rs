@@ -313,6 +313,90 @@ async fn test_small_block_is_returned_whole() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn test_block_starting_after_line_one_renders_its_body() {
+    let dir = temp_dir("blockafter1");
+    let file = dir.join("app.rs");
+    std::fs::write(
+        &file,
+        "fn helper() -> i32 {\n    1\n}\n\nfn main() {\n    let x = helper();\n    println!(\"{x}\");\n}\n",
+    )
+    .unwrap();
+
+    // The block starts at line 5, past the file's first line — a regression
+    // guard for block reads that used to render an empty body.
+    let results = read(
+        meta_with_root(&dir),
+        FsRead {
+            targets: vec![Target {
+                path: file.to_string_lossy().to_string(),
+                line: Some(5),
+                symbol: None,
+                line_range: None,
+            }],
+        },
+    )
+    .await;
+
+    let r = &results[0];
+    assert!(r.warnings.is_none(), "unexpected warning: {:?}", r.warnings);
+    assert!(
+        r.content.contains("5| fn main() {"),
+        "block head must be shown at its absolute line: {}",
+        r.content
+    );
+    assert!(
+        r.content.contains("6|     let x = helper();")
+            && r.content.contains("7|     println!(\"{x}\");")
+            && r.content.contains("8| }"),
+        "block body must render with absolute line numbers: {}",
+        r.content
+    );
+    assert!(
+        !r.content.contains("1| fn helper"),
+        "earlier lines must not leak into the block: {}",
+        r.content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_symbol_starting_after_line_one_renders_its_body() {
+    let dir = temp_dir("symafter1");
+    let file = dir.join("app.rs");
+    std::fs::write(
+        &file,
+        "fn helper() -> i32 {\n    1\n}\n\nfn main() {\n    let x = helper();\n    println!(\"{x}\");\n}\n",
+    )
+    .unwrap();
+
+    // The symbol's definition starts at line 5. Used to render a shifted or
+    // empty body.
+    let results = read(
+        meta_with_root(&dir),
+        FsRead {
+            targets: vec![Target {
+                path: file.to_string_lossy().to_string(),
+                line: None,
+                symbol: Some("main".to_string()),
+                line_range: None,
+            }],
+        },
+    )
+    .await;
+
+    let r = &results[0];
+    assert!(r.warnings.is_none(), "unexpected warning: {:?}", r.warnings);
+    assert!(
+        r.content.contains("5| fn main() {")
+            && r.content.contains("6|     let x = helper();")
+            && r.content.contains("8| }"),
+        "symbol body must render with absolute line numbers: {}",
+        r.content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── Seen-lines + column truncation ─────────────────────────────────────
 
 #[tokio::test]
@@ -345,6 +429,59 @@ async fn test_whole_file_records_seen_lines() {
         seen.len(),
         3,
         "whole-file read records every line, got: {seen:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_large_block_starting_after_line_one_elides_with_correct_numbers() {
+    let dir = temp_dir("elideafter");
+    let file = dir.join("big.rs");
+    let mut src = String::from("// preamble\n");
+    src.push_str("fn big() {\n");
+    for i in 0..38 {
+        src.push_str(&format!("    // body {i}\n"));
+    }
+    src.push_str("}\n");
+    std::fs::write(&file, &src).unwrap();
+
+    // The block starts at line 2. Before the fix, elision clamped the end to
+    // the block's own length and the tail segment rendered under the wrong
+    // line numbers (or not at all).
+    let results = read(
+        meta_with_root(&dir),
+        FsRead {
+            targets: vec![Target {
+                path: file.to_string_lossy().to_string(),
+                line: Some(2),
+                symbol: None,
+                line_range: None,
+            }],
+        },
+    )
+    .await;
+
+    let r = &results[0];
+    assert!(r.warnings.is_none(), "unexpected warning: {:?}", r.warnings);
+    assert!(
+        r.content.contains("2| fn big() {"),
+        "block head must be shown with its real line number: {}",
+        r.content
+    );
+    assert!(
+        r.content.contains('…'),
+        "elided interior must carry a marker: {}",
+        r.content
+    );
+    assert!(
+        r.content.contains("41| }"),
+        "closing brace must be shown with its real line number: {}",
+        r.content
+    );
+    assert!(
+        !r.content.contains("// body 30"),
+        "elided interior must not be shown: {}",
+        r.content
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -165,6 +165,33 @@ fn render_lines(
     (out, truncated_any)
 }
 
+/// Render a block-relative line slice as numbered hashline lines, labelling
+/// each line with its absolute 1-based number: `lines[0]` is `start_line`.
+///
+/// Unlike [`render_lines`] (whose input is the whole file, indexed by absolute
+/// line number), this indexes `lines` relatively so blocks that start past line
+/// 1 render their body correctly instead of clamping to an empty range.
+fn render_block_lines(
+    lines: &[String],
+    start_line: u32,
+    end: u32,
+    seen: &mut Vec<(u32, String)>,
+) -> (Vec<String>, bool) {
+    let mut out = Vec::new();
+    let mut truncated_any = false;
+    for (i, text) in lines.iter().enumerate() {
+        let n = start_line + i as u32;
+        if n > end {
+            break;
+        }
+        let (display, was_truncated) = truncate_column(text);
+        truncated_any |= was_truncated;
+        out.push(format::format_numbered_line(n, &display));
+        seen.push((n, text.clone()));
+    }
+    (out, truncated_any)
+}
+
 /// Output of [`read_range_body`]: numbered body, seen lines, content notices,
 /// and warnings (in that order).
 type RangeBody = (String, Vec<(u32, String)>, Vec<String>, Vec<String>);
@@ -234,20 +261,20 @@ fn elide_block(
 ) -> (Vec<String>, Option<(u32, u32)>, bool) {
     let n = lines.len();
     if n <= ELIDE_MIN_BLOCK_LINES {
-        let (out, truncated_any) = render_lines(lines, start_line, start_line + n as u32 - 1, seen);
+        let (out, truncated_any) = render_block_lines(lines, start_line, start_line + n as u32 - 1, seen);
         return (out, None, truncated_any);
     }
     let head_n = ELIDE_KEEP_HEAD.min(n);
     let tail_n = ELIDE_KEEP_TAIL.min(n.saturating_sub(head_n));
     let mut out = Vec::new();
     let mut truncated_any = false;
-    let (head, tr1) = render_lines(lines, start_line, start_line + head_n as u32 - 1, seen);
+    let (head, tr1) = render_block_lines(lines, start_line, start_line + head_n as u32 - 1, seen);
     out.extend(head);
     truncated_any |= tr1;
     out.push("…".to_string());
     let tail_start = n - tail_n; // 0-based index of the first kept tail line
-    let (tail, tr2) = render_lines(
-        lines,
+    let (tail, tr2) = render_block_lines(
+        &lines[tail_start..],
         start_line + tail_start as u32,
         start_line + n as u32 - 1,
         seen,

@@ -13,9 +13,9 @@ pub struct Target {
     pub symbol: Option<String>,
     /// Optional 1-based inclusive line range(s) to read exactly, e.g.
     /// `"50-100"` or `"10-20,200-220"` (comma-separated for multiple
-    /// disjoint ranges). Takes precedence over `line`/`symbol` and performs a
-    /// plain line slice — no AST block resolution — so the agent reads only
-    /// what it asked for.
+    /// disjoint ranges). Performs a plain line slice — no AST block
+    /// resolution — so the agent reads only what it asked for. Checked
+    /// before `line`, but after `symbol`: if `symbol` is set it wins.
     pub line_range: Option<String>,
 }
 
