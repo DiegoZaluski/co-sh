@@ -111,6 +111,9 @@ version = "3"
 default-features = false
 features = []
 
+[dependencies.open]
+version = "5"
+
 [dependencies.pulldown-cmark]
 version = "0.13"
 

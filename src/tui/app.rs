@@ -85,6 +85,11 @@ fn format_tokens(n: usize) -> String {
 }
 
 const SIDEBAR_WIDTH: u16 = 22;
+
+/// Header link that opens the project's bug-report page.
+/// TODO: replace the URL with the real GitHub issues URL.
+const BUG_REPORT_TEXT: &str = "𓆦 bug";
+const BUG_REPORT_URL: &str = "https://github.com/PLACEHOLDER-OWNER/PLACEHOLDER-REPO/issues";
 const FOOTER_HEIGHT: u16 = 1;
 
 /// When the session is empty (no messages), the prompt is centered horizontally
@@ -202,6 +207,8 @@ pub struct App {
     /// Whether the sidebar is focused to receive scroll events.
     /// Set to true when the user clicks inside the sidebar; false on outside clicks.
     sidebar_focused: bool,
+    /// Clickable area of the "bug report" header link (None when not drawn).
+    bug_link_area: Option<Rect>,
 }
 
 impl App {
@@ -305,6 +312,7 @@ impl App {
             last_mouse_y: 0,
             last_scroll_time: Instant::now(),
             sidebar_focused: false,
+            bug_link_area: None,
         }
     }
 
@@ -315,6 +323,22 @@ impl App {
             message: "Welcome! Press Ctrl+P for commands.".to_string(),
             variant: ToastVariant::Info,
             duration_ms: 5000,
+        });
+    }
+
+    /// Opens the bug-report page in the default browser and shows a toast.
+    fn open_bug_report_link(&mut self) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        self.toast_state.show(ToastOptions {
+            title: Some("Bug report".to_string()),
+            message: format!("Opening {BUG_REPORT_URL}…"),
+            variant: ToastVariant::Info,
+            duration_ms: 2500,
+        });
+        std::thread::spawn(move || {
+            if let Err(err) = open::that(BUG_REPORT_URL) {
+                log::error!("Failed to open bug report URL: {err}");
+            }
         });
     }
 
@@ -1708,6 +1732,8 @@ impl App {
                 }
             }
 
+            let bug_w = BUG_REPORT_TEXT.chars().count() as u16;
+
             let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
 
             let right_panel_w = if matches!(self.mode(), AppMode::Session)
@@ -1778,6 +1804,24 @@ impl App {
                     }
                 }
             }
+
+            // Bug report link — right-aligned in the header, only on the Home
+            // screen. Clicking it opens the GitHub issues page in the default
+            // browser. Other routers reuse this space, so it's hidden there.
+            let bug_right_x = main_area.right().saturating_sub(bug_w + 1);
+            let bug_link_area = if matches!(self.mode(), AppMode::Home) && bug_right_x >= area.x + 9 {
+                let bug_link_style = Style::default().fg(rgba_color(self.theme.accent));
+                for (i, ch) in BUG_REPORT_TEXT.chars().enumerate() {
+                    if let Some(cell) = buf.cell_mut((bug_right_x + i as u16, area.y)) {
+                        cell.set_char(ch);
+                        cell.set_style(bug_link_style);
+                    }
+                }
+                Some(Rect::new(bug_right_x, area.y, bug_w, 1))
+            } else {
+                None
+            };
+            self.bug_link_area = bug_link_area;
 
             // Right panel (independent of sidebar state)
             if right_panel_w > 0 {
@@ -4789,6 +4833,17 @@ impl App {
         }
 
         let mouse = MouseEvent::new(event_type, button, x, y, modifiers);
+
+        // Bug report link in the header — clicking opens the GitHub issues page.
+        if let Some(link_area) = self.bug_link_area
+            && x >= link_area.x
+            && x < link_area.right()
+            && y >= link_area.y
+            && y < link_area.bottom()
+        {
+            self.open_bug_report_link();
+            return Ok(true);
+        }
 
         // 1. Dialogs (highest z-order)
         if self.dialog.visible() {
