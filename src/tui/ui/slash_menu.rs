@@ -69,24 +69,16 @@ impl SlashMenu {
     pub fn new() -> Self {
         let commands = vec![
             SlashCommand {
-                name: "settings".into(),
-                desc: "Configure application settings".into(),
-            },
-            SlashCommand {
                 name: "models".into(),
                 desc: "Manage AI models".into(),
             },
             SlashCommand {
-                name: "providers".into(),
-                desc: "Manage providers".into(),
-            },
-            SlashCommand {
-                name: "help".into(),
-                desc: "Show help".into(),
-            },
-            SlashCommand {
                 name: "themes".into(),
                 desc: "Change color theme".into(),
+            },
+            SlashCommand {
+                name: "bell".into(),
+                desc: "Toggle completion bell".into(),
             },
         ];
 

@@ -209,6 +209,8 @@ pub struct App {
     sidebar_focused: bool,
     /// Clickable area of the "bug report" header link (None when not drawn).
     bug_link_area: Option<Rect>,
+    /// Whether the terminal bell rings when an agent loop finishes.
+    bell_enabled: bool,
 }
 
 impl App {
@@ -241,6 +243,12 @@ impl App {
             .and_then(|name| theme_registry.get(name))
             .cloned()
             .unwrap_or_else(|| theme_registry.default_theme().clone());
+
+        // Load saved bell toggle from preferences cache (default: enabled)
+        let saved_bell = prefs_cache
+            .get(&"bell_enabled".to_string())
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true);
 
         Self {
             state,
@@ -313,6 +321,7 @@ impl App {
             last_scroll_time: Instant::now(),
             sidebar_focused: false,
             bug_link_area: None,
+            bell_enabled: saved_bell,
         }
     }
 
@@ -2458,17 +2467,17 @@ impl App {
     /// first queued next-loop message starts a fresh loop. On Error the queues
     /// stay parked: the user decides when to resend (e.g. after switching the
     /// model) — a later manual message rolls them in.
-    fn handle_loop_end(&mut self, start_next: bool) {
+    fn handle_loop_end(&mut self, start_next: bool) -> bool {
         self.queued_input_tx = None;
         let Some(id) = self.state.current_session_id.clone() else {
-            return;
+            return false;
         };
         if self.active_loop_session_id.is_some()
             && self.active_loop_session_id.as_deref() != Some(id.as_str())
         {
             // The user switched sessions while the loop ran — leave the queues
             // untouched for the session that owns them.
-            return;
+            return false;
         }
         let next: Option<String> = {
             let queues = self.state.pending_queues.entry(id).or_default();
@@ -2483,7 +2492,20 @@ impl App {
         };
         if let Some(msg) = next {
             self.start_agent_loop(msg);
+            true
+        } else {
+            false
         }
+    }
+
+    /// Rings the terminal bell (BEL) so the user notices the agent loop ended.
+    fn trigger_bell(&self) {
+        if !self.bell_enabled {
+            return;
+        }
+        let mut out = io::stdout();
+        let _ = out.write_all(b"\x07");
+        let _ = out.flush();
     }
 
     /// Render the pending queued messages above the prompt, color-coded per
@@ -3107,6 +3129,24 @@ impl App {
                                         self.open_theme_dialog();
                                     } else if cmd.name == "models" {
                                         self.open_model_dialog();
+                                    } else if cmd.name == "bell" {
+                                        self.bell_enabled = !self.bell_enabled;
+                                        use crate::ui::toast::{ToastOptions, ToastVariant};
+                                        let state = if self.bell_enabled {
+                                            "enabled"
+                                        } else {
+                                            "disabled"
+                                        };
+                                        self.toast_state.show(ToastOptions {
+                                            title: Some("Bell".into()),
+                                            message: format!("Completion bell {state}."),
+                                            variant: ToastVariant::Info,
+                                            duration_ms: 3000,
+                                        });
+                                        self.prefs_cache.finish_revalidation(
+                                            "bell_enabled".to_string(),
+                                            self.bell_enabled.to_string(),
+                                        );
                                     } else {
                                         let cmd_name = format!("/{} ", cmd.name);
                                         self.prompt_view.input = cmd_name;
@@ -3407,6 +3447,24 @@ impl App {
                                                 self.open_theme_dialog();
                                             } else if cmd.name == "models" {
                                                 self.open_model_dialog();
+                                            } else if cmd.name == "bell" {
+                                                self.bell_enabled = !self.bell_enabled;
+                                                use crate::ui::toast::{ToastOptions, ToastVariant};
+                                                let state = if self.bell_enabled {
+                                                    "enabled"
+                                                } else {
+                                                    "disabled"
+                                                };
+                                                self.toast_state.show(ToastOptions {
+                                                    title: Some("Bell".into()),
+                                                    message: format!("Completion bell {state}."),
+                                                    variant: ToastVariant::Info,
+                                                    duration_ms: 3000,
+                                                });
+                                                self.prefs_cache.finish_revalidation(
+                                                    "bell_enabled".to_string(),
+                                                    self.bell_enabled.to_string(),
+                                                );
                                             } else {
                                                 let cmd_name = format!("/{} ", cmd.name);
                                                 self.prompt_view.input = cmd_name;
@@ -4231,8 +4289,12 @@ impl App {
 
                     // The loop ended: leftover "next request" messages become
                     // "next agent loop" candidates, and the first one starts a
-                    // fresh loop (FIFO).
-                    self.handle_loop_end(true);
+                    // fresh loop (FIFO). If nothing is queued, the work is
+                    // complete — ring the terminal bell to call the user back.
+                    let started_new_loop = self.handle_loop_end(true);
+                    if !started_new_loop {
+                        self.trigger_bell();
+                    }
                 }
 
                 HarnessEvent::UserMessageInjected { text } => {
