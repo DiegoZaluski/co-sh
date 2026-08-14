@@ -143,3 +143,7 @@ path = "examples/hashline/patcher.rs"
 [[example]]
 name = "rollback"
 path = "examples/rollback/core.rs"
+
+[[example]]
+name = "tree-sitter"
+path = "examples/tree_sitter/tree_sitter.rs"

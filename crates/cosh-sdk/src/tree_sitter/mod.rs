@@ -11,6 +11,7 @@ pub mod language;
 
 use crate::hashline::types::BlockSpan;
 use lru::LruCache;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use tree_sitter::{Language, Parser, Tree};
@@ -25,6 +26,10 @@ struct CachedEntry {
 
 pub struct TreeSitter {
     inner: Mutex<LruCache<String, CachedEntry>>,
+    /// Number of actual `parser.parse` calls (full + incremental), for
+    /// observability of the cache lifecycle. Incremented under the cache
+    /// lock; read via [`parse_count`](Self::parse_count).
+    parses: AtomicU64,
 }
 
 impl TreeSitter {
@@ -39,7 +44,16 @@ impl TreeSitter {
                 #[allow(clippy::expect_used)]
                 std::num::NonZeroUsize::new(capacity).expect("capacity > 0"),
             )),
+            parses: AtomicU64::new(0),
         }
+    }
+
+    /// Total number of `parser.parse` invocations performed so far (full
+    /// parses plus incremental re-parses). Cache hits do not increment it.
+    /// Useful for observing the parse lifecycle (e.g. in examples and tests).
+    #[must_use]
+    pub fn parse_count(&self) -> u64 {
+        self.parses.load(Ordering::Relaxed)
     }
 
     /// Acquires the cache entry for `path`, re-parsing if `text` changed.
@@ -68,6 +82,7 @@ impl TreeSitter {
                     guard.put(path.to_string(), old);
                     return None;
                 }
+                self.parses.fetch_add(1, Ordering::Relaxed);
                 let Some(tree) = parser.parse(text, Some(&old.tree)) else {
                     guard.put(path.to_string(), old);
                     return None;
@@ -82,6 +97,7 @@ impl TreeSitter {
                 let mut parser = Parser::new();
                 let language = language::detect_language(path)?;
                 parser.set_language(&language).ok()?;
+                self.parses.fetch_add(1, Ordering::Relaxed);
                 let tree = parser.parse(text, None)?;
                 CachedEntry {
                     language,
