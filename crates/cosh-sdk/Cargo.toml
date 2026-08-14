@@ -133,3 +133,9 @@ serial_test = "3"
 
 [lints]
 workspace = true
+
+# Examples are organized in subdirectories that mirror the module layout
+# (e.g. examples/hashline/run.rs), so they need explicit targets.
+[[example]]
+name = "hashline-run"
+path = "examples/hashline/run.rs"
