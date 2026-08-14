@@ -102,3 +102,7 @@ path = "examples/plan/run.rs"
 [[example]]
 name = "skills-run"
 path = "examples/skills/run.rs"
+
+[[example]]
+name = "subagent-run"
+path = "examples/subagent/run.rs"
