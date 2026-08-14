@@ -37,7 +37,7 @@ pub enum Cursor {
 cannot move with content drift, so `insert head:`/`insert tail:` edits are
 safe to apply even when the section's hash tag is stale (the patcher applies
 them with a warning instead of rejecting — see
-[`HEADTAIL_DRIFT_WARNING`](messages.md)). The anchor forms are the opposite:
+`HEADTAIL_DRIFT_WARNING`). The anchor forms are the opposite:
 they name a concrete line, so drift makes them suspect.
 
 ## `Edit` — one low-level operation
@@ -66,7 +66,7 @@ pub enum Edit {
 }
 ```
 
-Edits are produced by the [parser](parser.md) and consumed by the
+Edits are produced by the `parser` and consumed by the
 [applier](apply.md). Three things worth knowing:
 
 - **Multi-line replacements decompose.** `replace 5..7:` with three payload
@@ -150,7 +150,7 @@ with absolute paths (the common case for model output) be stored with
 cwd-relative paths; `path` provides a fallback header for input that has
 recognizable ops but no `¶PATH` yet — useful for streaming previews before
 the model writes the header. `StreamOptions` feeds
-[`stream_hash_lines`](stream.md).
+`stream_hash_lines`.
 
 ## `CompactDiffPreview` / `CompactDiffOptions`
 
@@ -163,5 +163,5 @@ pub struct CompactDiffPreview {
 pub struct CompactDiffOptions { pub max_unchanged_run: Option<u32> }  // default 2
 ```
 
-Produced by [`build_compact_diff_preview`](diff_preview.md) — a bounded
+Produced by `build_compact_diff_preview` — a bounded
 preview of the change with unchanged-run truncation.

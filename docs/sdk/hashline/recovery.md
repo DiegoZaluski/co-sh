@@ -6,7 +6,7 @@ the edit can be **replayed safely** onto drifted content, and if so, do it
 — producing the merged result plus warnings that tell the caller what
 happened.
 
-Recovery is stateless apart from the [`SnapshotStore`](snapshots.md) it
+Recovery is stateless apart from the `SnapshotStore` it
 queries. `Recovery::new(store)` and `Recovery::try_recover(&RecoveryArgs)`.
 
 ## The mechanism
@@ -20,8 +20,8 @@ file), `file_hash` (the stale tag), and `edits`:
    session" mismatch.
 2. **Replay + 3-way merge.** Apply the edits to the *snapshot's* text (the
    version the model actually saw), compute a structured patch
-   ([`structured_patch`](diff.md)) between snapshot-before and
-   snapshot-after, then [`apply_patch`](diff.md) that patch onto the live
+   (`structured_patch`) between snapshot-before and
+   snapshot-after, then `apply_patch` that patch onto the live
    content. This is the same merge a version-control system does: the
    model's *change* is transported to wherever the file is now, without
    clobbering unrelated edits.
@@ -63,12 +63,12 @@ actual hash, anchored lines, context) described in
 
 ## `MismatchError`
 
-Defined in [mismatch.rs](mismatch.md): a `Clone` + `Display` + `Error` type
+Defined in `mismatch.rs`: a `Clone` + `Display` + `Error` type
 with `path`, `expected_file_hash`, `actual_file_hash`, `file_lines`,
 `anchor_lines`, and `hash_recognized`, plus a pre-formatted message
 (`format_message()` / `display_message()`). The message includes the
 rejection header and a small window of numbered lines around each anchor
 (`*` marks anchored lines, `...` marks elided context). The same module
 exposes two small helpers used for anchor parsing and validation:
-[`parse_tag`](mismatch.md) (a bare line reference like `42`, `*42:foo`,
+`parse_tag` (a bare line reference like `42`, `*42:foo`,
 `> 7`) and `validate_line_ref(line, file_lines)`.

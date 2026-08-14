@@ -67,7 +67,7 @@ apply time the patcher compares it against a hash of the live file:
 | **Matches** (or no tag needed) | Apply directly. The file is exactly what the model read. |
 | **Stale, but only head/tail inserts** | Apply onto the live content with a warning: `Applied an \`insert head:\`/\`insert tail:\` edit onto the current file content even though the snapshot tag was stale … re-read if the drift was unexpected.` Head/tail position is content-independent, so the insert is safe. |
 | **Stale, anchored edit, snapshot recorded** | Attempt [recovery](recovery.md): replay the edit against the recorded snapshot and 3-way-merge onto the live content. Success yields a recovery banner warning. |
-| **Stale, anchored edit, no recovery** | Reject with a [`MismatchError`](mismatch.md): `Edit rejected: file changed between read and edit.` |
+| **Stale, anchored edit, no recovery** | Reject with a `MismatchError`: `Edit rejected: file changed between read and edit.` |
 
 The mismatch rejection is rich on purpose — it re-reads nothing, but it
 carries the expected/actual tags, the anchored lines, and the surrounding

@@ -84,13 +84,13 @@ Hashline is deliberately split into stages with a clean boundary between
 
 | Stage | Module | Pure? | What it does |
 |---|---|---|---|
-| Tokenize | [tokenizer](tokenizer.md) | yes | Classify each line: header, op, payload, envelope |
-| Parse | [parser](parser.md) | yes | Turn tokens into a flat list of [`Edit`](types.md) |
+| Tokenize | `tokenizer` | yes | Classify each line: header, op, payload, envelope |
+| Parse | `parser` | yes | Turn tokens into a flat list of [`Edit`](types.md) |
 | Split | [input](input.md) | yes | Split a multi-section patch into per-file [`PatchSection`]s; parse lazily |
 | Resolve blocks | [block](block.md) | yes | Expand `replace block N:` against file text + language |
 | Apply | [apply](apply.md) | yes | Execute the edits on a text body in memory |
-| Normalize | [normalize](normalize.md) | yes | BOM stripping, LF normalization, line-ending round-trip |
-| Store snapshots | [snapshots](snapshots.md) | — | Record full-file versions + their tags (trait, LRU default) |
+| Normalize | `normalize` | yes | BOM stripping, LF normalization, line-ending round-trip |
+| Store snapshots | `snapshots` | — | Record full-file versions + their tags (trait, LRU default) |
 | Validate + write | [patcher](patcher.md) | no | Read file → check tag → recover → write back |
 | Recover | [recovery](recovery.md) | — | 3-way-merge stale edits onto drifted content |
 

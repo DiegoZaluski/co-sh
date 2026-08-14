@@ -1,7 +1,7 @@
 # `rollback` types and constants
 
 The module's data surface is deliberately tiny: two I/O structs and three
-constants. Everything else is the shared [`InMemorySnapshotStore`](../hashline/snapshots.md)
+constants. Everything else is the shared `InMemorySnapshotStore`
 from `hashline::snapshots`, reused as-is.
 
 ---
@@ -75,7 +75,7 @@ singleton at first use (via `InMemorySnapshotStoreOptions`).
 ## The store itself
 
 `session_store()` returns `Arc<Mutex<InMemorySnapshotStore>>` — the same
-type family documented in [`hashline::snapshots`](../hashline/snapshots.md).
+type family documented in `hashline::snapshots`.
 The rollback module adds nothing to it: recording, deduplication, per-path
 history, LRU eviction, and `by_hash` lookups are all the store's own
 behavior. The `Arc<Mutex<S>>` wrapper also implements the `SnapshotStore`

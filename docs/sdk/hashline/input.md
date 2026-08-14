@@ -2,8 +2,8 @@
 
 This page is the reference for the patch language itself — what a valid
 patch looks like, how input is split into sections, and every diagnostic the
-parser can produce. The two modules behind it are [`tokenizer`](tokenizer.md)
-(line classification) and [`parser`](parser.md) (the state machine that
+parser can produce. The two modules behind it are `tokenizer`
+(line classification) and `parser` (the state machine that
 turns tokens into [`Edit`](types.md)s); the high-level entry point is
 [`Patch::parse`](input.md).
 
@@ -144,7 +144,7 @@ sections.
 
 ## Streaming-tolerant parsing
 
-[`parse_patch_streaming`](parser.md) and
+`parse_patch_streaming` and
 [`PatchSection::apply_partial_to`](input.md) are the streaming-tolerant
 variants: a trailing in-flight op (no payload yet) or a per-token parse
 error mid-stream becomes a **warning**, never a hard error or a phantom

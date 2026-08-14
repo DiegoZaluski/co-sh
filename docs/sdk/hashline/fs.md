@@ -4,7 +4,7 @@ The patcher never touches disk directly — it works through two traits that
 let the same engine run against any backing store:
 
 - [`Filesystem`](fs.md) — where file *content* comes from and goes to.
-- [`SnapshotStore`](snapshots.md) — where full-file *versions* are cached so
+- `SnapshotStore` — where full-file *versions* are cached so
   stale tags can be recovered.
 
 This page covers both. They're the two seams to implement when embedding

@@ -79,7 +79,7 @@ modification (lists known versions and tells you to pass an explicit hash).
 ## Relationship to hashline
 
 `rollback` and `hashline` share the same snapshot-store machinery
-([`hashline::snapshots`](../hashline/snapshots.md)) and the same hash
+(`hashline::snapshots`) and the same hash
 function. They differ in *who owns the store*:
 
 - `rollback` owns a process-global singleton (`session_store()`) with its
