@@ -146,6 +146,10 @@ name = "rollback"
 path = "examples/rollback/core.rs"
 
 [[example]]
+name = "find"
+path = "examples/find/find.rs"
+
+[[example]]
 name = "tree-sitter"
 path = "examples/tree_sitter/tree_sitter.rs"
 
