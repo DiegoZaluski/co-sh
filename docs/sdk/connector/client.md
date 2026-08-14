@@ -108,3 +108,15 @@ providers get native function-calling instructions.
 ---
 
 Next: [params — messages, tools, formats](params.md).
+
+---
+
+## Summary
+
+- `Connector` is the main client interface — construct with a provider name, configure with builder methods, then call request methods.
+- Builder methods (`with_model`, `with_temperature`, etc.) are `#[must_use]` and accumulate into `Parameters`; only `new` is fallible.
+- Request methods: `chat` (single user prompt), `chat_with_system` (user + system), `embed` (embedding vector, not Claude), and streaming variants.
+- Streaming yields `StreamChunk` items with `token()` (text delta) and `reasoning()` (thinking delta); after the stream ends, `raw()` returns the final SSE frame.
+- Special streaming methods: `stream_chat_with_system_no_tools` (sub-agents must not see tool schemas) and `stream_chat_with_messages` (full conversation history with tool-call roles).
+- Token accounting: `tokens()` reads provider-specific usage fields from raw responses; `is_local()` detects localhost servers for tool-calling behavior differences.
+- Introspection methods: `provider_name()`, `is_local()`, `model()`, `effective_model()`, and `has_tools()` provide metadata about the connector's configuration.

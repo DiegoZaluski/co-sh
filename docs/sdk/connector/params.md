@@ -56,9 +56,12 @@ thinking model emits a native `functionCall`, the part travels with a sibling
 conversation history (the API rejects the replay with HTTP 400 otherwise).
 The `skip_serializing_if` keeps it off every other provider's wire format.
 
+> **Why this field exists:** Gemini 3.x thinking models use cryptographic signatures to verify that function calls haven't been tampered with during conversation replay. This is a security/validity requirement specific to Gemini's architecture. Other providers don't have this requirement, so we use conditional serialization to keep the field off their wire formats.
+
 ## Tools: `ToolDefinition` + `ToolFunction`
 
 ```rust,ignore
+// Example: Define a weather tool with parameters
 let tool = ToolDefinition::new(
     ToolFunction::new("get_weather")
         .with_description("Get the current weather for a city")
@@ -69,6 +72,11 @@ let tool = ToolDefinition::new(
         }))
 );
 connector.with_tools(vec![tool]);
+
+// Control tool selection with with_tool_choice
+connector.with_tool_choice(serde_json::json!("auto"));  // let model decide
+connector.with_tool_choice(serde_json::json!("none"));  // disable tools
+connector.with_tool_choice(serde_json::json!(ToolName));  // force specific tool
 ```
 
 - `ToolFunction::new(name)` → `with_description(...)` → `with_parameters(...)`.
@@ -105,3 +113,14 @@ it off other providers' wire formats.
 ---
 
 Next: [output — responses and streams](output.md).
+
+---
+
+## Summary
+
+- `ChatMessage` is the shared conversation format mirroring OpenAI's shape: `role` ("system" | "user" | "assistant" | "tool"), `content`, `tool_calls` (assistant-only), and `tool_call_id` (tool-result-only).
+- Builders (`user_message`, `system_message`, `tool_result_message`, `assistant_tool_call_message`) construct messages with exactly the fields each role needs.
+- `ToolCallMsg` carries `thought_signature` for Gemini 3.x — required when replaying function calls in conversation history; `skip_serializing_if` keeps this off other providers.
+- Tools: `ToolDefinition::new(ToolFunction::new(name).with_description(...).with_parameters(...))` — wrap with `type: "function"` and hand to `Connector::with_tools`.
+- `ResponseFormat::json_object()` requests that the model emit valid JSON (currently the only variant).
+- `ClaudeThinkingBlock` captures extended thinking for verbatim replay — Anthropic validates the signature cryptographically and rejects modified/missing blocks.

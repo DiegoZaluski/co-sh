@@ -63,3 +63,13 @@ Use `err.is_context_window()` to test, or match on the variant directly.
 ---
 
 Next: [provider — registry and keys](provider.md).
+
+---
+
+## Summary
+
+- `ConnectorError` is the single error type for the whole connector surface, with variants for unknown provider, missing API key, HTTP errors, context window overflow, deserialization failures, and more.
+- The interesting piece is `classify_http`, which inspects response bodies for context-window overflow markers (case-insensitive phrases like "context length", "maximum context", "too many tokens").
+- Body inspection (not status code) is the reliable signal because: OpenAI/Anthropic overflows arrive as 400 (same as other errors), payload-too-large is 413, and SSE error frames can arrive with status 200.
+- `ContextWindowExceeded` includes a heuristic `window_tokens` hint — the smallest token-sized number (≥ 1000) near a size keyword in the body.
+- Use `err.is_context_window()` to test for overflow, or match on the variant directly; all variants implement `Display` and `std::error::Error`.

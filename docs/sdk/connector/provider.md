@@ -44,6 +44,21 @@ pub const COSH_SERVICE: &str = "cosh";   // default keyring service
 pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String>
 pub fn has_api_key(provider: &str) -> bool
 pub fn detect_provider() -> Option<&'static str>
+
+// Example: Check if a provider is configured
+if has_api_key("openai") {
+    println!("OpenAI is configured");
+}
+
+// Example: Get the API key (respects priority: keyring → env → explicit)
+if let Some(key) = get_api_key("anthropic", None) {
+    println!("Found Anthropic key");
+}
+
+// Example: Detect which provider the user is most likely using
+if let Some(provider) = detect_provider() {
+    println!("Default provider: {}", provider);
+}
 ```
 
 Resolution order:
@@ -52,6 +67,9 @@ Resolution order:
    the app (`keyring::Entry` under `cosh` by default). Preferring it over the
    environment means stale shell/`.env` exports can't shadow a key the user
    configured.
+
+> **Why keyring takes priority:** Users who explicitly save keys through the app have made a deliberate configuration choice. Environment variables are often temporary (session exports, `.env` files for development) and can become stale. By preferring keyring, we ensure the user's intentional configuration isn't accidentally overridden by forgotten environment state.
+
 2. **Environment variable** — per-provider fallback for providers never
    stored (`get_api_key("openai", None)` reads `OPENAI_API_KEY`).
 
@@ -76,3 +94,15 @@ serves the stale value.
 ---
 
 Next: [discovery — context windows and reasoning](discovery.md).
+
+---
+
+## Summary
+
+- The provider registry contains ~26 providers with `ProviderConfig` entries: name, family (OpenAICompatible/Gemini/Claude), base URL, default model, and extra-headers flag.
+- Providers include cloud services (openai, groq, mistral, together, openrouter, xai, deepseek, perplexity, etc.) and local model servers (ollama, lmstudio, vllm, llamacpp) pointing at localhost.
+- Enumeration: `known_providers()` (iterator), `known_providers_with_env()` (pairs with env vars), and `get_provider_env_var()` (env var name for a provider).
+- API key resolution: OS keyring (authoritative store under `cosh` service) → environment variable (fallback) → explicit `with_api_key` (highest priority).
+- Keyring lookups are cached per process lifetime (keyed by service + env var) and `Zeroizing`; misses are never cached so externally-added keys appear immediately.
+- Cache invalidation: `invalidate_api_key(env_var)` after storing/updating a key, or `clear_api_key_cache()` to forget everything.
+- `has_api_key(provider)` answers "configured?" regardless of backend; `detect_provider()` returns the first provider with a key (natural default).

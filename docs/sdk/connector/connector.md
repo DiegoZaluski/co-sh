@@ -23,6 +23,8 @@ Anthropic's `/messages` with its `x-api-key` header, Gemini's
 set of methods. The `Connector` internally classifies each provider into one
 of **three families**:
 
+> See [`client.md`](client.md) for the complete `Connector` API, [`params.md`](params.md) for request vocabulary, and [`discovery.md`](discovery.md) for context window and reasoning capability detection.
+
 | Family | Providers (examples) | Wire protocol |
 |---|---|---|
 | `OpenAICompatible` | openai, groq, mistral, deepseek, ollama, openrouter, together, xai, … | OpenAI `/chat/completions` + `/embeddings` |
@@ -75,3 +77,14 @@ constructs tool/message payloads, exercises the deterministic error paths,
 and makes best-effort live calls when an API key is available.
 
 Next: [client — the Connector](client.md).
+
+---
+
+## Summary
+
+- `connector` is a unified LLM client supporting OpenAI, Claude, Gemini, and OpenAI-compatible backends through a single interface.
+- The module classifies providers into three families: `OpenAICompatible` (OpenAI wire protocol), `Gemini` (Google `generateContent`), and `Claude` (Anthropic `/messages`).
+- Switching providers is a one-line change — the same code works across all families, with each translating shared parameters to its native format.
+- API keys resolve in order: OS keyring (authoritative store), environment variable (fallback), or explicit `with_api_key` (highest priority).
+- The module includes client ([`client`](client.md)), request vocabulary ([`params`](params.md)), response types ([`output`](output.md)), error handling ([`error`](error.md)), provider registry ([`provider`](provider.md)), and discovery ([`discovery`](discovery.md)).
+- Family-specific wire code and SSE plumbing are implementation details (`pub(crate)`) — everything routes through the public `Connector` interface.

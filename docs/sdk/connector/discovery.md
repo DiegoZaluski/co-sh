@@ -81,3 +81,14 @@ so the TUI can consult them instantly when rendering the model dialog.
 ---
 
 Back to the [module overview](connector.md).
+
+---
+
+## Summary
+
+- `discover_context_window` resolves a model's max input window from multiple sources: static table (fastest, offline), models.dev catalog (cached JSON), OpenRouter catalog (fallback), or Anthropic API (for unknown `claude*` ids only).
+- `effective_context_window` computes the usable budget from the advertised maximum using a logarithmic decay formula, clamped to [0.20, 0.85] — small windows are mostly usable, giant windows are strongly limited.
+- The decay formula reflects research findings: larger advertised windows create an "illusion" of capacity, so the effective fraction decreases as window size increases.
+- `model_reasoning` answers whether a model supports thinking/reasoning, resolved from static table (offline) or cached models.dev catalog.
+- `ModelReasoning` includes `supported` (boolean) and `efforts` (optional list of accepted effort levels like "low", "medium", "high").
+- Both discovery functions are synchronous and offline for TUI instant rendering; network catalogs are only consulted when static resolution fails.

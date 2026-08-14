@@ -74,3 +74,14 @@ JSON alongside.
 ---
 
 Next: [error — ConnectorError and classification](error.md).
+
+---
+
+## Summary
+
+- `ChatOutput` wraps a one-shot reply with `message()` (extracted text) and `raw()` (unmodified JSON response).
+- `StreamChunk` represents one streaming item with `token()` (text delta), `reasoning()` (thinking delta), `thinking_blocks()` (Claude extended thinking), and `finish_reason()` (final chunk only).
+- `ChatStream` is the streaming response implementing `Stream<Item = Result<StreamChunk>>`; after the stream ends, `raw()` returns the last SSE frame (usage, finish_reason, etc.).
+- `LsOutput` and `ModelInfo` handle model listing: `list_models()` returns available models with raw JSON alongside.
+- `thinking_blocks()` carries Claude extended-thinking blocks for verbatim replay (cryptographic signature validation); `skip_serializing_if` keeps this off other providers' wire formats.
+- Streaming uses `tokio_stream::StreamExt` to drive; incomplete streams return `StreamTerminated` when no frame was ever received.
