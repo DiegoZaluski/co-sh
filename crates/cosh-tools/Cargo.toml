@@ -106,3 +106,7 @@ path = "examples/skills/run.rs"
 [[example]]
 name = "subagent-run"
 path = "examples/subagent/run.rs"
+
+[[example]]
+name = "web-run"
+path = "examples/web/run.rs"
