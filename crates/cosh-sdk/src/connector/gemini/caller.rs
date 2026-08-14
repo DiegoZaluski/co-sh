@@ -625,7 +625,11 @@ pub(crate) fn api_version_for(params: &Parameters) -> &'static str {
         .reasoning_effort
         .as_deref()
         .is_some_and(|e| matches!(e, "minimal" | "low" | "medium" | "high"));
-    if has_thinking_level { "v1beta" } else { API_VERSION }
+    if has_thinking_level {
+        "v1beta"
+    } else {
+        API_VERSION
+    }
 }
 
 /// Resolve the effective Gemini API base URL.

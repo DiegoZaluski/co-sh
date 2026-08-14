@@ -4347,8 +4347,8 @@ impl App {
                             args,
                         });
                     self.permission_dialog.visible = true;
-                    // Default to "Deny" (index 2) for safety
-                    self.permission_dialog.selected = 2;
+                    // Default to "Allow Once" (index 1)
+                    self.permission_dialog.selected = 1;
                 }
             }
         }

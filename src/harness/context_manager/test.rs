@@ -3123,14 +3123,15 @@ fn long_session_run_cost_is_measured() {
     let start = std::time::Instant::now();
     let outcome = cm.run();
     let ms = start.elapsed().as_secs_f64() * 1000.0;
-    eprintln!(
-        "[LONG] run() over {items} items ({outcome:?}) took {ms:.1} ms — one overflow pass"
-    );
+    eprintln!("[LONG] run() over {items} items ({outcome:?}) took {ms:.1} ms — one overflow pass");
     // Measured ~288ms before the incremental `total_tokens` cache (bottleneck
     // #1) and ~78ms after it; the per-item token cache (bottleneck #2) took
     // it to ~37ms. The 1s ceiling is ~27x headroom — it catches a 10x+
     // regression or a genuine quadratic stall while ignoring machine noise.
-    assert!(ms < 1_000.0, "run() stalled for {ms:.1}ms over {items} items");
+    assert!(
+        ms < 1_000.0,
+        "run() stalled for {ms:.1}ms over {items} items"
+    );
 }
 
 /// The compaction `run()` must not re-tokenize LARGE tool results to compute
@@ -3198,5 +3199,8 @@ fn long_session_useless_sweep_stays_linear() {
     );
     // ~0ms post-fix vs ~2ms+ pre-fix on 1200 items. The 100ms ceiling is
     // enormous headroom — catches a return to per-item full-timeline scans.
-    assert!(ms < 100.0, "useless sweep took {ms:.1}ms over {before} items");
+    assert!(
+        ms < 100.0,
+        "useless sweep took {ms:.1}ms over {before} items"
+    );
 }

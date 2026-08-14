@@ -452,8 +452,7 @@ data: {\"type\":\"message_stop\"}\n\n";
     let blocks = thinking_chunk.thinking_blocks().unwrap();
     assert_eq!(blocks.len(), 1);
     assert_eq!(
-        blocks[0].thinking,
-        "Let me reason about it more",
+        blocks[0].thinking, "Let me reason about it more",
         "thinking_delta deltas must be accumulated into the block"
     );
     assert_eq!(blocks[0].signature, "sig_abc123");
@@ -494,7 +493,10 @@ data: {\"type\":\"message_stop\"}\n\n";
         tokens.push_str(chunk.token());
         reasoning.push_str(chunk.reasoning());
     }
-    assert_eq!(tokens, "Answer", "thinking must never leak into visible tokens");
+    assert_eq!(
+        tokens, "Answer",
+        "thinking must never leak into visible tokens"
+    );
     assert_eq!(reasoning, "think harder");
 }
 
@@ -504,7 +506,9 @@ data: {\"type\":\"message_stop\"}\n\n";
 /// 400.
 #[tokio::test]
 async fn assistant_tool_turn_replays_thinking_blocks_verbatim() {
-    use super::super::{ClaudeThinkingBlock, ToolCallFunctionMsg, ToolCallMsg, assistant_tool_call_message};
+    use super::super::{
+        ClaudeThinkingBlock, ToolCallFunctionMsg, ToolCallMsg, assistant_tool_call_message,
+    };
     let (port, captured, _raw, handle) = mock_server(
         r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
         200,

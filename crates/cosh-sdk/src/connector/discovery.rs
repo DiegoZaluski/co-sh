@@ -1828,7 +1828,9 @@ mod tests {
     #[test]
     fn effective_window_never_exceeds_the_raw_window() {
         // The effective window is always a fraction of the advertised one.
-        for w in [1000usize, 8_000, 16_000, 64_000, 128_000, 200_000, 1_000_000, 2_000_000] {
+        for w in [
+            1000usize, 8_000, 16_000, 64_000, 128_000, 200_000, 1_000_000, 2_000_000,
+        ] {
             let eff = effective_context_window(w);
             assert!(eff <= w, "{w} -> {eff} exceeds the raw window");
             assert!(eff > 0, "{w} -> 0 effective");

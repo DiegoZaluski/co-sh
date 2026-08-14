@@ -304,23 +304,18 @@ impl QueueChoiceDialog {
                 theme.text
             };
             let opt_w = inner_w.saturating_sub(3);
-            let combined = Self::truncate(
-                &format!("{label} · {}", OPTION_DESCRIPTIONS[i]),
-                opt_w,
-            );
+            let combined = Self::truncate(&format!("{label} · {}", OPTION_DESCRIPTIONS[i]), opt_w);
             draw_text_line(
                 buf,
                 &combined,
                 inner_x + 3,
                 ry,
                 opt_w,
-                Style::default()
-                    .fg(rgba_color(text_fg))
-                    .bg(if is_selected {
-                        rgba_color(theme.background_element)
-                    } else {
-                        bg
-                    }),
+                Style::default().fg(rgba_color(text_fg)).bg(if is_selected {
+                    rgba_color(theme.background_element)
+                } else {
+                    bg
+                }),
             );
         }
 

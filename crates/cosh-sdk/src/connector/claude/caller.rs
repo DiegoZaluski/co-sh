@@ -180,9 +180,9 @@ fn thinking_for_effort(model: &str, effort: &str) -> Option<ThinkingConfig> {
 /// floor (the 1024 headroom guarantees the answer always fits).
 fn effective_max_tokens(user_max: Option<u32>, thinking: &Option<ThinkingConfig>) -> u32 {
     match thinking {
-        Some(ThinkingConfig::Manual { budget_tokens, .. }) => {
-            user_max.unwrap_or(0).max(*budget_tokens + THINKING_OUTPUT_HEADROOM)
-        }
+        Some(ThinkingConfig::Manual { budget_tokens, .. }) => user_max
+            .unwrap_or(0)
+            .max(*budget_tokens + THINKING_OUTPUT_HEADROOM),
         _ => user_max.unwrap_or(4096),
     }
 }

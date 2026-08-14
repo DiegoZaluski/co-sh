@@ -2291,7 +2291,8 @@ fn bench_streaming_frame_time_vs_session_size() {
 fn bench_unique_agents_scan_cost() {
     use crate::state::AppState;
 
-    let eprintln_row = |pairs: usize, us: f64| eprintln!("[UNIQUE_AGENTS] {pairs:>7} pairs → {us:>8.2} us");
+    let eprintln_row =
+        |pairs: usize, us: f64| eprintln!("[UNIQUE_AGENTS] {pairs:>7} pairs → {us:>8.2} us");
 
     for &pairs in &[100usize, 500, 2000, 8000] {
         let session = bench_session_with_n_pairs(pairs);
@@ -2346,7 +2347,11 @@ fn bench_tool_state_expansion_maps_stay_small() {
         ts.expanded.len(),
         ts.error_expanded.len()
     );
-    assert_eq!(ts.expanded.len(), N, "every distinct tool id is a permanent entry");
+    assert_eq!(
+        ts.expanded.len(),
+        N,
+        "every distinct tool id is a permanent entry"
+    );
     // No unbounded blow-up: 5k toggles must not leave gigabytes behind.
     assert!(
         est_bytes < 10 * 1024 * 1024,
@@ -2399,7 +2404,9 @@ fn bench_render_memory_growth_short() {
             let step = msg_idx;
             if let Some(session) = state.current_session_mut() {
                 session.messages.push(bench_text_message(step, false));
-                session.messages.push(bench_tool_message(step, TOOL_OUTPUT_BYTES));
+                session
+                    .messages
+                    .push(bench_tool_message(step, TOOL_OUTPUT_BYTES));
                 session.messages.push(bench_user_message(step));
             }
             msg_idx += 1;
@@ -2561,9 +2568,7 @@ fn prefix_y_matches_linear_walk_and_binary_search() {
         loop {
             let bs = view.find_first_visible(scroll);
             let brute = (0..n)
-                .find(|&i| {
-                    view.prefix_y[i] + view.msg_height_cache[i] > scroll
-                })
+                .find(|&i| view.prefix_y[i] + view.msg_height_cache[i] > scroll)
                 .unwrap_or(n);
             assert_eq!(
                 bs, brute,
@@ -2617,7 +2622,10 @@ fn prune_render_cache_evicts_only_outside_guard_in_recency_order() {
     view.msg_cache_text_regions = (0..n).map(|_| Some(Vec::new())).collect();
     let per_entry: Vec<usize> = (0..n)
         .map(|i| {
-            SessionView::cache_entry_bytes_of(&view.msg_cache_cells[i], &view.msg_cache_text_regions[i])
+            SessionView::cache_entry_bytes_of(
+                &view.msg_cache_cells[i],
+                &view.msg_cache_text_regions[i],
+            )
         })
         .collect();
 
@@ -2627,8 +2635,7 @@ fn prune_render_cache_evicts_only_outside_guard_in_recency_order() {
     let vp_top = 0i32;
     let vp_bottom = 40i32;
     let guard_top = view.scroll_y - super::RENDER_CACHE_GUARD_ROWS;
-    let guard_bottom =
-        view.scroll_y + (vp_bottom - vp_top) + super::RENDER_CACHE_GUARD_ROWS;
+    let guard_bottom = view.scroll_y + (vp_bottom - vp_top) + super::RENDER_CACHE_GUARD_ROWS;
 
     // Reference: the pre-prefix_y walk computes the outside-guard set...
     let mut outside: Vec<usize> = Vec::new();
@@ -2701,7 +2708,10 @@ fn prune_render_cache_evicts_only_outside_guard_in_recency_order() {
             msg_bottom > guard_top && msg_top < guard_bottom
         })
         .collect();
-    assert!(!inside_guard.is_empty(), "test should exercise guard messages");
+    assert!(
+        !inside_guard.is_empty(),
+        "test should exercise guard messages"
+    );
     for idx in inside_guard {
         assert!(
             view.msg_cache_cells[idx].is_some(),
@@ -2730,9 +2740,7 @@ fn prune_render_cache_handles_overshoot_edges() {
     view.msg_cache_h = vec![0; n];
     // Stamps follow the index order: message 0 is the oldest.
     view.msg_cache_last_used = (0..n as u64).collect();
-    view.msg_cache_cells = (0..n)
-        .map(|_| Some(vec![Cell::default(); 8]))
-        .collect();
+    view.msg_cache_cells = (0..n).map(|_| Some(vec![Cell::default(); 8])).collect();
     view.msg_cache_text_regions = (0..n).map(|_| Some(Vec::new())).collect();
     let per_entry = SessionView::cache_entry_bytes_of(
         &view.msg_cache_cells[0],
@@ -2745,8 +2753,7 @@ fn prune_render_cache_handles_overshoot_edges() {
     let vp_top = 0i32;
     let vp_bottom = 40i32;
     let guard_top = view.scroll_y - super::RENDER_CACHE_GUARD_ROWS;
-    let guard_bottom =
-        view.scroll_y + (vp_bottom - vp_top) + super::RENDER_CACHE_GUARD_ROWS;
+    let guard_bottom = view.scroll_y + (vp_bottom - vp_top) + super::RENDER_CACHE_GUARD_ROWS;
     let is_candidate: Vec<bool> = (0..n)
         .map(|i| {
             let top = (i * 11) as i32;
@@ -2771,8 +2778,7 @@ fn prune_render_cache_handles_overshoot_edges() {
     // Case 2: overshoot larger than the combined candidate sizes → every
     // candidate is evicted (window degrades to the full list) and the guard
     // interior survives.
-    view.msg_cache_bytes =
-        super::RENDER_CACHE_LOW_WATER + 4 * candidate_count * per_entry;
+    view.msg_cache_bytes = super::RENDER_CACHE_LOW_WATER + 4 * candidate_count * per_entry;
     view.prune_render_cache(vp_top, vp_bottom);
     for idx in 0..n {
         if is_candidate[idx] {
@@ -2834,8 +2840,7 @@ fn prune_render_cache_breaks_stamp_ties_without_violating_invariants() {
     let vp_top = 0i32;
     let vp_bottom = 40i32;
     let guard_top = view.scroll_y - super::RENDER_CACHE_GUARD_ROWS;
-    let guard_bottom =
-        view.scroll_y + (vp_bottom - vp_top) + super::RENDER_CACHE_GUARD_ROWS;
+    let guard_bottom = view.scroll_y + (vp_bottom - vp_top) + super::RENDER_CACHE_GUARD_ROWS;
     let is_candidate: Vec<bool> = (0..n)
         .map(|i| {
             let top = (i * 11) as i32;

@@ -1524,15 +1524,8 @@ async fn queued_next_request_messages_are_injected_into_context() {
     // Run directly (like bug_hunt::run_loop_and_collect) so `h` is still
     // owned by this test after the loop terminates; the mock stream makes the
     // run deterministic and fast.
-    h.run_agent_loop_with_queued_input(
-        "hello",
-        tx,
-        answer_rx,
-        perm_rx,
-        stop_signal,
-        queued_rx,
-    )
-    .await;
+    h.run_agent_loop_with_queued_input("hello", tx, answer_rx, perm_rx, stop_signal, queued_rx)
+        .await;
 
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
@@ -1592,15 +1585,8 @@ async fn queued_next_request_message_enters_the_next_request_with_tool_work() {
     let (queued_tx, queued_rx) = tokio::sync::mpsc::unbounded_channel();
     queued_tx.send("follow up".to_string()).unwrap();
 
-    h.run_agent_loop_with_queued_input(
-        "use tool",
-        tx,
-        answer_rx,
-        perm_rx,
-        stop_signal,
-        queued_rx,
-    )
-    .await;
+    h.run_agent_loop_with_queued_input("use tool", tx, answer_rx, perm_rx, stop_signal, queued_rx)
+        .await;
 
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
@@ -1615,7 +1601,11 @@ async fn queued_next_request_message_enters_the_next_request_with_tool_work() {
         )),
         "expected a UserMessageInjected event; events={events:?}"
     );
-    assert!(events.iter().any(|e| matches!(e, HarnessEvent::Done { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. }))
+    );
 
     // The context sequence places the injected user turn in the SAME request
     // as the tool call — before it — and the loop still completes normally.
@@ -1624,8 +1614,7 @@ async fn queued_next_request_message_enters_the_next_request_with_tool_work() {
         .iter()
         .enumerate()
         .filter_map(|(i, it)| {
-            matches!(it, ContextItem::User { original, .. } if original == "follow up")
-                .then_some(i)
+            matches!(it, ContextItem::User { original, .. } if original == "follow up").then_some(i)
         })
         .collect();
     assert_eq!(

@@ -612,8 +612,8 @@ data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReas
 /// version.
 #[test]
 fn api_version_routes_thinking_to_beta() {
-    use crate::connector::params::Parameters;
     use crate::connector::gemini::{api_version_for, resolve_base_url};
+    use crate::connector::params::Parameters;
 
     // With a reasoning effort → v1beta.
     for effort in ["minimal", "low", "medium", "high"] {
