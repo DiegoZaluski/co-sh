@@ -30,6 +30,8 @@ pub fn canonical_name(self) -> &'static str             // stable lowercase key
 Not every grammar accepts `$NAME` as a valid identifier, so the module
 classifies each language into one of three implementations:
 
+> **Why this classification matters:** Different grammars have different identifier rules. Some accept `$` natively (like JavaScript), others reject it (like Rust). Rather than failing pattern matching for common cases, we translate patterns transparently. This design choice lets users write consistent `$MSG` patterns across all languages without worrying about grammar-specific limitations.
+
 1. **Stub languages** — the grammar accepts `$` natively, so patterns need
    no preprocessing: `Astro`, `Bash`, `Clojure`, `Dart`, `Diff`,
    `EmacsLisp`, `Graphql`, `Java`, `JavaScript`, `Json`, `Lua`, `Markdown`,
@@ -62,3 +64,14 @@ TypeScript, Verilog, Vue, Xml, Yaml, Zig`.
 
 The per-language `Language` implementations live here; the parser functions
 they dispatch to live in [`parse`](parse.md).
+
+---
+
+## Summary
+
+- `SupportLang` is a `Copy` enum of 60+ grammars, each implementing ast-grep's `Language` trait.
+- Language resolution: `from_alias` (case-insensitive), `from_path` (extension/filename inference), or explicit constants.
+- Grammar variants are classified into three implementations: Stub languages (accept `$` natively), Expando languages (rewrite patterns with expando characters), and Html (custom with injection support).
+- The classification is invisible to users — all languages work with `$MSG` patterns regardless of implementation.
+- Extension inference covers standard extensions plus special filenames (Makefile, Dockerfile, shell rc files, etc.).
+- The language list mirrors the `SupportLang` enum and spans major programming languages and configuration formats.

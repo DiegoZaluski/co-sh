@@ -30,3 +30,13 @@ Yaml, Zig.
 
 To operate on a raw `TSLanguage` yourself (outside the `SupportLang`
 registry), these functions are the direct access point.
+
+---
+
+## Summary
+
+- `ast::parse` provides one function per language that returns the tree-sitter grammar as an ast-grep `TSLanguage`.
+- Every `SupportLang` variant dispatches to exactly one of these functions via the `LanguageExt` implementation.
+- These functions are the single mapping point from grammar crates to ast-grep's `TSLanguage` type.
+- Most use the standard `LANGUAGE.into()` pattern; special cases exist for Dockerfile, PHP, TypeScript/TSX, OCaml, and XML.
+- Direct use is rare — callers typically use `SupportLang` which dispatches automatically — but these functions exist for direct `TSLanguage` access when needed.

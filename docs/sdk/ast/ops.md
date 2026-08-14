@@ -151,3 +151,17 @@ assert_eq!(matches.len(), 2);
 
 A complete runnable version lives at
 [`examples/ast/ops.rs`](../../../crates/cosh-sdk/examples/ast/ops.rs).
+
+---
+
+## Summary
+
+- `ast::ops` is the workhorse module with plain functions over `SupportLang` and ast-grep's `Pattern` type.
+- All operations return `Result<_, AstError>`; errors include unsupported language, invalid pattern, overlapping replacements, and I/O issues.
+- Language resolution: `resolve_supported_lang` (alias → lang), `resolve_language` (explicit lang or fallback to extension inference), and `is_supported_file`.
+- Pattern compilation supports standalone snippets and contextual selectors; multi-node fragments auto-wrap with minimal valid context.
+- Strictness levels: `Cst` (exact concrete syntax), `Smart` (default, ignores trivia), and progressively looser modes (`Ast`, `Relaxed`, `Signature`, `Template`).
+- Searching: `compile_search_patterns` returns one or more patterns (Rust adds contextual pattern), `collect_matches` runs patterns and returns all hits.
+- Rewriting: `compile_rewrite_rules` compiles pattern/replacement pairs, `rewrite_source` applies rules sequentially and returns final text plus replacement count.
+- Raw edit application: `apply_edits` sorts, deduplicates, and checks for overlaps; overlapping divergent edits error.
+- File discovery: `collect_matched_files` walks a directory respecting `.gitignore` and returns files matching glob patterns.

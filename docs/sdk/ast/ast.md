@@ -27,6 +27,8 @@ from oh-my-pi's `pi-ast`/`pi-natives`, stripped of the N-API/JS surface.
 | Parsers | [`parse`](parse.md) | The tree-sitter parser function for every language |
 | Operations | [`ops`](ops.md) | Pattern compilation, matching, rewriting, edit application, file discovery |
 
+> See [Language resolution](#language-resolution) below for how to obtain a `SupportLang`, and [`ops.md`](ops.md#strictness) for matching behavior options.
+
 The public entry points are re-exported from `ast::ops` (and `SupportLang`
 from `ast::lang`), so `use cosh_sdk::ast::{SupportLang, collect_matches,
 rewrite_source, …}` is all you typically need.
@@ -71,5 +73,16 @@ A complete, runnable walkthrough lives at
 [`examples/ast/ops.rs`](../../../crates/cosh-sdk/examples/ast/ops.rs): it
 resolves languages, compiles patterns with metavariables, collects matches,
 rewrites a snippet, applies raw edits, and shows the error paths.
+
+---
+
+## Summary
+
+- `ast` is the AST-aware search and rewrite engine powered by ast-grep, providing high-level pattern compilation, matching, and rewriting operations.
+- The module has three layers: Languages (SupportLang registry), Parsers (tree-sitter functions), and Operations (pattern compilation, matching, rewriting).
+- Patterns use metavariables (`$NAME` for single nodes, `$$$ARGS` for zero or more) and are parsed as real syntax in the target language.
+- Matching has a strictness knob: `Smart` (default, ignores trivia), `Cst` (exact concrete syntax), and progressively looser modes.
+- Language resolution can be explicit (from alias) or inferred from file paths; unknown languages are structured errors, not panics.
+- Public entry points are re-exported from `ast::ops` and `ast::lang`, so typical usage is `use cosh_sdk::ast::{SupportLang, collect_matches, rewrite_source, …}`.
 
 Next: [language resolution](lang.md), then [the operations](ops.md).
