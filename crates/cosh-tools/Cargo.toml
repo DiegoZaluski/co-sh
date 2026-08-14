@@ -94,3 +94,7 @@ path = "examples/find/grep.rs"
 [[example]]
 name = "bash-run"
 path = "examples/bash/run.rs"
+
+[[example]]
+name = "plan-run"
+path = "examples/plan/run.rs"
