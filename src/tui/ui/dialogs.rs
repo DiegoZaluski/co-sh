@@ -30,7 +30,6 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+T", "Toggle thinking (show/hide reasoning)"),
     ("Ctrl+D", "Toggle tool details (show/hide completed)"),
     ("Ctrl+G", "Toggle generic tool output"),
-    ("Ctrl+P", "Open command palette"),
     ("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
 ];
 

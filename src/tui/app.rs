@@ -49,7 +49,6 @@ use crate::session_store::{
 use crate::state::AppState;
 use crate::theme::{Theme, ThemeRegistry};
 use crate::types::SessionStatus;
-use crate::ui::command_palette::CommandPalette;
 use crate::ui::dialogs::{DialogAction, DialogState, DialogType};
 use crate::ui::toast::ToastState;
 use crate::util::selection;
@@ -129,7 +128,6 @@ pub struct App {
     pub keymap: KeyMap,
     pub config: TuiConfig,
     pub toast_state: ToastState,
-    pub command_palette: CommandPalette,
     pub slash_menu: crate::ui::slash_menu::SlashMenu,
     pub should_quit: bool,
     pub tokio_handle: Handle,
@@ -270,7 +268,6 @@ impl App {
             keymap: KeyMap::default_vim(),
             config: TuiConfig::default(),
             toast_state: ToastState::new(),
-            command_palette: CommandPalette::new(),
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
             theme_dialog_original: None,
             model_dialog_original: None,
@@ -2139,7 +2136,6 @@ impl App {
             }
             self.dialog.render(buf, area, &self.theme, now);
 
-            self.command_palette.render(buf, area, &self.theme);
             self.slash_menu.render(buf, prompt_area, &self.theme);
         }
     }
@@ -3354,31 +3350,7 @@ impl App {
                                 .unwrap_or_default();
                             self.prompt_view.history_down(&user_msgs);
                         }
-                        Some(crate::keymap::Action::ToggleCommandPalette) => {
-                            self.command_palette.toggle();
-                        }
                         None => {
-                            if self.command_palette.visible {
-                                match key.code {
-                                    KeyCode::Up => {
-                                        self.command_palette.select_prev();
-                                    }
-                                    KeyCode::Down => {
-                                        self.command_palette.select_next();
-                                    }
-                                    KeyCode::Backspace => {
-                                        self.command_palette.pop_char();
-                                    }
-                                    KeyCode::Char(ch) => {
-                                        self.command_palette.push_char(ch);
-                                    }
-                                    KeyCode::Esc => {
-                                        self.command_palette.visible = false;
-                                    }
-                                    _ => {}
-                                }
-                                return Ok(false);
-                            }
 
                             if self.slash_menu.visible {
                                 match key.code {
@@ -4945,15 +4917,7 @@ impl App {
             }
         }
 
-        // 2. Command palette
-        if self.command_palette.visible {
-            let area = self.terminal_size();
-            if self.command_palette.handle_mouse(&mouse, area, &self.theme) {
-                return Ok(true);
-            }
-        }
-
-        // 3. Slash menu
+        // Slash menu
         if self.slash_menu.visible && matches!(self.mode(), AppMode::Session) {
             let is_session = matches!(self.mode(), AppMode::Session);
             let area = self.terminal_size();
