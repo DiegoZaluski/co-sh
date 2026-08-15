@@ -15,7 +15,7 @@ fastembed = ["cosh-recall/fastembed", "dep:fastembed"]
 cloud = ["cosh-recall/cloud"]
 
 [package]
-description = "Coding agent for the terminal. No UI, no noise."
+description = "..."
 edition = "2024"
 license = "Apache-2.0"
 name = "cosh"
