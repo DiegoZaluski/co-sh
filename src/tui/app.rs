@@ -2860,12 +2860,16 @@ impl App {
                     // Shift/Ctrl/Alt+Enter inserts a newline instead of sending.
                     if key.code == KeyCode::Enter && key.modifiers != KeyModifiers::NONE {
                         // In RAG mode with the create-db form open, the newline
-                        // goes into the focused field instead of the prompt.
+                        // goes into the focused field instead of the prompt. The
+                        // key is consumed even when the form is at its growth
+                        // limit (handle_insert_newline then does nothing), so it
+                        // never leaks into the hidden prompt.
                         #[cfg(feature = "embed")]
                         if self.is_rag_mode()
                             && !self.dialog.visible()
-                            && self.rag_view.handle_insert_newline()
+                            && self.rag_view.show_create_db
                         {
+                            self.rag_view.handle_insert_newline();
                             return Ok(false);
                         }
                         self.prompt_view.note_activity();
@@ -3012,11 +3016,15 @@ impl App {
                                 self.rag_view.handle_ctrl_backspace();
                                 return Ok(false);
                             }
-                            // Ctrl+J = newline (universal ^J) in the create-db fields
+                            // Ctrl+J = newline (universal ^J) in the create-db
+                            // fields. Consumed whenever the form is open, even at
+                            // its growth limit, so it never falls through and
+                            // types a literal 'j'.
                             KeyCode::Char('j')
                                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && self.rag_view.handle_insert_newline() =>
+                                    && self.rag_view.show_create_db =>
                             {
+                                self.rag_view.handle_insert_newline();
                                 return Ok(false);
                             }
                             _ => {}
