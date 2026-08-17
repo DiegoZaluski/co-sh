@@ -5,12 +5,14 @@
 use std::time::SystemTime;
 
 use cosh_tui::core::lib::rgba::RGBA;
+use cosh_tui::core::renderables::markdown::markdown_to_visible_text;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
 use crate::theme::Theme;
+use crate::util::markdown::render_markdown;
 
 use super::models::{CreateDbFocus, RagMode};
 use super::view::{RagLayout, RagView};
@@ -29,9 +31,10 @@ const MODEL_LABEL_PAD: u16 = 3;
 /// Number of padding cells subtracted from label width for collapsed model line.
 const MODEL_COLLAPSED_PAD: u16 = 20;
 
-/// Offset of the input cursor relative to the label start
-/// (e.g. "Name:  " = 7 chars before the cursor position).
-const INPUT_LABEL_OFFSET: u16 = 7;
+/// Width in cells of the "Name:  " / "Desc:  " field labels. The labels are
+/// drawn outside the markdown content, so this is also how many columns the
+/// value loses when it wraps.
+pub(crate) const FIELD_LABEL_W: u16 = 7;
 
 /// Visible items in the DB picker scroll list.
 pub(crate) const DB_PICKER_VISIBLE: usize = 10;
@@ -124,35 +127,31 @@ pub(crate) fn truncate_label(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// Draw a blinking cursor on a text input field.
+/// Draw a blinking cursor at an explicit cell position on a text input field.
 ///
 /// `cursor` — the [`Cursor`] component with blink state.
-/// `input` — the current text content.
-/// `cursor_pos` — the logical cursor position (byte offset).
 /// `now` — the current time for blink timing.
-/// `pad` — X position of the label start.
-/// `form_y` — Y position of the field row.
-/// `pad_w` — available width for the field.
-fn draw_input_cursor(
+/// `pad` — X position of the field start.
+/// `col` — column of the cursor within the field (from the wrapped layout).
+/// `y` — Y position of the cursor row.
+/// `pad_w` — available width for the field (cursor hidden past the edge).
+fn draw_input_cursor_at(
     buf: &mut Buffer,
     cursor: &Cursor,
-    input: &str,
-    cursor_pos: usize,
     now: SystemTime,
     pad: u16,
-    form_y: u16,
+    col: u16,
+    y: u16,
     pad_w: u16,
     theme: &Theme,
     fg: Color,
     muted: Color,
     primary: Color,
 ) {
-    let cursor_col = input[..cursor_pos.min(input.len())].chars().count() as u16;
-    let cursor_x = pad + INPUT_LABEL_OFFSET + cursor_col;
-    if cursor_x >= pad + pad_w {
+    if col >= pad_w {
         return;
     }
-    if let Some(cell) = buf.cell_mut((cursor_x, form_y)) {
+    if let Some(cell) = buf.cell_mut((pad + col, y)) {
         match cursor.current_state(now) {
             CursorState::On => {
                 cell.set_style(Style::default().fg(primary).bg(fg));
@@ -167,6 +166,73 @@ fn draw_input_cursor(
             }
         }
     }
+}
+
+/// Position (row, col) of the cursor within a wrapped markdown field.
+///
+/// Markdown markers are stripped first (matching what the renderer displays),
+/// then the word-wrap logic of `estimate_height` / the markdown renderer
+/// (layout_word_wrap / flush_layout_word) is mirrored so the cursor lands
+/// exactly where the text is drawn, including multi-line wrapped fields.
+fn wrapped_cursor_pos(text: &str, pad_w: u16) -> (u16, u16) {
+    let mut visible = markdown_to_visible_text(text);
+    // markdown_to_visible_text trims trailing whitespace; restore trailing
+    // spaces so the cursor sits correctly when the input ends with spaces
+    // (e.g. an empty field right after the "Name:  " label).
+    let trailing_spaces = text.len() - text.trim_end_matches(' ').len();
+    for _ in 0..trailing_spaces {
+        visible.push(' ');
+    }
+    let mut x = 0u16;
+    let mut y = 0u16;
+    let mut word_w = 0u16;
+
+    for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(&visible) {
+        if grapheme == "\n" {
+            flush_cursor_word(&mut word_w, &mut x, &mut y, pad_w);
+            y += 1;
+            x = 0;
+            continue;
+        }
+        if grapheme == " " {
+            flush_cursor_word(&mut word_w, &mut x, &mut y, pad_w);
+            if x < pad_w {
+                x += 1;
+            }
+            continue;
+        }
+        word_w += w;
+    }
+    flush_cursor_word(&mut word_w, &mut x, &mut y, pad_w);
+    (y, x)
+}
+
+/// Flush an accumulated word of `word_w` columns starting at `*x`, advancing
+/// `*y` by the number of extra lines the word spans (mirrors
+/// `flush_layout_word` in cosh-tui's markdown layout estimator).
+fn flush_cursor_word(word_w: &mut u16, x: &mut u16, y: &mut u16, pad_w: u16) {
+    if *word_w == 0 {
+        return;
+    }
+    if *x + *word_w <= pad_w {
+        *x += *word_w;
+        *word_w = 0;
+        return;
+    }
+    if *word_w <= pad_w {
+        // Whole word fits on a fresh line: wrap it there intact.
+        *y += 1;
+        *x = *word_w;
+        *word_w = 0;
+        return;
+    }
+    // The word alone is wider than the whole line: break at character level.
+    let end = u32::from(*x) + u32::from(*word_w);
+    let lines = end.div_ceil(u32::from(pad_w)) as u16;
+    *y = y.saturating_add(lines.saturating_sub(1));
+    let rem = end % u32::from(pad_w);
+    *x = if rem == 0 { pad_w } else { rem as u16 };
+    *word_w = 0;
 }
 
 // Render implementation
@@ -353,7 +419,10 @@ impl RagView {
         title_fg: Color,
         _panel_bg: Color,
     ) {
-        let mini_box_h = self.create_db_mini_box_height();
+        let mut form_y = cy;
+        let pad = cx + 2;
+        let pad_w = input_w.saturating_sub(4);
+        let mini_box_h = self.create_db_mini_box_height(pad_w);
         let bg_term = rgba_color(theme.background);
         fill_rect(
             buf,
@@ -363,10 +432,6 @@ impl RagView {
             mini_box_h,
             Style::default().bg(bg_term),
         );
-
-        let mut form_y = cy;
-        let pad = cx + 2;
-        let pad_w = input_w.saturating_sub(4);
 
         // Gap above the first field
         form_y += 1;
@@ -427,73 +492,108 @@ impl RagView {
         // Gap above the Name field
         form_y += 1;
 
-        //  Name & Description
+        // Name & Description — the label is drawn as plain text and only the
+        // value goes through the markdown renderer, so long input wraps to
+        // extra lines with syntax highlighting and a leading label never
+        // hides block syntax (e.g. "## titulo") from the cmark parser.
         let now = SystemTime::now();
         let name_focused = self.create_db_focus == CreateDbFocus::Name;
         let desc_focused = self.create_db_focus == CreateDbFocus::Description;
+        let (name_lines, desc_lines) = self.create_db_field_lines(pad_w);
 
-        let nd = if self.db_name_input.is_empty() {
-            "Enter database name..."
+        // Name field
+        let name_fg = theme.text;
+        let name_bg = if name_focused {
+            theme.background_element
         } else {
-            &self.db_name_input
+            theme.background
         };
-        let name_text = format!("Name:  {nd}");
-        let max_name_w = pad_w as usize;
-        let name_trunc = truncate_label(&name_text, max_name_w);
-        let name_style = if name_focused {
+        let label = "Name:  ";
+        let label_w = label.chars().count() as u16;
+        let value_w = pad_w.saturating_sub(label_w).max(1);
+        draw_text_line(
+            buf,
+            label,
+            pad,
+            form_y,
+            label_w,
             Style::default()
-                .fg(fg)
-                .bg(rgba_color(theme.background_element))
-        } else {
-            Style::default().fg(fg)
-        };
-        draw_text_line(buf, &name_trunc, pad, form_y, pad_w, name_style);
+                .fg(rgba_color(name_fg))
+                .bg(rgba_color(name_bg)),
+        );
+        render_markdown(
+            buf,
+            Rect::new(pad + label_w, form_y, value_w, name_lines),
+            self.name_display_text(),
+            name_fg,
+            name_bg,
+        );
         if name_focused {
-            draw_input_cursor(
+            let prefix =
+                &self.db_name_input[..self.db_name_cursor_pos.min(self.db_name_input.len())];
+            let (row, col) = wrapped_cursor_pos(prefix, value_w);
+            draw_input_cursor_at(
                 buf,
                 &self.db_name_cursor,
-                &self.db_name_input,
-                self.db_name_cursor_pos,
                 now,
-                pad,
-                form_y,
-                pad_w,
+                pad + label_w,
+                col,
+                form_y + row,
+                value_w,
                 theme,
                 fg,
                 muted,
                 primary,
             );
         }
-        form_y += 1;
+        form_y += name_lines;
 
         // Gap above the Description field
         form_y += 1;
 
-        let dd = if self.db_description_input.is_empty() {
-            "Briefly describe what this DB contains..."
+        // Description field
+        let desc_fg = if desc_focused {
+            theme.text
         } else {
-            &self.db_description_input
+            theme.text_muted
         };
-        let desc_text = format!("Desc:  {dd}");
-        let desc_trunc = truncate_label(&desc_text, max_name_w);
-        let desc_style = if desc_focused {
+        let desc_bg = if desc_focused {
+            theme.background_element
+        } else {
+            theme.background
+        };
+        let label = "Desc:  ";
+        let label_w = label.chars().count() as u16;
+        let value_w = pad_w.saturating_sub(label_w).max(1);
+        draw_text_line(
+            buf,
+            label,
+            pad,
+            form_y,
+            label_w,
             Style::default()
-                .fg(fg)
-                .bg(rgba_color(theme.background_element))
-        } else {
-            Style::default().fg(muted)
-        };
-        draw_text_line(buf, &desc_trunc, pad, form_y, pad_w, desc_style);
+                .fg(rgba_color(desc_fg))
+                .bg(rgba_color(desc_bg)),
+        );
+        render_markdown(
+            buf,
+            Rect::new(pad + label_w, form_y, value_w, desc_lines),
+            self.desc_display_text(),
+            desc_fg,
+            desc_bg,
+        );
         if desc_focused {
-            draw_input_cursor(
+            let prefix = &self.db_description_input[..self.db_description_cursor_pos
+                .min(self.db_description_input.len())];
+            let (row, col) = wrapped_cursor_pos(prefix, value_w);
+            draw_input_cursor_at(
                 buf,
                 &self.db_description_cursor,
-                &self.db_description_input,
-                self.db_description_cursor_pos,
                 now,
-                pad,
-                form_y,
-                pad_w,
+                pad + label_w,
+                col,
+                form_y + row,
+                value_w,
                 theme,
                 fg,
                 muted,
@@ -504,17 +604,19 @@ impl RagView {
 
     /// Total height of the Create DB mini-form popup.
     ///
-    /// Each field (model, name, description) is preceded by one gap line.
-    /// When collapsed: gap + model + gap + name + gap + description + padding = 8 lines.
-    /// When expanded:    gap + header + model_items* + gap + name + gap + description + padding
-    ///                  = 7 + MAX_VISIBLE_MODELS_IN_FORM + 1 lines.
-    pub(crate) fn create_db_mini_box_height(&self) -> u16 {
+    /// Each field (model, name, description) is preceded by one gap line, and
+    /// the Name/Description fields wrap to as many lines as their markdown
+    /// content needs at width `pad_w`.
+    /// When collapsed: gap + model + gap + name + gap + description + padding.
+    /// When expanded:    gap + header + model_items* + gap + name + gap + description + padding.
+    pub(crate) fn create_db_mini_box_height(&self, pad_w: u16) -> u16 {
+        let (name_lines, desc_lines) = self.create_db_field_lines(pad_w);
         if self.models_expanded {
-            // 7 = gap(1) + header(1) + gap(1) + name(1) + gap(1) + description(1) + bottom_padding(1)
-            7 + MAX_VISIBLE_MODELS_IN_FORM as u16 + 1
+            // 6 = gap(1) + header(1) + gap(1) + gap(1) + padding(2)
+            6 + MAX_VISIBLE_MODELS_IN_FORM as u16 + name_lines + desc_lines
         } else {
-            // 8 = gap(1) + model(1) + gap(1) + name(1) + gap(1) + description(1) + padding(2)
-            8
+            // 6 = gap(1) + model(1) + gap(1) + gap(1) + padding(2)
+            6 + name_lines + desc_lines
         }
     }
 
@@ -895,5 +997,91 @@ impl RagView {
             }
             row_y += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrapped_cursor_pos;
+    use cosh_tui::core::renderables::markdown::estimate_height;
+
+    #[test]
+    fn pulldown_preserves_double_space() {
+        // If pulldown_cmark collapsed "a  b" to a single space, both
+        // estimates would be equal; the renderer's wrap then matches the
+        // simulation used for cursor placement.
+        let double = estimate_height("a  b", 3);
+        let single = estimate_height("a b", 3);
+        assert_eq!(double, 2, "double space should wrap b at width 3");
+        assert_eq!(single, 1, "single space should fit at width 3");
+    }
+
+    #[test]
+    fn heading_parses_without_label() {
+        // The field labels are no longer part of the markdown content, so a
+        // value like "## titulo" is recognized as a heading by cmark instead
+        // of literal text inside a paragraph.
+        assert_eq!(estimate_height("## titulo", 12), 1, "heading fits one line");
+        assert_eq!(
+            estimate_height("Name:  ## titulo", 12),
+            2,
+            "with a leading label the same text wraps as a paragraph"
+        );
+    }
+
+    #[test]
+    fn cursor_single_line() {
+        assert_eq!(wrapped_cursor_pos("abc", 100), (0, 3));
+        assert_eq!(wrapped_cursor_pos("a", 100), (0, 1));
+        assert_eq!(wrapped_cursor_pos("", 100), (0, 0));
+    }
+
+    #[test]
+    fn cursor_wraps_to_next_line() {
+        // "ab cde" at width 5: "cde" doesn't fit after "ab ", wraps to row 1.
+        assert_eq!(wrapped_cursor_pos("ab cde", 5), (1, 3));
+        // A word wider than the line breaks at character level.
+        assert_eq!(wrapped_cursor_pos("123456789", 5), (1, 4));
+        // Cursor right after "ab": still on the first line, col 2.
+        assert_eq!(wrapped_cursor_pos("ab", 5), (0, 2));
+    }
+
+    #[test]
+    fn cursor_matches_estimate_rows() {
+        // The cursor row for the full text equals (estimated lines - 1), even
+        // when markdown markers are present (they occupy no display columns).
+        for text in [
+            "short",
+            "a long description that wraps",
+            "*em* and `code` mixed together",
+            "**strong** with a [link](https://example.com) inside",
+            "## a heading that also wraps around",
+        ] {
+            for w in [10u16, 20, 40] {
+                let est = estimate_height(text, w).max(1);
+                let (row, _col) = wrapped_cursor_pos(text, w);
+                assert_eq!(
+                    row,
+                    est - 1,
+                    "cursor row mismatch for {text:?} at width {w}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn field_lines_grow_with_content() {
+        use crate::routes::rag::view::RagView;
+        let mut view = RagView::new();
+        let (n1, d1) = view.create_db_field_lines(60);
+        assert_eq!(n1, 1, "placeholder name fits one line at width 60");
+        assert_eq!(d1, 1, "placeholder description fits one line at width 60");
+        view.db_name_input =
+            "a very long database name that definitely wraps at width 30".into();
+        view.db_description_input =
+            "a very long description that will wrap to multiple lines at this narrow width".into();
+        let (n2, d2) = view.create_db_field_lines(30);
+        assert!(n2 > 1, "long name should wrap to multiple lines");
+        assert!(d2 > 1, "long description should wrap to multiple lines");
     }
 }

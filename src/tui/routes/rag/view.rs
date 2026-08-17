@@ -12,11 +12,12 @@ use std::collections::HashSet;
 
 use super::models::{CreateDbFocus, EmbedModelEntry, RagMode};
 use super::registry::RagRegistry;
-use super::render::MAX_VISIBLE_MODELS_IN_FORM;
+use super::render::{FIELD_LABEL_W, MAX_VISIBLE_MODELS_IN_FORM};
 use crate::component::cursor::Cursor;
 use crate::component::rag_input::RagInput;
 use crate::component::search_bar::SearchBar;
 use crate::component::spinner::SpinnerState;
+use cosh_tui::core::renderables::markdown::estimate_height;
 
 // Layout constants
 
@@ -96,11 +97,15 @@ impl RagView {
         } else {
             0
         };
+        // Field width of the Name/Description markdown fields (same derivation
+        // as render_create_db_form: input_w - 4 = inner_w - 8).
+        let pad_w = inner_w.saturating_sub(8);
         let create_db_lines: u16 = if self.show_create_db {
+            let (name_lines, desc_lines) = self.create_db_field_lines(pad_w);
             if self.models_expanded {
-                7 + db_model_count as u16 + 1
+                6 + db_model_count as u16 + name_lines + desc_lines
             } else {
-                8
+                6 + name_lines + desc_lines
             }
         } else if self.show_db_picker {
             5
@@ -117,7 +122,7 @@ impl RagView {
         // Without form: box1 = title(1) + gap(1) + input(input_h) + status(1) + bottom_gap(1) = 4 + input_h
         // With form:    box1 = title(1) + gap(1) + input(input_h) + form(form_h) = 2 + input_h + form_h
         let max_input_h = if self.show_create_db || self.show_db_picker {
-            let form_h = self.create_db_mini_box_height();
+            let form_h = self.create_db_mini_box_height(pad_w);
             box1_h.saturating_sub(2 + form_h)
         } else {
             box1_h.saturating_sub(4)
@@ -409,6 +414,37 @@ impl RagView {
         self.create_db_focus = CreateDbFocus::Name;
     }
 
+    /// Display text of the Name field (placeholder while empty).
+    pub(crate) fn name_display_text(&self) -> &str {
+        if self.db_name_input.is_empty() {
+            "Enter database name..."
+        } else {
+            &self.db_name_input
+        }
+    }
+
+    /// Display text of the Description field (placeholder while empty).
+    pub(crate) fn desc_display_text(&self) -> &str {
+        if self.db_description_input.is_empty() {
+            "Briefly describe what this DB contains..."
+        } else {
+            &self.db_description_input
+        }
+    }
+
+    /// Display lines occupied by the Name and Description fields at width
+    /// `pad_w`, counting the markdown wrapping done by the renderer.
+    ///
+    /// The labels are drawn outside the markdown content (so they don't
+    /// interfere with cmark's block parsing), so only the value wraps — the
+    /// value has `FIELD_LABEL_W` fewer columns available.
+    pub(crate) fn create_db_field_lines(&self, pad_w: u16) -> (u16, u16) {
+        let value_w = pad_w.saturating_sub(FIELD_LABEL_W).max(1);
+        let name_lines = markdown_field_lines(self.name_display_text(), value_w);
+        let desc_lines = markdown_field_lines(self.desc_display_text(), value_w);
+        (name_lines, desc_lines)
+    }
+
     pub fn db_count(&self) -> usize {
         self.registry.dbs.len()
     }
@@ -522,4 +558,13 @@ impl Default for RagView {
 pub(crate) fn max_visible_models(avail_h: u16) -> usize {
     let cap = (avail_h.saturating_sub(MODEL_COUNT_HEADROOM) / 2) as usize;
     cap.clamp(MIN_VISIBLE_MODELS, MAX_VISIBLE_MODELS_IN_FORM)
+}
+
+/// Rows a markdown paragraph occupies at `pad_w` columns, using the same
+/// wrap logic as the markdown renderer (so the form box fits the fields).
+fn markdown_field_lines(text: &str, pad_w: u16) -> u16 {
+    if text.is_empty() {
+        return 1;
+    }
+    estimate_height(text, pad_w.max(1)).max(1)
 }

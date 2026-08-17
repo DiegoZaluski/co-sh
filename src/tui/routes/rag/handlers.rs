@@ -641,7 +641,9 @@ impl RagView {
             return false;
         }
 
-        // Compute y positions for Name and Description lines
+        // Compute y positions for Name and Description fields. Each field
+        // (model, name, description) is preceded by one gap line, and the
+        // Name/Description fields can span multiple wrapped rows.
         let model_line_count = if self.models_expanded {
             let max_vis = super::render::MAX_VISIBLE_MODELS_IN_FORM;
             let total = self.available_models.len();
@@ -649,13 +651,13 @@ impl RagView {
         } else {
             1
         };
-
-        // Each field (model, name, description) is preceded by one gap line.
+        let (name_lines, desc_lines) =
+            self.create_db_field_lines(inner_w.saturating_sub(8));
         let name_y = form_y + model_line_count + 2;
-        let desc_y = form_y + model_line_count + 4;
+        let desc_y = name_y + name_lines + 1;
 
-        // Check if click is on Name line
-        if my == name_y {
+        // Check if click is on the Name field (any wrapped row)
+        if my >= name_y && my < name_y + name_lines {
             self.create_db_focus = CreateDbFocus::Name;
             self.db_name_cursor.note_activity();
             self.db_description_cursor.note_activity();
@@ -664,8 +666,8 @@ impl RagView {
             return true;
         }
 
-        // Check if click is on Description line
-        if my == desc_y {
+        // Check if click is on the Description field (any wrapped row)
+        if my >= desc_y && my < desc_y + desc_lines {
             self.create_db_focus = CreateDbFocus::Description;
             self.db_name_cursor.note_activity();
             self.db_description_cursor.note_activity();
@@ -794,7 +796,7 @@ impl RagView {
         let inner_x = area.x + 2;
         let input_h = self.url_input.height(area.width.saturating_sub(8));
         let form_y = area.y + 2 + input_h;
-        let form_h = self.create_db_mini_box_height();
+        let form_h = self.create_db_mini_box_height(inner_w.saturating_sub(8));
         let mx = mouse.x;
         let my = mouse.y;
         my >= form_y && my < form_y + form_h && mx >= inner_x && mx < inner_x + inner_w
