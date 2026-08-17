@@ -148,7 +148,7 @@ fn draw_input_cursor_at(
     muted: Color,
     primary: Color,
 ) {
-    if col >= pad_w {
+    if col > pad_w {
         return;
     }
     if let Some(cell) = buf.cell_mut((pad + col, y)) {
@@ -174,37 +174,18 @@ fn draw_input_cursor_at(
 /// then the word-wrap logic of `estimate_height` / the markdown renderer
 /// (layout_word_wrap / flush_layout_word) is mirrored so the cursor lands
 /// exactly where the text is drawn, including multi-line wrapped fields.
+///
+/// `text` must be the render text produced by `markdown_render_text` (or any
+/// plain text without blank lines).
 fn wrapped_cursor_pos(text: &str, pad_w: u16) -> (u16, u16) {
     let mut visible = markdown_to_visible_text(text);
-    // markdown_to_visible_text trims trailing whitespace; restore trailing
-    // spaces so the cursor sits correctly when the input ends with spaces
-    // (e.g. an empty field right after the "Name:  " label).
-    let trailing_spaces = text.len() - text.trim_end_matches(' ').len();
-    for _ in 0..trailing_spaces {
-        visible.push(' ');
-    }
-    let mut x = 0u16;
-    let mut y = 0u16;
-    let mut word_w = 0u16;
-
-    for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(&visible) {
-        if grapheme == "\n" {
-            flush_cursor_word(&mut word_w, &mut x, &mut y, pad_w);
-            y += 1;
-            x = 0;
-            continue;
-        }
-        if grapheme == " " {
-            flush_cursor_word(&mut word_w, &mut x, &mut y, pad_w);
-            if x < pad_w {
-                x += 1;
-            }
-            continue;
-        }
-        word_w += w;
-    }
-    flush_cursor_word(&mut word_w, &mut x, &mut y, pad_w);
-    (y, x)
+    // markdown_to_visible_text trims trailing whitespace; restore it (spaces,
+    // newlines and invisible blank-line spacers) so the cursor sits on the
+    // rows the renderer actually draws — e.g. right after a Shift+Enter the
+    // caret is on the blank line below, not pulled back up.
+    let trimmed = text.trim_end_matches(char::is_whitespace);
+    visible.push_str(&text[trimmed.len()..]);
+    walk_wrapped_cursor(&visible, pad_w)
 }
 
 /// Flush an accumulated word of `word_w` columns starting at `*x`, advancing
@@ -235,10 +216,157 @@ fn flush_cursor_word(word_w: &mut u16, x: &mut u16, y: &mut u16, pad_w: u16) {
     *word_w = 0;
 }
 
+/// Invisible spacer used to keep blank lines alive inside markdown.
+///
+/// The CommonMark parser collapses blank lines, so a blank line (e.g. right
+/// after pressing Shift+Enter) would disappear. Before handing text to the
+/// renderer we insert one of these characters at the start of every line
+/// that is otherwise blank. NBSP (`U+00A0`) is not whitespace to cmark, so
+/// the line becomes a real paragraph; it renders as a plain space in every
+/// terminal. For cursor/click geometry it is treated as width 0 so a blank
+/// line's caret sits at column 0 — exactly where the next typed character
+/// is drawn.
+const MARKDOWN_BLANK_LINE_SPACER: char = '\u{00A0}';
+
+/// Text actually handed to the markdown renderer, with blank lines kept
+/// alive by invisible spacers.
+///
+/// Returns `(render_text, insertions)` where `insertions[i]` is the number
+/// of spacer *bytes* inserted before original byte `i`. Callers translate a
+/// logical byte offset into the render text with `render_byte_offset`.
+pub(crate) fn markdown_render_text(text: &str) -> (String, Vec<usize>) {
+    let mut insertions = vec![0usize; text.len() + 1];
+    let mut out = String::with_capacity(text.len() + 16);
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut at_line_start = true;
+    let mut k = 0usize;
+    while k < chars.len() {
+        let (i, ch) = chars[k];
+        if at_line_start && ch.is_whitespace() {
+            // Blank line (rest of this line is all whitespace)? Anchor it so
+            // cmark keeps it as a real row instead of collapsing it.
+            let line_blank = chars[k..]
+                .iter()
+                .take_while(|(_, c)| *c != '\n')
+                .all(|(_, c)| c.is_whitespace());
+            if line_blank {
+                out.push(MARKDOWN_BLANK_LINE_SPACER);
+                insertions[i] += MARKDOWN_BLANK_LINE_SPACER.len_utf8();
+            }
+        }
+        out.push(ch);
+        at_line_start = ch == '\n';
+        k += 1;
+    }
+    (out, insertions)
+}
+
+/// Map a logical byte offset in `text` to its byte offset in the render text
+/// produced by `markdown_render_text(text)`, accounting for the invisible
+/// spacers inserted before it.
+pub(crate) fn render_byte_offset(insertions: &[usize], pos: usize) -> usize {
+    let pos = pos.min(insertions.len().saturating_sub(1));
+    pos + insertions[..=pos].iter().sum::<usize>()
+}
+
+/// Shared word-wrap walk over visible (marker-stripped) text, mirroring the
+/// markdown renderer: `\n` starts a new row, spaces advance the column, and
+/// the invisible blank-line spacer occupies no column.
+fn walk_wrapped_cursor(visible: &str, pad_w: u16) -> (u16, u16) {
+    let mut x = 0u16;
+    let mut y = 0u16;
+    let mut word_w = 0u16;
+
+    for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(visible) {
+        if grapheme == "\n" {
+            flush_cursor_word(&mut word_w, &mut x, &mut y, pad_w);
+            y += 1;
+            x = 0;
+            continue;
+        }
+        if grapheme == " " {
+            flush_cursor_word(&mut word_w, &mut x, &mut y, pad_w);
+            if x < pad_w {
+                x += 1;
+            }
+            continue;
+        }
+        if grapheme == "\u{00A0}" {
+            // Invisible spacer: keeps the blank line a real row but occupies
+            // no column for cursor/click geometry.
+            continue;
+        }
+        word_w += w;
+    }
+    flush_cursor_word(&mut word_w, &mut x, &mut y, pad_w);
+    (y, x)
+}
+
+/// Same as `wrapped_cursor_pos`, but trailing plain spaces are not restored
+/// (the renderer does not draw them) — only trailing newlines and blank-line
+/// spacers, which are real rows.
+fn wrapped_cursor_pos_display(text: &str, pad_w: u16) -> (u16, u16) {
+    let mut visible = markdown_to_visible_text(text);
+    let trimmed = text.trim_end_matches(char::is_whitespace);
+    let tail: String = text[trimmed.len()..]
+        .chars()
+        .filter(|c| *c != ' ')
+        .collect();
+    visible.push_str(&tail);
+    walk_wrapped_cursor(&visible, pad_w)
+}
+
+/// Map a click at (row, col) within a wrapped markdown field to a byte offset
+/// into the raw `value`, mirroring where the renderer draws the text.
+///
+/// This inverts the word-wrap used for the cursor
+/// (`wrapped_cursor_pos_display`): every possible caret position is sampled
+/// and the one whose drawn cell is closest to the click wins. Ties prefer
+/// the later position, so clicking on invisible markdown markers (`## `,
+/// `**`) lands after them — typing there keeps the block/inline syntax
+/// intact.
+/// Visual row of the caret at `byte_pos` in a create-db field value wrapped
+/// at `value_w` columns — the same walk that draws the cursor. The Left/Right
+/// handlers use this so the caret never crosses a line boundary horizontally
+/// (Up/Down move between lines instead).
+pub(crate) fn caret_row(value: &str, byte_pos: usize, value_w: u16) -> u16 {
+    let prefix = &value[..byte_pos.min(value.len())];
+    let (render, insertions) = markdown_render_text(prefix);
+    let rp = render_byte_offset(&insertions, prefix.len()).min(render.len());
+    wrapped_cursor_pos(&render[..rp], value_w).0
+}
+
+pub(crate) fn byte_pos_at_click(value: &str, row: u16, col: u16, pad_w: u16) -> usize {
+    let (render, insertions) = markdown_render_text(value);
+    let mut best = 0usize;
+    let mut best_dist = (u16::MAX, u16::MAX);
+    let mut p = 0usize;
+    loop {
+        let rp = render_byte_offset(&insertions, p).min(render.len());
+        let (r, c) = wrapped_cursor_pos_display(&render[..rp], pad_w);
+        let dist = (row.abs_diff(r), col.abs_diff(c));
+        // Iterating ascending, `<=` naturally prefers the later position on
+        // ties (same cell: markers, trailing invisible columns).
+        if dist <= best_dist {
+            best_dist = dist;
+            best = p;
+        }
+        if p >= value.len() {
+            break;
+        }
+        p += value[p..].chars().next().map_or(1, |c| c.len_utf8());
+    }
+    best
+}
+
 // Render implementation
 
 impl RagView {
     pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+        // Remember the area of this render: handlers (Up/Down visual-line
+        // navigation, newline-growth limit) need it to know the field width
+        // and how much room the form has.
+        self.last_area = Some(area);
         let fg = rgba_color(theme.text);
         let muted = rgba_color(theme.text_muted);
         let warning = rgba_color(theme.warning);
@@ -521,17 +649,20 @@ impl RagView {
                 .fg(rgba_color(name_fg))
                 .bg(rgba_color(name_bg)),
         );
+        let (name_render, _) = markdown_render_text(self.name_display_text());
         render_markdown(
             buf,
             Rect::new(pad + label_w, form_y, value_w, name_lines),
-            self.name_display_text(),
+            &name_render,
             name_fg,
             name_bg,
         );
         if name_focused {
             let prefix =
                 &self.db_name_input[..self.db_name_cursor_pos.min(self.db_name_input.len())];
-            let (row, col) = wrapped_cursor_pos(prefix, value_w);
+            let (render, insertions) = markdown_render_text(prefix);
+            let rp = render_byte_offset(&insertions, prefix.len()).min(render.len());
+            let (row, col) = wrapped_cursor_pos(&render[..rp], value_w);
             draw_input_cursor_at(
                 buf,
                 &self.db_name_cursor,
@@ -575,17 +706,20 @@ impl RagView {
                 .fg(rgba_color(desc_fg))
                 .bg(rgba_color(desc_bg)),
         );
+        let (desc_render, _) = markdown_render_text(self.desc_display_text());
         render_markdown(
             buf,
             Rect::new(pad + label_w, form_y, value_w, desc_lines),
-            self.desc_display_text(),
+            &desc_render,
             desc_fg,
             desc_bg,
         );
         if desc_focused {
             let prefix = &self.db_description_input[..self.db_description_cursor_pos
                 .min(self.db_description_input.len())];
-            let (row, col) = wrapped_cursor_pos(prefix, value_w);
+            let (render, insertions) = markdown_render_text(prefix);
+            let rp = render_byte_offset(&insertions, prefix.len()).min(render.len());
+            let (row, col) = wrapped_cursor_pos(&render[..rp], value_w);
             draw_input_cursor_at(
                 buf,
                 &self.db_description_cursor,
@@ -1083,5 +1217,199 @@ mod tests {
         let (n2, d2) = view.create_db_field_lines(30);
         assert!(n2 > 1, "long name should wrap to multiple lines");
         assert!(d2 > 1, "long description should wrap to multiple lines");
+    }
+
+    #[test]
+    fn markdown_render_text_keeps_blank_lines() {
+        // A blank line in the middle keeps its row (invisible spacer).
+        let (render, ins) = super::markdown_render_text("abc\n\nX");
+        assert_eq!(render, "abc\n\u{00A0}\nX");
+        assert_eq!(ins[4], 2, "spacer bytes before the second newline");
+        // A leading line break is anchored too (cmark would otherwise ignore
+        // the blank first line and shift everything up one row).
+        let (r2, i2) = super::markdown_render_text("\nX");
+        assert_eq!(r2, "\u{00A0}\nX");
+        assert_eq!(i2[0], 2);
+        // Trailing blank lines: each one stays a row.
+        let (r3, _) = super::markdown_render_text("abc\n\n");
+        assert_eq!(r3, "abc\n\u{00A0}\n");
+    }
+
+    #[test]
+    fn render_byte_offset_skips_spacers() {
+        let (_, ins) = super::markdown_render_text("abc\n\nX");
+        assert_eq!(super::render_byte_offset(&ins, 0), 0);
+        assert_eq!(super::render_byte_offset(&ins, 3), 3);
+        assert_eq!(super::render_byte_offset(&ins, 4), 6, "after first \\n");
+        assert_eq!(super::render_byte_offset(&ins, 5), 7, "before X");
+        assert_eq!(super::render_byte_offset(&ins, 6), 8, "end");
+    }
+
+    #[test]
+    fn cursor_row_after_trailing_newline() {
+        // Right after Shift+Enter the caret sits on the blank line below.
+        let (render, _) = super::markdown_render_text("abc\n");
+        assert_eq!(wrapped_cursor_pos(&render, 20), (1, 0));
+        let (render2, _) = super::markdown_render_text("abc\n\n");
+        assert_eq!(wrapped_cursor_pos(&render2, 20), (2, 0));
+    }
+
+    #[test]
+    fn typing_after_leading_breaks_keeps_row() {
+        // Regression: typing the first character after breaking lines used to
+        // render one line ABOVE the caret (cmark collapses leading blank
+        // lines, so the first real line started at row 0 while the caret was
+        // on the phantom row below). The typed character must land on the
+        // exact row the caret is on.
+        let row_of = |t: &str| wrapped_cursor_pos(&super::markdown_render_text(t).0, 20).0;
+        assert_eq!(row_of("\n"), row_of("\nX"), "one leading break");
+        assert_eq!(row_of("\n\n"), row_of("\n\nX"), "two leading breaks");
+        assert_eq!(row_of("\n\n\n"), row_of("\n\n\nX"), "three leading breaks");
+        // The character lands exactly on the caret row, below the leading
+        // blank rows.
+        assert_eq!(row_of("\nX"), 1);
+        assert_eq!(row_of("\n\nX"), 2);
+    }
+
+    #[test]
+    fn byte_pos_at_click_plain_and_wrapped() {
+        assert_eq!(super::byte_pos_at_click("hello", 0, 2, 100), 2);
+        assert_eq!(super::byte_pos_at_click("hello", 0, 99, 100), 5, "clamp to end");
+        // "ab cde" wraps at width 5: row 1 holds "cde", so a click on row 1
+        // lands at the end of the wrapped word. Clicking the space between
+        // the words lands after it (ties prefer the later position).
+        assert_eq!(super::byte_pos_at_click("ab cde", 0, 2, 5), 3);
+        assert_eq!(super::byte_pos_at_click("ab cde", 1, 0, 5), 6);
+        assert_eq!(super::byte_pos_at_click("ab cde", 1, 3, 5), 6);
+    }
+
+    #[test]
+    fn byte_pos_at_click_lands_after_markers() {
+        // Clicking on a heading marker puts the caret after the "## " so
+        // typing keeps the heading intact.
+        assert_eq!(super::byte_pos_at_click("## titulo", 0, 0, 100), 3);
+        assert_eq!(super::byte_pos_at_click("## titulo", 0, 1, 100), 4);
+        assert_eq!(super::byte_pos_at_click("## titulo", 0, 6, 100), 9);
+    }
+
+    #[test]
+    fn byte_pos_at_click_multibyte() {
+        // 'á' is 2 bytes: clicking col 2 (on 'l') lands before it, col 3
+        // (past it) lands after.
+        assert_eq!(super::byte_pos_at_click("olá", 0, 2, 100), 2);
+        assert_eq!(super::byte_pos_at_click("olá", 0, 3, 100), 4);
+    }
+
+    #[test]
+    fn byte_pos_at_click_blank_line() {
+        // Clicking the blank line between the newlines lands between them;
+        // clicking the row below lands after both.
+        assert_eq!(super::byte_pos_at_click("abc\n\nX", 1, 0, 20), 4);
+        assert_eq!(super::byte_pos_at_click("abc\n\nX", 2, 0, 20), 5);
+    }
+
+    #[test]
+    fn caret_row_follows_line_boundaries() {
+        // caret_row is what keeps Left/Right horizontal: crossing a newline
+        // changes the row, moving within a line does not.
+        let value_w = 20u16;
+        assert_eq!(super::caret_row("abc\ndef", 3, value_w), 0, "end of line 1");
+        assert_eq!(super::caret_row("abc\ndef", 4, value_w), 1, "start of line 2");
+        assert_eq!(super::caret_row("abc\ndef", 5, value_w), 1, "mid line 2");
+        // A wrapped line behaves the same: the caret after a word that fills
+        // the line is still on row 0; the next char wraps to row 1.
+        assert_eq!(super::caret_row("abc def ghi", 11, 11), 0);
+        assert_eq!(super::caret_row("abc def ghi j", 13, 11), 1);
+    }
+
+    #[test]
+    fn cursor_drawn_at_wrap_boundary() {
+        use crate::routes::rag::models::CreateDbFocus;
+        use crate::routes::rag::view::RagView;
+        use crate::theme::ThemeRegistry;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        // The caret at the end of a line that exactly fills the width sits at
+        // column == value_w; the cursor must still be drawn there (it used to
+        // vanish, making the caret appear to jump down on the next Right).
+        let area = Rect::new(0, 0, 30, 40);
+        let pad_w = (30 - 4) - 8;
+        let value_w = pad_w - 7;
+        let input_h = RagView::new().url_input.height(26);
+        let form_y = 2 + input_h;
+        let name_y = form_y + 3;
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let mut view = RagView::new();
+        view.toggle_create_db();
+        view.create_db_focus = CreateDbFocus::Description;
+        view.db_description_input = "abc def ghi jkl".into();
+        // Caret after "abc def ghi" (11 chars == value_w), before the space.
+        view.db_description_cursor_pos = 11;
+
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme);
+        let (name_lines, _) = view.create_db_field_lines(pad_w);
+        let desc_y = name_y + name_lines + 1;
+        let value_x = 6 + 7; // pad (cx + 2) + label width
+
+        let (render, ins) = super::markdown_render_text("abc def ghi jkl");
+        let rp = super::render_byte_offset(&ins, 11);
+        let (r, c) = wrapped_cursor_pos(&render[..rp], value_w);
+        assert_eq!((r, c), (0, value_w), "caret at the wrap boundary");
+
+        let cell = &buf[(value_x + c, desc_y + r)];
+        assert_eq!(
+            cell.bg,
+            super::rgba_color(theme.text),
+            "cursor must be drawn at the wrap boundary"
+        );
+    }
+
+    #[test]
+    fn render_first_char_after_leading_breaks_on_cursor_row() {
+        use crate::routes::rag::models::CreateDbFocus;
+        use crate::routes::rag::view::RagView;
+        use crate::theme::ThemeRegistry;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        // Geometry mirrors render_create_db_form: title(1) + gap(1) + input,
+        // then gap + model line + gap before the Name field, +1 gap before
+        // the Description field.
+        let area = Rect::new(0, 0, 100, 40);
+        let input_h = RagView::new().url_input.height(92);
+        let form_y = 2 + input_h;
+        let name_y = form_y + 3; // gap + collapsed model line + gap
+        let value_x = 4 + 2 + 7; // pad (cx + 2) + label width
+
+        let mut view = RagView::new();
+        view.toggle_create_db();
+        view.create_db_focus = CreateDbFocus::Description;
+        // One Shift+Enter on the empty field, then the first typed char.
+        view.db_description_input = "\nX".into();
+        view.db_description_cursor_pos = 2;
+        let mut buf = Buffer::empty(area);
+        let theme = ThemeRegistry::new().default_theme().clone();
+        view.render(&mut buf, area, &theme);
+
+        // Find the typed 'X' inside the Description field region only.
+        let (_, desc_lines) = view.create_db_field_lines(88);
+        let desc_y = name_y + 1 + 1; // name_lines(1) + gap
+        let mut found = Vec::new();
+        for y in desc_y..desc_y + desc_lines {
+            for x in 0..area.width {
+                if buf[(x, y)].symbol() == "X" {
+                    found.push((x, y));
+                }
+            }
+        }
+        assert!(!found.is_empty(), "typed char must be drawn in the field");
+        let (x, y) = found[0];
+        // The char lands on the row BELOW the leading blank line — the row
+        // the caret was on — never one line up.
+        assert_eq!(y, desc_y + 1, "X must render on the caret row");
+        assert_eq!(x, value_x, "X starts at the value's column 0");
     }
 }

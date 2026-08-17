@@ -100,7 +100,7 @@ impl RagInput {
     pub fn cursor_right(&mut self) {
         let len = self.text.len();
         if self.cursor_pos < len {
-            self.cursor_pos = self.text.floor_char_boundary(self.cursor_pos + 1).min(len);
+            self.cursor_pos += self.text[self.cursor_pos..].chars().next().unwrap_or(' ').len_utf8();
             self.cursor.note_activity();
         }
     }

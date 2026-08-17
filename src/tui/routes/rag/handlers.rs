@@ -6,12 +6,13 @@ use cosh_tui::core::types::MouseEvent;
 use ratatui::layout::Rect;
 
 use super::models::{CreateDbFocus, RagAction, RagMode};
+use super::render::byte_pos_at_click;
 use super::render::truncate_label;
 use super::render::{
     DB_PICKER_VISIBLE, DB_ROW_H_PADDING, DESC_POPUP_HEIGHT_PCT, DESC_POPUP_MIN_H, DESC_POPUP_MIN_W,
-    DESC_POPUP_WIDTH_PCT, MIN_CONTENT_WIDTH, PICKER_BOX_HEIGHT, PREVIEW_OVERLAY_HEIGHT_PCT,
-    PREVIEW_OVERLAY_MIN_H, PREVIEW_OVERLAY_MIN_W, PREVIEW_OVERLAY_WIDTH_PCT, SHOW_DESC_BTN_TEXT,
-    TRASH_EMOJI_WIDTH,
+    DESC_POPUP_WIDTH_PCT, FIELD_LABEL_W, MIN_CONTENT_WIDTH, PICKER_BOX_HEIGHT,
+    PREVIEW_OVERLAY_HEIGHT_PCT, PREVIEW_OVERLAY_MIN_H, PREVIEW_OVERLAY_MIN_W,
+    PREVIEW_OVERLAY_WIDTH_PCT, SHOW_DESC_BTN_TEXT, TRASH_EMOJI_WIDTH,
 };
 use super::view::RagView;
 
@@ -187,7 +188,8 @@ impl RagView {
         key: ratatui::crossterm::event::KeyCode,
     ) -> Option<RagAction> {
         match key {
-            ratatui::crossterm::event::KeyCode::Up | ratatui::crossterm::event::KeyCode::Down => {
+            key @ (ratatui::crossterm::event::KeyCode::Up
+            | ratatui::crossterm::event::KeyCode::Down) => {
                 if self.models_expanded && !self.available_models.is_empty() {
                     let total = self.available_models.len();
                     self.selected_model_index = match key {
@@ -210,6 +212,21 @@ impl RagView {
                     if self.selected_model_index < self.model_scroll_offset {
                         self.model_scroll_offset = self.selected_model_index;
                     }
+                } else if let Some(area) = self.last_area {
+                    // Collapsed form: Up/Down move the cursor between visual
+                    // lines of the focused field (like the chat prompt).
+                    self.note_cursor_activity();
+                    let inner_w = area.width.saturating_sub(4);
+                    let pad_w = inner_w.saturating_sub(8).max(1);
+                    let value_w = pad_w.saturating_sub(FIELD_LABEL_W).max(1);
+                    let (input, pos) = self.focused_input();
+                    let new_pos = crate::util::word_ops::move_visual_line(
+                        input,
+                        *pos,
+                        value_w as usize,
+                        key == ratatui::crossterm::event::KeyCode::Up,
+                    );
+                    *pos = new_pos;
                 }
                 Some(RagAction::Consumed)
             }
@@ -300,25 +317,45 @@ impl RagView {
                 self.note_cursor_activity();
                 let (input, pos) = self.focused_input();
                 if *pos < input.len() {
-                    let next = input.floor_char_boundary(*pos + 1).min(input.len());
+                    let next = *pos + input[*pos..].chars().next().unwrap_or(' ').len_utf8();
                     input.drain(*pos..next);
                 }
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Left => {
                 self.note_cursor_activity();
+                let value_w = self.field_value_w();
                 let (input, pos) = self.focused_input();
                 if *pos > 0 {
-                    *pos = input.floor_char_boundary(*pos - 1);
+                    let prev = input.floor_char_boundary(*pos - 1);
+                    // Horizontal arrows move within the current line only;
+                    // Up/Down move between lines. Without a rendered area the
+                    // move is always allowed (plain char movement).
+                    let same_line = match value_w {
+                        Some(w) => super::render::caret_row(input, prev, w)
+                            == super::render::caret_row(input, *pos, w),
+                        None => true,
+                    };
+                    if same_line {
+                        *pos = prev;
+                    }
                 }
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Right => {
                 self.note_cursor_activity();
+                let value_w = self.field_value_w();
                 let (input, pos) = self.focused_input();
                 if *pos < input.len() {
-                    let next = input.floor_char_boundary(*pos + 1).min(input.len());
-                    *pos = next;
+                    let next = *pos + input[*pos..].chars().next().unwrap_or(' ').len_utf8();
+                    let same_line = match value_w {
+                        Some(w) => super::render::caret_row(input, *pos, w)
+                            == super::render::caret_row(input, next, w),
+                        None => true,
+                    };
+                    if same_line {
+                        *pos = next;
+                    }
                 }
                 Some(RagAction::Consumed)
             }
@@ -336,6 +373,16 @@ impl RagView {
             }
             _ => Some(RagAction::Consumed),
         }
+    }
+
+    /// Wrap width of the focused field's value (label excluded), when the
+    /// last rendered area is known.
+    fn field_value_w(&self) -> Option<u16> {
+        self.last_area.map(|area| {
+            let inner_w = area.width.saturating_sub(4);
+            let pad_w = inner_w.saturating_sub(8).max(1);
+            pad_w.saturating_sub(FIELD_LABEL_W).max(1)
+        })
     }
 
     /// Reset blink timers for both cursors (called after any input).
@@ -404,22 +451,90 @@ impl RagView {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
-        self.url_input.handle_paste(text);
+        if self.show_create_db {
+            // Paste into the focused create-db field (keeps newlines — the
+            // description is multi-line markdown; strip \r like the prompt).
+            self.note_cursor_activity();
+            let cleaned = text.replace('\r', "");
+            let (input, pos) = self.focused_input();
+            input.insert_str(*pos, &cleaned);
+            *pos += cleaned.len();
+        } else {
+            self.url_input.handle_paste(text);
+        }
     }
 
-    // Ctrl+Backspace: delete the word before the cursor in the URL input.
+    // Ctrl+Backspace / Ctrl+W: delete the word before the cursor. In the
+    // create-db form this targets the focused field, otherwise the URL input.
     pub fn handle_ctrl_backspace(&mut self) {
-        self.url_input.delete_word_before_cursor();
+        if self.show_create_db {
+            self.note_cursor_activity();
+            let (input, pos) = self.focused_input();
+            let start = crate::util::word_ops::find_word_start(input, *pos);
+            if start < *pos {
+                input.drain(start..*pos);
+                *pos = start;
+            }
+        } else {
+            self.url_input.delete_word_before_cursor();
+        }
     }
 
     // Ctrl+Left: jump to the start of the previous word.
     pub fn handle_ctrl_left(&mut self) {
-        self.url_input.cursor_word_left();
+        if self.show_create_db {
+            self.note_cursor_activity();
+            let (input, pos) = self.focused_input();
+            let new_pos = crate::util::word_ops::find_word_start(input, *pos);
+            if new_pos < *pos {
+                *pos = new_pos;
+            }
+        } else {
+            self.url_input.cursor_word_left();
+        }
     }
 
     // Ctrl+Right: jump to the start of the next word.
     pub fn handle_ctrl_right(&mut self) {
-        self.url_input.cursor_word_right();
+        if self.show_create_db {
+            self.note_cursor_activity();
+            let (input, pos) = self.focused_input();
+            let new_pos = crate::util::word_ops::find_word_end(input, *pos);
+            if new_pos > *pos {
+                *pos = new_pos;
+            }
+        } else {
+            self.url_input.cursor_word_right();
+        }
+    }
+
+    /// Insert a newline at the cursor in the focused create-db field
+    /// (Ctrl+J / Shift+Enter, like the chat prompt). Returns `true` when a
+    /// newline was inserted (form open), `false` otherwise.
+    ///
+    /// The form stops growing once it fills the box: further newlines are
+    /// rejected so the text can never overflow off screen.
+    pub fn handle_insert_newline(&mut self) -> bool {
+        if !self.show_create_db {
+            return false;
+        }
+        // The box is capped at `avail_h - BOX1_BOTTOM_MARGIN` rows and the
+        // URL input shrinks to its 3-row minimum, so the form can use at
+        // most `avail_h - 13` rows. Block once the form is there.
+        if let Some(area) = self.last_area {
+            let inner_w = area.width.saturating_sub(4);
+            let pad_w = inner_w.saturating_sub(8).max(1);
+            let layout = self.compute_layout(area);
+            let form_h_max = layout.box1_h.saturating_sub(2 + 3);
+            if self.create_db_mini_box_height(pad_w) >= form_h_max {
+                return false;
+            }
+        }
+        self.note_cursor_activity();
+        let (input, pos) = self.focused_input();
+        input.insert(*pos, '\n');
+        *pos += 1;
+        true
     }
 
     // Preview overlay geometry (shared with mouse handling)
@@ -656,13 +771,24 @@ impl RagView {
         let name_y = form_y + model_line_count + 2;
         let desc_y = name_y + name_lines + 1;
 
+        // Value area of each field: the label starts at pad = cx + 2 and the
+        // markdown value begins right after the label (matches render).
+        let pad = area.x + 4 + 2; // layout.cx + 2
+        let pad_w = inner_w.saturating_sub(8);
+        let value_w = pad_w.saturating_sub(FIELD_LABEL_W).max(1);
+        let value_x = pad + FIELD_LABEL_W;
+
         // Check if click is on the Name field (any wrapped row)
         if my >= name_y && my < name_y + name_lines {
             self.create_db_focus = CreateDbFocus::Name;
             self.db_name_cursor.note_activity();
             self.db_description_cursor.note_activity();
-            // Place cursor at the end of existing text (like clicking to focus)
-            self.db_name_cursor_pos = self.db_name_input.len();
+            // Place the cursor at the clicked character (mirrors the prompt's
+            // char_pos_at_mouse, inverting the markdown word-wrap).
+            let row = my - name_y;
+            let col = mx.saturating_sub(value_x).min(value_w);
+            self.db_name_cursor_pos =
+                byte_pos_at_click(&self.db_name_input, row, col, value_w);
             return true;
         }
 
@@ -671,7 +797,10 @@ impl RagView {
             self.create_db_focus = CreateDbFocus::Description;
             self.db_name_cursor.note_activity();
             self.db_description_cursor.note_activity();
-            self.db_description_cursor_pos = self.db_description_input.len();
+            let row = my - desc_y;
+            let col = mx.saturating_sub(value_x).min(value_w);
+            self.db_description_cursor_pos =
+                byte_pos_at_click(&self.db_description_input, row, col, value_w);
             return true;
         }
 
@@ -800,5 +929,278 @@ impl RagView {
         let mx = mouse.x;
         let my = mouse.y;
         my >= form_y && my < form_y + form_h && mx >= inner_x && mx < inner_x + inner_w
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::models::CreateDbFocus;
+    use super::super::view::RagView;
+
+    fn open_form(view: &mut RagView) {
+        view.toggle_create_db();
+    }
+
+    #[test]
+    fn ctrl_word_navigation_in_name_field() {
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.db_name_input = "hello world foo".into();
+        view.db_name_cursor_pos = view.db_name_input.len();
+
+        view.handle_ctrl_left();
+        assert_eq!(view.db_name_cursor_pos, 12, "jump to start of 'foo'");
+        view.handle_ctrl_left();
+        assert_eq!(view.db_name_cursor_pos, 6, "jump to start of 'world'");
+        view.handle_ctrl_right();
+        assert_eq!(view.db_name_cursor_pos, 12, "jump to start of 'foo'");
+        view.handle_ctrl_right();
+        assert_eq!(view.db_name_cursor_pos, 15, "jump to end of 'foo'");
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_word_in_focused_field() {
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.db_name_input = "hello world".into();
+        view.db_name_cursor_pos = view.db_name_input.len();
+
+        view.handle_ctrl_backspace();
+        assert_eq!(view.db_name_input, "hello ");
+        assert_eq!(view.db_name_cursor_pos, 6);
+
+        view.handle_ctrl_backspace();
+        assert_eq!(view.db_name_input, "");
+        assert_eq!(view.db_name_cursor_pos, 0);
+    }
+
+    #[test]
+    fn ctrl_backspace_targets_description_when_focused() {
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.create_db_focus = CreateDbFocus::Description;
+        view.db_description_input = "foo bar baz".into();
+        view.db_description_cursor_pos = view.db_description_input.len();
+
+        view.handle_ctrl_backspace();
+        assert_eq!(view.db_description_input, "foo bar ");
+        assert_eq!(view.db_description_cursor_pos, 8);
+    }
+
+    #[test]
+    fn ctrl_word_ops_fall_back_to_url_input_when_form_closed() {
+        let mut view = RagView::new();
+        view.url_input.text = "hello world".into();
+        view.url_input.cursor_pos = view.url_input.text.len();
+
+        view.handle_ctrl_backspace();
+        assert_eq!(view.url_input.text, "hello ");
+        assert_eq!(view.url_input.cursor_pos, 6);
+
+        view.handle_ctrl_left();
+        assert_eq!(view.url_input.cursor_pos, 0);
+    }
+
+    #[test]
+    fn insert_newline_only_when_form_open() {
+        let mut view = RagView::new();
+        assert!(!view.handle_insert_newline(), "no-op when form closed");
+
+        open_form(&mut view);
+        view.create_db_focus = CreateDbFocus::Description;
+        view.db_description_input = "line1".into();
+        view.db_description_cursor_pos = 5;
+        assert!(view.handle_insert_newline());
+        assert_eq!(view.db_description_input, "line1\n");
+        assert_eq!(view.db_description_cursor_pos, 6);
+    }
+
+    #[test]
+    fn insert_newline_stops_at_area_limit() {
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.create_db_focus = CreateDbFocus::Description;
+        view.last_area = Some(ratatui::layout::Rect::new(0, 0, 100, 40));
+
+        let mut inserted = 0;
+        while view.handle_insert_newline() {
+            inserted += 1;
+        }
+        assert!(inserted >= 1, "some newlines should be allowed");
+        // The field must have grown with the newlines (box expands along).
+        assert!(
+            view.db_description_input.lines().count() + usize::from(view.db_description_input.ends_with('\n'))
+                > 1,
+            "the box should grow with each line break"
+        );
+
+        // The form must still fit within the box after the last insertion.
+        let area = view.last_area.unwrap();
+        let layout = view.compute_layout(area);
+        let form_h_max = layout.box1_h.saturating_sub(2 + 3);
+        let pad_w = area.width.saturating_sub(4).saturating_sub(8).max(1);
+        assert!(
+            view.create_db_mini_box_height(pad_w) <= form_h_max,
+            "form must not exceed the box"
+        );
+    }
+
+    #[test]
+    fn typing_after_blank_lines_keeps_cursor_below() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.create_db_focus = CreateDbFocus::Description;
+        view.db_description_input = "abc".into();
+        view.db_description_cursor_pos = 3;
+        // Two Shift+Enter: the cursor advances past each newline.
+        assert!(view.handle_insert_newline());
+        assert!(view.handle_insert_newline());
+        assert_eq!(view.db_description_input, "abc\n\n");
+        assert_eq!(view.db_description_cursor_pos, 5);
+        // Typing must insert right after the newlines (where the cursor is),
+        // not back at the top before the line breaks.
+        view.handle_key(KeyCode::Char('X'));
+        assert_eq!(view.db_description_input, "abc\n\nX");
+        assert_eq!(view.db_description_cursor_pos, 6);
+    }
+
+    #[test]
+    fn arrow_right_skips_multibyte_chars() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.db_name_input = "olá".into();
+        view.db_name_cursor_pos = 2; // before 'á' (2 bytes)
+        view.handle_key(KeyCode::Right);
+        assert_eq!(view.db_name_cursor_pos, 4, "Right must skip the 2-byte 'á'");
+        view.handle_key(KeyCode::Left);
+        assert_eq!(view.db_name_cursor_pos, 2);
+    }
+
+    #[test]
+    fn delete_removes_multibyte_char() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.db_name_input = "olá".into();
+        view.db_name_cursor_pos = 2; // before 'á'
+        view.handle_key(KeyCode::Delete);
+        assert_eq!(view.db_name_input, "ol");
+        assert_eq!(view.db_name_cursor_pos, 2);
+    }
+
+    #[test]
+    fn click_positions_cursor_in_fields() {
+        use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.db_name_input = "hello".into();
+        view.db_description_input = "world".into();
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        // Geometry mirrors handle_create_db_field_click + render: the form
+        // starts below the URL input (3 rows), the model line is 1 row, then
+        // a gap, then the Name field; the value starts after the label.
+        let input_h = view.url_input.height(92);
+        let form_y = 2 + input_h;
+        let name_y = form_y + 1 + 2;
+        let value_x = 0 + 4 + 2 + 7; // pad (cx + 2) + label width
+        let click = |x: u16, y: u16| {
+            MouseEvent::new(
+                MouseEventType::Up,
+                MouseButton::Left,
+                x,
+                y,
+                MouseModifiers::none(),
+            )
+        };
+
+        // Click on the Name field at col 2 → focus Name, cursor at byte 2.
+        assert!(view.handle_create_db_field_click(&click(value_x + 2, name_y), area));
+        assert_eq!(view.create_db_focus, CreateDbFocus::Name);
+        assert_eq!(view.db_name_cursor_pos, 2);
+
+        // Click past the end of the name → cursor clamps to the end.
+        assert!(view.handle_create_db_field_click(&click(value_x + 30, name_y), area));
+        assert_eq!(view.db_name_cursor_pos, 5);
+
+        // Click on the Description field at col 1 → focus desc, cursor byte 1.
+        let (name_lines, _) = view.create_db_field_lines(88);
+        let desc_y = name_y + name_lines + 1;
+        assert!(view.handle_create_db_field_click(&click(value_x + 1, desc_y), area));
+        assert_eq!(view.create_db_focus, CreateDbFocus::Description);
+        assert_eq!(view.db_description_cursor_pos, 1);
+
+        // Click on the model line (not a field row) → no focus change.
+        assert!(!view.handle_create_db_field_click(&click(value_x + 1, form_y + 1), area));
+        assert_eq!(view.create_db_focus, CreateDbFocus::Description);
+    }
+
+    #[test]
+    fn up_down_move_visual_line_after_render() {
+        use ratatui::buffer::Buffer;
+        use ratatui::crossterm::event::KeyCode;
+        use ratatui::layout::Rect;
+
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.create_db_focus = CreateDbFocus::Description;
+        view.db_description_input = "ab\ncd".into();
+        view.db_description_cursor_pos = 4; // end
+
+        // render() must store last_area — Up/Down need it to know the field
+        // width; without it they are silent no-ops.
+        let theme = crate::theme::ThemeRegistry::new().default_theme().clone();
+        let area = Rect::new(0, 0, 100, 40);
+        view.render(&mut Buffer::empty(area), area, &theme);
+        assert!(view.last_area.is_some(), "render must store the area");
+
+        view.handle_key(KeyCode::Up);
+        assert_eq!(view.db_description_cursor_pos, 1, "up to the previous line");
+        view.handle_key(KeyCode::Down);
+        assert_eq!(view.db_description_cursor_pos, 4, "down back to the end");
+    }
+
+    #[test]
+    fn left_right_stay_on_visual_line() {
+        use ratatui::buffer::Buffer;
+        use ratatui::crossterm::event::KeyCode;
+        use ratatui::layout::Rect;
+
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.create_db_focus = CreateDbFocus::Description;
+        view.db_description_input = "abc\ndef".into();
+        let theme = crate::theme::ThemeRegistry::new().default_theme().clone();
+        let area = Rect::new(0, 0, 100, 40);
+        view.render(&mut Buffer::empty(area), area, &theme);
+
+        // Right at the end of the first line: stays (Down moves between lines).
+        view.db_description_cursor_pos = 3;
+        view.handle_key(KeyCode::Right);
+        assert_eq!(view.db_description_cursor_pos, 3, "Right must not cross the newline");
+        // Left at the start of the second line: stays.
+        view.db_description_cursor_pos = 4;
+        view.handle_key(KeyCode::Left);
+        assert_eq!(view.db_description_cursor_pos, 4, "Left must not cross the newline");
+        // Within a line both move sideways normally.
+        view.db_description_cursor_pos = 1;
+        view.handle_key(KeyCode::Right);
+        assert_eq!(view.db_description_cursor_pos, 2);
+        view.db_description_cursor_pos = 5;
+        view.handle_key(KeyCode::Left);
+        assert_eq!(view.db_description_cursor_pos, 4);
+    }
+
+    #[test]
+    fn paste_into_focused_field_keeps_newlines() {
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.create_db_focus = CreateDbFocus::Description;
+        view.db_description_input = "ab".into();
+        view.db_description_cursor_pos = 1;
+        view.handle_paste("XY\nZ");
+        assert_eq!(view.db_description_input, "aXY\nZb");
+        assert_eq!(view.db_description_cursor_pos, 5);
     }
 }

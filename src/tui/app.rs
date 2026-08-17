@@ -2843,6 +2843,15 @@ impl App {
 
                     // Shift/Ctrl/Alt+Enter inserts a newline instead of sending.
                     if key.code == KeyCode::Enter && key.modifiers != KeyModifiers::NONE {
+                        // In RAG mode with the create-db form open, the newline
+                        // goes into the focused field instead of the prompt.
+                        #[cfg(feature = "embed")]
+                        if self.is_rag_mode()
+                            && !self.dialog.visible()
+                            && self.rag_view.handle_insert_newline()
+                        {
+                            return Ok(false);
+                        }
                         self.prompt_view.note_activity();
                         let pos = self.prompt_view.cursor_pos;
                         self.prompt_view.input.insert(pos, '\n');
@@ -2985,6 +2994,13 @@ impl App {
                             // Ctrl+W = delete word before cursor (universal terminal shortcut)
                             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 self.rag_view.handle_ctrl_backspace();
+                                return Ok(false);
+                            }
+                            // Ctrl+J = newline (universal ^J) in the create-db fields
+                            KeyCode::Char('j')
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && self.rag_view.handle_insert_newline() =>
+                            {
                                 return Ok(false);
                             }
                             _ => {}

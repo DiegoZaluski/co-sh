@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use super::models::{CreateDbFocus, EmbedModelEntry, RagMode};
 use super::registry::RagRegistry;
-use super::render::{FIELD_LABEL_W, MAX_VISIBLE_MODELS_IN_FORM};
+use super::render::{markdown_render_text, FIELD_LABEL_W, MAX_VISIBLE_MODELS_IN_FORM};
 use crate::component::cursor::Cursor;
 use crate::component::rag_input::RagInput;
 use crate::component::search_bar::SearchBar;
@@ -212,6 +212,10 @@ pub struct RagView {
     pub(crate) embed_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     pub(crate) embed_success: bool,
     pub(crate) embed_error: Option<String>,
+
+    /// Area of the most recent render. Used to cap the create-db form's
+    /// growth (newline insertion) to what actually fits on screen.
+    pub(crate) last_area: Option<ratatui::layout::Rect>,
 }
 
 impl RagView {
@@ -251,6 +255,7 @@ impl RagView {
             embed_rx: None,
             embed_success: false,
             embed_error: None,
+            last_area: None,
         }
     }
 
@@ -560,11 +565,28 @@ pub(crate) fn max_visible_models(avail_h: u16) -> usize {
     cap.clamp(MIN_VISIBLE_MODELS, MAX_VISIBLE_MODELS_IN_FORM)
 }
 
-/// Rows a markdown paragraph occupies at `pad_w` columns, using the same
-/// wrap logic as the markdown renderer (so the form box fits the fields).
+/// Rows a field value occupies at `pad_w` columns.
+///
+/// Measures the same string that is actually passed to the markdown renderer
+/// (`markdown_render_text` keeps blank lines alive with an invisible spacer),
+/// so the box grows together with every line break — including blank lines
+/// that cmark would otherwise collapse — and never cuts a wrapped row. Raw
+/// newlines always count as rows too (a trailing newline is a real row).
 fn markdown_field_lines(text: &str, pad_w: u16) -> u16 {
+    let (render, _) = markdown_render_text(text);
+    let rendered = if render.is_empty() {
+        1
+    } else {
+        estimate_height(&render, pad_w.max(1)).max(1)
+    };
+    rendered.max(raw_line_count(text))
+}
+
+/// Number of display rows the raw text occupies: every `\n` starts a new
+/// row, including a trailing newline.
+fn raw_line_count(text: &str) -> u16 {
     if text.is_empty() {
         return 1;
     }
-    estimate_height(text, pad_w.max(1)).max(1)
+    text.lines().count() as u16 + u16::from(text.ends_with('\n'))
 }
