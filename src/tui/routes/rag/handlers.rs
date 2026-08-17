@@ -133,14 +133,8 @@ impl RagView {
                 Some(RagAction::Back)
             }
             ratatui::crossterm::event::KeyCode::Tab => {
-                self.show_create_db = !self.show_create_db;
-                self.show_db_picker = false; // close DB picker if open
-                if !self.show_create_db {
-                    self.selected_model_index = 0;
-                    self.model_scroll_offset = 0;
-                    self.db_name_input.clear();
-                    self.db_description_input.clear();
-                }
+                // Toggle the form; closing it keeps the draft buffer alive.
+                self.toggle_create_db();
                 Some(RagAction::Consumed)
             }
             ratatui::crossterm::event::KeyCode::Home => {
@@ -260,8 +254,10 @@ impl RagView {
                         .unwrap_or(super::models::EmbedderConfig::Local {
                             model: super::models::LocalEmbedModel::AllMiniLML6V2,
                         });
-                    // Close form
+                    // Close the form and wipe the draft buffer: the database
+                    // is being created for real.
                     self.reset_create_db_form();
+                    self.clear_create_db_buffer();
                     Some(RagAction::CreateDb {
                         name,
                         description,

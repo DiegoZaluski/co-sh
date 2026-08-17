@@ -272,11 +272,8 @@ impl RagView {
         self.content_preview.clear();
         self.preview_scroll = 0;
         self.url_input.clear();
-        self.db_name_input.clear();
-        self.db_description_input.clear();
-        self.db_name_cursor_pos = 0;
-        self.db_description_cursor_pos = 0;
-        self.create_db_focus = CreateDbFocus::Name;
+        // Keep the Create DB draft buffer intact — it is only wiped once a DB
+        // is actually created (see clear_create_db_buffer).
         self.show_create_db = false;
         // Keep selected_db_for_embed (user may want to embed more content into same DB)
         self.registry = RagRegistry::load();
@@ -368,14 +365,9 @@ impl RagView {
         self.show_create_db = !self.show_create_db;
         self.show_db_picker = false; // close DB picker if open
         self.models_expanded = false;
-        if !self.show_create_db {
-            self.selected_model_index = 0;
-            self.model_scroll_offset = 0;
-            self.db_name_input.clear();
-            self.db_description_input.clear();
-            self.db_name_cursor_pos = 0;
-            self.db_description_cursor_pos = 0;
-        } else {
+        if self.show_create_db {
+            // Reopening the form keeps any draft the user already typed;
+            // the draft is only cleared once the DB is actually created.
             self.create_db_focus = CreateDbFocus::Name;
         }
     }
@@ -393,10 +385,21 @@ impl RagView {
         self.reset_create_db_form();
     }
 
-    /// Reset all Create DB form fields to their initial state.
+    /// Close the Create DB form without discarding the draft.
+    ///
+    /// The typed name/description (and picked model) act as a live buffer:
+    /// dismissing the form by accident (Esc, click outside, Tab) keeps the
+    /// draft so the user can reopen the form and continue where they left off.
     pub(crate) fn reset_create_db_form(&mut self) {
         self.show_create_db = false;
         self.models_expanded = false;
+    }
+
+    /// Wipe the Create DB draft buffer.
+    ///
+    /// Called only after the database has actually been created, so the next
+    /// form session starts empty.
+    pub(crate) fn clear_create_db_buffer(&mut self) {
         self.selected_model_index = 0;
         self.model_scroll_offset = 0;
         self.db_name_input.clear();
