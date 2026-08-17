@@ -2,8 +2,10 @@
 //!
 //! Strategy (head / middle / tail):
 //!
-//! - keep the **head** — the command's intent, headers, early errors;
-//! - keep the **tail** — the final lines and the exit status;
+//! - keep the **head** — the command's intent, headers, early errors (or the
+//!   start of a fetched article);
+//! - keep the **tail** — the final lines and the exit status (or the
+//!   conclusion);
 //! - when the output exceeds the token budget, the **middle** is written
 //!   verbatim to a scratch log at `<OS temp>/cosh/<content-hash>.log` and
 //!   replaced in the model-facing text with a structured notice pointing at
@@ -11,9 +13,10 @@
 //!   with `fs_read` (using `line_range`) or `find_grep` — no re-execution,
 //!   no information loss.
 //!
-//! The TUI is unaffected: it receives the full output as a live stream via
-//! `HarnessEvent::ToolOutput` before this truncation runs, so the user always
-//! sees everything.
+//! Used by `bash_run` ([`MAX_TOOL_OUTPUT_TOKENS`]) and `web_fetch`
+//! ([`WEB_FETCH_MAX_TOKENS`]). The TUI is unaffected: it receives the full
+//! output as a live stream via `HarnessEvent::ToolOutput` before this
+//! truncation runs, so the user always sees everything.
 
 use std::path::PathBuf;
 
@@ -28,14 +31,14 @@ use crate::util::estimate_tokens;
 /// ([`estimate_tokens`]) — the de-facto standard for cross-model estimation.
 pub const MAX_TOOL_OUTPUT_TOKENS: usize = 3000;
 
-/// Token budget kept from the beginning of the output.
+/// Token budget for the model-facing version of a single `web_fetch` result.
 ///
-/// Slightly larger than the tail: the beginning carries the command's intent,
-/// headers, and the first errors, which are usually the most informative.
-const HEAD_TOKEN_BUDGET: usize = 2000;
-
-/// Token budget kept from the end of the output (final lines + exit status).
-const TAIL_TOKEN_BUDGET: usize = 1000;
+/// Deliberately generous: normal articles and docs pages pass through whole;
+/// only ridiculously dense pages (large specs, dumps, …) are truncated, and
+/// even then the head/tail budgets scale with this cap so the model still
+/// sees the bulk of the content (the omitted middle is recoverable from the
+/// scratch log).
+pub const WEB_FETCH_MAX_TOKENS: usize = 12_000;
 
 // Soft-cap note: the model-facing text may exceed `MAX_TOOL_OUTPUT_TOKENS` by
 // a small margin — the per-line budget rounding plus the ~100-token notice.
@@ -53,21 +56,35 @@ pub struct TruncatedOutput {
 }
 
 /// Truncate `output` for the model context using the head / middle / tail
-/// strategy.
-///
-/// Outputs at or under [`MAX_TOOL_OUTPUT_TOKENS`] pass through verbatim.
-/// Larger outputs keep whole lines from the start and end of the output
-/// within the head/tail budgets; the middle is written to the scratch log and
-/// replaced with a notice pointing at it.
+/// strategy with the [`MAX_TOOL_OUTPUT_TOKENS`] budget (see
+/// [`truncate_tool_output_with_budget`]).
 #[must_use]
 pub fn truncate_tool_output(output: &str) -> TruncatedOutput {
-    if estimate_tokens(output) <= MAX_TOOL_OUTPUT_TOKENS {
+    truncate_tool_output_with_budget(output, MAX_TOOL_OUTPUT_TOKENS)
+}
+
+/// Truncate `output` for the model context using the head / middle / tail
+/// strategy with an explicit `max_tokens` budget.
+///
+/// Outputs at or under `max_tokens` pass through verbatim. Larger outputs
+/// keep whole lines from the start and end of the output within head/tail
+/// budgets derived from `max_tokens` (2/3 head, 1/3 tail — the beginning
+/// carries the intent/headers/early content, the end the conclusion/exit
+/// status); the middle is written to the scratch log and replaced with a
+/// notice pointing at it.
+#[must_use]
+pub fn truncate_tool_output_with_budget(output: &str, max_tokens: usize) -> TruncatedOutput {
+    if estimate_tokens(output) <= max_tokens {
         return TruncatedOutput {
             text: output.to_string(),
             log_path: None,
             truncated: false,
         };
     }
+    // Head 2/3, tail 1/3 of the budget — reproduces the fixed 2000/1000
+    // split of the 3000-token bash budget exactly.
+    let head_budget = max_tokens * 2 / 3;
+    let tail_budget = max_tokens - head_budget;
 
     // Index lines once as (byte offset of line start, line including '\n').
     let mut lines: Vec<(usize, &str)> = Vec::new();
@@ -82,7 +99,7 @@ pub fn truncate_tool_output(output: &str) -> TruncatedOutput {
     let mut head_tokens = 0usize;
     for (start, line) in &lines {
         let tokens = estimate_tokens(line);
-        if head_tokens + tokens > HEAD_TOKEN_BUDGET {
+        if head_tokens + tokens > head_budget {
             break;
         }
         head_tokens += tokens;
@@ -94,7 +111,7 @@ pub fn truncate_tool_output(output: &str) -> TruncatedOutput {
     let mut tail_tokens = 0usize;
     for (start, line) in lines.iter().rev() {
         let tokens = estimate_tokens(line);
-        if tail_tokens + tokens > TAIL_TOKEN_BUDGET {
+        if tail_tokens + tokens > tail_budget {
             break;
         }
         tail_tokens += tokens;
@@ -109,8 +126,8 @@ pub fn truncate_tool_output(output: &str) -> TruncatedOutput {
         (head_end, tail_start)
     } else {
         let len = output.len();
-        let head_bytes = (HEAD_TOKEN_BUDGET * 4).min(len / 2);
-        let tail_keep = (TAIL_TOKEN_BUDGET * 4).min(len / 2);
+        let head_bytes = (head_budget * 4).min(len / 2);
+        let tail_keep = (tail_budget * 4).min(len / 2);
         let head = output.floor_char_boundary(head_bytes);
         let tail = output.floor_char_boundary(len - tail_keep);
         if head < tail {
@@ -280,6 +297,50 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The budget-variant wrapper must reproduce the fixed-budget behavior
+    /// exactly when called with [`MAX_TOOL_OUTPUT_TOKENS`] (head 2/3, tail
+    /// 1/3 of the budget — the historical 2000/1000 split).
+    #[test]
+    fn budget_variant_matches_fixed_budget() {
+        let out = big_output();
+        let a = truncate_tool_output(&out);
+        let b = truncate_tool_output_with_budget(&out, MAX_TOOL_OUTPUT_TOKENS);
+        assert_eq!(a.text, b.text);
+        assert_eq!(a.log_path, b.log_path);
+        if let Some(path) = a.log_path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// The web budget is deliberately generous: ordinary content passes
+    /// through whole; only ridiculously dense content is truncated — and
+    /// even then a large head + tail survive around the notice.
+    #[test]
+    fn web_budget_passes_ordinary_content_and_truncates_dense() {
+        let small = "short article text with some content\n";
+        let r = truncate_tool_output_with_budget(small, WEB_FETCH_MAX_TOKENS);
+        assert!(!r.truncated);
+        assert_eq!(r.text, small);
+
+        // big_output() ≈ 13k estimated tokens — above the 12k web budget.
+        let out = big_output();
+        let r = truncate_tool_output_with_budget(&out, WEB_FETCH_MAX_TOKENS);
+        assert!(r.truncated, "dense content must be truncated");
+        assert!(r.text.contains("[OUTPUT TRUNCATED]"));
+        assert!(r.text.starts_with("line 0:"), "head must be kept");
+        assert!(r.text.contains("line 799:"), "tail must be kept");
+        // The generous budget scales head/tail with it: the kept text is far
+        // larger than the fixed 3k bash budget would keep.
+        assert!(
+            estimate_tokens(&r.text) > MAX_TOOL_OUTPUT_TOKENS,
+            "the web budget must keep more than the bash budget, got {} tokens",
+            estimate_tokens(&r.text)
+        );
+        if let Some(path) = r.log_path {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

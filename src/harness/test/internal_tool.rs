@@ -91,3 +91,67 @@ fn local_header_keeps_inline_tool_format() {
         "local providers keep the inline instruction as a fallback"
     );
 }
+
+/// Cloud providers hold the tool schemas in their native function-calling
+/// mechanism (the request's `tools` array) — re-sending them inline in the
+/// system prompt duplicates every schema (~4.3k tokens of the measured
+/// header) on every request. The header keeps names + descriptions as prose
+/// so the model can reason over the tool list, but the `Schema: {...}` block
+/// is omitted for non-local providers.
+#[test]
+fn cloud_header_omits_inline_schemas() {
+    use std::collections::HashSet;
+
+    let connector = Connector::new("openai").expect("openai provider");
+    let mut h = Harness::new(connector, "/tmp", HashSet::new());
+    h.format_header_context();
+    let header = h.build_chat_context_for_test();
+    assert!(
+        !header.contains("Schema:"),
+        "cloud header must not duplicate the native tool schemas inline"
+    );
+    // Names + descriptions stay as prose guidance.
+    assert!(
+        header.contains("bash_run"),
+        "tool names must remain in the header"
+    );
+    assert!(
+        header.contains("fs_read"),
+        "tool names must remain in the header"
+    );
+}
+
+/// Ask mode uses the filtered writer — the same schema omission must apply
+/// to it for cloud providers.
+#[test]
+fn cloud_ask_header_omits_inline_schemas() {
+    use std::collections::HashSet;
+
+    use super::super::core::Mode;
+    let connector = Connector::new("openai").expect("openai provider");
+    let mut h = Harness::new(connector, "/tmp", HashSet::new()).with_mode(Mode::Ask);
+    h.format_header_context();
+    let header = h.build_chat_context_for_test();
+    assert!(
+        !header.contains("Schema:"),
+        "cloud Ask header must also omit the inline schemas"
+    );
+    assert!(header.contains("fs_read"));
+}
+
+/// Local model servers (ollama/lmstudio/vllm/llamacpp) may lack reliable
+/// native function calling — the model emits inline JSON the extractor
+/// parses, so the full schemas MUST stay in the header for them.
+#[test]
+fn local_header_keeps_inline_schemas() {
+    use std::collections::HashSet;
+
+    let connector = Connector::new("ollama").expect("ollama provider");
+    let mut h = Harness::new(connector, "/tmp", HashSet::new());
+    h.format_header_context();
+    let header = h.build_chat_context_for_test();
+    assert!(
+        header.contains("Schema:"),
+        "local providers keep the inline schemas for the inline-JSON extractor path"
+    );
+}

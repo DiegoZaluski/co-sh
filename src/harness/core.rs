@@ -631,7 +631,15 @@ impl Harness {
         // (ollama/lmstudio/vllm/llamacpp) may lack reliable native function
         // calling and keep the legacy inline-JSON TOOL_FORMAT as a fallback
         // the extractor can capture.
-        let tool_format = if self.connector.is_local() {
+        //
+        // `include_inline_schemas` follows the SAME gate: local providers
+        // keep the full `Schema: {...}` dump in the header (the model emits
+        // inline JSON the extractor parses), while cloud providers omit it —
+        // they hold the schemas in the native `tools` array of the request,
+        // so re-sending them in the system prompt would duplicate every
+        // schema on each request (~4.3k tokens of the measured header).
+        let include_inline_schemas = self.connector.is_local();
+        let tool_format = if include_inline_schemas {
             TOOL_FORMAT
         } else {
             cosh_tools::TOOL_FORMAT_NATIVE
@@ -647,20 +655,30 @@ impl Harness {
             if self.disabled_tools.contains(&tool.name) {
                 continue;
             }
-            let schema = serde_json::to_string_pretty(&tool.input_schema).unwrap_or_default();
-            let _ = write!(
-                out,
-                "### {}\n{}\nSchema: {}\n\n",
-                tool.name, tool.description, schema,
-            );
+            if include_inline_schemas {
+                let schema = serde_json::to_string_pretty(&tool.input_schema).unwrap_or_default();
+                let _ = write!(
+                    out,
+                    "### {}\n{}\nSchema: {}\n\n",
+                    tool.name, tool.description, schema,
+                );
+            } else {
+                let _ = write!(out, "### {}\n{}\n\n", tool.name, tool.description);
+            }
         }
         if let Some(ref cosh) = self.cosh_tools {
             let _ = write!(out, "### System Tools\n\n");
             match self.mode {
-                Mode::Build | Mode::Yolo => {
-                    cosh.write_tool_descriptions_enabled(&mut out, &self.disabled_tools)
-                }
-                Mode::Ask => cosh.write_tool_descriptions_filtered(&mut out, &self.disabled_tools),
+                Mode::Build | Mode::Yolo => cosh.write_tool_descriptions_enabled(
+                    &mut out,
+                    &self.disabled_tools,
+                    include_inline_schemas,
+                ),
+                Mode::Ask => cosh.write_tool_descriptions_filtered(
+                    &mut out,
+                    &self.disabled_tools,
+                    include_inline_schemas,
+                ),
             }
         }
 
@@ -668,12 +686,16 @@ impl Harness {
             let _ = write!(out, "### MCP Server: {}\n\n", session.name_server);
             for tool in &session.tools {
                 let desc = tool.description.as_deref().unwrap_or_default();
-                let schema = serde_json::to_string_pretty(&*tool.input_schema).unwrap_or_default();
-                let _ = write!(
-                    out,
-                    "- **{name}**: {desc}\n  Schema: {schema}\n",
-                    name = tool.name
-                );
+                if include_inline_schemas {
+                    let schema = serde_json::to_string_pretty(&*tool.input_schema).unwrap_or_default();
+                    let _ = write!(
+                        out,
+                        "- **{name}**: {desc}\n  Schema: {schema}\n",
+                        name = tool.name
+                    );
+                } else {
+                    let _ = writeln!(out, "- **{name}**: {desc}", name = tool.name);
+                }
             }
         }
 

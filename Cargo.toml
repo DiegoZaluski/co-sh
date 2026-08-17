@@ -44,7 +44,7 @@ version = "5"
 optional = true
 
 [[bin]]
-name = "tui"
+name = "cosh"
 path = "src/tui/main.rs"
 
 [[bin]]

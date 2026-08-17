@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::events::HarnessEvent;
-use super::truncate::truncate_tool_output;
+use super::truncate::{WEB_FETCH_MAX_TOKENS, truncate_tool_output, truncate_tool_output_with_budget};
 use cosh_sdk::extract_action::ToolSchema;
 use cosh_sdk::find::{GlobMatch, GrepMatch};
 use cosh_tools::{
@@ -298,10 +298,18 @@ impl CoshTools {
     }
 
     /// All tool descriptions, skipping disabled ones.
+    ///
+    /// `include_schema` controls whether the full `inputSchema` is written
+    /// inline after each tool: local model servers (which may lack reliable
+    /// native function calling and emit inline JSON the extractor parses)
+    /// keep it, cloud providers omit it — they hold the schemas in their
+    /// native tool definitions, so re-sending them in the system prompt
+    /// would duplicate every schema on each request.
     pub fn write_tool_descriptions_enabled(
         &self,
         out: &mut String,
         disabled_tools: &HashSet<String>,
+        include_schema: bool,
     ) {
         let all = self.tool_descriptions();
         for desc in all {
@@ -309,13 +317,13 @@ impl CoshTools {
             if disabled_tools.contains(name) {
                 continue;
             }
-            let description = desc["description"].as_str().unwrap_or_default();
-            let schema = serde_json::to_string_pretty(&desc["inputSchema"]).unwrap_or_default();
-            let _ = write!(out, "- **{name}**: {description}\n  Schema: {schema}\n");
+            write_single_tool(out, &desc, include_schema);
         }
     }
 
     /// Tool descriptions restricted to read-only and search tools (Ask mode).
+    ///
+    /// `include_schema` behaves as in [`Self::write_tool_descriptions_enabled`].
     ///
     /// # Panics
     ///
@@ -324,24 +332,50 @@ impl CoshTools {
         &self,
         out: &mut String,
         disabled_tools: &HashSet<String>,
+        include_schema: bool,
     ) {
-        write_tool_if_enabled(out, disabled_tools, &self.fs.description_read);
-        write_tool_if_enabled(out, disabled_tools, &self.find.description_glob);
-        write_tool_if_enabled(out, disabled_tools, &self.find.description_grep);
-        write_tool_if_enabled(out, disabled_tools, &self.web.description_fetch);
-        write_tool_if_enabled(out, disabled_tools, &self.web.description_search);
+        write_tool_if_enabled(out, disabled_tools, &self.fs.description_read, include_schema);
+        write_tool_if_enabled(out, disabled_tools, &self.find.description_glob, include_schema);
+        write_tool_if_enabled(out, disabled_tools, &self.find.description_grep, include_schema);
+        write_tool_if_enabled(out, disabled_tools, &self.web.description_fetch, include_schema);
+        write_tool_if_enabled(out, disabled_tools, &self.web.description_search, include_schema);
         {
             let plan = self.plan.lock().unwrap();
-            write_tool_if_enabled(out, disabled_tools, &plan.description_todo_read);
-            write_tool_if_enabled(out, disabled_tools, &plan.description_load_from_md);
+            write_tool_if_enabled(
+                out,
+                disabled_tools,
+                &plan.description_todo_read,
+                include_schema,
+            );
+            write_tool_if_enabled(
+                out,
+                disabled_tools,
+                &plan.description_load_from_md,
+                include_schema,
+            );
         }
-        write_tool_if_enabled(out, disabled_tools, &self.question.description_ask);
+        write_tool_if_enabled(out, disabled_tools, &self.question.description_ask, include_schema);
         #[cfg(feature = "embed")]
-        write_tool_if_enabled(out, disabled_tools, &self.recall.description_search);
-        write_tool_if_enabled(out, disabled_tools, &self.skills.description_list);
-        write_tool_if_enabled(out, disabled_tools, &self.skills.description_read);
-        write_tool_if_enabled(out, disabled_tools, &self.skills.description_read_asset);
-        write_tool_if_enabled(out, disabled_tools, &self.skills.description_match_skills);
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.recall.description_search,
+            include_schema,
+        );
+        write_tool_if_enabled(out, disabled_tools, &self.skills.description_list, include_schema);
+        write_tool_if_enabled(out, disabled_tools, &self.skills.description_read, include_schema);
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.skills.description_read_asset,
+            include_schema,
+        );
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.skills.description_match_skills,
+            include_schema,
+        );
     }
 
     /// All schemas, skipping disabled ones.
@@ -506,49 +540,69 @@ fn extract_schema(desc: &serde_json::Value) -> ToolSchema {
     }
 }
 
-fn write_single_tool(out: &mut String, desc: &serde_json::Value) {
+/// Write one tool as `- **name**: description`, optionally followed by the
+/// full input schema.
+///
+/// Cloud providers hold the schemas in their native function-calling
+/// mechanism, so the harness omits the inline `Schema:` block for them (see
+/// [`CoshTools::write_tool_descriptions_enabled`]) — re-sending it would
+/// duplicate every schema on each request. Local model servers without
+/// reliable native calling keep the schemas because the model emits inline
+/// JSON the extractor parses.
+fn write_single_tool(out: &mut String, desc: &serde_json::Value, include_schema: bool) {
     let name = desc["name"].as_str().unwrap_or_default();
     let description = desc["description"].as_str().unwrap_or_default();
-    let schema = serde_json::to_string_pretty(&desc["inputSchema"]).unwrap_or_default();
-    let _ = write!(out, "- **{name}**: {description}\n  Schema: {schema}\n");
+    if include_schema {
+        let schema = serde_json::to_string_pretty(&desc["inputSchema"]).unwrap_or_default();
+        let _ = write!(out, "- **{name}**: {description}\n  Schema: {schema}\n");
+    } else {
+        let _ = writeln!(out, "- **{name}**: {description}");
+    }
 }
 
 /// Write a single tool description only if its name is not in the disabled set.
-fn write_tool_if_enabled(out: &mut String, disabled: &HashSet<String>, desc: &serde_json::Value) {
+fn write_tool_if_enabled(
+    out: &mut String,
+    disabled: &HashSet<String>,
+    desc: &serde_json::Value,
+    include_schema: bool,
+) {
     let name = desc["name"].as_str().unwrap_or_default();
     if !disabled.contains(name) {
-        write_single_tool(out, desc);
+        write_single_tool(out, desc, include_schema);
     }
 }
 
 impl Tools for CoshTools {
     fn write_tool_descriptions(&self, out: &mut String) {
-        write_single_tool(out, &self.bash.description_run);
-        write_single_tool(out, &self.fs.description_read);
-        write_single_tool(out, &self.fs.description_write);
-        write_single_tool(out, &self.fs.description_edit);
-        write_single_tool(out, &self.fs.description_rollback);
-        write_single_tool(out, &self.find.description_glob);
-        write_single_tool(out, &self.find.description_grep);
-        write_single_tool(out, &self.web.description_fetch);
-        write_single_tool(out, &self.web.description_search);
-        write_single_tool(out, &self.vision.description_terminal);
+        // This trait method always renders the full schema (the harness uses
+        // the `include_schema`-aware writers on `CoshTools` directly).
+        write_single_tool(out, &self.bash.description_run, true);
+        write_single_tool(out, &self.fs.description_read, true);
+        write_single_tool(out, &self.fs.description_write, true);
+        write_single_tool(out, &self.fs.description_edit, true);
+        write_single_tool(out, &self.fs.description_rollback, true);
+        write_single_tool(out, &self.find.description_glob, true);
+        write_single_tool(out, &self.find.description_grep, true);
+        write_single_tool(out, &self.web.description_fetch, true);
+        write_single_tool(out, &self.web.description_search, true);
+        write_single_tool(out, &self.vision.description_terminal, true);
         {
             let plan = self.plan.lock().unwrap();
-            write_single_tool(out, &plan.description_todo_write);
-            write_single_tool(out, &plan.description_todo_edit);
-            write_single_tool(out, &plan.description_todo_cross_off);
-            write_single_tool(out, &plan.description_todo_read);
-            write_single_tool(out, &plan.description_load_from_md);
+            write_single_tool(out, &plan.description_todo_write, true);
+            write_single_tool(out, &plan.description_todo_edit, true);
+            write_single_tool(out, &plan.description_todo_cross_off, true);
+            write_single_tool(out, &plan.description_todo_read, true);
+            write_single_tool(out, &plan.description_load_from_md, true);
         }
-        write_single_tool(out, &self.question.description_ask);
+        write_single_tool(out, &self.question.description_ask, true);
         #[cfg(feature = "embed")]
-        write_single_tool(out, &self.recall.description_search);
-        write_single_tool(out, &self.subagent.description_call);
-        write_single_tool(out, &self.skills.description_list);
-        write_single_tool(out, &self.skills.description_read);
-        write_single_tool(out, &self.skills.description_read_asset);
-        write_single_tool(out, &self.skills.description_match_skills);
+        write_single_tool(out, &self.recall.description_search, true);
+        write_single_tool(out, &self.subagent.description_call, true);
+        write_single_tool(out, &self.skills.description_list, true);
+        write_single_tool(out, &self.skills.description_read, true);
+        write_single_tool(out, &self.skills.description_read_asset, true);
+        write_single_tool(out, &self.skills.description_match_skills, true);
     }
 
     fn tool_descriptions(&self) -> Vec<serde_json::Value> {
@@ -849,7 +903,12 @@ impl Tools for CoshTools {
 
             "web_fetch" => {
                 let input: WebFetch = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                self.web.fetch(input).await
+                let text = self.web.fetch(input).await?;
+                // Keep the model context lean: only ridiculously dense pages
+                // are head/tail-truncated (generous budget, middle → scratch
+                // log — see `truncate`); normal articles pass through whole.
+                let truncated = truncate_tool_output_with_budget(&text, WEB_FETCH_MAX_TOKENS);
+                Ok(truncated.text)
             }
 
             "web_search" => {
