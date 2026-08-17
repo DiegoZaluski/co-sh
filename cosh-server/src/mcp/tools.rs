@@ -2,7 +2,6 @@ use cosh_tools::{
     bash::Bash,
     fs::{Fs, FsMetadata, FsRead, FsWrite},
     plan::Plan,
-    vision::Vision,
     web::Web,
 };
 use rmcp::{handler::server::wrapper::Parameters, model::*, tool, tool_router};
@@ -10,12 +9,11 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 #[allow(dead_code)]
-struct Server {
+pub struct Server {
     fs: Fs,
     web: Web,
     plan: Plan,
     bash: Bash,
-    vision: Vision,
 }
 
 #[allow(dead_code)]
@@ -33,7 +31,7 @@ struct ParametersFsWrite {
 }
 
 #[allow(dead_code)]
-#[tool_router]
+#[tool_router(server_handler)]
 impl Server {
     pub fn new() -> Self {
         Self {
@@ -41,7 +39,6 @@ impl Server {
             web: Web::new(),
             plan: Plan::new(),
             bash: Bash::new(),
-            vision: Vision::new(),
         }
     }
 
@@ -124,9 +121,4 @@ impl Server {
     pub fn todo_cross_off() {
         todo!()
     }
-
-    // --- VISION ---
-
-    #[tool]
-    fn vision_bash(&self) {}
 }

@@ -13,7 +13,6 @@ pub mod recall;
 pub mod skills;
 pub mod subagent;
 pub mod util;
-pub mod vision;
 pub mod web;
 
 /// MCP Tool description: name, description, and inputSchema as a JSON value.

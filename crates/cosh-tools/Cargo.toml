@@ -20,7 +20,6 @@ log = "0.4"
 regex = "1"
 strip-ansi-escapes = "0.2"
 libc = "0.2"
-proptest = "1"
 tokio-stream = "0.1"
 
 [dev-dependencies.tokio]

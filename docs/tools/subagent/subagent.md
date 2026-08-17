@@ -94,10 +94,9 @@ The harness intercepts the call and runs a **nested harness** instead:
 - **persists nothing** — the sub-agent's session state does not survive;
 - **returns only its final report** as the tool result; its streaming text is
   forwarded live to the TUI;
-- cannot ask the user questions, capture the terminal, or stop the loop:
-  `ask_questions`, `vision_terminal`, and `stop_agent_loop` are removed from
-  its tool set so it never even sees them (it must end with a written
-  answer).
+- cannot ask the user questions or stop the loop: `ask_questions` and
+  `stop_agent_loop` are removed from its tool set so it never even sees
+  them (it must end with a written answer).
 
 The internal sub-agent uses its own prompt, so it never inherits the main
 agent's review-loop mandate (it would otherwise nest review sub-agents

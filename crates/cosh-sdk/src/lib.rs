@@ -9,5 +9,4 @@ pub mod extract_action;
 pub mod find;
 pub mod hashline;
 pub mod rollback;
-pub mod term_screen;
 pub mod tree_sitter;

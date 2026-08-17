@@ -133,7 +133,6 @@ pub(crate) const MAX_ITERATIONS: u64 = 100;
 /// sub-agent's schema AND extractor, so the model never even sees them:
 /// - `ask_questions` — needs a human in the loop; the sub-agent is headless
 ///   and would hang waiting for an answer;
-/// - `vision_terminal` — needs a live terminal; the sub-agent is headless;
 /// - `stop_agent_loop` — the sub-agent's ONLY deliverable is its final text
 ///   report. If it could stop the loop directly, a model might call it as
 ///   its last action without writing the report (the caller would receive
@@ -141,7 +140,7 @@ pub(crate) const MAX_ITERATIONS: u64 = 100;
 ///
 /// Add future blocklist entries here.
 pub(crate) const SUBAGENT_BLOCKED_TOOLS: &[&str] =
-    &["ask_questions", "vision_terminal", "stop_agent_loop"];
+    &["ask_questions", "stop_agent_loop"];
 
 /// Chunk interpolated into the `subagent_call` tool description (via
 /// [`SubAgent::set_note`]) so the model learns — naturally, inside the

@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::events::HarnessEvent;
-use super::truncate::{WEB_FETCH_MAX_TOKENS, truncate_tool_output, truncate_tool_output_with_budget};
+use super::truncate::{
+    WEB_FETCH_MAX_TOKENS, truncate_tool_output, truncate_tool_output_with_budget,
+};
 use cosh_sdk::extract_action::ToolSchema;
 use cosh_sdk::find::{GlobMatch, GrepMatch};
 use cosh_tools::{
@@ -26,7 +28,6 @@ use cosh_tools::{
         SubAgent,
         types::{SubAgentCallInput, SubAgentCallOutput},
     },
-    vision::{TerminalInput, Vision},
     web::{Web, WebFetch, WebSearchInput},
 };
 
@@ -134,7 +135,6 @@ pub struct CoshTools {
     fs: Fs,
     find: Find,
     web: Web,
-    vision: Vision,
     plan: Mutex<Plan>,
     question: Question,
     #[cfg(feature = "embed")]
@@ -155,7 +155,6 @@ impl CoshTools {
             fs: Fs::new().cwd(cwd),
             find: Find::new().cwd(cwd),
             web: Web::new(),
-            vision: Vision::new(),
             plan: Mutex::new(Plan::new()),
             question: Question::new(),
             #[cfg(feature = "embed")]
@@ -334,11 +333,36 @@ impl CoshTools {
         disabled_tools: &HashSet<String>,
         include_schema: bool,
     ) {
-        write_tool_if_enabled(out, disabled_tools, &self.fs.description_read, include_schema);
-        write_tool_if_enabled(out, disabled_tools, &self.find.description_glob, include_schema);
-        write_tool_if_enabled(out, disabled_tools, &self.find.description_grep, include_schema);
-        write_tool_if_enabled(out, disabled_tools, &self.web.description_fetch, include_schema);
-        write_tool_if_enabled(out, disabled_tools, &self.web.description_search, include_schema);
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.fs.description_read,
+            include_schema,
+        );
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.find.description_glob,
+            include_schema,
+        );
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.find.description_grep,
+            include_schema,
+        );
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.web.description_fetch,
+            include_schema,
+        );
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.web.description_search,
+            include_schema,
+        );
         {
             let plan = self.plan.lock().unwrap();
             write_tool_if_enabled(
@@ -354,7 +378,12 @@ impl CoshTools {
                 include_schema,
             );
         }
-        write_tool_if_enabled(out, disabled_tools, &self.question.description_ask, include_schema);
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.question.description_ask,
+            include_schema,
+        );
         #[cfg(feature = "embed")]
         write_tool_if_enabled(
             out,
@@ -362,8 +391,18 @@ impl CoshTools {
             &self.recall.description_search,
             include_schema,
         );
-        write_tool_if_enabled(out, disabled_tools, &self.skills.description_list, include_schema);
-        write_tool_if_enabled(out, disabled_tools, &self.skills.description_read, include_schema);
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.skills.description_list,
+            include_schema,
+        );
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.skills.description_read,
+            include_schema,
+        );
         write_tool_if_enabled(
             out,
             disabled_tools,
@@ -586,7 +625,6 @@ impl Tools for CoshTools {
         write_single_tool(out, &self.find.description_grep, true);
         write_single_tool(out, &self.web.description_fetch, true);
         write_single_tool(out, &self.web.description_search, true);
-        write_single_tool(out, &self.vision.description_terminal, true);
         {
             let plan = self.plan.lock().unwrap();
             write_single_tool(out, &plan.description_todo_write, true);
@@ -616,7 +654,6 @@ impl Tools for CoshTools {
             self.find.description_grep.clone(),
             self.web.description_fetch.clone(),
             self.web.description_search.clone(),
-            self.vision.description_terminal.clone(),
         ];
         {
             let plan = self.plan.lock().unwrap();
@@ -648,7 +685,6 @@ impl Tools for CoshTools {
             extract_schema(&self.find.description_grep),
             extract_schema(&self.web.description_fetch),
             extract_schema(&self.web.description_search),
-            extract_schema(&self.vision.description_terminal),
         ];
         {
             let plan = self.plan.lock().unwrap();
@@ -915,12 +951,6 @@ impl Tools for CoshTools {
                 let input: WebSearchInput =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
                 self.web.search(&input.query).await
-            }
-
-            "vision_terminal" => {
-                let input: TerminalInput =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
-                self.vision.terminal(&input)
             }
 
             "plan_todo_write" => {

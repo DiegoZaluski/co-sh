@@ -39,7 +39,6 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
         ("find_grep", "Search file contents"),
         ("web_fetch", "Fetch web page content"),
         ("web_search", "Search the web"),
-        ("vision_terminal", "Capture terminal output"),
         ("plan_todo_write", "Write todo items"),
         ("plan_todo_edit", "Edit todo items"),
         ("plan_todo_cross_off", "Cross off todo items"),
