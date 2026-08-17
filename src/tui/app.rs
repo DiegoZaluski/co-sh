@@ -28,7 +28,7 @@ use crate::component::spinner_highlight::HighlightSpinner;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::fallback;
 use crate::keymap::KeyMap;
-use crate::logo::{LOGO_CHAT, LOGO_WIDTH};
+use crate::logo::LOGO_CHAT;
 use crate::routes::add_provider::AddProviderView;
 use crate::routes::home::footer::HomeFooterView;
 use crate::routes::home::{HomeAction, HomeView};
@@ -1931,7 +1931,7 @@ impl App {
                 0
             };
 
-            let (prompt_area_y, logo_start_y) = if is_empty_session && prompt_h > 0 {
+            let (prompt_area_y, _logo_start_y) = if is_empty_session && prompt_h > 0 {
                 let header_y = area.y + 1;
                 let total_block_h = logo_block_h + prompt_h;
                 let available = footer_y.saturating_sub(header_y);
@@ -2072,25 +2072,9 @@ impl App {
                         self.prompt_view.blur();
                     }
 
-                    // Render static logo above the prompt on empty session
-                    if is_empty_session && logo_start_y > 0 {
-                        let cx = main_area.x + main_area.width / 2;
-                        let lx = cx.saturating_sub(LOGO_WIDTH as u16 / 2);
-                        let logo_style = Style::default().fg(rgba_color(self.theme.primary));
-                        for (row, line) in LOGO_CHAT.iter().enumerate() {
-                            let ly = logo_start_y + row as u16;
-                            for (col, ch) in line.chars().enumerate() {
-                                let cx_pos = lx + col as u16;
-                                if cx_pos >= area.right() || ch == ' ' {
-                                    continue;
-                                }
-                                if let Some(cell) = buf.cell_mut((cx_pos, ly)) {
-                                    cell.set_char(ch);
-                                    cell.set_style(logo_style);
-                                }
-                            }
-                        }
-                    }
+                    // The animated chat-logo ("O" with a red center and a laser
+                    // beam) replaces the static logo on the empty session. It is
+                    // rendered by the prompt view, which owns its animation state.
                     self.prompt_view.cursor.terminal_focused = self.terminal_focused;
                     self.session_view.drag_selection = self.drag_selection;
                     self.session_view
@@ -2156,6 +2140,8 @@ impl App {
                             &unique_agents,
                             std::time::SystemTime::now(),
                             model_name,
+                            delta_time,
+                            is_empty_session,
                         );
                     }
                 }

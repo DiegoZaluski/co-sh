@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
+use crate::logo::ChatLogo;
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::types::{AgentColors, MessageRole, Part, Session};
@@ -80,6 +81,14 @@ pub struct PromptView {
     /// Pasted text parts that were compressed into virtual-text placeholders.
     /// Each entry maps a placeholder like `[Pasted ~N lines]` to the original text.
     pub pasted_parts: Vec<PastedPart>,
+    /// The chat-logo animation (a single "O" with a red center and a laser beam).
+    pub logo: ChatLogo,
+    /// Snapshot of `(input.len(), cursor_pos)` from the previous frame, used to
+    /// detect keystrokes so the logo's head-bob follows the typing rhythm.
+    last_input_snapshot: Option<(usize, usize)>,
+    /// Whether the logo was rendered in the previous frame (used to detect the
+    /// landing-screen → chat transition so the animation can be reset).
+    was_visible: bool,
 }
 
 impl PromptView {
@@ -94,6 +103,9 @@ impl PromptView {
             sel_start: None,
             sel_end: None,
             pasted_parts: Vec::new(),
+            logo: ChatLogo::new(),
+            last_input_snapshot: None,
+            was_visible: false,
         }
     }
 
@@ -592,7 +604,7 @@ impl PromptView {
     /// Render the prompt and draw the cursor — blinking when focused, dimmed when blurred.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn render(
-        &self,
+        &mut self,
         buf: &mut Buffer,
         area: Rect,
         state: &AppState,
@@ -601,6 +613,8 @@ impl PromptView {
         unique_agents: &[String],
         now: SystemTime,
         model_name: &str,
+        delta_time: f64,
+        show_logo: bool,
     ) {
         let text_w = area.width.saturating_sub(5) as usize;
         self.input_text_width.set(text_w);
@@ -820,72 +834,108 @@ impl PromptView {
             );
         }
 
-        // Draw cursor position — always visible, dimmed when unfocused
-        {
-            let cursor_char = if display_placeholder || self.input.is_empty() {
-                0
-            } else {
-                self.input[..self.cursor_pos].chars().count()
-            };
+        // ── Chat logo animation ───────────────────────────────────────────
+        // The O's center turns red, then a laser beams toward the typing
+        // position. The O drifts toward the cursor with a head-like motion.
+        // Only rendered on the empty-session landing screen where a logo slot
+        // is reserved above the prompt.
+        let cursor_char = if display_placeholder || self.input.is_empty() {
+            0
+        } else {
+            self.input[..self.cursor_pos].chars().count()
+        };
 
-            // Walk display_lines, accumulating char counts to find which
-            // visual line and column the cursor falls on.
-            // Each display line is a sub-slice of self.input (or the empty
-            // string from split), so we can count chars directly.
-            let mut cursor_line_idx = 0usize;
-            let mut cursor_col_idx = 0usize;
-            let mut acc = 0usize;
+        let mut cursor_line_idx = 0usize;
+        let mut cursor_col_idx = 0usize;
+        let mut acc = 0usize;
 
-            for (li, line) in display_lines.iter().enumerate() {
-                let n = line.chars().count();
-                // Match cursor on this display line if its character position falls
-                // within [acc, acc + n] (inclusive on both ends). The inclusive upper
-                // bound handles the case where the cursor is at the newline after this
-                // logical line — visually, that's the end of this display line.
-                if cursor_char <= acc + n {
-                    cursor_line_idx = li;
-                    cursor_col_idx = cursor_char.saturating_sub(acc);
-                    break;
-                }
-                acc += n;
-                // If the next byte in self.input is \n, account for it
-                if let Some((byte_idx, _)) = self.input.char_indices().nth(acc)
-                    && byte_idx < self.input.len()
-                    && self.input.as_bytes()[byte_idx] == b'\n'
-                {
-                    acc += 1;
-                }
+        for (li, line) in display_lines.iter().enumerate() {
+            let n = line.chars().count();
+            if cursor_char <= acc + n {
+                cursor_line_idx = li;
+                cursor_col_idx = cursor_char.saturating_sub(acc);
+                break;
             }
+            acc += n;
+            if let Some((byte_idx, _)) = self.input.char_indices().nth(acc)
+                && byte_idx < self.input.len()
+                && self.input.as_bytes()[byte_idx] == b'\n'
+            {
+                acc += 1;
+            }
+        }
 
-            let cursor_y = text_start + cursor_line_idx as u16;
-            if cursor_y < input_area.bottom() && cursor_line_idx < display_lines.len() {
-                let cursor_x = x_off + cursor_col_idx as u16;
-                if cursor_x < input_area.right()
-                    && let Some(cell) = buf.cell_mut((cursor_x, cursor_y))
-                {
-                    let dimmed_style = Style::default()
-                        .fg(rgba_color(theme.text_muted))
-                        .bg(rgba_color(theme.background));
-                    if self.is_focused {
-                        match self.cursor.current_state(now) {
-                            CursorState::On => {
-                                // ON: transparent cursor (invert colors)
-                                cell.set_style(
-                                    Style::default()
-                                        .fg(rgba_color(theme.background))
-                                        .bg(rgba_color(theme.text)),
-                                );
-                            }
-                            CursorState::Off | CursorState::Blur => {
-                                // OFF/Blur: dimmed visible state
-                                cell.set_style(dimmed_style);
-                            }
-                        }
-                    } else {
-                        // Unfocused: always show dimmed
+        let cursor_y = text_start + cursor_line_idx as u16;
+        let cursor_x = x_off + cursor_col_idx as u16;
+
+        if show_logo {
+            // Detect a keystroke since the previous frame (input changed) and
+            // feed it to the logo so its head-bob follows the typing rhythm.
+            let snapshot = (self.input.len(), self.cursor_pos);
+            if self.last_input_snapshot != Some(snapshot) {
+                self.logo.note_keystroke(cursor_x, cursor_y);
+            }
+            self.last_input_snapshot = Some(snapshot);
+
+            // Advance the animation toward the typing position, then draw it.
+            // The logo band sits just above the prompt box. The O glyph is
+            // clamped inside this band (it never enters the prompt), while the
+            // laser beam may cross the bottom edge and reach into the prompt
+            // toward the cursor.
+            let logo_x = input_area.x + input_area.width / 2;
+            let logo_y = input_area.y.saturating_sub(5);
+            let logo_area = Rect::new(
+                logo_x.saturating_sub(4),
+                logo_y,
+                input_area.width,
+                5,
+            );
+            self.logo.anchor(logo_area);
+            self.logo
+                .advance(delta_time, cursor_x as f64, cursor_y as f64);
+            self.logo.render(
+                buf,
+                logo_area,
+                cursor_x,
+                cursor_y,
+                rgba_color(theme.primary),
+                rgba_color(theme.background),
+            );
+            self.was_visible = true;
+        } else if self.was_visible {
+            // The landing screen is gone (message sent): reset the animation
+            // so it re-fills/re-fires when the next empty session appears.
+            self.was_visible = false;
+            self.last_input_snapshot = None;
+            self.logo.reset();
+        }
+
+        if cursor_y < input_area.bottom()
+            && cursor_line_idx < display_lines.len()
+            && cursor_x < input_area.right()
+            && let Some(cell) = buf.cell_mut((cursor_x, cursor_y))
+        {
+            let dimmed_style = Style::default()
+                .fg(rgba_color(theme.text_muted))
+                .bg(rgba_color(theme.background));
+            if self.is_focused {
+                match self.cursor.current_state(now) {
+                    CursorState::On => {
+                        // ON: transparent cursor (invert colors)
+                        cell.set_style(
+                            Style::default()
+                                .fg(rgba_color(theme.background))
+                                .bg(rgba_color(theme.text)),
+                        );
+                    }
+                    CursorState::Off | CursorState::Blur => {
+                        // OFF/Blur: dimmed visible state
                         cell.set_style(dimmed_style);
                     }
                 }
+            } else {
+                // Unfocused: always show dimmed
+                cell.set_style(dimmed_style);
             }
         }
     }
