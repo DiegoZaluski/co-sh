@@ -98,9 +98,9 @@ impl RagView {
         };
         let create_db_lines: u16 = if self.show_create_db {
             if self.models_expanded {
-                4 + db_model_count as u16 + 1
+                7 + db_model_count as u16 + 1
             } else {
-                5
+                8
             }
         } else if self.show_db_picker {
             5

@@ -578,7 +578,8 @@ impl RagView {
         if !self.show_create_db || self.models_expanded {
             return false;
         }
-        let model_y = area.y + 2 + self.url_input.height(area.width.saturating_sub(8));
+        // The model line is the first form field, preceded by one gap line.
+        let model_y = area.y + 2 + self.url_input.height(area.width.saturating_sub(8)) + 1;
         let inner_w = area.width.saturating_sub(4);
         if inner_w < MIN_CONTENT_WIDTH {
             return false;
@@ -649,8 +650,9 @@ impl RagView {
             1
         };
 
-        let name_y = form_y + model_line_count;
-        let desc_y = form_y + model_line_count + 1;
+        // Each field (model, name, description) is preceded by one gap line.
+        let name_y = form_y + model_line_count + 2;
+        let desc_y = form_y + model_line_count + 4;
 
         // Check if click is on Name line
         if my == name_y {

@@ -368,6 +368,9 @@ impl RagView {
         let pad = cx + 2;
         let pad_w = input_w.saturating_sub(4);
 
+        // Gap above the first field
+        form_y += 1;
+
         // Model selector
         if self.models_expanded {
             draw_text_line(buf, "Model", pad, form_y, pad_w, Style::default().fg(muted));
@@ -421,6 +424,9 @@ impl RagView {
             form_y += 1;
         }
 
+        // Gap above the Name field
+        form_y += 1;
+
         //  Name & Description
         let now = SystemTime::now();
         let name_focused = self.create_db_focus == CreateDbFocus::Name;
@@ -460,6 +466,9 @@ impl RagView {
         }
         form_y += 1;
 
+        // Gap above the Description field
+        form_y += 1;
+
         let dd = if self.db_description_input.is_empty() {
             "Briefly describe what this DB contains..."
         } else {
@@ -495,15 +504,17 @@ impl RagView {
 
     /// Total height of the Create DB mini-form popup.
     ///
-    /// When collapsed: model_line + gap + name + description + bottom_padding = 5 lines.
-    /// When expanded:    header + model_items* + name + description + bottom_padding
-    ///                  = 4 + MAX_VISIBLE_MODELS_IN_FORM + 1 lines.
+    /// Each field (model, name, description) is preceded by one gap line.
+    /// When collapsed: gap + model + gap + name + gap + description + padding = 8 lines.
+    /// When expanded:    gap + header + model_items* + gap + name + gap + description + padding
+    ///                  = 7 + MAX_VISIBLE_MODELS_IN_FORM + 1 lines.
     pub(crate) fn create_db_mini_box_height(&self) -> u16 {
         if self.models_expanded {
-            // 4 = header(1) + name(1) + description(1) + bottom_padding(1)
-            4 + MAX_VISIBLE_MODELS_IN_FORM as u16 + 1
+            // 7 = gap(1) + header(1) + gap(1) + name(1) + gap(1) + description(1) + bottom_padding(1)
+            7 + MAX_VISIBLE_MODELS_IN_FORM as u16 + 1
         } else {
-            5
+            // 8 = gap(1) + model(1) + gap(1) + name(1) + gap(1) + description(1) + padding(2)
+            8
         }
     }
 
