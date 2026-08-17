@@ -187,6 +187,8 @@ impl RagView {
         &mut self,
         key: ratatui::crossterm::event::KeyCode,
     ) -> Option<RagAction> {
+        // Any form key discards a lingering drag selection.
+        self.clear_field_selection();
         match key {
             key @ (ratatui::crossterm::event::KeyCode::Up
             | ratatui::crossterm::event::KeyCode::Down) => {
@@ -735,30 +737,29 @@ impl RagView {
         my == btn_y && mx >= sel_btn_x && mx < sel_btn_x + sel_btn_len
     }
 
-    /// Handle a mouse click inside the Create DB form: switch focus to the clicked field.
-    /// Returns `true` if the click was on a field (Name or Description), `false` otherwise.
-    pub fn handle_create_db_field_click(&mut self, mouse: &MouseEvent, area: Rect) -> bool {
+    /// Map a mouse position inside the Create DB form to the focused field
+    /// and the byte offset of the clicked character (mirrors the prompt's
+    /// `char_pos_at_mouse`, inverting the markdown word-wrap). Returns `None`
+    /// when the pointer is not over a field (label, gaps, model line, ...).
+    /// Row ranges of the two create-db fields within `area`.
+    ///
+    /// Returns `(name_y, name_lines, desc_y, desc_lines)` or `None` when the
+    /// form is closed or the area is too narrow to lay out. Each field
+    /// (model, name, description) is preceded by one gap line, and the
+    /// Name/Description fields can span multiple wrapped rows.
+    pub(crate) fn create_db_field_y_ranges(
+        &self,
+        area: Rect,
+    ) -> Option<(u16, u16, u16, u16)> {
         if !self.show_create_db {
-            return false;
+            return None;
         }
         let inner_w = area.width.saturating_sub(4);
         if inner_w < MIN_CONTENT_WIDTH {
-            return false;
+            return None;
         }
-        let inner_x = area.x + 2;
         let input_h = self.url_input.height(area.width.saturating_sub(8));
         let form_y = area.y + 2 + input_h;
-        let mx = mouse.x;
-        let my = mouse.y;
-
-        // X bounds: must be within the form's inner area
-        if !(mx >= inner_x && mx < inner_x + inner_w) {
-            return false;
-        }
-
-        // Compute y positions for Name and Description fields. Each field
-        // (model, name, description) is preceded by one gap line, and the
-        // Name/Description fields can span multiple wrapped rows.
         let model_line_count = if self.models_expanded {
             let max_vis = super::render::MAX_VISIBLE_MODELS_IN_FORM;
             let total = self.available_models.len();
@@ -766,10 +767,27 @@ impl RagView {
         } else {
             1
         };
-        let (name_lines, desc_lines) =
-            self.create_db_field_lines(inner_w.saturating_sub(8));
+        let (name_lines, desc_lines) = self.create_db_field_lines(inner_w.saturating_sub(8));
         let name_y = form_y + model_line_count + 2;
         let desc_y = name_y + name_lines + 1;
+        Some((name_y, name_lines, desc_y, desc_lines))
+    }
+
+    pub(crate) fn field_byte_at(
+        &self,
+        mouse: &MouseEvent,
+        area: Rect,
+    ) -> Option<(CreateDbFocus, usize)> {
+        let (name_y, name_lines, desc_y, desc_lines) = self.create_db_field_y_ranges(area)?;
+        let inner_w = area.width.saturating_sub(4);
+        let inner_x = area.x + 2;
+        let mx = mouse.x;
+        let my = mouse.y;
+
+        // X bounds: must be within the form's inner area
+        if !(mx >= inner_x && mx < inner_x + inner_w) {
+            return None;
+        }
 
         // Value area of each field: the label starts at pad = cx + 2 and the
         // markdown value begins right after the label (matches render).
@@ -778,33 +796,123 @@ impl RagView {
         let value_w = pad_w.saturating_sub(FIELD_LABEL_W).max(1);
         let value_x = pad + FIELD_LABEL_W;
 
-        // Check if click is on the Name field (any wrapped row)
         if my >= name_y && my < name_y + name_lines {
-            self.create_db_focus = CreateDbFocus::Name;
-            self.db_name_cursor.note_activity();
-            self.db_description_cursor.note_activity();
-            // Place the cursor at the clicked character (mirrors the prompt's
-            // char_pos_at_mouse, inverting the markdown word-wrap).
             let row = my - name_y;
             let col = mx.saturating_sub(value_x).min(value_w);
-            self.db_name_cursor_pos =
-                byte_pos_at_click(&self.db_name_input, row, col, value_w);
-            return true;
+            let byte = byte_pos_at_click(&self.db_name_input, row, col, value_w);
+            return Some((CreateDbFocus::Name, byte));
         }
-
-        // Check if click is on the Description field (any wrapped row)
         if my >= desc_y && my < desc_y + desc_lines {
-            self.create_db_focus = CreateDbFocus::Description;
-            self.db_name_cursor.note_activity();
-            self.db_description_cursor.note_activity();
             let row = my - desc_y;
             let col = mx.saturating_sub(value_x).min(value_w);
-            self.db_description_cursor_pos =
-                byte_pos_at_click(&self.db_description_input, row, col, value_w);
-            return true;
+            let byte = byte_pos_at_click(&self.db_description_input, row, col, value_w);
+            return Some((CreateDbFocus::Description, byte));
         }
+        None
+    }
 
-        false
+    /// Extend the active drag selection to the field position under the mouse,
+    /// clamping to the field's start/end when the drag leaves its rows.
+    /// Returns `true` when a selection is active (even if the byte did not move).
+    pub fn extend_field_selection_at(&mut self, mouse: &MouseEvent, area: Rect) -> bool {
+        let Some((focus, _, _)) = self.field_selection else {
+            return false;
+        };
+        let Some((name_y, name_lines, desc_y, desc_lines)) =
+            self.create_db_field_y_ranges(area)
+        else {
+            return false;
+        };
+        let (field_top, field_bottom, input) = match focus {
+            CreateDbFocus::Name => (name_y, name_y + name_lines, &self.db_name_input),
+            CreateDbFocus::Description => {
+                (desc_y, desc_y + desc_lines, &self.db_description_input)
+            }
+        };
+        let byte = if mouse.y < field_top {
+            0
+        } else if mouse.y >= field_bottom {
+            input.len()
+        } else {
+            // Clamp the x coordinate into the form's inner bounds so dragging
+            // past the value edge still lands on the row's first/last cell.
+            let inner_x = area.x + 2;
+            let inner_w = area.width.saturating_sub(4);
+            let mx = mouse.x.clamp(inner_x, inner_x + inner_w - 1);
+            let clamped = MouseEvent::new(mouse.event_type, mouse.button, mx, mouse.y, mouse.modifiers);
+            match self.field_byte_at(&clamped, area) {
+                Some((_, b)) => b,
+                None => return false,
+            }
+        };
+        self.extend_field_selection(byte);
+        match focus {
+            CreateDbFocus::Name => self.db_name_cursor_pos = byte,
+            CreateDbFocus::Description => self.db_description_cursor_pos = byte,
+        }
+        true
+    }
+
+    /// Handle a mouse click inside the Create DB form: switch focus to the clicked field
+    /// and place the cursor at the clicked character.
+    /// Returns `true` if the click was on a field (Name or Description), `false` otherwise.
+    pub fn handle_create_db_field_click(&mut self, mouse: &MouseEvent, area: Rect) -> bool {
+        let Some((focus, byte)) = self.field_byte_at(mouse, area) else {
+            return false;
+        };
+        self.create_db_focus = focus;
+        self.db_name_cursor.note_activity();
+        self.db_description_cursor.note_activity();
+        match focus {
+            CreateDbFocus::Name => self.db_name_cursor_pos = byte,
+            CreateDbFocus::Description => self.db_description_cursor_pos = byte,
+        }
+        // A plain click (no drag) leaves a zero-length anchor behind; drop it.
+        self.field_selection = None;
+        true
+    }
+
+    /// Begin a drag selection in a create-db field: focus it, place the caret
+    /// at `byte` and anchor the selection there (mirrors the prompt's mouse
+    /// press on the input).
+    pub fn start_field_selection(&mut self, focus: CreateDbFocus, byte: usize) {
+        self.create_db_focus = focus;
+        self.note_cursor_activity();
+        match focus {
+            CreateDbFocus::Name => self.db_name_cursor_pos = byte,
+            CreateDbFocus::Description => self.db_description_cursor_pos = byte,
+        }
+        self.field_selection = Some((focus, byte, byte));
+    }
+
+    /// Extend the active drag selection to `byte` (the anchor stays fixed, so
+    /// dragging backwards still selects the range in between).
+    pub fn extend_field_selection(&mut self, byte: usize) {
+        if let Some((focus, start, _)) = self.field_selection {
+            self.field_selection = Some((focus, start, byte));
+        }
+    }
+
+    pub fn has_field_selection(&self) -> bool {
+        matches!(self.field_selection, Some((_, s, e)) if s != e)
+    }
+
+    /// Text covered by the active selection in the raw input of the field.
+    pub fn selected_field_text(&self) -> String {
+        let Some((focus, s, e)) = self.field_selection else {
+            return String::new();
+        };
+        let input = match focus {
+            CreateDbFocus::Name => &self.db_name_input,
+            CreateDbFocus::Description => &self.db_description_input,
+        };
+        let start = s.min(e).min(input.len());
+        let end = s.max(e).min(input.len());
+        input[start..end].to_string()
+    }
+
+    pub fn clear_field_selection(&mut self) {
+        self.field_selection = None;
     }
 
     /// Dismiss the Create DB form on click outside the form area (used by app.rs).
@@ -1134,6 +1242,107 @@ mod tests {
         // Click on the model line (not a field row) → no focus change.
         assert!(!view.handle_create_db_field_click(&click(value_x + 1, form_y + 1), area));
         assert_eq!(view.create_db_focus, CreateDbFocus::Description);
+    }
+
+    #[test]
+    fn drag_selection_selects_and_copies_text() {
+        use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.db_name_input = "hello world".into();
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let input_h = view.url_input.height(92);
+        let form_y = 2 + input_h;
+        let name_y = form_y + 1 + 2;
+        let value_x = 0 + 4 + 2 + 7; // pad (cx + 2) + label width
+        let mouse = |x: u16, y: u16| {
+            MouseEvent::new(
+                MouseEventType::Drag,
+                MouseButton::Left,
+                x,
+                y,
+                MouseModifiers::none(),
+            )
+        };
+
+        // Press at 'hello' → anchors the selection at byte 0.
+        view.start_field_selection(CreateDbFocus::Name, 0);
+        assert!(view.field_selection.is_some());
+        assert!(!view.has_field_selection(), "anchor only, nothing selected yet");
+
+        // Drag to 'world' → extends to byte 0..11.
+        assert!(view.extend_field_selection_at(&mouse(value_x + 11, name_y), area));
+        assert_eq!(view.selected_field_text(), "hello world");
+        assert!(view.has_field_selection());
+        assert_eq!(view.db_name_cursor_pos, 11);
+
+        // Dragging back before the anchor selects the reversed range.
+        assert!(view.extend_field_selection_at(&mouse(value_x + 3, name_y), area));
+        assert_eq!(view.selected_field_text(), "hel");
+
+        view.clear_field_selection();
+        assert!(!view.has_field_selection());
+    }
+
+    #[test]
+    fn drag_selection_clamps_outside_field() {
+        use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.db_name_input = "hello".into();
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let mouse = |x: u16, y: u16| {
+            MouseEvent::new(
+                MouseEventType::Drag,
+                MouseButton::Left,
+                x,
+                y,
+                MouseModifiers::none(),
+            )
+        };
+        let input_h = view.url_input.height(92);
+        let form_y = 2 + input_h;
+        let name_y = form_y + 1 + 2;
+
+        view.start_field_selection(CreateDbFocus::Name, 2);
+        // Drag far above the Name field → clamps to byte 0.
+        assert!(view.extend_field_selection_at(&mouse(0, 0), area));
+        assert_eq!(view.selected_field_text(), "he");
+        // Drag far below the form → clamps to the end of the input.
+        assert!(view.extend_field_selection_at(&mouse(0, 39), area));
+        assert_eq!(view.selected_field_text(), "llo");
+
+        // No active selection → drag is a no-op.
+        view.clear_field_selection();
+        let value_x = 0 + 4 + 2 + 7;
+        assert!(!view.extend_field_selection_at(&mouse(value_x + 1, name_y), area));
+    }
+
+    #[test]
+    fn plain_click_clears_lingering_selection() {
+        use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+        let mut view = RagView::new();
+        open_form(&mut view);
+        view.db_name_input = "hello".into();
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let input_h = view.url_input.height(92);
+        let name_y = 2 + input_h + 1 + 2;
+        let value_x = 0 + 4 + 2 + 7;
+        let click = MouseEvent::new(
+            MouseEventType::Up,
+            MouseButton::Left,
+            value_x + 1,
+            name_y,
+            MouseModifiers::none(),
+        );
+
+        // A press that never became a drag leaves a zero-length anchor behind.
+        view.start_field_selection(CreateDbFocus::Name, 1);
+        assert!(view.field_selection.is_some());
+        // The plain click path discards it.
+        assert!(view.handle_create_db_field_click(&click, area));
+        assert!(view.field_selection.is_none());
+        assert_eq!(view.db_name_cursor_pos, 1);
     }
 
     #[test]

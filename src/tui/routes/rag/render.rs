@@ -168,6 +168,45 @@ fn draw_input_cursor_at(
     }
 }
 
+/// Highlight the cells covered by the byte range `[start, end)` of a field
+/// value, so a drag selection is visible over the markdown rendering.
+///
+/// The markdown renderer draws plain paragraph text with fg=Reset (only the
+/// field background is set on the cells), so a naive fg/bg swap would leave
+/// the selected text in the dark field color on the terminal's default
+/// background — invisible. Instead we paint the selection explicitly: the
+/// field's text color becomes the background and the field's background color
+/// becomes the foreground (dark text on a light bar — the same look as the
+/// chat prompt's selection).
+///
+/// Uses the same word-wrap walk that draws the cursor: the cell of each
+/// selected character is where the caret would sit right before it.
+fn highlight_selection(
+    buf: &mut Buffer,
+    area: Rect,
+    value_w: u16,
+    text: &str,
+    start: usize,
+    end: usize,
+    field_fg: RGBA,
+    field_bg: RGBA,
+) {
+    let (render, insertions) = markdown_render_text(text);
+    let mut p = start.min(text.len());
+    let end = end.min(text.len());
+    while p < end {
+        let rp = render_byte_offset(&insertions, p).min(render.len());
+        let (row, col) = wrapped_cursor_pos(&render[..rp], value_w);
+        if row < area.height && col < area.width {
+            if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+                cell.set_fg(rgba_color(field_bg));
+                cell.set_bg(rgba_color(field_fg));
+            }
+        }
+        p += text[p..].chars().next().map_or(1, |c| c.len_utf8());
+    }
+}
+
 /// Position (row, col) of the cursor within a wrapped markdown field.
 ///
 /// Markdown markers are stripped first (matching what the renderer displays),
@@ -677,6 +716,21 @@ impl RagView {
                 primary,
             );
         }
+        if let Some((focus, s, e)) = self.field_selection
+            && focus == CreateDbFocus::Name
+            && s != e
+        {
+            highlight_selection(
+                buf,
+                Rect::new(pad + label_w, form_y, value_w, name_lines),
+                value_w,
+                &self.db_name_input,
+                s,
+                e,
+                name_fg,
+                name_bg,
+            );
+        }
         form_y += name_lines;
 
         // Gap above the Description field
@@ -732,6 +786,21 @@ impl RagView {
                 fg,
                 muted,
                 primary,
+            );
+        }
+        if let Some((focus, s, e)) = self.field_selection
+            && focus == CreateDbFocus::Description
+            && s != e
+        {
+            highlight_selection(
+                buf,
+                Rect::new(pad + label_w, form_y, value_w, desc_lines),
+                value_w,
+                &self.db_description_input,
+                s,
+                e,
+                desc_fg,
+                desc_bg,
             );
         }
     }
@@ -1411,5 +1480,52 @@ mod tests {
         // the caret was on — never one line up.
         assert_eq!(y, desc_y + 1, "X must render on the caret row");
         assert_eq!(x, value_x, "X starts at the value's column 0");
+    }
+
+    #[test]
+    fn selection_highlight_visible_over_markdown() {
+        use crate::routes::rag::models::CreateDbFocus;
+        use crate::routes::rag::view::RagView;
+        use crate::theme::ThemeRegistry;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let area = Rect::new(0, 0, 100, 40);
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let mut view = RagView::new();
+        view.toggle_create_db();
+        view.create_db_focus = CreateDbFocus::Name;
+        view.db_name_input = "hello world".into();
+        view.db_name_cursor_pos = 5;
+        view.field_selection = Some((CreateDbFocus::Name, 0, 5));
+
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme);
+
+        let input_h = view.url_input.height(92);
+        let form_y = 2 + input_h;
+        let name_y = form_y + 3;
+        let value_x = 4 + 2 + 7;
+        let (name_lines, _) = view.create_db_field_lines(88);
+        // Selected cells (0..5 = "hello") must be painted dark-on-light:
+        // fg = field background color, bg = field text color. The swap is
+        // explicit because the markdown renderer leaves plain text fg=Reset.
+        for x in value_x..value_x + 5 {
+            let cell = &buf[(x, name_y)];
+            assert_eq!(
+                cell.bg,
+                super::rgba_color(theme.text),
+                "selection bg must be the field text color (light bar)"
+            );
+            assert_eq!(
+                cell.fg,
+                super::rgba_color(theme.background_element),
+                "selection fg must be the field background color (dark text)"
+            );
+        }
+        // The rest of the line is untouched.
+        let cell = &buf[(value_x + 6, name_y)];
+        assert_eq!(cell.bg, super::rgba_color(theme.background_element));
+        assert_eq!(cell.fg, ratatui::style::Color::Reset);
     }
 }

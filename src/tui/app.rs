@@ -2642,6 +2642,13 @@ impl App {
                         return Ok(false);
                     }
 
+                    // Escape also clears a lingering create-db field selection.
+                    #[cfg(feature = "embed")]
+                    if key.code == KeyCode::Esc && self.rag_view.field_selection.is_some() {
+                        self.rag_view.clear_field_selection();
+                        return Ok(false);
+                    }
+
                     // Escape also unfocuses the sidebar.
                     if key.code == KeyCode::Esc && self.sidebar_focused {
                         self.sidebar_focused = false;
@@ -2651,6 +2658,15 @@ impl App {
                     if key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
+                        // If there is a drag selection in a create-db field, copy it.
+                        #[cfg(feature = "embed")]
+                        if matches!(self.mode(), AppMode::Rag) && self.rag_view.has_field_selection()
+                        {
+                            let text = self.rag_view.selected_field_text();
+                            selection::copy_selection(&text, &mut self.toast_state);
+                            self.rag_view.clear_field_selection();
+                            return Ok(false);
+                        }
                         // If there is text selected in the prompt, copy it instead of quitting.
                         if matches!(self.mode(), AppMode::Session)
                             && self.prompt_view.has_selection()
@@ -4613,6 +4629,34 @@ impl App {
                     self.prompt_view.blur();
                 }
 
+                // Click inside a create-db field (RAG) starts a drag selection,
+                // mirroring the chat prompt's press-and-drag text selection.
+                #[cfg(feature = "embed")]
+                if matches!(self.mode(), AppMode::Rag) {
+                    let area = self.terminal_size();
+                    let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+                    let main_area = Rect::new(
+                        area.x + sidebar_w,
+                        area.y,
+                        area.width.saturating_sub(sidebar_w),
+                        area.height,
+                    );
+                    let tools_area = Rect::new(
+                        main_area.x,
+                        area.y + 1,
+                        main_area.width,
+                        main_area.height.saturating_sub(4),
+                    );
+                    let mouse = MouseEvent::new(event_type, button, x, y, modifiers);
+                    if self.rag_view.show_create_db
+                        && let Some((focus, byte)) =
+                            self.rag_view.field_byte_at(&mouse, tools_area)
+                    {
+                        self.rag_view.start_field_selection(focus, byte);
+                        return Ok(true);
+                    }
+                }
+
                 // Click in the visible right panel → start a drag selection on
                 // the bash / subagent section under the cursor.
                 if matches!(self.mode(), AppMode::Session)
@@ -4634,6 +4678,28 @@ impl App {
                 }
             }
             (MouseEventType::Drag, MouseButton::Left) => {
+                // Dragging inside a create-db field (RAG) extends the selection.
+                #[cfg(feature = "embed")]
+                if matches!(self.mode(), AppMode::Rag) && self.rag_view.field_selection.is_some() {
+                    let area = self.terminal_size();
+                    let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+                    let main_area = Rect::new(
+                        area.x + sidebar_w,
+                        area.y,
+                        area.width.saturating_sub(sidebar_w),
+                        area.height,
+                    );
+                    let tools_area = Rect::new(
+                        main_area.x,
+                        area.y + 1,
+                        main_area.width,
+                        main_area.height.saturating_sub(4),
+                    );
+                    let mouse = MouseEvent::new(event_type, button, x, y, modifiers);
+                    if self.rag_view.extend_field_selection_at(&mouse, tools_area) {
+                        return Ok(true);
+                    }
+                }
                 if self.state.right_panel.has_selection() {
                     self.state.right_panel.update_drag_selection(x, y);
                     return Ok(true);
@@ -4692,6 +4758,15 @@ impl App {
                 self.mouse_drag_active = false;
 
                 if is_drag {
+                    // Auto-copy a create-db field drag selection on release.
+                    #[cfg(feature = "embed")]
+                    if matches!(self.mode(), AppMode::Rag) && self.rag_view.has_field_selection() {
+                        let text = self.rag_view.selected_field_text();
+                        selection::copy_selection(&text, &mut self.toast_state);
+                        self.rag_view.clear_field_selection();
+                        return Ok(true);
+                    }
+
                     // Auto-copy prompt selection on mouse release after drag.
                     if self.prompt_view.has_selection() {
                         let text = self.prompt_view.selected_text();
@@ -5677,6 +5752,82 @@ mod tests {
         assert_eq!(format_tokens(123_456), "123,456");
         assert_eq!(format_tokens(9_876_543_210), "9,876,543,210");
         assert_eq!(format_tokens(usize::MAX), "18,446,744,073,709,551,615");
+    }
+
+    /// The full create-db field drag selection flow through the app's real
+    /// mouse dispatch: Down anchors, Drag extends, the render paints the
+    /// selection, and Up auto-copies then clears it.
+    #[tokio::test]
+    #[cfg(feature = "embed")]
+    async fn rag_field_drag_selection_through_app_mouse_events() {
+        use crate::routes::rag::models::CreateDbFocus;
+        use crossterm::event::{KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind};
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let mut app = App::new("/tmp".to_string());
+        app.show_rag = true;
+        app.rag_view.toggle_create_db();
+        app.rag_view.create_db_focus = CreateDbFocus::Name;
+        app.rag_view.db_name_input = "hello world".into();
+
+        // Geometry mirrors the app mouse handler (tools_area = Rect(0, 1, 80, 20))
+        // and the rag render: gap + input, then gap + model line + gap, and the
+        // value starts after the label.
+        let input_h = app.rag_view.url_input.height(72);
+        let name_y = 1 + 2 + input_h + 1 + 2;
+        let value_x = 0 + 4 + 2 + 7; // pad (cx + 2) + label width
+
+        let mouse = |kind: CKind, x: u16, y: u16| CMouse {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // Press on the Name field → anchor the selection at byte 0.
+        assert!(app
+            .handle_mouse_event(mouse(CKind::Down(CBtn::Left), value_x, name_y))
+            .unwrap());
+        assert!(app.rag_view.field_selection.is_some());
+
+        // Drag to the end of "hello world" → selection 0..11.
+        assert!(app
+            .handle_mouse_event(mouse(CKind::Drag(CBtn::Left), value_x + 11, name_y))
+            .unwrap());
+        assert_eq!(
+            app.rag_view.field_selection,
+            Some((CreateDbFocus::Name, 0, 11))
+        );
+        assert_eq!(app.rag_view.selected_field_text(), "hello world");
+
+        // The render paints the selection: each selected cell gets the field
+        // text color as background (light bar) — visible over the markdown.
+        let theme = app.theme.clone();
+        let text_color = {
+            let (r, g, b, _) = theme.text.to_ints();
+            ratatui::style::Color::Rgb(r, g, b)
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+        app.rag_view
+            .render(&mut buf, Rect::new(0, 1, 80, 20), &theme);
+        for x in value_x..value_x + 11 {
+            assert_eq!(
+                buf[(x, name_y)].bg,
+                text_color,
+                "selected cell at ({x},{name_y}) must show the highlight bar"
+            );
+        }
+        // The cell right after the selection is the caret (byte 11), which is
+        // drawn with the same light background; two cells past it the field
+        // background is untouched.
+        assert_ne!(buf[(value_x + 12, name_y)].bg, text_color);
+
+        // Release → auto-copy clears the selection.
+        assert!(app
+            .handle_mouse_event(mouse(CKind::Up(CBtn::Left), value_x + 11, name_y))
+            .unwrap());
+        assert!(app.rag_view.field_selection.is_none());
     }
 
     /// When the agent loop ends (Done/Stopped) before a "next request" message

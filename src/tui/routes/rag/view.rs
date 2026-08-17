@@ -216,6 +216,11 @@ pub struct RagView {
     /// Area of the most recent render. Used to cap the create-db form's
     /// growth (newline insertion) to what actually fits on screen.
     pub(crate) last_area: Option<ratatui::layout::Rect>,
+
+    /// Active drag selection in the create-db fields: (field, start, end)
+    /// byte offsets into the raw input. Set while dragging with the mouse
+    /// and auto-copied on release (mirrors the chat prompt).
+    pub(crate) field_selection: Option<(CreateDbFocus, usize, usize)>,
 }
 
 impl RagView {
@@ -256,6 +261,7 @@ impl RagView {
             embed_success: false,
             embed_error: None,
             last_area: None,
+            field_selection: None,
         }
     }
 
@@ -379,6 +385,7 @@ impl RagView {
             // Reopening the form keeps any draft the user already typed;
             // the draft is only cleared once the DB is actually created.
             self.create_db_focus = CreateDbFocus::Name;
+            self.field_selection = None;
         }
     }
 
@@ -403,6 +410,7 @@ impl RagView {
     pub(crate) fn reset_create_db_form(&mut self) {
         self.show_create_db = false;
         self.models_expanded = false;
+        self.field_selection = None;
     }
 
     /// Wipe the Create DB draft buffer.
@@ -417,6 +425,7 @@ impl RagView {
         self.db_name_cursor_pos = 0;
         self.db_description_cursor_pos = 0;
         self.create_db_focus = CreateDbFocus::Name;
+        self.field_selection = None;
     }
 
     /// Display text of the Name field (placeholder while empty).
