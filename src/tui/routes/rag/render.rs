@@ -36,6 +36,12 @@ const MODEL_COLLAPSED_PAD: u16 = 20;
 /// value loses when it wraps.
 pub(crate) const FIELD_LABEL_W: u16 = 7;
 
+/// Rows reserved above the create-db form inside box 1: section title (1)
+/// + gap (1) + URL input minimum (3). The form may grow up to `box1_h`
+/// minus this. The extra row of slack keeps the form's bottom border from
+/// touching box 1's bottom edge when it expands all the way to the limit.
+pub(crate) const CREATE_DB_FORM_BOTTOM_RESERVE: u16 = 2 + 3 + 1;
+
 /// Visible items in the DB picker scroll list.
 pub(crate) const DB_PICKER_VISIBLE: usize = 10;
 

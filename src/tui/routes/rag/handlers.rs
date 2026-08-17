@@ -522,12 +522,16 @@ impl RagView {
         }
         // The box is capped at `avail_h - BOX1_BOTTOM_MARGIN` rows and the
         // URL input shrinks to its 3-row minimum, so the form can use at
-        // most `avail_h - 13` rows. Block once the form is there.
+        // most `avail_h - BOX1_BOTTOM_MARGIN - CREATE_DB_FORM_BOTTOM_RESERVE`
+        // rows. The reserve leaves one row of slack below the form so its
+        // bottom border never touches box 1's bottom edge at full expansion.
         if let Some(area) = self.last_area {
             let inner_w = area.width.saturating_sub(4);
             let pad_w = inner_w.saturating_sub(8).max(1);
             let layout = self.compute_layout(area);
-            let form_h_max = layout.box1_h.saturating_sub(2 + 3);
+            let form_h_max = layout
+                .box1_h
+                .saturating_sub(super::render::CREATE_DB_FORM_BOTTOM_RESERVE);
             if self.create_db_mini_box_height(pad_w) >= form_h_max {
                 return false;
             }
@@ -1043,6 +1047,7 @@ impl RagView {
 #[cfg(test)]
 mod tests {
     use super::super::models::CreateDbFocus;
+    use super::super::render::CREATE_DB_FORM_BOTTOM_RESERVE;
     use super::super::view::RagView;
 
     fn open_form(view: &mut RagView) {
@@ -1142,14 +1147,21 @@ mod tests {
             "the box should grow with each line break"
         );
 
-        // The form must still fit within the box after the last insertion.
+        // The form must still fit within the box after the last insertion,
+        // with the bottom reserve (slack row) preserved.
         let area = view.last_area.unwrap();
         let layout = view.compute_layout(area);
-        let form_h_max = layout.box1_h.saturating_sub(2 + 3);
+        let form_h_max = layout.box1_h.saturating_sub(CREATE_DB_FORM_BOTTOM_RESERVE);
         let pad_w = area.width.saturating_sub(4).saturating_sub(8).max(1);
         assert!(
             view.create_db_mini_box_height(pad_w) <= form_h_max,
             "form must not exceed the box"
+        );
+        // At the limit the form leaves at least one row of slack before the
+        // box's bottom edge (the reserve is 1 more than title+gap+input min).
+        assert!(
+            view.create_db_mini_box_height(pad_w) < layout.box1_h.saturating_sub(2 + 3),
+            "form must stop one row short of the box edge"
         );
     }
 
