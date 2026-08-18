@@ -20,6 +20,7 @@ pub struct Setup {
     pub appearance: Appearance,
     pub tools: Tools,
     pub routing: Routing,
+    pub hooks: Hooks,
 }
 
 impl Default for Setup {
@@ -28,6 +29,7 @@ impl Default for Setup {
             appearance: Appearance::default(),
             tools: Tools::default(),
             routing: Routing::default(),
+            hooks: Hooks::default(),
         }
     }
 }
@@ -99,6 +101,41 @@ impl Default for Routing {
 pub struct FallbackEntry {
     pub provider: String,
     pub model: String,
+}
+
+// Hooks
+
+/// A single hook configuration entry (stored in setup.json).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookEntry {
+    /// Friendly display name (falls back to command when empty).
+    #[serde(default)]
+    pub name: String,
+    /// Regex pattern tested against the tool name. Empty = match all.
+    #[serde(default)]
+    pub matcher: String,
+    /// Shell command to execute.
+    pub command: String,
+    /// Timeout in seconds (default 30).
+    #[serde(default)]
+    pub timeout: Option<u64>,
+}
+
+/// PreToolUse hooks configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Hooks {
+    /// Hook configs keyed by event name (e.g. "PreToolUse").
+    #[serde(flatten)]
+    pub events: std::collections::HashMap<String, Vec<HookEntry>>,
+}
+
+impl Default for Hooks {
+    fn default() -> Self {
+        Self {
+            events: std::collections::HashMap::new(),
+        }
+    }
 }
 
 // Persistence

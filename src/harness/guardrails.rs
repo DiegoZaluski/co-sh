@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::core::Mode;
 
+
 /// Action the user can take in response to a permission request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionAction {

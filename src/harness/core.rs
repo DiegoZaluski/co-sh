@@ -336,6 +336,8 @@ pub struct Harness {
     /// To stop the agent loop.
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
+    /// PreToolUse hooks runner (empty when no hooks are configured).
+    hook_runner: Option<super::hooks::HookRunner>,
 
     /// Monotonic counter for synthetic tool_call ids (inline JSON calls that
     /// the extractor emits without an id).
@@ -505,6 +507,7 @@ impl Harness {
             last_context_window: None,
             discovered_window: None,
             last_overflow_toast: None,
+            hook_runner: None,
             compaction_generic_retries: 0,
             snapshot_interval: std::time::Duration::from_secs(10),
             #[cfg(test)]
@@ -546,6 +549,14 @@ impl Harness {
     #[must_use]
     pub fn with_fallbacks(mut self, fallbacks: Vec<(String, String)>) -> Self {
         self.fallbacks = fallbacks;
+        self
+    }
+
+    /// Set PreToolUse hooks from config entries.
+    pub fn with_hooks(mut self, configs: &[super::hooks::HookConfig], cwd: &str) -> Self {
+        if !configs.is_empty() {
+            self.hook_runner = Some(super::hooks::HookRunner::new(configs, cwd));
+        }
         self
     }
 
@@ -2504,6 +2515,55 @@ impl Harness {
                     // Normal dispatch for all other tools
                     // log::debug!("run_agent_loop dispatch_next start");
 
+                    // PreToolUse hooks: run user-defined shell commands
+                    // before the permission check. Deny/halt results block
+                    // the tool call without reaching the permission dialog.
+                    let tool_name_str = info.as_ref().map_or("?", |(_, n, _)| n.as_str());
+                    let tool_input_str = info
+                        .as_ref()
+                        .map_or("{}".to_string(), |(_, _, a)| a.to_string());
+                    let hook_result = self
+                        .hook_runner
+                        .as_ref()
+                        .map(|r| r.run(tool_name_str, &tool_input_str));
+
+                    if let Some(ref hr) = hook_result {
+                        if hr.decision == super::hooks::HookDecision::Deny || hr.halt {
+                            let reason = if hr.halt {
+                                format!("Turn halted by hook: {}", hr.reason)
+                            } else {
+                                format!("Tool call blocked by hook: {}", hr.reason)
+                            };
+                            log::debug!(
+                                "run_agent_loop HOOK_DENY tool={tool_name_str} halt={} reason={}",
+                                hr.halt,
+                                hr.reason,
+                            );
+                            self.tool_issuer.pop_front();
+                            self.tool_failure_count += 1;
+                            self.correction_memory.push(&reason);
+                            let _ = tx.send(HarnessEvent::ToolError {
+                                error: reason,
+                            });
+                            // Halt stops the entire turn
+                            if hr.halt {
+                                let msg = "Turn halted by hook".to_string();
+                                let _ = tx.send(HarnessEvent::Error(msg));
+                                terminal_sent = true;
+                                break;
+                            }
+                            if self.tool_failure_count >= MAX_TOOL_RETRIES {
+                                let msg = format!(
+                                    "{MAX_TOOL_RETRIES} consecutive tool call failures. Agent loop interrupted."
+                                );
+                                let _ = tx.send(HarnessEvent::Error(msg));
+                                terminal_sent = true;
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+
                     // Permission check
                     // Before dispatching, check if the tool needs user approval.
                     // This only applies to cosh tools (fs_read, bash_run, etc.)
@@ -3368,6 +3428,7 @@ impl Harness {
             last_context_window: None,
             discovered_window: None,
             last_overflow_toast: None,
+            hook_runner: None,
             compaction_generic_retries: 0,
             snapshot_interval: std::time::Duration::from_secs(10),
             mock_chat_response: None,

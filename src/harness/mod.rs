@@ -8,6 +8,7 @@ pub mod core;
 pub mod correction_memory;
 pub mod events;
 pub mod guardrails;
+pub mod hooks;
 pub mod tools;
 pub mod truncate;
 
@@ -18,4 +19,5 @@ pub use context_manager::{ContextDisplayInfo, ContextManager, ContextManagerStat
 pub use core::{Harness, Mode};
 pub use events::HarnessEvent;
 pub use guardrails::{PermissionAction, PermissionCheck, PermissionRequest, check_tool_permission};
+pub use hooks::{AggregateResult as HookAggregateResult, HookConfig, HookDecision, HookRunner};
 pub use tools::{CoshTools, Tools};
