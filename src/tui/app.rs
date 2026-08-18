@@ -235,6 +235,8 @@ impl App {
 
         // Load saved disabled tools from preferences cache
         let saved_disabled_tools = crate::routes::tools::load_disabled_tools(&prefs_cache);
+        // Persisted tool-call mode overrides the env default for the session.
+        let saved_tool_call_mode = crate::routes::tools::load_tool_call_mode(&prefs_cache);
 
         // Load saved theme from preferences cache, if available
         let saved_theme: Option<String> = prefs_cache.get(&"theme".to_string()).cloned();
@@ -305,7 +307,10 @@ impl App {
             perm_tx,
             queued_input_tx: None,
             active_loop_session_id: None,
-            llm_config: LlmConfig::from_env(),
+            llm_config: LlmConfig {
+                tool_call_mode: saved_tool_call_mode,
+                ..LlmConfig::from_env()
+            },
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
             agent_spinner: None,
@@ -1109,6 +1114,105 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// Open the tool-call mode picker (`native` | `inline`).
+    fn open_tool_call_dialog(&mut self) {
+        let current = match self.llm_config.tool_call_mode {
+            cosh_sdk::connector::ToolCallMode::Native => "native",
+            cosh_sdk::connector::ToolCallMode::Inline => "inline",
+        };
+        self.dialog.replace(DialogType::ToolCallList {
+            current: current.to_string(),
+        });
+        // Preselect the current mode (index 0 = native, 1 = inline).
+        if let Some(d) = self.dialog.current_mut() {
+            d.selected = if current == "inline" { 1 } else { 0 };
+        }
+    }
+
+    fn is_tool_call_dialog_visible(&self) -> bool {
+        self.dialog.current().is_some_and(|d| {
+            matches!(d.dialog_type, DialogType::ToolCallList { .. })
+        })
+    }
+
+    fn handle_tool_call_dialog_key(&mut self, key: KeyCode) -> bool {
+        if !self.is_tool_call_dialog_visible() {
+            return false;
+        }
+        match key {
+            KeyCode::Up => {
+                if let Some(d) = self.dialog.current_mut() {
+                    d.selected = if d.selected == 0 { 1 } else { 0 };
+                }
+                true
+            }
+            KeyCode::Down => {
+                if let Some(d) = self.dialog.current_mut() {
+                    d.selected = (d.selected + 1) % 2;
+                }
+                true
+            }
+            KeyCode::Enter => {
+                let selected = self
+                    .dialog
+                    .current()
+                    .map_or(0, |d| d.selected.min(1));
+                self.llm_config.tool_call_mode = if selected == 1 {
+                    cosh_sdk::connector::ToolCallMode::Inline
+                } else {
+                    cosh_sdk::connector::ToolCallMode::Native
+                };
+                crate::routes::tools::save_tool_call_mode(
+                    &mut self.prefs_cache,
+                    self.llm_config.tool_call_mode,
+                );
+                self.dialog.pop();
+                true
+            }
+            KeyCode::Esc => {
+                self.dialog.pop();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Execute a slash-menu command (Enter or click). Shared by the keyboard
+    /// and mouse handlers so both dispatch identically — a command missed here
+    /// silently degrades to filling the prompt with "/name ".
+    fn run_slash_command(&mut self, cmd: &crate::ui::slash_menu::SlashCommand) {
+        if cmd.name == "themes" {
+            self.open_theme_dialog();
+        } else if cmd.name == "models" {
+            self.open_model_dialog();
+        } else if cmd.name == "toolcall" {
+            self.open_tool_call_dialog();
+        } else if cmd.name == "bell" {
+            self.bell_enabled = !self.bell_enabled;
+            use crate::ui::toast::{ToastOptions, ToastVariant};
+            let state = if self.bell_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            self.toast_state.show(ToastOptions {
+                title: Some("Bell".into()),
+                message: format!("Completion bell {state}."),
+                variant: ToastVariant::Info,
+                duration_ms: 3000,
+            });
+            self.prefs_cache.finish_revalidation(
+                "bell_enabled".to_string(),
+                self.bell_enabled.to_string(),
+            );
+        } else {
+            let cmd_name = format!("/{} ", cmd.name);
+            self.prompt_view.input = cmd_name;
+            self.prompt_view.cursor_pos = self.prompt_view.input.len();
+        }
+        self.slash_menu.visible = false;
     }
 
     /// Add a character to the model filter and reset selection
@@ -2240,6 +2344,7 @@ impl App {
         let provider = self.llm_config.provider.clone();
         let model = self.llm_config.model.clone();
         let reasoning = self.llm_config.reasoning.clone();
+        let tool_call_mode = self.llm_config.tool_call_mode;
         let fallbacks = self.router_view.fallbacks.clone();
         // Auto-rotate: move the first working fallback to the front so the
         // next message tries the provider that actually worked before wasting
@@ -2372,7 +2477,9 @@ impl App {
                         for (i, fb) in fallbacks.iter().enumerate() {
                             match Connector::new(&fb.provider) {
                                 Ok(c) => {
-                                    let mut c = c.with_model(&fb.model);
+                                    let mut c = c
+                                        .with_model(&fb.model)
+                                        .with_tool_call_mode(tool_call_mode);
                                     // The user chose a reasoning effort for
                                     // auto mode — apply it, mapped onto the
                                     // closest level THIS model accepts (a
@@ -2420,6 +2527,10 @@ impl App {
                                 } else {
                                     c
                                 };
+                                // Apply the user's tool-call mode (native /
+                                // inline) — the two delivery paths are
+                                // mutually exclusive at the request level.
+                                let with_model = with_model.with_tool_call_mode(tool_call_mode);
                                 connector = if let Some(ref r) = reasoning {
                                     // Map the chosen level onto the closest
                                     // one the model actually accepts (e.g.
@@ -2720,6 +2831,13 @@ impl App {
 
                     // Check theme dialog FIRST, before action lookup
                     if self.is_theme_dialog_visible() && self.handle_theme_dialog_key(key.code) {
+                        return Ok(false);
+                    }
+
+                    // Check the tool-call mode dialog (standalone, like theme)
+                    if self.is_tool_call_dialog_visible()
+                        && self.handle_tool_call_dialog_key(key.code)
+                    {
                         return Ok(false);
                     }
 
@@ -3196,35 +3314,8 @@ impl App {
                             KeyCode::Down => self.slash_menu.select_next(),
                             KeyCode::Enter => {
                                 self.prompt_view.note_activity();
-                                if let Some(cmd) = self.slash_menu.get_selected_command() {
-                                    if cmd.name == "themes" {
-                                        self.open_theme_dialog();
-                                    } else if cmd.name == "models" {
-                                        self.open_model_dialog();
-                                    } else if cmd.name == "bell" {
-                                        self.bell_enabled = !self.bell_enabled;
-                                        use crate::ui::toast::{ToastOptions, ToastVariant};
-                                        let state = if self.bell_enabled {
-                                            "enabled"
-                                        } else {
-                                            "disabled"
-                                        };
-                                        self.toast_state.show(ToastOptions {
-                                            title: Some("Bell".into()),
-                                            message: format!("Completion bell {state}."),
-                                            variant: ToastVariant::Info,
-                                            duration_ms: 3000,
-                                        });
-                                        self.prefs_cache.finish_revalidation(
-                                            "bell_enabled".to_string(),
-                                            self.bell_enabled.to_string(),
-                                        );
-                                    } else {
-                                        let cmd_name = format!("/{} ", cmd.name);
-                                        self.prompt_view.input = cmd_name;
-                                        self.prompt_view.cursor_pos = self.prompt_view.input.len();
-                                    }
-                                    self.slash_menu.visible = false;
+                                if let Some(cmd) = self.slash_menu.get_selected_command().cloned() {
+                                    self.run_slash_command(&cmd);
                                 }
                             }
                             KeyCode::Esc => {
@@ -3514,36 +3605,10 @@ impl App {
                                     KeyCode::Down => self.slash_menu.select_next(),
                                     KeyCode::Enter => {
                                         self.prompt_view.note_activity();
-                                        if let Some(cmd) = self.slash_menu.get_selected_command() {
-                                            if cmd.name == "themes" {
-                                                self.open_theme_dialog();
-                                            } else if cmd.name == "models" {
-                                                self.open_model_dialog();
-                                            } else if cmd.name == "bell" {
-                                                self.bell_enabled = !self.bell_enabled;
-                                                use crate::ui::toast::{ToastOptions, ToastVariant};
-                                                let state = if self.bell_enabled {
-                                                    "enabled"
-                                                } else {
-                                                    "disabled"
-                                                };
-                                                self.toast_state.show(ToastOptions {
-                                                    title: Some("Bell".into()),
-                                                    message: format!("Completion bell {state}."),
-                                                    variant: ToastVariant::Info,
-                                                    duration_ms: 3000,
-                                                });
-                                                self.prefs_cache.finish_revalidation(
-                                                    "bell_enabled".to_string(),
-                                                    self.bell_enabled.to_string(),
-                                                );
-                                            } else {
-                                                let cmd_name = format!("/{} ", cmd.name);
-                                                self.prompt_view.input = cmd_name;
-                                                self.prompt_view.cursor_pos =
-                                                    self.prompt_view.input.len();
-                                            }
-                                            self.slash_menu.visible = false;
+                                        if let Some(cmd) =
+                                            self.slash_menu.get_selected_command().cloned()
+                                        {
+                                            self.run_slash_command(&cmd);
                                         }
                                     }
                                     KeyCode::Esc => {
@@ -4938,6 +5003,9 @@ impl App {
                             DialogType::ThemeList { .. } => {
                                 self.handle_theme_dialog_key(KeyCode::Up);
                             }
+                            DialogType::ToolCallList { .. } => {
+                                self.handle_tool_call_dialog_key(KeyCode::Up);
+                            }
                             _ => {}
                         }
                     } else if self.sidebar_focused && self.sidebar.open && x < SIDEBAR_WIDTH {
@@ -4982,6 +5050,9 @@ impl App {
                             }
                             DialogType::ThemeList { .. } => {
                                 self.handle_theme_dialog_key(KeyCode::Down);
+                            }
+                            DialogType::ToolCallList { .. } => {
+                                self.handle_tool_call_dialog_key(KeyCode::Down);
                             }
                             _ => {}
                         }
@@ -5100,6 +5171,10 @@ impl App {
                                 self.handle_reasoning_dialog_key(KeyCode::Enter);
                                 return Ok(true);
                             }
+                            DialogType::ToolCallList { .. } => {
+                                self.handle_tool_call_dialog_key(KeyCode::Enter);
+                                return Ok(true);
+                            }
                             DialogType::ApiKeyInput {
                                 provider,
                                 env_var,
@@ -5196,17 +5271,8 @@ impl App {
                 .handle_mouse(&mouse, prompt_area, &self.theme)
             {
                 self.prompt_view.note_activity();
-                if let Some(cmd) = self.slash_menu.get_selected_command() {
-                    if cmd.name == "themes" {
-                        self.open_theme_dialog();
-                    } else if cmd.name == "models" {
-                        self.open_model_dialog();
-                    } else {
-                        let cmd_name = format!("/{} ", cmd.name);
-                        self.prompt_view.input = cmd_name;
-                        self.prompt_view.cursor_pos = self.prompt_view.input.len();
-                    }
-                    self.slash_menu.visible = false;
+                if let Some(cmd) = self.slash_menu.get_selected_command().cloned() {
+                    self.run_slash_command(&cmd);
                 }
                 return Ok(true);
             }
@@ -5915,6 +5981,178 @@ mod tests {
         // The sender channel is dropped at loop end so nothing can be injected
         // into the finished loop.
         assert!(app.queued_input_tx.is_none());
+    }
+
+    /// Regression: Enter on `/toolcall` in the slash menu must open the
+    /// mode picker dialog. It used to fall into the generic branch (fill the
+    /// prompt with "/toolcall ") because the dispatch lived only in the
+    /// unreachable `None` keymap branch, not in the handler that actually
+    /// intercepts Enter.
+    #[tokio::test]
+    async fn slash_toolcall_command_opens_tool_call_dialog() {
+        let mut app = App::new("/tmp".to_string());
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "toolcall".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        assert!(
+            app.is_tool_call_dialog_visible(),
+            "selecting /toolcall must open the native|inline picker"
+        );
+        assert!(!app.slash_menu.visible, "slash menu closes after Enter");
+    }
+
+    /// Generic slash commands still fill the prompt instead of opening a
+    /// dialog (the fallback branch of `run_slash_command`).
+    #[tokio::test]
+    async fn slash_unknown_command_fills_prompt() {
+        let mut app = App::new("/tmp".to_string());
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "compact".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        assert_eq!(app.prompt_view.input, "/compact ");
+        assert!(!app.dialog.visible());
+        assert!(!app.slash_menu.visible);
+    }
+
+    /// Regression: the picker box must be wide enough to show each option's
+    /// full description — the inline row used to truncate at
+    /// "JSON written in the text,". Geometry at 80x24 with the 60-wide box:
+    /// dialog_x=10, list_top=12, labels start at x=13; the inline label ends
+    /// with 'y' at x=63 and the native one with ')' at x=58.
+    #[tokio::test]
+    async fn tool_call_dialog_render_shows_full_description_text() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = App::new("/tmp".to_string());
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "toolcall".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+
+        let theme = app.theme.clone();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+        app.dialog.render(
+            &mut buf,
+            Rect::new(0, 0, 80, 24),
+            &theme,
+            std::time::SystemTime::now(),
+        );
+
+        assert_eq!(
+            buf[(63, 13)].symbol(),
+            "y",
+            "inline description must end with 'locally' (not truncated)"
+        );
+        assert_eq!(
+            buf[(58, 12)].symbol(),
+            ")",
+            "native description must end with 'default)' (not truncated)"
+        );
+    }
+
+    /// The tool-call picker must respond to the mouse wheel like the other
+    /// list dialogs (ModelList/ThemeList/ReasoningList). The wheel routes to
+    /// the dialog's Up/Down handler; the dialog stays open while cycling the
+    /// two options. Sleeps straddle the 50ms scroll debounce.
+    #[tokio::test]
+    async fn tool_call_dialog_mouse_wheel_changes_selection() {
+        use crossterm::event::{
+            KeyModifiers, MouseEvent as CMouse, MouseEventKind as CKind,
+        };
+        let mut app = App::new("/tmp".to_string());
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "toolcall".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        assert!(app.is_tool_call_dialog_visible());
+        assert_eq!(app.dialog.current().unwrap().selected, 0);
+
+        let wheel = |kind: CKind| CMouse {
+            kind,
+            column: 40,
+            row: 12,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // The 50ms scroll debounce starts at App creation — wait before the
+        // first wheel notch so it isn't dropped.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        // Wheel down: native -> inline (selection 1), dialog stays open.
+        assert!(app.handle_mouse_event(wheel(CKind::ScrollDown)).unwrap());
+        assert_eq!(app.dialog.current().unwrap().selected, 1);
+        assert!(app.is_tool_call_dialog_visible());
+
+        // Wheel down again: wraps back to native.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(app.handle_mouse_event(wheel(CKind::ScrollDown)).unwrap());
+        assert_eq!(app.dialog.current().unwrap().selected, 0);
+
+        // Wheel up: native -> inline.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(app.handle_mouse_event(wheel(CKind::ScrollUp)).unwrap());
+        assert_eq!(app.dialog.current().unwrap().selected, 1);
+        assert!(app.is_tool_call_dialog_visible());
+    }
+
+    /// Clicking an option in the picker must APPLY the mode (not just close
+    /// the dialog like the pre-fix `_` fallback did). Row 1 = inline. Clicks
+    /// are processed on the Up event (the app's click dispatch gate), so the
+    /// test sends Down then Up.
+    #[tokio::test]
+    async fn tool_call_dialog_mouse_click_applies_mode() {
+        use crossterm::event::{
+            KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
+        };
+        let mut app = App::new("/tmp".to_string());
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "toolcall".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        assert!(app.is_tool_call_dialog_visible());
+
+        // Geometry mirrors the ToolCallList mouse handler with the (80x24)
+        // fallback terminal size: dialog_x = 20, dialog_y = 9, list_top = 12.
+        // Dialog clicks are dispatched on the Up event; send Down first so
+        // the app tracks a real press.
+        fn click_row(app: &mut App, row: u16) {
+            let evt = |kind: CKind| CMouse {
+                kind,
+                column: 40,
+                row,
+                modifiers: KeyModifiers::NONE,
+            };
+            app.handle_mouse_event(evt(CKind::Down(CBtn::Left))).unwrap();
+            app.handle_mouse_event(evt(CKind::Up(CBtn::Left))).unwrap();
+        }
+
+        // Click the "inline" row (list_top + 1 = 13).
+        click_row(&mut app, 13);
+        assert_eq!(
+            app.llm_config.tool_call_mode,
+            cosh_sdk::connector::ToolCallMode::Inline,
+            "clicking the inline row must apply the mode"
+        );
+        assert!(
+            !app.is_tool_call_dialog_visible(),
+            "dialog closes after applying"
+        );
+
+        // Reopen and click "native" (row 12): back to Native.
+        app.run_slash_command(&cmd);
+        click_row(&mut app, 12);
+        assert_eq!(
+            app.llm_config.tool_call_mode,
+            cosh_sdk::connector::ToolCallMode::Native
+        );
+        assert!(!app.is_tool_call_dialog_visible());
     }
 
     /// The user's exact scenario: a "next request" message that the loop

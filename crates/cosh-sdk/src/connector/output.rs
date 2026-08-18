@@ -1,5 +1,6 @@
 use super::error::ConnectorError;
 use super::params::ClaudeThinkingBlock;
+use crate::extract_action::NativeToolCall;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::Stream;
@@ -50,6 +51,12 @@ pub struct StreamChunk {
     /// follow-up request. `None` for every other provider and for turns
     /// without thinking blocks.
     pub(crate) thinking_blocks: Option<Vec<ClaudeThinkingBlock>>,
+    /// A tool call the provider delivered NATIVELY (structured
+    /// `tool_calls`/`tool_use`/`functionCall` parts) — the harness routes it
+    /// straight to the extractor's native validation funnel instead of
+    /// parsing text. `None` for text/reasoning chunks and for the legacy
+    /// inline-JSON path (which arrives as `token` text).
+    pub(crate) tool_call: Option<NativeToolCall>,
 }
 
 impl StreamChunk {
@@ -84,6 +91,16 @@ impl StreamChunk {
     #[must_use]
     pub fn finish_reason(&self) -> Option<&str> {
         self.finish_reason.as_deref()
+    }
+
+    /// The native tool call carried by this chunk, if the provider
+    /// delivered one structurally (`tool_calls`/`tool_use`/`functionCall`).
+    /// The harness feeds it to the extractor's native validation funnel
+    /// (see `ExtractAction::register_native_call`) — no text parsing, the
+    /// provider already split the call into structured fields.
+    #[must_use]
+    pub fn tool_call(&self) -> Option<&NativeToolCall> {
+        self.tool_call.as_ref()
     }
 }
 

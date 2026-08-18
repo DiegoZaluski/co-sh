@@ -273,6 +273,65 @@ data: [DONE]\n\n";
     assert!(json.get("thinking").is_none(), "non-deepseek: no toggle");
 }
 
+/// Inline tool-call mode: the request must NOT carry the native `tools`
+/// array (nor `tool_choice`) — the model writes tool calls as JSON into its
+/// text response and the harness parses them. Without `tools` on the wire
+/// the API can never produce structured tool calls, so the native and
+/// inline delivery paths are mutually exclusive at the request level.
+#[tokio::test]
+async fn inline_mode_omits_tools_from_request() {
+    use super::super::{ToolCallMode, ToolDefinition, ToolFunction};
+
+    let tool = ToolDefinition::new(
+        ToolFunction::new("read_file")
+            .with_description("Read a file")
+            .with_parameters(serde_json::json!({"type": "object"})),
+    );
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = connector(port)
+        .with_tools(vec![tool])
+        .with_tool_choice(serde_json::json!("auto"))
+        .with_tool_call_mode(ToolCallMode::Inline);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.get("tools").is_none(),
+        "inline mode must not send native tools: {json}"
+    );
+    assert!(
+        json.get("tool_choice").is_none(),
+        "inline mode must not send tool_choice: {json}"
+    );
+
+    // The same connector in the default Native mode DOES send them.
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = connector(port)
+        .with_tools(vec![ToolDefinition::new(ToolFunction::new("read_file"))])
+        .with_tool_call_mode(ToolCallMode::Native);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.get("tools").is_some(),
+        "native mode sends the tools array: {json}"
+    );
+}
+
 /// No effort → no `reasoning_effort` field in the payload.
 #[tokio::test]
 async fn request_omits_reasoning_effort_without_setting() {

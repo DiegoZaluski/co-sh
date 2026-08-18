@@ -3,7 +3,8 @@ use super::super::common::{
 };
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
-use super::super::params::{ClaudeThinkingBlock, Parameters, ToolDefinition};
+use super::super::params::{ClaudeThinkingBlock, Parameters, ToolCallMode, ToolDefinition};
+use crate::extract_action::NativeToolCall;
 use super::super::provider::{ProviderConfig, get_api_key};
 
 // Public ChatMessage type for structured conversation history.
@@ -306,8 +307,20 @@ fn build_request(
     system_prompt: Option<&str>,
 ) -> MessageRequest {
     let stop_sequences = params.stop.as_ref().and_then(convert_stop);
-    let tools = params.tools.as_ref().map(|t| build_tools(t));
-    let tool_choice = params.tool_choice.as_ref().and_then(convert_tool_choice);
+    // Inline mode: no native `tools` on the wire — the model writes tool
+    // calls as JSON in its text response and the harness parses them. The
+    // two delivery paths are mutually exclusive at the request level.
+    let native_tools = params.tool_call_mode == ToolCallMode::Native;
+    let tools = if native_tools {
+        params.tools.as_ref().map(|t| build_tools(t))
+    } else {
+        None
+    };
+    let tool_choice = if native_tools {
+        params.tool_choice.as_ref().and_then(convert_tool_choice)
+    } else {
+        None
+    };
     let thinking = params
         .reasoning_effort
         .as_deref()
@@ -508,10 +521,13 @@ fn take_thinking_chunk(
         reasoning: String::new(),
         thinking_blocks: Some(std::mem::take(pending_thinking)),
         finish_reason: None,
+        tool_call: None,
     })
 }
 
-/// Flush accumulated Claude tool uses as synthetic [`StreamChunk`] tokens.
+/// Flush accumulated Claude tool uses as structured [`StreamChunk`] items
+/// carrying the provider's native call verbatim (no inline-JSON round trip:
+/// the harness extractor validates the structured fields directly).
 fn flush_claude_tool_uses(
     pending: &mut Vec<ClaudePendingToolUse>,
     last_raw: &mut Option<String>,
@@ -522,15 +538,18 @@ fn flush_claude_tool_uses(
         if tc.name.is_empty() {
             continue;
         }
-        let args: serde_json::Value = serde_json::from_str(&tc.input_json)
-            .unwrap_or_else(|_| serde_json::Value::String(tc.input_json.clone()));
-        let json = serde_json::json!({"name": tc.name, "arguments": args, "id": tc.id});
         out.push(StreamChunk {
             raw: raw.clone(),
-            token: json.to_string(),
+            token: String::new(),
             reasoning: String::new(),
             finish_reason: Some("tool_calls".to_string()),
             thinking_blocks: None,
+            tool_call: Some(NativeToolCall {
+                id: tc.id,
+                name: tc.name,
+                arguments: tc.input_json,
+                thought_signature: String::new(),
+            }),
         });
     }
     out
@@ -583,8 +602,18 @@ pub async fn chat_stream_with_messages(
     let claude_messages = convert_to_claude_messages(messages);
 
     let stop_sequences = params.stop.as_ref().and_then(convert_stop);
-    let tools = params.tools.as_ref().map(|t| build_tools(t));
-    let tool_choice = params.tool_choice.as_ref().and_then(convert_tool_choice);
+    // Inline mode: no native `tools` on the wire (see `build_request`).
+    let native_tools = params.tool_call_mode == ToolCallMode::Native;
+    let tools = if native_tools {
+        params.tools.as_ref().map(|t| build_tools(t))
+    } else {
+        None
+    };
+    let tool_choice = if native_tools {
+        params.tool_choice.as_ref().and_then(convert_tool_choice)
+    } else {
+        None
+    };
     let thinking = params
         .reasoning_effort
         .as_deref()
@@ -713,6 +742,7 @@ pub async fn chat_stream_with_messages(
                                                 reasoning: initial,
                                                 finish_reason: None,
                                                 thinking_blocks: None,
+                                                tool_call: None,
                                             });
                                         }
                                     }
@@ -732,6 +762,7 @@ pub async fn chat_stream_with_messages(
                                                 reasoning: String::new(),
                                                 finish_reason: None,
                                                 thinking_blocks: None,
+                                                tool_call: None,
                                             });
                                         }
                                         "thinking_delta" => {
@@ -751,6 +782,7 @@ pub async fn chat_stream_with_messages(
                                                     reasoning: text,
                                                     finish_reason: None,
                                                     thinking_blocks: None,
+                                                    tool_call: None,
                                                 });
                                             }
                                         }
@@ -815,6 +847,7 @@ pub async fn chat_stream_with_messages(
                                             reasoning: String::new(),
                                             finish_reason,
                                             thinking_blocks: None,
+                                            tool_call: None,
                                         });
                                         return;
                                     }
@@ -923,6 +956,7 @@ pub async fn chat_stream(
                                             reasoning: String::new(),
                                             finish_reason: None,
                                             thinking_blocks: None,
+                                            tool_call: None,
                                         });
                                     }
                                 }
@@ -936,6 +970,7 @@ pub async fn chat_stream(
                                         reasoning: String::new(),
                                         finish_reason,
                                         thinking_blocks: None,
+                                        tool_call: None,
                                     });
                                 }
                                 "message_stop" => return,

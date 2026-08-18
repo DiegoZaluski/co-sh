@@ -195,6 +195,30 @@ impl ToolFunction {
     }
 }
 
+/// How tool calls are delivered between the model and the harness.
+///
+/// The two modes are mutually exclusive at the REQUEST level, so the paths
+/// can never cross: in [`ToolCallMode::Inline`] the request carries no
+/// native `tools` array (the API cannot produce structured tool calls), and
+/// in [`ToolCallMode::Native`] the harness never parses text for tool
+/// calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ToolCallMode {
+    /// Structured tool calls via the provider's native mechanism
+    /// (`tool_calls` / `tool_use` / `functionCall` parts). The request
+    /// carries the native `tools` array. This is the default — the same
+    /// contract the crush agent uses.
+    #[default]
+    Native,
+    /// Inline-JSON tool calls the model writes into its text response
+    /// (`{"name": ..., "arguments": ...}`), parsed by the harness
+    /// extractor. The request carries NO native `tools`, so structured
+    /// tool calls are impossible and the two paths never cross. Meant for
+    /// local servers / small models without reliable native function
+    /// calling.
+    Inline,
+}
+
 /// A tool definition sent to the model, wrapping a [`ToolFunction`].
 ///
 /// See [`ToolFunction`] for a full usage example.
@@ -250,6 +274,9 @@ pub struct Parameters {
     pub(crate) tools: Option<Vec<ToolDefinition>>,
     #[zeroize(skip)]
     pub(crate) tool_choice: Option<serde_json::Value>,
+    /// Tool-call delivery mode (see [`ToolCallMode`]). Defaults to `Native`.
+    #[zeroize(skip)]
+    pub(crate) tool_call_mode: ToolCallMode,
     #[zeroize(skip)]
     pub(crate) user: Option<String>,
     #[zeroize(skip)]
@@ -276,6 +303,7 @@ impl Default for Parameters {
             reasoning_effort: None,
             tools: None,
             tool_choice: None,
+            tool_call_mode: ToolCallMode::Native,
             user: None,
             base_url: None,
             // Default to the canonical cosh keyring service so callers only

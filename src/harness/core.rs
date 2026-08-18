@@ -2,12 +2,12 @@ use super::context_manager::{ContextManager, MAX_CONTEXT_TOKENS, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
 use cosh_sdk::connector::{
-    ChatMessage, ClaudeThinkingBlock, Connector, ConnectorError, ToolDefinition,
+    ChatMessage, ClaudeThinkingBlock, Connector, ConnectorError, ToolCallMode, ToolDefinition,
     resolve_reasoning_effort,
 };
 #[cfg(not(test))]
 use cosh_sdk::connector::{discover_context_window, effective_context_window};
-use cosh_sdk::extract_action::{ExtractAction, Item, StreamAction, ToolCallData, ToolSchema};
+use cosh_sdk::extract_action::{ExtractAction, Item, NativeToolCall, StreamAction, ToolCallData, ToolSchema};
 use cosh_tools::TOOL_FORMAT;
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, Tool};
@@ -404,6 +404,13 @@ pub struct Harness {
     pub(crate) mock_chat_queue: VecDeque<Result<String, String>>,
     #[cfg(test)]
     pub(crate) mock_stream_queue: VecDeque<Result<Vec<String>, String>>,
+    /// Test-only queue of NATIVE (structured) tool calls, consumed one list
+    /// per stream right after its string tokens. Lets a test drive a real
+    /// provider-delivered `tool_calls`/`tool_use`/`functionCall` through the
+    /// same `register_native_call` → `route_tool_call` funnel the
+    /// real-stream branch uses.
+    #[cfg(test)]
+    pub(crate) mock_native_stream_queue: VecDeque<Vec<NativeToolCall>>,
     /// Per-stream mock `finish_reason` values, consumed one per stream so a
     /// test can simulate a single truncated response followed by a normal one.
     #[cfg(test)]
@@ -476,6 +483,8 @@ impl Harness {
             mock_chat_queue: VecDeque::new(),
             #[cfg(test)]
             mock_stream_queue: VecDeque::new(),
+            #[cfg(test)]
+            mock_native_stream_queue: VecDeque::new(),
             #[cfg(test)]
             mock_finish_reasons: VecDeque::new(),
             #[cfg(test)]
@@ -623,22 +632,21 @@ impl Harness {
             },
         };
         let _ = write!(out, "{instructions}");
-        // All providers officially recommend native function calling and warn
-        // that inline-JSON instructions in the prompt conflict with it (the
-        // Gemini API rejects the turn with MALFORMED_FUNCTION_CALL when a
-        // model obeys the inline format over toolConfig AUTO). Cloud providers
-        // therefore get the NATIVE instruction. Only local model servers
-        // (ollama/lmstudio/vllm/llamacpp) may lack reliable native function
-        // calling and keep the legacy inline-JSON TOOL_FORMAT as a fallback
-        // the extractor can capture.
-        //
-        // `include_inline_schemas` follows the SAME gate: local providers
-        // keep the full `Schema: {...}` dump in the header (the model emits
-        // inline JSON the extractor parses), while cloud providers omit it —
-        // they hold the schemas in the native `tools` array of the request,
-        // so re-sending them in the system prompt would duplicate every
-        // schema on each request (~4.3k tokens of the measured header).
-        let include_inline_schemas = self.connector.is_local();
+        // The tool-call delivery mode decides BOTH the prompt instruction
+        // and the header schemas — the two paths are mutually exclusive (see
+        // `ToolCallMode`):
+        // - `Native` (default, like crush): the model uses the platform's
+        //   structured function calling. The prompt forbids JSON-in-text, and
+        //   the schemas live ONLY in the request's native `tools` array —
+        //   re-sending them in the system prompt would duplicate every
+        //   schema on each request (~4.3k tokens of the measured header).
+        // - `Inline`: the model writes `{"name", "arguments"}` JSON into its
+        //   text response (the extractor parses it). The full `Schema: {...}`
+        //   dump stays in the header, and the request carries no native
+        //   `tools` (see the caller gates) so the API can never produce
+        //   structured tool calls — the two paths never cross.
+        let include_inline_schemas =
+            self.connector.tool_call_mode() == ToolCallMode::Inline;
         let tool_format = if include_inline_schemas {
             TOOL_FORMAT
         } else {
@@ -825,10 +833,18 @@ impl Harness {
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut extractor = self.build_extractor();
-        let result = self.process_extraction(out.message(), &mut extractor);
-        self.last_failed_raw = extractor.take_last_failed_raw();
-        Ok(result)
+        // Inline mode: parse tool calls out of the model's text. Native mode
+        // (default): the text is the answer — never parsed, matching the
+        // crush contract (tool calls arrive only as structured parts, which
+        // the non-streaming `chat` path does not surface).
+        if self.connector.tool_call_mode() == ToolCallMode::Inline {
+            let mut extractor = self.build_extractor();
+            let result = self.process_extraction(out.message(), &mut extractor);
+            self.last_failed_raw = extractor.take_last_failed_raw();
+            Ok(result)
+        } else {
+            Ok(out.message().to_string())
+        }
     }
 
     /// Run the LLM compaction (phase 3, the last-resort fallback): build the
@@ -1261,7 +1277,15 @@ impl Harness {
                 Ok(tokens) => {
                     let mut extractor = self.build_extractor();
                     for token in &tokens {
-                        self.process_stream_chunk(token, &mut extractor, &mut on_token);
+                        self.dispatch_chunk(token, None, &mut extractor, &mut on_token);
+                    }
+                    // Test-only: route structured native tool calls through the
+                    // same funnel the real-stream branch uses (a provider
+                    // emitting `tool_calls`/`tool_use`/`functionCall` parts).
+                    if let Some(calls) = self.mock_native_stream_queue.pop_front() {
+                        for call in calls {
+                            self.process_native_tool_call(&call, &mut extractor, &mut on_token);
+                        }
                     }
                     // Tests can simulate a provider-side truncation by queueing
                     // a finish_reason per stream (consumed one at a time).
@@ -1372,7 +1396,7 @@ impl Harness {
                     &token[..token.floor_char_boundary(token.len().min(50))]
                 );
             }
-            self.process_stream_chunk(token, &mut extractor, &mut on_token);
+            self.dispatch_chunk(token, chunk.tool_call(), &mut extractor, &mut on_token);
             // Stream reasoning/thinking deltas to the TUI so the user sees the
             // model "think" while it works (never echoed back to the model).
             let reasoning = chunk.reasoning();
@@ -1397,6 +1421,31 @@ impl Harness {
         Ok("done".into())
     }
 
+    /// Dispatch one stream chunk to the correct tool-call path, honoring the
+    /// active [`ToolCallMode`]:
+    /// - a native (structured) chunk always routes to the extractor's native
+    ///   validation funnel ([`Self::process_native_tool_call`]), in both
+    ///   modes;
+    /// - text chunks are parsed for inline-JSON tool calls ONLY in
+    ///   [`ToolCallMode::Inline`] — in `Native` mode (default) the text is
+    ///   the model's answer and is emitted verbatim, never parsed (the crush
+    ///   contract: tool calls arrive only as structured parts).
+    fn dispatch_chunk(
+        &mut self,
+        token: &str,
+        native: Option<&NativeToolCall>,
+        extractor: &mut ExtractAction,
+        on_token: &mut dyn FnMut(&str),
+    ) {
+        if let Some(native) = native {
+            self.process_native_tool_call(native, extractor, on_token);
+        } else if self.connector.tool_call_mode() == ToolCallMode::Inline {
+            self.process_stream_chunk(token, extractor, on_token);
+        } else {
+            on_token(token);
+        }
+    }
+
     /// Process a stream chunk through the extractor, routing tool calls and
     /// yielding text via the callback.
     fn process_stream_chunk(
@@ -1411,21 +1460,52 @@ impl Harness {
             StreamAction::Text(text) => {
                 on_token(&text);
             }
-            StreamAction::ToolCall(tc) => match self.handle_harness_tool(&tc) {
-                None => {
-                    self.tool_issuer.push_back(tc);
-                }
-                Some(result) if !result.is_empty() => {
-                    self.push_tool_history(
-                        &tc.id,
-                        &tc.name,
-                        &tc.arguments,
-                        &tc.thought_signature,
-                        &result,
-                    );
-                }
-                _ => {}
-            },
+            StreamAction::ToolCall(tc) => self.route_tool_call(tc),
+            StreamAction::Pending => {}
+        }
+    }
+
+    /// Route a validated tool call: consume it if it is a harness tool,
+    /// otherwise queue it for dispatch. Shared by the inline-JSON path
+    /// ([`Self::process_stream_chunk`]) and the native structured path
+    /// ([`Self::process_native_tool_call`]).
+    fn route_tool_call(&mut self, tc: ToolCallData) {
+        match self.handle_harness_tool(&tc) {
+            None => {
+                self.tool_issuer.push_back(tc);
+            }
+            Some(result) if !result.is_empty() => {
+                self.push_tool_history(
+                    &tc.id,
+                    &tc.name,
+                    &tc.arguments,
+                    &tc.thought_signature,
+                    &result,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Route a tool call the provider delivered NATIVELY (structured
+    /// `tool_calls`/`tool_use`/`functionCall` parts) through the extractor's
+    /// native validation funnel — the same `StreamAction` dispatch as the
+    /// inline-JSON path, minus the text parsing. Validation failures are
+    /// counted and fed to the correction memory exactly like a failed inline
+    /// call (the tool-failure message streams as text).
+    fn process_native_tool_call(
+        &mut self,
+        native: &NativeToolCall,
+        extractor: &mut ExtractAction,
+        on_token: &mut dyn FnMut(&str),
+    ) {
+        let action = extractor.register_native_call(native);
+        self.tool_extraction_failure_count += extractor.take_tool_failures();
+        match action {
+            StreamAction::Text(text) => {
+                on_token(&text);
+            }
+            StreamAction::ToolCall(tc) => self.route_tool_call(tc),
             StreamAction::Pending => {}
         }
     }
@@ -1452,7 +1532,7 @@ impl Harness {
                 Ok(tokens) => {
                     let mut extractor = self.build_extractor();
                     for token in &tokens {
-                        self.process_stream_chunk(token, &mut extractor, &mut on_token);
+                        self.dispatch_chunk(token, None, &mut extractor, &mut on_token);
                     }
                     // Tests can simulate a provider-side truncation by queueing
                     // a finish_reason per stream (consumed one at a time).
@@ -1548,7 +1628,7 @@ impl Harness {
                     &token[..token.floor_char_boundary(token.len().min(50))]
                 );
             }
-            self.process_stream_chunk(token, &mut extractor, &mut on_token);
+            self.dispatch_chunk(token, chunk.tool_call(), &mut extractor, &mut on_token);
             // Stream reasoning/thinking deltas to the TUI so the user sees the
             // model "think" while it works (never echoed back to the model).
             let reasoning = chunk.reasoning();
@@ -2043,7 +2123,13 @@ impl Harness {
                     let (provider, model) = self.fallbacks.remove(0);
                     match Connector::new(&provider) {
                         Ok(c) => {
-                            let mut c = c.with_model(&model);
+                            let mut c = c
+                                .with_model(&model)
+                                // Re-apply the tool-call mode: the fallback
+                                // connector is built from scratch and would
+                                // otherwise silently revert to Native (the
+                                // inline path would stop parsing text).
+                                .with_tool_call_mode(self.connector.tool_call_mode());
                             // Re-apply the reasoning effort the user chose:
                             // the fallback connector is built from scratch and
                             // would otherwise silently drop it (the classic
@@ -3095,7 +3181,13 @@ impl Harness {
 impl Harness {
     /// Create a harness for testing without a real connector.
     pub(crate) fn new_test() -> Self {
-        let connector = Connector::new("openai").unwrap();
+        let connector = Connector::new("openai")
+            .unwrap()
+            // Test mocks drive the stream with TEXT tokens (the inline-JSON
+            // path), so the test harness defaults to Inline mode — matching
+            // the historical behavior of every mock-driven test. Production
+            // `Harness::new` keeps the connector default (Native).
+            .with_tool_call_mode(ToolCallMode::Inline);
         Self {
             connector,
             sessions: Vec::new(),
@@ -3130,9 +3222,18 @@ impl Harness {
             mock_chat_response: None,
             mock_chat_queue: VecDeque::new(),
             mock_stream_queue: VecDeque::new(),
+            mock_native_stream_queue: VecDeque::new(),
             mock_finish_reasons: VecDeque::new(),
             test_tools: Vec::new(),
         }
+    }
+
+    /// Override the tool-call delivery mode (test-only; the production path
+    /// is set on the connector by the caller).
+    #[cfg(test)]
+    pub(crate) fn with_tool_call_mode(mut self, mode: ToolCallMode) -> Self {
+        self.connector = self.connector.with_tool_call_mode(mode);
+        self
     }
 
     /// Register a tool schema for testing extraction without needing a real MCP session.
@@ -3208,6 +3309,19 @@ impl Harness {
                     .map_err(|s| s.to_string()),
             );
         }
+        self
+    }
+
+    /// Queue NATIVE (structured) tool calls for the NEXT stream, delivered
+    /// right after its string tokens — mirrors a provider emitting
+    /// `tool_calls`/`tool_use`/`functionCall` parts. Consumed one list per
+    /// stream.
+    #[cfg(test)]
+    pub(crate) fn with_mock_native_calls(
+        mut self,
+        calls: Vec<cosh_sdk::extract_action::NativeToolCall>,
+    ) -> Self {
+        self.mock_native_stream_queue.push_back(calls);
         self
     }
 

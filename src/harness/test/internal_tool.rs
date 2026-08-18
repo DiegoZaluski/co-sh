@@ -77,18 +77,45 @@ fn cloud_header_uses_native_tool_format() {
     );
 }
 
+/// The tool-call MODE decides the instruction — not the provider's
+/// locality. Default (Native, like crush): every provider, local included,
+/// is told to use the platform's structured function calling.
 #[test]
-fn local_header_keeps_inline_tool_format() {
+fn local_header_defaults_to_native_tool_format() {
     use std::collections::HashSet;
-    // ollama runs on localhost — it may lack reliable native function
-    // calling, so it keeps the inline-JSON TOOL_FORMAT as a fallback.
+
+    use super::super::core::Harness;
     let connector = Connector::new("ollama").expect("ollama provider");
     let mut h = Harness::new(connector, "/tmp", HashSet::new());
     h.format_header_context();
     let header = h.build_chat_context_for_test();
     assert!(
+        header.contains("NATIVE function calling mechanism"),
+        "default mode is Native even for local providers"
+    );
+    assert!(
+        !header.contains("respond with a JSON object"),
+        "no inline instruction in Native mode"
+    );
+}
+
+/// Switching the mode to Inline restores the inline-JSON instruction for
+/// ANY provider — the user opts into the text-parsed path explicitly.
+#[test]
+fn inline_mode_keeps_inline_tool_format() {
+    use std::collections::HashSet;
+
+    use super::super::core::Harness;
+    use cosh_sdk::connector::ToolCallMode;
+    let connector = Connector::new("openai")
+        .expect("openai provider")
+        .with_tool_call_mode(ToolCallMode::Inline);
+    let mut h = Harness::new(connector, "/tmp", HashSet::new());
+    h.format_header_context();
+    let header = h.build_chat_context_for_test();
+    assert!(
         header.contains("respond with a JSON object"),
-        "local providers keep the inline instruction as a fallback"
+        "Inline mode keeps the inline instruction"
     );
 }
 
@@ -139,19 +166,32 @@ fn cloud_ask_header_omits_inline_schemas() {
     assert!(header.contains("fs_read"));
 }
 
-/// Local model servers (ollama/lmstudio/vllm/llamacpp) may lack reliable
-/// native function calling — the model emits inline JSON the extractor
-/// parses, so the full schemas MUST stay in the header for them.
+/// The schemas stay inline in the header ONLY in Inline mode (the model
+/// must see them to write valid JSON). In Native mode they live exclusively
+/// in the request's `tools` array — for local providers too.
 #[test]
-fn local_header_keeps_inline_schemas() {
+fn header_schemas_follow_tool_call_mode() {
     use std::collections::HashSet;
+
+    use cosh_sdk::connector::ToolCallMode;
 
     let connector = Connector::new("ollama").expect("ollama provider");
     let mut h = Harness::new(connector, "/tmp", HashSet::new());
     h.format_header_context();
     let header = h.build_chat_context_for_test();
     assert!(
+        !header.contains("Schema:"),
+        "Native mode (default) omits inline schemas even for local providers"
+    );
+
+    let connector = Connector::new("ollama")
+        .expect("ollama provider")
+        .with_tool_call_mode(ToolCallMode::Inline);
+    let mut h = Harness::new(connector, "/tmp", HashSet::new());
+    h.format_header_context();
+    let header = h.build_chat_context_for_test();
+    assert!(
         header.contains("Schema:"),
-        "local providers keep the inline schemas for the inline-JSON extractor path"
+        "Inline mode keeps the inline schemas for the extractor path"
     );
 }

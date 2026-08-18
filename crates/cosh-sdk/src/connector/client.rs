@@ -1,6 +1,6 @@
 use super::error::ConnectorError;
 use super::output::{ChatOutput, ChatStream, LsOutput};
-use super::params::{ChatMessage, Parameters, ResponseFormat, ToolDefinition};
+use super::params::{ChatMessage, Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
 use super::provider::{Family, ProviderConfig, get_provider};
 
 use super::claude;
@@ -431,6 +431,25 @@ impl Connector {
     #[must_use]
     pub fn provider_name(&self) -> Option<&'static str> {
         self.provider.map(|p| p.name)
+    }
+
+    /// Choose how tool calls are delivered: native structured parts
+    /// ([`ToolCallMode::Native`], the default — the same contract the crush
+    /// agent uses) or inline-JSON text the harness parses
+    /// ([`ToolCallMode::Inline`]). In `Inline` mode the request carries no
+    /// native `tools`, so the two paths never cross: the API cannot produce
+    /// structured tool calls, and the harness is the only consumer of the
+    /// model's text.
+    pub fn with_tool_call_mode(mut self, mode: ToolCallMode) -> Self {
+        self.params.tool_call_mode = mode;
+        self
+    }
+
+    /// The active tool-call delivery mode (defaults to
+    /// [`ToolCallMode::Native`]).
+    #[must_use]
+    pub const fn tool_call_mode(&self) -> ToolCallMode {
+        self.params.tool_call_mode
     }
 
     /// Whether the provider endpoint runs on this machine (`localhost` /

@@ -80,6 +80,10 @@ impl SlashMenu {
                 name: "bell".into(),
                 desc: "Toggle completion bell".into(),
             },
+            SlashCommand {
+                name: "toolcall".into(),
+                desc: "Tool call mode: native | inline".into(),
+            },
         ];
 
         Self {

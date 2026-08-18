@@ -3,7 +3,8 @@ use super::super::common::{
 };
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
-use super::super::params::{Parameters, ResponseFormat, ToolDefinition};
+use super::super::params::{Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
+use crate::extract_action::NativeToolCall;
 use super::super::provider::{ProviderConfig, get_api_key};
 
 use async_stream::stream;
@@ -191,16 +192,9 @@ struct PendingToolCall {
     arguments: String,
 }
 
-/// Render an accumulated tool call as inline JSON text so the harness
-/// extractor can detect and validate it.
-fn pending_tool_call_to_json(tc: &PendingToolCall) -> String {
-    let args: serde_json::Value = serde_json::from_str(&tc.arguments)
-        .unwrap_or_else(|_| serde_json::Value::String(tc.arguments.clone()));
-    serde_json::json!({"name": tc.name, "arguments": args, "id": tc.id}).to_string()
-}
-
-/// Drain accumulated tool calls and return synthetic [`StreamChunk`] items
-/// with inline JSON text that the harness extractor can parse.
+/// Drain accumulated tool calls and return structured [`StreamChunk`] items
+/// carrying the provider's native call verbatim (no inline-JSON round trip:
+/// the harness extractor validates the structured fields directly).
 fn flush_tool_calls(
     pending: &mut Vec<PendingToolCall>,
     last_raw: &mut Option<String>,
@@ -213,10 +207,16 @@ fn flush_tool_calls(
         }
         out.push(StreamChunk {
             raw: raw.clone(),
-            token: pending_tool_call_to_json(&tc),
+            token: String::new(),
             reasoning: String::new(),
             finish_reason: Some("tool_calls".to_string()),
             thinking_blocks: None,
+            tool_call: Some(NativeToolCall {
+                id: tc.id,
+                name: tc.name,
+                arguments: tc.arguments,
+                thought_signature: String::new(),
+            }),
         });
     }
     out
@@ -396,6 +396,7 @@ fn process_sse_response(
                                 reasoning: String::new(),
                                 finish_reason: None,
                                 thinking_blocks: None,
+                                tool_call: None,
                             });
                         }
 
@@ -408,6 +409,7 @@ fn process_sse_response(
                                 reasoning,
                                 finish_reason: None,
                                 thinking_blocks: None,
+                                tool_call: None,
                             });
                         }
 
@@ -428,6 +430,7 @@ fn process_sse_response(
                                 reasoning: String::new(),
                                 finish_reason,
                                 thinking_blocks: None,
+                                tool_call: None,
                             });
                             return;
                         }
@@ -473,6 +476,12 @@ fn build_chat_request(
         (provider == "deepseek" && params.reasoning_effort.is_some()).then(|| ThinkingToggle {
             kind: "enabled".to_string(),
         });
+    // In inline mode the request must NOT carry the native `tools` array:
+    // the model is instructed to write tool calls as JSON into its text
+    // response, and the harness parses them. Without `tools` the API can
+    // never produce structured tool calls, so the two delivery paths are
+    // mutually exclusive at the wire level.
+    let native_tools = params.tool_call_mode == ToolCallMode::Native;
     ChatRequest {
         model,
         messages,
@@ -487,8 +496,16 @@ fn build_chat_request(
         response_format: params.response_format.clone(),
         logprobs: params.logprobs,
         top_logprobs: params.top_logprobs,
-        tools: params.tools.clone(),
-        tool_choice: params.tool_choice.clone(),
+        tools: if native_tools {
+            params.tools.clone()
+        } else {
+            None
+        },
+        tool_choice: if native_tools {
+            params.tool_choice.clone()
+        } else {
+            None
+        },
         reasoning_effort: params.reasoning_effort.clone(),
         thinking,
         user: params.user.clone(),

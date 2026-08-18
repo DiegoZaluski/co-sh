@@ -3,7 +3,8 @@ use super::super::common::{
 };
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
-use super::super::params::{ChatMessage, Parameters, ToolDefinition};
+use super::super::params::{ChatMessage, Parameters, ToolCallMode, ToolDefinition};
+use crate::extract_action::NativeToolCall;
 use super::super::provider::{ProviderConfig, get_api_key};
 
 use async_stream::stream;
@@ -687,8 +688,21 @@ fn prepare_request(
 
     let (contents, system_instruction) = build_contents(prompt, system_prompt);
     let generation_config = build_generation_config(params);
-    let tools = params.tools.as_ref().map(|t| build_tools(t));
-    let tool_config = build_effective_tool_config(params);
+    // Inline mode: no native `tools` on the wire — the model writes tool
+    // calls as JSON into its text response and the harness parses them.
+    // Without `tools` (and `toolConfig`) the API can never emit a
+    // `functionCall` part, so the two delivery paths never cross.
+    let native_tools = params.tool_call_mode == ToolCallMode::Native;
+    let tools = if native_tools {
+        params.tools.as_ref().map(|t| build_tools(t))
+    } else {
+        None
+    };
+    let tool_config = if native_tools {
+        build_effective_tool_config(params)
+    } else {
+        None
+    };
 
     let request = GenerateContentRequest {
         contents,
@@ -813,6 +827,7 @@ pub async fn chat_stream(
                                             reasoning: text.to_string(),
                                             finish_reason: None,
                                             thinking_blocks: None,
+                                            tool_call: None,
                                         });
                                     } else {
                                         yield Ok(StreamChunk {
@@ -821,6 +836,7 @@ pub async fn chat_stream(
                                             reasoning: String::new(),
                                             finish_reason: None,
                                             thinking_blocks: None,
+                                            tool_call: None,
                                         });
                                     }
                                 }
@@ -832,6 +848,7 @@ pub async fn chat_stream(
                                     reasoning: String::new(),
                                     finish_reason,
                                     thinking_blocks: None,
+                                    tool_call: None,
                                 });
                                 return;
                             }
@@ -959,24 +976,22 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<Content> {
     contents
 }
 
-/// Serialize a native Gemini `functionCall` part into the synthetic
-/// inline-JSON token the harness extractor expects (`{"name", "arguments",
-/// "id"}`), carrying the sibling `thoughtSignature` verbatim so it survives
-/// the extraction round-trip and can be replayed on the follow-up request.
-fn tool_call_token(fc: &FunctionCallPart, signature: &str) -> String {
+/// Convert a native Gemini `functionCall` part into a structured
+/// [`NativeToolCall`] the harness extractor validates directly — no
+/// inline-JSON round trip. The sibling `thoughtSignature` (Gemini 3.x)
+/// travels verbatim so it survives validation and can be replayed on the
+/// follow-up request.
+fn native_tool_call(fc: &FunctionCallPart, signature: &str) -> NativeToolCall {
     let args = fc
         .args
         .clone()
         .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-    let mut token = serde_json::json!({
-        "name": fc.name,
-        "arguments": args,
-        "id": fc.id.clone().unwrap_or_default(),
-    });
-    if !signature.is_empty() {
-        token["thought_signature"] = serde_json::json!(signature);
+    NativeToolCall {
+        id: fc.id.clone().unwrap_or_default(),
+        name: fc.name.clone(),
+        arguments: args.to_string(),
+        thought_signature: signature.to_string(),
     }
-    token.to_string()
 }
 
 /// Stream a chat completion with a full messages array, converting the
@@ -1000,6 +1015,8 @@ pub async fn chat_stream_with_messages(
         .unwrap_or_else(|| config.default_model.to_string());
 
     let contents = convert_messages(messages);
+    // Inline mode: no native `tools` on the wire (see `prepare_request`).
+    let native_tools = params.tool_call_mode == ToolCallMode::Native;
     let request = GenerateContentRequest {
         contents,
         system_instruction: Some(Content {
@@ -1007,8 +1024,16 @@ pub async fn chat_stream_with_messages(
             parts: vec![Part::text(system)],
         }),
         generation_config: build_generation_config(params),
-        tools: params.tools.as_ref().map(|t| build_tools(t)),
-        tool_config: build_effective_tool_config(params),
+        tools: if native_tools {
+            params.tools.as_ref().map(|t| build_tools(t))
+        } else {
+            None
+        },
+        tool_config: if native_tools {
+            build_effective_tool_config(params)
+        } else {
+            None
+        },
     };
 
     let base_url = resolve_base_url(config, params);
@@ -1075,6 +1100,7 @@ pub async fn chat_stream_with_messages(
                                                 reasoning: text.to_string(),
                                                 finish_reason: None,
                                                 thinking_blocks: None,
+                                                tool_call: None,
                                             });
                                         } else {
                                             yield Ok(StreamChunk {
@@ -1083,6 +1109,7 @@ pub async fn chat_stream_with_messages(
                                                 reasoning: String::new(),
                                                 finish_reason: None,
                                                 thinking_blocks: None,
+                                                tool_call: None,
                                             });
                                         }
                                     }
@@ -1102,10 +1129,11 @@ pub async fn chat_stream_with_messages(
                                     for (fc, sig) in pending_tool_calls.drain(..) {
                                         yield Ok(StreamChunk {
                                             raw: raw.clone(),
-                                            token: tool_call_token(&fc, &sig),
+                                            token: String::new(),
                                             reasoning: String::new(),
                                             finish_reason: Some("tool_calls".to_string()),
                                             thinking_blocks: None,
+                                            tool_call: Some(native_tool_call(&fc, &sig)),
                                         });
                                     }
                                     return;
@@ -1117,6 +1145,7 @@ pub async fn chat_stream_with_messages(
                                         reasoning: String::new(),
                                         finish_reason,
                                         thinking_blocks: None,
+                                        tool_call: None,
                                     });
                                     return;
                                 }
@@ -1139,10 +1168,11 @@ pub async fn chat_stream_with_messages(
                 for (fc, sig) in pending_tool_calls.drain(..) {
                     yield Ok(StreamChunk {
                         raw: raw.clone(),
-                        token: tool_call_token(&fc, &sig),
+                        token: String::new(),
                         reasoning: String::new(),
                         finish_reason: Some("tool_calls".to_string()),
                         thinking_blocks: None,
+                        tool_call: Some(native_tool_call(&fc, &sig)),
                     });
                 }
             }

@@ -19,13 +19,14 @@ else the API returned is there to parse manually.
 ## `StreamChunk` — one item in a stream
 
 ```rust,ignore
-pub struct StreamChunk { /* raw, token, reasoning, finish_reason, thinking_blocks */ }
+pub struct StreamChunk { /* raw, token, reasoning, finish_reason, thinking_blocks, tool_call */ }
 
 impl StreamChunk {
     pub fn token(&self) -> &str                      // text delta
     pub fn reasoning(&self) -> &str                  // reasoning/thinking delta
     pub fn thinking_blocks(&self) -> Option<&[ClaudeThinkingBlock]>  // Claude only
     pub fn finish_reason(&self) -> Option<&str>      // "stop", "length", ...
+    pub fn tool_call(&self) -> Option<&NativeToolCall>  // provider-delivered structured call
 }
 ```
 
@@ -36,6 +37,13 @@ impl StreamChunk {
   signature) for verbatim replay — see [`ClaudeThinkingBlock`](params.md).
 - `finish_reason()` is `Some` only on the final chunk: `"stop"`, `"length"`,
   `"content_filter"`, `"tool_calls"`, or provider-specific values.
+- `tool_call()` carries a tool call the provider delivered NATIVELY
+  (structured `tool_calls`/`tool_use`/`functionCall` parts — id, name, the
+  raw accumulated `arguments` JSON text, and the Gemini `thought_signature`
+  when present). The harness routes it straight to the extractor's native
+  validation funnel (`ExtractAction::register_native_call`) — no
+  inline-JSON round trip. It is `None` for text/reasoning chunks and for the
+  legacy inline-JSON path (local providers, which arrive as `token` text).
 
 ## `ChatStream` — the streaming response
 
@@ -80,7 +88,7 @@ Next: [error — ConnectorError and classification](error.md).
 ## Summary
 
 - `ChatOutput` wraps a one-shot reply with `message()` (extracted text) and `raw()` (unmodified JSON response).
-- `StreamChunk` represents one streaming item with `token()` (text delta), `reasoning()` (thinking delta), `thinking_blocks()` (Claude extended thinking), and `finish_reason()` (final chunk only).
+- `StreamChunk` represents one streaming item with `token()` (text delta), `reasoning()` (thinking delta), `thinking_blocks()` (Claude extended thinking), `finish_reason()` (final chunk only), and `tool_call()` (a provider-delivered native tool call, validated directly by the harness without a text round trip).
 - `ChatStream` is the streaming response implementing `Stream<Item = Result<StreamChunk>>`; after the stream ends, `raw()` returns the last SSE frame (usage, finish_reason, etc.).
 - `LsOutput` and `ModelInfo` handle model listing: `list_models()` returns available models with raw JSON alongside.
 - `thinking_blocks()` carries Claude extended-thinking blocks for verbatim replay (cryptographic signature validation); `skip_serializing_if` keeps this off other providers' wire formats.

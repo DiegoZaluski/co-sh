@@ -27,9 +27,9 @@ pub use discovery::{
 pub use error::ConnectorError;
 pub use output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 pub use params::{
-    ChatMessage, ClaudeThinkingBlock, ResponseFormat, ToolCallFunctionMsg, ToolCallMsg,
-    ToolDefinition, ToolFunction, assistant_tool_call_message, system_message, tool_result_message,
-    user_message,
+    ChatMessage, ClaudeThinkingBlock, ResponseFormat, ToolCallFunctionMsg, ToolCallMode,
+    ToolCallMsg, ToolDefinition, ToolFunction, assistant_tool_call_message, system_message,
+    tool_result_message, user_message,
 };
 pub use provider::{
     COSH_SERVICE, clear_api_key_cache, detect_provider, get_api_key, get_provider_env_var,

@@ -1,4 +1,4 @@
-use crate::extract_action::{ExtractAction, Item, StreamAction, ToolSchema};
+use crate::extract_action::{ExtractAction, Item, NativeToolCall, StreamAction, ToolSchema};
 
 fn make_extractor() -> ExtractAction {
     let test_tool = ToolSchema {
@@ -588,5 +588,123 @@ fn stream_real_fenced_code_block_keeps_body_as_display_text() {
             )
         }
         other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// register_native_call (provider-delivered structured tool calls)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn native_call_valid_with_id_and_arguments() {
+    let mut ex = make_extractor();
+    let call = NativeToolCall {
+        id: "call_abc".into(),
+        name: "fs.read".into(),
+        arguments: r#"{"path": "/a"}"#.into(),
+        thought_signature: String::new(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::ToolCall(tc) => {
+            assert_eq!(tc.id, "call_abc");
+            assert_eq!(tc.name, "fs.read");
+            assert_eq!(tc.arguments, serde_json::json!({"path": "/a"}));
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+    assert_eq!(ex.take_tool_failures(), 0, "valid call → no failure");
+}
+
+#[test]
+fn native_call_empty_arguments_defaults_to_empty_object() {
+    // Some providers (e.g. Ollama) stream tool calls with no arguments at
+    // all — `{}` must validate against tools that take no required fields
+    // (mirrors fantasy's empty-args → `{}` default).
+    let mut ex = ExtractAction::new().with_tool(ToolSchema {
+        name: "no_args".into(),
+        input_schema: serde_json::json!({"type": "object"}),
+    });
+    let call = NativeToolCall {
+        id: String::new(),
+        name: "no_args".into(),
+        arguments: String::new(),
+        thought_signature: String::new(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::ToolCall(tc) => {
+            assert_eq!(tc.name, "no_args");
+            assert_eq!(tc.arguments, serde_json::json!({}));
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[test]
+fn native_call_missing_required_field_is_a_failure() {
+    let mut ex = make_extractor();
+    let call = NativeToolCall {
+        id: "call_1".into(),
+        name: "fs.read".into(),
+        arguments: r#"{}"#.into(),
+        thought_signature: String::new(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::Text(t) => assert!(t.contains("Tool call failure")),
+        other => panic!("expected failure text, got {other:?}"),
+    }
+    assert_eq!(ex.take_tool_failures(), 1, "schema violation counts as failure");
+    assert!(
+        ex.take_last_failed_raw().contains("fs.read"),
+        "last_failed_raw feeds the correction memory"
+    );
+}
+
+#[test]
+fn native_call_unknown_tool_is_a_failure() {
+    let mut ex = make_extractor();
+    let call = NativeToolCall {
+        id: "call_1".into(),
+        name: "nonexistent".into(),
+        arguments: r#"{}"#.into(),
+        thought_signature: String::new(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::Text(t) => assert!(t.contains("Tool call failure")),
+        other => panic!("expected failure text, got {other:?}"),
+    }
+    assert_eq!(ex.take_tool_failures(), 1);
+}
+
+#[test]
+fn native_call_malformed_arguments_is_a_failure() {
+    let mut ex = make_extractor();
+    let call = NativeToolCall {
+        id: "call_1".into(),
+        name: "fs.read".into(),
+        arguments: "{not json".into(),
+        thought_signature: String::new(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::Text(t) => assert!(t.contains("Tool call failure")),
+        other => panic!("expected failure text, got {other:?}"),
+    }
+    assert_eq!(ex.take_tool_failures(), 1);
+}
+
+#[test]
+fn native_call_preserves_thought_signature() {
+    let mut ex = make_extractor();
+    let call = NativeToolCall {
+        id: "fc_1".into(),
+        name: "fs.read".into(),
+        arguments: r#"{"path": "/a"}"#.into(),
+        thought_signature: "sig_xyz".into(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::ToolCall(tc) => {
+            assert_eq!(tc.id, "fc_1");
+            assert_eq!(tc.thought_signature, "sig_xyz");
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
     }
 }

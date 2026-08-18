@@ -25,6 +25,29 @@ pub struct ToolCallData {
     pub thought_signature: String,
 }
 
+/// A tool call the provider delivered NATIVELY (structured `tool_calls` /
+/// `tool_use` / `functionCall` parts), handed to the extractor for the SAME
+/// schema validation the inline-JSON text path performs.
+///
+/// The provider already split the call into structured fields, so no text
+/// parsing happens — but the envelope is still validated against the
+/// registered schemas, failures are counted, and `last_failed_raw` is
+/// recorded for the correction memory, exactly like a failed inline call.
+#[derive(Debug, Clone)]
+pub struct NativeToolCall {
+    /// Tool call ID from the API's native mechanism.
+    pub id: String,
+    /// Tool name.
+    pub name: String,
+    /// Raw accumulated `arguments` JSON text as the provider streamed it
+    /// (empty when the provider sent no arguments at all — e.g. Ollama).
+    pub arguments: String,
+    /// Gemini 3.x thought signature (sibling of a native `functionCall`),
+    /// replayed verbatim on the follow-up request. Empty for every other
+    /// provider.
+    pub thought_signature: String,
+}
+
 /// Action returned by [`ExtractAction::extract_stream`].
 #[derive(Debug)]
 pub enum StreamAction {
@@ -248,6 +271,51 @@ impl ExtractAction {
         }
 
         BatchResult { items }
+    }
+
+    /// Validate a tool call the provider delivered NATIVELY (structured
+    /// `tool_calls`/`tool_use`/`functionCall` parts) through the same schema
+    /// funnel as the inline-JSON text path — minus the text parsing.
+    ///
+    /// Empty arguments default to `{}` (some providers — e.g. Ollama —
+    /// stream tool calls with no `arguments` at all); non-empty arguments
+    /// are passed through as a JSON string so [`validate_tool_call`] can
+    /// attempt a parse, falling back to schema rejection — the model gets
+    /// the same correction feedback as an inline-JSON failure.
+    ///
+    /// Returns [`StreamAction::ToolCall`] when the call validates against a
+    /// registered schema, [`StreamAction::Text`] (the tool-failure message)
+    /// when it does not, or [`StreamAction::Pending`] when nothing applies.
+    pub fn register_native_call(&mut self, call: &NativeToolCall) -> StreamAction {
+        let mut obj = serde_json::Map::new();
+        obj.insert("name".to_string(), JsonValue::String(call.name.clone()));
+        // The provider's accumulated `arguments` JSON text, verbatim. Empty
+        // arguments default to `{}` so a call with no payload still
+        // validates against tools that take no required fields.
+        let args = if call.arguments.trim().is_empty() {
+            JsonValue::Object(serde_json::Map::new())
+        } else {
+            JsonValue::String(call.arguments.clone())
+        };
+        obj.insert("arguments".to_string(), args);
+        if !call.id.is_empty() {
+            obj.insert("id".to_string(), JsonValue::String(call.id.clone()));
+        }
+        if !call.thought_signature.is_empty() {
+            obj.insert(
+                "thought_signature".to_string(),
+                JsonValue::String(call.thought_signature.clone()),
+            );
+        }
+        let envelope = JsonValue::Object(obj);
+        match validate_tool_call(&envelope, &self.tools) {
+            Some(tc) => StreamAction::ToolCall(tc),
+            None => {
+                self.tool_failure_count += 1;
+                self.last_failed_raw = envelope.to_string();
+                StreamAction::Text(self.tool_failure_message.clone())
+            }
+        }
     }
 
     /// Process a single token in streaming mode.

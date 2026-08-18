@@ -425,6 +425,48 @@ async fn request_omits_thinking_without_effort() {
     );
 }
 
+/// Inline tool-call mode: no native `tools` (nor `tool_choice`) on the wire
+/// — the model writes tool calls as JSON into its text response and the
+/// harness parses them. The native and inline delivery paths are mutually
+/// exclusive at the request level.
+#[tokio::test]
+async fn inline_mode_omits_tools_from_request() {
+    use super::super::{ToolCallMode, ToolDefinition, ToolFunction};
+
+    let tool = ToolDefinition::new(
+        ToolFunction::new("read_file")
+            .with_description("Read a file")
+            .with_parameters(serde_json::json!({"type": "object"})),
+    );
+    let sse = "\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}\n\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null}}\n\n\
+data: {\"type\":\"message_stop\"}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = claude_connector(port)
+        .with_tools(vec![tool])
+        .with_tool_call_mode(ToolCallMode::Inline);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[super::super::user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.get("tools").is_none(),
+        "inline mode must not send native tools: {json}"
+    );
+    assert!(
+        json.get("tool_choice").is_none(),
+        "inline mode must not send tool_choice: {json}"
+    );
+}
+
 /// A stream that ends with a tool_use must emit the turn's thinking blocks
 /// (summary text + signature, captured via `thinking_delta` and
 /// `signature_delta`) as a single chunk BEFORE the tool-call chunks — the
@@ -480,12 +522,13 @@ data: {\"type\":\"message_stop\"}\n\n";
     assert!(thinking_chunk.token().is_empty());
     assert_eq!(thinking_chunk.finish_reason(), None);
 
-    // The tool-use token carries the accumulated args.
+    // The tool-use chunk carries the accumulated args as a native call.
     let tool_chunk = &chunks[tool_pos];
-    let json: serde_json::Value = serde_json::from_str(tool_chunk.token()).unwrap();
-    assert_eq!(json["name"], "bash");
-    assert_eq!(json["arguments"], serde_json::json!({"cmd":"ls"}));
-    assert_eq!(json["id"], "toolu_1");
+    let call = tool_chunk.tool_call().expect("native tool call on the chunk");
+    assert!(tool_chunk.token().is_empty(), "no synthetic JSON token anymore");
+    assert_eq!(call.name, "bash");
+    assert_eq!(call.arguments, r#"{"cmd":"ls"}"#);
+    assert_eq!(call.id, "toolu_1");
 }
 
 /// The thinking deltas stream as `reasoning` chunks so the TUI shows the

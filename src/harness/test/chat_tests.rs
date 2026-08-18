@@ -1,4 +1,5 @@
 use super::super::core::Harness;
+use cosh_sdk::extract_action::NativeToolCall;
 use serde_json::json;
 
 fn make_harness() -> Harness {
@@ -149,4 +150,127 @@ async fn stream_chat_interleaves_text_and_tool_calls() {
 
     let err = h.dispatch_next().await.unwrap_err();
     assert!(err.contains("no server found"), "tool was queued: {err}");
+}
+
+#[tokio::test]
+async fn native_mode_never_parses_text_json() {
+    // Default mode (Native, like crush): text tokens are the model's
+    // answer. Even a well-formed tool-call envelope in prose must NOT be
+    // turned into a queued tool call — the two delivery paths never cross.
+    let mut h = make_harness()
+        .with_test_tool(
+            "fetch",
+            json!({ "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }),
+        )
+        .with_tool_call_mode(cosh_sdk::connector::ToolCallMode::Native)
+        .with_mock_stream(Ok(vec![
+            "before ",
+            r#"{"name": "fetch", "arguments": {"url": "x"}}"#,
+            " after",
+        ]));
+
+    let mut texts = Vec::new();
+    let _ = h
+        .stream_chat("fetch it", &mut |t: &str| texts.push(t.to_string()))
+        .await;
+
+    assert_eq!(
+        texts,
+        vec![
+            "before ",
+            r#"{"name": "fetch", "arguments": {"url": "x"}}"#,
+            " after",
+        ],
+        "native mode emits text verbatim — JSON envelope included"
+    );
+    assert!(!h.has_pending_tools(), "native mode never queues from text");
+}
+
+#[tokio::test]
+async fn inline_mode_parses_text_json() {
+    // Explicit Inline mode: the same text stream IS parsed, and the JSON
+    // envelope becomes a queued tool call.
+    let mut h = make_harness()
+        .with_test_tool(
+            "fetch",
+            json!({ "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }),
+        )
+        .with_tool_call_mode(cosh_sdk::connector::ToolCallMode::Inline)
+        .with_mock_stream(Ok(vec![
+            "before ",
+            r#"{"name": "fetch", "arguments": {"url": "x"}}"#,
+            " after",
+        ]));
+
+    let mut texts = Vec::new();
+    let _ = h
+        .stream_chat("fetch it", &mut |t: &str| texts.push(t.to_string()))
+        .await;
+
+    assert_eq!(texts, vec!["before ", " after"]);
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(err.contains("no server found"), "tool was queued: {err}");
+}
+
+#[tokio::test]
+async fn stream_chat_routes_native_tool_call_directly() {
+    // A provider-delivered structured tool call (native `tool_calls` /
+    // `tool_use` / `functionCall` part) must skip the text parser and queue
+    // straight for dispatch, while text around it still streams.
+    let mut h = make_harness()
+        .with_test_tool(
+            "fetch",
+            json!({ "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }),
+        )
+        .with_mock_stream(Ok(vec!["before "]))
+        .with_mock_native_calls(vec![NativeToolCall {
+            id: "call_abc".to_string(),
+            name: "fetch".to_string(),
+            arguments: r#"{"url": "https://x"}"#.to_string(),
+            thought_signature: String::new(),
+        }]);
+
+    let mut texts = Vec::new();
+    let _ = h
+        .stream_chat_with_messages("sys", &[], &mut |t: &str| texts.push(t.to_string()))
+        .await;
+
+    assert_eq!(texts, vec!["before "], "text still streams");
+
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(err.contains("no server found"), "native tool was queued: {err}");
+}
+
+#[tokio::test]
+async fn stream_chat_native_call_invalid_schema_feeds_correction_memory() {
+    // A native call that fails schema validation must NOT be queued for
+    // dispatch — it is counted and recorded for the correction memory, like
+    // a failed inline-JSON call.
+    let mut h = make_harness()
+        .with_test_tool(
+            "fetch",
+            json!({ "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }),
+        )
+        .with_mock_stream(Ok(vec![]))
+        .with_mock_native_calls(vec![NativeToolCall {
+            id: "call_1".to_string(),
+            name: "fetch".to_string(),
+            arguments: r#"{}"#.to_string(), // missing required "url"
+            thought_signature: String::new(),
+        }]);
+
+    let mut texts = Vec::new();
+    let _ = h
+        .stream_chat_with_messages("sys", &[], &mut |t: &str| texts.push(t.to_string()))
+        .await;
+
+    assert!(
+        texts.iter().any(|t| t.contains("Tool call failure")),
+        "failed native call streams the failure warning"
+    );
+    assert!(!h.has_pending_tools(), "invalid call must not be queued");
+    // The failure is counted inside the extractor (`take_tool_failures`)
+    // and the raw envelope lands in `last_failed_raw` — both feed the
+    // correction memory on the next loop iteration, exactly like a failed
+    // inline-JSON call (unit-tested in the extractor).
 }

@@ -338,8 +338,8 @@ data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReas
 }
 
 /// A `functionCall` part arriving with a sibling `thoughtSignature` in the
-/// STREAM must surface it in the synthetic tool-call token JSON, so the
-/// harness extractor can carry it into the next request's history.
+/// STREAM must surface it on the structured tool call, so the harness
+/// extractor can carry it into the next request's history.
 #[tokio::test]
 async fn stream_with_messages_surfaces_thought_signature_in_token() {
     let sse = "\
@@ -354,14 +354,19 @@ data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}\
     handle.join().unwrap();
 
     let chunks: Vec<_> = stream.collect().await;
-    assert_eq!(chunks.len(), 1, "only the synthetic tool-call token");
+    assert_eq!(chunks.len(), 1, "only the native tool-call chunk");
     let chunk = chunks[0].as_ref().unwrap();
-    let json: serde_json::Value = serde_json::from_str(chunk.token()).unwrap();
-    assert_eq!(json["name"], "fs_read");
-    assert_eq!(json["id"], "fc_1");
+    let call = chunk.tool_call().expect("native tool call on the chunk");
+    assert!(chunk.token().is_empty(), "no synthetic JSON token anymore");
+    assert_eq!(call.name, "fs_read");
+    assert_eq!(call.id, "fc_1");
     assert_eq!(
-        json["thought_signature"], "sig_xyz",
-        "the streamed thought signature must surface in the synthetic token"
+        call.thought_signature, "sig_xyz",
+        "the streamed thought signature must survive on the native call"
+    );
+    assert_eq!(
+        call.arguments, r#"{"targets":[{"path":"TODO.md"}]}"#,
+        "the provider's args JSON travels verbatim"
     );
 }
 
@@ -441,9 +446,9 @@ data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}\
     assert_eq!(tokens, "Hello world");
 }
 
-/// A `functionCall` part in the stream must be flushed as a synthetic
-/// inline-JSON token (the format the harness extractor expects), carrying
-/// the call id for round-tripping.
+/// A `functionCall` part in the stream must be flushed as a structured
+/// native tool call (the format the harness extractor validates directly),
+/// carrying the call id for round-tripping.
 #[tokio::test]
 async fn stream_with_messages_flushes_tool_calls() {
     let sse = "\
@@ -458,16 +463,17 @@ data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}\
     handle.join().unwrap();
 
     let chunks: Vec<_> = stream.collect().await;
-    assert_eq!(chunks.len(), 1, "only the synthetic tool-call token");
+    assert_eq!(chunks.len(), 1, "only the native tool-call chunk");
     let chunk = chunks[0].as_ref().unwrap();
     assert_eq!(chunk.finish_reason(), Some("tool_calls"));
-    let json: serde_json::Value = serde_json::from_str(chunk.token()).unwrap();
-    assert_eq!(json["name"], "get_weather");
-    assert_eq!(json["arguments"], serde_json::json!({"city":"SP"}));
-    assert_eq!(json["id"], "fc_1");
+    let call = chunk.tool_call().expect("native tool call on the chunk");
+    assert!(chunk.token().is_empty(), "no synthetic JSON token anymore");
+    assert_eq!(call.name, "get_weather");
+    assert_eq!(call.arguments, r#"{"city":"SP"}"#);
+    assert_eq!(call.id, "fc_1");
     assert!(
-        json.get("thought_signature").is_none(),
-        "a call without a signature must not carry the key"
+        call.thought_signature.is_empty(),
+        "a call without a signature must not carry it"
     );
 }
 
@@ -549,6 +555,41 @@ data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReas
     assert_eq!(
         json["toolConfig"]["functionCallingConfig"]["mode"], "AUTO",
         "tools present must force native function calling, got: {body}"
+    );
+}
+
+/// Inline tool-call mode: no `tools` (nor `toolConfig`) on the wire — the
+/// model writes tool calls as JSON into its text response and the harness
+/// parses them. Without `tools`/`toolConfig` the API can never emit a
+/// `functionCall` part, so the native and inline delivery paths never cross.
+#[tokio::test]
+async fn inline_mode_omits_tools_and_tool_config() {
+    use super::super::ToolCallMode;
+
+    let sse = "\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let tool = ToolDefinition::new(
+        ToolFunction::new("get_weather")
+            .with_description("Get the weather")
+            .with_parameters(serde_json::json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})),
+    );
+    let c = gemini_connector(port)
+        .with_tools(vec![tool])
+        .with_tool_call_mode(ToolCallMode::Inline);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json.get("tools").is_none(), "inline mode: no tools: {body}");
+    assert!(
+        json.get("toolConfig").is_none(),
+        "inline mode: no toolConfig: {body}"
     );
 }
 

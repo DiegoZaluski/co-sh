@@ -10,6 +10,8 @@ use crate::theme::Theme;
 use crate::util::list_selection::ListSelection;
 
 const DISABLED_TOOLS_KEY: &str = "disabled_tools";
+/// Persisted tool-call delivery mode ("native" | "inline").
+const TOOL_CALL_MODE_KEY: &str = "tool_call_mode";
 
 pub fn load_disabled_tools(
     cache: &crate::util::cache::StaleCache<String, String>,
@@ -26,6 +28,29 @@ pub fn save_disabled_tools(
 ) {
     let raw = serde_json::to_string(disabled).unwrap_or_default();
     cache.finish_revalidation(DISABLED_TOOLS_KEY.to_string(), raw);
+}
+
+/// Load the persisted tool-call mode. Unknown/missing values fall back to
+/// `Native` (the default contract).
+#[must_use]
+pub fn load_tool_call_mode(
+    cache: &crate::util::cache::StaleCache<String, String>,
+) -> cosh_sdk::connector::ToolCallMode {
+    match cache.get(&TOOL_CALL_MODE_KEY.to_string()) {
+        Some(raw) if raw == "inline" => cosh_sdk::connector::ToolCallMode::Inline,
+        _ => cosh_sdk::connector::ToolCallMode::Native,
+    }
+}
+
+pub fn save_tool_call_mode(
+    cache: &mut crate::util::cache::StaleCache<String, String>,
+    mode: cosh_sdk::connector::ToolCallMode,
+) {
+    let raw = match mode {
+        cosh_sdk::connector::ToolCallMode::Native => "native",
+        cosh_sdk::connector::ToolCallMode::Inline => "inline",
+    };
+    cache.finish_revalidation(TOOL_CALL_MODE_KEY.to_string(), raw.to_string());
 }
 
 fn internal_tools() -> &'static [(&'static str, &'static str)] {

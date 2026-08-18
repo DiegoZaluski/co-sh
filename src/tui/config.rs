@@ -34,6 +34,11 @@ pub struct LlmConfig {
     /// native knob (`reasoning_effort` / `thinkingConfig.thinkingLevel` /
     /// `thinking.budget_tokens`).
     pub reasoning: Option<String>,
+    /// How tool calls are delivered: native structured parts (default, like
+    /// crush) or inline-JSON text the harness parses. The two paths are
+    /// mutually exclusive at the request level — see
+    /// [`cosh_sdk::connector::ToolCallMode`].
+    pub tool_call_mode: cosh_sdk::connector::ToolCallMode,
 }
 
 impl LlmConfig {
@@ -44,10 +49,16 @@ impl LlmConfig {
             .or_else(|| cosh_sdk::connector::detect_provider().map(String::from))
             .unwrap_or_else(|| "openai".to_string());
 
+        let tool_call_mode = match std::env::var("COSH_TOOL_CALL_MODE").as_deref() {
+            Ok("inline") => cosh_sdk::connector::ToolCallMode::Inline,
+            Ok("native") | Ok(_) | Err(_) => cosh_sdk::connector::ToolCallMode::Native,
+        };
+
         Self {
             provider,
             model: std::env::var("COSH_MODEL").ok(),
             reasoning: std::env::var("COSH_REASONING").ok(),
+            tool_call_mode,
         }
     }
 }
