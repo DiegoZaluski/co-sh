@@ -3911,10 +3911,13 @@ fn test_completed_read_renders_code_box() {
     );
 }
 
-/// A long read is capped at 20 code lines (like the Write box) and the cached
-/// height still matches the drawn height.
+/// A long read collapses to a preview by default (like the Glob/bash box) and
+/// expands to the FULL file the model read when clicked; the cached height
+/// tracks the toggle exactly.
 #[test]
-fn test_completed_read_caps_height_like_write() {
+fn test_completed_read_expands_to_full_content() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
     let msg = Message {
         id: "msg-read".into(),
         role: MessageRole::Assistant,
@@ -3928,28 +3931,52 @@ fn test_completed_read_caps_height_like_write() {
     let theme = test_theme();
     let config = test_config();
 
-    let area = Rect::new(0, 0, 80, 60);
+    let area = Rect::new(0, 0, 80, 80);
     let mut buf = Buffer::empty(area);
-    view.render(&mut buf, area, &state, &theme, &config, 0.016);
 
-    let text = buffer_text(&buf);
+    // First render: collapsed preview (10 lines + "…" + hint), default state.
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let collapsed_h = view.cached_total_height;
+    assert!(!view.tool_state.is_expanded("read-1"));
     assert!(
-        text.contains("fn code_line_19"),
-        "the first 20 code lines must be visible"
+        !buffer_text(&buf).contains("fn code_line_29"),
+        "a collapsed read must not show lines past the preview"
     );
     assert!(
-        !text.contains("fn code_line_29"),
-        "lines past the 20-line cap must not be drawn"
+        buffer_text(&buf).contains("Click to expand"),
+        "a collapsed read must show the expand hint"
     );
-    assert_eq!(
-        view.actual_total_height, view.cached_total_height,
-        "capped read box diverges from the cache estimate"
+    assert_eq!(collapsed_h, 17);
+    assert_eq!(view.actual_total_height, view.cached_total_height);
+
+    // Click inside the read box → expand.
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 3,
+        MouseModifiers::none(),
     );
-    assert_eq!(
-        view.cached_total_height, 25,
-        "20 code lines → top margin + box(23) + bottom margin = 25 rows, got {}",
-        view.cached_total_height
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(handled);
+    assert!(view.tool_state.is_expanded("read-1"));
+
+    // Re-render: the full file is now visible and the height grew to match.
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    assert!(
+        view.cached_total_height > collapsed_h,
+        "expanding the read box must grow the cached height"
     );
+    assert_eq!(view.cached_total_height, 36);
+    assert!(
+        buffer_text(&buf).contains("fn code_line_29"),
+        "an expanded read must show the full file the model read"
+    );
+    assert!(
+        buffer_text(&buf).contains("Click to collapse"),
+        "an expanded read must show the collapse hint"
+    );
+    assert_eq!(view.actual_total_height, view.cached_total_height);
 }
 
 /// A running read stays a single-line inline label (no box yet).

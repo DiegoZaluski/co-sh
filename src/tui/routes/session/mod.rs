@@ -1498,13 +1498,22 @@ impl SessionView {
                         // + 2 for external margins (top + bottom)
                         diff_lines + 5
                     } else if tool_render::tool_display(&t.tool) == "read" {
-                        // Read block: clean code capped at 20 lines, mirroring
-                        // render_read's `max_lines` (same as the Write box).
+                        // Read block: preview collapsed to a few lines, full
+                        // code when expanded (mirrors render_read).
+                        let id = t.tool_call_id.as_deref().unwrap_or("read");
                         let code = tool_render::read_block_text(t).unwrap_or_default();
-                        let lines = code.lines().count().max(1) as u16;
+                        let collapsed = crate::util::scroll::collapse_tool_output(&code, 10, 800);
+                        let expanded = tool_state.is_expanded(id);
+                        let display = if expanded || !collapsed.overflow {
+                            &code
+                        } else {
+                            &collapsed.output
+                        };
+                        let lines =
+                            display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
                         // Internal box: top padding (1) + title + content +
                         // bottom padding (1) = lines + 3; +2 external margins.
-                        lines.min(20) + 5
+                        lines + 5
                     } else {
                         // bash (and write) block. When the tool is expanded, the full
                         // output is rendered, so the height must match render_shell.
@@ -1829,15 +1838,20 @@ impl SessionView {
                     if click_y >= part_y && click_y < part_y + part_h {
                         if let crate::types::Part::Tool(tool) = part {
                             let display = tool_render::tool_display(&tool.tool);
-                            if display == "bash" || display == "glob" {
+                            if display == "bash" || display == "glob" || display == "read" {
                                 let output =
                                     tool.output.as_deref().unwrap_or("").trim().to_string();
                                 if !output.is_empty() {
-                                    let id = tool.tool_call_id.as_deref().unwrap_or(
-                                        if display == "glob" { "glob" } else { "shell" },
-                                    );
+                                    let id =
+                                        tool.tool_call_id.as_deref().unwrap_or(match display {
+                                            "glob" => "glob",
+                                            "read" => "read",
+                                            _ => "shell",
+                                        });
                                     let text = if display == "glob" {
                                         tool_render::glob_block_text(tool).unwrap_or_default()
+                                    } else if display == "read" {
+                                        tool_render::read_block_text(tool).unwrap_or_default()
                                     } else {
                                         output
                                     };

@@ -1246,17 +1246,27 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         .filter(|s| !s.is_idle());
 
     // Completed reads with parseable content draw a code box styled like the
-    // Write box: the clean code the model read, capped at 20 lines.
+    // Write box. Large reads collapse to a preview (like the Glob/bash box):
+    // the first lines with a "…" marker and a "Click to expand" hint; clicking
+    // toggles the full file the model read.
     if is_completed && let Some(code) = read_block_text(part) {
-        let max_lines = 20u16;
-        let display_lines = code.lines().count().min(max_lines as usize) as u16;
+        let id = part.tool_call_id.as_deref().unwrap_or("read");
+        let expanded = ctx.state.is_expanded(id);
+        let collapsed = crate::util::scroll::collapse_tool_output(&code, 10, 800);
+        let display = if expanded || !collapsed.overflow {
+            &code
+        } else {
+            &collapsed.output
+        };
+        let content_lines = display.lines().count().max(1) as u16;
+        let lines = content_lines + u16::from(collapsed.overflow);
         // 1 blank row of internal padding above the title (the bottom-padding
         // row is the last row of the box), matching the Write box.
         let area = Rect::new(
             ctx.x,
             ctx.y,
             ctx.max_w.saturating_add(3),
-            display_lines + 2 + TOOL_BOX_PAD_V,
+            lines + 2 + TOOL_BOX_PAD_V,
         );
         *ctx.line_h = area.height;
 
@@ -1305,13 +1315,29 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
             ctx.y + 1 + TOOL_BOX_PAD_V,
             max_w_inner,
             CodeBlockSpec {
-                content: &code,
+                content: display,
                 lang,
                 default_fg,
                 ln_fg,
-                max_lines,
+                max_lines: content_lines,
             },
         );
+        if collapsed.overflow {
+            let hint_y = ctx.y + TOOL_BOX_PAD_V + 1 + content_lines;
+            let hint = if expanded {
+                "Click to collapse"
+            } else {
+                "Click to expand"
+            };
+            draw_text_line(
+                ctx.buf,
+                hint,
+                ctx.x + 3,
+                hint_y,
+                ctx.max_w.saturating_sub(3),
+                Style::default().fg(rgba_color(ctx.theme.text_muted)),
+            );
+        }
         return;
     }
 
