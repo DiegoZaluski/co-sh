@@ -9,48 +9,36 @@ use cosh_tui::core::types::MouseEvent;
 use crate::theme::Theme;
 use crate::util::list_selection::ListSelection;
 
-const DISABLED_TOOLS_KEY: &str = "disabled_tools";
-/// Persisted tool-call delivery mode ("native" | "inline").
-const TOOL_CALL_MODE_KEY: &str = "tool_call_mode";
-
-pub fn load_disabled_tools(
-    cache: &crate::util::cache::StaleCache<String, String>,
-) -> HashSet<String> {
-    match cache.get(&DISABLED_TOOLS_KEY.to_string()) {
-        Some(raw) => serde_json::from_str(raw).unwrap_or_default(),
-        None => HashSet::new(),
-    }
+pub fn load_disabled_tools(setup: &crate::util::setup::Setup) -> HashSet<String> {
+    setup.tools.disabled.iter().cloned().collect()
 }
 
-pub fn save_disabled_tools(
-    cache: &mut crate::util::cache::StaleCache<String, String>,
-    disabled: &HashSet<String>,
-) {
-    let raw = serde_json::to_string(disabled).unwrap_or_default();
-    cache.finish_revalidation(DISABLED_TOOLS_KEY.to_string(), raw);
+pub fn save_disabled_tools(setup: &mut crate::util::setup::Setup, disabled: &HashSet<String>) {
+    setup.tools.disabled = disabled.iter().cloned().collect();
+    setup.save();
 }
 
 /// Load the persisted tool-call mode. Unknown/missing values fall back to
 /// `Native` (the default contract).
 #[must_use]
 pub fn load_tool_call_mode(
-    cache: &crate::util::cache::StaleCache<String, String>,
+    setup: &crate::util::setup::Setup,
 ) -> cosh_sdk::connector::ToolCallMode {
-    match cache.get(&TOOL_CALL_MODE_KEY.to_string()) {
-        Some(raw) if raw == "inline" => cosh_sdk::connector::ToolCallMode::Inline,
+    match setup.tools.tool_call_mode.as_str() {
+        "inline" => cosh_sdk::connector::ToolCallMode::Inline,
         _ => cosh_sdk::connector::ToolCallMode::Native,
     }
 }
 
 pub fn save_tool_call_mode(
-    cache: &mut crate::util::cache::StaleCache<String, String>,
+    setup: &mut crate::util::setup::Setup,
     mode: cosh_sdk::connector::ToolCallMode,
 ) {
-    let raw = match mode {
-        cosh_sdk::connector::ToolCallMode::Native => "native",
-        cosh_sdk::connector::ToolCallMode::Inline => "inline",
+    setup.tools.tool_call_mode = match mode {
+        cosh_sdk::connector::ToolCallMode::Native => "native".to_string(),
+        cosh_sdk::connector::ToolCallMode::Inline => "inline".to_string(),
     };
-    cache.finish_revalidation(TOOL_CALL_MODE_KEY.to_string(), raw.to_string());
+    setup.save();
 }
 
 fn internal_tools() -> &'static [(&'static str, &'static str)] {

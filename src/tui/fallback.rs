@@ -1,10 +1,4 @@
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FallbackEntry {
-    pub provider: String,
-    pub model: String,
-}
+pub use crate::util::setup::FallbackEntry;
 
 pub const DEFAULT_FALLBACKS: &[(&str, &str)] = &[
     ("nvidia", "deepseek-ai/deepseek-v4-pro"),
@@ -23,21 +17,15 @@ pub fn default_fallbacks() -> Vec<FallbackEntry> {
         .collect()
 }
 
-const FALLBACK_KEY: &str = "fallback";
-
-pub fn load_fallbacks(
-    cache: &crate::util::cache::StaleCache<String, String>,
-) -> Vec<FallbackEntry> {
-    match cache.get(&FALLBACK_KEY.to_string()) {
-        Some(raw) => serde_json::from_str(raw).unwrap_or_else(|_| default_fallbacks()),
-        None => default_fallbacks(),
+pub fn load_fallbacks(setup: &crate::util::setup::Setup) -> Vec<FallbackEntry> {
+    if setup.routing.fallbacks.is_empty() {
+        default_fallbacks()
+    } else {
+        setup.routing.fallbacks.clone()
     }
 }
 
-pub fn save_fallbacks(
-    cache: &mut crate::util::cache::StaleCache<String, String>,
-    fallbacks: &[FallbackEntry],
-) {
-    let raw = serde_json::to_string(fallbacks).unwrap_or_default();
-    cache.finish_revalidation(FALLBACK_KEY.to_string(), raw);
+pub fn save_fallbacks(setup: &mut crate::util::setup::Setup, fallbacks: &[FallbackEntry]) {
+    setup.routing.fallbacks = fallbacks.to_vec();
+    setup.save();
 }

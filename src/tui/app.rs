@@ -176,8 +176,9 @@ pub struct App {
     reasoning_dialog_original: Option<String>,
     /// Stale-while-revalidate cache for model listings, keyed by provider.
     model_cache: crate::util::cache::StaleCache<String, Vec<cosh::ModelEntry>>,
-    /// Generic preferences cache (theme, etc.) persisted as key-value pairs.
-    prefs_cache: crate::util::cache::StaleCache<String, String>,
+    /// Structured user preferences (theme, tools, routing) persisted in
+    /// `~/.config/cosh/setup.json`.
+    setup: crate::util::setup::Setup,
     /// Session persistence store (JSONL files on disk).
     session_store: SessionStore,
     /// When set, the current Confirm dialog is asking about deleting a session.
@@ -241,29 +242,27 @@ impl App {
         let (perm_tx, _perm_rx) = mpsc::unbounded_channel();
 
         let theme_registry = ThemeRegistry::new();
-        let prefs_cache = crate::util::cache::StaleCache::new("", "preferences.json");
+        let setup = crate::util::setup::Setup::load();
 
-        // Load saved fallback chain from preferences cache
-        let saved_fallbacks = fallback::load_fallbacks(&prefs_cache);
+        // Load saved fallback chain from setup config
+        let saved_fallbacks = fallback::load_fallbacks(&setup);
 
-        // Load saved disabled tools from preferences cache
-        let saved_disabled_tools = crate::routes::tools::load_disabled_tools(&prefs_cache);
+        // Load saved disabled tools from setup config
+        let saved_disabled_tools = crate::routes::tools::load_disabled_tools(&setup);
         // Persisted tool-call mode overrides the env default for the session.
-        let saved_tool_call_mode = crate::routes::tools::load_tool_call_mode(&prefs_cache);
+        let saved_tool_call_mode = crate::routes::tools::load_tool_call_mode(&setup);
 
-        // Load saved theme from preferences cache, if available
-        let saved_theme: Option<String> = prefs_cache.get(&"theme".to_string()).cloned();
-        let theme = saved_theme
-            .as_deref()
-            .and_then(|name| theme_registry.get(name))
-            .cloned()
-            .unwrap_or_else(|| theme_registry.default_theme().clone());
+        // Load saved theme from setup config
+        let theme = if setup.appearance.theme.is_empty() {
+            theme_registry.default_theme().clone()
+        } else {
+            theme_registry
+                .get(&setup.appearance.theme)
+                .cloned()
+                .unwrap_or_else(|| theme_registry.default_theme().clone())
+        };
 
-        // Load saved bell toggle from preferences cache (default: enabled)
-        let saved_bell = prefs_cache
-            .get(&"bell_enabled".to_string())
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(true);
+        let saved_bell = setup.appearance.bell_enabled;
 
         Self {
             state,
@@ -303,7 +302,7 @@ impl App {
             model_dialog_original: None,
             reasoning_dialog_original: None,
             model_cache: crate::util::cache::StaleCache::new("cache", "model.json"),
-            prefs_cache,
+            setup,
             session_store,
             pending_delete_session_id: None,
             #[cfg(feature = "embed")]
@@ -603,8 +602,8 @@ impl App {
                         self.config.theme_gen += 1;
                     }
                     // Persist theme choice so it survives restarts
-                    self.prefs_cache
-                        .finish_revalidation("theme".to_string(), name);
+                    self.setup.appearance.theme = name;
+                    self.setup.save();
                 }
                 self.theme_dialog_original = None;
                 self.dialog.pop();
@@ -1178,7 +1177,7 @@ impl App {
                     cosh_sdk::connector::ToolCallMode::Native
                 };
                 crate::routes::tools::save_tool_call_mode(
-                    &mut self.prefs_cache,
+                    &mut self.setup,
                     self.llm_config.tool_call_mode,
                 );
                 self.dialog.pop();
@@ -1216,10 +1215,8 @@ impl App {
                 variant: ToastVariant::Info,
                 duration_ms: 3000,
             });
-            self.prefs_cache.finish_revalidation(
-                "bell_enabled".to_string(),
-                self.bell_enabled.to_string(),
-            );
+            self.setup.appearance.bell_enabled = self.bell_enabled;
+            self.setup.save();
         } else {
             let cmd_name = format!("/{} ", cmd.name);
             self.prompt_view.input = cmd_name;
@@ -3132,7 +3129,7 @@ impl App {
                                     }
                                     HomeAction::OpenModelRouter => {
                                         // Refresh fallbacks from prefs cache and models from model cache
-                                        let saved = fallback::load_fallbacks(&self.prefs_cache);
+                                        let saved = fallback::load_fallbacks(&self.setup);
                                         self.router_view.set_fallbacks(saved);
                                         self.show_router = true;
                                     }
@@ -3165,7 +3162,7 @@ impl App {
                             KeyCode::Enter | KeyCode::Char(' ') => {
                                 self.internal_tools_view.toggle_current();
                                 crate::routes::tools::save_disabled_tools(
-                                    &mut self.prefs_cache,
+                                    &mut self.setup,
                                     &self.internal_tools_view.disabled,
                                 );
                                 return Ok(false);
@@ -3239,7 +3236,7 @@ impl App {
                                 if self.router_view.focus == FocusTarget::Models {
                                     self.router_view.add_selected_to_fallback(&all_models);
                                     fallback::save_fallbacks(
-                                        &mut self.prefs_cache,
+                                        &mut self.setup,
                                         &self.router_view.fallbacks,
                                     );
                                 }
@@ -3249,7 +3246,7 @@ impl App {
                                 if self.router_view.focus == FocusTarget::Fallbacks {
                                     if self.router_view.remove_selected_fallback().is_some() {
                                         fallback::save_fallbacks(
-                                            &mut self.prefs_cache,
+                                            &mut self.setup,
                                             &self.router_view.fallbacks,
                                         );
                                     }
@@ -3264,7 +3261,7 @@ impl App {
                                     if let Some(i) = idx {
                                         self.router_view.remove_fallback(i);
                                         fallback::save_fallbacks(
-                                            &mut self.prefs_cache,
+                                            &mut self.setup,
                                             &self.router_view.fallbacks,
                                         );
                                     }
@@ -5208,10 +5205,8 @@ impl App {
                                 if let Some(d) = self.dialog.current() {
                                     let sel = d.selected.min(filtered.len().saturating_sub(1));
                                     if sel < filtered.len() {
-                                        self.prefs_cache.finish_revalidation(
-                                            "theme".to_string(),
-                                            filtered[sel].clone(),
-                                        );
+                                        self.setup.appearance.theme = filtered[sel].clone();
+                                        self.setup.save();
                                     }
                                 }
                             }
@@ -5571,7 +5566,7 @@ impl App {
                         self.show_add_provider = true;
                     }
                     crate::routes::home::HomeAction::OpenModelRouter => {
-                        let saved = fallback::load_fallbacks(&self.prefs_cache);
+                        let saved = fallback::load_fallbacks(&self.setup);
                         self.router_view.set_fallbacks(saved);
                         self.show_router = true;
                     }
@@ -5605,7 +5600,7 @@ impl App {
                 .router_view
                 .handle_mouse(&all_models, &mouse, tools_area)
             {
-                fallback::save_fallbacks(&mut self.prefs_cache, &self.router_view.fallbacks);
+                fallback::save_fallbacks(&mut self.setup, &self.router_view.fallbacks);
                 if self.router_view.focus == FocusTarget::Fallbacks
                     && !self.router_view.fallbacks.is_empty()
                 {
@@ -5641,7 +5636,7 @@ impl App {
                 self.internal_tools_view.selection.selected_index = clicked_idx;
                 self.internal_tools_view.toggle_current();
                 crate::routes::tools::save_disabled_tools(
-                    &mut self.prefs_cache,
+                    &mut self.setup,
                     &self.internal_tools_view.disabled,
                 );
                 return Ok(true);
