@@ -31,7 +31,7 @@ use crate::state::AppState;
 use crate::theme::Theme;
 use crate::types::{
     AgentColors, CompactionPart, CompactionPhase, FilePart, Message, MessageRole, Part,
-    ReasoningPart, SessionStatus, ToolStatus,
+    ReasoningPart, SessionStatus, ToolPart, ToolStatus,
 };
 use std::time::Instant;
 
@@ -270,6 +270,27 @@ fn msg_has_running_compaction(msg: &Message) -> bool {
         .any(|p| matches!(p, Part::Compaction(c) if c.is_running()))
 }
 
+/// Indices of messages that can still change in place, so their change token
+/// genuinely needs re-checking: those holding a `Running` tool (its output
+/// grows / its status transitions) or a `Running` compaction (it finalizes
+/// once). Every other message is immutable once set, so re-hashing its full
+/// content every frame would pay O(whole transcript) per frame for nothing.
+/// The scan is a cheap O(parts) status pass — no content hashing.
+fn mutable_msg_indices(session: &crate::types::Session) -> Vec<usize> {
+    session
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            m.parts.iter().any(|p| {
+                matches!(p, Part::Tool(t) if matches!(t.status, ToolStatus::Running))
+                    || matches!(p, Part::Compaction(c) if c.is_running())
+            })
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 fn msg_content_token(
     msg: &Message,
     config_token: u64,
@@ -361,6 +382,19 @@ pub struct SessionView {
     /// Change-detection token of the last message when caches were last built.
     /// Used to detect streaming/tool-status changes without a full cache rebuild.
     last_msg_change_token: u64,
+    /// Change-detection token per message (parallel to `msg_height_cache`).
+    /// The incremental path re-estimates ANY message whose token changed —
+    /// not just the last — so a tool box completing/outputting in an older
+    /// message (ToolResult/ToolOutput search every message) keeps its cached
+    /// height in sync with what the render actually draws.
+    msg_change_tokens: Vec<u64>,
+    /// Indices that held a still-mutable part (Running tool / Running
+    /// compaction) during the PREVIOUS incremental height pass. Carried over
+    /// and re-checked one more pass so a tool that completes in place
+    /// (Running → Completed) between frames still lands its final height, then
+    /// it drops out on its own. This lets the incremental scan re-hash only the
+    /// few messages that can actually change instead of the whole transcript.
+    prev_mutable_msgs: Vec<usize>,
     /// ID of the session for which caches were last built.
     /// Forces a full rebuild when switching sessions with the same message count.
     last_session_id: Option<String>,
@@ -468,6 +502,8 @@ impl SessionView {
             cache_max_w: 0,
             cache_config_token: 0,
             last_msg_change_token: 0,
+            msg_change_tokens: Vec::new(),
+            prev_mutable_msgs: Vec::new(),
             text_regions_gen: 0,
             msg_cache_tokens: Vec::new(),
             msg_cache_cells: Vec::new(),
@@ -1244,15 +1280,15 @@ impl SessionView {
                     }
 
                     // Determine if this tool renders as a block (bordered box)
-                    // so we can add a small vertical margin around it.
-                    let tool_display = tool_render::tool_display(&tool.tool);
-                    let is_block = matches!(tool.status, ToolStatus::Completed)
-                        && tool.output.as_deref().is_some_and(|o| !o.trim().is_empty())
-                        && matches!(tool_display, "bash" | "write" | "edit" | "todo" | "glob");
+                    // so we can add a small vertical margin around it. Uses the
+                    // same predicate as the height estimate (`tool_is_block`),
+                    // so the drawn box plus margins matches the cached height.
+                    let is_block = Self::tool_is_block(tool);
 
-                    // Top margin — skip if this is the first part in the message
-                    // or if there isn't room for at least 1 row after it.
-                    if is_block && y > y_start && y + 1 < bottom {
+                    // Top margin — always added for block tools (the estimate
+                    // reserves it even for the first part of the message), but
+                    // skip if there isn't room for at least 1 row after it.
+                    if is_block && y + 1 < bottom {
                         y += 1;
                     }
 
@@ -1376,6 +1412,39 @@ impl SessionView {
         (y - y_).max(1)
     }
 
+    /// True when the tool renders as a bordered block (box) rather than an
+    /// inline single-line label. Mirrors what the renderers actually draw so
+    /// the height estimate and the render agree on the box's external margins:
+    /// `render_shell` boxes any bash with output (Running or Completed),
+    /// `render_glob` boxes any glob with listable output, `render_write` /
+    /// `render_edit` box only completed tools, `render_read` boxes any
+    /// completed read with parseable content, `render_todo` boxes any
+    /// non-running tool with listable output (Completed and Failed both draw).
+    fn tool_is_block(part: &ToolPart) -> bool {
+        let display = tool_render::tool_display(&part.tool);
+        let has_output = part.output.as_deref().is_some_and(|o| !o.trim().is_empty());
+        match display {
+            "bash" => has_output,
+            "glob" => tool_render::glob_block_text(part).is_some(),
+            "write" | "edit" => has_output && matches!(part.status, ToolStatus::Completed),
+            "read" => {
+                has_output
+                    && matches!(part.status, ToolStatus::Completed)
+                    && tool_render::read_block_text(part).is_some()
+            }
+            "todo" => {
+                !matches!(part.status, ToolStatus::Running)
+                    && has_output
+                    && !tool_render::format_todo_output(
+                        part.output.as_deref().unwrap_or("").trim(),
+                        &part.tool,
+                    )
+                    .is_empty()
+            }
+            _ => false,
+        }
+    }
+
     fn estimate_part_height(
         part: &Part,
         max_w: u16,
@@ -1409,16 +1478,13 @@ impl SessionView {
                 {
                     return 0;
                 }
-                // Only tools that render block-style output (shell, write, edit, todo)
+                // Only tools that render block-style output (shell, write, edit, read, todo, glob)
                 // should allocate height for the full output block. All other tool
                 // types render inline (1 line) regardless of whether they have output.
-                let is_block = t.output.is_some()
-                    && matches!(t.status, ToolStatus::Completed)
-                    && !t.output.as_deref().unwrap_or("").trim().is_empty()
-                    && matches!(
-                        tool_render::tool_display(&t.tool),
-                        "bash" | "write" | "edit" | "todo" | "glob"
-                    );
+                // The conditions mirror each renderer EXACTLY, so the cached height
+                // matches the drawn box even mid-loop (Running bash/glob with
+                // streamed output already draw their box).
+                let is_block = Self::tool_is_block(t);
                 if is_block {
                     let output = t.output.as_deref().unwrap_or("").trim();
                     // Add 2 rows for the block's internal padding (top/bottom border lines),
@@ -1460,6 +1526,23 @@ impl SessionView {
                         // line_h = diff_lines + 3 (padding + title + gap)
                         // + 2 for external margins (top + bottom)
                         diff_lines + 5
+                    } else if tool_render::tool_display(&t.tool) == "read" {
+                        // Read block: preview collapsed to a few lines, full
+                        // code when expanded (mirrors render_read).
+                        let id = t.tool_call_id.as_deref().unwrap_or("read");
+                        let code = tool_render::read_block_text(t).unwrap_or_default();
+                        let collapsed = crate::util::scroll::collapse_tool_output(&code, 10, 800);
+                        let expanded = tool_state.is_expanded(id);
+                        let display = if expanded || !collapsed.overflow {
+                            &code
+                        } else {
+                            &collapsed.output
+                        };
+                        let lines =
+                            display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
+                        // Internal box: top padding (1) + title + content +
+                        // bottom padding (1) = lines + 3; +2 external margins.
+                        lines + 5
                     } else {
                         // bash (and write) block. When the tool is expanded, the full
                         // output is rendered, so the height must match render_shell.
@@ -1784,15 +1867,20 @@ impl SessionView {
                     if click_y >= part_y && click_y < part_y + part_h {
                         if let crate::types::Part::Tool(tool) = part {
                             let display = tool_render::tool_display(&tool.tool);
-                            if display == "bash" || display == "glob" {
+                            if display == "bash" || display == "glob" || display == "read" {
                                 let output =
                                     tool.output.as_deref().unwrap_or("").trim().to_string();
                                 if !output.is_empty() {
-                                    let id = tool.tool_call_id.as_deref().unwrap_or(
-                                        if display == "glob" { "glob" } else { "shell" },
-                                    );
+                                    let id =
+                                        tool.tool_call_id.as_deref().unwrap_or(match display {
+                                            "glob" => "glob",
+                                            "read" => "read",
+                                            _ => "shell",
+                                        });
                                     let text = if display == "glob" {
                                         tool_render::glob_block_text(tool).unwrap_or_default()
+                                    } else if display == "read" {
+                                        tool_render::read_block_text(tool).unwrap_or_default()
                                     } else {
                                         output
                                     };
@@ -1972,8 +2060,10 @@ impl SessionView {
                 self.cache_config_token = config_tok;
                 self.last_msg_change_token =
                     session.messages.last().map(msg_change_token).unwrap_or(0);
+                self.msg_change_tokens = session.messages.iter().map(msg_change_token).collect();
                 self.last_session_id = Some(session.id.clone());
                 self.last_tool_state_version = self.tool_state.version;
+                self.prev_mutable_msgs = mutable_msg_indices(session);
                 self.cached_total_height = self.rebuild_prefix_y();
                 // When the session, expansion state, terminal width, or config
                 // changed, the previous actual_total_height was computed for a
@@ -2036,8 +2126,11 @@ impl SessionView {
                 self.cache_config_token = config_tok;
                 self.last_msg_change_token =
                     session.messages.last().map(msg_change_token).unwrap_or(0);
+                self.msg_change_tokens
+                    .extend(session.messages.iter().skip(prev_len).map(msg_change_token));
                 self.last_session_id = Some(session.id.clone());
                 self.last_tool_state_version = self.tool_state.version;
+                self.prev_mutable_msgs = mutable_msg_indices(session);
                 // Incremental: add new messages' heights plus a gap for each.
                 // All new messages have idx > 0 (prev_len >= 1), so gap = 1 per message.
                 let new_count = self.msg_height_cache.len() - prev_len;
@@ -2074,58 +2167,89 @@ impl SessionView {
                 }
             }
         } else {
-            // Incremental update: refresh only the last message when its
-            // content/status changes (streaming token generation, tool completion).
-            let current_token = session.messages.last().map(msg_change_token).unwrap_or(0);
-            if current_token != self.last_msg_change_token && !self.msg_height_cache.is_empty() {
+            // Incremental update: re-estimate ANY message that can still
+            // change. Streaming text and tool completion normally touch only
+            // the last message, but ToolResult/ToolError (app.rs) and glob/grep
+            // ToolOutput (app.rs) search EVERY message for the running tool
+            // part, so a box in an OLDER message can complete or grow while a
+            // newer message streams below. Re-estimating it keeps the cached
+            // height in sync with the box the render actually draws.
+            //
+            // Only messages that CAN change are re-hashed each pass: the last
+            // message (always) plus any message with a Running tool / Running
+            // compaction, plus those that had a running part LAST pass (a tool
+            // completing in place between frames is no longer `Running`, but we
+            // still catch it once so its final height lands). Everything else is
+            // immutable, so hashing its full content per frame would pay
+            // O(whole transcript) every frame for nothing.
+            let mut any_changed = false;
+            let mut changed_last = false;
+            if !self.msg_height_cache.is_empty() {
                 let last_idx = session.messages.len() - 1;
-                let last_msg = &session.messages[last_idx];
-                let part_hs: Vec<u16> = last_msg
-                    .parts
-                    .iter()
-                    .map(|p| {
-                        Self::estimate_part_height(
-                            p,
-                            max_w,
-                            config,
-                            &last_msg.role,
-                            &self.tool_state,
-                        )
-                    })
-                    .collect();
-                let msg_h = Self::render_message_height(
-                    last_msg,
-                    max_w,
-                    config,
-                    Some(&part_hs),
-                    &self.tool_state,
-                );
-                let old_last_h = self.msg_height_cache[last_idx];
-                if last_idx < self.part_heights_cache.len() {
-                    self.part_heights_cache[last_idx] = part_hs;
-                    self.msg_height_cache[last_idx] = msg_h;
+                // Take last pass's mutable set (carried over to catch an
+                // in-place completion), then store this pass's for next time.
+                let prev_mutable = std::mem::take(&mut self.prev_mutable_msgs);
+                let curr_mutable = mutable_msg_indices(session);
+                let is_candidate = |idx: usize| {
+                    idx == last_idx
+                        || prev_mutable.binary_search(&idx).is_ok()
+                        || curr_mutable.binary_search(&idx).is_ok()
+                };
+                for (idx, msg) in session.messages.iter().enumerate() {
+                    if !is_candidate(idx) {
+                        continue;
+                    }
+                    let token = msg_change_token(msg);
+                    if token == self.msg_change_tokens.get(idx).copied().unwrap_or(u64::MAX) {
+                        continue;
+                    }
+                    let part_hs: Vec<u16> = msg
+                        .parts
+                        .iter()
+                        .map(|p| {
+                            Self::estimate_part_height(
+                                p,
+                                max_w,
+                                config,
+                                &msg.role,
+                                &self.tool_state,
+                            )
+                        })
+                        .collect();
+                    let msg_h = Self::render_message_height(
+                        msg,
+                        max_w,
+                        config,
+                        Some(&part_hs),
+                        &self.tool_state,
+                    );
+                    if idx < self.part_heights_cache.len() {
+                        self.part_heights_cache[idx] = part_hs;
+                        self.msg_height_cache[idx] = msg_h;
+                    }
+                    if idx < self.msg_change_tokens.len() {
+                        self.msg_change_tokens[idx] = token;
+                    }
+                    changed_last |= idx == last_idx;
+                    any_changed = true;
                 }
-                self.last_msg_change_token = current_token;
+                self.prev_mutable_msgs = curr_mutable;
+            }
+            if any_changed {
+                // The changed message's height moved, so every start position
+                // after the first changed message shifts — rebuild the whole
+                // prefix_y (O(n) sums) and the cached total.
+                self.cached_total_height = self.rebuild_prefix_y();
+                self.last_msg_change_token =
+                    session.messages.last().map(msg_change_token).unwrap_or(0);
                 self.last_session_id = Some(session.id.clone());
                 self.last_tool_state_version = self.tool_state.version;
-                // Incremental: update cached total by the height difference.
-                // Message count is unchanged, so no gap adjustment needed.
-                self.cached_total_height += msg_h - old_last_h;
-                // The LAST message's start position never changes (only its
-                // height), so only the final prefix_y entry (the total) moves.
-                if let Some(last) = self.prefix_y.last_mut() {
-                    *last += msg_h - old_last_h;
-                }
                 // Sync actual_total_height using .max() — see note above.
                 self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
-                // Rate-limited: this fires on EVERY frame while streaming.
                 if self.render_frame.is_multiple_of(30) {
-                    log::debug!("[PERF] msg_height_cache: updated last msg (streaming)");
-                }
-            } else {
-                // Rate-limited: this fires on EVERY idle frame otherwise.
-                if self.render_frame.is_multiple_of(30) {
-                    log::debug!("[PERF] msg_height_cache: hit (cached)");
+                    log::debug!(
+                        "[PERF] msg_height_cache: incremental update (last={changed_last})"
+                    );
                 }
             }
             HeightCacheUpdate::default()

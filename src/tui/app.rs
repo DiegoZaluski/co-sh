@@ -96,6 +96,10 @@ const FOOTER_HEIGHT: u16 = 1;
 /// with a width of `RATIO * main_area` but at least `MIN_WIDTH` characters wide.
 const EMPTY_SESSION_PROMPT_MIN_WIDTH: u16 = 50;
 const EMPTY_SESSION_PROMPT_RATIO: f64 = 0.4;
+/// Rows always reserved for the conversation (or logo) above the prompt, so the
+/// responsive prompt limit never swallows the whole screen even on a very short
+/// terminal.
+const MIN_PROMPT_RESERVE_ROWS: u16 = 4;
 
 enum AppMode {
     Home,
@@ -105,6 +109,15 @@ enum AppMode {
     Router,
     #[cfg(feature = "embed")]
     Rag,
+}
+
+/// Result of `App::session_main_area`: the session chat's content area plus
+/// the sidebar/right-panel widths that were subtracted, so `render` and the
+/// mouse dispatch cannot drift apart.
+struct SessionArea {
+    main: Rect,
+    sidebar_w: u16,
+    right_panel_w: u16,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1795,6 +1808,32 @@ impl App {
         Ok(())
     }
 
+    /// The session view's content area: full terminal minus the open sidebar
+    /// and (in Session mode) the visible right panel. Shared by `render` and
+    /// the mouse dispatch so click hit-testing uses the EXACT width the view
+    /// rendered at — a wider mouse area would re-wrap every message, shifting
+    /// `prefix_y` and making tool-box clicks land on the wrong row.
+    fn session_main_area(&self, area: Rect) -> SessionArea {
+        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+        let right_panel_w = if matches!(self.mode(), AppMode::Session)
+            && (should_show_right_panel(area.width, &self.state.right_panel))
+        {
+            RIGHT_PANEL_WIDTH
+        } else {
+            0
+        };
+        SessionArea {
+            main: Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w + right_panel_w),
+                area.height,
+            ),
+            sidebar_w,
+            right_panel_w,
+        }
+    }
+
     fn render(&mut self, frame: &mut Frame<'_>, delta_time: f64) {
         // Sync live_requested — keeps the render loop running smoothly.
         // Session: during streaming, sticky scroll needs continuous re-rendering.
@@ -1862,21 +1901,11 @@ impl App {
 
             let bug_w = BUG_REPORT_TEXT.chars().count() as u16;
 
-            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
-
-            let right_panel_w = if matches!(self.mode(), AppMode::Session)
-                && (should_show_right_panel(area.width, &self.state.right_panel))
-            {
-                RIGHT_PANEL_WIDTH
-            } else {
-                0
-            };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w + right_panel_w),
-                area.height,
-            );
+            let SessionArea {
+                main: main_area,
+                sidebar_w,
+                right_panel_w,
+            } = self.session_main_area(area);
 
             // Context info bar — only after the user has sent at least one
             // message. Shows the agent's current context against the model
@@ -2008,7 +2037,12 @@ impl App {
             };
 
             let prompt_h = if is_session && !hide_prompt_and_spinner {
-                self.prompt_view.required_height(prompt_area_w)
+                // Responsive vertical budget: everything between the header and
+                // the footer, minus the rows always reserved for the session.
+                let prompt_budget = footer_y
+                    .saturating_sub(area.y + 1)
+                    .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+                self.prompt_view.required_height(prompt_area_w, prompt_budget)
             } else {
                 0
             };
@@ -4917,9 +4951,14 @@ impl App {
                             area.width.saturating_sub(sidebar_w),
                             area.height,
                         );
-                        let prompt_h = self
-                            .prompt_view
-                            .required_height(main_area.width.saturating_sub(4));
+                        let footer_y = main_area.bottom().saturating_sub(1);
+                        let prompt_budget = footer_y
+                            .saturating_sub(area.y + 1)
+                            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+                        let prompt_h = self.prompt_view.required_height(
+                            main_area.width.saturating_sub(4),
+                            prompt_budget,
+                        );
                         let question_h = if self.question_dialog.visible {
                             self.question_dialog
                                 .required_height(main_area.width.saturating_sub(4))
@@ -4931,7 +4970,6 @@ impl App {
                                 && self.agent_spinner.is_some()
                                 && !self.question_dialog.visible,
                         );
-                        let footer_y = main_area.bottom().saturating_sub(1);
                         let prompt_area_y = footer_y.saturating_sub(prompt_h);
                         let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
                         let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
@@ -5264,18 +5302,19 @@ impl App {
                 area.width.saturating_sub(sidebar_w),
                 area.height,
             );
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let prompt_budget = footer_y
+                .saturating_sub(area.y + 1)
+                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
             let prompt_h = if is_session {
                 self.prompt_view
-                    .required_height(main_area.width.saturating_sub(4))
+                    .required_height(main_area.width.saturating_sub(4), prompt_budget)
             } else {
                 0
             };
             let prompt_area = Rect::new(
                 main_area.x + 2,
-                main_area
-                    .bottom()
-                    .saturating_sub(1)
-                    .saturating_sub(prompt_h),
+                footer_y.saturating_sub(prompt_h),
                 main_area.width.saturating_sub(4),
                 prompt_h,
             );
@@ -5302,16 +5341,19 @@ impl App {
                 area.height,
             );
             // When question dialog is visible, prompt is hidden (like OpenCode)
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let prompt_budget = footer_y
+                .saturating_sub(area.y + 1)
+                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
             let prompt_h = if self.question_dialog.visible {
                 0
             } else {
                 self.prompt_view
-                    .required_height(main_area.width.saturating_sub(4))
+                    .required_height(main_area.width.saturating_sub(4), prompt_budget)
             };
             let question_h = self
                 .question_dialog
                 .required_height(main_area.width.saturating_sub(4));
-            let footer_y = main_area.bottom().saturating_sub(1);
             let prompt_area_y = footer_y.saturating_sub(prompt_h);
             let question_h = question_h.min(prompt_area_y.saturating_sub(area.y + 1));
             let question_area_y = prompt_area_y.saturating_sub(question_h);
@@ -5431,16 +5473,16 @@ impl App {
         // 7. Session view (tool expand/collapse)
         if matches!(self.mode(), AppMode::Session) {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
+            let SessionArea {
+                main: main_area, ..
+            } = self.session_main_area(area);
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let prompt_budget = footer_y
+                .saturating_sub(area.y + 1)
+                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
             let prompt_h = self
                 .prompt_view
-                .required_height(main_area.width.saturating_sub(4));
+                .required_height(main_area.width.saturating_sub(4), prompt_budget);
             let question_h = if self.question_dialog.visible {
                 self.question_dialog
                     .required_height(main_area.width.saturating_sub(4))
@@ -5452,7 +5494,6 @@ impl App {
                     && self.agent_spinner.is_some()
                     && !self.question_dialog.visible,
             );
-            let footer_y = main_area.bottom().saturating_sub(1);
             let prompt_area_y = footer_y.saturating_sub(prompt_h);
             let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
             let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
@@ -5692,7 +5733,12 @@ impl App {
             (main_area.x + 2, full_w)
         };
 
-        let prompt_h = self.prompt_view.required_height(prompt_area_w);
+        // Same responsive budget as `render()` so mouse mapping matches the
+        // actually-rendered prompt height on every screen size.
+        let prompt_budget = footer_y
+            .saturating_sub(area.y + 1)
+            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+        let prompt_h = self.prompt_view.required_height(prompt_area_w, prompt_budget);
 
         let logo_block_h = if is_empty_session {
             LOGO_CHAT.len() as u16 + 1
@@ -5871,6 +5917,66 @@ mod tests {
         assert_eq!(format_tokens(123_456), "123,456");
         assert_eq!(format_tokens(9_876_543_210), "9,876,543,210");
         assert_eq!(format_tokens(usize::MAX), "18,446,744,073,709,551,615");
+    }
+
+    /// The session chat area must shrink by the right-panel width whenever the
+    /// panel is visible — and the mouse dispatch shares this exact helper with
+    /// `render`. A wider mouse area re-wraps every message and shifts `prefix_y`,
+    /// making tool-box expand/collapse clicks land on the wrong row (the bug was
+    /// "boxes can't be expanded while the agent loop is active").
+    #[tokio::test]
+    async fn session_main_area_matches_render_width_with_right_panel() {
+        use ratatui::layout::Rect;
+
+        use super::RIGHT_PANEL_WIDTH;
+        use crate::routes::session::right_panel::types::RightPanelState;
+
+        let mut app = App::new("/tmp".to_string());
+        let id = super::generate_session_id();
+        app.state.add_empty_session(id.clone(), "t".into(), 0);
+        app.state.current_session_id = Some(id);
+        app.state.right_panel = RightPanelState::new();
+        app.state.right_panel.start_pty("echo hi".into(), None);
+
+        let area = Rect::new(0, 0, 140, 30);
+        let sa = app.session_main_area(area);
+        assert_eq!(sa.main.width, 140 - RIGHT_PANEL_WIDTH);
+        assert_eq!(sa.right_panel_w, RIGHT_PANEL_WIDTH);
+
+        app.sidebar.open = true;
+        let sa = app.session_main_area(area);
+        assert_eq!(
+            sa.main.width,
+            140 - super::SIDEBAR_WIDTH - RIGHT_PANEL_WIDTH,
+            "open sidebar + right panel must both be subtracted"
+        );
+    }
+
+    /// Hidden panel (narrow terminal or no content) must not shrink the area.
+    #[tokio::test]
+    async fn session_main_area_ignores_hidden_right_panel() {
+        use ratatui::layout::Rect;
+
+        use crate::routes::session::right_panel::types::RightPanelState;
+
+        let mut app = App::new("/tmp".to_string());
+        app.state.add_empty_session("t".into(), "t".into(), 0);
+        app.state.current_session_id = Some("t".into());
+        app.state.right_panel = RightPanelState::new();
+
+        // Narrow terminal → panel hidden even if there were content.
+        app.state.right_panel.start_pty("echo hi".into(), None);
+        let sa = app.session_main_area(Rect::new(0, 0, 90, 30));
+        assert_eq!(sa.right_panel_w, 0);
+        assert_eq!(sa.main.width, 90);
+
+        // Wide terminal but no todos/pty content → panel hidden.
+        let mut app2 = App::new("/tmp".to_string());
+        app2.state.add_empty_session("t".into(), "t".into(), 0);
+        app2.state.current_session_id = Some("t".into());
+        let sa2 = app2.session_main_area(Rect::new(0, 0, 140, 30));
+        assert_eq!(sa2.right_panel_w, 0);
+        assert_eq!(sa2.main.width, 140);
     }
 
     /// The full create-db field drag selection flow through the app's real

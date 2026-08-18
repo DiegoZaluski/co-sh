@@ -983,6 +983,436 @@ fn test_bash_output_collapse_shrinks_without_scroll_gap() {
     assert!(!buffer_text(&buf).contains("line 119"));
 }
 
+#[test]
+fn test_running_bash_click_can_expand_box() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let msg = Message {
+        id: "msg-bash-running".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "bash_run".into(),
+            input: serde_json::json!({ "command": "echo hello" }),
+            output: Some(output),
+            status: ToolStatus::Running,
+            tool_call_id: Some("bash-running".into()),
+            is_start: true,
+            is_streaming: false,
+            cached_line_count: None,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Working;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 2,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking inside a running bash block must be consumed by the session view"
+    );
+    assert!(
+        view.tool_state.is_expanded("bash-running"),
+        "clicking a running bash block must expand it (collapse preview shows 10 of 20 lines)"
+    );
+}
+
+/// Regression: a completed bash box must stay clickable to expand while the
+/// agent loop streams NEW content below it (the box is an OLD message). The
+/// scroll is sticky-bottom, so the box's screen row stays pinned while the
+/// streaming tail grows.
+#[test]
+fn test_completed_bash_click_expands_while_new_content_streams() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let bash_msg = Message {
+        id: "msg-bash".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "bash_run".into(),
+            input: serde_json::json!({ "command": "echo hello" }),
+            output: Some(output),
+            status: ToolStatus::Completed,
+            tool_call_id: Some("bash-old".into()),
+            is_start: true,
+            is_streaming: false,
+            cached_line_count: None,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let stream_msg = Message {
+        id: "msg-stream".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Text(TextPart {
+            text: "Working on it...\n".into(),
+            synthetic: false,
+        })],
+        created_at: 1,
+        agent: None,
+        model: None,
+    };
+
+    let mut state = AppState::new();
+    let session = Session {
+        id: "test-session".into(),
+        title: "Test".into(),
+        created_at: 0,
+        messages: vec![bash_msg, stream_msg],
+    };
+    state.add_session(session);
+    state.current_session_id = Some("test-session".into());
+    state.status = SessionStatus::Working;
+
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+
+    // Grow the streaming tail across frames, exactly like the agent loop
+    // appending content while the user reads the old bash box.
+    for _ in 0..3 {
+        if let Some(session) = state.current_session_mut() {
+            if let Some(last) = session.messages.last_mut() {
+                if let Some(Part::Text(t)) = last.parts.last_mut() {
+                    t.text
+                        .push_str("more streaming output continues here to grow the tail\n");
+                } else {
+                    last.parts.push(Part::Text(TextPart {
+                        text: "more streaming output continues here to grow the tail\n".into(),
+                        synthetic: false,
+                    }));
+                }
+            }
+        }
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    }
+
+    // The bash box's hint row is the click target (old message, pinned by
+    // sticky-bottom while the tail grew).
+    let hint_row = (0..area.height)
+        .find(|&r| {
+            let row_text: String = (0..area.width)
+                .filter_map(|cx| buf.cell((cx, r)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row_text.contains("Click to expand")
+        })
+        .expect("bash box hint row must be visible while the tail streams");
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        hint_row,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking the bash box while the tail streams must be consumed"
+    );
+    assert!(
+        view.tool_state.is_expanded("bash-old"),
+        "an old completed bash box must expand even while the agent loop streams below it"
+    );
+}
+
+#[test]
+fn test_running_glob_click_can_expand_streaming_box() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output = serde_json::json!({
+        "pattern": "**/*.rs",
+        "formatted": (0..20).map(|i| format!("src/file_{i}.rs")).collect::<Vec<_>>().join("\n")
+    })
+    .to_string();
+    let msg = Message {
+        id: "msg-glob-running".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "find_glob".into(),
+            input: serde_json::json!({ "pattern": "**/*.rs" }),
+            output: Some(output),
+            status: ToolStatus::Running,
+            tool_call_id: Some("glob-running".into()),
+            is_start: true,
+            is_streaming: true,
+            cached_line_count: Some(20),
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Working;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // The glob box is drawn tall (block with "Click to expand") while RUNNING,
+    // exactly like find_glob/find_grep stream matches into a Running part.
+    let hint_row = (0..area.height)
+        .find(|&r| {
+            let row_text: String = (0..area.width)
+                .filter_map(|cx| buf.cell((cx, r)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row_text.contains("Click to expand")
+        })
+        .expect("running glob box must render the expand hint");
+    assert!(
+        hint_row > 3,
+        "streaming glob box must be drawn tall, hint at row {hint_row}"
+    );
+
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        hint_row,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking the running glob box must be consumed by the session view"
+    );
+    assert!(
+        view.tool_state.is_expanded("glob-running"),
+        "clicking a running (streaming) glob box must expand it"
+    );
+}
+
+/// Regression guard: a bash box BELOW earlier wrapped text must expand when
+/// the mouse handler is given the SAME session area the view rendered at.
+/// (The app guarantees this via `App::session_main_area`, shared by render and
+/// the mouse dispatch — a wider mouse area would re-wrap the leading message,
+/// shift the box's `prefix_y`, and make the click miss.)
+#[test]
+fn test_completed_bash_click_expands_below_wrapped_message_with_matching_widths() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    // Long bash output that wraps differently at different widths.
+    let output: String = (0..40)
+        .map(|i| format!("some very long output line number {i}\n"))
+        .collect();
+    let msg = Message {
+        id: "msg-bash-w".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "bash_run".into(),
+            input: serde_json::json!({ "command": "echo hello" }),
+            output: Some(output),
+            status: ToolStatus::Completed,
+            tool_call_id: Some("bash-w".into()),
+            is_start: true,
+            is_streaming: false,
+            cached_line_count: None,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = AppState::new();
+    let session = Session {
+        id: "test-session".into(),
+        title: "Test".into(),
+        created_at: 0,
+        messages: vec![
+            Message {
+                id: "msg-lead".into(),
+                role: MessageRole::Assistant,
+                parts: vec![Part::Text(TextPart {
+                    text: (0..12)
+                        .map(|i| {
+                            format!("This is a fairly long line of model output text number {i} ")
+                                .repeat(3)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    synthetic: false,
+                })],
+                created_at: 0,
+                agent: None,
+                model: None,
+            },
+            msg,
+        ],
+    };
+    state.add_session(session);
+    state.current_session_id = Some("test-session".into());
+    state.status = SessionStatus::Working;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    let hint_row = (0..area.height)
+        .find(|&r| {
+            let row_text: String = (0..area.width)
+                .filter_map(|cx| buf.cell((cx, r)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row_text.contains("Click to expand")
+        })
+        .expect("bash box hint row must be visible");
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        hint_row,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking the bash box below wrapped text must be consumed"
+    );
+    assert!(
+        view.tool_state.is_expanded("bash-w"),
+        "the bash box must expand when render and mouse share the same area"
+    );
+}
+
+#[test]
+fn test_summarizing_box_click_expands_while_running() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{CompactionPart, CompactionPhase, Message, MessageRole, Part};
+
+    let mut text = String::from("# My Heading\n\n");
+    for i in 0..19 {
+        text.push_str(&format!("line {i}\n\n"));
+    }
+    let msg = Message {
+        id: "msg-summarize-running".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Compaction(CompactionPart {
+            phase: CompactionPhase::Llm,
+            started_at: 0,
+            elapsed_ms: None,
+            text,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Working;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 2,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking inside a running Summarizing box must be consumed by the session view"
+    );
+    assert!(
+        view.tool_state.is_expanded("summarize-0"),
+        "clicking a running Summarizing box must expand it"
+    );
+}
+
+#[test]
+fn test_completed_bash_click_expands_while_status_working() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let msg = Message {
+        id: "msg-bash-done".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "bash_run".into(),
+            input: serde_json::json!({ "command": "echo hello" }),
+            output: Some(output),
+            status: ToolStatus::Completed,
+            tool_call_id: Some("bash-done".into()),
+            is_start: true,
+            is_streaming: false,
+            cached_line_count: None,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Working;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 2,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking inside a completed bash block while the loop is active must be consumed"
+    );
+    assert!(
+        view.tool_state.is_expanded("bash-done"),
+        "clicking a completed bash block must expand it even while the loop is running"
+    );
+}
+
 /// Glob results render as an expandable block: collapsed preview shows only a
 /// bounded set of file paths, a click toggles the full grouped list, and the
 /// message/part heights grow to match (mirroring the bash block behaviour).
@@ -2878,4 +3308,709 @@ fn prune_render_cache_breaks_stamp_ties_without_violating_invariants() {
             );
         }
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Streaming render/scroll divergences near tool boxes (bugs reported:
+// "chat voltando sozinho para cima perto de caixas" + "antecipação de subida"
+// with a slight sway). These tests VERIFY whether the divergence actually
+// happens; they are intentionally written against the intended invariant.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Build an AppState with `msgs` as the session messages.
+fn test_state_msgs(msgs: Vec<Message>) -> AppState {
+    let mut state = AppState::new();
+    let session = Session {
+        id: "test-session".into(),
+        title: "Test".into(),
+        created_at: 0,
+        messages: msgs,
+    };
+    state.add_session(session);
+    state.current_session_id = Some("test-session".into());
+    state.status = SessionStatus::Working;
+    state
+}
+
+/// Build a glob tool part with `n` streamed matches. Mirrors the JSON shape
+/// `find_glob` produces so `glob_block_text` renders a box.
+fn glob_part(tool_call_id: &str, n: usize, status: ToolStatus) -> Part {
+    let matches: Vec<serde_json::Value> = (0..n)
+        .map(|i| serde_json::json!({ "path": format!("src/mod{i}/file{i}.rs") }))
+        .collect();
+    Part::Tool(ToolPart {
+        tool: "find_glob".into(),
+        input: serde_json::json!({ "pattern": "**/*.rs", "path": "src" }),
+        output: Some(serde_json::json!({ "matches": matches }).to_string()),
+        status,
+        tool_call_id: Some(tool_call_id.into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+    })
+}
+
+/// Build a bash tool part with `n` lines of output.
+fn bash_part(tool_call_id: &str, n: usize, status: ToolStatus) -> Part {
+    let output: String = (0..n).map(|i| format!("line {i}\n")).collect();
+    Part::Tool(ToolPart {
+        tool: "bash_run".into(),
+        input: serde_json::json!({ "command": "echo hello" }),
+        output: if n == 0 { None } else { Some(output) },
+        status,
+        tool_call_id: Some(tool_call_id.into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+    })
+}
+
+/// Build a read tool part whose output mirrors `fs_read`: a JSON array of
+/// results carrying hashline content (header line, `N| text` body, and a
+/// trailing bracketed notice), exactly like `crates/cosh-tools/src/fs/read.rs`.
+fn read_part(tool_call_id: &str, n: usize, status: ToolStatus) -> Part {
+    let body: String = (0..n)
+        .map(|i| format!("{}| fn code_line_{i}() {{ return {i}; }}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = format!(
+        "¶src/main.rs#abc123\n{body}\n[{n} more lines in file; continue with line_range \"{}-{}\"]",
+        n + 1,
+        n + 10
+    );
+    let results = serde_json::json!([{
+        "path": "src/main.rs",
+        "file_hash": "abc123",
+        "header": "¶src/main.rs#abc123",
+        "content": content,
+        "warnings": null
+    }]);
+    Part::Tool(ToolPart {
+        tool: "fs_read".into(),
+        input: serde_json::json!({ "targets": [{ "path": "src/main.rs" }] }),
+        output: Some(results.to_string()),
+        status,
+        tool_call_id: Some(tool_call_id.into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+    })
+}
+
+/// True when the buffer row is entirely blank (space glyphs only).
+fn row_is_blank(buf: &Buffer, y: u16) -> bool {
+    (0..buf.area.width).all(|x| {
+        buf.cell((x, y))
+            .map(|c| c.symbol().chars().next().unwrap_or(' ') == ' ')
+            .unwrap_or(true)
+    })
+}
+
+/// PROBLEM 1: a RUNNING glob with streamed output draws its box but the
+/// render-side `is_block` (margins) only applies to Completed tools, while
+/// the height estimate treats Running-with-output as a block. The cached
+/// height is therefore 2 rows TALLER than the actual drawn box → a blank
+/// gap at the bottom ("antecipação de subida") and the scroll clamp pulling
+/// the view up ("voltar para cima").
+#[test]
+fn test_running_glob_streaming_no_bottom_gap() {
+    let theme = test_theme();
+    let config = test_config();
+
+    let msg0 = Message {
+        id: "msg-user".into(),
+        role: MessageRole::User,
+        parts: vec![Part::Text(TextPart {
+            text: "list src files".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let msg1 = Message {
+        id: "msg-stream".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            glob_part("glob-1", 20, ToolStatus::Running),
+            Part::Text(TextPart {
+                text: (0..40)
+                    .map(|i| format!("streaming line number {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                synthetic: false,
+            }),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state_msgs(vec![msg0, msg1]);
+    let mut view = SessionView::new();
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    eprintln!(
+        "[GLOB_GAP] actual_total={} cached_total={} scroll_y={} sticky={} last_row_blank={}",
+        view.actual_total_height,
+        view.cached_total_height,
+        view.scroll_y,
+        view.is_sticky_bottom,
+        row_is_blank(&buf, area.height - 1)
+    );
+
+    // The actual rendered height must match the cached estimate. A divergence
+    // here is what pushes content up / leaves a bottom gap near the box.
+    assert_eq!(
+        view.actual_total_height, view.cached_total_height,
+        "Running glob with streamed output: actual render height diverges from \
+         the cached estimate (box margins mismatch) — the streamed content is \
+         shifted up with a blank gap at the bottom"
+    );
+
+    // With sticky bottom, the last visible row must contain content, not a gap.
+    if view.is_sticky_bottom || view.is_at_bottom() {
+        assert!(
+            !row_is_blank(&buf, area.height - 1),
+            "sticky-bottom view shows a blank gap at the last row near the box"
+        );
+    }
+}
+
+/// PROBLEM 1, bash variant: a RUNNING bash with output draws its box
+/// (render_shell draws whenever output is non-empty) but the height cache
+/// estimates it as a block WITH margins → 2-row divergence while streaming.
+#[test]
+fn test_running_bash_streaming_no_bottom_gap() {
+    let theme = test_theme();
+    let config = test_config();
+
+    let msg0 = Message {
+        id: "msg-user".into(),
+        role: MessageRole::User,
+        parts: vec![Part::Text(TextPart {
+            text: "run ls".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let msg1 = Message {
+        id: "msg-stream".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            bash_part("bash-1", 12, ToolStatus::Running),
+            Part::Text(TextPart {
+                text: (0..40)
+                    .map(|i| format!("streaming line number {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                synthetic: false,
+            }),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state_msgs(vec![msg0, msg1]);
+    let mut view = SessionView::new();
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    eprintln!(
+        "[BASH_GAP] actual_total={} cached_total={} scroll_y={} sticky={} last_row_blank={}",
+        view.actual_total_height,
+        view.cached_total_height,
+        view.scroll_y,
+        view.is_sticky_bottom,
+        row_is_blank(&buf, area.height - 1)
+    );
+
+    assert_eq!(
+        view.actual_total_height, view.cached_total_height,
+        "Running bash with output: actual render height diverges from the cached \
+         estimate (box margins mismatch)"
+    );
+}
+
+/// PROBLEM 1 effect: while a Running box with output streams, `actual_total`
+/// stays 2 rows below `cached_total`, so the sticky scroll anchor and the
+/// render-start clamp fight each other → scroll_y drifts back up ("voltar
+/// para cima") and sways as tokens arrive. scroll_y must never decrease.
+#[test]
+fn test_streaming_scroll_does_not_drift_up_near_box() {
+    let theme = test_theme();
+    let config = test_config();
+
+    let msg0 = Message {
+        id: "msg-user".into(),
+        role: MessageRole::User,
+        parts: vec![Part::Text(TextPart {
+            text: "search".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+
+    // Grow the glob box's streamed output across frames (mimics ToolOutput).
+    let mut view = SessionView::new();
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buf = Buffer::empty(area);
+
+    let mut prev_scroll = 0i32;
+    for n in [4usize, 8, 12, 20, 30] {
+        let msg1 = Message {
+            id: "msg-stream".into(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                glob_part("glob-1", n, ToolStatus::Running),
+                Part::Text(TextPart {
+                    text: (0..30)
+                        .map(|i| format!("streaming line number {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    synthetic: false,
+                }),
+            ],
+            created_at: 0,
+            agent: None,
+            model: None,
+        };
+        let state = test_state_msgs(vec![msg0.clone(), msg1]);
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+        eprintln!(
+            "[DRIFT] n={n:>2} scroll_y={:>4} delta={:>4} actual={:>4} cached={:>4}",
+            view.scroll_y,
+            view.scroll_y - prev_scroll,
+            view.actual_total_height,
+            view.cached_total_height
+        );
+        assert_eq!(
+            view.actual_total_height, view.cached_total_height,
+            "frame n={n}: divergence while a Running box streams output"
+        );
+        let delta = view.scroll_y - prev_scroll;
+        assert!(
+            delta >= 0,
+            "frame n={n}: scroll_y DECREASED by {delta} while content grows \
+             (chat scrolls back up near the box)"
+        );
+        prev_scroll = view.scroll_y;
+    }
+}
+
+/// PROBLEM 2: a tool box completing in a NON-LAST message. The height cache
+/// is only refreshed for the LAST message, so the completed box's cached
+/// height stays at its old (1-row) value while the render draws the full box.
+/// actual_total diverges from cached_total → the sticky anchor leaves the
+/// newest streaming text below the fold ("chat voltando para cima").
+#[test]
+fn test_non_last_box_completion_keeps_latest_stream_visible() {
+    let theme = test_theme();
+    let config = test_config();
+
+    let msg0 = Message {
+        id: "msg-user".into(),
+        role: MessageRole::User,
+        parts: vec![Part::Text(TextPart {
+            text: "run ls".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut msg1 = Message {
+        id: "msg-box".into(),
+        role: MessageRole::Assistant,
+        parts: vec![bash_part("bash-1", 0, ToolStatus::Running)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let msg2 = Message {
+        id: "msg-stream".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Text(TextPart {
+            text: (0..4)
+                .map(|i| format!("result line number {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+
+    let mut view = SessionView::new();
+    // Small viewport so the box (which inflates on completion) is visible and
+    // its growth pushes the streaming tail below the fold.
+    let area = Rect::new(0, 0, 80, 16);
+    let mut buf = Buffer::empty(area);
+
+    // Frame 1: box running, no output — everything fits, no scroll.
+    view.render(
+        &mut buf,
+        area,
+        &test_state_msgs(vec![msg0.clone(), msg1.clone(), msg2.clone()]),
+        &theme,
+        &config,
+        0.016,
+    );
+    let cached_before = view.cached_total_height;
+    let h1_before = view.msg_height_cache[1];
+    eprintln!(
+        "[STALE] before: cached_total={cached_before} msg1_h={h1_before} actual={}",
+        view.actual_total_height
+    );
+
+    // ToolResult completes the box in msg1 (a NON-last message) while msg2 streams.
+    if let Part::Tool(tp) = &mut msg1.parts[0] {
+        tp.status = ToolStatus::Completed;
+        tp.output = Some((0..20).map(|i| format!("out {i}\n")).collect());
+    }
+    view.render(
+        &mut buf,
+        area,
+        &test_state_msgs(vec![msg0, msg1, msg2]),
+        &theme,
+        &config,
+        0.016,
+    );
+
+    let cached_after = view.cached_total_height;
+    let h1_after = view.msg_height_cache[1];
+    eprintln!(
+        "[STALE] after: cached_total={cached_after} msg1_h={h1_after} actual={} scroll_y={} sticky={}",
+        view.actual_total_height, view.scroll_y, view.is_sticky_bottom
+    );
+
+    // The completed box must be reflected in the height cache.
+    assert!(
+        h1_after > h1_before,
+        "completed bash box in a non-last message left its cached height stale \
+         ({} → {}): the walk advances by the real box height but scroll/sticky \
+         still use the old estimate",
+        h1_before,
+        h1_after
+    );
+
+    // The box must not overlap the streaming tail: every box content row must
+    // sit ABOVE the first streaming line, never interleaved below it.
+    let buffer_out = buffer_text(&buf);
+    let lines: Vec<&str> = buffer_out.lines().collect();
+    let first_stream = lines
+        .iter()
+        .position(|l| l.contains("result line number 0"))
+        .expect("msg2 must be rendered");
+    let overlapping_box_rows: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .skip(first_stream)
+        .filter(|(_, l)| l.contains("out "))
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        overlapping_box_rows.is_empty(),
+        "the completed bash box overflowed its cached 1-row slot and painted \
+         over the streaming tail (box rows below msg2: {overlapping_box_rows:?}) — \
+         the non-last message's height cache is stale",
+    );
+}
+
+/// PROBLEM 2, glob variant: `find_glob`/`find_grep` ToolOutput events append
+/// lines to a Running part that may live in a NON-LAST message. Its cached
+/// height stays stale while the drawn box grows → scroll/sticky drift.
+#[test]
+fn test_non_last_glob_stream_growth_updates_cached_height() {
+    let theme = test_theme();
+    let config = test_config();
+
+    let msg0 = Message {
+        id: "msg-user".into(),
+        role: MessageRole::User,
+        parts: vec![Part::Text(TextPart {
+            text: "search".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let msg2 = Message {
+        id: "msg-stream".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Text(TextPart {
+            text: (0..4)
+                .map(|i| format!("streaming line number {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+
+    let mut view = SessionView::new();
+    // Small viewport so the glob box stays visible while it grows.
+    let area = Rect::new(0, 0, 80, 16);
+    let mut buf = Buffer::empty(area);
+
+    // Frame 1: glob Running with NO matches yet (inline, consistent).
+    let msg1 = Message {
+        id: "msg-glob".into(),
+        role: MessageRole::Assistant,
+        parts: vec![glob_part("glob-1", 0, ToolStatus::Running)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    view.render(
+        &mut buf,
+        area,
+        &test_state_msgs(vec![msg0.clone(), msg1, msg2.clone()]),
+        &theme,
+        &config,
+        0.016,
+    );
+    let h1_before = view.msg_height_cache[1];
+    eprintln!(
+        "[GLOB_STALE] n=0 scroll_y={:>4} actual={:>4} cached={:>4} msg1_h={h1_before}",
+        view.scroll_y, view.actual_total_height, view.cached_total_height
+    );
+
+    // ToolOutput events stream matches into the NON-LAST message while msg2 streams.
+    let mut prev_scroll = view.scroll_y;
+    let mut last_text_visible = false;
+    for n in [4usize, 12, 30] {
+        let msg1 = Message {
+            id: "msg-glob".into(),
+            role: MessageRole::Assistant,
+            parts: vec![glob_part("glob-1", n, ToolStatus::Running)],
+            created_at: 0,
+            agent: None,
+            model: None,
+        };
+        view.render(
+            &mut buf,
+            area,
+            &test_state_msgs(vec![msg0.clone(), msg1, msg2.clone()]),
+            &theme,
+            &config,
+            0.016,
+        );
+        last_text_visible = buffer_text(&buf).contains("streaming line number 3");
+        eprintln!(
+            "[GLOB_STALE] n={n:>2} scroll_y={:>4} delta={:>4} actual={:>4} cached={:>4} msg1_h={} tail_visible={}",
+            view.scroll_y,
+            view.scroll_y - prev_scroll,
+            view.actual_total_height,
+            view.cached_total_height,
+            view.msg_height_cache[1],
+            last_text_visible
+        );
+        // The non-last message's cached height must track the growing box.
+        assert!(
+            view.msg_height_cache[1] > h1_before,
+            "frame n={n}: the glob box's streamed growth was NOT reflected in the \
+             non-last message's cached height (stale, {} vs initial {h1_before})",
+            view.msg_height_cache[1]
+        );
+        // Cache and actual must not diverge.
+        assert_eq!(
+            view.actual_total_height, view.cached_total_height,
+            "frame n={n}: glob box growing in a non-last message diverges from \
+             the cached estimate (stale non-last height cache)"
+        );
+        let delta = view.scroll_y - prev_scroll;
+        assert!(
+            delta >= 0,
+            "frame n={n}: scroll_y decreased while the glob box grew"
+        );
+        prev_scroll = view.scroll_y;
+    }
+
+    // While the glob box grows in the non-last message, the streaming tail must
+    // stay visible at the bottom (sticky scroll must follow the box's growth).
+    assert!(
+        last_text_visible,
+        "the growing glob box pushed the streaming tail below the fold \
+         (sticky scroll uses the stale cached height)"
+    );
+}
+
+/// A completed read draws a code box (styled like Write): title `# Read <path>`,
+/// the clean code lines the model read (hashline `N| ` prefixes stripped, header
+/// and notices hidden), a blank top-margin row, and a cached height that exactly
+/// matches what the render draws (no bottom gap / scroll drift).
+#[test]
+fn test_completed_read_renders_code_box() {
+    let msg = Message {
+        id: "msg-read".into(),
+        role: MessageRole::Assistant,
+        parts: vec![read_part("read-1", 3, ToolStatus::Completed)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state(msg);
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 40);
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    let text = buffer_text(&buf);
+    assert!(
+        text.contains("# Read src/main.rs"),
+        "read box must have a `# Read src/main.rs` title"
+    );
+    assert!(
+        text.contains("fn code_line_0"),
+        "read box must show the code the model read"
+    );
+    assert!(
+        !text.contains("1| fn code_line_0"),
+        "hashline `N| ` prefixes must be stripped from the shown code"
+    );
+    assert!(
+        !text.contains("¶src/main.rs"),
+        "the hashline header must not appear inside the read box"
+    );
+    assert!(
+        !text.contains("more lines in file"),
+        "bracketed read notices must not appear inside the read box"
+    );
+
+    // Top-margin row above the box (external margin reserved by the estimate).
+    assert!(
+        row_is_blank(&buf, 0),
+        "row above the read box must be blank"
+    );
+
+    // The cached height must match the actual drawn height exactly.
+    assert_eq!(
+        view.actual_total_height, view.cached_total_height,
+        "read box height diverges from the cache estimate"
+    );
+    assert_eq!(
+        view.cached_total_height, 8,
+        "3 code lines → top margin + box(6) + bottom margin = 8 rows, got {}",
+        view.cached_total_height
+    );
+}
+
+/// A long read collapses to a preview by default (like the Glob/bash box) and
+/// expands to the FULL file the model read when clicked; the cached height
+/// tracks the toggle exactly.
+#[test]
+fn test_completed_read_expands_to_full_content() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    let msg = Message {
+        id: "msg-read".into(),
+        role: MessageRole::Assistant,
+        parts: vec![read_part("read-1", 30, ToolStatus::Completed)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state(msg);
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 80);
+    let mut buf = Buffer::empty(area);
+
+    // First render: collapsed preview (10 lines + "…" + hint), default state.
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let collapsed_h = view.cached_total_height;
+    assert!(!view.tool_state.is_expanded("read-1"));
+    assert!(
+        !buffer_text(&buf).contains("fn code_line_29"),
+        "a collapsed read must not show lines past the preview"
+    );
+    assert!(
+        buffer_text(&buf).contains("Click to expand"),
+        "a collapsed read must show the expand hint"
+    );
+    assert_eq!(collapsed_h, 17);
+    assert_eq!(view.actual_total_height, view.cached_total_height);
+
+    // Click inside the read box → expand.
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 3,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(handled);
+    assert!(view.tool_state.is_expanded("read-1"));
+
+    // Re-render: the full file is now visible and the height grew to match.
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    assert!(
+        view.cached_total_height > collapsed_h,
+        "expanding the read box must grow the cached height"
+    );
+    assert_eq!(view.cached_total_height, 36);
+    assert!(
+        buffer_text(&buf).contains("fn code_line_29"),
+        "an expanded read must show the full file the model read"
+    );
+    assert!(
+        buffer_text(&buf).contains("Click to collapse"),
+        "an expanded read must show the collapse hint"
+    );
+    assert_eq!(view.actual_total_height, view.cached_total_height);
+}
+
+/// A running read stays a single-line inline label (no box yet).
+#[test]
+fn test_running_read_stays_inline() {
+    let msg = Message {
+        id: "msg-read".into(),
+        role: MessageRole::Assistant,
+        parts: vec![read_part("read-1", 5, ToolStatus::Running)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state(msg);
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 20);
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    let text = buffer_text(&buf);
+    assert!(
+        text.contains("Read src/main.rs"),
+        "running read must keep the inline `Read <path>` label"
+    );
+    assert!(
+        !text.contains("fn code_line_0"),
+        "running read must not draw a code box yet"
+    );
+    assert_eq!(
+        view.cached_total_height, 1,
+        "running read is a single inline row"
+    );
+    assert_eq!(view.actual_total_height, view.cached_total_height);
 }
