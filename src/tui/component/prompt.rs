@@ -21,6 +21,12 @@ const CAP_H: u16 = 1;
 const FOOTER_H: u16 = 1;
 const PLACEHOLDER: &str = "Type a message...";
 
+/// Maximum number of wrapped lines the prompt box may grow to before it stops
+/// growing and starts scrolling its content upward. Generous by design: a chat
+/// message can span several lines, but the input box must never take over the
+/// whole terminal with unbounded text / newlines.
+const MAX_PROMPT_LINES: usize = 20;
+
 /// Thresholds for triggering paste compression (matches opencode: >=3 lines or >150 chars).
 const PASTE_MIN_LINES: usize = 3;
 const PASTE_MIN_CHARS: usize = 150;
@@ -89,6 +95,10 @@ pub struct PromptView {
     /// Whether the logo was rendered in the previous frame (used to detect the
     /// landing-screen → chat transition so the animation can be reset).
     was_visible: bool,
+    /// Index of the first visible wrapped line when the prompt content exceeds
+    /// [`MAX_PROMPT_LINES`]. Kept from the last render so mouse hit-testing
+    /// (`char_pos_at_mouse`) can map screen rows back to content lines.
+    scroll_top: usize,
 }
 
 impl PromptView {
@@ -106,6 +116,7 @@ impl PromptView {
             logo: ChatLogo::new(),
             last_input_snapshot: None,
             was_visible: false,
+            scroll_top: 0,
         }
     }
 
@@ -510,9 +521,14 @@ impl PromptView {
         }
     }
 
-    pub fn required_height(&self, area_width: u16) -> u16 {
+    /// Compute the prompt's height. `max_height` is the vertical budget the
+    /// layout can afford (the available screen space above the footer), so the
+    /// box never overflows a small terminal: the limit is **responsive** — a
+    /// short screen caps the box low right away, while a tall screen lets it
+    /// stretch up to the generous [`MAX_PROMPT_LINES`] hard cap.
+    pub fn required_height(&self, area_width: u16, max_height: u16) -> u16 {
         let text_w = area_width.saturating_sub(5) as usize;
-        let lines = if self.input.is_empty() || text_w == 0 {
+        let content_lines = if self.input.is_empty() || text_w == 0 {
             1
         } else {
             self.input
@@ -523,7 +539,12 @@ impl PromptView {
                 })
                 .sum()
         };
-        BASE_H + lines as u16 + AGENT_H + CAP_H + FOOTER_H
+        let overhead = BASE_H + AGENT_H + CAP_H + FOOTER_H;
+        let budget_lines = max_height.saturating_sub(overhead).max(1);
+        let lines = content_lines
+            .min(MAX_PROMPT_LINES as usize)
+            .min(budget_lines as usize);
+        overhead + lines as u16
     }
 
     fn wrapped_lines(input: &str, max_w: usize) -> Vec<&str> {
@@ -566,14 +587,22 @@ impl PromptView {
             .input
             .split('\n')
             .map(|line| line.chars().count().div_ceil(text_w).max(1))
-            .sum::<usize>() as u16;
-        let bottom = text_start + n;
+            .sum::<usize>();
+        // The visible box is capped responsively (derive the same window as the
+        // render does from the allocated `area.height`); clicks can only land on
+        // the scrolled-in window, so remap the row to the content line using the
+        // scroll offset from the last render.
+        let eff_cap = area
+            .height
+            .saturating_sub(BASE_H + AGENT_H + CAP_H + FOOTER_H)
+            .max(1);
+        let bottom = text_start + n.min(eff_cap as usize) as u16;
 
         if y < text_start || y >= bottom || x < x_off {
             return None;
         }
 
-        let visual_line = (y - text_start) as usize;
+        let visual_line = self.scroll_top + (y - text_start) as usize;
         let col = (x - x_off) as usize;
 
         let display_lines = Self::wrapped_lines(&self.input, text_w);
@@ -632,7 +661,49 @@ impl PromptView {
         };
         let n = display_lines.len() as u16;
 
-        let input_h = BASE_H + n + AGENT_H;
+        // Locate the cursor's visual (wrapped) line/column so the scroll window
+        // below can always keep it visible.
+        let cursor_char = if display_placeholder || self.input.is_empty() {
+            0
+        } else {
+            self.input[..self.cursor_pos].chars().count()
+        };
+        let mut cursor_line_idx = 0usize;
+        let mut cursor_col_idx = 0usize;
+        let mut acc = 0usize;
+        for (li, line) in display_lines.iter().enumerate() {
+            let line_chars = line.chars().count();
+            if cursor_char <= acc + line_chars {
+                cursor_line_idx = li;
+                cursor_col_idx = cursor_char.saturating_sub(acc);
+                break;
+            }
+            acc += line_chars;
+            if let Some((byte_idx, _)) = self.input.char_indices().nth(acc)
+                && byte_idx < self.input.len()
+                && self.input.as_bytes()[byte_idx] == b'\n'
+            {
+                acc += 1;
+            }
+        }
+
+        // Growth limit + scroll-up window. The box height is already capped
+        // responsively by `required_height` (`area.height` here); derive the
+        // visible line count from it so a small screen caps the window low and
+        // a tall screen allows up to `MAX_PROMPT_LINES`. When the content
+        // overflows, only the window's lines ending at the cursor are drawn
+        // (the older top lines visually leave the box upward as new lines
+        // arrive — an LRU-like scroll-up, like the chat's summarizing box).
+        let total_lines = n as usize;
+        let eff_cap = area
+            .height
+            .saturating_sub(BASE_H + AGENT_H + CAP_H + FOOTER_H)
+            .max(1);
+        let eff_n = n.min(eff_cap);
+        let scroll_top = prompt_scroll_top(cursor_line_idx, total_lines, eff_n as usize);
+        self.scroll_top = scroll_top;
+
+        let input_h = BASE_H + eff_n + AGENT_H;
         let input_area = Rect::new(area.x, area.y, area.width, input_h);
         let cap_y = input_area.bottom();
         let cap_area = Rect::new(area.x, cap_y, area.width, CAP_H);
@@ -696,18 +767,18 @@ impl PromptView {
             }
         }
 
-        for (i, line) in display_lines.iter().enumerate() {
-            let ly = text_start + i as u16;
+        for (idx, line) in display_lines.iter().enumerate().skip(scroll_top) {
+            let ly = text_start + (idx - scroll_top) as u16;
             if ly >= input_area.bottom() {
                 break;
             }
-            let base_style = if display_placeholder && i == 0 {
+            let base_style = if display_placeholder && idx == 0 {
                 Style::default().fg(rgba_color(theme.text_muted))
             } else {
                 Style::default().fg(rgba_color(theme.text))
             };
 
-            if is_paste_line[i] {
+            if is_paste_line[idx] {
                 draw_text_line(
                     buf,
                     line,
@@ -734,8 +805,8 @@ impl PromptView {
             let sel_b = sel_s.max(sel_e);
             let input_start = self.input.as_ptr() as usize;
 
-            for (i, line) in display_lines.iter().enumerate() {
-                let ly = text_start + i as u16;
+            for (idx, line) in display_lines.iter().enumerate().skip(scroll_top) {
+                let ly = text_start + (idx - scroll_top) as u16;
                 if ly >= input_area.bottom() {
                     break;
                 }
@@ -776,7 +847,7 @@ impl PromptView {
 
         let agent_label = capitalize(agent_name);
         let label_style = Style::default().fg(rgba_color(agent_color));
-        let label_y = input_area.y + BASE_H + n;
+        let label_y = input_area.y + BASE_H + eff_n;
         draw_text_line(buf, &agent_label, x_off, label_y, max_line_w, label_style);
 
         let mut cap_border_box = BoxRenderable::new();
@@ -839,33 +910,10 @@ impl PromptView {
         // position. The O drifts toward the cursor with a head-like motion.
         // Only rendered on the empty-session landing screen where a logo slot
         // is reserved above the prompt.
-        let cursor_char = if display_placeholder || self.input.is_empty() {
-            0
-        } else {
-            self.input[..self.cursor_pos].chars().count()
-        };
-
-        let mut cursor_line_idx = 0usize;
-        let mut cursor_col_idx = 0usize;
-        let mut acc = 0usize;
-
-        for (li, line) in display_lines.iter().enumerate() {
-            let n = line.chars().count();
-            if cursor_char <= acc + n {
-                cursor_line_idx = li;
-                cursor_col_idx = cursor_char.saturating_sub(acc);
-                break;
-            }
-            acc += n;
-            if let Some((byte_idx, _)) = self.input.char_indices().nth(acc)
-                && byte_idx < self.input.len()
-                && self.input.as_bytes()[byte_idx] == b'\n'
-            {
-                acc += 1;
-            }
-        }
-
-        let cursor_y = text_start + cursor_line_idx as u16;
+        // `cursor_line_idx`/`cursor_col_idx` were computed above when the scroll
+        // window was established; only the cursor's screen row needs the
+        // scroll offset subtracted so it stays inside the visible window.
+        let cursor_y = text_start + (cursor_line_idx - scroll_top) as u16;
         let cursor_x = x_off + cursor_col_idx as u16;
 
         if show_logo {
@@ -941,10 +989,120 @@ impl PromptView {
     }
 }
 
+/// Index of the first visible wrapped line when the prompt content exceeds the
+/// visible window (`window` is the responsive line cap — capped low on small
+/// screens, up to [`MAX_PROMPT_LINES`] on tall ones). The window keeps the
+/// cursor line visible: normally it sits at the bottom of the window (so new
+/// lines push old ones off the top — the scroll-up effect), and it follows the
+/// cursor if the user moves it up.
+fn prompt_scroll_top(cursor_line: usize, total_lines: usize, window: usize) -> usize {
+    if total_lines <= window {
+        return 0;
+    }
+    let window = window as isize;
+    let cursor_line = cursor_line as isize;
+    let desired = (cursor_line - window + 1).max(0);
+    (desired.min(total_lines as isize - window)).max(0) as usize
+}
+
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         None => String::new(),
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_height_caps_at_generous_limit() {
+        let view = PromptView::new();
+        // One wrapped line at width 200, unbounded budget.
+        let base = view.required_height(200, 1000);
+        // A single line: 1 wrapped line → BASE_H + 1 + AGENT_H + CAP_H + FOOTER_H.
+        assert_eq!(base, BASE_H + 1 + AGENT_H + CAP_H + FOOTER_H);
+
+        // Many newlines must not grow the box past the hard cap (tall screen).
+        let mut huge = PromptView::new();
+        huge.input = "line\n".repeat(500);
+        assert_eq!(
+            huge.required_height(200, 1000),
+            BASE_H + MAX_PROMPT_LINES as u16 + AGENT_H + CAP_H + FOOTER_H,
+            "required_height must be capped at MAX_PROMPT_LINES"
+        );
+    }
+
+    #[test]
+    fn required_height_respects_vertical_budget_on_small_screens() {
+        let overhead = BASE_H + AGENT_H + CAP_H + FOOTER_H;
+        let mut view = PromptView::new();
+        view.input = "line\n".repeat(500);
+
+        // A compressed screen hands a small budget: the box shrinks right away
+        // instead of staying at the hard cap (which would overflow the screen).
+        let small_budget = overhead + 3;
+        assert_eq!(
+            view.required_height(200, small_budget),
+            overhead + 3,
+            "small budget must cap the prompt low immediately"
+        );
+
+        // A large budget still hits the generous hard cap.
+        assert_eq!(
+            view.required_height(200, 1000),
+            overhead + MAX_PROMPT_LINES as u16,
+            "generous budget keeps the tall-screen behavior"
+        );
+
+        // Even when the budget is smaller than the box's fixed overhead, it
+        // never collapses below a single usable line.
+        assert_eq!(
+            view.required_height(200, overhead.saturating_sub(1)),
+            overhead + 1,
+            "never collapse below one line"
+        );
+    }
+
+    #[test]
+    fn scroll_top_stays_zero_within_limit() {
+        for total in 0..=MAX_PROMPT_LINES {
+            assert_eq!(prompt_scroll_top(total, total, MAX_PROMPT_LINES), 0);
+        }
+        // Cursor at top of a fitting buffer.
+        assert_eq!(prompt_scroll_top(0, MAX_PROMPT_LINES, MAX_PROMPT_LINES), 0);
+    }
+
+    #[test]
+    fn scroll_top_keeps_bottom_visible_when_overflowing() {
+        // Cursor at the last line → the last `window` lines are shown.
+        let window = MAX_PROMPT_LINES;
+        let total = MAX_PROMPT_LINES + 10;
+        assert_eq!(
+            prompt_scroll_top(total - 1, total, window),
+            total - window,
+            "bottom lines stay visible (scroll-up effect)"
+        );
+        // Cursor at the very top → the first lines are shown instead.
+        assert_eq!(
+            prompt_scroll_top(0, total, window),
+            0,
+            "cursor at top keeps the window at the top"
+        );
+        // Cursor in the middle → window follows so the cursor line is visible.
+        let cursor = MAX_PROMPT_LINES + 4;
+        let st = prompt_scroll_top(cursor, total, window);
+        assert!(cursor >= st && cursor < st + window);
+    }
+
+    #[test]
+    fn scroll_top_respects_a_small_responsive_window() {
+        // Small screen → small window: overflow kicks in with far fewer lines.
+        let window = 4;
+        let total = 10;
+        assert_eq!(prompt_scroll_top(total - 1, total, window), total - window);
+        assert_eq!(prompt_scroll_top(0, total, window), 0);
     }
 }

@@ -96,6 +96,10 @@ const FOOTER_HEIGHT: u16 = 1;
 /// with a width of `RATIO * main_area` but at least `MIN_WIDTH` characters wide.
 const EMPTY_SESSION_PROMPT_MIN_WIDTH: u16 = 50;
 const EMPTY_SESSION_PROMPT_RATIO: f64 = 0.4;
+/// Rows always reserved for the conversation (or logo) above the prompt, so the
+/// responsive prompt limit never swallows the whole screen even on a very short
+/// terminal.
+const MIN_PROMPT_RESERVE_ROWS: u16 = 4;
 
 enum AppMode {
     Home,
@@ -1889,7 +1893,12 @@ impl App {
             };
 
             let prompt_h = if is_session && !hide_prompt_and_spinner {
-                self.prompt_view.required_height(prompt_area_w)
+                // Responsive vertical budget: everything between the header and
+                // the footer, minus the rows always reserved for the session.
+                let prompt_budget = footer_y
+                    .saturating_sub(area.y + 1)
+                    .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+                self.prompt_view.required_height(prompt_area_w, prompt_budget)
             } else {
                 0
             };
@@ -4793,9 +4802,14 @@ impl App {
                             area.width.saturating_sub(sidebar_w),
                             area.height,
                         );
-                        let prompt_h = self
-                            .prompt_view
-                            .required_height(main_area.width.saturating_sub(4));
+                        let footer_y = main_area.bottom().saturating_sub(1);
+                        let prompt_budget = footer_y
+                            .saturating_sub(area.y + 1)
+                            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+                        let prompt_h = self.prompt_view.required_height(
+                            main_area.width.saturating_sub(4),
+                            prompt_budget,
+                        );
                         let question_h = if self.question_dialog.visible {
                             self.question_dialog
                                 .required_height(main_area.width.saturating_sub(4))
@@ -4807,7 +4821,6 @@ impl App {
                                 && self.agent_spinner.is_some()
                                 && !self.question_dialog.visible,
                         );
-                        let footer_y = main_area.bottom().saturating_sub(1);
                         let prompt_area_y = footer_y.saturating_sub(prompt_h);
                         let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
                         let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
@@ -5130,18 +5143,19 @@ impl App {
                 area.width.saturating_sub(sidebar_w),
                 area.height,
             );
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let prompt_budget = footer_y
+                .saturating_sub(area.y + 1)
+                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
             let prompt_h = if is_session {
                 self.prompt_view
-                    .required_height(main_area.width.saturating_sub(4))
+                    .required_height(main_area.width.saturating_sub(4), prompt_budget)
             } else {
                 0
             };
             let prompt_area = Rect::new(
                 main_area.x + 2,
-                main_area
-                    .bottom()
-                    .saturating_sub(1)
-                    .saturating_sub(prompt_h),
+                footer_y.saturating_sub(prompt_h),
                 main_area.width.saturating_sub(4),
                 prompt_h,
             );
@@ -5177,16 +5191,19 @@ impl App {
                 area.height,
             );
             // When question dialog is visible, prompt is hidden (like OpenCode)
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let prompt_budget = footer_y
+                .saturating_sub(area.y + 1)
+                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
             let prompt_h = if self.question_dialog.visible {
                 0
             } else {
                 self.prompt_view
-                    .required_height(main_area.width.saturating_sub(4))
+                    .required_height(main_area.width.saturating_sub(4), prompt_budget)
             };
             let question_h = self
                 .question_dialog
                 .required_height(main_area.width.saturating_sub(4));
-            let footer_y = main_area.bottom().saturating_sub(1);
             let prompt_area_y = footer_y.saturating_sub(prompt_h);
             let question_h = question_h.min(prompt_area_y.saturating_sub(area.y + 1));
             let question_area_y = prompt_area_y.saturating_sub(question_h);
@@ -5313,9 +5330,13 @@ impl App {
                 area.width.saturating_sub(sidebar_w),
                 area.height,
             );
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let prompt_budget = footer_y
+                .saturating_sub(area.y + 1)
+                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
             let prompt_h = self
                 .prompt_view
-                .required_height(main_area.width.saturating_sub(4));
+                .required_height(main_area.width.saturating_sub(4), prompt_budget);
             let question_h = if self.question_dialog.visible {
                 self.question_dialog
                     .required_height(main_area.width.saturating_sub(4))
@@ -5327,7 +5348,6 @@ impl App {
                     && self.agent_spinner.is_some()
                     && !self.question_dialog.visible,
             );
-            let footer_y = main_area.bottom().saturating_sub(1);
             let prompt_area_y = footer_y.saturating_sub(prompt_h);
             let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
             let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
@@ -5567,7 +5587,12 @@ impl App {
             (main_area.x + 2, full_w)
         };
 
-        let prompt_h = self.prompt_view.required_height(prompt_area_w);
+        // Same responsive budget as `render()` so mouse mapping matches the
+        // actually-rendered prompt height on every screen size.
+        let prompt_budget = footer_y
+            .saturating_sub(area.y + 1)
+            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+        let prompt_h = self.prompt_view.required_height(prompt_area_w, prompt_budget);
 
         let logo_block_h = if is_empty_session {
             LOGO_CHAT.len() as u16 + 1
