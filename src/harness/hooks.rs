@@ -405,32 +405,87 @@ impl HookRunner {
     }
 
     fn run_one(&self, config: &HookConfig, payload: &str) -> HookResult {
-        let _timeout = config.timeout_duration();
+        let timeout = config.timeout_duration();
+        let tool_name = extract_tool_name_from_payload(payload);
 
-        let output = match Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(&config.command)
             .current_dir(&self.cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .env("COSH_EVENT", "PreToolUse")
-            .env("COSH_TOOL_NAME", &payload)
-            .output()
-        {
-            Ok(output) => output,
+            .env("COSH_TOOL_NAME", &tool_name);
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
             Err(e) => {
                 log::warn!("Hook failed to execute: {} ({e})", config.command);
                 return HookResult::default();
             }
         };
 
-        // Check timeout is handled by the caller via a timeout wrapper
-        // if needed. For simplicity, we rely on the OS process timeout.
+        // Spawn a killer thread that fires after the timeout.
+        let kill_pid = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let kill_flag = kill_pid.clone();
+        let child_pid = child.id();
+        let kill_handle = std::thread::spawn(move || {
+            std::thread::sleep(timeout);
+            kill_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            // Kill the process group (negative PID kills the group).
+            #[cfg(unix)]
+            let _ = std::process::Command::new("kill")
+                .arg("-9")
+                .arg(child_pid.to_string())
+                .output();
+        });
 
-        let exit_code = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // Read stdout/stderr in parallel before wait (avoids deadlock when
+        // the pipe buffer fills while we wait).
+        let stdout_handle = child.stdout.take().map(|mut out| {
+            std::thread::spawn(move || {
+                let mut buf = String::new();
+                use std::io::Read;
+                let _ = out.read_to_string(&mut buf);
+                buf
+            })
+        });
+        let stderr_handle = child.stderr.take().map(|mut err| {
+            std::thread::spawn(move || {
+                let mut buf = String::new();
+                use std::io::Read;
+                let _ = err.read_to_string(&mut buf);
+                buf
+            })
+        });
+
+        let status = child.wait();
+        let timed_out = kill_pid.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = kill_handle.join();
+
+        if timed_out {
+            log::warn!(
+                "Hook timed out after {timeout:?}: {}",
+                config.command,
+            );
+            return HookResult::default();
+        }
+
+        let exit_code = match status {
+            Ok(s) => s.code().unwrap_or(-1),
+            Err(e) => {
+                log::warn!("Hook wait failed: {} ({e})", config.command);
+                return HookResult::default();
+            }
+        };
+
+        let stdout = stdout_handle
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
+        let stderr = stderr_handle
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
 
         match exit_code {
             0 => parse_stdout(&stdout),
@@ -470,6 +525,15 @@ impl HookRunner {
 }
 
 // ── Payload ─────────────────────────────────────────────────────────────────
+
+/// Extract the tool name from a JSON payload string.
+fn extract_tool_name_from_payload(payload: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("tool_name").cloned())
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
+}
 
 /// Build the JSON payload piped to hook commands via stdin.
 fn build_payload(tool_name: &str, tool_input: &str) -> String {
