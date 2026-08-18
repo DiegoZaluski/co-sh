@@ -4065,6 +4065,19 @@ impl App {
 
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
+                HarnessEvent::ClearAssistant => {
+                    // The SDK retried a mid-stream failure and is about to
+                    // re-stream the response from the beginning: drop the
+                    // partial assistant message rendered from the failed
+                    // attempt (it would otherwise concatenate with the
+                    // retried response).
+                    if let Some(session) = self.state.current_session_mut()
+                        && let Some(msg) = session.messages.last_mut()
+                        && msg.role == MessageRole::Assistant
+                    {
+                        session.messages.pop();
+                    }
+                }
                 HarnessEvent::Token { text } => {
                     if text.trim().is_empty() {
                         continue;

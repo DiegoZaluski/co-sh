@@ -1,7 +1,11 @@
 use super::error::ConnectorError;
+use super::output::StreamChunk;
 use super::provider::ProviderConfig;
+use async_stream::stream;
+use std::pin::Pin;
 use std::sync::OnceLock;
 use std::time::Duration;
+use tokio_stream::Stream;
 
 /// Per-chunk read timeout for SSE streams. Generous (120s) so a slow local
 /// model or a reasoning pause between tokens does not abort the agent loop
@@ -14,7 +18,7 @@ pub(crate) const SSE_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
 /// LLM call pays a full DNS + TCP + TLS handshake — the dominant source of the
 /// slow intervals between agent-loop calls. One long-lived client keeps
 /// keep-alive connections alive between calls (and between sessions).
-fn shared_client() -> &'static reqwest::Client {
+pub(crate) fn shared_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         // Only a CONNECT timeout lives on the client: an SSE stream's body is
@@ -233,7 +237,7 @@ pub async fn send_get_request(
     Ok(response.text().await?)
 }
 
-pub async fn send_request_stream(
+pub(crate) async fn send_request_stream(
     config: &ProviderConfig,
     url: &str,
     body: &(impl serde::Serialize + Sync),
@@ -254,6 +258,33 @@ pub async fn send_request_stream(
     }
 
     let json_body = serde_json::to_string(body)?;
+    send_builder(request_builder, json_body).await
+}
+
+/// Build the provider-extra headers (HTTP-Referer / X-Title) for the given
+/// provider — shared by the plain send path and the retry wrapper.
+pub(crate) fn apply_provider_headers(
+    request_builder: reqwest::RequestBuilder,
+    config: &ProviderConfig,
+) -> reqwest::RequestBuilder {
+    if config.needs_extra_headers {
+        request_builder
+            .header("HTTP-Referer", "https://localhost")
+            .header("X-Title", "provider")
+    } else {
+        request_builder
+    }
+}
+
+/// Execute a fully-configured [`reqwest::RequestBuilder`] (URL, headers,
+/// provider extras, serialized JSON body attached) once, mapping non-2xx
+/// responses to a classified [`ConnectorError`] with the server's retry hint
+/// attached when one was sent. The builder is cloned per attempt so the
+/// original stays reusable across retries.
+async fn send_builder(
+    request_builder: reqwest::RequestBuilder,
+    json_body: String,
+) -> Result<reqwest::Response, ConnectorError> {
     let response = tokio::time::timeout(
         Duration::from_mins(1),
         request_builder.body(json_body).send(),
@@ -264,6 +295,10 @@ pub async fn send_request_stream(
 
     let status = response.status();
     if !status.is_success() {
+        // Capture the retry hint BEFORE consuming the body (the retry
+        // middleware paces rate-limit retries with the server's own
+        // `retry-after` / `retry-after-ms` when present).
+        let retry_after_ms = parse_retry_after_ms(response.headers());
         let error_text = response
             .text()
             .await
@@ -271,8 +306,175 @@ pub async fn send_request_stream(
         let status = status.as_u16();
         let error_msg = format!("HTTP {status} - {error_text}");
         log::error!("HTTP Error captured: {error_msg}");
-        return Err(ConnectorError::classify_http(status, error_text));
+        let mut err = ConnectorError::classify_http(status, error_text);
+        if let ConnectorError::HttpError {
+            retry_after_ms: slot,
+            ..
+        } = &mut err
+        {
+            *slot = retry_after_ms;
+        }
+        return Err(err);
     }
 
     Ok(response)
+}
+
+/// Retry wrapper around a single chat-stream request, mirroring the
+/// crush/fantasy semantics (see [`crate::connector::retry`]): a retryable
+/// failure — rate limit (429), HTTP 5xx, network/transport error — is
+/// re-sent with exponential backoff (honoring the server's `retry-after`
+/// hint) up to [`RETRY_MAX_RETRIES`]. When a mid-stream failure happens
+/// AFTER partial content was already yielded, a [`StreamChunk::reset`]
+/// marker is emitted first so the consumer discards the failed attempt's
+/// buffered text (the retried response restarts from the beginning).
+///
+/// `request_builder` must already carry the URL, headers and provider
+/// extras; the (already serialized) `json_body` is re-attached per attempt.
+/// `retry_delay_override` (usually `None`) replaces the production
+/// 5s → 10s → 20s backoff — tests pass a tiny delay so retries run in
+/// milliseconds.
+pub async fn send_with_retry(
+    request_builder: &reqwest::RequestBuilder,
+    json_body: String,
+    retry_delay_override: Option<Duration>,
+) -> Result<reqwest::Response, ConnectorError> {
+    use super::retry::{RETRY_MAX_RETRIES, is_retryable_error, retry_delay};
+
+    let mut attempts = 0usize;
+    loop {
+        attempts += 1;
+        let Some(builder) = request_builder.try_clone() else {
+            return Err(ConnectorError::Network("request builder not clonable".to_string()));
+        };
+        match send_builder(builder, json_body.clone()).await {
+            Err(e) if attempts <= RETRY_MAX_RETRIES && is_retryable_error(&e) => {
+                log::warn!("retry #{attempts} after request error: {e}");
+                let delay = retry_delay_override.unwrap_or_else(|| retry_delay(&e, attempts));
+                tokio::time::sleep(delay).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Wrap the SSE stream of an ALREADY-SUCCESSFUL response in mid-stream
+/// retry handling: if the stream fails with a retryable error (connection
+/// cut, 5xx chunk), the request is re-sent (with backoff, honoring
+/// `retry_delay_override`) and the response re-parsed. When partial content
+/// was already yielded, a [`StreamChunk::reset`] marker is emitted first so
+/// the consumer discards the failed attempt's text — the retried response
+/// restarts from the beginning.
+///
+/// The FIRST request stays eager (performed by [`send_with_retry`] before
+/// this wrapper runs) so connect-phase failures surface from the call, not
+/// the first poll.
+pub fn retry_mid_stream(
+    initial_response: reqwest::Response,
+    request_builder: reqwest::RequestBuilder,
+    json_body: String,
+    retry_delay_override: Option<Duration>,
+    parse: impl Fn(
+            reqwest::Response,
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>>
+        + Send
+        + 'static,
+) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> {
+    use super::retry::{RETRY_MAX_RETRIES, is_retryable_error, retry_delay};
+    use tokio_stream::StreamExt;
+
+    Box::pin(stream! {
+        let mut response = initial_response;
+        let mut attempts = 1usize;
+        let mut emitted_any = false;
+        'stream: loop {
+            let mut inner = parse(response);
+            while let Some(item) = inner.next().await {
+                match item {
+                    Ok(chunk) => {
+                        emitted_any = true;
+                        yield Ok(chunk);
+                    }
+                    Err(e) if attempts <= RETRY_MAX_RETRIES && is_retryable_error(&e) => {
+                        log::warn!("retry #{attempts} after mid-stream error: {e}");
+                        if emitted_any {
+                            // The consumer must drop the partial content of
+                            // the failed attempt; the retried response
+                            // restarts from the beginning.
+                            yield Ok(StreamChunk::reset());
+                        }
+                        // Re-request (with its own request-phase retries).
+                        loop {
+                            attempts += 1;
+                            let delay = retry_delay_override
+                                .unwrap_or_else(|| retry_delay(&e, attempts));
+                            tokio::time::sleep(delay).await;
+                            let Some(builder) = request_builder.try_clone() else {
+                                yield Err(ConnectorError::Network(
+                                    "request builder not clonable".to_string(),
+                                ));
+                                return;
+                            };
+                            match send_builder(builder, json_body.clone()).await {
+                                Ok(r) => {
+                                    response = r;
+                                    continue 'stream;
+                                }
+                                Err(e2) if attempts <= RETRY_MAX_RETRIES
+                                    && is_retryable_error(&e2) =>
+                                {
+                                    log::warn!("retry #{attempts} after re-request error: {e2}");
+                                }
+                                Err(e2) => {
+                                    yield Err(e2);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                }
+            }
+            // The parse stream ended cleanly (finish reason / [DONE] / EOF
+            // without a retryable error): the response completed.
+            return;
+        }
+    })
+}
+
+/// Parse the server's retry hint from response headers: `retry-after-ms`
+/// (milliseconds, used e.g. by OpenAI) or `retry-after` (seconds or an HTTP
+/// date). Mirrors the crush/fantasy sanity bounds: only a delay in
+/// (0, 60s] is honored — a hint outside that range is ignored in favor of
+/// the exponential backoff.
+fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let raw = headers
+        .get("retry-after-ms")
+        .or_else(|| headers.get("retry-after"))?
+        .to_str()
+        .ok()?
+        .trim()
+        .to_ascii_lowercase();
+    let ms = raw.parse::<u64>().ok().map(|secs| {
+        if headers.contains_key("retry-after-ms") {
+            secs
+        } else {
+            secs.saturating_mul(1000)
+        }
+    });
+    // `retry-after-ms` may itself be fractional ("1500.5") — fall back to a
+    // whole-second parse for the plain `retry-after` case.
+    let ms = ms.or_else(|| {
+        let secs = raw.parse::<f64>().ok()?;
+        Some((secs * 1000.0) as u64)
+    });
+    let ms = ms?;
+    if ms > 0 && ms <= 60_000 {
+        Some(ms)
+    } else {
+        None
+    }
 }

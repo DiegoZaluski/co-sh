@@ -19,6 +19,8 @@ mod output;
 mod params;
 mod provider;
 
+pub mod retry;
+
 pub use client::Connector;
 pub use discovery::{
     ModelReasoning, discover_context_window, effective_context_window, model_reasoning,

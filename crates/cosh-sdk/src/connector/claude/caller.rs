@@ -1,5 +1,6 @@
 use super::super::common::{
-    SSE_CHUNK_TIMEOUT, SseBuffer, send_get_request, send_request, send_request_stream,
+    SSE_CHUNK_TIMEOUT, SseBuffer, apply_provider_headers, retry_mid_stream, send_get_request,
+    send_request, send_request_stream, send_with_retry, shared_client,
 };
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
@@ -522,6 +523,7 @@ fn take_thinking_chunk(
         thinking_blocks: Some(std::mem::take(pending_thinking)),
         finish_reason: None,
         tool_call: None,
+        reset: false,
     })
 }
 
@@ -550,6 +552,7 @@ fn flush_claude_tool_uses(
                 arguments: tc.input_json,
                 thought_signature: String::new(),
             }),
+            reset: false,
         });
     }
     out
@@ -645,9 +648,43 @@ pub async fn chat_stream_with_messages(
         ("anthropic-version", "2023-06-01"),
     ];
     log::debug!("chat_stream_with_messages (Claude): sending request to {url}");
-    let response = send_request_stream(config, &url, &request, headers).await?;
+    let stream = if params.retry_enabled {
+        let json_body = serde_json::to_string(&request)?;
+        let request_builder = apply_provider_headers(
+            shared_client().post(&url).header("Content-Type", "application/json"),
+            config,
+        )
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01");
+        let response = send_with_retry(
+            &request_builder,
+            json_body.clone(),
+            params.retry_delay_override,
+        )
+        .await?;
+        retry_mid_stream(
+            response,
+            request_builder,
+            json_body,
+            params.retry_delay_override,
+            parse_sse_stream_with_tools,
+        )
+    } else {
+        let response = send_request_stream(config, &url, &request, headers).await?;
+        parse_sse_stream_with_tools(response)
+    };
+    Ok(ChatStream::new(stream))
+}
 
-    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> = Box::pin(
+/// Parse a Claude SSE response into stream chunks, accumulating `tool_use`
+/// blocks and thinking blocks (the `stream_chat_with_messages` path — the
+/// agent loop). The thinking blocks that preceded a tool call are REQUIRED
+/// on the follow-up request, so they are emitted verbatim (signature
+/// included) before the tool-call chunks.
+fn parse_sse_stream_with_tools(
+    response: reqwest::Response,
+) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> {
+    Box::pin(
         stream! {
             let mut response = response;
             let mut buf = SseBuffer::new();
@@ -743,6 +780,7 @@ pub async fn chat_stream_with_messages(
                                                 finish_reason: None,
                                                 thinking_blocks: None,
                                                 tool_call: None,
+                                                reset: false,
                                             });
                                         }
                                     }
@@ -763,6 +801,7 @@ pub async fn chat_stream_with_messages(
                                                 finish_reason: None,
                                                 thinking_blocks: None,
                                                 tool_call: None,
+                                                reset: false,
                                             });
                                         }
                                         "thinking_delta" => {
@@ -783,6 +822,7 @@ pub async fn chat_stream_with_messages(
                                                     finish_reason: None,
                                                     thinking_blocks: None,
                                                     tool_call: None,
+                                                    reset: false,
                                                 });
                                             }
                                         }
@@ -848,6 +888,7 @@ pub async fn chat_stream_with_messages(
                                             finish_reason,
                                             thinking_blocks: None,
                                             tool_call: None,
+                                            reset: false,
                                         });
                                         return;
                                     }
@@ -889,10 +930,7 @@ pub async fn chat_stream_with_messages(
                     break;
                 }
             }
-        },
-    );
-
-    Ok(ChatStream::new(inner))
+    })
 }
 
 pub async fn chat_stream(
@@ -906,14 +944,45 @@ pub async fn chat_stream(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/messages");
 
-    let headers = &[
-        ("x-api-key", ctx.api_key.as_str()),
-        ("anthropic-version", "2023-06-01"),
-    ];
-    let response = send_request_stream(config, &url, &ctx.request, headers).await?;
+    let stream = if params.retry_enabled {
+        let json_body = serde_json::to_string(&ctx.request)?;
+        let request_builder = apply_provider_headers(
+            shared_client().post(&url).header("Content-Type", "application/json"),
+            config,
+        )
+        .header("x-api-key", ctx.api_key)
+        .header("anthropic-version", "2023-06-01");
+        let response = send_with_retry(
+            &request_builder,
+            json_body.clone(),
+            params.retry_delay_override,
+        )
+        .await?;
+        retry_mid_stream(
+            response,
+            request_builder,
+            json_body,
+            params.retry_delay_override,
+            parse_sse_stream,
+        )
+    } else {
+        let headers = &[
+            ("x-api-key", ctx.api_key.as_str()),
+            ("anthropic-version", "2023-06-01"),
+        ];
+        let response = send_request_stream(config, &url, &ctx.request, headers).await?;
+        parse_sse_stream(response)
+    };
+    Ok(ChatStream::new(stream))
+}
 
-    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =
-        Box::pin(stream! {
+/// Parse a Claude SSE response into stream chunks (text, reasoning,
+/// thinking blocks, finish reason — no tool accumulation; the
+/// `stream_chat`/`stream_chat_with_system` path).
+fn parse_sse_stream(
+    response: reqwest::Response,
+) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> {
+    Box::pin(stream! {
             let mut response = response;
             let mut buf = SseBuffer::new();
             loop {
@@ -957,6 +1026,7 @@ pub async fn chat_stream(
                                             finish_reason: None,
                                             thinking_blocks: None,
                                             tool_call: None,
+                                            reset: false,
                                         });
                                     }
                                 }
@@ -971,6 +1041,7 @@ pub async fn chat_stream(
                                         finish_reason,
                                         thinking_blocks: None,
                                         tool_call: None,
+                                        reset: false,
                                     });
                                 }
                                 "message_stop" => return,
@@ -994,9 +1065,7 @@ pub async fn chat_stream(
                     break;
                 }
             }
-        });
-
-    Ok(ChatStream::new(inner))
+    })
 }
 
 #[derive(serde::Deserialize)]

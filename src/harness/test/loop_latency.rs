@@ -20,7 +20,7 @@
 //! Neither is a defect; both are measured only to characterise the wall clock.
 
 use crate::harness::context_manager::{ContextManager, MAX_CONTEXT_TOKENS};
-use crate::harness::core::{Harness, Mode};
+use crate::harness::core::{Harness, Mode, StreamEvent};
 use crate::harness::guardrails::{PermissionCheck, check_tool_permission};
 use crate::util::estimate_tokens;
 use cosh_sdk::connector::Connector;
@@ -107,7 +107,11 @@ async fn streaming_and_extraction_of_many_tokens_is_fast() {
     let start = std::time::Instant::now();
     let mut received = 0usize;
     let result = h
-        .stream_chat_with_messages("sys", &[], |t| received += t.len())
+        .stream_chat_with_messages("sys", &[], |e| {
+            if let StreamEvent::Token(t) = e {
+                received += t.len();
+            }
+        })
         .await;
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(result.as_deref(), Ok("done"));

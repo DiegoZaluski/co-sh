@@ -181,7 +181,8 @@ async fn test_agent_loop_with_tool_call() {
 
     handle.abort();
 
-    // Should get tokens, tool call, tool error (no server), then Error (mock consumed)
+    // Should get tokens, tool call, tool result (test tools dispatch with a
+    // canned success), then a terminal event (mock stream consumed).
     assert!(
         events
             .iter()
@@ -195,7 +196,7 @@ async fn test_agent_loop_with_tool_call() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, HarnessEvent::ToolError { .. }))
+            .any(|e| matches!(e, HarnessEvent::ToolResult { .. }))
     );
     let last = events.last().unwrap();
     assert!(
@@ -204,6 +205,89 @@ async fn test_agent_loop_with_tool_call() {
             HarnessEvent::Done { .. } | HarnessEvent::Stopped { .. } | HarnessEvent::Error(_)
         ),
         "expected terminal event, got {last:?}"
+    );
+}
+
+// ── Crush-style loop detection ────────────────────────────────────────────
+//
+// When the model repeats the EXACT same tool interaction (name + arguments +
+// result) more than LOOP_DETECTION_MAX_REPEATS times within the recent
+// LOOP_DETECTION_WINDOW_SIZE tool-calling iterations, the loop stops with a
+// `Done` (plus a Toast) instead of burning tokens up to MAX_ITERATIONS.
+// Here the model calls `test_tool` with the same arguments 20 times; the
+// identical signature (canned success result) trips the detector at the
+// 10th tool-calling iteration, so only 10 streams are consumed.
+#[tokio::test]
+async fn loop_detection_stops_repeated_identical_tool_calls() {
+    // 20 identical tool-calling iterations — the detector must stop at 10.
+    let streams: Vec<Result<Vec<&str>, &str>> = (0..20)
+        .map(|_| Ok(vec![r#"{"name": "test_tool", "arguments": {"x": "same"}}"#]))
+        .collect();
+    let mut h = Harness::new_test()
+        .with_test_tool(
+            "test_tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "type": "string" } },
+                "required": ["x"]
+            }),
+        )
+        .with_mock_streams(streams);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("repeat the same call", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(8);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error(_)
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    handle.abort();
+
+    // The 10th tool call is dispatched, THEN the detector fires — so the
+    // loop stops with exactly 10 dispatched calls, not 20.
+    let tool_calls = events
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::ToolCall { .. }))
+        .count();
+    assert_eq!(
+        tool_calls, 10,
+        "loop must stop at the 10th identical tool call, got {tool_calls}; \
+         events={events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(HarnessEvent::Done { .. })),
+        "loop detection must end with Done, got {:?}",
+        events.last()
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Toast { .. })),
+        "loop detection must surface a Toast explaining the stop"
     );
 }
 

@@ -82,7 +82,7 @@ pub enum Family {
     Claude,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct ProviderConfig {
     pub name: &'static str,
     pub family: Family,

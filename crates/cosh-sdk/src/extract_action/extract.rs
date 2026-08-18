@@ -220,6 +220,15 @@ impl ExtractAction {
         std::mem::take(&mut self.tool_failure_count)
     }
 
+    /// Drop the streaming buffer and any half-parsed tool call. Called by
+    /// the harness when the SDK retries a mid-stream failure: the partial
+    /// text of the failed attempt must not leak into the retried response
+    /// (which restarts from the beginning).
+    pub fn reset_stream_state(&mut self) {
+        self.state = StreamState::default();
+        self.last_failed_raw.clear();
+    }
+
     /// Drain the raw JSON of the last failed tool call attempt.
     #[must_use]
     pub fn take_last_failed_raw(&mut self) -> String {

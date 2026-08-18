@@ -57,6 +57,36 @@ pub struct StreamChunk {
     /// parsing text. `None` for text/reasoning chunks and for the legacy
     /// inline-JSON path (which arrives as `token` text).
     pub(crate) tool_call: Option<NativeToolCall>,
+    /// Set on the marker chunk the retry middleware emits BEFORE re-streaming
+    /// a response after a mid-stream failure: everything the consumer
+    /// buffered so far belongs to the failed attempt and must be discarded
+    /// (see [`StreamChunk::reset`]).
+    pub(crate) reset: bool,
+}
+
+impl StreamChunk {
+    /// Marker chunk the retry middleware emits before re-streaming a
+    /// response after a mid-stream failure: the consumer must discard any
+    /// partial content buffered from the failed attempt (the retried
+    /// response restarts from the beginning).
+    #[must_use]
+    pub fn reset() -> Self {
+        Self {
+            raw: String::new(),
+            token: String::new(),
+            reasoning: String::new(),
+            finish_reason: None,
+            thinking_blocks: None,
+            tool_call: None,
+            reset: true,
+        }
+    }
+
+    /// Whether this chunk is a retry marker (see [`StreamChunk::reset`]).
+    #[must_use]
+    pub fn is_reset(&self) -> bool {
+        self.reset
+    }
 }
 
 impl StreamChunk {

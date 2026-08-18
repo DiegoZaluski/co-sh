@@ -452,6 +452,22 @@ impl Connector {
         self.params.tool_call_mode
     }
 
+    /// Enable/disable request retry (retryable failures — rate limits,
+    /// HTTP 5xx, network errors — are retried with exponential backoff).
+    /// Defaults to enabled; tests disable it for single-shot mock servers.
+    pub fn with_retry(mut self, enabled: bool) -> Self {
+        self.params.retry_enabled = enabled;
+        self
+    }
+
+    /// Override the retry backoff base delay (default 5s → 10s → 20s).
+    /// Primarily for tests: a tiny delay makes retry tests run in
+    /// milliseconds instead of sleeping real backoffs.
+    pub fn with_retry_delay(mut self, delay: std::time::Duration) -> Self {
+        self.params.retry_delay_override = Some(delay);
+        self
+    }
+
     /// Whether the provider endpoint runs on this machine (`localhost` /
     /// `127.0.0.1`).
     ///

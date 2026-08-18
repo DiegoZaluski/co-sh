@@ -13,6 +13,16 @@ pub enum ConnectorError {
         status: u16,
         /// Response body from the server.
         body: String,
+        /// `retry-after` / `retry-after-ms` from the response headers, when
+        /// the server sent one that parsed to a sane (0..=60s) delay. Used
+        /// by the retry middleware to pace rate-limit retries instead of
+        /// blindly backing off.
+        retry_after_ms: Option<u64>,
+        /// Whether the error is transient (e.g. OpenAI SSE `server_error`,
+        /// `overloaded_error`) and safe to retry — even when the HTTP status
+        /// is 200 (mid-stream error event). Mirrors fantasy's
+        /// `TransientStreamErrorTypes` map.
+        transient: bool,
     },
     /// The upstream rejected the request because the prompt exceeds the
     /// model's context window (OpenAI/Anthropic-style 400 with a
@@ -62,13 +72,33 @@ impl ConnectorError {
                 body,
             }
         } else {
-            Self::HttpError { status, body }
+            Self::HttpError {
+                status,
+                retry_after_ms: None,
+                transient: false,
+                body,
+            }
         }
     }
 
     /// True when this error is a context-window overflow.
     pub fn is_context_window(&self) -> bool {
         matches!(self, Self::ContextWindowExceeded { .. })
+    }
+
+    /// Mark this error as transient: safe to retry even when the HTTP
+    /// status is 200 (e.g. OpenAI SSE `server_error` / `overloaded_error`
+    /// mid-stream error events).
+    pub fn mark_transient(mut self) -> Self {
+        if let Self::HttpError { transient: ref mut t, .. } = self {
+            *t = true;
+        }
+        self
+    }
+
+    /// Whether this error is transient and safe to retry.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::HttpError { transient: true, .. })
     }
 }
 
@@ -152,7 +182,9 @@ impl fmt::Display for ConnectorError {
         match self {
             Self::UnknownProvider(p) => write!(f, "Unknown provider: {p}"),
             Self::MissingApiKey(p) => write!(f, "API key not set for provider: {p}"),
-            Self::HttpError { status, body } => write!(f, "HTTP {status} - {body}"),
+            Self::HttpError {
+                status, body, ..
+            } => write!(f, "HTTP {status} - {body}"),
             Self::ContextWindowExceeded { status, body, .. } => {
                 write!(f, "HTTP {status} - {body}")
             }

@@ -1,4 +1,4 @@
-use super::super::core::Harness;
+use super::super::core::{Harness, StreamEvent};
 use cosh_sdk::extract_action::NativeToolCall;
 use serde_json::json;
 
@@ -48,11 +48,8 @@ async fn chat_extracts_tool_call_into_queue() {
         "text before tool call preserved"
     );
 
-    let err = h.dispatch_next().await.unwrap_err();
-    assert!(
-        err.contains("no server found"),
-        "tool queued but no session"
-    );
+    let out = h.dispatch_next().await.unwrap();
+    assert_eq!(out, "ok:filesystem.read", "tool was queued and dispatched");
 }
 
 #[tokio::test]
@@ -82,7 +79,11 @@ async fn stream_chat_yields_tokens() {
 
     let mut tokens = Vec::new();
     let result = h
-        .stream_chat("test", &mut |t: &str| tokens.push(t.to_string()))
+        .stream_chat("test", &mut |e: StreamEvent| {
+            if let StreamEvent::Token(t) = e {
+                tokens.push(t);
+            }
+        })
         .await
         .unwrap();
     assert_eq!(result, "done");
@@ -95,7 +96,11 @@ async fn stream_chat_returns_error() {
 
     let mut tokens = Vec::new();
     let err = h
-        .stream_chat("test", &mut |t: &str| tokens.push(t.to_string()))
+        .stream_chat("test", &mut |e: StreamEvent| {
+            if let StreamEvent::Token(t) = e {
+                tokens.push(t);
+            }
+        })
         .await
         .unwrap_err();
 
@@ -118,14 +123,18 @@ async fn stream_chat_extracts_tool_call() {
 
     let mut text_parts = Vec::new();
     let result = h
-        .stream_chat("fetch it", &mut |t: &str| text_parts.push(t.to_string()))
+        .stream_chat("fetch it", &mut |e: StreamEvent| {
+            if let StreamEvent::Token(t) = e {
+                text_parts.push(t);
+            }
+        })
         .await;
 
     assert!(result.is_ok());
     assert_eq!(text_parts, vec!["before ", " after"]);
 
-    let err = h.dispatch_next().await.unwrap_err();
-    assert!(err.contains("no server found"), "tool was queued");
+    let out = h.dispatch_next().await.unwrap();
+    assert_eq!(out, "ok:fetch", "tool was queued and dispatched");
 }
 
 #[tokio::test]
@@ -143,13 +152,17 @@ async fn stream_chat_interleaves_text_and_tool_calls() {
 
     let mut texts = Vec::new();
     let _ = h
-        .stream_chat("search", &mut |t: &str| texts.push(t.to_string()))
+        .stream_chat("search", &mut |e: StreamEvent| {
+            if let StreamEvent::Token(t) = e {
+                texts.push(t);
+            }
+        })
         .await;
 
     assert_eq!(texts, vec!["Let me check", "Here are the results"]);
 
-    let err = h.dispatch_next().await.unwrap_err();
-    assert!(err.contains("no server found"), "tool was queued: {err}");
+    let out = h.dispatch_next().await.unwrap();
+    assert_eq!(out, "ok:search", "tool was queued and dispatched");
 }
 
 #[tokio::test]
@@ -171,7 +184,11 @@ async fn native_mode_never_parses_text_json() {
 
     let mut texts = Vec::new();
     let _ = h
-        .stream_chat("fetch it", &mut |t: &str| texts.push(t.to_string()))
+        .stream_chat("fetch it", &mut |e: StreamEvent| {
+            if let StreamEvent::Token(t) = e {
+                texts.push(t);
+            }
+        })
         .await;
 
     assert_eq!(
@@ -204,12 +221,16 @@ async fn inline_mode_parses_text_json() {
 
     let mut texts = Vec::new();
     let _ = h
-        .stream_chat("fetch it", &mut |t: &str| texts.push(t.to_string()))
+        .stream_chat("fetch it", &mut |e: StreamEvent| {
+            if let StreamEvent::Token(t) = e {
+                texts.push(t);
+            }
+        })
         .await;
 
     assert_eq!(texts, vec!["before ", " after"]);
-    let err = h.dispatch_next().await.unwrap_err();
-    assert!(err.contains("no server found"), "tool was queued: {err}");
+    let out = h.dispatch_next().await.unwrap();
+    assert_eq!(out, "ok:fetch", "tool was queued and dispatched");
 }
 
 #[tokio::test]
@@ -232,13 +253,17 @@ async fn stream_chat_routes_native_tool_call_directly() {
 
     let mut texts = Vec::new();
     let _ = h
-        .stream_chat_with_messages("sys", &[], &mut |t: &str| texts.push(t.to_string()))
+        .stream_chat_with_messages("sys", &[], &mut |e: StreamEvent| {
+            if let StreamEvent::Token(t) = e {
+                texts.push(t);
+            }
+        })
         .await;
 
     assert_eq!(texts, vec!["before "], "text still streams");
 
-    let err = h.dispatch_next().await.unwrap_err();
-    assert!(err.contains("no server found"), "native tool was queued: {err}");
+    let out = h.dispatch_next().await.unwrap();
+    assert_eq!(out, "ok:fetch", "native tool was queued and dispatched");
 }
 
 #[tokio::test]
@@ -261,7 +286,11 @@ async fn stream_chat_native_call_invalid_schema_feeds_correction_memory() {
 
     let mut texts = Vec::new();
     let _ = h
-        .stream_chat_with_messages("sys", &[], &mut |t: &str| texts.push(t.to_string()))
+        .stream_chat_with_messages("sys", &[], &mut |e: StreamEvent| {
+            if let StreamEvent::Token(t) = e {
+                texts.push(t);
+            }
+        })
         .await;
 
     assert!(
@@ -273,4 +302,31 @@ async fn stream_chat_native_call_invalid_schema_feeds_correction_memory() {
     // and the raw envelope lands in `last_failed_raw` — both feed the
     // correction memory on the next loop iteration, exactly like a failed
     // inline-JSON call (unit-tested in the extractor).
+}
+
+#[tokio::test]
+async fn stream_reset_marker_discards_partial_then_restarts() {
+    // The SDK emits a reset marker when it retries a mid-stream failure:
+    // the harness must forward it to the consumer BEFORE the retried tokens
+    // so the partial content of the failed attempt is discarded, never
+    // concatenated with the retried response.
+    let mut h = make_harness().with_mock_stream_reset().with_mock_stream(Ok(vec![
+        "retried-",
+        "answer",
+    ]));
+
+    let mut events = Vec::new();
+    let _ = h
+        .stream_chat_with_messages("sys", &[], &mut |e: StreamEvent| events.push(e))
+        .await;
+
+    assert_eq!(
+        events,
+        vec![
+            StreamEvent::Reset,
+            StreamEvent::Token("retried-".to_string()),
+            StreamEvent::Token("answer".to_string()),
+        ],
+        "the reset marker arrives first, then the retried response"
+    );
 }

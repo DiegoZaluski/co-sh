@@ -1,5 +1,6 @@
 use super::super::common::{
-    SSE_CHUNK_TIMEOUT, SseBuffer, send_get_request, send_request, send_request_stream,
+    SSE_CHUNK_TIMEOUT, SseBuffer, apply_provider_headers, retry_mid_stream, send_get_request,
+    send_request, send_request_stream, send_with_retry, shared_client,
 };
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
@@ -128,6 +129,25 @@ struct ApiErrorDetail {
     r#type: Option<String>,
 }
 
+impl ApiErrorDetail {
+    fn error_type(&self) -> Option<&str> {
+        self.r#type.as_deref()
+    }
+}
+
+/// Whether the provider's error type code names a transient server-side
+/// condition worth retrying. Mirrors fantasy's `TransientStreamErrorTypes`.
+/// Mid-stream SSE error events ride inside an already-successful 200
+/// response, so the HTTP status code cannot signal retryability — the
+/// providers classify the payload against this set.
+fn is_transient_error_type(err: &ApiErrorDetail) -> bool {
+    matches!(
+        err.error_type(),
+        Some("server_error" | "internal_error" | "overloaded_error" | "api_error"
+            | "rate_limit_error")
+    )
+}
+
 //  SSE streaming types
 
 #[derive(serde::Deserialize)]
@@ -217,6 +237,7 @@ fn flush_tool_calls(
                 arguments: tc.arguments,
                 thought_signature: String::new(),
             }),
+            reset: false,
         });
     }
     out
@@ -397,6 +418,7 @@ fn process_sse_response(
                                 finish_reason: None,
                                 thinking_blocks: None,
                                 tool_call: None,
+                                reset: false,
                             });
                         }
 
@@ -410,6 +432,7 @@ fn process_sse_response(
                                 finish_reason: None,
                                 thinking_blocks: None,
                                 tool_call: None,
+                                reset: false,
                             });
                         }
 
@@ -431,16 +454,21 @@ fn process_sse_response(
                                 finish_reason,
                                 thinking_blocks: None,
                                 tool_call: None,
+                                reset: false,
                             });
                             return;
                         }
                     }
                     Err(e) => {
                         if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&data) {
-                            yield Err(ConnectorError::classify_http(
-                                200,
-                                api_err.error.message,
-                            ));
+                            let transient = is_transient_error_type(&api_err.error);
+                            let err =
+                                ConnectorError::classify_http(200, api_err.error.message);
+                            yield Err(if transient {
+                                err.mark_transient()
+                            } else {
+                                err
+                            });
                             return;
                         }
                         yield Err(ConnectorError::Deserialization(format!(
@@ -545,7 +573,13 @@ pub async fn chat(
         Ok(r) => r,
         Err(e) => {
             if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&response_text) {
-                return Err(ConnectorError::classify_http(200, api_err.error.message));
+                let transient = is_transient_error_type(&api_err.error);
+                let err = ConnectorError::classify_http(200, api_err.error.message);
+                return Err(if transient {
+                    err.mark_transient()
+                } else {
+                    err
+                });
             }
             return Err(ConnectorError::Deserialization(format!(
                 "{e}. Raw response: {response_text}"
@@ -596,11 +630,30 @@ pub async fn chat_stream(
 
     let auth = format!("Bearer {api_key}");
     log::debug!("chat_stream: sending request to {url}");
-    let response =
-        send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
-    log::debug!("chat_stream: got response status={}", response.status());
-
-    let stream = process_sse_response(response);
+    let stream = if params.retry_enabled {
+        let json_body = serde_json::to_string(&request)?;
+        let request_builder = apply_provider_headers(
+            shared_client().post(&url).header("Content-Type", "application/json"),
+            config,
+        )
+        .header("Authorization", auth);
+        let response = send_with_retry(
+            &request_builder,
+            json_body.clone(),
+            params.retry_delay_override,
+        )
+        .await?;
+        retry_mid_stream(
+            response,
+            request_builder,
+            json_body,
+            params.retry_delay_override,
+            process_sse_response,
+        )
+    } else {
+        let response = send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
+        process_sse_response(response)
+    };
     Ok(ChatStream::new(stream))
 }
 
@@ -639,10 +692,30 @@ pub async fn chat_stream_with_messages(
 
     let auth = format!("Bearer {api_key}");
     log::debug!("chat_stream_with_messages: sending request to {url}");
-    let response =
-        send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
-
-    let stream = process_sse_response(response);
+    let stream = if params.retry_enabled {
+        let json_body = serde_json::to_string(&request)?;
+        let request_builder = apply_provider_headers(
+            shared_client().post(&url).header("Content-Type", "application/json"),
+            config,
+        )
+        .header("Authorization", auth);
+        let response = send_with_retry(
+            &request_builder,
+            json_body.clone(),
+            params.retry_delay_override,
+        )
+        .await?;
+        retry_mid_stream(
+            response,
+            request_builder,
+            json_body,
+            params.retry_delay_override,
+            process_sse_response,
+        )
+    } else {
+        let response = send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
+        process_sse_response(response)
+    };
     Ok(ChatStream::new(stream))
 }
 

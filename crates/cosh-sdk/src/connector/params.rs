@@ -1,3 +1,4 @@
+use std::time::Duration;
 use zeroize::Zeroize;
 
 use crate::connector::provider::COSH_SERVICE;
@@ -277,6 +278,17 @@ pub struct Parameters {
     /// Tool-call delivery mode (see [`ToolCallMode`]). Defaults to `Native`.
     #[zeroize(skip)]
     pub(crate) tool_call_mode: ToolCallMode,
+    /// Whether retryable request failures (rate limits, 5xx, network) are
+    /// retried with backoff (see [`crate::connector::retry`]). Defaults to
+    /// `true`; tests disable it to keep single-shot mock-server semantics.
+    #[zeroize(skip)]
+    pub(crate) retry_enabled: bool,
+    /// Override for the retry backoff base delay (see
+    /// [`crate::connector::retry::RETRY_INITIAL_DELAY`]). `None` uses the
+    /// production 5s → 10s → 20s schedule; tests set a tiny value so retry
+    /// tests run in milliseconds instead of sleeping real backoffs.
+    #[zeroize(skip)]
+    pub(crate) retry_delay_override: Option<Duration>,
     #[zeroize(skip)]
     pub(crate) user: Option<String>,
     #[zeroize(skip)]
@@ -304,6 +316,8 @@ impl Default for Parameters {
             tools: None,
             tool_choice: None,
             tool_call_mode: ToolCallMode::Native,
+            retry_enabled: true,
+            retry_delay_override: None,
             user: None,
             base_url: None,
             // Default to the canonical cosh keyring service so callers only

@@ -1,5 +1,6 @@
 use super::super::common::{
-    SSE_CHUNK_TIMEOUT, SseBuffer, send_get_request, send_request, send_request_stream,
+    SSE_CHUNK_TIMEOUT, SseBuffer, apply_provider_headers, retry_mid_stream, send_get_request,
+    send_request, send_request_stream, send_with_retry, shared_client,
 };
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
@@ -766,16 +767,46 @@ pub async fn chat_stream(
     // produce zero frames from (empty stream, no tokens, no error).
     let url = format!("{base_url}/models/{model}:streamGenerateContent?alt=sse");
 
-    let response = send_request_stream(
-        config,
-        &url,
-        &ctx.request,
-        &[("x-goog-api-key", ctx.api_key.as_str())],
-    )
-    .await?;
+    let stream = if params.retry_enabled {
+        let json_body = serde_json::to_string(&ctx.request)?;
+        let request_builder = apply_provider_headers(
+            shared_client().post(&url).header("Content-Type", "application/json"),
+            config,
+        )
+        .header("x-goog-api-key", ctx.api_key);
+        let response = send_with_retry(
+            &request_builder,
+            json_body.clone(),
+            params.retry_delay_override,
+        )
+        .await?;
+        retry_mid_stream(
+            response,
+            request_builder,
+            json_body,
+            params.retry_delay_override,
+            parse_sse_stream,
+        )
+    } else {
+        let response = send_request_stream(
+            config,
+            &url,
+            &ctx.request,
+            &[("x-goog-api-key", ctx.api_key.as_str())],
+        )
+        .await?;
+        parse_sse_stream(response)
+    };
+    Ok(ChatStream::new(stream))
+}
 
-    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> =
-        Box::pin(stream! {
+/// Parse a Gemini `?alt=sse` response body into stream chunks (text,
+/// reasoning, finish reason and native `functionCall` parts). Shared by the
+/// retried streaming paths.
+fn parse_sse_stream(
+    response: reqwest::Response,
+) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> {
+    Box::pin(stream! {
             let mut response = response;
             let mut buf = SseBuffer::new();
             loop {
@@ -828,6 +859,7 @@ pub async fn chat_stream(
                                             finish_reason: None,
                                             thinking_blocks: None,
                                             tool_call: None,
+                                            reset: false,
                                         });
                                     } else {
                                         yield Ok(StreamChunk {
@@ -837,6 +869,7 @@ pub async fn chat_stream(
                                             finish_reason: None,
                                             thinking_blocks: None,
                                             tool_call: None,
+                                            reset: false,
                                         });
                                     }
                                 }
@@ -849,6 +882,7 @@ pub async fn chat_stream(
                                     finish_reason,
                                     thinking_blocks: None,
                                     tool_call: None,
+                                    reset: false,
                                 });
                                 return;
                             }
@@ -863,9 +897,7 @@ pub async fn chat_stream(
                     break;
                 }
             }
-        });
-
-    Ok(ChatStream::new(inner))
+    })
 }
 
 /// Convert our structured [`ChatMessage`] array to Gemini `contents[]`.
@@ -1042,16 +1074,48 @@ pub async fn chat_stream_with_messages(
     // silently drops (empty stream, no tokens, no error).
     let url = format!("{base_url}/models/{model}:streamGenerateContent?alt=sse");
 
-    let response = send_request_stream(
-        config,
-        &url,
-        &request,
-        &[("x-goog-api-key", api_key.as_str())],
-    )
-    .await?;
+    let stream = if params.retry_enabled {
+        let json_body = serde_json::to_string(&request)?;
+        let request_builder = apply_provider_headers(
+            shared_client().post(&url).header("Content-Type", "application/json"),
+            config,
+        )
+        .header("x-goog-api-key", api_key);
+        let response = send_with_retry(
+            &request_builder,
+            json_body.clone(),
+            params.retry_delay_override,
+        )
+        .await?;
+        retry_mid_stream(
+            response,
+            request_builder,
+            json_body,
+            params.retry_delay_override,
+            parse_sse_stream_messages,
+        )
+    } else {
+        let response = send_request_stream(
+            config,
+            &url,
+            &request,
+            &[("x-goog-api-key", api_key.as_str())],
+        )
+        .await?;
+        parse_sse_stream_messages(response)
+    };
+    Ok(ChatStream::new(stream))
+}
 
-    let inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> = Box::pin(
-        stream! {
+/// Parse a Gemini `?alt=sse` response into stream chunks with native
+/// `functionCall` accumulation (the `stream_chat_with_messages` path — the
+/// agent loop). At turn end the accumulated calls are flushed with a
+/// `tool_calls` finish reason; calls left over when the stream ends without
+/// a stop signal are flushed too, so they are never silently dropped.
+fn parse_sse_stream_messages(
+    response: reqwest::Response,
+) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> {
+    Box::pin(stream! {
             let mut response = response;
             let mut buf = SseBuffer::new();
             // Accumulate complete functionCall parts; Gemini emits them
@@ -1101,6 +1165,7 @@ pub async fn chat_stream_with_messages(
                                                 finish_reason: None,
                                                 thinking_blocks: None,
                                                 tool_call: None,
+                                                reset: false,
                                             });
                                         } else {
                                             yield Ok(StreamChunk {
@@ -1110,6 +1175,7 @@ pub async fn chat_stream_with_messages(
                                                 finish_reason: None,
                                                 thinking_blocks: None,
                                                 tool_call: None,
+                                                reset: false,
                                             });
                                         }
                                     }
@@ -1134,6 +1200,7 @@ pub async fn chat_stream_with_messages(
                                             finish_reason: Some("tool_calls".to_string()),
                                             thinking_blocks: None,
                                             tool_call: Some(native_tool_call(&fc, &sig)),
+                                            reset: false,
                                         });
                                     }
                                     return;
@@ -1146,6 +1213,7 @@ pub async fn chat_stream_with_messages(
                                         finish_reason,
                                         thinking_blocks: None,
                                         tool_call: None,
+                                        reset: false,
                                     });
                                     return;
                                 }
@@ -1173,13 +1241,11 @@ pub async fn chat_stream_with_messages(
                         finish_reason: Some("tool_calls".to_string()),
                         thinking_blocks: None,
                         tool_call: Some(native_tool_call(&fc, &sig)),
+                        reset: false,
                     });
                 }
             }
-        },
-    );
-
-    Ok(ChatStream::new(inner))
+    })
 }
 
 pub async fn embed(

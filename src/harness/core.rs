@@ -23,6 +23,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tokio::time::Duration;
 
+/// One event delivered to a streaming callback: a text token, or the reset
+/// marker the SDK emits when it retries a mid-stream failure (the consumer
+/// must drop any partial content from the failed attempt before the retried
+/// response restarts).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEvent {
+    /// A text token.
+    Token(String),
+    /// The retried response is about to restart from the beginning.
+    Reset,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Build,
@@ -128,6 +140,18 @@ const MAX_TOOL_RETRIES: usize = 3;
 /// 20 was too low for real multi-step work (editing files, running tests,
 /// searching) — the loop force-stopped mid-task with a misleading `Done`.
 pub(crate) const MAX_ITERATIONS: u64 = 100;
+
+/// Loop-detection window: the number of recent tool-call iterations watched
+/// for a repeated identical interaction, mirroring crush's
+/// `loopDetectionWindowSize`. Detection only fires once the window is full
+/// (at least this many tool-calling iterations have happened).
+const LOOP_DETECTION_WINDOW_SIZE: usize = 10;
+
+/// Loop-detection threshold: an identical tool+input+result signature seen
+/// more than this many times within the window stops the loop, mirroring
+/// crush's `loopDetectionMaxRepeats`. Catches a model hammering the exact
+/// same failing call long before it burns tokens up to `MAX_ITERATIONS`.
+const LOOP_DETECTION_MAX_REPEATS: usize = 5;
 
 /// Tools disabled inside the internal sub-agent harness (the merged
 /// `subagent_call` internal path). The tools are removed from the
@@ -415,6 +439,11 @@ pub struct Harness {
     /// test can simulate a single truncated response followed by a normal one.
     #[cfg(test)]
     pub(crate) mock_finish_reasons: VecDeque<Option<String>>,
+    /// Per-stream mock reset markers, consumed one per stream: `true` makes
+    /// the mock path emit [`StreamEvent::Reset`] before the tokens, driving
+    /// the same discard-then-restart flow the SDK's mid-stream retry emits.
+    #[cfg(test)]
+    pub(crate) mock_stream_resets: VecDeque<bool>,
     #[cfg(test)]
     pub(crate) test_tools: Vec<ToolSchema>,
 }
@@ -487,6 +516,8 @@ impl Harness {
             mock_native_stream_queue: VecDeque::new(),
             #[cfg(test)]
             mock_finish_reasons: VecDeque::new(),
+            #[cfg(test)]
+            mock_stream_resets: VecDeque::new(),
             #[cfg(test)]
             test_tools: Vec::new(),
         }
@@ -1264,7 +1295,7 @@ impl Harness {
         &mut self,
         system: &str,
         messages: &[ChatMessage],
-        mut on_token: impl FnMut(&str),
+        mut on_event: impl FnMut(StreamEvent),
     ) -> Result<String, String> {
         // Reset the truncation signal and the thinking-block stash for this
         // stream before anything else.
@@ -1276,15 +1307,20 @@ impl Harness {
             match response {
                 Ok(tokens) => {
                     let mut extractor = self.build_extractor();
+                    // Simulate the SDK's mid-stream retry marker: the consumer
+                    // must discard any partial content and restart.
+                    if self.mock_stream_resets.pop_front() == Some(true) {
+                        on_event(StreamEvent::Reset);
+                    }
                     for token in &tokens {
-                        self.dispatch_chunk(token, None, &mut extractor, &mut on_token);
+                        self.dispatch_chunk(token, None, &mut extractor, &mut on_event);
                     }
                     // Test-only: route structured native tool calls through the
                     // same funnel the real-stream branch uses (a provider
                     // emitting `tool_calls`/`tool_use`/`functionCall` parts).
                     if let Some(calls) = self.mock_native_stream_queue.pop_front() {
                         for call in calls {
-                            self.process_native_tool_call(&call, &mut extractor, &mut on_token);
+                            self.process_native_tool_call(&call, &mut extractor, &mut on_event);
                         }
                     }
                     // Tests can simulate a provider-side truncation by queueing
@@ -1396,7 +1432,20 @@ impl Harness {
                     &token[..token.floor_char_boundary(token.len().min(50))]
                 );
             }
-            self.dispatch_chunk(token, chunk.tool_call(), &mut extractor, &mut on_token);
+            // The SDK retried a mid-stream failure: drop the partial content
+            // of the failed attempt — the extractor buffer, the thinking
+            // blocks stashed from it, and any finish reason it carried — and
+            // tell the consumer (agent loop / TUI) to discard what it
+            // rendered, so the retried response restarts clean.
+            if chunk.is_reset() {
+                log::debug!("stream_chat_with_messages RESET after retry");
+                extractor.reset_stream_state();
+                self.pending_thinking_blocks.clear();
+                self.last_finish_reason = None;
+                on_event(StreamEvent::Reset);
+                continue;
+            }
+            self.dispatch_chunk(token, chunk.tool_call(), &mut extractor, &mut on_event);
             // Stream reasoning/thinking deltas to the TUI so the user sees the
             // model "think" while it works (never echoed back to the model).
             let reasoning = chunk.reasoning();
@@ -1435,14 +1484,14 @@ impl Harness {
         token: &str,
         native: Option<&NativeToolCall>,
         extractor: &mut ExtractAction,
-        on_token: &mut dyn FnMut(&str),
+        on_event: &mut dyn FnMut(StreamEvent),
     ) {
         if let Some(native) = native {
-            self.process_native_tool_call(native, extractor, on_token);
+            self.process_native_tool_call(native, extractor, on_event);
         } else if self.connector.tool_call_mode() == ToolCallMode::Inline {
-            self.process_stream_chunk(token, extractor, on_token);
+            self.process_stream_chunk(token, extractor, on_event);
         } else {
-            on_token(token);
+            on_event(StreamEvent::Token(token.to_string()));
         }
     }
 
@@ -1452,13 +1501,13 @@ impl Harness {
         &mut self,
         token: &str,
         extractor: &mut ExtractAction,
-        on_token: &mut dyn FnMut(&str),
+        on_event: &mut dyn FnMut(StreamEvent),
     ) {
         let action = extractor.extract_stream(token);
         self.tool_extraction_failure_count += extractor.take_tool_failures();
         match action {
             StreamAction::Text(text) => {
-                on_token(&text);
+                on_event(StreamEvent::Token(text));
             }
             StreamAction::ToolCall(tc) => self.route_tool_call(tc),
             StreamAction::Pending => {}
@@ -1497,13 +1546,13 @@ impl Harness {
         &mut self,
         native: &NativeToolCall,
         extractor: &mut ExtractAction,
-        on_token: &mut dyn FnMut(&str),
+        on_event: &mut dyn FnMut(StreamEvent),
     ) {
         let action = extractor.register_native_call(native);
         self.tool_extraction_failure_count += extractor.take_tool_failures();
         match action {
             StreamAction::Text(text) => {
-                on_token(&text);
+                on_event(StreamEvent::Token(text));
             }
             StreamAction::ToolCall(tc) => self.route_tool_call(tc),
             StreamAction::Pending => {}
@@ -1521,7 +1570,7 @@ impl Harness {
     pub async fn stream_chat(
         &mut self,
         input: &str,
-        mut on_token: impl FnMut(&str),
+        mut on_event: impl FnMut(StreamEvent),
     ) -> Result<String, String> {
         // Reset the truncation signal for this stream before anything else.
         self.last_finish_reason = None;
@@ -1532,7 +1581,7 @@ impl Harness {
                 Ok(tokens) => {
                     let mut extractor = self.build_extractor();
                     for token in &tokens {
-                        self.dispatch_chunk(token, None, &mut extractor, &mut on_token);
+                        self.dispatch_chunk(token, None, &mut extractor, &mut on_event);
                     }
                     // Tests can simulate a provider-side truncation by queueing
                     // a finish_reason per stream (consumed one at a time).
@@ -1628,7 +1677,17 @@ impl Harness {
                     &token[..token.floor_char_boundary(token.len().min(50))]
                 );
             }
-            self.dispatch_chunk(token, chunk.tool_call(), &mut extractor, &mut on_token);
+            // The SDK retried a mid-stream failure: drop the partial content
+            // of the failed attempt and tell the consumer to do the same, so
+            // the retried response restarts clean (see
+            // [`Self::stream_chat_with_messages`]).
+            if chunk.is_reset() {
+                extractor.reset_stream_state();
+                self.last_finish_reason = None;
+                on_event(StreamEvent::Reset);
+                continue;
+            }
+            self.dispatch_chunk(token, chunk.tool_call(), &mut extractor, &mut on_event);
             // Stream reasoning/thinking deltas to the TUI so the user sees the
             // model "think" while it works (never echoed back to the model).
             let reasoning = chunk.reasoning();
@@ -1729,6 +1788,28 @@ impl Harness {
             let list = cosh.todo_list();
             self.context_manager.set_todo_list(list);
         }
+    }
+
+    /// Hash one iteration's tool interactions (name, arguments, result — in
+    /// dispatch order) into a stable signature for loop detection, mirroring
+    /// crush's `getToolInteractionSignature`. Two iterations whose tool calls
+    /// and results are byte-identical hash equal, so a model stuck repeating
+    /// the exact same failing action is detected (see
+    /// [`LOOP_DETECTION_WINDOW_SIZE`]/[`LOOP_DETECTION_MAX_REPEATS`]).
+    ///
+    /// FNV-1a 64-bit — deterministic within a run, no external deps.
+    fn tool_interaction_signature(interactions: &[String]) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for part in interactions {
+            for b in part.as_bytes() {
+                hash ^= u64::from(*b);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            // Separator so "a" + "b" and "ab" cannot collide.
+            hash ^= 0xff;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
     }
 
     /// Add a tool call + its result to the context manager (structural
@@ -1852,7 +1933,7 @@ impl Harness {
         stop_signal: Arc<AtomicBool>,
         mut queued_input_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     ) {
-        use super::events::HarnessEvent;
+        use super::events::{HarnessEvent, ToastVariant};
         use super::guardrails::{PermissionCheck, check_tool_permission};
         use cosh_tools::question::types::{QuestionInput, QuestionOutput};
 
@@ -1861,6 +1942,14 @@ impl Harness {
         // iteration so the user prompt is not sent twice).
         let mut current_input = String::new();
         let mut iteration = 0u64;
+
+        // Crush-style loop detection: watch the last N tool-calling
+        // iterations for an identical tool+input+result signature. A
+        // signature seen more than `LOOP_DETECTION_MAX_REPEATS` times stops
+        // the loop before the model burns tokens up to MAX_ITERATIONS on a
+        // stuck repetition.
+        let mut loop_window: VecDeque<String> =
+            VecDeque::with_capacity(LOOP_DETECTION_WINDOW_SIZE);
 
         // Throttle the periodic context snapshots so the TUI can persist the
         // `.ctx` companion file incrementally without serializing the whole
@@ -2021,6 +2110,10 @@ impl Harness {
                 break;
             }
 
+            // Tool interactions dispatched during THIS iteration, captured
+            // as "name\0args\0result" parts for loop detection.
+            let mut tool_interactions: Vec<String> = Vec::new();
+
             // Inject user messages queued for the NEXT REQUEST (the TUI's
             // "next request" queue) into the model context before this
             // request is built. Each is a regular protected user turn and is
@@ -2048,11 +2141,21 @@ impl Harness {
             let result = loop {
                 let messages = self.context_manager.build_messages(&current_input);
                 let attempt = self
-                    .stream_chat_with_messages(&system_context, &messages, |token| {
-                        assistant_response.push_str(token);
-                        let _ = tx.send(HarnessEvent::Token {
-                            text: token.to_string(),
-                        });
+                    .stream_chat_with_messages(&system_context, &messages, |event| {
+                        match event {
+                            // The SDK retried a mid-stream failure: drop the
+                            // partial assistant text accumulated so far and
+                            // tell the TUI to discard what it rendered, so
+                            // the retried response does not concatenate.
+                            StreamEvent::Reset => {
+                                assistant_response.clear();
+                                let _ = tx.send(HarnessEvent::ClearAssistant);
+                            }
+                            StreamEvent::Token(token) => {
+                                assistant_response.push_str(&token);
+                                let _ = tx.send(HarnessEvent::Token { text: token });
+                            }
+                        }
                     })
                     .await;
                 if let Err(ref e) = attempt
@@ -2367,6 +2470,9 @@ impl Harness {
                                             info_sig.as_deref().unwrap_or_default(),
                                             &json,
                                         );
+                                        // Loop-detection signature part.
+                                        tool_interactions
+                                            .push(format!("{name}\u{0}{args}\u{0}{json}"));
                                     }
                                     let _ = tx.send(HarnessEvent::ToolResult { output: json });
                                 }
@@ -2700,6 +2806,9 @@ impl Harness {
                                     info_sig.as_deref().unwrap_or_default(),
                                     &output,
                                 );
+                                // Loop-detection signature part.
+                                tool_interactions
+                                    .push(format!("{name}\u{0}{args}\u{0}{output}"));
                             }
                             let _ = tx.send(HarnessEvent::ToolResult { output });
                         }
@@ -2719,6 +2828,8 @@ impl Harness {
                                     info_sig.as_deref().unwrap_or_default(),
                                     &e,
                                 );
+                                // Loop-detection signature part.
+                                tool_interactions.push(format!("{name}\u{0}{args}\u{0}{e}"));
                             }
                             self.tool_failure_count += 1;
                             log::debug!(
@@ -2761,6 +2872,38 @@ impl Harness {
 
             if check_stop!() {
                 break;
+            }
+
+            // Crush-style loop detection: an identical tool+input+result
+            // signature seen more than LOOP_DETECTION_MAX_REPEATS times
+            // within the recent window means the model is stuck repeating
+            // the exact same action (e.g. re-running a failing command).
+            // Stop the loop here instead of burning tokens up to
+            // MAX_ITERATIONS — same safety intent, caught far earlier.
+            if !tool_interactions.is_empty() {
+                let sig = Self::tool_interaction_signature(&tool_interactions);
+                loop_window.push_back(sig.clone());
+                if loop_window.len() > LOOP_DETECTION_WINDOW_SIZE {
+                    loop_window.pop_front();
+                }
+                let repeats = loop_window.iter().filter(|s| **s == sig).count();
+                if loop_window.len() == LOOP_DETECTION_WINDOW_SIZE
+                    && repeats > LOOP_DETECTION_MAX_REPEATS
+                {
+                    log::debug!("run_agent_loop LOOP_DETECTED repeats={repeats}");
+                    self.context_manager.close_loop();
+                    let _ = tx.send(HarnessEvent::Toast {
+                        message: "Agent stopped: repeated identical tool calls \
+                                  detected (the model appears stuck in a loop)."
+                            .to_string(),
+                        variant: ToastVariant::Info,
+                    });
+                    let _ = tx.send(HarnessEvent::Done {
+                        context_state: bincode::serialize(&self.context_manager.save_state())
+                            .unwrap_or_default(),
+                    });
+                    break;
+                }
             }
 
             if !had_tools {
@@ -2944,6 +3087,15 @@ impl Harness {
                     .resolve_subagent_input(input)?;
                 return self.run_internal_subagent(call_input).await;
             }
+        }
+
+        // Test-only tools have no real dispatch implementation; return a
+        // canned, deterministic success so tests (e.g. loop detection) can
+        // drive repeated identical (tool, args, result) interactions.
+        #[cfg(test)]
+        if let Some(schema) = self.test_tools.iter().find(|t| t.name == tool_name) {
+            self.tool_issuer.pop_front();
+            return Ok(format!("ok:{}", schema.name));
         }
 
         // Tier 1: cosh tools
@@ -3223,7 +3375,10 @@ impl Harness {
             mock_chat_queue: VecDeque::new(),
             mock_stream_queue: VecDeque::new(),
             mock_native_stream_queue: VecDeque::new(),
+            #[cfg(test)]
             mock_finish_reasons: VecDeque::new(),
+            #[cfg(test)]
+            mock_stream_resets: VecDeque::new(),
             test_tools: Vec::new(),
         }
     }
@@ -3331,6 +3486,15 @@ impl Harness {
     #[cfg(test)]
     pub(crate) fn with_mock_finish_reason(mut self, reason: Option<&str>) -> Self {
         self.mock_finish_reasons.push_back(reason.map(String::from));
+        self
+    }
+
+    /// Queue a mock reset marker for the NEXT stream: the mock path emits
+    /// [`StreamEvent::Reset`] before the tokens, driving the same
+    /// discard-then-restart flow the SDK's mid-stream retry produces.
+    #[cfg(test)]
+    pub(crate) fn with_mock_stream_reset(mut self) -> Self {
+        self.mock_stream_resets.push_back(true);
         self
     }
 

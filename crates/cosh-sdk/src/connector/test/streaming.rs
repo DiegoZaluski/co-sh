@@ -103,7 +103,9 @@ data: [DONE]\n\n";
 #[tokio::test]
 async fn http_error_propagates() {
     let (port, _body, _raw, handle) = mock_server("Internal Server Error", 500);
-    let c = connector(port);
+    // Single-shot: this test asserts the FIRST attempt's error surfaces
+    // (retry is covered by connector::test::retry).
+    let c = connector(port).with_retry(false);
     let result = c.stream_chat("hi").await;
     handle.join().unwrap();
     match result {
@@ -119,7 +121,9 @@ async fn terminated_without_done() {
         "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
         200,
     );
-    let c = connector(port);
+    // Single-shot: a truncated stream must surface `StreamTerminated` from
+    // the first attempt (the retry path would re-request and mask it).
+    let c = connector(port).with_retry(false);
     let stream = c.stream_chat("hi").await.unwrap();
     handle.join().unwrap();
 

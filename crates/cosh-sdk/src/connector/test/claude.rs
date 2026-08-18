@@ -266,7 +266,9 @@ async fn model_fallback() {
 #[tokio::test]
 async fn streaming_http_error_propagates() {
     let (port, _body, _raw, handle) = mock_server("Internal Server Error", 500);
-    let c = claude_connector(port);
+    // Single-shot: this test asserts the FIRST attempt's error surfaces
+    // (retry is covered by connector::test::retry).
+    let c = claude_connector(port).with_retry(false);
     let result = c.stream_chat("hi").await;
     handle.join().unwrap();
     match result {

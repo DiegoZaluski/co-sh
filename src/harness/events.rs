@@ -14,6 +14,11 @@ pub struct ModelEntry {
 pub enum HarnessEvent {
     /// A text token streamed from the LLM.
     Token { text: String },
+    /// The SDK retried a mid-stream failure and is about to re-stream the
+    /// response from the beginning: the TUI must drop any partial assistant
+    /// message it rendered from the failed attempt (it would otherwise
+    /// concatenate with the retried response).
+    ClearAssistant,
     /// A complete tool call extracted from the LLM response.
     ToolCall { tool: String, input: Value },
     /// Successful result of a dispatched tool call.
