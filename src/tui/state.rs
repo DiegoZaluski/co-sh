@@ -30,6 +30,27 @@ pub struct PendingQueues {
     pub next_loop: VecDeque<String>,
 }
 
+impl PendingQueues {
+    /// Total number of queued messages across both queues.
+    pub fn queued_count(&self) -> usize {
+        self.next_request.len() + self.next_loop.len()
+    }
+
+    /// All queued messages in FIFO order: next_request first, then next_loop.
+    pub fn queued_list(&self) -> impl Iterator<Item = &str> {
+        self.next_request
+            .iter()
+            .chain(self.next_loop.iter())
+            .map(String::as_str)
+    }
+
+    /// Clear all queued messages from both queues.
+    pub fn clear(&mut self) {
+        self.next_request.clear();
+        self.next_loop.clear();
+    }
+}
+
 pub struct AppState {
     /// Header-only session summaries (always in RAM, sidebar uses these).
     pub session_summaries: Vec<SessionSummary>,

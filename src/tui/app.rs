@@ -3544,6 +3544,14 @@ impl App {
                         Some(crate::keymap::Action::Cancel) => {
                             if self.state.status == crate::types::SessionStatus::Working {
                                 self.stop_signal.store(true, Ordering::Relaxed);
+                                // Clear pending queues: the user explicitly
+                                // cancelled, so queued follow-ups should not
+                                // auto-start a new loop.
+                                if let Some(id) = self.state.current_session_id.clone()
+                                    && let Some(queues) = self.state.pending_queues.get_mut(&id)
+                                {
+                                    queues.clear();
+                                }
                                 return Ok(false);
                             }
                             if self.queue_choice_dialog.visible {
@@ -3630,6 +3638,13 @@ impl App {
                                 .map(PromptView::user_message_texts)
                                 .unwrap_or_default();
                             self.prompt_view.history_down(&user_msgs);
+                        }
+                        Some(crate::keymap::Action::ClearQueue) => {
+                            if let Some(id) = self.state.current_session_id.clone()
+                                && let Some(queues) = self.state.pending_queues.get_mut(&id)
+                            {
+                                queues.clear();
+                            }
                         }
                         None => {
 

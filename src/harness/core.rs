@@ -7,7 +7,9 @@ use cosh_sdk::connector::{
 };
 #[cfg(not(test))]
 use cosh_sdk::connector::{discover_context_window, effective_context_window};
-use cosh_sdk::extract_action::{ExtractAction, Item, NativeToolCall, StreamAction, ToolCallData, ToolSchema};
+use cosh_sdk::extract_action::{
+    ExtractAction, Item, NativeToolCall, StreamAction, ToolCallData, ToolSchema,
+};
 use cosh_tools::TOOL_FORMAT;
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, Tool};
@@ -164,8 +166,7 @@ const LOOP_DETECTION_MAX_REPEATS: usize = 5;
 ///   nothing). Blocked so the loop can only end with a written answer.
 ///
 /// Add future blocklist entries here.
-pub(crate) const SUBAGENT_BLOCKED_TOOLS: &[&str] =
-    &["ask_questions", "stop_agent_loop"];
+pub(crate) const SUBAGENT_BLOCKED_TOOLS: &[&str] = &["ask_questions", "stop_agent_loop"];
 
 /// Chunk interpolated into the `subagent_call` tool description (via
 /// [`SubAgent::set_note`]) so the model learns — naturally, inside the
@@ -676,8 +677,7 @@ impl Harness {
         //   dump stays in the header, and the request carries no native
         //   `tools` (see the caller gates) so the API can never produce
         //   structured tool calls — the two paths never cross.
-        let include_inline_schemas =
-            self.connector.tool_call_mode() == ToolCallMode::Inline;
+        let include_inline_schemas = self.connector.tool_call_mode() == ToolCallMode::Inline;
         let tool_format = if include_inline_schemas {
             TOOL_FORMAT
         } else {
@@ -726,7 +726,8 @@ impl Harness {
             for tool in &session.tools {
                 let desc = tool.description.as_deref().unwrap_or_default();
                 if include_inline_schemas {
-                    let schema = serde_json::to_string_pretty(&*tool.input_schema).unwrap_or_default();
+                    let schema =
+                        serde_json::to_string_pretty(&*tool.input_schema).unwrap_or_default();
                     let _ = write!(
                         out,
                         "- **{name}**: {desc}\n  Schema: {schema}\n",
@@ -1376,7 +1377,7 @@ impl Harness {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             } => {
-                log::debug!("stream_chat_with_messages STOPPED during connect");
+                // log::debug!("stream_chat_with_messages STOPPED during connect");
                 return Err(INTERRUPTED_MARKER.to_string());
             }
         };
@@ -1399,7 +1400,7 @@ impl Harness {
             let chunk = {
                 let poll = tokio::select! {
                     chunk = stream.next() => chunk.map(|c| c.map_err(|e| {
-                        log::debug!("stream_chat_with_messages STREAM_ERR={e}");
+                        // log::debug!("stream_chat_with_messages STREAM_ERR={e}");
                         e.to_string()
                     })),
                     () = tokio::time::sleep(Duration::from_millis(50)) => {
@@ -1466,7 +1467,7 @@ impl Harness {
 
         self.last_failed_raw = extractor.take_last_failed_raw();
 
-        log::debug!("stream_chat_with_messages DONE total_tokens={token_count}");
+        // log::debug!("stream_chat_with_messages DONE total_tokens={token_count}");
         Ok("done".into())
     }
 
@@ -1604,7 +1605,7 @@ impl Harness {
                 match result {
                     Ok(s) => s,
                     Err(e) => {
-                        log::debug!("stream_chat CONNECTOR_ERR={e}");
+                        // log::debug!("stream_chat CONNECTOR_ERR={e}");
                         return Err(e.to_string());
                     }
                 }
@@ -1621,7 +1622,7 @@ impl Harness {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             } => {
-                log::debug!("stream_chat STOPPED during connect");
+                // log::debug!("stream_chat STOPPED during connect");
                 return Err(INTERRUPTED_MARKER.to_string());
             }
         };
@@ -1636,7 +1637,7 @@ impl Harness {
                     .as_ref()
                     .is_some_and(|s| s.load(Ordering::Relaxed));
                 if stop {
-                    log::debug!("stream_chat STOPPED by signal");
+                    // log::debug!("stream_chat STOPPED by signal");
                     break;
                 }
             }
@@ -1644,7 +1645,7 @@ impl Harness {
             let chunk = {
                 let poll = tokio::select! {
                     chunk = stream.next() => chunk.map(|c| c.map_err(|e| {
-                        log::debug!("stream_chat STREAM_ERR={e}");
+                        // log::debug!("stream_chat STREAM_ERR={e}");
                         e.to_string()
                     })),
                     () = tokio::time::sleep(Duration::from_millis(50)) => {
@@ -1703,7 +1704,7 @@ impl Harness {
         // Capture the last failed tool call raw JSON for correction feedback
         self.last_failed_raw = extractor.take_last_failed_raw();
 
-        log::debug!("stream_chat DONE total_tokens={token_count}");
+        // log::debug!("stream_chat DONE total_tokens={token_count}");
         Ok("done".into())
     }
 
@@ -1948,8 +1949,7 @@ impl Harness {
         // signature seen more than `LOOP_DETECTION_MAX_REPEATS` times stops
         // the loop before the model burns tokens up to MAX_ITERATIONS on a
         // stuck repetition.
-        let mut loop_window: VecDeque<String> =
-            VecDeque::with_capacity(LOOP_DETECTION_WINDOW_SIZE);
+        let mut loop_window: VecDeque<String> = VecDeque::with_capacity(LOOP_DETECTION_WINDOW_SIZE);
 
         // Throttle the periodic context snapshots so the TUI can persist the
         // `.ctx` companion file incrementally without serializing the whole
@@ -2718,7 +2718,7 @@ impl Harness {
                                     }
                                     None => {
                                         // Channel closed or stop requested
-                                        log::debug!("run_agent_loop PERM_CHANNEL_CLOSED");
+                                        // log::debug!("run_agent_loop PERM_CHANNEL_CLOSED");
                                         self.tool_issuer.pop_front();
                                         let _ = tx.send(HarnessEvent::ToolError {
                                             error: "Internal error: permission channel closed"
@@ -2807,8 +2807,7 @@ impl Harness {
                                     &output,
                                 );
                                 // Loop-detection signature part.
-                                tool_interactions
-                                    .push(format!("{name}\u{0}{args}\u{0}{output}"));
+                                tool_interactions.push(format!("{name}\u{0}{args}\u{0}{output}"));
                             }
                             let _ = tx.send(HarnessEvent::ToolResult { output });
                         }
@@ -2849,7 +2848,7 @@ impl Harness {
                             }
                         }
                         DispatchOut::Stopped => {
-                            log::debug!("run_agent_loop dispatch_next STOPPED by user");
+                            // log::debug!("run_agent_loop dispatch_next STOPPED by user");
                             self.stop = true;
                             self.context_manager.close_loop();
                             let _ = tx.send(HarnessEvent::Stopped {
@@ -2890,7 +2889,7 @@ impl Harness {
                 if loop_window.len() == LOOP_DETECTION_WINDOW_SIZE
                     && repeats > LOOP_DETECTION_MAX_REPEATS
                 {
-                    log::debug!("run_agent_loop LOOP_DETECTED repeats={repeats}");
+                    // log::debug!("run_agent_loop LOOP_DETECTED repeats={repeats}");
                     self.context_manager.close_loop();
                     let _ = tx.send(HarnessEvent::Toast {
                         message: "Agent stopped: repeated identical tool calls \
@@ -2920,7 +2919,7 @@ impl Harness {
                         });
                         break;
                     }
-                    log::debug!("run_agent_loop RETRY (extraction failures)");
+                    // log::debug!("run_agent_loop RETRY (extraction failures)");
                     current_input.clear();
                     continue;
                 }
@@ -2940,7 +2939,7 @@ impl Harness {
                         });
                         break;
                     }
-                    log::debug!("run_agent_loop TRUNCATED (length) — continuing");
+                    // log::debug!("run_agent_loop TRUNCATED (length) — continuing");
                     current_input =
                         "Your previous response was cut off by the output token limit. \
                          Please continue exactly where you left off."
@@ -2949,7 +2948,7 @@ impl Harness {
                 }
                 // No tools and no extraction failures — conversation is complete.
                 // The final text response becomes the loop's LoopClosure.
-                log::debug!("run_agent_loop DONE (no tools)");
+                // log::debug!("run_agent_loop DONE (no tools)");
                 self.context_manager.close_loop();
                 let _ = tx.send(HarnessEvent::Done {
                     context_state: bincode::serialize(&self.context_manager.save_state())
@@ -2958,7 +2957,7 @@ impl Harness {
                 break;
             }
 
-            log::debug!("run_agent_loop RESTARTING with tool results");
+            // log::debug!("run_agent_loop RESTARTING with tool results");
             // The tool results have already been recorded in the context
             // manager via `push_tool_history` during dispatch. Just set the
             // continuation prompt for the next iteration.
@@ -2987,7 +2986,7 @@ impl Harness {
                 });
             }
         }
-        log::debug!("run_agent_loop EXIT");
+        // log::debug!("run_agent_loop EXIT");
 
         // Send final context info — the TUI shows this as the last known
         // state until the next agent loop starts.

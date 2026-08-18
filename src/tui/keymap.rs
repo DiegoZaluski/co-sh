@@ -27,6 +27,7 @@ pub enum Action {
     NextSession,
     PrevSession,
     ToggleMode,
+    ClearQueue,
 }
 
 #[derive(Debug, Clone)]
