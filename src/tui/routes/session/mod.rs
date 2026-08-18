@@ -270,6 +270,27 @@ fn msg_has_running_compaction(msg: &Message) -> bool {
         .any(|p| matches!(p, Part::Compaction(c) if c.is_running()))
 }
 
+/// Indices of messages that can still change in place, so their change token
+/// genuinely needs re-checking: those holding a `Running` tool (its output
+/// grows / its status transitions) or a `Running` compaction (it finalizes
+/// once). Every other message is immutable once set, so re-hashing its full
+/// content every frame would pay O(whole transcript) per frame for nothing.
+/// The scan is a cheap O(parts) status pass — no content hashing.
+fn mutable_msg_indices(session: &crate::types::Session) -> Vec<usize> {
+    session
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            m.parts.iter().any(|p| {
+                matches!(p, Part::Tool(t) if matches!(t.status, ToolStatus::Running))
+                    || matches!(p, Part::Compaction(c) if c.is_running())
+            })
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 fn msg_content_token(
     msg: &Message,
     config_token: u64,
@@ -367,6 +388,13 @@ pub struct SessionView {
     /// message (ToolResult/ToolOutput search every message) keeps its cached
     /// height in sync with what the render actually draws.
     msg_change_tokens: Vec<u64>,
+    /// Indices that held a still-mutable part (Running tool / Running
+    /// compaction) during the PREVIOUS incremental height pass. Carried over
+    /// and re-checked one more pass so a tool that completes in place
+    /// (Running → Completed) between frames still lands its final height, then
+    /// it drops out on its own. This lets the incremental scan re-hash only the
+    /// few messages that can actually change instead of the whole transcript.
+    prev_mutable_msgs: Vec<usize>,
     /// ID of the session for which caches were last built.
     /// Forces a full rebuild when switching sessions with the same message count.
     last_session_id: Option<String>,
@@ -475,6 +503,7 @@ impl SessionView {
             cache_config_token: 0,
             last_msg_change_token: 0,
             msg_change_tokens: Vec::new(),
+            prev_mutable_msgs: Vec::new(),
             text_regions_gen: 0,
             msg_cache_tokens: Vec::new(),
             msg_cache_cells: Vec::new(),
@@ -2034,6 +2063,7 @@ impl SessionView {
                 self.msg_change_tokens = session.messages.iter().map(msg_change_token).collect();
                 self.last_session_id = Some(session.id.clone());
                 self.last_tool_state_version = self.tool_state.version;
+                self.prev_mutable_msgs = mutable_msg_indices(session);
                 self.cached_total_height = self.rebuild_prefix_y();
                 // When the session, expansion state, terminal width, or config
                 // changed, the previous actual_total_height was computed for a
@@ -2100,6 +2130,7 @@ impl SessionView {
                     .extend(session.messages.iter().skip(prev_len).map(msg_change_token));
                 self.last_session_id = Some(session.id.clone());
                 self.last_tool_state_version = self.tool_state.version;
+                self.prev_mutable_msgs = mutable_msg_indices(session);
                 // Incremental: add new messages' heights plus a gap for each.
                 // All new messages have idx > 0 (prev_len >= 1), so gap = 1 per message.
                 let new_count = self.msg_height_cache.len() - prev_len;
@@ -2136,17 +2167,38 @@ impl SessionView {
                 }
             }
         } else {
-            // Incremental update: re-estimate ANY message whose content/status
-            // changed. Streaming text and tool completion normally touch only
+            // Incremental update: re-estimate ANY message that can still
+            // change. Streaming text and tool completion normally touch only
             // the last message, but ToolResult/ToolError (app.rs) and glob/grep
             // ToolOutput (app.rs) search EVERY message for the running tool
             // part, so a box in an OLDER message can complete or grow while a
             // newer message streams below. Re-estimating it keeps the cached
             // height in sync with the box the render actually draws.
+            //
+            // Only messages that CAN change are re-hashed each pass: the last
+            // message (always) plus any message with a Running tool / Running
+            // compaction, plus those that had a running part LAST pass (a tool
+            // completing in place between frames is no longer `Running`, but we
+            // still catch it once so its final height lands). Everything else is
+            // immutable, so hashing its full content per frame would pay
+            // O(whole transcript) every frame for nothing.
             let mut any_changed = false;
             let mut changed_last = false;
             if !self.msg_height_cache.is_empty() {
+                let last_idx = session.messages.len() - 1;
+                // Take last pass's mutable set (carried over to catch an
+                // in-place completion), then store this pass's for next time.
+                let prev_mutable = std::mem::take(&mut self.prev_mutable_msgs);
+                let curr_mutable = mutable_msg_indices(session);
+                let is_candidate = |idx: usize| {
+                    idx == last_idx
+                        || prev_mutable.binary_search(&idx).is_ok()
+                        || curr_mutable.binary_search(&idx).is_ok()
+                };
                 for (idx, msg) in session.messages.iter().enumerate() {
+                    if !is_candidate(idx) {
+                        continue;
+                    }
                     let token = msg_change_token(msg);
                     if token == self.msg_change_tokens.get(idx).copied().unwrap_or(u64::MAX) {
                         continue;
@@ -2178,9 +2230,10 @@ impl SessionView {
                     if idx < self.msg_change_tokens.len() {
                         self.msg_change_tokens[idx] = token;
                     }
-                    changed_last |= idx == session.messages.len() - 1;
+                    changed_last |= idx == last_idx;
                     any_changed = true;
                 }
+                self.prev_mutable_msgs = curr_mutable;
             }
             if any_changed {
                 // The changed message's height moved, so every start position
