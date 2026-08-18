@@ -10,7 +10,7 @@
 //! cargo run --example skills
 //! ```
 
-use cosh_tools::skills::{EmbeddedSkill, SkillOutput, Skills, SkillSource};
+use cosh_tools::skills::{EmbeddedSkill, SkillOutput, SkillSource, Skills};
 
 fn show_out(label: &str, out: &SkillOutput) {
     println!("== {label} ==");
@@ -80,8 +80,11 @@ fn main() {
     ] {
         let skill_dir = dir.join(name);
         std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), format!("---\nname: {name}\n{fm}---\n{body}\n"))
-            .unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\n{fm}---\n{body}\n"),
+        )
+        .unwrap();
     }
     // An asset file inside the rust skill.
     std::fs::create_dir_all(dir.join("rust").join("templates")).unwrap();
@@ -173,7 +176,10 @@ fn main() {
     );
 
     // 8. Errors: unknown skill, missing source directory.
-    show_err("8a. read of unknown skill", skills.read("nope").unwrap_err());
+    show_err(
+        "8a. read of unknown skill",
+        skills.read("nope").unwrap_err(),
+    );
     show_err(
         "8b. missing source directory",
         Skills::new()

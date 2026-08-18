@@ -52,21 +52,32 @@ fn main() {
     let span = create_component("span").expect("span is built-in");
     println!("== 1. component catalogue ==");
     println!("  built-in \"span\" -> {:?}", span.id());
-    println!("  unknown \"nope\" -> {:?}", create_component("nope").is_none());
+    println!(
+        "  unknown \"nope\" -> {:?}",
+        create_component("nope").is_none()
+    );
     println!();
 
     // ── 2. Registering a custom component ──────────────────────────────────
     // Custom tags can be added with a constructor closure.
-    register_component("status", Box::new(|| -> Box<dyn Renderable> {
-        let mut s = SpanRenderable::new();
-        s.set_text("ready".into());
-        Box::new(s)
-    }));
+    register_component(
+        "status",
+        Box::new(|| -> Box<dyn Renderable> {
+            let mut s = SpanRenderable::new();
+            s.set_text("ready".into());
+            Box::new(s)
+        }),
+    );
     let status = create_component("status").expect("registered above");
     let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
     status.render_self(&mut buf, Rect::new(0, 0, 8, 1));
     println!("== 2. custom component ==");
-    println!("  rendered: |{}|", (0..8).map(|x| buf[(x, 0)].symbol().to_string()).collect::<String>());
+    println!(
+        "  rendered: |{}|",
+        (0..8)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect::<String>()
+    );
     println!();
 
     // ── 3. SpanRenderable: text + attributes + link ────────────────────────
@@ -84,7 +95,10 @@ fn main() {
     let dynamic = DynamicRenderable::try_new("span").expect("span is built-in");
     println!("== 4. DynamicRenderable ==");
     println!("  try_new(\"span\") -> Some({:?})", dynamic.id());
-    println!("  try_new(\"nope\") -> {:?}", DynamicRenderable::try_new("nope").is_none());
+    println!(
+        "  try_new(\"nope\") -> {:?}",
+        DynamicRenderable::try_new("nope").is_none()
+    );
     println!();
 
     // ── 5. Slot placeholders ───────────────────────────────────────────────
@@ -94,7 +108,10 @@ fn main() {
     slot.register_child(42, Box::new(text_slot));
     println!("== 5. slots ==");
     println!("  after register_child: child_count={}", slot.child_count());
-    println!("  current_child present: {}", slot.current_child().is_some());
+    println!(
+        "  current_child present: {}",
+        slot.current_child().is_some()
+    );
     let moved = slot.remove_child(42).expect("child exists");
     slot.register_child(99, moved); // re-parented without destruction
     println!("  after re-parent: child_count={}", slot.child_count());
@@ -102,21 +119,39 @@ fn main() {
 
     // ── 6. SlotRegistry: plugin fragments ──────────────────────────────────
     let mut registry = SlotRegistry::new();
-    registry.register("statusbar", "clock", Box::new(|| -> Box<dyn Renderable> {
-        Box::new(TextRenderable::new(Some(string_to_styled_text("12:00"))))
-    }));
-    registry.register("statusbar", "git", Box::new(|| -> Box<dyn Renderable> {
-        Box::new(TextRenderable::new(Some(string_to_styled_text("main"))))
-    }));
+    registry.register(
+        "statusbar",
+        "clock",
+        Box::new(|| -> Box<dyn Renderable> {
+            Box::new(TextRenderable::new(Some(string_to_styled_text("12:00"))))
+        }),
+    );
+    registry.register(
+        "statusbar",
+        "git",
+        Box::new(|| -> Box<dyn Renderable> {
+            Box::new(TextRenderable::new(Some(string_to_styled_text("main"))))
+        }),
+    );
     registry.on_error(Box::new(|event: &PluginErrorEvent| {
-        println!("  [error] {} in {}: {}", event.plugin_id, event.slot_name, event.error);
+        println!(
+            "  [error] {} in {}: {}",
+            event.plugin_id, event.slot_name, event.error
+        );
     }));
     let entries = registry.resolve("statusbar", SlotMode::Append);
     println!("== 6. SlotRegistry ==");
     println!("  slot_count: {}", registry.slot_count());
     println!("  has_entries: {}", registry.has_entries("statusbar"));
-    println!("  Append resolves {} entries: {:?}", entries.len(), entries.iter().map(|e| e.id.clone()).collect::<Vec<_>>());
-    println!("  SingleWinner resolves {} entry", registry.resolve("statusbar", SlotMode::SingleWinner).len());
+    println!(
+        "  Append resolves {} entries: {:?}",
+        entries.len(),
+        entries.iter().map(|e| e.id.clone()).collect::<Vec<_>>()
+    );
+    println!(
+        "  SingleWinner resolves {} entry",
+        registry.resolve("statusbar", SlotMode::SingleWinner).len()
+    );
     registry.report_error(&PluginErrorEvent {
         plugin_id: "git".into(),
         slot_name: "statusbar".into(),
@@ -125,7 +160,10 @@ fn main() {
         error: "boom".into(),
     });
     registry.unregister("statusbar");
-    println!("  after unregister, has_entries: {}", registry.has_entries("statusbar"));
+    println!(
+        "  after unregister, has_entries: {}",
+        registry.has_entries("statusbar")
+    );
     println!();
 
     // ── 7. Reconciler DOM ops ──────────────────────────────────────────────
@@ -162,7 +200,10 @@ fn main() {
     println!("  get_next_id(\"span\"): {}", get_next_id("span"));
     println!("  get_next_id(\"box\"): {}", get_next_id("box"));
     set_debug(false);
-    println!("  is_debug after off: {}", cosh_tui::solid::utils::log::is_debug());
+    println!(
+        "  is_debug after off: {}",
+        cosh_tui::solid::utils::log::is_debug()
+    );
     println!();
 
     // ── 10. Scaffolded parts (informational only) ──────────────────────────
@@ -192,6 +233,11 @@ fn main() {
     container.set_border(true);
     container.set_border_color(Some("#00AAFF".into()));
     container.set_title(Some("solid demo".into()));
-    show("    box frame only (children need the managed renderer)", &container, 20, 3);
+    show(
+        "    box frame only (children need the managed renderer)",
+        &container,
+        20,
+        3,
+    );
     let _ = RGBA::from_ints(0, 0, 0, 0);
 }

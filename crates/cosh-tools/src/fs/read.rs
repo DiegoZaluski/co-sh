@@ -261,7 +261,8 @@ fn elide_block(
 ) -> (Vec<String>, Option<(u32, u32)>, bool) {
     let n = lines.len();
     if n <= ELIDE_MIN_BLOCK_LINES {
-        let (out, truncated_any) = render_block_lines(lines, start_line, start_line + n as u32 - 1, seen);
+        let (out, truncated_any) =
+            render_block_lines(lines, start_line, start_line + n as u32 - 1, seen);
         return (out, None, truncated_any);
     }
     let head_n = ELIDE_KEEP_HEAD.min(n);

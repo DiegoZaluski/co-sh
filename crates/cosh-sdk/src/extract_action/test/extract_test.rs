@@ -652,7 +652,11 @@ fn native_call_missing_required_field_is_a_failure() {
         StreamAction::Text(t) => assert!(t.contains("Tool call failure")),
         other => panic!("expected failure text, got {other:?}"),
     }
-    assert_eq!(ex.take_tool_failures(), 1, "schema violation counts as failure");
+    assert_eq!(
+        ex.take_tool_failures(),
+        1,
+        "schema violation counts as failure"
+    );
     assert!(
         ex.take_last_failed_raw().contains("fs.read"),
         "last_failed_raw feeds the correction memory"

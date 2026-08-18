@@ -11,8 +11,8 @@
 //! ```
 
 use cosh_tools::plan::{
-    Plan, TodoCrossOff, TodoEdit, TodoList, TodoReadAction, TodoStatus, TodoWriteAction,
-    todo_read, todo_write,
+    Plan, TodoCrossOff, TodoEdit, TodoList, TodoReadAction, TodoStatus, TodoWriteAction, todo_read,
+    todo_write,
 };
 
 /// Render a list the way the harness's protected context block does:
@@ -90,9 +90,13 @@ fn main() {
     show_nags("2. Add with a nonexistent dependency", &out.nags);
 
     // ── 3. Start, and the one-in-progress rule ----------------------------
-    plan.todo_write(&TodoWriteAction::Start { id: "task-1".into() })
-        .unwrap();
-    match plan.todo_write(&TodoWriteAction::Start { id: "task-2".into() }) {
+    plan.todo_write(&TodoWriteAction::Start {
+        id: "task-1".into(),
+    })
+    .unwrap();
+    match plan.todo_write(&TodoWriteAction::Start {
+        id: "task-2".into(),
+    }) {
         Ok(_) => panic!("second Start must be rejected"),
         Err(e) => {
             println!("== 3. second Start rejected ==");
@@ -113,10 +117,14 @@ fn main() {
 
     // ── 5. Cross off: terminal states are sticky, dependents are warned ----
     let out = plan
-        .todo_cross_off(&TodoCrossOff::Complete { id: "task-1".into() })
+        .todo_cross_off(&TodoCrossOff::Complete {
+            id: "task-1".into(),
+        })
         .unwrap();
     show_nags("5. completing task-1 (task-2 depends on it)", &out.nags);
-    match plan.todo_cross_off(&TodoCrossOff::Complete { id: "task-1".into() }) {
+    match plan.todo_cross_off(&TodoCrossOff::Complete {
+        id: "task-1".into(),
+    }) {
         Ok(_) => panic!("crossing off a terminal task must fail"),
         Err(e) => {
             println!("== 5b. second Complete rejected (sticky) ==");
@@ -136,8 +144,10 @@ fn main() {
     println!();
 
     // ── 7. The verification contract --------------------------------------
-    plan.todo_cross_off(&TodoCrossOff::Complete { id: "task-2".into() })
-        .unwrap();
+    plan.todo_cross_off(&TodoCrossOff::Complete {
+        id: "task-2".into(),
+    })
+    .unwrap();
     let out = plan
         .todo_read(&TodoReadAction::List {
             group: None,
@@ -145,7 +155,10 @@ fn main() {
         })
         .unwrap();
     // task-1 lives in Backend now, so both Database and Backend nag.
-    show_nags("7. read after Database + Backend are fully terminal", &out.nags);
+    show_nags(
+        "7. read after Database + Backend are fully terminal",
+        &out.nags,
+    );
     plan.todo_write(&TodoWriteAction::VerifyGroup {
         group: "Database".into(),
     })
@@ -211,9 +224,14 @@ fn main() {
     .unwrap();
     plan.load_from_md(&path.to_string_lossy()).unwrap();
     std::fs::remove_file(&path).ok();
-    show("10. after load_from_md (parsed file, ids renumbered)", &plan);
+    show(
+        "10. after load_from_md (parsed file, ids renumbered)",
+        &plan,
+    );
     let out = plan
-        .todo_read(&TodoReadAction::Get { id: "task-2".into() })
+        .todo_read(&TodoReadAction::Get {
+            id: "task-2".into(),
+        })
         .unwrap();
     println!("== 10b. Get task-2 ==");
     print!("{}", render(&TodoList { groups: out.groups }));

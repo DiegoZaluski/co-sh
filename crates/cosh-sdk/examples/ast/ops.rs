@@ -9,9 +9,8 @@
 //! ```
 
 use cosh_sdk::ast::{
-    AstMatchStrictness, apply_edits, collect_matches, compile_pattern,
-    compile_rewrite_rules, compile_search_patterns, rewrite_source,
-    resolve_language, resolve_supported_lang,
+    AstMatchStrictness, apply_edits, collect_matches, compile_pattern, compile_rewrite_rules,
+    compile_search_patterns, resolve_language, resolve_supported_lang, rewrite_source,
 };
 use std::path::Path;
 
@@ -25,7 +24,12 @@ fn main() {
     let err = resolve_supported_lang("cobol");
     println!(
         "  unknown alias -> {}",
-        err.unwrap_err().to_string().split("Supported:").next().unwrap().trim()
+        err.unwrap_err()
+            .to_string()
+            .split("Supported:")
+            .next()
+            .unwrap()
+            .trim()
     );
     println!();
 
@@ -46,13 +50,8 @@ fn main() {
 }
 ";
     // $A + $B matches every binary addition expression.
-    let pattern = compile_pattern(
-        "$A + $B",
-        None,
-        &AstMatchStrictness::Smart.into(),
-        lang,
-    )
-    .unwrap();
+    let pattern =
+        compile_pattern("$A + $B", None, &AstMatchStrictness::Smart.into(), lang).unwrap();
     let matches = collect_matches(src, lang, &[pattern]);
     println!("  `$A + $B` matched {} expressions:", matches.len());
     for m in &matches {
@@ -95,14 +94,33 @@ fn main() {
     println!("  single edit: \"abcdef\" -> \"{out}\"");
     // Two identical edits collapse into one deterministic edit.
     let dup = vec![
-        ast_grep_core::source::Edit { position: 0, deleted_length: 2, inserted_text: b"Y".to_vec() },
-        ast_grep_core::source::Edit { position: 0, deleted_length: 2, inserted_text: b"Y".to_vec() },
+        ast_grep_core::source::Edit {
+            position: 0,
+            deleted_length: 2,
+            inserted_text: b"Y".to_vec(),
+        },
+        ast_grep_core::source::Edit {
+            position: 0,
+            deleted_length: 2,
+            inserted_text: b"Y".to_vec(),
+        },
     ];
-    println!("  duplicate edits dedupe: \"abcdef\" -> \"{}\"", apply_edits("abcdef", &dup).unwrap());
+    println!(
+        "  duplicate edits dedupe: \"abcdef\" -> \"{}\"",
+        apply_edits("abcdef", &dup).unwrap()
+    );
     // Overlapping divergent edits are rejected.
     let overlap = vec![
-        ast_grep_core::source::Edit { position: 1, deleted_length: 3, inserted_text: b"a".to_vec() },
-        ast_grep_core::source::Edit { position: 2, deleted_length: 1, inserted_text: b"b".to_vec() },
+        ast_grep_core::source::Edit {
+            position: 1,
+            deleted_length: 3,
+            inserted_text: b"a".to_vec(),
+        },
+        ast_grep_core::source::Edit {
+            position: 2,
+            deleted_length: 1,
+            inserted_text: b"b".to_vec(),
+        },
     ];
     let err = apply_edits("abcdef", &overlap).unwrap_err();
     println!("  overlapping edits rejected: {err}");

@@ -8,11 +8,11 @@
 //! cargo run -p cosh-sdk --example find
 //! ```
 
-use cosh_sdk::find::{
-    FileType, GlobOptions, GlobResult, GrepOptions, GrepOutputMode, GrepResult,
-    build_glob_pattern, glob, grep,
-};
 use cosh_sdk::find::task::{AbortReason, AbortToken, CancelToken};
+use cosh_sdk::find::{
+    FileType, GlobOptions, GlobResult, GrepOptions, GrepOutputMode, GrepResult, build_glob_pattern,
+    glob, grep,
+};
 use std::path::Path;
 
 fn show_glob(label: &str, result: Result<GlobResult, String>) {
@@ -72,8 +72,14 @@ fn main() {
     // process working directory, so we chdir into the scratch root.
     let project = std::env::temp_dir().join("cosh-sdk-find-example");
     let _ = std::fs::remove_dir_all(&project);
-    write(&project.join("src/lib.rs"), "pub fn double(x: i32) -> i32 { x * 2 }\n");
-    write(&project.join("src/main.rs"), "fn main() { println!(\"hi\"); }\n");
+    write(
+        &project.join("src/lib.rs"),
+        "pub fn double(x: i32) -> i32 { x * 2 }\n",
+    );
+    write(
+        &project.join("src/main.rs"),
+        "fn main() { println!(\"hi\"); }\n",
+    );
     write(&project.join("src/util/helper.rs"), "fn helper() {}\n");
     write(&project.join("tests/it.rs"), "fn double_works() {}\n");
     write(&project.join("docs/guide.md"), "# Guide\n");
@@ -182,7 +188,10 @@ fn main() {
     // ── 4. glob_util: pattern normalization ─────────────────────────────────
     println!("== 4. build_glob_pattern ==");
     for (pattern, recursive) in [("*.rs", true), ("src/*.rs", true), ("*.{ts,tsx", true)] {
-        println!("  {pattern:>12} recursive={recursive:<5} -> {}", build_glob_pattern(pattern, recursive));
+        println!(
+            "  {pattern:>12} recursive={recursive:<5} -> {}",
+            build_glob_pattern(pattern, recursive)
+        );
     }
     println!();
 
@@ -241,7 +250,10 @@ fn main() {
     );
 
     // ── 7. grep: context lines + line truncation ────────────────────────────
-    write(&project.join("notes.txt"), "alpha\nneedle one\nbeta\ngamma\nneedle two\n");
+    write(
+        &project.join("notes.txt"),
+        "alpha\nneedle one\nbeta\ngamma\nneedle two\n",
+    );
     show_grep(
         "grep `needle` with context_after=1, max_columns=6",
         grep(GrepOptions {
@@ -287,12 +299,21 @@ fn main() {
     write(&project.join("src/new.rs"), "fn new() {}\n");
     // Within the TTL (1s), the cached scan is served: new.rs is NOT visible.
     let second = glob(opts()).unwrap();
-    println!("  after creating src/new.rs, first scan found {} files", first.total_matches);
-    println!("  cached scan (same TTL window) found {} files", second.total_matches);
+    println!(
+        "  after creating src/new.rs, first scan found {} files",
+        first.total_matches
+    );
+    println!(
+        "  cached scan (same TTL window) found {} files",
+        second.total_matches
+    );
     // Invalidate the cache and the next scan sees the new file.
     cosh_sdk::find::fs_cache::invalidate_all();
     let third = glob(opts()).unwrap();
-    println!("  after invalidate_all, scan found {} files", third.total_matches);
+    println!(
+        "  after invalidate_all, scan found {} files",
+        third.total_matches
+    );
     println!();
 
     // ── 9. Cancellation: an AbortToken stops a running search ───────────────
@@ -310,100 +331,115 @@ fn main() {
     println!();
 
     // ── 10. Error paths ─────────────────────────────────────────────────────
-    show_glob("glob missing path", glob(GlobOptions {
-        pattern: "*.rs".into(),
-        path: "does-not-exist".into(),
-        file_type: None,
-        recursive: None,
-        hidden: None,
-        max_results: None,
-        gitignore: None,
-        cache: None,
-        sort_by_mtime: None,
-        include_node_modules: None,
-        timeout_ms: None,
-        on_match: None,
-    }));
-    show_glob("glob on a file (not a dir)", glob(GlobOptions {
-        pattern: "*".into(),
-        path: "notes.txt".into(),
-        file_type: None,
-        recursive: None,
-        hidden: None,
-        max_results: None,
-        gitignore: None,
-        cache: None,
-        sort_by_mtime: None,
-        include_node_modules: None,
-        timeout_ms: None,
-        on_match: None,
-    }));
+    show_glob(
+        "glob missing path",
+        glob(GlobOptions {
+            pattern: "*.rs".into(),
+            path: "does-not-exist".into(),
+            file_type: None,
+            recursive: None,
+            hidden: None,
+            max_results: None,
+            gitignore: None,
+            cache: None,
+            sort_by_mtime: None,
+            include_node_modules: None,
+            timeout_ms: None,
+            on_match: None,
+        }),
+    );
+    show_glob(
+        "glob on a file (not a dir)",
+        glob(GlobOptions {
+            pattern: "*".into(),
+            path: "notes.txt".into(),
+            file_type: None,
+            recursive: None,
+            hidden: None,
+            max_results: None,
+            gitignore: None,
+            cache: None,
+            sort_by_mtime: None,
+            include_node_modules: None,
+            timeout_ms: None,
+            on_match: None,
+        }),
+    );
     // A non-quantifier brace is tolerated (escaped to a literal), so `a{2`
     // simply matches nothing here — the pattern never errors.
-    show_grep("grep `a{2` (brace tolerance)", grep(GrepOptions {
-        pattern: "a{2".into(),
-        path: "notes.txt".into(),
-        glob: None,
-        r#type: None,
-        ignore_case: None,
-        multiline: None,
-        hidden: None,
-        gitignore: None,
-        cache: None,
-        max_count: None,
-        offset: None,
-        context_before: None,
-        context_after: None,
-        context: None,
-        max_columns: None,
-        mode: None,
-        max_count_per_file: None,
-        timeout_ms: None,
-        on_match: None,
-    }));
+    show_grep(
+        "grep `a{2` (brace tolerance)",
+        grep(GrepOptions {
+            pattern: "a{2".into(),
+            path: "notes.txt".into(),
+            glob: None,
+            r#type: None,
+            ignore_case: None,
+            multiline: None,
+            hidden: None,
+            gitignore: None,
+            cache: None,
+            max_count: None,
+            offset: None,
+            context_before: None,
+            context_after: None,
+            context: None,
+            max_columns: None,
+            mode: None,
+            max_count_per_file: None,
+            timeout_ms: None,
+            on_match: None,
+        }),
+    );
     // An unclosed character class has no tolerance path — genuine error.
-    show_grep("grep `[abc` (genuine regex error)", grep(GrepOptions {
-        pattern: "[abc".into(),
-        path: "notes.txt".into(),
-        glob: None,
-        r#type: None,
-        ignore_case: None,
-        multiline: None,
-        hidden: None,
-        gitignore: None,
-        cache: None,
-        max_count: None,
-        offset: None,
-        context_before: None,
-        context_after: None,
-        context: None,
-        max_columns: None,
-        mode: None,
-        max_count_per_file: None,
-        timeout_ms: None,
-        on_match: None,
-    }));
-    show_grep("grep missing path", grep(GrepOptions {
-        pattern: "needle".into(),
-        path: "nope.txt".into(),
-        glob: None,
-        r#type: None,
-        ignore_case: None,
-        multiline: None,
-        hidden: None,
-        gitignore: None,
-        cache: None,
-        max_count: None,
-        offset: None,
-        context_before: None,
-        context_after: None,
-        context: None,
-        max_columns: None,
-        mode: None,
-        max_count_per_file: None,
-        timeout_ms: None,
-        on_match: None,
-    }));
+    show_grep(
+        "grep `[abc` (genuine regex error)",
+        grep(GrepOptions {
+            pattern: "[abc".into(),
+            path: "notes.txt".into(),
+            glob: None,
+            r#type: None,
+            ignore_case: None,
+            multiline: None,
+            hidden: None,
+            gitignore: None,
+            cache: None,
+            max_count: None,
+            offset: None,
+            context_before: None,
+            context_after: None,
+            context: None,
+            max_columns: None,
+            mode: None,
+            max_count_per_file: None,
+            timeout_ms: None,
+            on_match: None,
+        }),
+    );
+    show_grep(
+        "grep missing path",
+        grep(GrepOptions {
+            pattern: "needle".into(),
+            path: "nope.txt".into(),
+            glob: None,
+            r#type: None,
+            ignore_case: None,
+            multiline: None,
+            hidden: None,
+            gitignore: None,
+            cache: None,
+            max_count: None,
+            offset: None,
+            context_before: None,
+            context_after: None,
+            context: None,
+            max_columns: None,
+            mode: None,
+            max_count_per_file: None,
+            timeout_ms: None,
+            on_match: None,
+        }),
+    );
 
     let _ = &project;
     std::env::set_current_dir("/").ok();

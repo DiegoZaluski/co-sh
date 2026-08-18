@@ -34,7 +34,11 @@ fn main() {
     std::fs::write(src.join("lib.rs"), file_a).unwrap();
     std::fs::write(src.join("main.rs"), file_a).unwrap();
     std::fs::write(src.join("util/helper.rs"), file_a).unwrap();
-    std::fs::write(src.join("util/unrelated.rs"), "pub fn keep(x: u32) -> u32 {\n    x\n}\n").unwrap();
+    std::fs::write(
+        src.join("util/unrelated.rs"),
+        "pub fn keep(x: u32) -> u32 {\n    x\n}\n",
+    )
+    .unwrap();
 
     let fs = Fs::new().cwd(&project);
 

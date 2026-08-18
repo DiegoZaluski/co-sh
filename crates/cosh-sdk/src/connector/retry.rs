@@ -50,7 +50,8 @@ pub fn is_retryable_error(e: &ConnectorError) -> bool {
 /// bounds (mirrors fantasy's `getRetryDelayInMs`).
 #[must_use]
 pub fn retry_delay(e: &ConnectorError, attempt: usize) -> Duration {
-    let base = RETRY_INITIAL_DELAY.mul_f64(RETRY_BACKOFF_FACTOR.powi(attempt.saturating_sub(1) as i32));
+    let base =
+        RETRY_INITIAL_DELAY.mul_f64(RETRY_BACKOFF_FACTOR.powi(attempt.saturating_sub(1) as i32));
     if let ConnectorError::HttpError {
         retry_after_ms: Some(ms),
         ..

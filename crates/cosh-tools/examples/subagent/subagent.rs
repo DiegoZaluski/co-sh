@@ -70,7 +70,10 @@ fn main() {
     // ── 4. set_note: description interpolation -----------------------------
     println!("== 4. set_note interpolation ==");
     let before = sub.description_call["description"].as_str().unwrap();
-    println!("  note absent by default: {}", !before.contains("internal agent runs the task instead"));
+    println!(
+        "  note absent by default: {}",
+        !before.contains("internal agent runs the task instead")
+    );
     let mut noted = SubAgent::new();
     noted.set_note("When `agent` is omitted or empty, an internal agent runs the task instead.");
     let after = noted.description_call["description"].as_str().unwrap();
@@ -96,10 +99,7 @@ fn main() {
     println!("== 6. sample AGENTS invocations ==");
     for name in ["opencode", "claude", "aider"] {
         if let Some((_, binary, args)) = AGENTS.iter().find(|(n, _, _)| *n == name) {
-            println!(
-                "  {name}: {binary} {} \"<input>\"",
-                args.join(" ")
-            );
+            println!("  {name}: {binary} {} \"<input>\"", args.join(" "));
         }
     }
     println!("\n  ({} agents registered)", AGENTS.len());

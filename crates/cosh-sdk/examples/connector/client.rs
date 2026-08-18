@@ -26,9 +26,18 @@ async fn main() -> Result<(), ConnectorError> {
     for (name, env) in cosh_sdk::connector::known_providers_with_env().take(6) {
         println!("  {name:<12} key env: {env}");
     }
-    println!("  ollama env var: {:?}", cosh_sdk::connector::get_provider_env_var("ollama"));
-    println!("  has_api_key(openai): {}", cosh_sdk::connector::has_api_key("openai"));
-    println!("  detect_provider: {:?}", cosh_sdk::connector::detect_provider());
+    println!(
+        "  ollama env var: {:?}",
+        cosh_sdk::connector::get_provider_env_var("ollama")
+    );
+    println!(
+        "  has_api_key(openai): {}",
+        cosh_sdk::connector::has_api_key("openai")
+    );
+    println!(
+        "  detect_provider: {:?}",
+        cosh_sdk::connector::detect_provider()
+    );
     println!();
 
     // ── 2. Builder + introspection (no network) ──────────────────────────────
@@ -81,7 +90,10 @@ async fn main() -> Result<(), ConnectorError> {
     }
     // ResponseFormat serializes as {"type": "json_object"}.
     let fmt = ResponseFormat::json_object();
-    println!("  response_format: {}", serde_json::to_string(&fmt).unwrap());
+    println!(
+        "  response_format: {}",
+        serde_json::to_string(&fmt).unwrap()
+    );
     println!();
 
     // ── 4. Error classification (deterministic) ──────────────────────────────
@@ -91,7 +103,11 @@ async fn main() -> Result<(), ConnectorError> {
         "This model's maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens.".into(),
     );
     match ctx {
-        ConnectorError::ContextWindowExceeded { status, window_tokens, .. } => {
+        ConnectorError::ContextWindowExceeded {
+            status,
+            window_tokens,
+            ..
+        } => {
             println!("  context overflow: HTTP {status}, window ≈ {window_tokens:?} tokens");
         }
         other => println!("  unexpected: {other}"),
@@ -102,7 +118,10 @@ async fn main() -> Result<(), ConnectorError> {
         200,
         "This model's maximum context length is 64000 tokens.".into(),
     );
-    println!("  200 SSE frame with overflow body -> is_context_window: {}", sse.is_context_window());
+    println!(
+        "  200 SSE frame with overflow body -> is_context_window: {}",
+        sse.is_context_window()
+    );
     println!();
 
     // ── 5. Model discovery (static table, offline) ───────────────────────────
@@ -115,7 +134,10 @@ async fn main() -> Result<(), ConnectorError> {
         println!(
             "  {model:<18} window {:<8} effective ~{:<8} reasoning: {reasoning:?}",
             window.map(|w| w.to_string()).unwrap_or_else(|| "?".into()),
-            window.map(effective_context_window).map(|w| w.to_string()).unwrap_or_else(|| "?".into()),
+            window
+                .map(effective_context_window)
+                .map(|w| w.to_string())
+                .unwrap_or_else(|| "?".into()),
         );
     }
     println!();

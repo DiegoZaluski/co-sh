@@ -310,10 +310,9 @@ async fn stream_reset_marker_discards_partial_then_restarts() {
     // the harness must forward it to the consumer BEFORE the retried tokens
     // so the partial content of the failed attempt is discarded, never
     // concatenated with the retried response.
-    let mut h = make_harness().with_mock_stream_reset().with_mock_stream(Ok(vec![
-        "retried-",
-        "answer",
-    ]));
+    let mut h = make_harness()
+        .with_mock_stream_reset()
+        .with_mock_stream(Ok(vec!["retried-", "answer"]));
 
     let mut events = Vec::new();
     let _ = h

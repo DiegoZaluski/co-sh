@@ -43,7 +43,11 @@ async fn rate_limit_is_retried_and_stream_succeeds() {
         }
     }
     assert_eq!(text, "hello world", "retried stream delivers the full text");
-    assert_eq!(*request_count.lock().unwrap(), 2, "429 then retry = 2 requests");
+    assert_eq!(
+        *request_count.lock().unwrap(),
+        2,
+        "429 then retry = 2 requests"
+    );
 
     let _ = handle.join();
 }
@@ -83,7 +87,8 @@ async fn mid_stream_failure_emits_reset_and_restarts() {
     // First attempt: one token, then the connection dies WITHOUT [DONE] —
     // the parser surfaces StreamTerminated (retryable). Second attempt:
     // the full stream.
-    let partial = "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"partial-\"},\"index\":0}]}\n\n";
+    let partial =
+        "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"partial-\"},\"index\":0}]}\n\n";
     let full = "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"retried\"},\"index\":0}]}\n\n\
                 data: {\"id\":\"1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}]}\n\n\
                 data: [DONE]\n\n";
@@ -112,7 +117,10 @@ async fn mid_stream_failure_emits_reset_and_restarts() {
         }
     }
     assert!(saw_reset, "a mid-stream retry must emit the reset marker");
-    assert_eq!(text, "retried", "the retried response replaces the partial text");
+    assert_eq!(
+        text, "retried",
+        "the retried response replaces the partial text"
+    );
     assert_eq!(*request_count.lock().unwrap(), 2);
 
     let _ = handle.join();
@@ -226,8 +234,15 @@ async fn transient_sse_error_is_retried() {
             Err(e) => panic!("stream error after transient retry: {e}"),
         }
     }
-    assert_eq!(text, "ok", "transient SSE error must be retried transparently");
-    assert_eq!(*request_count.lock().unwrap(), 2, "transient error then retry = 2 requests");
+    assert_eq!(
+        text, "ok",
+        "transient SSE error must be retried transparently"
+    );
+    assert_eq!(
+        *request_count.lock().unwrap(),
+        2,
+        "transient error then retry = 2 requests"
+    );
 
     let _ = handle.join();
 }
@@ -240,9 +255,8 @@ async fn transient_sse_error_is_retried() {
 async fn non_transient_sse_error_is_not_retried() {
     let sse_error =
         "data: {\"error\":{\"message\":\"bad request\",\"type\":\"invalid_request_error\"}}\n\n";
-    let (port, request_count, handle) = mock_server_sequence(vec![MockResponse::new(
-        200, sse_error,
-    )]);
+    let (port, request_count, handle) =
+        mock_server_sequence(vec![MockResponse::new(200, sse_error)]);
 
     let c = connector(port);
     let mut stream = c.stream_chat("hi").await.unwrap();
@@ -257,8 +271,15 @@ async fn non_transient_sse_error_is_not_retried() {
             break;
         }
     }
-    assert!(saw_error, "a non-transient SSE error must surface as a stream error");
-    assert_eq!(*request_count.lock().unwrap(), 1, "no retry on non-transient error");
+    assert!(
+        saw_error,
+        "a non-transient SSE error must surface as a stream error"
+    );
+    assert_eq!(
+        *request_count.lock().unwrap(),
+        1,
+        "no retry on non-transient error"
+    );
 
     let _ = handle.join();
 }
@@ -294,12 +315,10 @@ async fn max_retries_exhausted_surfaces_last_error() {
 #[tokio::test]
 async fn mid_stream_non_retryable_error_surfaces_immediately() {
     // First attempt: one token, then a 401 error event (non-retryable).
-    let sse_partial =
-        "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"partial-\"},\"index\":0}]}\n\n\
+    let sse_partial = "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"partial-\"},\"index\":0}]}\n\n\
          data: {\"error\":{\"message\":\"unauthorized\"}}\n\n";
-    let (port, request_count, handle) = mock_server_sequence(vec![MockResponse::new(
-        200, sse_partial,
-    )]);
+    let (port, request_count, handle) =
+        mock_server_sequence(vec![MockResponse::new(200, sse_partial)]);
 
     let c = connector(port);
     let mut stream = c.stream_chat("hi").await.unwrap();
@@ -317,7 +336,11 @@ async fn mid_stream_non_retryable_error_surfaces_immediately() {
         saw_error,
         "a non-retryable mid-stream error must surface without retry"
     );
-    assert_eq!(*request_count.lock().unwrap(), 1, "no retry on non-retryable error");
+    assert_eq!(
+        *request_count.lock().unwrap(),
+        1,
+        "no retry on non-retryable error"
+    );
 
     let _ = handle.join();
 }
@@ -347,7 +370,11 @@ async fn retry_after_hint_is_honored() {
         }
     }
     assert_eq!(text, "ok");
-    assert_eq!(*request_count.lock().unwrap(), 2, "429 then retry = 2 requests");
+    assert_eq!(
+        *request_count.lock().unwrap(),
+        2,
+        "429 then retry = 2 requests"
+    );
 
     let _ = handle.join();
 }
@@ -387,7 +414,10 @@ async fn multiple_mid_stream_retries_succeed() {
             }
         }
     }
-    assert_eq!(text, "done", "the third attempt's content replaces prior partials");
+    assert_eq!(
+        text, "done",
+        "the third attempt's content replaces prior partials"
+    );
     assert_eq!(*request_count.lock().unwrap(), 3, "three attempts total");
 
     let _ = handle.join();

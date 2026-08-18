@@ -11,9 +11,9 @@ pub mod language;
 
 use crate::hashline::types::BlockSpan;
 use lru::LruCache;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tree_sitter::{Language, Parser, Tree};
 
 const DEFAULT_CAPACITY: usize = 128;

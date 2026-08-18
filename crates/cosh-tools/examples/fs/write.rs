@@ -60,7 +60,9 @@ async fn main() {
     // 3. The same path becomes writable once it is on the allowlist. The
     //    allowlist grants access to specific paths OUTSIDE the root; entries
     //    are matched exactly, so the file path itself must be listed.
-    let fs = Fs::new().cwd(&project).allowlist([outside.join("secret.txt")]);
+    let fs = Fs::new()
+        .cwd(&project)
+        .allowlist([outside.join("secret.txt")]);
 
     let results = fs
         .write(vec![TargetFile {
@@ -95,5 +97,8 @@ async fn main() {
     println!("warnings: {:?}", results[0].warnings);
 
     let final_text = std::fs::read_to_string(project.join("generated.rs")).unwrap();
-    println!("file still contains: {}", final_text.lines().next().unwrap());
+    println!(
+        "file still contains: {}",
+        final_text.lines().next().unwrap()
+    );
 }

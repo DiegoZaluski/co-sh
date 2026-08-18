@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use super::models::{CreateDbFocus, EmbedModelEntry, RagMode};
 use super::registry::RagRegistry;
-use super::render::{markdown_render_text, FIELD_LABEL_W, MAX_VISIBLE_MODELS_IN_FORM};
+use super::render::{FIELD_LABEL_W, MAX_VISIBLE_MODELS_IN_FORM, markdown_render_text};
 use crate::component::cursor::Cursor;
 use crate::component::rag_input::RagInput;
 use crate::component::search_bar::SearchBar;

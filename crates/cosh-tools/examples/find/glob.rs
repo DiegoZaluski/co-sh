@@ -69,53 +69,50 @@ fn main() {
     // 1. Bare glob as a target: recurses from the working directory — every
     //    `.rs` file at every depth under the project root. (Default sort:
     //    most recently modified first.)
-    show("bare glob target `*.rs`", find.glob_full(
-        "",
-        Some("*.rs".into()),
-        None,
-        GlobCallOptions::default(),
-        None,
-    ));
+    show(
+        "bare glob target `*.rs`",
+        find.glob_full(
+            "",
+            Some("*.rs".into()),
+            None,
+            GlobCallOptions::default(),
+            None,
+        ),
+    );
 
     // 2. Plain directory target + bare `pattern`: SHALLOW — only the direct
     //    children of `src` named *.rs. `src/util/helper.rs` is NOT matched.
-    show("pattern `*.rs` over dir target `src`", find.glob_full(
-        "*.rs",
-        Some("src".into()),
-        None,
-        sorted(),
-        None,
-    ));
+    show(
+        "pattern `*.rs` over dir target `src`",
+        find.glob_full("*.rs", Some("src".into()), None, sorted(), None),
+    );
 
     // 3. Same directory target, recursive pattern: the whole tree.
-    show("pattern `**/*.rs` over dir target `src`", find.glob_full(
-        "**/*.rs",
-        Some("src".into()),
-        None,
-        sorted(),
-        None,
-    ));
+    show(
+        "pattern `**/*.rs` over dir target `src`",
+        find.glob_full("**/*.rs", Some("src".into()), None, sorted(), None),
+    );
 
     // 4. Scoped glob target stays shallow: `src/*.rs`, not `src/sub/*.rs`.
-    show("scoped glob target `src/*.rs`", find.glob_full(
-        "",
-        Some("src/*.rs".into()),
-        None,
-        sorted(),
-        None,
-    ));
+    show(
+        "scoped glob target `src/*.rs`",
+        find.glob_full("", Some("src/*.rs".into()), None, sorted(), None),
+    );
 
     // 5. file_type filter: only directories (rendered with a trailing `/`).
-    show("directories only under `src`", find.glob_full(
-        "**",
-        Some("src".into()),
-        None,
-        GlobCallOptions {
-            file_type: Some("dir".into()),
-            ..sorted()
-        },
-        None,
-    ));
+    show(
+        "directories only under `src`",
+        find.glob_full(
+            "**",
+            Some("src".into()),
+            None,
+            GlobCallOptions {
+                file_type: Some("dir".into()),
+                ..sorted()
+            },
+            None,
+        ),
+    );
 
     // 6. tree format groups the output by depth; `formatted` carries the
     //    rendered tree.
@@ -137,40 +134,46 @@ fn main() {
 
     // 7. Multi-target search: `paths` overrides `path`; results from both
     //    roots are merged and deduplicated.
-    show("multi-target `paths = [src, tests]`", find.glob_full(
-        "*.rs",
-        None,
-        Some(vec!["src".into(), "tests".into()]),
-        sorted(),
-        None,
-    ));
+    show(
+        "multi-target `paths = [src, tests]`",
+        find.glob_full(
+            "*.rs",
+            None,
+            Some(vec!["src".into(), "tests".into()]),
+            sorted(),
+            None,
+        ),
+    );
 
     // 8. A missing target among several is skipped (reported in
     //    `missing_paths`), not an error.
-    show("one missing target", find.glob_full(
-        "*.rs",
-        None,
-        Some(vec!["src".into(), "nope".into()]),
-        sorted(),
-        None,
-    ));
+    show(
+        "one missing target",
+        find.glob_full(
+            "*.rs",
+            None,
+            Some(vec!["src".into(), "nope".into()]),
+            sorted(),
+            None,
+        ),
+    );
 
     // 9. Every target missing IS an error.
-    show("all targets missing", find.glob_full(
-        "*.rs",
-        Some("nope".into()),
-        None,
-        GlobCallOptions::default(),
-        None,
-    ));
+    show(
+        "all targets missing",
+        find.glob_full(
+            "*.rs",
+            Some("nope".into()),
+            None,
+            GlobCallOptions::default(),
+            None,
+        ),
+    );
 
     // 10. A literal file target short-circuits the walk: the file itself is
     //     returned as the single match.
-    show("file literal target `src/lib.rs`", find.glob_full(
-        "",
-        Some("src/lib.rs".into()),
-        None,
-        sorted(),
-        None,
-    ));
+    show(
+        "file literal target `src/lib.rs`",
+        find.glob_full("", Some("src/lib.rs".into()), None, sorted(), None),
+    );
 }

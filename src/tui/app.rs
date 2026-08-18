@@ -1144,9 +1144,9 @@ impl App {
     }
 
     fn is_tool_call_dialog_visible(&self) -> bool {
-        self.dialog.current().is_some_and(|d| {
-            matches!(d.dialog_type, DialogType::ToolCallList { .. })
-        })
+        self.dialog
+            .current()
+            .is_some_and(|d| matches!(d.dialog_type, DialogType::ToolCallList { .. }))
     }
 
     fn handle_tool_call_dialog_key(&mut self, key: KeyCode) -> bool {
@@ -1167,10 +1167,7 @@ impl App {
                 true
             }
             KeyCode::Enter => {
-                let selected = self
-                    .dialog
-                    .current()
-                    .map_or(0, |d| d.selected.min(1));
+                let selected = self.dialog.current().map_or(0, |d| d.selected.min(1));
                 self.llm_config.tool_call_mode = if selected == 1 {
                     cosh_sdk::connector::ToolCallMode::Inline
                 } else {
@@ -1963,7 +1960,8 @@ impl App {
             // screen. Clicking it opens the GitHub issues page in the default
             // browser. Other routers reuse this space, so it's hidden there.
             let bug_right_x = main_area.right().saturating_sub(bug_w + 1);
-            let bug_link_area = if matches!(self.mode(), AppMode::Home) && bug_right_x >= area.x + 9 {
+            let bug_link_area = if matches!(self.mode(), AppMode::Home) && bug_right_x >= area.x + 9
+            {
                 let bug_link_style = Style::default().fg(rgba_color(self.theme.accent));
                 for (i, ch) in BUG_REPORT_TEXT.chars().enumerate() {
                     if let Some(cell) = buf.cell_mut((bug_right_x + i as u16, area.y)) {
@@ -2039,7 +2037,8 @@ impl App {
                 let prompt_budget = footer_y
                     .saturating_sub(area.y + 1)
                     .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
-                self.prompt_view.required_height(prompt_area_w, prompt_budget)
+                self.prompt_view
+                    .required_height(prompt_area_w, prompt_budget)
             } else {
                 0
             };
@@ -2508,9 +2507,8 @@ impl App {
                         for (i, fb) in fallbacks.iter().enumerate() {
                             match Connector::new(&fb.provider) {
                                 Ok(c) => {
-                                    let mut c = c
-                                        .with_model(&fb.model)
-                                        .with_tool_call_mode(tool_call_mode);
+                                    let mut c =
+                                        c.with_model(&fb.model).with_tool_call_mode(tool_call_mode);
                                     // The user chose a reasoning effort for
                                     // auto mode — apply it, mapped onto the
                                     // closest level THIS model accepts (a
@@ -2834,7 +2832,8 @@ impl App {
                     {
                         // If there is a drag selection in a create-db field, copy it.
                         #[cfg(feature = "embed")]
-                        if matches!(self.mode(), AppMode::Rag) && self.rag_view.has_field_selection()
+                        if matches!(self.mode(), AppMode::Rag)
+                            && self.rag_view.has_field_selection()
                         {
                             let text = self.rag_view.selected_field_text();
                             selection::copy_selection(&text, &mut self.toast_state);
@@ -3462,7 +3461,9 @@ impl App {
                             self.sidebar.open = !self.sidebar.open;
                         }
                         Some(crate::keymap::Action::ToggleHelp) => {
-                            if self.dialog.visible() && matches!(self.dialog.current(), Some(d) if matches!(d.dialog_type, DialogType::Shortcuts { .. })) {
+                            if self.dialog.visible()
+                                && matches!(self.dialog.current(), Some(d) if matches!(d.dialog_type, DialogType::Shortcuts { .. }))
+                            {
                                 self.dialog.clear();
                             } else {
                                 self.dialog.show(DialogType::Shortcuts { scroll: 0 });
@@ -3644,7 +3645,6 @@ impl App {
                             }
                         }
                         None => {
-
                             if self.slash_menu.visible {
                                 match key.code {
                                     KeyCode::Up => self.slash_menu.select_prev(),
@@ -4813,8 +4813,7 @@ impl App {
                     );
                     let mouse = MouseEvent::new(event_type, button, x, y, modifiers);
                     if self.rag_view.show_create_db
-                        && let Some((focus, byte)) =
-                            self.rag_view.field_byte_at(&mouse, tools_area)
+                        && let Some((focus, byte)) = self.rag_view.field_byte_at(&mouse, tools_area)
                     {
                         self.rag_view.start_field_selection(focus, byte);
                         return Ok(true);
@@ -4967,10 +4966,9 @@ impl App {
                         let prompt_budget = footer_y
                             .saturating_sub(area.y + 1)
                             .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
-                        let prompt_h = self.prompt_view.required_height(
-                            main_area.width.saturating_sub(4),
-                            prompt_budget,
-                        );
+                        let prompt_h = self
+                            .prompt_view
+                            .required_height(main_area.width.saturating_sub(4), prompt_budget);
                         let question_h = if self.question_dialog.visible {
                             self.question_dialog
                                 .required_height(main_area.width.saturating_sub(4))
@@ -5748,7 +5746,9 @@ impl App {
         let prompt_budget = footer_y
             .saturating_sub(area.y + 1)
             .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
-        let prompt_h = self.prompt_view.required_height(prompt_area_w, prompt_budget);
+        let prompt_h = self
+            .prompt_view
+            .required_height(prompt_area_w, prompt_budget);
 
         let logo_block_h = if is_empty_session {
             LOGO_CHAT.len() as u16 + 1
@@ -5996,7 +5996,9 @@ mod tests {
     #[cfg(feature = "embed")]
     async fn rag_field_drag_selection_through_app_mouse_events() {
         use crate::routes::rag::models::CreateDbFocus;
-        use crossterm::event::{KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind};
+        use crossterm::event::{
+            KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
+        };
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -6021,15 +6023,17 @@ mod tests {
         };
 
         // Press on the Name field → anchor the selection at byte 0.
-        assert!(app
-            .handle_mouse_event(mouse(CKind::Down(CBtn::Left), value_x, name_y))
-            .unwrap());
+        assert!(
+            app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), value_x, name_y))
+                .unwrap()
+        );
         assert!(app.rag_view.field_selection.is_some());
 
         // Drag to the end of "hello world" → selection 0..11.
-        assert!(app
-            .handle_mouse_event(mouse(CKind::Drag(CBtn::Left), value_x + 11, name_y))
-            .unwrap());
+        assert!(
+            app.handle_mouse_event(mouse(CKind::Drag(CBtn::Left), value_x + 11, name_y))
+                .unwrap()
+        );
         assert_eq!(
             app.rag_view.field_selection,
             Some((CreateDbFocus::Name, 0, 11))
@@ -6059,9 +6063,10 @@ mod tests {
         assert_ne!(buf[(value_x + 12, name_y)].bg, text_color);
 
         // Release → auto-copy clears the selection.
-        assert!(app
-            .handle_mouse_event(mouse(CKind::Up(CBtn::Left), value_x + 11, name_y))
-            .unwrap());
+        assert!(
+            app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), value_x + 11, name_y))
+                .unwrap()
+        );
         assert!(app.rag_view.field_selection.is_none());
     }
 
@@ -6190,9 +6195,7 @@ mod tests {
     /// two options. Sleeps straddle the 50ms scroll debounce.
     #[tokio::test]
     async fn tool_call_dialog_mouse_wheel_changes_selection() {
-        use crossterm::event::{
-            KeyModifiers, MouseEvent as CMouse, MouseEventKind as CKind,
-        };
+        use crossterm::event::{KeyModifiers, MouseEvent as CMouse, MouseEventKind as CKind};
         let mut app = App::new("/tmp".to_string());
         let cmd = crate::ui::slash_menu::SlashCommand {
             name: "toolcall".into(),
@@ -6258,7 +6261,8 @@ mod tests {
                 row,
                 modifiers: KeyModifiers::NONE,
             };
-            app.handle_mouse_event(evt(CKind::Down(CBtn::Left))).unwrap();
+            app.handle_mouse_event(evt(CKind::Down(CBtn::Left)))
+                .unwrap();
             app.handle_mouse_event(evt(CKind::Up(CBtn::Left))).unwrap();
         }
 

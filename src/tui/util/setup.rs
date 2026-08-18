@@ -138,8 +138,6 @@ impl Setup {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

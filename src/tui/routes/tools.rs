@@ -21,9 +21,7 @@ pub fn save_disabled_tools(setup: &mut crate::util::setup::Setup, disabled: &Has
 /// Load the persisted tool-call mode. Unknown/missing values fall back to
 /// `Native` (the default contract).
 #[must_use]
-pub fn load_tool_call_mode(
-    setup: &crate::util::setup::Setup,
-) -> cosh_sdk::connector::ToolCallMode {
+pub fn load_tool_call_mode(setup: &crate::util::setup::Setup) -> cosh_sdk::connector::ToolCallMode {
     match setup.tools.tool_call_mode.as_str() {
         "inline" => cosh_sdk::connector::ToolCallMode::Inline,
         _ => cosh_sdk::connector::ToolCallMode::Native,

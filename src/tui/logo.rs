@@ -20,12 +20,7 @@ pub const LOGO_CHAT: &[&str] = &[
 
 /// The second letter of the cosh logo: the "O" at columns 7-13, rows 1-4 of
 /// [`LOGO_CHAT`]. It is used as the chat-logo animation glyph.
-pub const O_GLYPH: [&str; 4] = [
-    " ▄███▄ ",
-    "█▌ ▅ ▐█",
-    "█▌ ▀ ▐█",
-    " ▀███▀ ",
-];
+pub const O_GLYPH: [&str; 4] = [" ▄███▄ ", "█▌ ▅ ▐█", "█▌ ▀ ▐█", " ▀███▀ "];
 
 pub const O_GLYPH_W: usize = 7;
 pub const O_GLYPH_H: usize = 4;
@@ -118,12 +113,7 @@ impl ChatLogo {
     pub fn anchor(&mut self, area: ratatui::layout::Rect) {
         let max_x = area.right().saturating_sub(O_GLYPH_W as u16);
         let max_y = area.bottom().saturating_sub(O_GLYPH_H as u16);
-        self.bounds = Some((
-            area.x as f64,
-            max_x as f64,
-            area.y as f64,
-            max_y as f64,
-        ));
+        self.bounds = Some((area.x as f64, max_x as f64, area.y as f64, max_y as f64));
         if !self.positioned {
             self.pos_x = area.x as f64 + (area.width as f64 / 2.0) - (O_GLYPH_W as f64 / 2.0);
             self.pos_y = area.y as f64 + 1.0;
@@ -263,9 +253,9 @@ impl ChatLogo {
                             ((gc as f64 - 3.0).powi(2) + (gr as f64 - 1.5).powi(2)).sqrt();
                         let bri = 0.55 + (1.0 - dist_edge / 4.0).clamp(0.0, 1.0) * 0.45;
                         cell.set_char(ch);
-                        cell.set_style(ratatui::style::Style::default().fg(
-                            blend_color(primary, bg, bri),
-                        ));
+                        cell.set_style(
+                            ratatui::style::Style::default().fg(blend_color(primary, bg, bri)),
+                        );
                     }
                     // Outer spaces of the glyph: leave the background alone.
                 }
@@ -495,7 +485,10 @@ mod tests {
             .iter()
             .filter(|(_, _, c)| matches!(c, '@' | '$' | '#' | ';' | '.' | ','))
             .count();
-        assert!(beam_chars >= 1, "expected laser characters, got {beam_chars}");
+        assert!(
+            beam_chars >= 1,
+            "expected laser characters, got {beam_chars}"
+        );
     }
 
     /// Render a frame to an ASCII grid: beam chars as `.`, red-colored cells
@@ -521,7 +514,10 @@ mod tests {
                     _ if matches!(
                         col,
                         ratatui::style::Color::Rgb(r, g, b) if r > g && r > b
-                    ) => '*',
+                    ) =>
+                    {
+                        '*'
+                    }
                     ' ' => ' ',
                     _ => 'o',
                 };

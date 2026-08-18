@@ -29,10 +29,7 @@ async fn main() {
     }
     // Recording the same content again fuses: same tag, no new entry.
     let again = record(&path, versions[2]).unwrap();
-    println!(
-        "  re-record v3 -> {again} (fused: {})",
-        again == hashes[2]
-    );
+    println!("  re-record v3 -> {again} (fused: {})", again == hashes[2]);
     println!();
 
     // ── 2. Restore by explicit hash ─────────────────────────────────────────
@@ -81,21 +78,25 @@ async fn main() {
     }
     println!("  stepped: {steps:?}");
     // The oldest retained version has no predecessor.
-    let err = err_of(restore(RestoreInput {
-        path: path.clone(),
-        hash: None,
-    })
-    .await);
+    let err = err_of(
+        restore(RestoreInput {
+            path: path.clone(),
+            hash: None,
+        })
+        .await,
+    );
     println!("  at oldest: {err}");
     println!();
 
     // ── 5. Error paths ──────────────────────────────────────────────────────
     println!("== 5. errors ==");
-    let unknown = err_of(restore(RestoreInput {
-        path: path.clone(),
-        hash: Some("DEAD".to_string()),
-    })
-    .await);
+    let unknown = err_of(
+        restore(RestoreInput {
+            path: path.clone(),
+            hash: Some("DEAD".to_string()),
+        })
+        .await,
+    );
     println!("  unknown hash: {unknown}\n");
 
     let fresh = std::env::temp_dir()
@@ -103,11 +104,13 @@ async fn main() {
         .to_string_lossy()
         .to_string();
     std::fs::write(&fresh, "content\n").unwrap();
-    let err = err_of(restore(RestoreInput {
-        path: fresh.clone(),
-        hash: None,
-    })
-    .await);
+    let err = err_of(
+        restore(RestoreInput {
+            path: fresh.clone(),
+            hash: None,
+        })
+        .await,
+    );
     println!("  no history: {err}\n");
     let _ = std::fs::remove_file(&fresh);
 

@@ -45,10 +45,11 @@ async fn main() {
 
     // ── 3. Live fetch (best-effort) ------------------------------------------
     println!("== 3. web.fetch example.com (best effort) ==");
-    match web.fetch(WebFetch {
-        url: "https://example.com".into(),
-    })
-    .await
+    match web
+        .fetch(WebFetch {
+            url: "https://example.com".into(),
+        })
+        .await
     {
         Ok(text) => {
             println!("  fetched {} bytes, first 200:", text.len());
@@ -65,7 +66,10 @@ async fn main() {
     println!("== 4. web.search (best effort, num_results=3) ==");
     match searcher.search("rust programming language").await {
         Ok(results) => {
-            println!("  result blocks: {}", results.matches("\n---\n").count() + 1);
+            println!(
+                "  result blocks: {}",
+                results.matches("\n---\n").count() + 1
+            );
             for line in results.lines().take(9) {
                 println!("    {line}");
             }

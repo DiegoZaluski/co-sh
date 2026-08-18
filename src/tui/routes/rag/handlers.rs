@@ -334,8 +334,10 @@ impl RagView {
                     // Up/Down move between lines. Without a rendered area the
                     // move is always allowed (plain char movement).
                     let same_line = match value_w {
-                        Some(w) => super::render::caret_row(input, prev, w)
-                            == super::render::caret_row(input, *pos, w),
+                        Some(w) => {
+                            super::render::caret_row(input, prev, w)
+                                == super::render::caret_row(input, *pos, w)
+                        }
                         None => true,
                     };
                     if same_line {
@@ -351,8 +353,10 @@ impl RagView {
                 if *pos < input.len() {
                     let next = *pos + input[*pos..].chars().next().unwrap_or(' ').len_utf8();
                     let same_line = match value_w {
-                        Some(w) => super::render::caret_row(input, *pos, w)
-                            == super::render::caret_row(input, next, w),
+                        Some(w) => {
+                            super::render::caret_row(input, *pos, w)
+                                == super::render::caret_row(input, next, w)
+                        }
                         None => true,
                     };
                     if same_line {
@@ -751,10 +755,7 @@ impl RagView {
     /// form is closed or the area is too narrow to lay out. Each field
     /// (model, name, description) is preceded by one gap line, and the
     /// Name/Description fields can span multiple wrapped rows.
-    pub(crate) fn create_db_field_y_ranges(
-        &self,
-        area: Rect,
-    ) -> Option<(u16, u16, u16, u16)> {
+    pub(crate) fn create_db_field_y_ranges(&self, area: Rect) -> Option<(u16, u16, u16, u16)> {
         if !self.show_create_db {
             return None;
         }
@@ -822,16 +823,13 @@ impl RagView {
         let Some((focus, _, _)) = self.field_selection else {
             return false;
         };
-        let Some((name_y, name_lines, desc_y, desc_lines)) =
-            self.create_db_field_y_ranges(area)
+        let Some((name_y, name_lines, desc_y, desc_lines)) = self.create_db_field_y_ranges(area)
         else {
             return false;
         };
         let (field_top, field_bottom, input) = match focus {
             CreateDbFocus::Name => (name_y, name_y + name_lines, &self.db_name_input),
-            CreateDbFocus::Description => {
-                (desc_y, desc_y + desc_lines, &self.db_description_input)
-            }
+            CreateDbFocus::Description => (desc_y, desc_y + desc_lines, &self.db_description_input),
         };
         let byte = if mouse.y < field_top {
             0
@@ -843,7 +841,8 @@ impl RagView {
             let inner_x = area.x + 2;
             let inner_w = area.width.saturating_sub(4);
             let mx = mouse.x.clamp(inner_x, inner_x + inner_w - 1);
-            let clamped = MouseEvent::new(mouse.event_type, mouse.button, mx, mouse.y, mouse.modifiers);
+            let clamped =
+                MouseEvent::new(mouse.event_type, mouse.button, mx, mouse.y, mouse.modifiers);
             match self.field_byte_at(&clamped, area) {
                 Some((_, b)) => b,
                 None => return false,
@@ -1142,7 +1141,8 @@ mod tests {
         assert!(inserted >= 1, "some newlines should be allowed");
         // The field must have grown with the newlines (box expands along).
         assert!(
-            view.db_description_input.lines().count() + usize::from(view.db_description_input.ends_with('\n'))
+            view.db_description_input.lines().count()
+                + usize::from(view.db_description_input.ends_with('\n'))
                 > 1,
             "the box should grow with each line break"
         );
@@ -1280,7 +1280,10 @@ mod tests {
         // Press at 'hello' → anchors the selection at byte 0.
         view.start_field_selection(CreateDbFocus::Name, 0);
         assert!(view.field_selection.is_some());
-        assert!(!view.has_field_selection(), "anchor only, nothing selected yet");
+        assert!(
+            !view.has_field_selection(),
+            "anchor only, nothing selected yet"
+        );
 
         // Drag to 'world' → extends to byte 0..11.
         assert!(view.extend_field_selection_at(&mouse(value_x + 11, name_y), area));
@@ -1399,11 +1402,17 @@ mod tests {
         // Right at the end of the first line: stays (Down moves between lines).
         view.db_description_cursor_pos = 3;
         view.handle_key(KeyCode::Right);
-        assert_eq!(view.db_description_cursor_pos, 3, "Right must not cross the newline");
+        assert_eq!(
+            view.db_description_cursor_pos, 3,
+            "Right must not cross the newline"
+        );
         // Left at the start of the second line: stays.
         view.db_description_cursor_pos = 4;
         view.handle_key(KeyCode::Left);
-        assert_eq!(view.db_description_cursor_pos, 4, "Left must not cross the newline");
+        assert_eq!(
+            view.db_description_cursor_pos, 4,
+            "Left must not cross the newline"
+        );
         // Within a line both move sideways normally.
         view.db_description_cursor_pos = 1;
         view.handle_key(KeyCode::Right);

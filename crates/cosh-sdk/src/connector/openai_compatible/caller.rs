@@ -5,8 +5,8 @@ use super::super::common::{
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 use super::super::params::{Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
-use crate::extract_action::NativeToolCall;
 use super::super::provider::{ProviderConfig, get_api_key};
+use crate::extract_action::NativeToolCall;
 
 use async_stream::stream;
 use std::pin::Pin;
@@ -143,8 +143,13 @@ impl ApiErrorDetail {
 fn is_transient_error_type(err: &ApiErrorDetail) -> bool {
     matches!(
         err.error_type(),
-        Some("server_error" | "internal_error" | "overloaded_error" | "api_error"
-            | "rate_limit_error")
+        Some(
+            "server_error"
+                | "internal_error"
+                | "overloaded_error"
+                | "api_error"
+                | "rate_limit_error"
+        )
     )
 }
 
@@ -575,11 +580,7 @@ pub async fn chat(
             if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&response_text) {
                 let transient = is_transient_error_type(&api_err.error);
                 let err = ConnectorError::classify_http(200, api_err.error.message);
-                return Err(if transient {
-                    err.mark_transient()
-                } else {
-                    err
-                });
+                return Err(if transient { err.mark_transient() } else { err });
             }
             return Err(ConnectorError::Deserialization(format!(
                 "{e}. Raw response: {response_text}"
@@ -633,7 +634,9 @@ pub async fn chat_stream(
     let stream = if params.retry_enabled {
         let json_body = serde_json::to_string(&request)?;
         let request_builder = apply_provider_headers(
-            shared_client().post(&url).header("Content-Type", "application/json"),
+            shared_client()
+                .post(&url)
+                .header("Content-Type", "application/json"),
             config,
         )
         .header("Authorization", auth);
@@ -651,7 +654,9 @@ pub async fn chat_stream(
             process_sse_response,
         )
     } else {
-        let response = send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
+        let response =
+            send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())])
+                .await?;
         process_sse_response(response)
     };
     Ok(ChatStream::new(stream))
@@ -695,7 +700,9 @@ pub async fn chat_stream_with_messages(
     let stream = if params.retry_enabled {
         let json_body = serde_json::to_string(&request)?;
         let request_builder = apply_provider_headers(
-            shared_client().post(&url).header("Content-Type", "application/json"),
+            shared_client()
+                .post(&url)
+                .header("Content-Type", "application/json"),
             config,
         )
         .header("Authorization", auth);
@@ -713,7 +720,9 @@ pub async fn chat_stream_with_messages(
             process_sse_response,
         )
     } else {
-        let response = send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
+        let response =
+            send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())])
+                .await?;
         process_sse_response(response)
     };
     Ok(ChatStream::new(stream))

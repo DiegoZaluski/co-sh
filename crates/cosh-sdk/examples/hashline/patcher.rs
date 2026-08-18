@@ -14,11 +14,11 @@ use cosh_sdk::hashline::format::{
 };
 use cosh_sdk::hashline::fs::{DiskFilesystem, Filesystem, InMemoryFilesystem};
 use cosh_sdk::hashline::input::{Patch, PatchSection};
-use cosh_sdk::hashline::types::SplitOptions;
 use cosh_sdk::hashline::patcher::Patcher;
 use cosh_sdk::hashline::snapshots::{
     InMemorySnapshotStore, InMemorySnapshotStoreOptions, SnapshotStore,
 };
+use cosh_sdk::hashline::types::SplitOptions;
 
 const LIB_RS: &str = "\
 fn double(x: i32) -> i32 {
@@ -79,9 +79,7 @@ insert tail:
     // ── 3. In-memory apply: pure, no filesystem ─────────────────────────────
     println!("== 3. apply_edits on a text body ==");
     let single: PatchSection = Patch::parse_single(
-        &format!(
-            "¶src/lib.rs#{tag}\nreplace 2..3:\n+    x * 2 + 1\n+}}"
-        ),
+        &format!("¶src/lib.rs#{tag}\nreplace 2..3:\n+    x * 2 + 1\n+}}"),
         &SplitOptions::default(),
     )
     .unwrap();
@@ -101,11 +99,21 @@ insert tail:
     let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
     let tag1 = store.record("src/lib.rs", LIB_RS);
     let tag2 = store.record("src/lib.rs", LIB_RS); // same bytes → same tag
-    println!("  record #1 -> {tag1}, record #2 -> {tag2} (fused: {})", tag1 == tag2);
+    println!(
+        "  record #1 -> {tag1}, record #2 -> {tag2} (fused: {})",
+        tag1 == tag2
+    );
     let head = store.head("src/lib.rs").unwrap();
-    println!("  head text has {} lines, recorded at {}", head.text.lines().count(), head.recorded_at);
+    println!(
+        "  head text has {} lines, recorded at {}",
+        head.text.lines().count(),
+        head.recorded_at
+    );
     let by_tag = store.by_hash("src/lib.rs", &tag1).unwrap();
-    println!("  by_hash({tag1}) resolves to {} lines", by_tag.text.lines().count());
+    println!(
+        "  by_hash({tag1}) resolves to {} lines",
+        by_tag.text.lines().count()
+    );
     println!();
 
     // ── 5. Tag validation + drift recovery ─────────────────────────────────
@@ -121,9 +129,7 @@ insert tail:
     let read_tag = store.record("src/lib.rs", LIB_RS);
     // …then author a patch against that read, but apply it to the drifted file.
     let stale_patch = Patch::parse(
-        &format!(
-            "¶src/lib.rs#{read_tag}\ninsert after 5:\n+    // todo: handle negative inputs"
-        ),
+        &format!("¶src/lib.rs#{read_tag}\ninsert after 5:\n+    // todo: handle negative inputs"),
         &SplitOptions::default(),
     )
     .unwrap();
@@ -174,9 +180,7 @@ insert tail:
 
     let mut disk_patcher = Patcher::new(disk_fs, disk_store, None);
     let disk_patch = Patch::parse(
-        &format!(
-            "¶{path_str}#{disk_tag}\ninsert after 4:\n+// edited via hashline on disk"
-        ),
+        &format!("¶{path_str}#{disk_tag}\ninsert after 4:\n+// edited via hashline on disk"),
         &SplitOptions::default(),
     )
     .unwrap();

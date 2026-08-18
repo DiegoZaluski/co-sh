@@ -298,7 +298,7 @@ impl RouterView {
                 let max_visible = (work_h.saturating_sub(MODEL_LIST_TOP_OFFSET + 1)) as usize;
                 let actual_visible = max_visible.min(filtered.len());
                 let list_bottom = list_top + actual_visible as u16;
-                
+
                 // Only process click if it's within the actual model list area
                 if mouse.y >= list_top && mouse.y < list_bottom {
                     let row = (mouse.y - list_top) as usize;
@@ -320,7 +320,7 @@ impl RouterView {
                 let max_visible = (work_h.saturating_sub(FALLBACK_LIST_TOP_OFFSET + 1)) as usize;
                 let actual_visible = max_visible.min(self.fallbacks.len());
                 let list_bottom = list_top + actual_visible as u16;
-                
+
                 // Only process click if it's within the actual fallback list area
                 if mouse.y >= list_top && mouse.y < list_bottom {
                     let row = (mouse.y - list_top) as usize;

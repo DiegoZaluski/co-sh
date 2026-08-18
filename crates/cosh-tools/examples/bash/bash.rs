@@ -76,13 +76,19 @@ async fn main() {
     show("non-zero exit", &run_and_render(&bash, "exit 42").await);
 
     // 4. A signal death: killed by SIGKILL (9); exit_code is None.
-    show("killed by signal", &run_and_render(&bash, "kill -KILL $$").await);
+    show(
+        "killed by signal",
+        &run_and_render(&bash, "kill -KILL $$").await,
+    );
 
     // 5. Environment variables are set on the child.
-    let bash_env = Bash::new().cwd(dir.to_string_lossy()).env(Some(vec![
-        ("GREETING".into(), "bonjour".into()),
-    ]));
-    show("env var", &run_and_render(&bash_env, "echo $GREETING").await);
+    let bash_env = Bash::new()
+        .cwd(dir.to_string_lossy())
+        .env(Some(vec![("GREETING".into(), "bonjour".into())]));
+    show(
+        "env var",
+        &run_and_render(&bash_env, "echo $GREETING").await,
+    );
 
     // 6. The working directory is where the command runs.
     show("cwd", &run_and_render(&bash, "cat notes.txt").await);
@@ -140,6 +146,9 @@ async fn main() {
     }
     println!("== PTY mode ==");
     println!("  raw bytes: {:?}", String::from_utf8_lossy(&raw));
-    println!("  contains \"hello\": {}", String::from_utf8_lossy(&raw).contains("hello"));
+    println!(
+        "  contains \"hello\": {}",
+        String::from_utf8_lossy(&raw).contains("hello")
+    );
     println!();
 }

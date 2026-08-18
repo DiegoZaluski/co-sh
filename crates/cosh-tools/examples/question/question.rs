@@ -16,7 +16,11 @@ fn ask(label: &str, result: Result<cosh_tools::question::types::QuestionOutput, 
     println!("== {label} ==");
     match result {
         Ok(out) => {
-            println!("  accepted {} question(s), answers: {}", out.questions.len(), out.answers.len());
+            println!(
+                "  accepted {} question(s), answers: {}",
+                out.questions.len(),
+                out.answers.len()
+            );
             for q in &out.questions {
                 println!(
                     "  - [{}] {} ({}",
@@ -82,7 +86,10 @@ fn main() {
             },
         ],
     };
-    ask("2. valid batch (Text, SingleChoice, MultiChoice, YesNo)", question.ask(&input));
+    ask(
+        "2. valid batch (Text, SingleChoice, MultiChoice, YesNo)",
+        question.ask(&input),
+    );
 
     // ── 3. The output serializes to JSON (what the harness returns) ------------
     let out = question.ask(&input).unwrap();
@@ -91,7 +98,10 @@ fn main() {
     println!();
 
     // ── 4. Validation errors ----------------------------------------------------
-    ask("4a. no questions", question.ask(&QuestionInput { questions: vec![] }));
+    ask(
+        "4a. no questions",
+        question.ask(&QuestionInput { questions: vec![] }),
+    );
 
     ask(
         "4b. duplicate ids",

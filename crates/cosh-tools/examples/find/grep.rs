@@ -14,20 +14,11 @@ use cosh_tools::fs::{Fs, Target};
 fn show(label: &str, out: &cosh_tools::find::GrepOutput) {
     println!("== {label} ==");
     for m in &out.matches {
-        println!(
-            "  {}:{}\t{}",
-            m.path,
-            m.line_number,
-            m.line.trim_end()
-        );
+        println!("  {}:{}\t{}", m.path, m.line_number, m.line.trim_end());
     }
     println!(
         "  total={} files_with={} files_searched={} useless={:?} timed_out={:?}",
-        out.total_matches,
-        out.files_with_matches,
-        out.files_searched,
-        out.useless,
-        out.timed_out
+        out.total_matches, out.files_with_matches, out.files_searched, out.useless, out.timed_out
     );
     if let Some(note) = &out.note {
         println!("  note: {note}");
@@ -54,7 +45,11 @@ fn main() {
 ";
     std::fs::write(project.join("src/lib.rs"), src).unwrap();
     std::fs::write(project.join("src/main.rs"), src).unwrap();
-    std::fs::write(project.join("src/util/helper.rs"), "fn helper() -> i32 { 1 }\n").unwrap();
+    std::fs::write(
+        project.join("src/util/helper.rs"),
+        "fn helper() -> i32 { 1 }\n",
+    )
+    .unwrap();
 
     let find = Find::new().cwd(&project);
 
@@ -81,13 +76,19 @@ fn main() {
         page1.file_limit_reached,
         page1.note,
     );
-    let page2 = find.grep_skipping("fn page_test", "paging", Some(20)).unwrap();
+    let page2 = find
+        .grep_skipping("fn page_test", "paging", Some(20))
+        .unwrap();
     println!("== file window: skip=20 ==");
     println!(
         "  matches_shown={} file_limit_reached={} first_match={}:{}",
         page2.matches.len(),
         page2.file_limit_reached,
-        page2.matches.first().map(|m| m.path.as_str()).unwrap_or("-"),
+        page2
+            .matches
+            .first()
+            .map(|m| m.path.as_str())
+            .unwrap_or("-"),
         page2.matches.first().map(|m| m.line_number).unwrap_or(0),
     );
     println!();
@@ -95,7 +96,9 @@ fn main() {
     // 3. No matches is `useless: true`, not an error.
     show(
         "no match",
-        &find.grep("zzz_nothing", &project.join("src").to_string_lossy()).unwrap(),
+        &find
+            .grep("zzz_nothing", &project.join("src").to_string_lossy())
+            .unwrap(),
     );
 
     // 3. Single-file scope: absolute paths, and `line_range` is allowed.
@@ -128,7 +131,9 @@ fn main() {
 
     // 5. The payoff: edit a matched file directly from the grep anchor, no
     //    re-read. `files[0]` is the first matched file with a hashline tag.
-    let out = find.grep("fn double", &project.join("src").to_string_lossy()).unwrap();
+    let out = find
+        .grep("fn double", &project.join("src").to_string_lossy())
+        .unwrap();
     let anchor = &out.files[0];
     let abs_path = anchor
         .header

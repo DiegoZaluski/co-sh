@@ -149,7 +149,9 @@ const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500)
 /// first attempt and answer the retried request.
 ///
 /// Returns `(port, request_count, thread_handle)`.
-pub fn mock_server_sequence(responses: Vec<MockResponse>) -> (u16, Arc<Mutex<usize>>, std::thread::JoinHandle<()>) {
+pub fn mock_server_sequence(
+    responses: Vec<MockResponse>,
+) -> (u16, Arc<Mutex<usize>>, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let responses = Arc::new(Mutex::new(responses.into_iter()));

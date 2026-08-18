@@ -90,7 +90,11 @@ impl ConnectorError {
     /// status is 200 (e.g. OpenAI SSE `server_error` / `overloaded_error`
     /// mid-stream error events).
     pub fn mark_transient(mut self) -> Self {
-        if let Self::HttpError { transient: ref mut t, .. } = self {
+        if let Self::HttpError {
+            transient: ref mut t,
+            ..
+        } = self
+        {
             *t = true;
         }
         self
@@ -98,7 +102,13 @@ impl ConnectorError {
 
     /// Whether this error is transient and safe to retry.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::HttpError { transient: true, .. })
+        matches!(
+            self,
+            Self::HttpError {
+                transient: true,
+                ..
+            }
+        )
     }
 }
 
@@ -182,9 +192,7 @@ impl fmt::Display for ConnectorError {
         match self {
             Self::UnknownProvider(p) => write!(f, "Unknown provider: {p}"),
             Self::MissingApiKey(p) => write!(f, "API key not set for provider: {p}"),
-            Self::HttpError {
-                status, body, ..
-            } => write!(f, "HTTP {status} - {body}"),
+            Self::HttpError { status, body, .. } => write!(f, "HTTP {status} - {body}"),
             Self::ContextWindowExceeded { status, body, .. } => {
                 write!(f, "HTTP {status} - {body}")
             }

@@ -32,8 +32,8 @@ async fn main() {
         .as_str()
         .unwrap()
         .to_string();
-    let customized = Recall::new()
-        .with_description("Active databases: docs (semantic code search).");
+    let customized =
+        Recall::new().with_description("Active databases: docs (semantic code search).");
     let custom = customized.description_search["description"]
         .as_str()
         .unwrap();

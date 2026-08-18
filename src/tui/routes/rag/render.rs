@@ -775,7 +775,8 @@ impl RagView {
             desc_bg,
         );
         if desc_focused {
-            let prefix = &self.db_description_input[..self.db_description_cursor_pos
+            let prefix = &self.db_description_input[..self
+                .db_description_cursor_pos
                 .min(self.db_description_input.len())];
             let (render, insertions) = markdown_render_text(prefix);
             let rp = render_byte_offset(&insertions, prefix.len()).min(render.len());
@@ -1285,8 +1286,7 @@ mod tests {
         let (n1, d1) = view.create_db_field_lines(60);
         assert_eq!(n1, 1, "placeholder name fits one line at width 60");
         assert_eq!(d1, 1, "placeholder description fits one line at width 60");
-        view.db_name_input =
-            "a very long database name that definitely wraps at width 30".into();
+        view.db_name_input = "a very long database name that definitely wraps at width 30".into();
         view.db_description_input =
             "a very long description that will wrap to multiple lines at this narrow width".into();
         let (n2, d2) = view.create_db_field_lines(30);
@@ -1349,7 +1349,11 @@ mod tests {
     #[test]
     fn byte_pos_at_click_plain_and_wrapped() {
         assert_eq!(super::byte_pos_at_click("hello", 0, 2, 100), 2);
-        assert_eq!(super::byte_pos_at_click("hello", 0, 99, 100), 5, "clamp to end");
+        assert_eq!(
+            super::byte_pos_at_click("hello", 0, 99, 100),
+            5,
+            "clamp to end"
+        );
         // "ab cde" wraps at width 5: row 1 holds "cde", so a click on row 1
         // lands at the end of the wrapped word. Clicking the space between
         // the words lands after it (ties prefer the later position).
@@ -1389,7 +1393,11 @@ mod tests {
         // changes the row, moving within a line does not.
         let value_w = 20u16;
         assert_eq!(super::caret_row("abc\ndef", 3, value_w), 0, "end of line 1");
-        assert_eq!(super::caret_row("abc\ndef", 4, value_w), 1, "start of line 2");
+        assert_eq!(
+            super::caret_row("abc\ndef", 4, value_w),
+            1,
+            "start of line 2"
+        );
         assert_eq!(super::caret_row("abc\ndef", 5, value_w), 1, "mid line 2");
         // A wrapped line behaves the same: the caret after a word that fills
         // the line is still on row 0; the next char wraps to row 1.

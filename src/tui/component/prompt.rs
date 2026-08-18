@@ -932,12 +932,7 @@ impl PromptView {
             // toward the cursor.
             let logo_x = input_area.x + input_area.width / 2;
             let logo_y = input_area.y.saturating_sub(5);
-            let logo_area = Rect::new(
-                logo_x.saturating_sub(4),
-                logo_y,
-                input_area.width,
-                5,
-            );
+            let logo_area = Rect::new(logo_x.saturating_sub(4), logo_y, input_area.width, 5);
             self.logo.anchor(logo_area);
             self.logo
                 .advance(delta_time, cursor_x as f64, cursor_y as f64);

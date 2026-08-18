@@ -116,7 +116,9 @@ pub fn move_visual_line(text: &str, cursor_byte: usize, cols: usize, up: bool) -
                         return cursor_byte;
                     }
                     let prev = lines[li - 1];
-                    let col = visual_col.min(cols - 1).min(prev.chars().count().saturating_sub(1));
+                    let col = visual_col
+                        .min(cols - 1)
+                        .min(prev.chars().count().saturating_sub(1));
                     return byte_off - prev.len() - 1 + byte_in_line(prev, col);
                 }
                 let visual_line = offset / cols;
@@ -126,7 +128,9 @@ pub fn move_visual_line(text: &str, cursor_byte: usize, cols: usize, up: bool) -
                         return cursor_byte;
                     }
                     let prev = lines[li - 1];
-                    let col = visual_col.min(cols - 1).min(prev.chars().count().saturating_sub(1));
+                    let col = visual_col
+                        .min(cols - 1)
+                        .min(prev.chars().count().saturating_sub(1));
                     return byte_off - prev.len() - 1 + byte_in_line(prev, col);
                 }
                 let target = (visual_line - 1) * cols + visual_col.min(cols - 1);
@@ -148,7 +152,9 @@ pub fn move_visual_line(text: &str, cursor_byte: usize, cols: usize, up: bool) -
                     }
                     let next = lines[li + 1];
                     let next_start = byte_off + line.len() + 1;
-                    let col = visual_col.min(cols - 1).min(next.chars().count().saturating_sub(1));
+                    let col = visual_col
+                        .min(cols - 1)
+                        .min(next.chars().count().saturating_sub(1));
                     return next_start + byte_in_line(next, col);
                 }
                 let target = (visual_line + 1) * cols + visual_col.min(cols - 1);

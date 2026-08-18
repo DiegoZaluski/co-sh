@@ -17,11 +17,9 @@ fn show_items(label: &str, items: Vec<Item>) {
     for (i, item) in items.iter().enumerate() {
         match item {
             Item::Text(t) => println!("  [{i}] Text: {:?}", truncate(t, 60)),
-            Item::ToolCall(call) => println!(
-                "  [{i}] ToolCall: {} {:#}",
-                call.name,
-                call.arguments
-            ),
+            Item::ToolCall(call) => {
+                println!("  [{i}] ToolCall: {} {:#}", call.name, call.arguments)
+            }
         }
     }
     println!();
@@ -92,7 +90,8 @@ fn main() {
     // ── 1. Batch: no tool calls → the whole text is one Text item ──────────
     show_items(
         "batch: plain text only",
-        ex.extract_batch("Let me look at the project structure first.").items,
+        ex.extract_batch("Let me look at the project structure first.")
+            .items,
     );
 
     // ── 2. Batch: one inline call, prose around it ──────────────────────────
@@ -123,20 +122,16 @@ fn main() {
     );
     show_items(
         "batch: string-encoded arguments",
-        ex.extract_batch(
-            r#"{"name": "fs.read", "arguments": "{\"path\": \"/y\"}"}"#,
-        )
-        .items,
+        ex.extract_batch(r#"{"name": "fs.read", "arguments": "{\"path\": \"/y\"}"}"#)
+            .items,
     );
 
     // ── 5. Bare-arguments fallback ──────────────────────────────────────────
     // No name field, but the object matches exactly one registered schema.
     show_items(
         "batch: bare arguments",
-        ex.extract_batch(
-            r#"{"questions": [{"id": "1", "question": "OK?", "type": "Text"}]}"#,
-        )
-        .items,
+        ex.extract_batch(r#"{"questions": [{"id": "1", "question": "OK?", "type": "Text"}]}"#)
+            .items,
     );
 
     // ── 6. Validation failures are suppressed, not shown ────────────────────
@@ -149,7 +144,8 @@ fn main() {
     );
     show_items(
         "batch: missing required field",
-        ex.extract_batch(r#"{"name": "fs.read", "arguments": {}}"#).items,
+        ex.extract_batch(r#"{"name": "fs.read", "arguments": {}}"#)
+            .items,
     );
     println!(
         "== failure accounting ==\n  failures since last take: {}\n  last failed raw: {:?}\n",
@@ -171,15 +167,14 @@ fn main() {
     println!("== find_json_objects ==  {spans:?}\n");
 
     // ── 9. Streaming: text, pending, then a complete call ───────────────────
-    let mut stream = ExtractAction::new()
-        .with_tool(ToolSchema {
-            name: "fs.read".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"],
-            }),
-        });
+    let mut stream = ExtractAction::new().with_tool(ToolSchema {
+        name: "fs.read".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"],
+        }),
+    });
     let mut actions = Vec::new();
     for token in [
         "Reading ",
@@ -201,11 +196,7 @@ fn main() {
         }),
     });
     let mut actions = Vec::new();
-    for token in [
-        "I think ",
-        r#"{"result": "sure""#,
-        " the answer is 42",
-    ] {
+    for token in ["I think ", r#"{"result": "sure""#, " the answer is 42"] {
         actions.push(stream.extract_stream(token));
     }
     show_stream("stream: explanatory JSON early-exits", actions);
@@ -228,10 +219,14 @@ fn main() {
     println!("== jsonish: trailing comma fixed ==\n  {value:?}\n");
 
     // ── 12. Round-trip a ToolCallData through the API ───────────────────────
-    let out = ex
-        .extract_batch(r#"{"name": "fs.read", "arguments": {"path": "x"}}"#);
+    let out = ex.extract_batch(r#"{"name": "fs.read", "arguments": {"path": "x"}}"#);
     if let Item::ToolCall(call) = &out.items[0] {
-        let ToolCallData { id, name, arguments, thought_signature } = call;
+        let ToolCallData {
+            id,
+            name,
+            arguments,
+            thought_signature,
+        } = call;
         println!(
             "== ToolCallData fields ==\n  id={id:?} name={name:?} arguments={arguments} thought_signature={thought_signature:?}"
         );

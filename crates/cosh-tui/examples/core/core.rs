@@ -11,9 +11,7 @@
 //! cargo run --example core
 //! ```
 
-use cosh_tui::core::border::{
-    BorderSidesConfig, BorderStyle, border_chars,
-};
+use cosh_tui::core::border::{BorderSidesConfig, BorderStyle, border_chars};
 use cosh_tui::core::layout::LayoutTree;
 use cosh_tui::core::lib::rgba::{ColorInput, RGBA, parse_color};
 use cosh_tui::core::lib::styled_text::{StyledText, TextChunk, UrlLink, string_to_styled_text};
@@ -34,7 +32,9 @@ use cosh_tui::core::renderables::text::TextRenderable;
 use cosh_tui::core::renderables::text_table::TextTableRenderable;
 use cosh_tui::core::renderables::textarea::{TextareaOptions, TextareaRenderable};
 use cosh_tui::core::syntax_style::SyntaxStyle;
-use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers, TextAttributes};
+use cosh_tui::core::types::{
+    MouseButton, MouseEvent, MouseEventType, MouseModifiers, TextAttributes,
+};
 use cosh_tui::core::utils::{
     TextAttributeOptions, attributes_with_link, create_text_attributes, get_link_id,
 };
@@ -61,18 +61,32 @@ fn main() {
     let a = RGBA::from_hex("#ff8800");
     let b = RGBA::from_ints(255, 136, 0, 255);
     assert_eq!(a, b);
-    assert_eq!(parse_color(ColorInput::String("orange".into())), RGBA::from_hex("#ffa500"));
-    assert_eq!(parse_color(ColorInput::String("transparent".into())).to_ints(), (0, 0, 0, 0));
+    assert_eq!(
+        parse_color(ColorInput::String("orange".into())),
+        RGBA::from_hex("#ffa500")
+    );
+    assert_eq!(
+        parse_color(ColorInput::String("transparent".into())).to_ints(),
+        (0, 0, 0, 0)
+    );
     // Invalid hex falls back to the magenta sentinel.
     assert_eq!(RGBA::from_hex("#nope").to_ints(), (255, 0, 255, 255));
     println!("== 1. colors ==");
     println!("  from_hex #ff8800 == from_ints: {}", a == b);
-    println!("  \"orange\" -> {}", parse_color(ColorInput::String("orange".into())));
+    println!(
+        "  \"orange\" -> {}",
+        parse_color(ColorInput::String("orange".into()))
+    );
     println!();
 
     // ── 2. Borders: styles and side configs ───────────────────────────────
     let rounded = border_chars(BorderStyle::Rounded);
-    let sides = BorderSidesConfig { top: true, right: false, bottom: true, left: false };
+    let sides = BorderSidesConfig {
+        top: true,
+        right: false,
+        bottom: true,
+        left: false,
+    };
     println!("== 2. borders ==");
     println!("  rounded top_left: {}", rounded.top_left);
     println!(
@@ -85,8 +99,14 @@ fn main() {
     println!("== 3. unicode widths ==");
     println!("  \"abc\" -> {} cols", str_display_width("abc"));
     println!("  \"中文字\" -> {} cols", str_display_width("中文字"));
-    println!("  flag 🇧🇷 -> {} cols", str_display_width("\u{1F1E7}\u{1F1F7}"));
-    println!("  wrap \"hello world foo\" @ 8 -> {:?}", word_wrap("hello world foo", 8));
+    println!(
+        "  flag 🇧🇷 -> {} cols",
+        str_display_width("\u{1F1E7}\u{1F1F7}")
+    );
+    println!(
+        "  wrap \"hello world foo\" @ 8 -> {:?}",
+        word_wrap("hello world foo", 8)
+    );
     for (g, w) in graphemes_with_width("a中") {
         println!("  grapheme {g:?} width {w}");
     }
@@ -102,7 +122,11 @@ fn main() {
     println!("== 4. attributes ==");
     println!("  bold|underline bits: {attrs:#x}");
     println!("  bold set: {}", attrs & TextAttributes::BOLD.bits() != 0);
-    println!("  link id round-trip: {} -> {}", with_link, get_link_id(with_link));
+    println!(
+        "  link id round-trip: {} -> {}",
+        with_link,
+        get_link_id(with_link)
+    );
     println!();
 
     // ── 5. SyntaxStyle registry ───────────────────────────────────────────
@@ -123,13 +147,19 @@ fn main() {
     println!("  registered names: {:?}", styles.get_registered_names());
     println!(
         "  merged keyword fg: {}",
-        merged.fg.map(|c| c.to_string()).unwrap_or_else(|| "none".into())
+        merged
+            .fg
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "none".into())
     );
     println!();
 
     // ── 6. LayoutTree: two stacked panels ─────────────────────────────────
     let mut tree = LayoutTree::new();
-    let grow = taffy::Style { flex_grow: 1.0, ..taffy::Style::default() };
+    let grow = taffy::Style {
+        flex_grow: 1.0,
+        ..taffy::Style::default()
+    };
     let top = tree.new_leaf(grow.clone());
     let bottom = tree.new_leaf(grow);
     let col = tree.new_container(
@@ -156,7 +186,13 @@ fn main() {
     // ── 7. TextRenderable with styled chunks ──────────────────────────────
     let mut text = TextRenderable::new(Some(StyledText {
         chunks: vec![
-            TextChunk { text: "status: ".into(), fg: None, bg: None, attributes: 0, link: None },
+            TextChunk {
+                text: "status: ".into(),
+                fg: None,
+                bg: None,
+                attributes: 0,
+                link: None,
+            },
             TextChunk {
                 text: "ok".into(),
                 fg: Some(RGBA::from_hex("#22c55e")),
@@ -197,13 +233,16 @@ fn main() {
     input.delete_char_backward();
     println!("== 10. InputRenderable ==");
     println!("  value after insert + delete: {:?}", input.value());
-    show("  rendered (placeholder, empty value)",
+    show(
+        "  rendered (placeholder, empty value)",
         &{
             let mut empty = InputRenderable::new(None);
             empty.set_placeholder("Type here…".into());
             empty
         },
-        20, 1);
+        20,
+        1,
+    );
     show("  rendered (with value)", &input, 20, 1);
 
     // ── 11. TextareaRenderable ────────────────────────────────────────────
@@ -224,9 +263,18 @@ fn main() {
     // ── 12. SelectRenderable ──────────────────────────────────────────────
     let mut select = SelectRenderable::new();
     select.set_options(vec![
-        SelectOption { name: "rust".into(), description: "systems language".into() },
-        SelectOption { name: "go".into(), description: "concurrent".into() },
-        SelectOption { name: "python".into(), description: "scripting".into() },
+        SelectOption {
+            name: "rust".into(),
+            description: "systems language".into(),
+        },
+        SelectOption {
+            name: "go".into(),
+            description: "concurrent".into(),
+        },
+        SelectOption {
+            name: "python".into(),
+            description: "scripting".into(),
+        },
     ]);
     select.move_down(1);
     println!("== 12. SelectRenderable ==");
@@ -239,12 +287,21 @@ fn main() {
     // ── 13. TabSelectRenderable ───────────────────────────────────────────
     let mut tabs = TabSelectRenderable::new();
     tabs.set_options(vec![
-        TabSelectOption { name: "chat".into(), description: "conversation".into() },
-        TabSelectOption { name: "files".into(), description: "explorer".into() },
+        TabSelectOption {
+            name: "chat".into(),
+            description: "conversation".into(),
+        },
+        TabSelectOption {
+            name: "files".into(),
+            description: "explorer".into(),
+        },
     ]);
     tabs.move_right();
     println!("== 13. TabSelectRenderable ==");
-    println!("  selected index after move_right: {}", tabs.selected_index());
+    println!(
+        "  selected index after move_right: {}",
+        tabs.selected_index()
+    );
     show("  rendered", &tabs, 24, 3);
 
     // ── 14. SliderRenderable ──────────────────────────────────────────────
@@ -292,13 +349,15 @@ fn main() {
     show("    (split)", &split, 40, 6);
 
     // ── 19. TextTableRenderable ───────────────────────────────────────────
-    let chunk = |s: &str| vec![TextChunk {
-        text: s.into(),
-        fg: None,
-        bg: None,
-        attributes: 0,
-        link: None,
-    }];
+    let chunk = |s: &str| {
+        vec![TextChunk {
+            text: s.into(),
+            fg: None,
+            bg: None,
+            attributes: 0,
+            link: None,
+        }]
+    };
     let table = TextTableRenderable::new(Some(vec![
         vec![chunk("file"), chunk("size")],
         vec![chunk("lib.rs"), chunk("1.2 kB")],
@@ -320,7 +379,10 @@ fn main() {
     root.add(cosh_tui::core::renderables::text_node::TextNodeAddItem::Node(bold));
     let chunks = root.to_chunks(&cosh_tui::core::renderables::text_node::InheritedStyle::new());
     println!("== 20. TextNodeRenderable ==");
-    println!("  chunks: {:?}", chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>());
+    println!(
+        "  chunks: {:?}",
+        chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+    );
     println!(
         "  second chunk bold: {}",
         chunks[1].attributes & TextAttributes::BOLD.bits() != 0
@@ -328,7 +390,11 @@ fn main() {
     println!();
 
     // ── 21. ASCIIFontRenderable ───────────────────────────────────────────
-    let logo = ASCIIFontRenderable::new(Some("COSH".into()), Some("tiny".into()), Some("#22c55e".into()));
+    let logo = ASCIIFontRenderable::new(
+        Some("COSH".into()),
+        Some("tiny".into()),
+        Some("#22c55e".into()),
+    );
     show("21. ASCIIFontRenderable", &logo, 10, 1);
 
     // ── 22. RenderableNode and RootRenderable ─────────────────────────────
@@ -337,7 +403,10 @@ fn main() {
     let idx = root_node.add_child(Box::new(fresh_text));
     println!("== 22. RenderableNode / RootRenderable ==");
     println!("  RenderableNode child index: {idx}");
-    println!("  RenderableNode children: {}", root_node.children_ref().len());
+    println!(
+        "  RenderableNode children: {}",
+        root_node.children_ref().len()
+    );
     let mut app_root = RootRenderable::new();
     let panel_id = app_root.add_child(Box::new(panel));
     println!("  RootRenderable child index: {panel_id}");
@@ -378,10 +447,15 @@ fn main() {
                 underline: true,
                 ..Default::default()
             }),
-            link: Some(UrlLink { url: "https://example.com".into() }),
+            link: Some(UrlLink {
+                url: "https://example.com".into(),
+            }),
         }],
     };
     println!("== 24. StyledText + UrlLink ==");
     println!("  link: {}", linked.chunks[0].link.as_ref().unwrap().url);
-    println!("  plain: {:?}", string_to_styled_text("plain").chunks[0].text);
+    println!(
+        "  plain: {:?}",
+        string_to_styled_text("plain").chunks[0].text
+    );
 }

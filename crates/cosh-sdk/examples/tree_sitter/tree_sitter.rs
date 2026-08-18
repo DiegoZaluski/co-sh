@@ -28,12 +28,21 @@ fn main() {
     // Only lines where a syntactic node BEGINS resolve. `fn double` starts
     // on line 1 -> the whole function, lines 1-3.
     let block = ts.resolve_block("demo.rs", src, 1).unwrap();
-    println!("  block at line 1 (fn double): lines {}-{}", block.start, block.end);
+    println!(
+        "  block at line 1 (fn double): lines {}-{}",
+        block.start, block.end
+    );
     let main_block = ts.resolve_block("demo.rs", src, 5).unwrap();
-    println!("  block at line 5 (fn main): lines {}-{}", main_block.start, main_block.end);
+    println!(
+        "  block at line 5 (fn main): lines {}-{}",
+        main_block.start, main_block.end
+    );
     // Interior lines (a body statement, line 2) and blank lines (line 4)
     // have no node STARTING there -> None.
-    println!("  body statement line 2: {:?}", ts.resolve_block("demo.rs", src, 2));
+    println!(
+        "  body statement line 2: {:?}",
+        ts.resolve_block("demo.rs", src, 2)
+    );
     println!("  blank line 4: {:?}", ts.resolve_block("demo.rs", src, 4));
     println!();
 
@@ -115,6 +124,9 @@ fn main() {
     println!("== 5. tree_sitter() global ==");
     let global = tree_sitter();
     let b = global.resolve_block("demo.rs", src, 1).unwrap();
-    println!("  global cache resolves line 1 to lines {}-{}", b.start, b.end);
+    println!(
+        "  global cache resolves line 1 to lines {}-{}",
+        b.start, b.end
+    );
     println!("  (the global instance is shared across the crate)");
 }

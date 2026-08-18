@@ -526,8 +526,13 @@ data: {\"type\":\"message_stop\"}\n\n";
 
     // The tool-use chunk carries the accumulated args as a native call.
     let tool_chunk = &chunks[tool_pos];
-    let call = tool_chunk.tool_call().expect("native tool call on the chunk");
-    assert!(tool_chunk.token().is_empty(), "no synthetic JSON token anymore");
+    let call = tool_chunk
+        .tool_call()
+        .expect("native tool call on the chunk");
+    assert!(
+        tool_chunk.token().is_empty(),
+        "no synthetic JSON token anymore"
+    );
     assert_eq!(call.name, "bash");
     assert_eq!(call.arguments, r#"{"cmd":"ls"}"#);
     assert_eq!(call.id, "toolu_1");

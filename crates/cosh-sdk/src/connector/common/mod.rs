@@ -345,7 +345,9 @@ pub async fn send_with_retry(
     loop {
         attempts += 1;
         let Some(builder) = request_builder.try_clone() else {
-            return Err(ConnectorError::Network("request builder not clonable".to_string()));
+            return Err(ConnectorError::Network(
+                "request builder not clonable".to_string(),
+            ));
         };
         match send_builder(builder, json_body.clone()).await {
             Err(e) if attempts <= RETRY_MAX_RETRIES && is_retryable_error(&e) => {
@@ -375,10 +377,10 @@ pub fn retry_mid_stream(
     json_body: String,
     retry_delay_override: Option<Duration>,
     parse: impl Fn(
-            reqwest::Response,
-        ) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>>
-        + Send
-        + 'static,
+        reqwest::Response,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>>
+    + Send
+    + 'static,
 ) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> {
     use super::retry::{RETRY_MAX_RETRIES, is_retryable_error, retry_delay};
     use tokio_stream::StreamExt;

@@ -5,8 +5,8 @@ use super::super::common::{
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 use super::super::params::{ChatMessage, Parameters, ToolCallMode, ToolDefinition};
-use crate::extract_action::NativeToolCall;
 use super::super::provider::{ProviderConfig, get_api_key};
+use crate::extract_action::NativeToolCall;
 
 use async_stream::stream;
 use std::collections::HashMap;
@@ -770,7 +770,9 @@ pub async fn chat_stream(
     let stream = if params.retry_enabled {
         let json_body = serde_json::to_string(&ctx.request)?;
         let request_builder = apply_provider_headers(
-            shared_client().post(&url).header("Content-Type", "application/json"),
+            shared_client()
+                .post(&url)
+                .header("Content-Type", "application/json"),
             config,
         )
         .header("x-goog-api-key", ctx.api_key);
@@ -1077,7 +1079,9 @@ pub async fn chat_stream_with_messages(
     let stream = if params.retry_enabled {
         let json_body = serde_json::to_string(&request)?;
         let request_builder = apply_provider_headers(
-            shared_client().post(&url).header("Content-Type", "application/json"),
+            shared_client()
+                .post(&url)
+                .header("Content-Type", "application/json"),
             config,
         )
         .header("x-goog-api-key", api_key);

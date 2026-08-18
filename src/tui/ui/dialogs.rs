@@ -1036,7 +1036,7 @@ impl DialogState {
                     }
                 }
 
-                // Title line 
+                // Title line
                 let title_text = "Keyboard Shortcuts";
                 draw_text_line(
                     buf,
@@ -1839,7 +1839,10 @@ impl DialogState {
                 let list_x = dialog_x + list_pad;
                 let list_w = dialog_w.saturating_sub(list_pad * 2);
                 let bg_element = rgba_color(theme.background_element);
-                let options = [("native", "Structured function calls (default)"), ("inline", "JSON written in the text, parsed locally")];
+                let options = [
+                    ("native", "Structured function calls (default)"),
+                    ("inline", "JSON written in the text, parsed locally"),
+                ];
 
                 for (idx, (name, desc)) in options.iter().enumerate() {
                     let y = list_top + idx as u16;
