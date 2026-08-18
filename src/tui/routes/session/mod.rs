@@ -1409,16 +1409,36 @@ impl SessionView {
                 {
                     return 0;
                 }
-                // Only tools that render block-style output (shell, write, edit, todo)
+                // Only tools that render block-style output (shell, write, edit, todo, glob)
                 // should allocate height for the full output block. All other tool
                 // types render inline (1 line) regardless of whether they have output.
-                let is_block = t.output.is_some()
-                    && matches!(t.status, ToolStatus::Completed)
-                    && !t.output.as_deref().unwrap_or("").trim().is_empty()
-                    && matches!(
-                        tool_render::tool_display(&t.tool),
-                        "bash" | "write" | "edit" | "todo" | "glob"
-                    );
+                // The conditions mirror each renderer EXACTLY, so the cached height
+                // matches the drawn box even mid-loop (Running bash/glob with
+                // streamed output already draw their box).
+                let display = tool_render::tool_display(&t.tool);
+                let has_output = t.output.as_deref().is_some_and(|o| !o.trim().is_empty());
+                let is_block = match display {
+                    // render_shell draws the box whenever output is non-empty.
+                    "bash" => has_output,
+                    // render_glob draws the box whenever the output is listable.
+                    "glob" => tool_render::glob_block_text(t).is_some(),
+                    // render_write / render_edit only box completed tools.
+                    "write" | "edit" => {
+                        has_output && matches!(t.status, ToolStatus::Completed)
+                    }
+                    // render_todo boxes anything not running with output
+                    // (Completed and Failed both draw).
+                    "todo" => {
+                        !matches!(t.status, ToolStatus::Running)
+                            && has_output
+                            && !tool_render::format_todo_output(
+                                t.output.as_deref().unwrap_or("").trim(),
+                                &t.tool,
+                            )
+                            .is_empty()
+                    }
+                    _ => false,
+                };
                 if is_block {
                     let output = t.output.as_deref().unwrap_or("").trim();
                     // Add 2 rows for the block's internal padding (top/bottom border lines),

@@ -983,6 +983,437 @@ fn test_bash_output_collapse_shrinks_without_scroll_gap() {
     assert!(!buffer_text(&buf).contains("line 119"));
 }
 
+#[test]
+fn test_running_bash_click_can_expand_box() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let msg = Message {
+        id: "msg-bash-running".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "bash_run".into(),
+            input: serde_json::json!({ "command": "echo hello" }),
+            output: Some(output),
+            status: ToolStatus::Running,
+            tool_call_id: Some("bash-running".into()),
+            is_start: true,
+            is_streaming: false,
+            cached_line_count: None,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Working;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 2,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking inside a running bash block must be consumed by the session view"
+    );
+    assert!(
+        view.tool_state.is_expanded("bash-running"),
+        "clicking a running bash block must expand it (collapse preview shows 10 of 20 lines)"
+    );
+}
+
+/// Regression: a completed bash box must stay clickable to expand while the
+/// agent loop streams NEW content below it (the box is an OLD message). The
+/// scroll is sticky-bottom, so the box's screen row stays pinned while the
+/// streaming tail grows.
+#[test]
+fn test_completed_bash_click_expands_while_new_content_streams() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let bash_msg = Message {
+        id: "msg-bash".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "bash_run".into(),
+            input: serde_json::json!({ "command": "echo hello" }),
+            output: Some(output),
+            status: ToolStatus::Completed,
+            tool_call_id: Some("bash-old".into()),
+            is_start: true,
+            is_streaming: false,
+            cached_line_count: None,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let stream_msg = Message {
+        id: "msg-stream".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Text(TextPart {
+            text: "Working on it...\n".into(),
+            synthetic: false,
+        })],
+        created_at: 1,
+        agent: None,
+        model: None,
+    };
+
+    let mut state = AppState::new();
+    let session = Session {
+        id: "test-session".into(),
+        title: "Test".into(),
+        created_at: 0,
+        messages: vec![bash_msg, stream_msg],
+    };
+    state.add_session(session);
+    state.current_session_id = Some("test-session".into());
+    state.status = SessionStatus::Working;
+
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+
+    // Grow the streaming tail across frames, exactly like the agent loop
+    // appending content while the user reads the old bash box.
+    for _ in 0..3 {
+        if let Some(session) = state.current_session_mut() {
+            if let Some(last) = session.messages.last_mut() {
+                if let Some(Part::Text(t)) = last.parts.last_mut() {
+                    t.text
+                        .push_str("more streaming output continues here to grow the tail\n");
+                } else {
+                    last.parts.push(Part::Text(TextPart {
+                        text: "more streaming output continues here to grow the tail\n".into(),
+                        synthetic: false,
+                    }));
+                }
+            }
+        }
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    }
+
+    // The bash box's hint row is the click target (old message, pinned by
+    // sticky-bottom while the tail grew).
+    let hint_row = (0..area.height)
+        .find(|&r| {
+            let row_text: String = (0..area.width)
+                .filter_map(|cx| buf.cell((cx, r)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row_text.contains("Click to expand")
+        })
+        .expect("bash box hint row must be visible while the tail streams");
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        hint_row,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking the bash box while the tail streams must be consumed"
+    );
+    assert!(
+        view.tool_state.is_expanded("bash-old"),
+        "an old completed bash box must expand even while the agent loop streams below it"
+    );
+}
+
+#[test]
+fn test_running_glob_click_can_expand_streaming_box() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output = serde_json::json!({
+        "pattern": "**/*.rs",
+        "formatted": (0..20).map(|i| format!("src/file_{i}.rs")).collect::<Vec<_>>().join("\n")
+    })
+    .to_string();
+    let msg = Message {
+        id: "msg-glob-running".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "find_glob".into(),
+            input: serde_json::json!({ "pattern": "**/*.rs" }),
+            output: Some(output),
+            status: ToolStatus::Running,
+            tool_call_id: Some("glob-running".into()),
+            is_start: true,
+            is_streaming: true,
+            cached_line_count: Some(20),
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Working;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // The glob box is drawn tall (block with "Click to expand") while RUNNING,
+    // exactly like find_glob/find_grep stream matches into a Running part.
+    let hint_row = (0..area.height)
+        .find(|&r| {
+            let row_text: String = (0..area.width)
+                .filter_map(|cx| buf.cell((cx, r)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row_text.contains("Click to expand")
+        })
+        .expect("running glob box must render the expand hint");
+    assert!(
+        hint_row > 3,
+        "streaming glob box must be drawn tall, hint at row {hint_row}"
+    );
+
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        hint_row,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking the running glob box must be consumed by the session view"
+    );
+    assert!(
+        view.tool_state.is_expanded("glob-running"),
+        "clicking a running (streaming) glob box must expand it"
+    );
+}
+
+#[test]
+/// Regression guard: a bash box BELOW earlier wrapped text must expand when
+/// the mouse handler is given the SAME session area the view rendered at.
+/// (The app guarantees this via `App::session_main_area`, shared by render and
+/// the mouse dispatch — a wider mouse area would re-wrap the leading message,
+/// shift the box's `prefix_y`, and make the click miss.)
+#[test]
+fn test_completed_bash_click_expands_below_wrapped_message_with_matching_widths() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    // Long bash output that wraps differently at different widths.
+    let output: String = (0..40)
+        .map(|i| format!("some very long output line number {i}\n"))
+        .collect();
+    let msg = Message {
+        id: "msg-bash-w".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "bash_run".into(),
+            input: serde_json::json!({ "command": "echo hello" }),
+            output: Some(output),
+            status: ToolStatus::Completed,
+            tool_call_id: Some("bash-w".into()),
+            is_start: true,
+            is_streaming: false,
+            cached_line_count: None,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = AppState::new();
+    let session = Session {
+        id: "test-session".into(),
+        title: "Test".into(),
+        created_at: 0,
+        messages: vec![
+            Message {
+                id: "msg-lead".into(),
+                role: MessageRole::Assistant,
+                parts: vec![Part::Text(TextPart {
+                    text: (0..12)
+                        .map(|i| {
+                            format!("This is a fairly long line of model output text number {i} ")
+                                .repeat(3)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    synthetic: false,
+                })],
+                created_at: 0,
+                agent: None,
+                model: None,
+            },
+            msg,
+        ],
+    };
+    state.add_session(session);
+    state.current_session_id = Some("test-session".into());
+    state.status = SessionStatus::Working;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    let hint_row = (0..area.height)
+        .find(|&r| {
+            let row_text: String = (0..area.width)
+                .filter_map(|cx| buf.cell((cx, r)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row_text.contains("Click to expand")
+        })
+        .expect("bash box hint row must be visible");
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        hint_row,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking the bash box below wrapped text must be consumed"
+    );
+    assert!(
+        view.tool_state.is_expanded("bash-w"),
+        "the bash box must expand when render and mouse share the same area"
+    );
+}
+
+#[test]
+fn test_summarizing_box_click_expands_while_running() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{CompactionPart, CompactionPhase, Message, MessageRole, Part};
+
+    let mut text = String::from("# My Heading\n\n");
+    for i in 0..19 {
+        text.push_str(&format!("line {i}\n\n"));
+    }
+    let msg = Message {
+        id: "msg-summarize-running".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Compaction(CompactionPart {
+            phase: CompactionPhase::Llm,
+            started_at: 0,
+            elapsed_ms: None,
+            text,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Working;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 2,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking inside a running Summarizing box must be consumed by the session view"
+    );
+    assert!(
+        view.tool_state.is_expanded("summarize-0"),
+        "clicking a running Summarizing box must expand it"
+    );
+}
+
+#[test]
+fn test_completed_bash_click_expands_while_status_working() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    use crate::types::{ToolPart, ToolStatus};
+
+    let output: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let msg = Message {
+        id: "msg-bash-done".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Tool(ToolPart {
+            tool: "bash_run".into(),
+            input: serde_json::json!({ "command": "echo hello" }),
+            output: Some(output),
+            status: ToolStatus::Completed,
+            tool_call_id: Some("bash-done".into()),
+            is_start: true,
+            is_streaming: false,
+            cached_line_count: None,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Working;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 2,
+        MouseModifiers::none(),
+    );
+    let handled = view.handle_mouse(&click, area, &state, &config);
+    assert!(
+        handled,
+        "clicking inside a completed bash block while the loop is active must be consumed"
+    );
+    assert!(
+        view.tool_state.is_expanded("bash-done"),
+        "clicking a completed bash block must expand it even while the loop is running"
+    );
+}
+
 /// Glob results render as an expandable block: collapsed preview shows only a
 /// bounded set of file paths, a click toggles the full grouped list, and the
 /// message/part heights grow to match (mirroring the bash block behaviour).
