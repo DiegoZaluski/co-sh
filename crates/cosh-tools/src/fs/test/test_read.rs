@@ -6,7 +6,7 @@ use cosh_sdk::hashline::snapshots::SnapshotStore;
 
 fn meta() -> FsMetadata {
     FsMetadata {
-        root: PathBuf::from("/home/inky/cosh"),
+        root: PathBuf::from("/home/inky/co-sh"),
         allowlist: None,
         blocklist: None,
     }
@@ -36,13 +36,13 @@ async fn test_function_search() {
         FsRead {
             targets: vec![
                 Target {
-                    path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/tokenizer.rs".to_string(),
+                    path: "/home/inky/co-sh/crates/cosh-sdk/src/hashline/tokenizer.rs".to_string(),
                     line: None,
                     symbol: Some("tokenize".to_string()),
                     line_range: None,
                 },
                 Target {
-                    path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/types.rs".to_string(),
+                    path: "/home/inky/co-sh/crates/cosh-sdk/src/hashline/types.rs".to_string(),
                     line: None,
                     symbol: None,
                     line_range: None,
@@ -66,7 +66,7 @@ async fn test_line_block() {
         meta(),
         FsRead {
             targets: vec![Target {
-                path: "/home/inky/cosh/crates/cosh-sdk/src/hashline/tokenizer.rs".to_string(),
+                path: "/home/inky/co-sh/crates/cosh-sdk/src/hashline/tokenizer.rs".to_string(),
                 line: Some(5),
                 symbol: None,
                 line_range: None,

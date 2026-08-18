@@ -155,6 +155,15 @@ impl Connector {
         self
     }
 
+    /// The reasoning effort set via [`with_reasoning_effort`](Self::with_reasoning_effort).
+    ///
+    /// Lets callers (e.g. the harness) re-apply the same level when the
+    /// connector is rebuilt for a fallback provider or model.
+    #[must_use]
+    pub fn reasoning_effort(&self) -> Option<&str> {
+        self.params.reasoning_effort.as_deref()
+    }
+
     /// A unique identifier for the end-user (for monitoring/abuse detection).
     pub fn with_user(mut self, v: impl Into<String>) -> Self {
         self.params.user = Some(v.into());

@@ -8,7 +8,7 @@ use super::super::types::{FsMetadata, FsRollback};
 
 static TEST_ID: AtomicU64 = AtomicU64::new(0);
 
-const ROOT: &str = "/home/inky/cosh";
+const ROOT: &str = "/home/inky/co-sh";
 
 fn tmp(label: &str) -> String {
     let id = TEST_ID.fetch_add(1, Ordering::Relaxed);

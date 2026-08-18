@@ -963,12 +963,27 @@ impl App {
     /// reasoning, push the reasoning sub-dialog on top of the model list.
     fn confirm_model_entry(&mut self, model: &str, provider: &str) {
         if model == "auto" {
-            self.llm_config.model = Some("auto".to_string());
-            self.llm_config.provider = String::new();
-            self.llm_config.reasoning = None;
-            self.model_dialog_original = None;
-            self.reasoning_dialog_original = None;
-            self.dialog.pop();
+            // Auto mode may land on ANY fallback model, so it offers the
+            // standard effort set; the choice is re-mapped onto the closest
+            // level each fallback model actually accepts (both here and on
+            // every harness fallback switch via `resolve_reasoning_effort`).
+            let current = self.llm_config.reasoning.clone().unwrap_or_default();
+            let levels = vec![
+                "default".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ];
+            let start = levels.iter().position(|l| l == &current).unwrap_or(0);
+            self.dialog.show(DialogType::ReasoningList {
+                model: model.to_string(),
+                provider: provider.to_string(),
+                levels,
+                current,
+            });
+            if let Some(inst) = self.dialog.current_mut() {
+                inst.selected = start;
+            }
             return;
         }
 
@@ -2357,7 +2372,23 @@ impl App {
                         for (i, fb) in fallbacks.iter().enumerate() {
                             match Connector::new(&fb.provider) {
                                 Ok(c) => {
-                                    let c = c.with_model(&fb.model);
+                                    let mut c = c.with_model(&fb.model);
+                                    // The user chose a reasoning effort for
+                                    // auto mode — apply it, mapped onto the
+                                    // closest level THIS model accepts (a
+                                    // model without the knob drops it). The
+                                    // harness re-resolves per model on every
+                                    // fallback switch.
+                                    if let Some(r) = reasoning.as_deref()
+                                        && let Some(resolved) =
+                                            cosh_sdk::connector::resolve_reasoning_effort(
+                                                &fb.model,
+                                                r,
+                                                Some("cosh/cache"),
+                                            )
+                                    {
+                                        c = c.with_reasoning_effort(resolved);
+                                    }
                                     found = Some((c, i));
                                     break;
                                 }
@@ -2390,7 +2421,22 @@ impl App {
                                     c
                                 };
                                 connector = if let Some(ref r) = reasoning {
-                                    with_model.with_reasoning_effort(r)
+                                    // Map the chosen level onto the closest
+                                    // one the model actually accepts (e.g.
+                                    // "medium" on a low/high-only model) —
+                                    // never send a knob that would 400 or be
+                                    // silently ignored.
+                                    let effective = model
+                                        .as_deref()
+                                        .and_then(|m| {
+                                            cosh_sdk::connector::resolve_reasoning_effort(
+                                                m,
+                                                r,
+                                                Some("cosh/cache"),
+                                            )
+                                        })
+                                        .unwrap_or_else(|| r.clone());
+                                    with_model.with_reasoning_effort(effective)
                                 } else {
                                     with_model
                                 };

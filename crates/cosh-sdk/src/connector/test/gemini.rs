@@ -94,6 +94,89 @@ async fn stream_delivers_final_frame_without_trailing_separator() {
     assert_eq!(last_fr.as_deref(), Some("STOP"));
 }
 
+/// A thinking model streams `thought: true` parts (internal reasoning)
+/// BEFORE the final text answer. Those parts must surface as `reasoning`
+/// (for the TUI's thinking view) — NEVER as response tokens, which would
+/// leak the model's chain-of-thought into the visible answer.
+#[tokio::test]
+async fn streaming_thought_parts_are_reasoning_not_tokens() {
+    let sse = concat!(
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Let me reason step by step\",\"thought\":true}],\"role\":\"model\"},\"index\":0}]}\r\n\r\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"The answer is 42\"}],\"role\":\"model\"},\"index\":0}]}\r\n\r\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\",\"index\":0}]}\r\n\r\n",
+    );
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    handle.join().unwrap();
+
+    let mut tokens = String::new();
+    let mut reasoning = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        tokens.push_str(chunk.token());
+        reasoning.push_str(chunk.reasoning());
+    }
+    assert_eq!(
+        tokens, "The answer is 42",
+        "thought text must never leak into the response tokens"
+    );
+    assert_eq!(
+        reasoning, "Let me reason step by step",
+        "thought text must stream as reasoning for the TUI"
+    );
+}
+
+/// The same thought/token separation must hold on the prompt-based
+/// `stream_chat` path (used by `stream_chat_with_system` and the
+/// summarizer's no-tools call).
+#[tokio::test]
+async fn stream_chat_separates_thought_from_token() {
+    let sse = concat!(
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"think\",\"thought\":true}],\"role\":\"model\"},\"index\":0}]}\r\n\r\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"out loud\"}],\"role\":\"model\"},\"index\":0}]}\r\n\r\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\",\"index\":0}]}\r\n\r\n",
+    );
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = gemini_connector(port);
+    let mut stream = c.stream_chat("hi").await.unwrap();
+    handle.join().unwrap();
+
+    let mut tokens = String::new();
+    let mut reasoning = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        tokens.push_str(chunk.token());
+        reasoning.push_str(chunk.reasoning());
+    }
+    assert_eq!(tokens, "out loud");
+    assert_eq!(reasoning, "think");
+}
+
+/// Non-streaming `chat` must skip `thought` parts too: the first part of a
+/// thinking response is the reasoning summary, not the answer — returning it
+/// as the message would hand the user the chain-of-thought.
+#[tokio::test]
+async fn chat_skips_thought_parts_in_response_text() {
+    let body = concat!(
+        "{\"candidates\":[{\"content\":{\"parts\":[",
+        "{\"text\":\"internal reasoning\",\"thought\":true},",
+        "{\"text\":\"real answer\"}],\"role\":\"model\"},\"index\":0}],",
+        "\"finishReason\":\"STOP\"}",
+    );
+    let (port, _body, _raw, handle) = mock_server(body, 200);
+    let c = gemini_connector(port);
+    let out = c.chat("hi").await.unwrap();
+    handle.join().unwrap();
+    assert_eq!(
+        out.message, "real answer",
+        "the visible answer must exclude the reasoning summary"
+    );
+}
+
 /// A plain-text tool result (not valid JSON) must still be preserved —
 /// wrapped as `{"result": ...}` — never dropped to an empty object.
 #[tokio::test]
@@ -579,6 +662,13 @@ data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReas
     assert_eq!(
         json["generationConfig"]["thinkingConfig"]["thinkingLevel"], "high",
         "reasoning effort must map onto thinkingLevel, got: {body}"
+    );
+    // The reasoning summary must be requested too — without includeThoughts
+    // Gemini 3 never returns the thinking text, so the TUI would show no
+    // Think block even though the model reasoned server-side.
+    assert_eq!(
+        json["generationConfig"]["thinkingConfig"]["includeThoughts"], true,
+        "thinking config must request thought summaries, got: {body}"
     );
 }
 

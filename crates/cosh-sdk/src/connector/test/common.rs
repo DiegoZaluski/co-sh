@@ -148,6 +148,14 @@ pub fn claude_connector_no_key(port: u16) -> Connector {
         .with_base_url(format!("http://127.0.0.1:{port}"))
 }
 
+/// Build a DeepSeek Connector pointed at a mock server on the given port.
+pub fn deepseek_connector(port: u16) -> Connector {
+    Connector::new("deepseek")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}/v1"))
+        .with_api_key("sk-deepseek-test")
+}
+
 /// Build a Gemini Connector pointed at a mock server on the given port.
 pub fn gemini_connector(port: u16) -> Connector {
     Connector::new("gemini")

@@ -315,8 +315,29 @@ async fn reasoning_effort_enables_adaptive_thinking_on_46() {
         json["thinking"].get("budget_tokens").is_none(),
         "adaptive thinking carries no token budget"
     );
-    // Adaptive mode has no budget constraint — max_tokens stays at the default.
-    assert_eq!(json["max_tokens"], 4096);
+    // Adaptive thinking sizes itself within max_tokens: the plain 4096
+    // default would squeeze a high-effort turn (thinking + answer must both
+    // fit) — the floor is raised so the effort is actually spendable.
+    assert_eq!(json["max_tokens"], 16_384);
+}
+
+/// An explicit max_tokens above the adaptive floor is respected verbatim.
+#[tokio::test]
+async fn adaptive_thinking_respects_explicit_max_tokens() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port)
+        .with_reasoning_effort("high")
+        .with_max_tokens(32_000)
+        .chat("hello")
+        .await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["max_tokens"], 32_000);
 }
 
 /// On Claude 4.5 and earlier the reasoning effort maps onto MANUAL extended

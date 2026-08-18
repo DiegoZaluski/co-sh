@@ -4,7 +4,7 @@
 //! HTTP error propagation before stream start, and stream termination without
 //! a `[DONE]` signal.
 use super::super::{StreamChunk, user_message};
-use super::common::{connector, mock_server};
+use super::common::{connector, deepseek_connector, mock_server};
 use tokio_stream::StreamExt;
 
 /// Ensures all SSE data chunks are concatenated correctly.
@@ -203,6 +203,74 @@ data: [DONE]\n\n";
         json["reasoning_effort"], "low",
         "effort must be sent top-level, got: {body}"
     );
+}
+
+/// DeepSeek's thinking mode requires the explicit `thinking` toggle next to
+/// `reasoning_effort` — several OpenAI-compatible DeepSeek deployments
+/// ignore `reasoning_effort` alone and never enter thinking mode.
+#[tokio::test]
+async fn deepseek_effort_sends_thinking_toggle() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = deepseek_connector(port).with_reasoning_effort("high");
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["reasoning_effort"], "high");
+    assert_eq!(
+        json["thinking"]["type"], "enabled",
+        "deepseek must carry the thinking toggle, got: {body}"
+    );
+}
+
+/// No effort → no toggle either (the toggle only accompanies a reasoning
+/// effort).
+#[tokio::test]
+async fn deepseek_omits_toggle_without_effort() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = deepseek_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json.get("thinking").is_none(), "no effort → no toggle");
+}
+
+/// Other OpenAI-compatible providers must NEVER receive the DeepSeek-only
+/// `thinking` toggle — OpenAI rejects unknown top-level fields with 400.
+#[tokio::test]
+async fn non_deepseek_omits_thinking_toggle() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = connector(port).with_reasoning_effort("high");
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json.get("thinking").is_none(), "non-deepseek: no toggle");
 }
 
 /// No effort → no `reasoning_effort` field in the payload.

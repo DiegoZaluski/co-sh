@@ -196,6 +196,79 @@ pub fn model_reasoning_from_catalog(
     None
 }
 
+/// Effort levels ordered from least to most thinking, used to map a desired
+/// effort onto the closest level a model actually accepts.
+const EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Resolve a desired reasoning effort onto a level the model actually accepts.
+///
+/// Used when a user-chosen effort must survive a model/family switch (auto
+/// mode, provider fallback): instead of silently sending a knob the model
+/// rejects (HTTP 400) or ignores, the desired level is mapped to the CLOSEST
+/// supported one. Returns:
+///
+/// * `Some(level)` — the exact desired level when supported, otherwise the
+///   closest supported one (ties broken toward MORE thinking — the user asked
+///   for depth, so never reduce it more than necessary);
+/// * `None` — the model has NO reasoning knob (the caller omits the effort
+///   entirely) or the desired level is unknown;
+/// * `Some(desired)` unchanged — when the model's capability is unknown
+///   (absent from the static table AND the catalog); the provider's wire
+///   mapping tolerates or ignores it, same as today.
+#[must_use]
+pub fn resolve_reasoning_effort(
+    model: &str,
+    desired: &str,
+    cache_dir: Option<&str>,
+) -> Option<String> {
+    match model_reasoning(model, cache_dir) {
+        // Known reasoning model: keep the desired level when supported,
+        // otherwise map to the closest one.
+        Some(meta) if meta.supported => {
+            // Models that advertise only a toggle or a token budget (no
+            // effort list) accept the standard set — each provider's wire
+            // mapping tolerates low/medium/high.
+            let supported: Vec<String> = match meta.efforts {
+                Some(efforts) if !efforts.is_empty() => efforts,
+                _ => vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+            };
+            if supported.iter().any(|l| l == desired) {
+                Some(desired.to_string())
+            } else {
+                closest_effort(&supported, desired)
+            }
+        }
+        // Known NON-reasoning model: drop the knob entirely.
+        Some(_) => None,
+        // Unknown model (absent from the static table AND the catalog): pass
+        // the desired level through unchanged — the caller's heuristic already
+        // deemed the model reasoning-capable, and the provider's wire mapping
+        // tolerates or ignores the knob.
+        None => Some(desired.to_string()),
+    }
+}
+
+/// The supported effort closest to `desired` in [`EFFORT_ORDER`], with ties
+/// broken toward the HIGHER level.
+fn closest_effort(supported: &[String], desired: &str) -> Option<String> {
+    let desired_idx = EFFORT_ORDER.iter().position(|l| *l == desired)?;
+    supported
+        .iter()
+        .filter_map(|l| {
+            let idx = EFFORT_ORDER.iter().position(|e| *e == l)?;
+            Some((idx.abs_diff(desired_idx), l))
+        })
+        .min_by(|(da, la), (db, lb)| {
+            da.cmp(db).then_with(|| {
+                let ia = EFFORT_ORDER.iter().position(|e| *e == *la).unwrap_or(0);
+                let ib = EFFORT_ORDER.iter().position(|e| *e == *lb).unwrap_or(0);
+                // Higher effort wins ties: the user asked for more thinking.
+                ib.cmp(&ia)
+            })
+        })
+        .map(|(_, l)| l.clone())
+}
+
 /// Resolves the user-supplied cache directory (e.g. `"cosh"` or `"cosh/cache"`)
 /// under the platform's local data dir (`~/.local/share/…` on Linux) using the
 /// `directories` crate.
@@ -763,28 +836,40 @@ const KNOWN_REASONING: &[KnownReasoning] = &[
             "deepseek-v3.1",
         ],
     },
-    // Google Gemini — 2.5 exposes thinking only (budget knob, no efforts);
-    // the 3.x line adds effort levels.
+    // Google Gemini — the 2.5 line and every 3.x model expose a thinking
+    // knob; the effort sets follow the official thinking docs (the catalog
+    // omits effort lists for Gemini). Note the per-model differences:
+    // gemini-3-pro-preview accepts ONLY low/high ("medium" is a 400), while
+    // the flash line goes down to minimal.
     KnownReasoning {
         supported: true,
-        efforts: None,
+        efforts: Some(&["low", "medium", "high"]),
         aliases: &[
             "gemini-2.5-pro",
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
-            "gemini-3-pro",
-            "gemini-3.1-pro",
         ],
     },
     KnownReasoning {
         supported: true,
-        efforts: Some(&["minimal", "low", "high"]),
-        aliases: &["gemini-3-flash"],
+        efforts: Some(&["low", "high"]),
+        aliases: &["gemini-3-pro", "gemini-3-pro-preview"],
+    },
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["low", "medium", "high"]),
+        aliases: &[
+            "gemini-3.1-pro",
+            "gemini-3.1-pro-preview",
+            "gemini-3.7-flash",
+        ],
     },
     KnownReasoning {
         supported: true,
         efforts: Some(&["minimal", "low", "medium", "high"]),
         aliases: &[
+            "gemini-3-flash",
+            "gemini-3-flash-preview",
             "gemini-3.1-flash-lite",
             "gemini-3.5-flash",
             "gemini-3.5-flash-lite",
@@ -1370,6 +1455,85 @@ mod tests {
                 "max".to_string()
             ])
         );
+    }
+
+    // resolve_reasoning_effort — closest-level mapping (no network, no disk).
+
+    #[test]
+    fn resolve_effort_keeps_supported_level_verbatim() {
+        // gpt-5 accepts low/medium/high — "high" stays "high".
+        assert_eq!(
+            resolve_reasoning_effort("gpt-5", "high", None),
+            Some("high".to_string())
+        );
+        // Models with only a toggle (efforts: None) accept the standard set.
+        assert_eq!(
+            resolve_reasoning_effort("deepseek-v4-flash", "medium", None),
+            Some("medium".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_effort_maps_unsupported_level_to_closest() {
+        // gemini-3-pro-preview accepts only low/high: "medium" lands on
+        // "high" (tie broken toward more thinking).
+        assert_eq!(
+            resolve_reasoning_effort("gemini-3-pro-preview", "medium", None),
+            Some("high".to_string())
+        );
+        // "minimal" is closer to low than to high.
+        assert_eq!(
+            resolve_reasoning_effort("gemini-3-pro-preview", "minimal", None),
+            Some("low".to_string())
+        );
+        // A model capped at low/medium downgrades "high".
+        assert_eq!(
+            resolve_reasoning_effort("mistral-medium-3.5", "high", None),
+            Some("high".to_string())
+        );
+        assert_eq!(
+            resolve_reasoning_effort("mistral-medium-3.5", "medium", None),
+            Some("high".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_effort_drops_knob_for_non_reasoning_models() {
+        // A model known to have NO reasoning knob drops the effort entirely.
+        assert_eq!(resolve_reasoning_effort("gpt-4o", "high", None), None);
+        assert_eq!(resolve_reasoning_effort("qwen3-8b", "low", None), None);
+        // Unknown models pass the desired level through unchanged (the wire
+        // mapping tolerates or ignores it).
+        assert_eq!(
+            resolve_reasoning_effort("totally-unknown-model-123", "high", None),
+            Some("high".to_string())
+        );
+        // "none"/"default" (disable) resolve to None for models whose
+        // supported set has no "none".
+        assert_eq!(resolve_reasoning_effort("gpt-5", "none", None), None);
+        assert_eq!(resolve_reasoning_effort("gpt-5", "default", None), None);
+    }
+
+    #[test]
+    fn closest_effort_ties_break_toward_more_thinking() {
+        // Desired "medium" between "low" and "high": both are distance 1 —
+        // the higher one wins.
+        assert_eq!(
+            closest_effort(&["low".to_string(), "high".to_string()], "medium"),
+            Some("high".to_string())
+        );
+        // Desired "xhigh" with only ["low", "high"] → "high".
+        assert_eq!(
+            closest_effort(&["low".to_string(), "high".to_string()], "xhigh"),
+            Some("high".to_string())
+        );
+        // Desired "max" with only ["medium", "high"] → "high".
+        assert_eq!(
+            closest_effort(&["medium".to_string(), "high".to_string()], "max"),
+            Some("high".to_string())
+        );
+        // Desired outside the known order → None (caller drops the knob).
+        assert_eq!(closest_effort(&["low".to_string()], "exotic"), None);
     }
 
     #[test]

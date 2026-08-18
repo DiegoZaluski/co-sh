@@ -3,8 +3,8 @@ use super::super::grep::{grep, grep_targets};
 use super::super::types::Grep;
 use cosh_sdk::hashline::snapshots::SnapshotStore;
 
-const FIND_DIR: &str = "/home/inky/cosh/crates/cosh-sdk/src/find";
-const GLOB_FILE: &str = "/home/inky/cosh/crates/cosh-sdk/src/find/glob.rs";
+const FIND_DIR: &str = "/home/inky/co-sh/crates/cosh-sdk/src/find";
+const GLOB_FILE: &str = "/home/inky/co-sh/crates/cosh-sdk/src/find/glob.rs";
 
 /// Create a scratch directory for grep tests that need controlled fixtures.
 /// Recreated fresh on each call so tests are independent of prior state.

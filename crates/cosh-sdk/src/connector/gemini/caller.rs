@@ -152,14 +152,22 @@ struct GenerationConfig {
     thinking_config: Option<ThinkingConfig>,
 }
 
-/// Gemini 3.x thinking knob — `generationConfig.thinkingConfig.thinkingLevel`.
+/// Gemini thinking knob — `generationConfig.thinkingConfig`.
 ///
-/// Gemini 3 models accept `"minimal" | "low" | "medium" | "high"`; the
-/// harness maps its `low`/`medium`/`high` reasoning effort onto these.
+/// `thinkingLevel` (Gemini 3.x) accepts `"minimal" | "low" | "medium" |
+/// "high"`; the harness maps its reasoning effort onto these.
+///
+/// `includeThoughts` asks the API to RETURN the model's reasoning summary in
+/// the response. Without it Gemini 3 streams only the final answer plus a
+/// `thoughtSignature` — the thinking text never reaches the TUI (the model
+/// thinks server-side, billed via `thoughtsTokenCount`, but there is nothing
+/// to display). Best-effort: even when set, the summary may be absent for
+/// turns where the model did not reason enough.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ThinkingConfig {
     thinking_level: String,
+    include_thoughts: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -185,6 +193,11 @@ struct ResponsePart {
     text: Option<String>,
     #[serde(default)]
     function_call: Option<FunctionCallPart>,
+    /// Marks a THINKING part: its `text` is the model's internal reasoning
+    /// summary, never the final answer. Surfaced as `reasoning` (so the TUI
+    /// shows it as thinking) instead of being emitted as a response token.
+    #[serde(default)]
+    thought: bool,
     /// Sibling `thoughtSignature` of a native `functionCall` part (Gemini 3.x
     /// thinking models). Captured so the harness can replay it verbatim on
     /// the follow-up request — the API rejects the call otherwise.
@@ -303,6 +316,9 @@ fn build_generation_config(params: &Parameters) -> Option<GenerationConfig> {
         };
         Some(ThinkingConfig {
             thinking_level: level.to_string(),
+            // Always surface the reasoning summary — the user asked for a
+            // thinking level, so the TUI should be able to show it.
+            include_thoughts: true,
         })
     });
 
@@ -598,14 +614,20 @@ fn extract_response_text(response: &GenerateContentResponse) -> Result<String, C
         .candidates
         .first()
         .ok_or(ConnectorError::NoChoices)?;
-    candidate
+    // A thinking model prepends `thought: true` parts (internal reasoning)
+    // before the answer — never surface those as the response text.
+    let texts: Vec<&str> = candidate
         .content
         .parts
-        .first()
-        .and_then(|p| p.text.as_deref())
+        .iter()
+        .filter(|p| !p.thought)
+        .filter_map(|p| p.text.as_deref())
         .filter(|t| !t.is_empty())
-        .map(String::from)
-        .ok_or(ConnectorError::NoContent)
+        .collect();
+    if texts.is_empty() {
+        return Err(ConnectorError::NoContent);
+    }
+    Ok(texts.concat())
 }
 
 struct RequestContext {
@@ -768,23 +790,49 @@ pub async fn chat_stream(
                 for data in frames {
                     match serde_json::from_str::<GenerateContentResponse>(&data) {
                         Ok(ccr) => {
-                            let token = ccr.candidates.first()
-                                .and_then(|c| c.content.parts.first())
-                                .and_then(|p| p.text.as_deref())
-                                .unwrap_or("")
-                                .to_owned();
                             let finish_reason = ccr.candidates.first()
                                 .and_then(|c| c.finish_reason.as_deref())
                                 .map(String::from);
                             let should_stop = finish_reason.is_some();
-                            yield Ok(StreamChunk {
-                                raw: data,
-                                token,
-                                reasoning: String::new(),
-                                finish_reason,
-                                thinking_blocks: None,
-                            });
+                            // A thinking model streams its reasoning as
+                            // `thought: true` parts (text = the internal
+                            // summary) ahead of the final answer. Separate
+                            // them: thoughts → reasoning, text → token.
+                            if let Some(candidate) = ccr.candidates.first() {
+                                for part in &candidate.content.parts {
+                                    let Some(text) = part.text
+                                        .as_deref()
+                                        .filter(|t| !t.is_empty())
+                                    else {
+                                        continue;
+                                    };
+                                    if part.thought {
+                                        yield Ok(StreamChunk {
+                                            raw: data.clone(),
+                                            token: String::new(),
+                                            reasoning: text.to_string(),
+                                            finish_reason: None,
+                                            thinking_blocks: None,
+                                        });
+                                    } else {
+                                        yield Ok(StreamChunk {
+                                            raw: data.clone(),
+                                            token: text.to_string(),
+                                            reasoning: String::new(),
+                                            finish_reason: None,
+                                            thinking_blocks: None,
+                                        });
+                                    }
+                                }
+                            }
                             if should_stop {
+                                yield Ok(StreamChunk {
+                                    raw: data,
+                                    token: String::new(),
+                                    reasoning: String::new(),
+                                    finish_reason,
+                                    thinking_blocks: None,
+                                });
                                 return;
                             }
                         }
@@ -1017,13 +1065,26 @@ pub async fn chat_stream_with_messages(
                             if let Some(candidate) = ccr.candidates.first() {
                                 for part in &candidate.content.parts {
                                     if let Some(text) = part.text.as_deref().filter(|t| !t.is_empty()) {
-                                        yield Ok(StreamChunk {
-                                            raw: data.clone(),
-                                            token: text.to_string(),
-                                            reasoning: String::new(),
-                                            finish_reason: None,
-                                            thinking_blocks: None,
-                                        });
+                                        // `thought: true` parts are the model's
+                                        // internal reasoning — surface as
+                                        // `reasoning`, never as a response token.
+                                        if part.thought {
+                                            yield Ok(StreamChunk {
+                                                raw: data.clone(),
+                                                token: String::new(),
+                                                reasoning: text.to_string(),
+                                                finish_reason: None,
+                                                thinking_blocks: None,
+                                            });
+                                        } else {
+                                            yield Ok(StreamChunk {
+                                                raw: data.clone(),
+                                                token: text.to_string(),
+                                                reasoning: String::new(),
+                                                finish_reason: None,
+                                                thinking_blocks: None,
+                                            });
+                                        }
                                     }
                                     if let Some(fc) = &part.function_call {
                                         pending_tool_calls.push((

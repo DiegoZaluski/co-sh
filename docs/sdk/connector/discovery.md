@@ -7,6 +7,7 @@ Knows things about models that the models' own APIs don't tell you: the
 pub async fn discover_context_window(model_name: &str, cache_dir: Option<&str>) -> Option<usize>
 pub fn model_reasoning(model_name: &str, cache_dir: Option<&str>) -> Option<ModelReasoning>
 pub fn model_reasoning_from_catalog(model_name: &str, cache_dir: Option<&str>) -> Option<ModelReasoning>
+pub fn resolve_reasoning_effort(model: &str, desired: &str, cache_dir: Option<&str>) -> Option<String>
 pub fn effective_context_window(window: usize) -> usize
 pub struct ModelReasoning { pub supported: bool, pub efforts: Option<Vec<String>> }
 ```
@@ -78,6 +79,13 @@ the standard low/medium/high set). `model_reasoning_from_catalog` skips the
 static tier and reads the catalog directly. Both are synchronous and offline,
 so the TUI can consult them instantly when rendering the model dialog.
 
+`resolve_reasoning_effort` maps a user-chosen effort onto a level the model
+actually accepts — used when the choice must survive a model/family switch
+(auto mode, provider fallback). It keeps the desired level verbatim when
+supported, otherwise returns the **closest** supported level (ties broken
+ toward more thinking), `None` for models known to have no reasoning knob,
+and the desired level unchanged for models whose capability is unknown.
+
 ---
 
 Back to the [module overview](connector.md).
@@ -90,5 +98,6 @@ Back to the [module overview](connector.md).
 - `effective_context_window` computes the usable budget from the advertised maximum using a logarithmic decay formula, clamped to [0.20, 0.85] — small windows are mostly usable, giant windows are strongly limited.
 - The decay formula reflects research findings: larger advertised windows create an "illusion" of capacity, so the effective fraction decreases as window size increases.
 - `model_reasoning` answers whether a model supports thinking/reasoning, resolved from static table (offline) or cached models.dev catalog.
+- `resolve_reasoning_effort` maps a desired effort onto the closest level the model accepts (ties toward more thinking), drops it for known non-reasoning models, and passes it through for unknown ones — so a user-chosen level survives fallback switches without sending a knob the model rejects.
 - `ModelReasoning` includes `supported` (boolean) and `efforts` (optional list of accepted effort levels like "low", "medium", "high").
 - Both discovery functions are synchronous and offline for TUI instant rendering; network catalogs are only consulted when static resolution fails.

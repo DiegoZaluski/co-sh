@@ -3,7 +3,7 @@ use cosh_sdk::hashline::format::compute_file_hash;
 use serde_json::json;
 
 fn fs_auto() -> Fs {
-    Fs::new().cwd("/home/inky/cosh")
+    Fs::new().cwd("/home/inky/co-sh")
 }
 fn fs_replace() -> Fs {
     fs_auto().only_replace()
@@ -14,7 +14,7 @@ fn fs_ast() -> Fs {
 
 #[tokio::test]
 async fn auto_dispatches_to_replace_via_targets() {
-    let path = "/home/inky/cosh/cosh_test_dispatch_replace.txt";
+    let path = "/home/inky/co-sh/cosh_test_dispatch_replace.txt";
     std::fs::write(path, "line1\nline2\n").unwrap();
     let hash = compute_file_hash(&std::fs::read_to_string(path).unwrap());
     let args = json!({
@@ -28,7 +28,7 @@ async fn auto_dispatches_to_replace_via_targets() {
 
 #[tokio::test]
 async fn auto_dispatches_to_ast_via_ast() {
-    let path = "/home/inky/cosh/cosh_test_dispatch_ast.rs";
+    let path = "/home/inky/co-sh/cosh_test_dispatch_ast.rs";
     std::fs::write(path, "fn main() { oldApi(1); }\n").unwrap();
     let args = json!({
         "ast": { "ops": [{"pat": "oldApi($$$ARGS)", "out": "newApi($$$ARGS)"}], "paths": [path] }
@@ -44,7 +44,7 @@ async fn auto_dispatches_to_ast_via_ast() {
 
 #[tokio::test]
 async fn only_replace_forces_replace_engine() {
-    let path = "/home/inky/cosh/cosh_test_only_replace.txt";
+    let path = "/home/inky/co-sh/cosh_test_only_replace.txt";
     std::fs::write(path, "a\n").unwrap();
     let hash = compute_file_hash(&std::fs::read_to_string(path).unwrap());
     let args = json!({
@@ -61,7 +61,7 @@ async fn only_replace_forces_replace_engine() {
 
 #[tokio::test]
 async fn only_ast_forces_ast_engine() {
-    let path = "/home/inky/cosh/cosh_test_only_ast.rs";
+    let path = "/home/inky/co-sh/cosh_test_only_ast.rs";
     std::fs::write(path, "fn main() { foo(1); }\n").unwrap();
     let args = json!({
         "ast": { "ops": [{"pat": "foo($$$ARGS)", "out": "bar($$$ARGS)"}], "paths": [path] }
@@ -106,7 +106,7 @@ async fn auto_with_no_arguments_returns_usage_prompt() {
 
 #[tokio::test]
 async fn auto_with_both_arguments_returns_error() {
-    let path = "/home/inky/cosh/cosh_test_dispatch_both.txt";
+    let path = "/home/inky/co-sh/cosh_test_dispatch_both.txt";
     std::fs::write(path, "a\n").unwrap();
     let hash = compute_file_hash(&std::fs::read_to_string(path).unwrap());
     let args = json!({

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::super::glob::{glob, glob_with};
 use super::super::types::Glob;
 
-const FIND_DIR: &str = "/home/inky/cosh/crates/cosh-sdk/src/find";
+const FIND_DIR: &str = "/home/inky/co-sh/crates/cosh-sdk/src/find";
 
 /// Minimal temp dir that cleans itself up (no extra dependencies).
 struct TempDir(PathBuf);
@@ -78,7 +78,7 @@ fn glob_dir_filter_returns_only_dirs() {
             ..Default::default()
         },
         "*",
-        "/home/inky/cosh/crates",
+        "/home/inky/co-sh/crates",
     )
     .expect("glob with dir filter should succeed");
 
@@ -101,7 +101,7 @@ fn glob_max_results_limits_output() {
             ..Default::default()
         },
         "*.rs",
-        "/home/inky/cosh",
+        "/home/inky/co-sh",
     )
     .expect("glob with max_results should succeed");
 
@@ -119,7 +119,7 @@ fn glob_rejects_unknown_file_type() {
             ..Default::default()
         },
         "*",
-        "/home/inky/cosh",
+        "/home/inky/co-sh",
     )
     .err()
     .expect("glob with unknown file_type should return an error");

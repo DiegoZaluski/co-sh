@@ -19,7 +19,7 @@ use super::super::types::{
 use super::super::write::write;
 use cosh_sdk::hashline::format::compute_file_hash;
 
-const PROJECT_ROOT: &str = "/home/inky/cosh";
+const PROJECT_ROOT: &str = "/home/inky/co-sh";
 
 fn meta() -> FsMetadata {
     FsMetadata {
@@ -67,7 +67,7 @@ async fn read_gap_dotdot_traversal_no_guard() {
         meta(),
         FsRead {
             targets: vec![Target {
-                path: "/home/inky/cosh/../../../etc/hostname".to_string(),
+                path: "/home/inky/co-sh/../../../etc/hostname".to_string(),
                 line: None,
                 symbol: None,
                 line_range: None,
@@ -143,7 +143,7 @@ async fn read_traversal_relative_path_escapes_denied() {
 
 #[tokio::test]
 async fn write_traversal_via_dotdot_is_denied() {
-    let traversal_path = "/home/inky/cosh/../../../tmp/cosh_traversal_write.txt";
+    let traversal_path = "/home/inky/co-sh/../../../tmp/cosh_traversal_write.txt";
     let resolved = "/tmp/cosh_traversal_write.txt";
     let _ = std::fs::remove_file(resolved);
 
@@ -185,7 +185,7 @@ async fn write_traversal_via_dotdot_is_denied() {
 
 #[tokio::test]
 async fn write_traversal_blocklist_respected_after_normalization() {
-    let traversal_path = "/home/inky/cosh/../../../tmp/cosh_traversal_blocked.txt";
+    let traversal_path = "/home/inky/co-sh/../../../tmp/cosh_traversal_blocked.txt";
     let resolved = "/tmp/cosh_traversal_blocked.txt";
     let _ = std::fs::remove_file(resolved);
 
@@ -226,7 +226,7 @@ async fn write_traversal_blocklist_respected_after_normalization() {
 #[cfg(unix)]
 async fn write_gap_symlink_escape() {
     let outside_dir = "/tmp/cosh_symlink_escape_target";
-    let symlink_path = "/home/inky/cosh/cosh_sandbox_escape_link";
+    let symlink_path = "/home/inky/co-sh/cosh_sandbox_escape_link";
     let outside_file = format!("{outside_dir}/evil.txt");
 
     let _ = std::fs::remove_dir_all(outside_dir);
@@ -283,7 +283,7 @@ async fn write_gap_symlink_escape() {
 #[cfg(unix)]
 async fn edit_gap_symlink_escape() {
     let outside_dir = "/tmp/cosh_symlink_edit_escape";
-    let symlink_path = "/home/inky/cosh/cosh_edit_escape_link";
+    let symlink_path = "/home/inky/co-sh/cosh_edit_escape_link";
     let outside_file = format!("{outside_dir}/target.txt");
 
     let _ = std::fs::remove_dir_all(outside_dir);
@@ -337,11 +337,11 @@ async fn edit_gap_symlink_escape() {
 
 #[tokio::test]
 async fn edit_traversal_via_dotdot_resolves_inside_root_and_succeeds() {
-    let real_path = "/home/inky/cosh/cosh_traversal_edit_target.txt";
+    let real_path = "/home/inky/co-sh/cosh_traversal_edit_target.txt";
     std::fs::write(real_path, "original\n").unwrap();
     let hash = compute_file_hash("original\n");
 
-    let traversal_path = "/home/inky/cosh/../cosh/cosh_traversal_edit_target.txt";
+    let traversal_path = "/home/inky/co-sh/../co-sh/cosh_traversal_edit_target.txt";
 
     let result = edit(
         FsMetadata {
@@ -372,10 +372,10 @@ async fn edit_traversal_via_dotdot_resolves_inside_root_and_succeeds() {
 
 #[tokio::test]
 async fn edit_traversal_escape_via_dotdot_is_denied() {
-    let real_path = "/home/inky/cosh/cosh_traversal_edit_escape.txt";
+    let real_path = "/home/inky/co-sh/cosh_traversal_edit_escape.txt";
     std::fs::write(real_path, "original\n").unwrap();
 
-    let escape_path = "/home/inky/cosh/../../../tmp/cosh_traversal_edit_escape.txt";
+    let escape_path = "/home/inky/co-sh/../../../tmp/cosh_traversal_edit_escape.txt";
     let resolved = "/tmp/cosh_traversal_edit_escape.txt";
 
     let result = edit(
@@ -412,8 +412,8 @@ async fn edit_traversal_escape_via_dotdot_is_denied() {
 
 #[tokio::test]
 async fn rollback_traversal_via_dotdot_resolves_inside_root_and_succeeds() {
-    let real_path = "/home/inky/cosh/cosh_traversal_rb_target.txt";
-    let traversal_path = "/home/inky/cosh/../cosh/cosh_traversal_rb_target.txt";
+    let real_path = "/home/inky/co-sh/cosh_traversal_rb_target.txt";
+    let traversal_path = "/home/inky/co-sh/../co-sh/cosh_traversal_rb_target.txt";
 
     std::fs::write(real_path, "version1\n").unwrap();
     let _ = cosh_sdk::rollback::record(real_path, "version1\n");
@@ -445,8 +445,8 @@ async fn rollback_traversal_via_dotdot_resolves_inside_root_and_succeeds() {
 
 #[tokio::test]
 async fn rollback_traversal_escape_via_dotdot_is_denied() {
-    let real_path = "/home/inky/cosh/cosh_traversal_rb_escape.txt";
-    let escape_path = "/home/inky/cosh/../../../tmp/cosh_traversal_rb_escape.txt";
+    let real_path = "/home/inky/co-sh/cosh_traversal_rb_escape.txt";
+    let escape_path = "/home/inky/co-sh/../../../tmp/cosh_traversal_rb_escape.txt";
 
     std::fs::write(real_path, "version1\n").unwrap();
     let _ = cosh_sdk::rollback::record(escape_path, "version1\n");

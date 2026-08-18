@@ -112,6 +112,16 @@ struct OutputConfig {
 /// returns 400 when `budget_tokens >= max_tokens`.
 const THINKING_OUTPUT_HEADROOM: u32 = 1024;
 
+/// Default output ceiling for ADAPTIVE thinking turns.
+///
+/// Adaptive models size their own thinking WITHIN `max_tokens` (thinking +
+/// answer must both fit). The plain 4096 default would squeeze a `high`-
+/// effort response, silently capping how much the model can reason — the
+/// classic "high feels like low" symptom. Raised only when an adaptive
+/// effort is active; an explicit caller max_tokens above the floor is
+/// respected verbatim.
+const ADAPTIVE_THINKING_MAX_TOKENS: u32 = 16_384;
+
 /// Whether the model accepts adaptive thinking (`thinking.type: "adaptive"`).
 ///
 /// Per Anthropic's current docs, adaptive thinking is the mode for the 4.6
@@ -183,6 +193,9 @@ fn effective_max_tokens(user_max: Option<u32>, thinking: &Option<ThinkingConfig>
         Some(ThinkingConfig::Manual { budget_tokens, .. }) => user_max
             .unwrap_or(0)
             .max(*budget_tokens + THINKING_OUTPUT_HEADROOM),
+        Some(ThinkingConfig::Adaptive { .. }) => {
+            user_max.unwrap_or(0).max(ADAPTIVE_THINKING_MAX_TOKENS)
+        }
         _ => user_max.unwrap_or(4096),
     }
 }

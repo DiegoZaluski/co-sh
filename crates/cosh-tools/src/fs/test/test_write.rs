@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 fn meta() -> FsMetadata {
     FsMetadata {
-        root: PathBuf::from("/home/inky/cosh"),
+        root: PathBuf::from("/home/inky/co-sh"),
         allowlist: None,
         blocklist: None,
     }
@@ -16,7 +16,7 @@ async fn write_creates_file_and_returns_hash_header() {
         meta(),
         FsWrite {
             targets: vec![TargetFile {
-                path: "/home/inky/cosh/ftest.txt".to_string(),
+                path: "/home/inky/co-sh/ftest.txt".to_string(),
                 text: "hello world".to_string(),
             }],
         },
@@ -25,9 +25,9 @@ async fn write_creates_file_and_returns_hash_header() {
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 1);
-    assert!(results[0].header.contains("¶/home/inky/cosh/ftest.txt#"));
+    assert!(results[0].header.contains("¶/home/inky/co-sh/ftest.txt#"));
     assert!(results[0].warnings.is_none());
-    let _ = std::fs::remove_file("/home/inky/cosh/ftest.txt");
+    let _ = std::fs::remove_file("/home/inky/co-sh/ftest.txt");
 }
 
 #[tokio::test]
@@ -37,11 +37,11 @@ async fn write_creates_multiple_files_in_single_call() {
         FsWrite {
             targets: vec![
                 TargetFile {
-                    path: "/home/inky/cosh/ftest.txt".to_string(),
+                    path: "/home/inky/co-sh/ftest.txt".to_string(),
                     text: "hello world".to_string(),
                 },
                 TargetFile {
-                    path: "/home/inky/cosh/ftst2.txt".to_string(),
+                    path: "/home/inky/co-sh/ftst2.txt".to_string(),
                     text: "test".to_string(),
                 },
             ],
@@ -51,27 +51,27 @@ async fn write_creates_multiple_files_in_single_call() {
     assert!(result.is_ok());
     let results = result.unwrap();
     assert_eq!(results.len(), 2);
-    assert!(results[0].header.contains("¶/home/inky/cosh/ftest.txt#"));
+    assert!(results[0].header.contains("¶/home/inky/co-sh/ftest.txt#"));
     assert!(results[0].warnings.is_none());
-    assert!(results[1].header.contains("¶/home/inky/cosh/ftst2.txt#"));
+    assert!(results[1].header.contains("¶/home/inky/co-sh/ftst2.txt#"));
     assert!(results[1].warnings.is_none());
-    let _ = std::fs::remove_file("/home/inky/cosh/ftest.txt");
-    let _ = std::fs::remove_file("/home/inky/cosh/ftst2.txt");
+    let _ = std::fs::remove_file("/home/inky/co-sh/ftest.txt");
+    let _ = std::fs::remove_file("/home/inky/co-sh/ftst2.txt");
 }
 
 #[tokio::test]
 async fn write_denied_when_path_is_in_blocklist() {
     let metadata = FsMetadata {
-        root: Path::new("/home/inky/cosh").to_path_buf(),
+        root: Path::new("/home/inky/co-sh").to_path_buf(),
         allowlist: None,
-        blocklist: Some(vec![PathBuf::from("/home/inky/cosh/ftest.txt")]),
+        blocklist: Some(vec![PathBuf::from("/home/inky/co-sh/ftest.txt")]),
     };
 
     let result = write(
         metadata,
         FsWrite {
             targets: vec![TargetFile {
-                path: "/home/inky/cosh/ftest.txt".to_string(),
+                path: "/home/inky/co-sh/ftest.txt".to_string(),
                 text: "should not be written".to_string(),
             }],
         },
@@ -91,7 +91,7 @@ async fn write_denied_when_path_is_in_blocklist() {
 
 #[tokio::test]
 async fn write_reports_empty_text_inline_and_skips_file() {
-    let path = "/home/inky/cosh/cosh_test_empty.txt";
+    let path = "/home/inky/co-sh/cosh_test_empty.txt";
     let _ = std::fs::remove_file(path);
 
     let result = write(
@@ -121,7 +121,7 @@ async fn write_reports_empty_text_inline_and_skips_file() {
 async fn write_allowed_outside_root_when_path_in_allowlist() {
     let path = "/tmp/cosh_test_allowlist_write.txt";
     let metadata = FsMetadata {
-        root: PathBuf::from("/home/inky/cosh"),
+        root: PathBuf::from("/home/inky/co-sh"),
         allowlist: Some(vec![PathBuf::from(path)]),
         blocklist: None,
     };
@@ -150,16 +150,16 @@ async fn write_allowed_outside_root_when_path_in_allowlist() {
 #[tokio::test]
 async fn write_errors_on_inconsistent_blocklist_and_allowlist() {
     let metadata = FsMetadata {
-        root: PathBuf::from("/home/inky/cosh"),
-        allowlist: Some(vec![PathBuf::from("/home/inky/cosh/ftest.txt")]),
-        blocklist: Some(vec![PathBuf::from("/home/inky/cosh/ftest.txt")]),
+        root: PathBuf::from("/home/inky/co-sh"),
+        allowlist: Some(vec![PathBuf::from("/home/inky/co-sh/ftest.txt")]),
+        blocklist: Some(vec![PathBuf::from("/home/inky/co-sh/ftest.txt")]),
     };
 
     let result = write(
         metadata,
         FsWrite {
             targets: vec![TargetFile {
-                path: "/home/inky/cosh/ftest.txt".to_string(),
+                path: "/home/inky/co-sh/ftest.txt".to_string(),
                 text: "should never be written".to_string(),
             }],
         },
@@ -171,7 +171,7 @@ async fn write_errors_on_inconsistent_blocklist_and_allowlist() {
 
 #[tokio::test]
 async fn write_strips_hashline_prefixes_and_reports_warning() {
-    let path = "/home/inky/cosh/cosh_test_strip_hashline.txt";
+    let path = "/home/inky/co-sh/cosh_test_strip_hashline.txt";
     let content = "[main.rs#ABCD]\n42: fn main() {\n43:     println!(\"hello\");\n44: }";
 
     let result = write(
@@ -205,7 +205,7 @@ async fn write_strips_hashline_prefixes_and_reports_warning() {
 
 #[tokio::test]
 async fn write_strips_hashline_prefixes_without_bracket_header() {
-    let path = "/home/inky/cosh/cosh_test_strip_line_prefixes.txt";
+    let path = "/home/inky/co-sh/cosh_test_strip_line_prefixes.txt";
     let content = "42: fn main() {\n43:     println!(\"hello\");\n44: }";
 
     let result = write(
@@ -237,7 +237,7 @@ async fn write_strips_hashline_prefixes_without_bracket_header() {
 
 #[tokio::test]
 async fn write_does_not_strip_normal_content() {
-    let path = "/home/inky/cosh/cosh_test_no_strip.txt";
+    let path = "/home/inky/co-sh/cosh_test_no_strip.txt";
     let content = "fn main() {\n    println!(\"hello\");\n}";
 
     let result = write(
@@ -265,7 +265,7 @@ async fn write_does_not_strip_normal_content() {
 async fn write_chmods_executable_for_shebang() {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = "/home/inky/cosh/cosh_test_shebang.sh";
+    let path = "/home/inky/co-sh/cosh_test_shebang.sh";
     let content = "#!/usr/bin/env bash\necho hello";
 
     let result = write(
@@ -299,7 +299,7 @@ async fn write_chmods_executable_for_shebang() {
 
 #[tokio::test]
 async fn write_refuses_to_overwrite_auto_generated_file() {
-    let path = "/home/inky/cosh/cosh_test_generated.txt";
+    let path = "/home/inky/co-sh/cosh_test_generated.txt";
     let original = "// Code generated by tool. DO NOT EDIT.\noriginal\n";
     std::fs::write(path, original).unwrap();
 
@@ -334,7 +334,7 @@ async fn write_refuses_to_overwrite_auto_generated_file() {
 async fn write_allows_creating_file_with_generated_marker() {
     // Creating a brand-new file is always allowed — the guard protects
     // overwriting existing generated files, not generating new ones.
-    let path = "/home/inky/cosh/cosh_test_create_generated.txt";
+    let path = "/home/inky/co-sh/cosh_test_create_generated.txt";
     let _ = std::fs::remove_file(path);
     let content = "// Code generated by tool. DO NOT EDIT.\nhello\n";
 
@@ -360,7 +360,7 @@ async fn write_allows_creating_file_with_generated_marker() {
 async fn write_normalizes_crlf_to_lf() {
     // Parity with read: CRLF content is canonicalized to LF so the returned
     // hash/header matches what a follow-up read would report.
-    let path = "/home/inky/cosh/cosh_test_crlf.txt";
+    let path = "/home/inky/co-sh/cosh_test_crlf.txt";
 
     let result = write(
         meta(),
@@ -385,7 +385,7 @@ async fn write_normalizes_crlf_to_lf() {
 async fn write_does_not_chmod_without_shebang() {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = "/home/inky/cosh/cosh_test_no_shebang.txt";
+    let path = "/home/inky/co-sh/cosh_test_no_shebang.txt";
     let content = "plain text file";
 
     let result = write(

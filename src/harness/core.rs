@@ -3,6 +3,7 @@ use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
 use cosh_sdk::connector::{
     ChatMessage, ClaudeThinkingBlock, Connector, ConnectorError, ToolDefinition,
+    resolve_reasoning_effort,
 };
 #[cfg(not(test))]
 use cosh_sdk::connector::{discover_context_window, effective_context_window};
@@ -2042,7 +2043,21 @@ impl Harness {
                     let (provider, model) = self.fallbacks.remove(0);
                     match Connector::new(&provider) {
                         Ok(c) => {
-                            self.connector = c.with_model(&model);
+                            let mut c = c.with_model(&model);
+                            // Re-apply the reasoning effort the user chose:
+                            // the fallback connector is built from scratch and
+                            // would otherwise silently drop it (the classic
+                            // "high feels like low" after a fallback switch).
+                            // The level is mapped onto the closest one the
+                            // fallback model actually accepts; a model with no
+                            // reasoning knob drops the effort entirely.
+                            if let Some(effort) = self.connector.reasoning_effort()
+                                && let Some(resolved) =
+                                    resolve_reasoning_effort(&model, effort, Some("cosh/cache"))
+                            {
+                                c = c.with_reasoning_effort(resolved);
+                            }
+                            self.connector = c;
                             // Re-register native tool definitions on the new
                             // connector — otherwise the fallback provider
                             // receives zero tools.

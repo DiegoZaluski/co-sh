@@ -15,6 +15,17 @@ use super::super::params::{
     ChatMessage as ApiChatMessage, system_message, user_message as pub_user_message,
 };
 
+/// DeepSeek's thinking-mode toggle — `thinking: {type: "enabled"}`. Sent ONLY
+/// for the DeepSeek provider alongside a reasoning effort: without the toggle,
+/// several OpenAI-compatible DeepSeek deployments ignore `reasoning_effort`
+/// entirely and the model never enters thinking mode. Other providers must
+/// never receive it (OpenAI rejects unknown top-level fields with 400).
+#[derive(serde::Serialize)]
+struct ThinkingToggle {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
 #[derive(serde::Serialize)]
 struct ChatRequest {
     model: String,
@@ -47,6 +58,8 @@ struct ChatRequest {
     tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingToggle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     user: Option<String>,
 }
@@ -451,7 +464,15 @@ fn build_chat_request(
     messages: Vec<ApiChatMessage>,
     params: &Parameters,
     stream: bool,
+    provider: &str,
 ) -> ChatRequest {
+    // DeepSeek's thinking mode needs the explicit `thinking` toggle next to
+    // `reasoning_effort` — scoped to the DeepSeek provider so no other
+    // OpenAI-compatible backend ever receives the non-standard field.
+    let thinking =
+        (provider == "deepseek" && params.reasoning_effort.is_some()).then(|| ThinkingToggle {
+            kind: "enabled".to_string(),
+        });
     ChatRequest {
         model,
         messages,
@@ -469,6 +490,7 @@ fn build_chat_request(
         tools: params.tools.clone(),
         tool_choice: params.tool_choice.clone(),
         reasoning_effort: params.reasoning_effort.clone(),
+        thinking,
         user: params.user.clone(),
     }
 }
@@ -495,7 +517,7 @@ pub async fn chat(
         .unwrap_or_else(|| config.default_model.to_string());
 
     let messages = build_messages(prompt, system_prompt);
-    let request = build_chat_request(model, messages, params, false);
+    let request = build_chat_request(model, messages, params, false, config.name);
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/chat/completions");
 
@@ -551,7 +573,7 @@ pub async fn chat_stream(
         .unwrap_or_else(|| config.default_model.to_string());
 
     let messages = build_messages(prompt, system_prompt);
-    let request = build_chat_request(model, messages, params, true);
+    let request = build_chat_request(model, messages, params, true, config.name);
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/chat/completions");
 
@@ -594,7 +616,7 @@ pub async fn chat_stream_with_messages(
     // serialization, otherwise the request would be rejected with 400.
     let all_messages = build_full_messages(system, messages);
     let all_messages = strip_internal_fields(&all_messages);
-    let request = build_chat_request(model, all_messages, params, true);
+    let request = build_chat_request(model, all_messages, params, true, config.name);
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/chat/completions");
 
