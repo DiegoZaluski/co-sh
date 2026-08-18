@@ -2004,6 +2004,31 @@ impl App {
                     &self.state,
                     &self.theme,
                 );
+
+                // Hover tooltip: when the mouse is over a sidebar item
+                // whose title was LLM-generated, show the full title as
+                // a toast.  Checked every frame so it works even when
+                // the terminal doesn't send Move events.
+                let mx = self.last_mouse_x;
+                let my = self.last_mouse_y;
+                let content_start_y = area.y + 2;
+                if my >= content_start_y
+                    && my < area.y + area.height
+                    && mx < sidebar_w
+                {
+                    let idx = self.sidebar.selection.scroll_offset
+                        + (my - content_start_y) as usize;
+                    if let Some(summary) = self.state.session_summaries.get(idx)
+                        && summary.title_generated
+                    {
+                        self.toast_state.show(crate::ui::toast::ToastOptions {
+                            title: None,
+                            message: summary.title.clone(),
+                            variant: crate::ui::toast::ToastVariant::Info,
+                            duration_ms: 3000,
+                        });
+                    }
+                }
             }
 
             let footer_y = main_area.bottom().saturating_sub(1);
@@ -4749,6 +4774,7 @@ impl App {
                     // Update the session title in memory.
                     if let Some(session) = self.state.session_cache.get_mut(&session_id) {
                         session.title = title.clone();
+                        session.title_generated = true;
                     }
                     // Update the sidebar summary.
                     if let Some(summary) = self
@@ -4758,6 +4784,7 @@ impl App {
                         .find(|s| s.session_id == session_id)
                     {
                         summary.title = title;
+                        summary.title_generated = true;
                     }
                 }
             }

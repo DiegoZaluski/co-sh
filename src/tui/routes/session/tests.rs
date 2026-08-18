@@ -42,6 +42,7 @@ fn test_state(msg: Message) -> AppState {
         id: "test-session".into(),
         title: "Test".into(),
         created_at: 0,
+        title_generated: false,
         messages: vec![msg],
     };
     state.add_session(session);
@@ -379,6 +380,7 @@ fn test_full_chat_history_performance() {
         id: "chat-history".into(),
         title: "Chat".into(),
         created_at: 0,
+        title_generated: false,
         messages,
     };
     state.add_session(session);
@@ -1080,6 +1082,7 @@ fn test_completed_bash_click_expands_while_new_content_streams() {
         id: "test-session".into(),
         title: "Test".into(),
         created_at: 0,
+        title_generated: false,
         messages: vec![bash_msg, stream_msg],
     };
     state.add_session(session);
@@ -1251,6 +1254,7 @@ fn test_completed_bash_click_expands_below_wrapped_message_with_matching_widths(
         id: "test-session".into(),
         title: "Test".into(),
         created_at: 0,
+        title_generated: false,
         messages: vec![
             Message {
                 id: "msg-lead".into(),
@@ -1994,6 +1998,7 @@ fn state_with_bash_block(session_id: &str, line: &str) -> AppState {
         id: session_id.into(),
         title: session_id.into(),
         created_at: 0,
+        title_generated: false,
         messages: vec![Message {
             id: format!("{session_id}-0"),
             role: MessageRole::Assistant,
@@ -2099,6 +2104,7 @@ fn test_code_block_bottom_padding_not_overlapped() {
         id: "test-session".into(),
         title: "Test".into(),
         created_at: 0,
+        title_generated: false,
         messages: vec![code_msg, reply],
     };
     state.add_session(session);
@@ -2412,6 +2418,7 @@ fn bench_render_memory_growth_is_bounded() {
         id: "bench".into(),
         title: "Bench".into(),
         created_at: 0,
+        title_generated: false,
         messages: vec![bench_user_message(0)],
     };
     state.add_session(session);
@@ -2548,6 +2555,7 @@ fn bench_session_with_n_pairs(n: usize) -> Session {
         id: format!("bench-{n}"),
         title: "Bench".into(),
         created_at: 0,
+        title_generated: false,
         messages,
     }
 }
@@ -2643,6 +2651,7 @@ fn bench_streaming_frame_time_vs_session_size() {
         id: "bench-stream".into(),
         title: "Bench".into(),
         created_at: 0,
+        title_generated: false,
         messages: vec![bench_user_message(0)],
     };
     state.add_session(session);
@@ -2818,6 +2827,7 @@ fn bench_render_memory_growth_short() {
         id: "bench-short".into(),
         title: "Bench".into(),
         created_at: 0,
+        title_generated: false,
         messages: vec![bench_user_message(0)],
     };
     state.add_session(session);
@@ -2907,6 +2917,7 @@ fn bench_render_heaptrack_minimal() {
         id: "bench-ht".into(),
         title: "Bench".into(),
         created_at: 0,
+        title_generated: false,
         messages: vec![bench_user_message(0)],
     };
     state.add_session(session);
@@ -3324,6 +3335,7 @@ fn test_state_msgs(msgs: Vec<Message>) -> AppState {
         id: "test-session".into(),
         title: "Test".into(),
         created_at: 0,
+        title_generated: false,
         messages: msgs,
     };
     state.add_session(session);

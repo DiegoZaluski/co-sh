@@ -132,6 +132,7 @@ impl AppState {
             message_count: session.messages.len(),
             cwd: self.working_directory.clone(),
             model: None,
+            title_generated: session.title_generated,
         };
         self.session_summaries.push(summary);
         self.pending_queues.entry(session.id.clone()).or_default();
@@ -150,6 +151,7 @@ impl AppState {
                 title,
                 created_at,
                 messages: vec![],
+                title_generated: false,
             },
         );
     }
@@ -172,6 +174,7 @@ impl AppState {
                 message_count: session.messages.len(),
                 cwd: self.working_directory.clone(),
                 model: None,
+                title_generated: session.title_generated,
             };
             self.session_summaries.push(summary);
         }
@@ -279,6 +282,7 @@ impl AppState {
             id: "demo-1".to_string(),
             title: "Demo Session".to_string(),
             created_at: 1000,
+            title_generated: false,
             messages: vec![
                 Message {
                     id: "msg-1".to_string(),

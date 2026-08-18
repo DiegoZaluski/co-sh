@@ -103,7 +103,7 @@ impl ToastState {
             bottom: false,
         });
 
-        let inner_h = if toast.title.is_some() { 3u16 } else { 2u16 };
+        let inner_h = 3u16;
         let toast_area = Rect::new(toast_x, toast_y, toast_w, inner_h);
         bg.render_self(buf, toast_area);
 
@@ -118,6 +118,9 @@ impl ToastState {
             t.set_attributes(TextAttributes::BOLD.bits());
             let title_area = Rect::new(toast_x + padding_x, y, inner_w, 1);
             t.render_self(buf, title_area);
+            y += 1;
+        } else {
+            // No title: skip one line so the message appears centered.
             y += 1;
         }
 
