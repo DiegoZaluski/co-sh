@@ -43,6 +43,7 @@ struct SessionHeader {
 }
 
 /// Manages reading and writing session files to disk, isolated by CWD.
+#[derive(Clone)]
 pub struct SessionStore {
     /// Resolved path to the per-CWD sessions directory
     /// (e.g. `~/.local/share/cosh/sessions/{hash}/`).
@@ -100,6 +101,37 @@ impl SessionStore {
         }
 
         self.evict_old_sessions();
+    }
+
+    /// Update only the title in an existing session file on disk.
+    ///
+    /// Reads the file, replaces the title in the first-line JSON header,
+    /// and writes it back.  This is much cheaper than a full `save_session`
+    /// rewrite and is used by the async title generation path.
+    pub fn update_title(&self, session_id: &str, new_title: &str) {
+        let file_path = self.file_path(session_id);
+        let Ok(contents) = std::fs::read_to_string(&file_path) else {
+            return;
+        };
+        let mut out_lines: Vec<String> = Vec::new();
+        let mut first = true;
+        for line in contents.lines() {
+            if first {
+                first = false;
+                // Replace the title field in the JSON header (line 0).
+                if let Ok(mut header) = serde_json::from_str::<SessionHeader>(line) {
+                    header.title = new_title.to_string();
+                    if let Ok(json) = serde_json::to_string(&header) {
+                        out_lines.push(json);
+                        continue;
+                    }
+                }
+            }
+            out_lines.push(line.to_string());
+        }
+        if let Err(e) = std::fs::write(&file_path, out_lines.join("\n")) {
+            log::warn!("failed to update title for session {session_id}: {e}");
+        }
     }
 
     /// Load all session files from the current CWD's subdirectory, sorted by

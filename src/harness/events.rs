@@ -126,6 +126,14 @@ pub enum HarnessEvent {
         /// Severity/color variant.
         variant: ToastVariant,
     },
+    /// The async title generator produced a semantic title for the session.
+    /// The TUI updates the in-memory session and sidebar.
+    TitleGenerated {
+        /// The session whose title was updated.
+        session_id: String,
+        /// The new human-readable title.
+        title: String,
+    },
 }
 
 /// Severity of a [`HarnessEvent::Toast`]. Kept in the harness (not the TUI)

@@ -183,6 +183,10 @@ pub struct App {
     session_store: SessionStore,
     /// When set, the current Confirm dialog is asking about deleting a session.
     pending_delete_session_id: Option<String>,
+    /// Whether a title has already been generated for the current session.
+    /// Set to `false` when a new session is created; set to `true` after
+    /// the async title generation task is spawned.
+    title_generated: bool,
     /// When set, the current Confirm dialog is asking about deleting a RAG database.
     #[cfg(feature = "embed")]
     pending_delete_db_name: Option<String>,
@@ -305,6 +309,7 @@ impl App {
             setup,
             session_store,
             pending_delete_session_id: None,
+            title_generated: false,
             #[cfg(feature = "embed")]
             pending_delete_db_name: None,
             #[cfg(feature = "embed")]
@@ -2347,6 +2352,7 @@ impl App {
                     .as_millis() as u64,
             );
             self.state.current_session_id = Some(id);
+            self.title_generated = false;
         }
 
         if let Some(session) = self.state.current_session_mut() {
@@ -3079,6 +3085,7 @@ impl App {
                                         self.finalize_stale_compaction_lines();
                                         self.state
                                             .switch_to_session(session_id, &self.session_store);
+                                        self.title_generated = true;
                                         self.finalize_stale_compaction_lines();
                                         return Ok(false);
                                     }
@@ -3112,6 +3119,7 @@ impl App {
                                         let title = format_session_timestamp(now_ms);
                                         self.state.add_empty_session(id.clone(), title, now_ms);
                                         self.state.current_session_id = Some(id);
+                                        self.title_generated = false;
                                         self.prompt_view.focus();
                                     }
                                     HomeAction::ToggleSidebar => {
@@ -4480,6 +4488,70 @@ impl App {
                     {
                         self.session_store.save_session(session);
                         self.session_store.save_ctx(&id, &context_state);
+
+                        // Trigger async title generation for the first response.
+                        // The session title starts as a timestamp; the LLM produces
+                        // a semantic title from the first user message.
+                        if !self.title_generated {
+                            // Extract the first user message text.
+                            let first_user = session.messages.iter().find_map(|m| {
+                                if m.role == MessageRole::User {
+                                    let text: String = m
+                                        .parts
+                                        .iter()
+                                        .filter_map(|p| match p {
+                                            Part::Text(t) => Some(t.text.as_str()),
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    if text.is_empty() { None } else { Some(text) }
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(user_prompt) = first_user {
+                                let provider = self.llm_config.provider.clone();
+                                let model = self.llm_config.model.clone();
+                                let session_id = id.clone();
+                                let session_store = self.session_store.clone();
+                                let event_tx = self.event_tx.clone();
+                                self.tokio_handle.spawn(async move {
+                                    let Ok(mut connector) =
+                                        cosh_sdk::connector::Connector::new(&provider)
+                                    else {
+                                        return;
+                                    };
+                                    if let Some(ref m) = model {
+                                        connector = connector.with_model(m);
+                                    }
+                                    // Disable tools and retry for the title call —
+                                    // it is a simple chat completion.
+                                    connector = connector
+                                        .with_tool_call_mode(
+                                            cosh_sdk::connector::ToolCallMode::Native,
+                                        )
+                                        .with_retry(false);
+                                    if let Some(title) =
+                                        cosh::harness::generate_title(&connector, &user_prompt)
+                                            .await
+                                    {
+                                        // Persist the updated title to disk.
+                                        session_store.update_title(&session_id, &title);
+                                        // Update the session title in memory.
+                                        let _ = event_tx.send(
+                                            HarnessEvent::TitleGenerated {
+                                                session_id,
+                                                title,
+                                            },
+                                        );
+                                    }
+                                });
+                                self.title_generated = true;
+                            }
+                        }
+                        // Ensure the sidebar shows the session (must happen
+                        // after the immutable borrow of session is released).
                         self.state.ensure_session_summary(&id);
                     }
 
@@ -4671,6 +4743,22 @@ impl App {
                     self.permission_dialog.visible = true;
                     // Default to "Allow Once" (index 1)
                     self.permission_dialog.selected = 1;
+                }
+
+                HarnessEvent::TitleGenerated { session_id, title } => {
+                    // Update the session title in memory.
+                    if let Some(session) = self.state.session_cache.get_mut(&session_id) {
+                        session.title = title.clone();
+                    }
+                    // Update the sidebar summary.
+                    if let Some(summary) = self
+                        .state
+                        .session_summaries
+                        .iter_mut()
+                        .find(|s| s.session_id == session_id)
+                    {
+                        summary.title = title;
+                    }
                 }
             }
         }
@@ -5461,6 +5549,7 @@ impl App {
                     self.finalize_stale_compaction_lines();
                     self.state
                         .switch_to_session(session_id, &self.session_store);
+                    self.title_generated = true;
                     self.finalize_stale_compaction_lines();
                     return Ok(true);
                 }
@@ -5549,6 +5638,7 @@ impl App {
                         let title = format_session_timestamp(now_ms);
                         self.state.add_empty_session(id.clone(), title, now_ms);
                         self.state.current_session_id = Some(id);
+                        self.title_generated = false;
                         self.prompt_view.focus();
                     }
                     crate::routes::home::HomeAction::ToggleSidebar => {
