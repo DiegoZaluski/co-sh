@@ -3365,6 +3365,38 @@ fn bash_part(tool_call_id: &str, n: usize, status: ToolStatus) -> Part {
     })
 }
 
+/// Build a read tool part whose output mirrors `fs_read`: a JSON array of
+/// results carrying hashline content (header line, `N| text` body, and a
+/// trailing bracketed notice), exactly like `crates/cosh-tools/src/fs/read.rs`.
+fn read_part(tool_call_id: &str, n: usize, status: ToolStatus) -> Part {
+    let body: String = (0..n)
+        .map(|i| format!("{}| fn code_line_{i}() {{ return {i}; }}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = format!(
+        "¶src/main.rs#abc123\n{body}\n[{n} more lines in file; continue with line_range \"{}-{}\"]",
+        n + 1,
+        n + 10
+    );
+    let results = serde_json::json!([{
+        "path": "src/main.rs",
+        "file_hash": "abc123",
+        "header": "¶src/main.rs#abc123",
+        "content": content,
+        "warnings": null
+    }]);
+    Part::Tool(ToolPart {
+        tool: "fs_read".into(),
+        input: serde_json::json!({ "targets": [{ "path": "src/main.rs" }] }),
+        output: Some(results.to_string()),
+        status,
+        tool_call_id: Some(tool_call_id.into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+    })
+}
+
 /// True when the buffer row is entirely blank (space glyphs only).
 fn row_is_blank(buf: &Buffer, y: u16) -> bool {
     (0..buf.area.width).all(|x| {
@@ -3814,4 +3846,144 @@ fn test_non_last_glob_stream_growth_updates_cached_height() {
         "the growing glob box pushed the streaming tail below the fold \
          (sticky scroll uses the stale cached height)"
     );
+}
+
+/// A completed read draws a code box (styled like Write): title `# Read <path>`,
+/// the clean code lines the model read (hashline `N| ` prefixes stripped, header
+/// and notices hidden), a blank top-margin row, and a cached height that exactly
+/// matches what the render draws (no bottom gap / scroll drift).
+#[test]
+fn test_completed_read_renders_code_box() {
+    let msg = Message {
+        id: "msg-read".into(),
+        role: MessageRole::Assistant,
+        parts: vec![read_part("read-1", 3, ToolStatus::Completed)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state(msg);
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 40);
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    let text = buffer_text(&buf);
+    assert!(
+        text.contains("# Read src/main.rs"),
+        "read box must have a `# Read src/main.rs` title"
+    );
+    assert!(
+        text.contains("fn code_line_0"),
+        "read box must show the code the model read"
+    );
+    assert!(
+        !text.contains("1| fn code_line_0"),
+        "hashline `N| ` prefixes must be stripped from the shown code"
+    );
+    assert!(
+        !text.contains("¶src/main.rs"),
+        "the hashline header must not appear inside the read box"
+    );
+    assert!(
+        !text.contains("more lines in file"),
+        "bracketed read notices must not appear inside the read box"
+    );
+
+    // Top-margin row above the box (external margin reserved by the estimate).
+    assert!(
+        row_is_blank(&buf, 0),
+        "row above the read box must be blank"
+    );
+
+    // The cached height must match the actual drawn height exactly.
+    assert_eq!(
+        view.actual_total_height, view.cached_total_height,
+        "read box height diverges from the cache estimate"
+    );
+    assert_eq!(
+        view.cached_total_height, 8,
+        "3 code lines → top margin + box(6) + bottom margin = 8 rows, got {}",
+        view.cached_total_height
+    );
+}
+
+/// A long read is capped at 20 code lines (like the Write box) and the cached
+/// height still matches the drawn height.
+#[test]
+fn test_completed_read_caps_height_like_write() {
+    let msg = Message {
+        id: "msg-read".into(),
+        role: MessageRole::Assistant,
+        parts: vec![read_part("read-1", 30, ToolStatus::Completed)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state(msg);
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    let text = buffer_text(&buf);
+    assert!(
+        text.contains("fn code_line_19"),
+        "the first 20 code lines must be visible"
+    );
+    assert!(
+        !text.contains("fn code_line_29"),
+        "lines past the 20-line cap must not be drawn"
+    );
+    assert_eq!(
+        view.actual_total_height, view.cached_total_height,
+        "capped read box diverges from the cache estimate"
+    );
+    assert_eq!(
+        view.cached_total_height, 25,
+        "20 code lines → top margin + box(23) + bottom margin = 25 rows, got {}",
+        view.cached_total_height
+    );
+}
+
+/// A running read stays a single-line inline label (no box yet).
+#[test]
+fn test_running_read_stays_inline() {
+    let msg = Message {
+        id: "msg-read".into(),
+        role: MessageRole::Assistant,
+        parts: vec![read_part("read-1", 5, ToolStatus::Running)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state(msg);
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 20);
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    let text = buffer_text(&buf);
+    assert!(
+        text.contains("Read src/main.rs"),
+        "running read must keep the inline `Read <path>` label"
+    );
+    assert!(
+        !text.contains("fn code_line_0"),
+        "running read must not draw a code box yet"
+    );
+    assert_eq!(
+        view.cached_total_height, 1,
+        "running read is a single inline row"
+    );
+    assert_eq!(view.actual_total_height, view.cached_total_height);
 }

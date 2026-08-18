@@ -1388,7 +1388,8 @@ impl SessionView {
     /// the height estimate and the render agree on the box's external margins:
     /// `render_shell` boxes any bash with output (Running or Completed),
     /// `render_glob` boxes any glob with listable output, `render_write` /
-    /// `render_edit` box only completed tools, `render_todo` boxes any
+    /// `render_edit` box only completed tools, `render_read` boxes any
+    /// completed read with parseable content, `render_todo` boxes any
     /// non-running tool with listable output (Completed and Failed both draw).
     fn tool_is_block(part: &ToolPart) -> bool {
         let display = tool_render::tool_display(&part.tool);
@@ -1397,6 +1398,11 @@ impl SessionView {
             "bash" => has_output,
             "glob" => tool_render::glob_block_text(part).is_some(),
             "write" | "edit" => has_output && matches!(part.status, ToolStatus::Completed),
+            "read" => {
+                has_output
+                    && matches!(part.status, ToolStatus::Completed)
+                    && tool_render::read_block_text(part).is_some()
+            }
             "todo" => {
                 !matches!(part.status, ToolStatus::Running)
                     && has_output
@@ -1443,7 +1449,7 @@ impl SessionView {
                 {
                     return 0;
                 }
-                // Only tools that render block-style output (shell, write, edit, todo, glob)
+                // Only tools that render block-style output (shell, write, edit, read, todo, glob)
                 // should allocate height for the full output block. All other tool
                 // types render inline (1 line) regardless of whether they have output.
                 // The conditions mirror each renderer EXACTLY, so the cached height
@@ -1491,6 +1497,14 @@ impl SessionView {
                         // line_h = diff_lines + 3 (padding + title + gap)
                         // + 2 for external margins (top + bottom)
                         diff_lines + 5
+                    } else if tool_render::tool_display(&t.tool) == "read" {
+                        // Read block: clean code capped at 20 lines, mirroring
+                        // render_read's `max_lines` (same as the Write box).
+                        let code = tool_render::read_block_text(t).unwrap_or_default();
+                        let lines = code.lines().count().max(1) as u16;
+                        // Internal box: top padding (1) + title + content +
+                        // bottom padding (1) = lines + 3; +2 external margins.
+                        lines.min(20) + 5
                     } else {
                         // bash (and write) block. When the tool is expanded, the full
                         // output is rendered, so the height must match render_shell.

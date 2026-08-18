@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use cosh_sdk::hashline::format::{HL_FILE_PREFIX, HL_LINE_BODY_SEP};
 use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
@@ -990,6 +991,58 @@ pub(crate) fn glob_block_text(part: &ToolPart) -> Option<String> {
         })
 }
 
+/// Extract the file content a completed read surfaced, as clean code lines.
+///
+/// `fs_read` returns a JSON array of read results whose `content` is
+/// hashline-formatted: a `¶path#hash` header line, numbered `N| text` body
+/// lines, and trailing bracketed notices (`[…N lines elided…]`, truncation
+/// hints). This strips the header and notices and removes the `N| ` prefixes
+/// so the read box shows exactly the code the model read (mirrors
+/// `glob_block_text`). Multiple results are joined with a blank line; `None`
+/// when nothing readable remains.
+pub(crate) fn read_block_text(part: &ToolPart) -> Option<String> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(part.output.as_deref()?) else {
+        return None;
+    };
+    let results = json.as_array()?;
+    let mut blocks: Vec<String> = Vec::new();
+    for result in results {
+        let content = result.get("content")?.as_str()?;
+        let mut code: Vec<&str> = Vec::new();
+        for line in content.lines() {
+            if line.starts_with(HL_FILE_PREFIX) {
+                continue; // hashline header `¶path#hash`
+            }
+            // Numbered hashline: `N| text` → keep `text`. The bare `…` elision
+            // marker is kept too (it is part of what the model read). Bracketed
+            // notices and any other unnumbered line are dropped.
+            if let Some(body) = strip_numbered_prefix(line) {
+                code.push(body);
+            } else if line.trim() == "…" {
+                code.push("…");
+            }
+        }
+        if !code.is_empty() {
+            blocks.push(code.join("\n"));
+        }
+    }
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(blocks.join("\n\n"))
+    }
+}
+
+/// Split a hashline `N| text` line into its body, or `None` when the line is
+/// not numbered (the separator is [`HL_LINE_BODY_SEP`]).
+fn strip_numbered_prefix(line: &str) -> Option<&str> {
+    let (num, rest) = line.split_once(HL_LINE_BODY_SEP)?;
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(rest)
+}
+
 /// Status glyph prefix and warning flag for a completed search-tool result.
 struct GlobStatus<'a> {
     glyph: &'a str,
@@ -1183,13 +1236,6 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let is_running = matches!(part.status, ToolStatus::Running);
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
-    let label = format!("Read {filepath}");
-    let fg = if is_completed {
-        ctx.theme.text_muted
-    } else {
-        ctx.theme.text
-    };
-    *ctx.line_h = 1;
     let tool_id = format!("read_{}", part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
@@ -1198,6 +1244,85 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         .tool_spinners
         .get(&tool_id)
         .filter(|s| !s.is_idle());
+
+    // Completed reads with parseable content draw a code box styled like the
+    // Write box: the clean code the model read, capped at 20 lines.
+    if is_completed && let Some(code) = read_block_text(part) {
+        let max_lines = 20u16;
+        let display_lines = code.lines().count().min(max_lines as usize) as u16;
+        // 1 blank row of internal padding above the title (the bottom-padding
+        // row is the last row of the box), matching the Write box.
+        let area = Rect::new(
+            ctx.x,
+            ctx.y,
+            ctx.max_w.saturating_add(3),
+            display_lines + 2 + TOOL_BOX_PAD_V,
+        );
+        *ctx.line_h = area.height;
+
+        let mut border_box = BoxRenderable::new();
+        border_box.set_background_color(Some(ctx.theme.background_panel.into()));
+        border_box.set_border_color(Some(ctx.theme.background.into()));
+        border_box.set_border_sides(BorderSidesConfig {
+            left: true,
+            top: false,
+            right: false,
+            bottom: false,
+        });
+        border_box.set_custom_border_chars(BorderCharacters {
+            top_left: ' ',
+            top_right: ' ',
+            bottom_left: ' ',
+            bottom_right: ' ',
+            horizontal: ' ',
+            vertical: '┃',
+            top_t: ' ',
+            bottom_t: ' ',
+            left_t: '┃',
+            right_t: ' ',
+            cross: ' ',
+        });
+        border_box.render_self(ctx.buf, area);
+
+        let title = format!("# Read {filepath}");
+        let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
+        draw_text_line(
+            ctx.buf,
+            &title,
+            ctx.x + 3,
+            ctx.y + TOOL_BOX_PAD_V,
+            ctx.max_w.saturating_sub(3),
+            title_style,
+        );
+
+        let max_w_inner = ctx.max_w.saturating_sub(3);
+        let default_fg = rgba_color(ctx.theme.text);
+        let ln_fg = rgba_color(ctx.theme.text_muted);
+        let lang = lang_name_from_path(&filepath);
+        draw_highlighted_code_with_ln(
+            ctx.buf,
+            ctx.x + 3,
+            ctx.y + 1 + TOOL_BOX_PAD_V,
+            max_w_inner,
+            CodeBlockSpec {
+                content: &code,
+                lang,
+                default_fg,
+                ln_fg,
+                max_lines,
+            },
+        );
+        return;
+    }
+
+    // Running/failed/no-code reads keep the lightweight single-line label.
+    let label = format!("Read {filepath}");
+    let fg = if is_completed {
+        ctx.theme.text_muted
+    } else {
+        ctx.theme.text
+    };
+    *ctx.line_h = 1;
     render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, spinner);
 }
 
