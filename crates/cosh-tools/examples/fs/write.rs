@@ -29,11 +29,13 @@ async fn main() {
             TargetFile {
                 path: "notes.txt".to_string(),
                 text: "first line\nsecond line\n".to_string(),
-             file_hash: None, },
+                file_hash: None,
+            },
             TargetFile {
                 path: "scripts/hello.sh".to_string(),
                 text: "#!/bin/sh\necho hello\n".to_string(),
-             file_hash: None, },
+                file_hash: None,
+            },
         ])
         .await
         .unwrap();
@@ -50,7 +52,8 @@ async fn main() {
         .write(vec![TargetFile {
             path: outside.join("secret.txt").to_string_lossy().to_string(),
             text: "do not touch\n".to_string(),
-         file_hash: None, }])
+            file_hash: None,
+        }])
         .await
         .unwrap();
 
@@ -68,7 +71,8 @@ async fn main() {
         .write(vec![TargetFile {
             path: outside.join("secret.txt").to_string_lossy().to_string(),
             text: "allowed now\n".to_string(),
-         file_hash: None, }])
+            file_hash: None,
+        }])
         .await
         .unwrap();
 
@@ -89,7 +93,8 @@ async fn main() {
         .write(vec![TargetFile {
             path: "generated.rs".to_string(),
             text: "// my replacement\n".to_string(),
-         file_hash: None, }])
+            file_hash: None,
+        }])
         .await
         .unwrap();
 

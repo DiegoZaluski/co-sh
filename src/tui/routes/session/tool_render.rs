@@ -746,7 +746,13 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         .output
         .as_deref()
         .and_then(|o| serde_json::from_str::<serde_json::Value>(o).ok())
-        .and_then(|v| v.as_array()?.first()?.get("warnings")?.as_str().map(String::from));
+        .and_then(|v| {
+            v.as_array()?
+                .first()?
+                .get("warnings")?
+                .as_str()
+                .map(String::from)
+        });
 
     if has_warnings.is_none() && is_completed && !content.is_empty() {
         let max_lines = 20u16;

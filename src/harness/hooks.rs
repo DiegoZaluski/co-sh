@@ -296,12 +296,8 @@ fn shallow_merge(base: &str, patch: &str) -> Result<String, String> {
     let patch_val: serde_json::Value =
         serde_json::from_str(patch).map_err(|e| format!("patch: {e}"))?;
 
-    let base_obj = base_val
-        .as_object()
-        .ok_or("base is not a JSON object")?;
-    let patch_obj = patch_val
-        .as_object()
-        .ok_or("patch is not a JSON object")?;
+    let base_obj = base_val.as_object().ok_or("base is not a JSON object")?;
+    let patch_obj = patch_val.as_object().ok_or("patch is not a JSON object")?;
 
     let mut merged = base_obj.clone();
     for (k, v) in patch_obj {
@@ -396,11 +392,7 @@ impl HookRunner {
     fn matching_hooks(&self, tool_name: &str) -> Vec<&CompiledHook> {
         self.hooks
             .iter()
-            .filter(|h| {
-                h.matcher
-                    .as_ref()
-                    .map_or(true, |re| re.is_match(tool_name))
-            })
+            .filter(|h| h.matcher.as_ref().map_or(true, |re| re.is_match(tool_name)))
             .collect()
     }
 
@@ -465,10 +457,7 @@ impl HookRunner {
         let _ = kill_handle.join();
 
         if timed_out {
-            log::warn!(
-                "Hook timed out after {timeout:?}: {}",
-                config.command,
-            );
+            log::warn!("Hook timed out after {timeout:?}: {}", config.command,);
             return HookResult::default();
         }
 
@@ -515,9 +504,7 @@ impl HookRunner {
                 }
             }
             _ => {
-                log::warn!(
-                    "Hook failed with non-blocking error: exit={exit_code} stderr={stderr}"
-                );
+                log::warn!("Hook failed with non-blocking error: exit={exit_code} stderr={stderr}");
                 HookResult::default()
             }
         }

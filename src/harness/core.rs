@@ -2542,9 +2542,7 @@ impl Harness {
                             self.tool_issuer.pop_front();
                             self.tool_failure_count += 1;
                             self.correction_memory.push(&reason);
-                            let _ = tx.send(HarnessEvent::ToolError {
-                                error: reason,
-                            });
+                            let _ = tx.send(HarnessEvent::ToolError { error: reason });
                             // Halt stops the entire turn
                             if hr.halt {
                                 let msg = "Turn halted by hook".to_string();

@@ -35,9 +35,7 @@ pub async fn generate_title(connector: &Connector, user_prompt: &str) -> Option<
         return None;
     }
 
-    let result = connector
-        .chat_with_system(user_prompt, TITLE_SYSTEM)
-        .await;
+    let result = connector.chat_with_system(user_prompt, TITLE_SYSTEM).await;
 
     match result {
         Ok(output) => {
