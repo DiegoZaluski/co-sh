@@ -113,6 +113,12 @@ impl ChatLogo {
     pub fn anchor(&mut self, area: ratatui::layout::Rect) {
         let max_x = area.right().saturating_sub(O_GLYPH_W as u16);
         let max_y = area.bottom().saturating_sub(O_GLYPH_H as u16);
+        // Guard: when the area is too small for the glyph, min > max which
+        // would make f64::clamp panic in advance(). Skip storing bounds so
+        // the position is unconstrained until a larger area is provided.
+        if max_x <= area.x || max_y <= area.y {
+            return;
+        }
         self.bounds = Some((area.x as f64, max_x as f64, area.y as f64, max_y as f64));
         if !self.positioned {
             self.pos_x = area.x as f64 + (area.width as f64 / 2.0) - (O_GLYPH_W as f64 / 2.0);
