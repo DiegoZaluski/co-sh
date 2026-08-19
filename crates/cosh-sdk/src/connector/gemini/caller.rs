@@ -1480,10 +1480,12 @@ mod tests {
     #[test]
     fn effective_tool_config_forces_auto_with_tools() {
         use crate::connector::params::{Parameters, ToolFunction};
-        let mut p = Parameters::default();
-        p.tools = Some(vec![crate::connector::ToolDefinition::new(
-            ToolFunction::new("glob").with_description("d"),
-        )]);
+        let p = Parameters {
+            tools: Some(vec![crate::connector::ToolDefinition::new(
+                ToolFunction::new("glob").with_description("d"),
+            )]),
+            ..Default::default()
+        };
         let cfg = super::build_effective_tool_config(&p).expect("tools present → toolConfig");
         assert_eq!(
             cfg.function_calling_config.mode, "AUTO",
@@ -1501,11 +1503,13 @@ mod tests {
     #[test]
     fn effective_tool_config_respects_explicit_choice() {
         use crate::connector::params::{Parameters, ToolFunction};
-        let mut p = Parameters::default();
-        p.tools = Some(vec![crate::connector::ToolDefinition::new(
-            ToolFunction::new("glob").with_description("d"),
-        )]);
-        p.tool_choice = Some(serde_json::json!("ANY"));
+        let p = Parameters {
+            tools: Some(vec![crate::connector::ToolDefinition::new(
+                ToolFunction::new("glob").with_description("d"),
+            )]),
+            tool_choice: Some(serde_json::json!("ANY")),
+            ..Default::default()
+        };
         let cfg = super::build_effective_tool_config(&p).expect("explicit choice wins");
         assert_eq!(cfg.function_calling_config.mode, "ANY");
     }

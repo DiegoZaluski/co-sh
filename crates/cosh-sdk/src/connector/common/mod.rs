@@ -101,93 +101,6 @@ fn next_sse_separator(buf: &[u8]) -> Option<usize> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{SseBuffer, next_sse_separator};
-
-    #[test]
-    fn splits_lf_frames() {
-        let mut buf = SseBuffer::new();
-        let frames = buf.push_and_drain(b"data: {\"a\":1}\n\ndata: {\"b\":2}\n\n");
-        assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
-    }
-
-    /// The Gemini API emits CRLF CRLF between SSE events — the exact wire
-    /// format captured from a live `streamGenerateContent?alt=sse` call.
-    /// A parser that only splits on LF LF would buffer the whole body and
-    /// emit zero frames (the silent-failure bug).
-    #[test]
-    fn splits_crlf_frames() {
-        let mut buf = SseBuffer::new();
-        let frames = buf.push_and_drain(b"data: {\"a\":1}\r\n\r\ndata: {\"b\":2}\r\n\r\n");
-        assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
-    }
-
-    #[test]
-    fn buffers_partial_frame_until_separator() {
-        let mut buf = SseBuffer::new();
-        // First chunk ends mid-frame (no blank line yet).
-        assert!(buf.push_and_drain(b"data: {\"a\":1}\r\n").is_empty());
-        // The rest completes the frame and carries the next one.
-        let frames = buf.push_and_drain(b"\r\ndata: {\"b\":2}\r\n\r\n");
-        assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
-    }
-
-    #[test]
-    fn mixed_separator_styles_are_both_split() {
-        let mut buf = SseBuffer::new();
-        let frames = buf.push_and_drain(b"data: {\"a\":1}\n\ndata: {\"b\":2}\r\n\r\n");
-        assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
-    }
-
-    #[test]
-    fn separator_offsets_are_correct() {
-        assert_eq!(
-            next_sse_separator(b"data: x\n\n"),
-            Some(b"data: x\n\n".len())
-        );
-        assert_eq!(
-            next_sse_separator(b"data: x\r\n\r\n"),
-            Some(b"data: x\r\n\r\n".len())
-        );
-        assert_eq!(next_sse_separator(b"data: x"), None);
-    }
-
-    /// A stream that ends without a trailing blank line must still deliver
-    /// its final frame at EOF — the "silently lost tail frame" class of
-    /// failure (same family as the CRLF separator bug).
-    #[test]
-    fn flush_emits_final_frame_without_separator() {
-        let mut buf = SseBuffer::new();
-        // First frame ends cleanly; the second never gets its blank line,
-        // so it must be recovered by flush() at EOF.
-        let frames = buf.push_and_drain(b"data: {\"a\":1}\r\n\r\ndata: {\"b\":2}");
-        assert_eq!(frames, vec![r#"{"a":1}"#]);
-        assert_eq!(buf.flush(), vec![r#"{"b":2}"#]);
-        assert!(buf.flush().is_empty());
-    }
-
-    #[test]
-    fn flush_is_noop_when_stream_ended_cleanly() {
-        let mut buf = SseBuffer::new();
-        let frames = buf.push_and_drain(b"data: {\"a\":1}\n\n");
-        assert_eq!(frames, vec![r#"{"a":1}"#]);
-        assert!(buf.flush().is_empty());
-    }
-
-    #[test]
-    fn flush_recovers_multiple_unseparated_data_lines() {
-        // Server that never emits blank lines (NDJSON-ish): every `data:`
-        // line still becomes a frame at EOF.
-        let mut buf = SseBuffer::new();
-        assert!(
-            buf.push_and_drain(b"data: {\"a\":1}\ndata: {\"b\":2}")
-                .is_empty()
-        );
-        assert_eq!(buf.flush(), vec![r#"{"a":1}"#, r#"{"b":2}"#]);
-    }
-}
-
 pub async fn send_request(
     config: &ProviderConfig,
     url: &str,
@@ -478,5 +391,92 @@ fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         Some(ms)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SseBuffer, next_sse_separator};
+
+    #[test]
+    fn splits_lf_frames() {
+        let mut buf = SseBuffer::new();
+        let frames = buf.push_and_drain(b"data: {\"a\":1}\n\ndata: {\"b\":2}\n\n");
+        assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
+    }
+
+    /// The Gemini API emits CRLF CRLF between SSE events — the exact wire
+    /// format captured from a live `streamGenerateContent?alt=sse` call.
+    /// A parser that only splits on LF LF would buffer the whole body and
+    /// emit zero frames (the silent-failure bug).
+    #[test]
+    fn splits_crlf_frames() {
+        let mut buf = SseBuffer::new();
+        let frames = buf.push_and_drain(b"data: {\"a\":1}\r\n\r\ndata: {\"b\":2}\r\n\r\n");
+        assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
+    }
+
+    #[test]
+    fn buffers_partial_frame_until_separator() {
+        let mut buf = SseBuffer::new();
+        // First chunk ends mid-frame (no blank line yet).
+        assert!(buf.push_and_drain(b"data: {\"a\":1}\r\n").is_empty());
+        // The rest completes the frame and carries the next one.
+        let frames = buf.push_and_drain(b"\r\ndata: {\"b\":2}\r\n\r\n");
+        assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
+    }
+
+    #[test]
+    fn mixed_separator_styles_are_both_split() {
+        let mut buf = SseBuffer::new();
+        let frames = buf.push_and_drain(b"data: {\"a\":1}\n\ndata: {\"b\":2}\r\n\r\n");
+        assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
+    }
+
+    #[test]
+    fn separator_offsets_are_correct() {
+        assert_eq!(
+            next_sse_separator(b"data: x\n\n"),
+            Some(b"data: x\n\n".len())
+        );
+        assert_eq!(
+            next_sse_separator(b"data: x\r\n\r\n"),
+            Some(b"data: x\r\n\r\n".len())
+        );
+        assert_eq!(next_sse_separator(b"data: x"), None);
+    }
+
+    /// A stream that ends without a trailing blank line must still deliver
+    /// its final frame at EOF — the "silently lost tail frame" class of
+    /// failure (same family as the CRLF separator bug).
+    #[test]
+    fn flush_emits_final_frame_without_separator() {
+        let mut buf = SseBuffer::new();
+        // First frame ends cleanly; the second never gets its blank line,
+        // so it must be recovered by flush() at EOF.
+        let frames = buf.push_and_drain(b"data: {\"a\":1}\r\n\r\ndata: {\"b\":2}");
+        assert_eq!(frames, vec![r#"{"a":1}"#]);
+        assert_eq!(buf.flush(), vec![r#"{"b":2}"#]);
+        assert!(buf.flush().is_empty());
+    }
+
+    #[test]
+    fn flush_is_noop_when_stream_ended_cleanly() {
+        let mut buf = SseBuffer::new();
+        let frames = buf.push_and_drain(b"data: {\"a\":1}\n\n");
+        assert_eq!(frames, vec![r#"{"a":1}"#]);
+        assert!(buf.flush().is_empty());
+    }
+
+    #[test]
+    fn flush_recovers_multiple_unseparated_data_lines() {
+        // Server that never emits blank lines (NDJSON-ish): every `data:`
+        // line still becomes a frame at EOF.
+        let mut buf = SseBuffer::new();
+        assert!(
+            buf.push_and_drain(b"data: {\"a\":1}\ndata: {\"b\":2}")
+                .is_empty()
+        );
+        assert_eq!(buf.flush(), vec![r#"{"a":1}"#, r#"{"b":2}"#]);
     }
 }

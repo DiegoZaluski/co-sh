@@ -145,6 +145,9 @@ pub struct CoshTools {
     subagent: SubAgent,
     /// Optional event sender for streaming tool output.
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
+    /// Configured base URLs for local providers (used by the cloud embedder).
+    #[cfg(feature = "embed")]
+    local_base_urls: std::collections::HashMap<String, String>,
 }
 
 impl CoshTools {
@@ -164,7 +167,18 @@ impl CoshTools {
             skills: Skills::new(),
             subagent: SubAgent::new(),
             event_tx: None,
+            #[cfg(feature = "embed")]
+            local_base_urls: std::collections::HashMap::new(),
         }
+    }
+
+    /// Configured base URLs for local providers, honored by the cloud
+    /// embedder when a provider is local.
+    #[cfg(feature = "embed")]
+    #[must_use]
+    pub fn with_local_base_urls(mut self, urls: std::collections::HashMap<String, String>) -> Self {
+        self.local_base_urls = urls;
+        self
     }
 
     /// Get the project root directory (used for path validation).
@@ -476,6 +490,7 @@ impl CoshTools {
 #[cfg(any(feature = "fastembed", feature = "cloud"))]
 fn config_to_embedder(
     config: &RecallEmbedderConfig,
+    base_urls: &std::collections::HashMap<String, String>,
 ) -> Result<cosh_recall::embed::Embedder, String> {
     match config {
         #[cfg(feature = "fastembed")]
@@ -494,9 +509,12 @@ fn config_to_embedder(
             model,
             dim,
         } => {
-            let connector = cosh_sdk::connector::Connector::new(provider)
+            let mut connector = cosh_sdk::connector::Connector::new(provider)
                 .map_err(|e| format!("connector error: {e}"))?
                 .with_model(model);
+            if let Some(url) = base_urls.get(provider) {
+                connector = connector.with_base_url(url.clone());
+            }
             Ok(cosh_recall::embed::Embedder::new_cloud(connector, *dim))
         }
         #[cfg(not(feature = "cloud"))]
@@ -519,9 +537,10 @@ async fn dispatch_recall_search(
     db: &RecallDb,
     query: &str,
     limit: usize,
+    base_urls: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
     // 1. Create embedder from the DB's config
-    let embedder = config_to_embedder(&db.embedder)?;
+    let embedder = config_to_embedder(&db.embedder, base_urls)?;
 
     // 2. Connect to the LanceDB table in READ-ONLY mode
     let vec_db = cosh_recall::embed::VecDb::connect_readonly(&db.uri, &db.table_name)
@@ -564,6 +583,7 @@ async fn dispatch_recall_search(
     _db: &RecallDb,
     _query: &str,
     _limit: usize,
+    _base_urls: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
     Err(
         "RAG search requires building with --features lancedb,fastembed \
@@ -1121,7 +1141,8 @@ impl Tools for CoshTools {
                     })?;
 
                 // Embed the query and search — requires fastembed or cloud feature
-                let output = dispatch_recall_search(db, query, limit).await?;
+                let output =
+                    dispatch_recall_search(db, query, limit, &self.local_base_urls).await?;
                 Ok(output)
             }
 

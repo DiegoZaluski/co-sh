@@ -34,8 +34,9 @@ pub use params::{
     tool_result_message, user_message,
 };
 pub use provider::{
-    COSH_SERVICE, clear_api_key_cache, detect_provider, get_api_key, get_provider_env_var,
-    has_api_key, invalidate_api_key, known_providers, known_providers_with_env,
+    COSH_SERVICE, clear_api_key_cache, detect_provider, get_api_key, get_provider,
+    get_provider_env_var, has_api_key, invalidate_api_key, is_local_provider,
+    known_local_providers, known_providers, known_providers_with_env, normalize_local_base_url,
 };
 
 #[cfg(test)]

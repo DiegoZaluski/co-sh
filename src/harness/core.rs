@@ -393,6 +393,10 @@ pub struct Harness {
     /// connector's API call fails.
     fallbacks: Vec<(String, String)>,
 
+    /// Configured base URLs for local providers (provider → URL), used when
+    /// building fallback connectors so they hit the user's server.
+    local_base_urls: std::collections::HashMap<String, String>,
+
     /// Window size (tokens) parsed from the LAST context-window overflow
     /// error, stashed by [`Self::stream_chat_with_messages`] so the retry
     /// loop can drain tool chains locally (without an HTTP round trip per
@@ -504,6 +508,7 @@ impl Harness {
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
+            local_base_urls: std::collections::HashMap::new(),
             last_context_window: None,
             discovered_window: None,
             last_overflow_toast: None,
@@ -549,6 +554,19 @@ impl Harness {
     #[must_use]
     pub fn with_fallbacks(mut self, fallbacks: Vec<(String, String)>) -> Self {
         self.fallbacks = fallbacks;
+        self
+    }
+
+    /// Map of local provider name → base URL configured by the user (from
+    /// setup.json). Applied when a fallback connector is built for a local
+    /// provider so it hits the user's server instead of the default port.
+    #[must_use]
+    pub fn with_local_base_urls(mut self, urls: std::collections::HashMap<String, String>) -> Self {
+        self.local_base_urls = urls.clone();
+        #[cfg(feature = "embed")]
+        if let Some(cosh_tools) = self.cosh_tools.take() {
+            self.cosh_tools = Some(cosh_tools.with_local_base_urls(urls));
+        }
         self
     }
 
@@ -2244,6 +2262,11 @@ impl Harness {
                                 // otherwise silently revert to Native (the
                                 // inline path would stop parsing text).
                                 .with_tool_call_mode(self.connector.tool_call_mode());
+                            // Point a local fallback provider at the user's
+                            // configured server URL, if one was saved.
+                            if let Some(url) = self.local_base_urls.get(&provider) {
+                                c = c.with_base_url(url.clone());
+                            }
                             // Re-apply the reasoning effort the user chose:
                             // the fallback connector is built from scratch and
                             // would otherwise silently drop it (the classic
@@ -2527,39 +2550,39 @@ impl Harness {
                         .as_ref()
                         .map(|r| r.run(tool_name_str, &tool_input_str));
 
-                    if let Some(ref hr) = hook_result {
-                        if hr.decision == super::hooks::HookDecision::Deny || hr.halt {
-                            let reason = if hr.halt {
-                                format!("Turn halted by hook: {}", hr.reason)
-                            } else {
-                                format!("Tool call blocked by hook: {}", hr.reason)
-                            };
-                            log::debug!(
-                                "run_agent_loop HOOK_DENY tool={tool_name_str} halt={} reason={}",
-                                hr.halt,
-                                hr.reason,
-                            );
-                            self.tool_issuer.pop_front();
-                            self.tool_failure_count += 1;
-                            self.correction_memory.push(&reason);
-                            let _ = tx.send(HarnessEvent::ToolError { error: reason });
-                            // Halt stops the entire turn
-                            if hr.halt {
-                                let msg = "Turn halted by hook".to_string();
-                                let _ = tx.send(HarnessEvent::Error(msg));
-                                terminal_sent = true;
-                                break;
-                            }
-                            if self.tool_failure_count >= MAX_TOOL_RETRIES {
-                                let msg = format!(
-                                    "{MAX_TOOL_RETRIES} consecutive tool call failures. Agent loop interrupted."
-                                );
-                                let _ = tx.send(HarnessEvent::Error(msg));
-                                terminal_sent = true;
-                                break;
-                            }
-                            continue;
+                    if let Some(ref hr) = hook_result
+                        && (hr.decision == super::hooks::HookDecision::Deny || hr.halt)
+                    {
+                        let reason = if hr.halt {
+                            format!("Turn halted by hook: {}", hr.reason)
+                        } else {
+                            format!("Tool call blocked by hook: {}", hr.reason)
+                        };
+                        log::debug!(
+                            "run_agent_loop HOOK_DENY tool={tool_name_str} halt={} reason={}",
+                            hr.halt,
+                            hr.reason,
+                        );
+                        self.tool_issuer.pop_front();
+                        self.tool_failure_count += 1;
+                        self.correction_memory.push(&reason);
+                        let _ = tx.send(HarnessEvent::ToolError { error: reason });
+                        // Halt stops the entire turn
+                        if hr.halt {
+                            let msg = "Turn halted by hook".to_string();
+                            let _ = tx.send(HarnessEvent::Error(msg));
+                            terminal_sent = true;
+                            break;
                         }
+                        if self.tool_failure_count >= MAX_TOOL_RETRIES {
+                            let msg = format!(
+                                "{MAX_TOOL_RETRIES} consecutive tool call failures. Agent loop interrupted."
+                            );
+                            let _ = tx.send(HarnessEvent::Error(msg));
+                            terminal_sent = true;
+                            break;
+                        }
+                        continue;
                     }
 
                     // Permission check
@@ -3423,6 +3446,7 @@ impl Harness {
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
+            local_base_urls: std::collections::HashMap::new(),
             last_context_window: None,
             discovered_window: None,
             last_overflow_toast: None,

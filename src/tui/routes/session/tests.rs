@@ -1099,17 +1099,17 @@ fn test_completed_bash_click_expands_while_new_content_streams() {
     // Grow the streaming tail across frames, exactly like the agent loop
     // appending content while the user reads the old bash box.
     for _ in 0..3 {
-        if let Some(session) = state.current_session_mut() {
-            if let Some(last) = session.messages.last_mut() {
-                if let Some(Part::Text(t)) = last.parts.last_mut() {
-                    t.text
-                        .push_str("more streaming output continues here to grow the tail\n");
-                } else {
-                    last.parts.push(Part::Text(TextPart {
-                        text: "more streaming output continues here to grow the tail\n".into(),
-                        synthetic: false,
-                    }));
-                }
+        if let Some(session) = state.current_session_mut()
+            && let Some(last) = session.messages.last_mut()
+        {
+            if let Some(Part::Text(t)) = last.parts.last_mut() {
+                t.text
+                    .push_str("more streaming output continues here to grow the tail\n");
+            } else {
+                last.parts.push(Part::Text(TextPart {
+                    text: "more streaming output continues here to grow the tail\n".into(),
+                    synthetic: false,
+                }));
             }
         }
         view.render(&mut buf, area, &state, &theme, &config, 0.016);
@@ -3081,12 +3081,12 @@ fn prune_render_cache_evicts_only_outside_guard_in_recency_order() {
     // Reference: the pre-prefix_y walk computes the outside-guard set...
     let mut outside: Vec<usize> = Vec::new();
     let mut wy = 0i32;
-    for idx in 0..n {
+    for (idx, h) in heights.iter().copied().enumerate().take(n) {
         if idx > 0 {
             wy += 1;
         }
         let msg_top = wy;
-        wy += heights[idx];
+        wy += h;
         let msg_bottom = wy;
         if (msg_bottom <= guard_top || msg_top >= guard_bottom)
             && view.msg_cache_cells[idx].is_some()
@@ -3221,8 +3221,8 @@ fn prune_render_cache_handles_overshoot_edges() {
     // interior survives.
     view.msg_cache_bytes = super::RENDER_CACHE_LOW_WATER + 4 * candidate_count * per_entry;
     view.prune_render_cache(vp_top, vp_bottom);
-    for idx in 0..n {
-        if is_candidate[idx] {
+    for (idx, &candidate) in is_candidate.iter().enumerate().take(n) {
+        if candidate {
             assert!(
                 view.msg_cache_cells[idx].is_none(),
                 "msg {idx} (candidate) survived a full eviction"
@@ -3304,15 +3304,15 @@ fn prune_render_cache_breaks_stamp_ties_without_violating_invariants() {
     // Only outside-guard candidates may be evicted; the guard interior is
     // sacred regardless of how ties were broken.
     let mut evicted = 0usize;
-    for idx in 0..n {
+    for (idx, &candidate) in is_candidate.iter().enumerate().take(n) {
         if view.msg_cache_cells[idx].is_none() {
             evicted += 1;
-            assert!(is_candidate[idx], "msg {idx} evicted but inside the guard");
+            assert!(candidate, "msg {idx} evicted but inside the guard");
         }
     }
     assert!(evicted > 0, "overshoot > 0 must evict at least one entry");
-    for idx in 0..n {
-        if !is_candidate[idx] {
+    for (idx, &candidate) in is_candidate.iter().enumerate().take(n) {
+        if !candidate {
             assert!(
                 view.msg_cache_cells[idx].is_some(),
                 "msg {idx} inside the guard must survive"

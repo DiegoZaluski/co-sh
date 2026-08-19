@@ -16,22 +16,13 @@ use serde::{Deserialize, Serialize};
 /// Root object persisted as `~/.config/cosh/setup.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Setup {
     pub appearance: Appearance,
     pub tools: Tools,
     pub routing: Routing,
     pub hooks: Hooks,
-}
-
-impl Default for Setup {
-    fn default() -> Self {
-        Self {
-            appearance: Appearance::default(),
-            tools: Tools::default(),
-            routing: Routing::default(),
-            hooks: Hooks::default(),
-        }
-    }
+    pub providers: Providers,
 }
 
 // Categories
@@ -103,6 +94,24 @@ pub struct FallbackEntry {
     pub model: String,
 }
 
+// Providers
+
+/// Local model server endpoints configured through the ADD Provider screen.
+/// Stored per provider name; used to override the registry's default
+/// `localhost` port when building connectors.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Providers {
+    /// Map of local provider name → endpoint configuration.
+    pub local: std::collections::HashMap<String, LocalEndpoint>,
+}
+
+/// A single local provider endpoint (`http://host:port`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalEndpoint {
+    pub base_url: String,
+}
+
 // Hooks
 
 /// A single hook configuration entry (stored in setup.json).
@@ -124,18 +133,11 @@ pub struct HookEntry {
 /// PreToolUse hooks configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Hooks {
     /// Hook configs keyed by event name (e.g. "PreToolUse").
     #[serde(flatten)]
     pub events: std::collections::HashMap<String, Vec<HookEntry>>,
-}
-
-impl Default for Hooks {
-    fn default() -> Self {
-        Self {
-            events: std::collections::HashMap::new(),
-        }
-    }
 }
 
 // Persistence
@@ -173,6 +175,34 @@ impl Setup {
             std::fs::write(&path, json).ok();
         }
     }
+
+    /// The configured base URL for a local provider, if the user saved one
+    /// through the ADD Provider screen.
+    #[must_use]
+    pub fn local_base_url(&self, provider: &str) -> Option<&str> {
+        self.providers
+            .local
+            .get(provider)
+            .map(|endpoint| endpoint.base_url.as_str())
+    }
+
+    /// Save (or replace) the base URL for a local provider and persist.
+    pub fn set_local_base_url(&mut self, provider: &str, base_url: &str) {
+        self.providers.local.insert(
+            provider.to_string(),
+            LocalEndpoint {
+                base_url: base_url.to_string(),
+            },
+        );
+        self.save();
+    }
+
+    /// Forget a local provider's configured base URL and persist.
+    pub fn remove_local_base_url(&mut self, provider: &str) {
+        if self.providers.local.remove(provider).is_some() {
+            self.save();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -184,8 +214,9 @@ mod tests {
         let setup = Setup::default();
         let json = serde_json::to_string_pretty(&setup).unwrap();
         let parsed: Setup = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.appearance.bell_enabled, true);
+        assert!(parsed.appearance.bell_enabled);
         assert_eq!(parsed.tools.tool_call_mode, "native");
+        assert!(parsed.providers.local.is_empty());
     }
 
     #[test]
@@ -196,6 +227,12 @@ mod tests {
         let mut setup = Setup::default();
         setup.appearance.theme = "dracula".to_string();
         setup.tools.disabled = vec!["bash".to_string()];
+        setup.providers.local.insert(
+            "llamacpp".to_string(),
+            LocalEndpoint {
+                base_url: "http://127.0.0.1:9999".to_string(),
+            },
+        );
 
         let json = serde_json::to_string_pretty(&setup).unwrap();
         std::fs::write(&path, &json).unwrap();
@@ -203,5 +240,9 @@ mod tests {
         let loaded: Setup = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.appearance.theme, "dracula");
         assert_eq!(loaded.tools.disabled, vec!["bash".to_string()]);
+        assert_eq!(
+            loaded.local_base_url("llamacpp"),
+            Some("http://127.0.0.1:9999")
+        );
     }
 }

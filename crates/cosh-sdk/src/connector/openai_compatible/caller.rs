@@ -5,7 +5,7 @@ use super::super::common::{
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 use super::super::params::{Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
-use super::super::provider::{ProviderConfig, get_api_key};
+use super::super::provider::{ProviderConfig, get_api_key, is_local_provider};
 use crate::extract_action::NativeToolCall;
 
 use async_stream::stream;
@@ -545,6 +545,22 @@ fn build_chat_request(
     }
 }
 
+/// Resolve the API key for a request, if any.
+///
+/// Local providers are configured by URL and never require a key (most
+/// servers ignore the `Authorization` header entirely); cloud providers fall
+/// back to the OS keyring / environment and must have a key.
+fn optional_api_key(
+    config: &ProviderConfig,
+    params: &Parameters,
+    service: Option<&str>,
+) -> Option<String> {
+    params
+        .api_key
+        .clone()
+        .or_else(|| get_api_key(config.name, service))
+}
+
 /// Send a non-streaming chat completion request.
 ///
 /// Resolves the API key and model, builds the request body, and parses the
@@ -556,11 +572,10 @@ pub async fn chat(
     system_prompt: Option<&str>,
     service: Option<&str>,
 ) -> Result<ChatOutput, ConnectorError> {
-    let api_key = params
-        .api_key
-        .clone()
-        .or_else(|| get_api_key(config.name, service))
-        .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
+    let api_key = optional_api_key(config, params, service);
+    if !is_local_provider(config.name) && api_key.is_none() {
+        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
+    }
     let model = params
         .model
         .clone()
@@ -571,9 +586,12 @@ pub async fn chat(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/chat/completions");
 
-    let auth = format!("Bearer {api_key}");
-    let response_text =
-        send_request(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
+    let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
+    let mut headers: Vec<(&str, &str)> = Vec::new();
+    if let Some(a) = &auth {
+        headers.push(("Authorization", a.as_str()));
+    }
+    let response_text = send_request(config, &url, &request, &headers).await?;
     let chat_response: ChatResponse = match serde_json::from_str(&response_text) {
         Ok(r) => r,
         Err(e) => {
@@ -614,11 +632,10 @@ pub async fn chat_stream(
     system_prompt: Option<&str>,
     service: Option<&str>,
 ) -> Result<ChatStream, ConnectorError> {
-    let api_key = params
-        .api_key
-        .clone()
-        .or_else(|| get_api_key(config.name, service))
-        .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
+    let api_key = optional_api_key(config, params, service);
+    if !is_local_provider(config.name) && api_key.is_none() {
+        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
+    }
     let model = params
         .model
         .clone()
@@ -629,17 +646,19 @@ pub async fn chat_stream(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/chat/completions");
 
-    let auth = format!("Bearer {api_key}");
+    let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
     log::debug!("chat_stream: sending request to {url}");
     let stream = if params.retry_enabled {
         let json_body = serde_json::to_string(&request)?;
-        let request_builder = apply_provider_headers(
+        let mut request_builder = apply_provider_headers(
             shared_client()
                 .post(&url)
                 .header("Content-Type", "application/json"),
             config,
-        )
-        .header("Authorization", auth);
+        );
+        if let Some(a) = &auth {
+            request_builder = request_builder.header("Authorization", a.as_str());
+        }
         let response = send_with_retry(
             &request_builder,
             json_body.clone(),
@@ -654,9 +673,11 @@ pub async fn chat_stream(
             process_sse_response,
         )
     } else {
-        let response =
-            send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())])
-                .await?;
+        let mut headers: Vec<(&str, &str)> = Vec::new();
+        if let Some(a) = &auth {
+            headers.push(("Authorization", a.as_str()));
+        }
+        let response = send_request_stream(config, &url, &request, &headers).await?;
         process_sse_response(response)
     };
     Ok(ChatStream::new(stream))
@@ -676,11 +697,10 @@ pub async fn chat_stream_with_messages(
     messages: &[ApiChatMessage],
     service: Option<&str>,
 ) -> Result<ChatStream, ConnectorError> {
-    let api_key = params
-        .api_key
-        .clone()
-        .or_else(|| get_api_key(config.name, service))
-        .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
+    let api_key = optional_api_key(config, params, service);
+    if !is_local_provider(config.name) && api_key.is_none() {
+        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
+    }
     let model = params
         .model
         .clone()
@@ -695,17 +715,19 @@ pub async fn chat_stream_with_messages(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/chat/completions");
 
-    let auth = format!("Bearer {api_key}");
+    let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
     log::debug!("chat_stream_with_messages: sending request to {url}");
     let stream = if params.retry_enabled {
         let json_body = serde_json::to_string(&request)?;
-        let request_builder = apply_provider_headers(
+        let mut request_builder = apply_provider_headers(
             shared_client()
                 .post(&url)
                 .header("Content-Type", "application/json"),
             config,
-        )
-        .header("Authorization", auth);
+        );
+        if let Some(a) = &auth {
+            request_builder = request_builder.header("Authorization", a.as_str());
+        }
         let response = send_with_retry(
             &request_builder,
             json_body.clone(),
@@ -720,9 +742,11 @@ pub async fn chat_stream_with_messages(
             process_sse_response,
         )
     } else {
-        let response =
-            send_request_stream(config, &url, &request, &[("Authorization", auth.as_str())])
-                .await?;
+        let mut headers: Vec<(&str, &str)> = Vec::new();
+        if let Some(a) = &auth {
+            headers.push(("Authorization", a.as_str()));
+        }
+        let response = send_request_stream(config, &url, &request, &headers).await?;
         process_sse_response(response)
     };
     Ok(ChatStream::new(stream))
@@ -738,11 +762,10 @@ pub async fn embed(
     input: &str,
     service: Option<&str>,
 ) -> Result<Vec<f32>, ConnectorError> {
-    let api_key = params
-        .api_key
-        .clone()
-        .or_else(|| get_api_key(config.name, service))
-        .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
+    let api_key = optional_api_key(config, params, service);
+    if !is_local_provider(config.name) && api_key.is_none() {
+        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
+    }
     let model = params
         .model
         .clone()
@@ -755,9 +778,12 @@ pub async fn embed(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/embeddings");
 
-    let auth = format!("Bearer {api_key}");
-    let response_text =
-        send_request(config, &url, &request, &[("Authorization", auth.as_str())]).await?;
+    let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
+    let mut headers: Vec<(&str, &str)> = Vec::new();
+    if let Some(a) = &auth {
+        headers.push(("Authorization", a.as_str()));
+    }
+    let response_text = send_request(config, &url, &request, &headers).await?;
     let embed_response: EmbeddingResponse = serde_json::from_str(&response_text)?;
     let first_data = embed_response
         .data
@@ -785,17 +811,20 @@ pub async fn list_models(
     params: &Parameters,
     service: Option<&str>,
 ) -> Result<LsOutput, ConnectorError> {
-    let api_key = params
-        .api_key
-        .clone()
-        .or_else(|| get_api_key(config.name, service))
-        .ok_or_else(|| ConnectorError::MissingApiKey(config.name.to_string()))?;
+    let api_key = optional_api_key(config, params, service);
+    if !is_local_provider(config.name) && api_key.is_none() {
+        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
+    }
 
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/models");
 
-    let auth = format!("Bearer {api_key}");
-    let response_text = send_get_request(config, &url, &[("Authorization", auth.as_str())]).await?;
+    let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
+    let mut headers: Vec<(&str, &str)> = Vec::new();
+    if let Some(a) = &auth {
+        headers.push(("Authorization", a.as_str()));
+    }
+    let response_text = send_get_request(config, &url, &headers).await?;
 
     let list: ListModelsResponse = serde_json::from_str(&response_text)?;
     let models: Vec<ModelInfo> = list

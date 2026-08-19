@@ -78,6 +78,49 @@ async fn openai_network_error() {
     );
 }
 
+//  Local providers need no API key
+
+#[tokio::test]
+async fn local_provider_without_api_key() {
+    let raw_body = r#"{"object":"list","data":[{"id":"Qwen2.5-7B-Instruct-GGUF:Q4_K_M","object":"model"},{"id":"Qwen3-8B-GGUF:Q4_K_M","object":"model"}]}"#;
+    let (port, _body, _raw, handle) = mock_server(raw_body, 200);
+    // No `.with_api_key` — local providers must not require one.
+    let result = Connector::new("llamacpp")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}/v1"))
+        .with_service_keyring("cosh-tests-no-key")
+        .list_models()
+        .await;
+    handle.join().unwrap();
+    let out = result.unwrap();
+
+    let ids: Vec<&str> = out.models().iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["Qwen2.5-7B-Instruct-GGUF:Q4_K_M", "Qwen3-8B-GGUF:Q4_K_M"]
+    );
+}
+
+#[tokio::test]
+async fn local_provider_still_honors_explicit_key() {
+    let raw_body = r#"{"object":"list","data":[{"id":"model-a","object":"model"}]}"#;
+    let (port, _body, raw, handle) = mock_server(raw_body, 200);
+    let result = Connector::new("llamacpp")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}/v1"))
+        .with_api_key("sk-local")
+        .list_models()
+        .await;
+    handle.join().unwrap();
+    assert_eq!(result.unwrap().raw(), raw_body);
+    let raw_req = raw.lock().unwrap();
+    let req = raw_req.as_deref().unwrap_or_default().to_lowercase();
+    assert!(
+        req.contains("authorization: bearer sk-local"),
+        "explicit key must still be sent as a header, got: {req}"
+    );
+}
+
 //  Gemini
 
 #[tokio::test]

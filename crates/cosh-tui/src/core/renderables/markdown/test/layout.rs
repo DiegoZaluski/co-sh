@@ -120,9 +120,9 @@ fn test_wide_table_needs_multiple_rows() {
 }
 
 /// Fenced code block with a language tag and 3 code lines: the label row (1)
-/// + 3 code rows + bottom padding (1) + blank separator (1) + TagEnd blank
-/// (1) = 7 rows. Pinned EXACT so a regression in the accounting (e.g. the
-/// N+2 vs N+4 mistake) cannot pass inside a loose range.
+/// plus 3 code rows, bottom padding (1), a blank separator (1), and a TagEnd
+/// blank (1) = 7 rows. Pinned EXACT so a regression in the accounting (e.g.
+/// the N+2 vs N+4 mistake) cannot pass inside a loose range.
 #[test]
 fn test_code_block_fenced_height() {
     let text = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```";

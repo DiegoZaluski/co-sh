@@ -29,7 +29,7 @@ use crate::config::{LlmConfig, TuiConfig};
 use crate::fallback;
 use crate::keymap::KeyMap;
 use crate::logo::LOGO_CHAT;
-use crate::routes::add_provider::AddProviderView;
+use crate::routes::add_provider::{AddProviderView, ProviderEntry};
 use crate::routes::home::footer::HomeFooterView;
 use crate::routes::home::{HomeAction, HomeView};
 use crate::routes::router::{FocusTarget, RouterView};
@@ -402,7 +402,6 @@ impl App {
     fn open_model_dialog(&mut self) {
         use cosh::ModelEntry;
         use cosh_sdk::connector::Connector;
-        use cosh_sdk::connector::known_providers_with_env;
 
         let current = self.llm_config.model.clone().unwrap_or_default();
 
@@ -412,19 +411,25 @@ impl App {
 
         // Collect providers and check if their API key is still configured.
         // If a provider has no key (env var or keyring), invalidate its cache
-        // entry so stale models don't appear as available options.
-        let providers_to_check: Vec<&str> = {
-            let mut active = Vec::new();
+        // entry so stale models don't appear as available options. Local
+        // providers qualify when configured in setup.json or when they
+        // respond on their default port (probed below); unqualified ones are
+        // purged too.
+        let providers_to_check: Vec<&'static str> = self.active_providers();
+        {
+            use cosh_sdk::connector::{is_local_provider, known_providers_with_env};
             for (provider, _) in known_providers_with_env() {
-                if cosh_sdk::connector::has_api_key(provider) {
-                    active.push(provider);
-                } else {
+                if !is_local_provider(provider) && !providers_to_check.contains(&provider) {
                     // Provider no longer configured — purge cached models
                     self.model_cache.invalidate(&provider.to_string());
                 }
             }
-            active
-        };
+            for provider in cosh_sdk::connector::known_local_providers() {
+                if !providers_to_check.contains(&provider) {
+                    self.model_cache.invalidate(&provider.to_string());
+                }
+            }
+        }
 
         // Try to populate the dialog from cache first (instant, no network)
         let mut cached_models: Vec<ModelEntry> = Vec::new();
@@ -482,19 +487,23 @@ impl App {
             // Always revalidate in background (stale-while-revalidate)
             let dialog_tx = self.event_tx.clone();
             let dialog_tx_clone = dialog_tx;
+            let base_urls = self.configured_local_base_urls();
 
             self.tokio_handle.spawn(async move {
                 let mut all_models: Vec<ModelEntry> = Vec::new();
 
                 for provider in providers_to_check {
-                    if let Ok(connector) = Connector::new(provider)
-                        && let Ok(output) = connector.list_models().await
-                    {
-                        for model_info in output.models() {
-                            all_models.push(ModelEntry {
-                                provider: provider.to_string(),
-                                model: model_info.id().to_string(),
-                            });
+                    if let Ok(mut connector) = Connector::new(provider) {
+                        if let Some(url) = base_urls.get(provider) {
+                            connector = connector.with_base_url(url.clone());
+                        }
+                        if let Ok(output) = connector.list_models().await {
+                            for model_info in output.models() {
+                                all_models.push(ModelEntry {
+                                    provider: provider.to_string(),
+                                    model: model_info.id().to_string(),
+                                });
+                            }
                         }
                     }
                 }
@@ -723,16 +732,16 @@ impl App {
             )
     }
 
-    fn is_apikey_input_visible(&self) -> bool {
+    fn is_text_input_visible(&self) -> bool {
         self.dialog.visible()
             && matches!(
                 self.dialog.current().map(|d| &d.dialog_type),
-                Some(DialogType::ApiKeyInput { .. })
+                Some(DialogType::ApiKeyInput { .. } | DialogType::LocalUrlInput { .. })
             )
     }
 
-    fn handle_apikey_dialog_key(&mut self, key: KeyCode) -> bool {
-        if !self.is_apikey_input_visible() {
+    fn handle_text_input_dialog_key(&mut self, key: KeyCode) -> bool {
+        if !self.is_text_input_visible() {
             return false;
         }
 
@@ -743,38 +752,9 @@ impl App {
 
         match key {
             KeyCode::Enter => {
-                let should_save = self.dialog.current().is_some_and(|d| {
-                    if let DialogType::ApiKeyInput { input, .. } = &d.dialog_type {
-                        !input.is_empty()
-                    } else {
-                        false
-                    }
-                });
-                if should_save
-                    && let Some(d) = self.dialog.current()
-                    && let DialogType::ApiKeyInput {
-                        provider,
-                        env_var,
-                        input,
-                        ..
-                    } = &d.dialog_type
-                {
-                    if let Err(e) = save_provider_api_key(env_var, input) {
-                        use crate::ui::toast::{ToastOptions, ToastVariant};
-                        self.toast_state.show(ToastOptions {
-                            title: Some("Key not saved".to_string()),
-                            message: format!("Failed to store the API key in the OS keyring: {e}"),
-                            variant: ToastVariant::Error,
-                            duration_ms: 6000,
-                        });
-                    } else {
-                        cosh_sdk::connector::invalidate_api_key(env_var);
-                    }
-                    // Invalidate model cache for this provider so the next
-                    // dialog open fetches fresh models with the new key.
-                    self.model_cache.invalidate(&provider.to_string());
+                if self.save_text_input_dialog() {
+                    self.dialog.pop();
                 }
-                self.dialog.pop();
                 true
             }
             KeyCode::Esc => {
@@ -783,7 +763,8 @@ impl App {
             }
             KeyCode::Left => {
                 if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::ApiKeyInput { cursor_pos, .. } = &mut d.dialog_type
+                    && let DialogType::ApiKeyInput { cursor_pos, .. }
+                    | DialogType::LocalUrlInput { cursor_pos, .. } = &mut d.dialog_type
                     && *cursor_pos > 0
                 {
                     *cursor_pos -= 1;
@@ -794,6 +775,9 @@ impl App {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput {
                         input, cursor_pos, ..
+                    }
+                    | DialogType::LocalUrlInput {
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos < input.len()
                 {
@@ -803,7 +787,8 @@ impl App {
             }
             KeyCode::Home => {
                 if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::ApiKeyInput { cursor_pos, .. } = &mut d.dialog_type
+                    && let DialogType::ApiKeyInput { cursor_pos, .. }
+                    | DialogType::LocalUrlInput { cursor_pos, .. } = &mut d.dialog_type
                 {
                     *cursor_pos = 0;
                 }
@@ -812,6 +797,9 @@ impl App {
             KeyCode::End => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::LocalUrlInput {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                 {
@@ -822,6 +810,9 @@ impl App {
             KeyCode::Delete => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::LocalUrlInput {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos < input.len()
@@ -834,6 +825,9 @@ impl App {
             KeyCode::Backspace => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::LocalUrlInput {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos > 0
@@ -848,12 +842,69 @@ impl App {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput {
                         input, cursor_pos, ..
+                    }
+                    | DialogType::LocalUrlInput {
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
                 {
                     input.insert(*cursor_pos, ch);
                     *cursor_pos += ch.len_utf8();
                 }
                 true
+            }
+            _ => false,
+        }
+    }
+
+    /// Perform the save for the current text input dialog (API key → keyring,
+    /// local URL → setup.json). Returns `true` when the input was accepted.
+    fn save_text_input_dialog(&mut self) -> bool {
+        let Some(d) = self.dialog.current() else {
+            return false;
+        };
+        match &d.dialog_type {
+            DialogType::ApiKeyInput {
+                provider,
+                env_var,
+                input,
+                ..
+            } if !input.is_empty() => {
+                if let Err(e) = save_provider_api_key(env_var, input) {
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Key not saved".to_string()),
+                        message: format!("Failed to store the API key in the OS keyring: {e}"),
+                        variant: ToastVariant::Error,
+                        duration_ms: 6000,
+                    });
+                } else {
+                    cosh_sdk::connector::invalidate_api_key(env_var);
+                }
+                // Invalidate model cache for this provider so the next dialog
+                // open fetches fresh models with the new key.
+                self.model_cache.invalidate(provider);
+                true
+            }
+            DialogType::LocalUrlInput {
+                provider, input, ..
+            } if !input.is_empty() => {
+                let trimmed = input.trim();
+                if !is_valid_local_url(trimmed) {
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    self.toast_state.show(ToastOptions {
+                        title: Some("URL not saved".to_string()),
+                        message: format!(
+                            "Invalid server URL: \"{trimmed}\". Expected http://host:port"
+                        ),
+                        variant: ToastVariant::Error,
+                        duration_ms: 6000,
+                    });
+                    false
+                } else {
+                    self.setup.set_local_base_url(provider, trimmed);
+                    self.model_cache.invalidate(provider);
+                    true
+                }
             }
             _ => false,
         }
@@ -871,6 +922,94 @@ impl App {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// The configured base URL for a provider, if the user saved one for a
+    /// local provider in setup.json. Normalized so OpenAI-compatible servers
+    /// get the `/v1` suffix their API exposes.
+    #[must_use]
+    fn base_url_for(&self, provider: &str) -> Option<String> {
+        self.setup
+            .local_base_url(provider)
+            .map(|url| cosh_sdk::connector::normalize_local_base_url(provider, url))
+    }
+
+    /// Map of provider → base URL for every local provider the user configured
+    /// in setup.json. Used to build fallback connectors inside the harness.
+    #[must_use]
+    fn configured_local_base_urls(&self) -> std::collections::HashMap<String, String> {
+        self.setup
+            .providers
+            .local
+            .iter()
+            .map(|(provider, endpoint)| {
+                (
+                    provider.clone(),
+                    cosh_sdk::connector::normalize_local_base_url(provider, &endpoint.base_url),
+                )
+            })
+            .collect()
+    }
+
+    /// Providers whose models are eligible for the model picker.
+    ///
+    /// Cloud providers qualify when an API key is available. Local providers
+    /// qualify when configured in setup.json OR when they respond on their
+    /// default port — the model list probes every local provider and surfaces
+    /// whatever answers, so a llama.cpp / ollama / vLLM server just needs to be
+    /// running. Same-port servers (llamacpp/llamafile/localai all default to
+    /// 8080, text-generation-webui/tabbyapi to 5000) are probed once: the
+    /// first provider (registry order) represents the shared endpoint.
+    #[must_use]
+    fn active_providers(&self) -> Vec<&'static str> {
+        use cosh_sdk::connector::{
+            get_provider, is_local_provider, known_local_providers, known_providers_with_env,
+        };
+
+        let mut active: Vec<&'static str> = Vec::new();
+        for (provider, _) in known_providers_with_env() {
+            if !is_local_provider(provider) && cosh_sdk::connector::has_api_key(provider) {
+                active.push(provider);
+            }
+        }
+
+        // Local providers: configured URL wins; otherwise the registry's
+        // default endpoint. Probe each distinct endpoint only once.
+        let mut endpoints: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for provider in known_local_providers() {
+            let endpoint = if let Some(cfg) = self.setup.local_base_url(provider) {
+                cosh_sdk::connector::normalize_local_base_url(provider, cfg)
+            } else {
+                get_provider(provider).map_or_else(String::new, |cfg| cfg.base_url.to_string())
+            };
+            if endpoints.insert(endpoint) {
+                active.push(provider);
+            }
+        }
+        active
+    }
+
+    /// Open the right credential dialog for a provider: local providers ask
+    /// for a server URL (saved to setup.json); cloud providers ask for an API
+    /// key (stored in the OS keyring).
+    fn open_provider_dialog(&mut self, entry: &ProviderEntry) {
+        if entry.local {
+            self.dialog.show(DialogType::LocalUrlInput {
+                provider: entry.name.to_string(),
+                input: self
+                    .setup
+                    .local_base_url(entry.name)
+                    .map_or_else(String::new, str::to_string),
+                cursor_pos: 0,
+            });
+        } else {
+            self.dialog.show(DialogType::ApiKeyInput {
+                provider: entry.name.to_string(),
+                env_var: entry.hint.clone(),
+                input: String::new(),
+                cursor_pos: 0,
+            });
         }
     }
 
@@ -1240,10 +1379,8 @@ impl App {
 
     fn collect_cached_models(&self) -> Vec<cosh::ModelEntry> {
         let mut models = Vec::new();
-        for (provider, _) in cosh_sdk::connector::known_providers_with_env() {
-            if cosh_sdk::connector::has_api_key(provider)
-                && let Some(cached) = self.model_cache.get(&provider.to_string())
-            {
+        for provider in self.active_providers() {
+            if let Some(cached) = self.model_cache.get(&provider.to_string()) {
                 models.extend(cached.iter().cloned());
             }
         }
@@ -1517,11 +1654,17 @@ impl App {
                         let table_name = db.name.clone();
                         let embedder_config = db.embedder.clone();
                         let embed_content = content.clone();
+                        let base_urls = self.configured_local_base_urls();
                         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
                         let handle = self.tokio_handle.spawn(async move {
-                            let result =
-                                embed_document(&uri, &table_name, &embedder_config, &embed_content)
-                                    .await;
+                            let result = embed_document(
+                                &uri,
+                                &table_name,
+                                &embedder_config,
+                                &embed_content,
+                                &base_urls,
+                            )
+                            .await;
                             let _ = tx.send(result);
                         });
                         self.rag_embed_handle = Some(handle);
@@ -2216,7 +2359,8 @@ impl App {
                         session_area.width,
                         session_area.height.saturating_sub(1),
                     );
-                    self.add_provider_view.render(buf, tools_area, &self.theme);
+                    self.add_provider_view
+                        .render(buf, tools_area, &self.theme, &self.setup);
                 }
                 AppMode::Router => {
                     self.prompt_view.blur();
@@ -2403,6 +2547,8 @@ impl App {
         let model = self.llm_config.model.clone();
         let reasoning = self.llm_config.reasoning.clone();
         let tool_call_mode = self.llm_config.tool_call_mode;
+        let base_url = self.base_url_for(&provider);
+        let local_base_urls = self.configured_local_base_urls();
         let fallbacks = self.router_view.fallbacks.clone();
         // Auto-rotate: move the first working fallback to the front so the
         // next message tries the provider that actually worked before wasting
@@ -2537,6 +2683,11 @@ impl App {
                                 Ok(c) => {
                                     let mut c =
                                         c.with_model(&fb.model).with_tool_call_mode(tool_call_mode);
+                                    // Honor a configured local server URL for
+                                    // this fallback provider, if any.
+                                    if let Some(url) = local_base_urls.get(&fb.provider) {
+                                        c = c.with_base_url(url.clone());
+                                    }
                                     // The user chose a reasoning effort for
                                     // auto mode — apply it, mapped onto the
                                     // closest level THIS model accepts (a
@@ -2584,6 +2735,12 @@ impl App {
                                 } else {
                                     c
                                 };
+                                // Honor a configured local server URL.
+                                let with_model = if let Some(ref url) = base_url {
+                                    with_model.with_base_url(url.clone())
+                                } else {
+                                    with_model
+                                };
                                 // Apply the user's tool-call mode (native /
                                 // inline) — the two delivery paths are
                                 // mutually exclusive at the request level.
@@ -2620,7 +2777,8 @@ impl App {
                     let mut harness = Harness::new(connector, &cwd, disabled_tools)
                         .with_mode(mode)
                         .with_history(&history)
-                        .with_fallbacks(remaining);
+                        .with_fallbacks(remaining)
+                        .with_local_base_urls(local_base_urls);
 
                     // Restore compressed context state from .ctx companion file
                     if let Some(ref ctx_bytes) = ctx_bytes {
@@ -2976,9 +3134,9 @@ impl App {
                         return Ok(false);
                     }
 
-                    // Check ApiKeyInput dialog
-                    if self.is_apikey_input_visible() {
-                        let handled = self.handle_apikey_dialog_key(key.code);
+                    // Check ApiKey/LocalUrl input dialog
+                    if self.is_text_input_visible() {
+                        let handled = self.handle_text_input_dialog_key(key.code);
                         if handled {
                             return Ok(false);
                         }
@@ -3005,12 +3163,11 @@ impl App {
                             }
                             KeyCode::Char('k') => {
                                 // Only handle 'k' for scrolling if not Ctrl+K (which toggles the dialog)
-                                if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    if let Some(d) = self.dialog.current_mut()
-                                        && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
-                                    {
-                                        *scroll = scroll.saturating_sub(1);
-                                    }
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && let Some(d) = self.dialog.current_mut()
+                                    && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
+                                {
+                                    *scroll = scroll.saturating_sub(1);
                                 }
                                 // Let Ctrl+K pass through to the action handler
                                 if !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -3337,15 +3494,8 @@ impl App {
                                 return Ok(false);
                             }
                             KeyCode::Enter => {
-                                if let Some((provider, env_var)) =
-                                    self.add_provider_view.selected_provider()
-                                {
-                                    self.dialog.show(DialogType::ApiKeyInput {
-                                        provider: provider.to_string(),
-                                        env_var: env_var.to_string(),
-                                        input: String::new(),
-                                        cursor_pos: 0,
-                                    });
+                                if let Some(entry) = self.add_provider_view.selected_provider() {
+                                    self.open_provider_dialog(&entry);
                                 }
                                 return Ok(false);
                             }
@@ -3938,10 +4088,13 @@ impl App {
             }
             Event::Resize(_w, _h) => {}
             Event::Paste(text) => {
-                // If ApiKeyInput dialog is visible, paste into the dialog input
-                if self.is_apikey_input_visible() {
+                // If a text input dialog is visible, paste into the dialog input
+                if self.is_text_input_visible() {
                     if let Some(d) = self.dialog.current_mut()
                         && let DialogType::ApiKeyInput {
+                            input, cursor_pos, ..
+                        }
+                        | DialogType::LocalUrlInput {
                             input, cursor_pos, ..
                         } = &mut d.dialog_type
                     {
@@ -4534,6 +4687,7 @@ impl App {
                             if let Some(user_prompt) = first_user {
                                 let provider = self.llm_config.provider.clone();
                                 let model = self.llm_config.model.clone();
+                                let base_url = self.base_url_for(&provider);
                                 let session_id = id.clone();
                                 let session_store = self.session_store.clone();
                                 let event_tx = self.event_tx.clone();
@@ -4545,6 +4699,9 @@ impl App {
                                     };
                                     if let Some(ref m) = model {
                                         connector = connector.with_model(m);
+                                    }
+                                    if let Some(ref url) = base_url {
+                                        connector = connector.with_base_url(url.clone());
                                     }
                                     // Disable tools and retry for the title call —
                                     // it is a simple chat completion.
@@ -5343,28 +5500,14 @@ impl App {
                                 self.handle_tool_call_dialog_key(KeyCode::Enter);
                                 return Ok(true);
                             }
-                            DialogType::ApiKeyInput {
-                                provider,
-                                env_var,
-                                input,
-                                ..
-                            } if !input.is_empty() => {
-                                if let Err(e) = save_provider_api_key(env_var, input) {
-                                    use crate::ui::toast::{ToastOptions, ToastVariant};
-                                    self.toast_state.show(ToastOptions {
-                                        title: Some("Key not saved".to_string()),
-                                        message: format!(
-                                            "Failed to store the API key in the OS keyring: {e}"
-                                        ),
-                                        variant: ToastVariant::Error,
-                                        duration_ms: 6000,
-                                    });
-                                } else {
-                                    cosh_sdk::connector::invalidate_api_key(env_var);
+                            DialogType::ApiKeyInput { .. } | DialogType::LocalUrlInput { .. } => {
+                                // Keep the dialog open when the input was
+                                // rejected (e.g. invalid local URL) — matches
+                                // the Enter-key behavior.
+                                if self.save_text_input_dialog() {
+                                    self.dialog.pop();
                                 }
-                                // Invalidate model cache for this provider so the next
-                                // dialog open fetches fresh models with the new key.
-                                self.model_cache.invalidate(&provider.to_string());
+                                return Ok(true);
                             }
                             _ => {}
                         }
@@ -5773,13 +5916,8 @@ impl App {
             );
             if let Some(clicked_idx) = self.add_provider_view.handle_mouse(&mouse, tools_area) {
                 self.add_provider_view.selection.selected_index = clicked_idx;
-                if let Some((provider, env_var)) = self.add_provider_view.selected_provider() {
-                    self.dialog.show(DialogType::ApiKeyInput {
-                        provider: provider.to_string(),
-                        env_var: env_var.to_string(),
-                        input: String::new(),
-                        cursor_pos: 0,
-                    });
+                if let Some(entry) = self.add_provider_view.selected_provider() {
+                    self.open_provider_dialog(&entry);
                 }
                 return Ok(true);
             }
@@ -5948,6 +6086,38 @@ fn save_provider_api_key(env_var: &str, api_key: &str) -> Result<(), keyring::Er
     Ok(())
 }
 
+/// Whether a string looks like a usable local server URL: starts with
+/// `http://` or `https://` and has a non-empty host.
+#[must_use]
+fn is_valid_local_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    let rest = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"));
+    rest.is_some_and(|host| !host.is_empty())
+}
+
+#[cfg(test)]
+mod local_url_tests {
+    use super::is_valid_local_url;
+
+    #[test]
+    fn accepts_http_and_https_with_host() {
+        assert!(is_valid_local_url("http://127.0.0.1:8080"));
+        assert!(is_valid_local_url("https://localhost:11434"));
+        assert!(is_valid_local_url("  http://host:1  "));
+    }
+
+    #[test]
+    fn rejects_missing_scheme_or_empty_host() {
+        assert!(!is_valid_local_url("127.0.0.1:8080"));
+        assert!(!is_valid_local_url("http://"));
+        assert!(!is_valid_local_url("https://"));
+        assert!(!is_valid_local_url(""));
+        assert!(!is_valid_local_url("ftp://host"));
+    }
+}
+
 // Embedding helpers (feature-gated)
 
 #[cfg(feature = "embed")]
@@ -5956,6 +6126,7 @@ async fn embed_document(
     table_name: &str,
     embedder_config: &crate::routes::rag::models::EmbedderConfig,
     content: &str,
+    base_urls: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     use cosh_recall::embed::Rag;
 
@@ -5965,7 +6136,7 @@ async fn embed_document(
             create_local_embedder(*model)?
         }
         crate::routes::rag::models::EmbedderConfig::Cloud(c) => {
-            create_cloud_embedder(&c.provider, &c.model, dim)?
+            create_cloud_embedder(&c.provider, &c.model, dim, base_urls)?
         }
     };
 
@@ -5994,12 +6165,16 @@ fn create_cloud_embedder(
     provider: &str,
     model: &str,
     dim: usize,
+    base_urls: &std::collections::HashMap<String, String>,
 ) -> Result<cosh_recall::embed::Embedder, String> {
     use cosh_recall::embed::Embedder;
     use cosh_sdk::connector::Connector;
-    let connector = Connector::new(provider)
+    let mut connector = Connector::new(provider)
         .map_err(|e| format!("Failed to create connector: {e}"))?
         .with_model(model);
+    if let Some(url) = base_urls.get(provider) {
+        connector = connector.with_base_url(url.clone());
+    }
     Ok(Embedder::new_cloud(connector, dim))
 }
 
@@ -6008,6 +6183,7 @@ fn create_cloud_embedder(
     _provider: &str,
     _model: &str,
     _dim: usize,
+    _base_urls: &std::collections::HashMap<String, String>,
 ) -> Result<cosh_recall::embed::Embedder, String> {
     Err("Cloud embedding requires the 'cloud' feature (enable with --features cloud)".into())
 }

@@ -122,3 +122,9 @@ impl Server {
         todo!()
     }
 }
+
+impl Default for Server {
+    fn default() -> Self {
+        Self::new()
+    }
+}

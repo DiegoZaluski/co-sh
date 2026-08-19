@@ -1,7 +1,8 @@
 # `connector::provider` — registry and API keys
 
 The provider registry: which backends exist, their base URLs, default models,
-and how API keys are resolved and cached.
+and how API keys are resolved and cached. Local model servers are flagged and
+configured by URL instead of API key.
 
 ## The registry
 
@@ -14,6 +15,7 @@ pub struct ProviderConfig {
     pub base_url: &'static str,
     pub default_model: &'static str,
     pub needs_extra_headers: bool,   // e.g. OpenRouter
+    pub local: bool,                 // local model server (URL, not API key)
 }
 ```
 
@@ -22,7 +24,26 @@ pub struct ProviderConfig {
 `huggingface`, `sambanova`, `poe`, `cerebras`, `nvidia`, `anyscale`,
 `vercel`, `cloudflare`, `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`,
 `gemini`, `claude`, `zai`, `charm`. The local model servers (ollama,
-lmstudio, vllm, llamacpp) point at `http://localhost:*`.
+lmstudio, vllm, llamacpp, and the extra ones below) point at
+`http://localhost:*`.
+
+Local providers (configured by URL, never by API key):
+
+| Provider | Default port |
+|---|---|
+| ollama | 11434 |
+| llamacpp | 8080 |
+| lmstudio | 1234 |
+| vllm | 8000 |
+| llamafile | 8080 |
+| koboldcpp | 5001 |
+| text-generation-webui | 5000 |
+| localai | 8080 |
+| jan | 1337 |
+| gpt4all | 4891 |
+| aphrodite | 2242 |
+| sglang | 30000 |
+| tabbyapi | 5000 |
 
 ## Enumerating providers
 
@@ -30,11 +51,34 @@ lmstudio, vllm, llamacpp) point at `http://localhost:*`.
 pub fn known_providers() -> impl Iterator<Item = &'static str>
 pub fn known_providers_with_env() -> impl Iterator<Item = (&'static str, &'static str)>
 pub fn get_provider_env_var(provider: &str) -> Option<&'static str>
+pub fn is_local_provider(provider: &str) -> bool
+pub fn known_local_providers() -> impl Iterator<Item = &'static str>
+pub fn get_provider(name: &str) -> Option<&'static ProviderConfig>
 ```
 
 `known_providers_with_env` pairs each provider with its key env var
 (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …) — handy for UI
-rendering.
+rendering. Note: **local providers are excluded** from `known_providers_with_env`
+— they have no API key, and keeping them out protects `--check-keyring` and
+`detect_provider()` from "detecting" a local server as a configured cloud
+provider.
+
+`is_local_provider` / `known_local_providers` classify the registry for the
+ADD Provider screen: local providers prompt for a server URL instead of an API
+key.
+
+### Normalizing local base URLs
+
+```rust,ignore
+pub fn normalize_local_base_url(provider: &str, url: &str) -> String
+```
+
+Users type `http://127.0.0.1:8080` (no `/v1`). For OpenAI-compatible local
+providers this appends `/v1` internally; URLs that already have a path are
+left untouched, and unknown providers are returned verbatim. The raw URL the
+user typed is stored in setup.json — normalization is applied at request time,
+never persisted, and lives in the TUI layer (not in `with_base_url`), so SDK
+tests can keep mocking exact URLs.
 
 ## API key resolution
 
@@ -99,9 +143,11 @@ Next: [discovery — context windows and reasoning](discovery.md).
 
 ## Summary
 
-- The provider registry contains ~26 providers with `ProviderConfig` entries: name, family (OpenAICompatible/Gemini/Claude), base URL, default model, and extra-headers flag.
-- Providers include cloud services (openai, groq, mistral, together, openrouter, xai, deepseek, perplexity, etc.) and local model servers (ollama, lmstudio, vllm, llamacpp) pointing at localhost.
-- Enumeration: `known_providers()` (iterator), `known_providers_with_env()` (pairs with env vars), and `get_provider_env_var()` (env var name for a provider).
+- The provider registry contains ~26 providers with `ProviderConfig` entries: name, family (OpenAICompatible/Gemini/Claude), base URL, default model, extra-headers flag, and `local` flag.
+- Providers include cloud services (openai, groq, mistral, together, openrouter, xai, deepseek, perplexity, etc.) and local model servers (ollama, lmstudio, vllm, llamacpp, llamafile, koboldcpp, text-generation-webui, localai, jan, gpt4all, aphrodite, sglang, tabbyapi) pointing at localhost.
+- Enumeration: `known_providers()` (iterator), `known_providers_with_env()` (pairs with env vars), and `get_provider_env_var()` (env var name for a provider). Local providers are excluded from `known_providers_with_env` — they have no key and must not be "detected" as configured cloud providers.
+- `is_local_provider` / `known_local_providers` classify the registry; `get_provider` returns the full `ProviderConfig` (default port, family, model).
+- `normalize_local_base_url(provider, url)` appends `/v1` for bare OpenAI-compatible URLs; it is applied at request time in the TUI layer, never persisted.
 - API key resolution: OS keyring (authoritative store under `cosh` service) → environment variable (fallback) → explicit `with_api_key` (highest priority).
 - Keyring lookups are cached per process lifetime (keyed by service + env var) and `Zeroizing`; misses are never cached so externally-added keys appear immediately.
 - Cache invalidation: `invalidate_api_key(env_var)` after storing/updating a key, or `clear_api_key_cache()` to forget everything.

@@ -392,7 +392,7 @@ impl HookRunner {
     fn matching_hooks(&self, tool_name: &str) -> Vec<&CompiledHook> {
         self.hooks
             .iter()
-            .filter(|h| h.matcher.as_ref().map_or(true, |re| re.is_match(tool_name)))
+            .filter(|h| h.matcher.as_ref().is_none_or(|re| re.is_match(tool_name)))
             .collect()
     }
 

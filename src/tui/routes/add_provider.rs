@@ -2,16 +2,56 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use cosh_sdk::connector::{has_api_key, known_providers_with_env};
+use cosh_sdk::connector::{
+    get_provider, get_provider_env_var, has_api_key, is_local_provider, known_providers,
+};
 use cosh_tui::core::types::MouseEvent;
 
 use crate::component::search_bar::SearchBar;
 use crate::theme::Theme;
 use crate::util::list_selection::ListSelection;
+use crate::util::setup::Setup;
 
-fn all_providers() -> Vec<(&'static str, &'static str)> {
-    let mut providers: Vec<(&'static str, &'static str)> = known_providers_with_env().collect();
-    providers.sort_by_key(|(name, _)| *name);
+/// A provider entry shown in the ADD Provider list. Local providers
+/// (ollama, llamacpp, …) are configured with a base URL; cloud providers with
+/// an API key.
+#[derive(Debug, Clone)]
+pub struct ProviderEntry {
+    pub name: &'static str,
+    pub local: bool,
+    /// Cloud: the API key env var name. Local: the default server URL.
+    pub hint: String,
+}
+
+impl ProviderEntry {
+    /// Whether the provider is considered configured.
+    /// Cloud → an API key is available (env or keyring). Local → a base URL
+    /// was saved in setup.json.
+    #[must_use]
+    pub fn is_configured(&self, setup: &Setup) -> bool {
+        if self.local {
+            setup.local_base_url(self.name).is_some()
+        } else {
+            has_api_key(self.name)
+        }
+    }
+}
+
+fn all_providers() -> Vec<ProviderEntry> {
+    let mut providers: Vec<ProviderEntry> = known_providers()
+        .map(|name| {
+            let local = is_local_provider(name);
+            let hint = if local {
+                get_provider(name)
+                    .map(|cfg| cfg.base_url.to_string())
+                    .unwrap_or_default()
+            } else {
+                get_provider_env_var(name).unwrap_or("").to_string()
+            };
+            ProviderEntry { name, local, hint }
+        })
+        .collect();
+    providers.sort_by_key(|p| p.name);
     providers
 }
 
@@ -28,7 +68,7 @@ impl AddProviderView {
         }
     }
 
-    fn filtered_providers(&self) -> Vec<(&'static str, &'static str)> {
+    fn filtered_providers(&self) -> Vec<ProviderEntry> {
         let providers = all_providers();
         if self.search_bar.is_empty() {
             return providers;
@@ -36,8 +76,9 @@ impl AddProviderView {
         let lower = self.search_bar.as_str().to_lowercase();
         providers
             .into_iter()
-            .filter(|(name, env)| {
-                name.to_lowercase().contains(&lower) || env.to_lowercase().contains(&lower)
+            .filter(|entry| {
+                entry.name.to_lowercase().contains(&lower)
+                    || entry.hint.to_lowercase().contains(&lower)
             })
             .collect()
     }
@@ -67,9 +108,9 @@ impl AddProviderView {
         self.selection.select_prev(self.filtered_providers().len());
     }
 
-    pub fn selected_provider(&self) -> Option<(&'static str, &'static str)> {
+    pub fn selected_provider(&self) -> Option<ProviderEntry> {
         let providers = self.filtered_providers();
-        providers.get(self.selection.selected_index).copied()
+        providers.get(self.selection.selected_index).cloned()
     }
 
     fn find_row_for_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
@@ -112,7 +153,7 @@ impl AddProviderView {
         self.find_row_for_mouse(mouse, area)
     }
 
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, setup: &Setup) {
         let providers = self.filtered_providers();
         let fg = rgba_color(theme.text);
         let muted = rgba_color(theme.text_muted);
@@ -177,7 +218,7 @@ impl AddProviderView {
             if idx >= providers.len() {
                 break;
             }
-            let (name, env_var) = providers[idx];
+            let entry = &providers[idx];
             let y = list_start_y + i as u16;
             if y >= area.bottom() {
                 break;
@@ -186,7 +227,7 @@ impl AddProviderView {
             let is_selected = idx == self.selection.selected_index;
             let row_color = if is_selected { primary } else { fg };
 
-            let is_configured = has_api_key(name);
+            let is_configured = entry.is_configured(setup);
             let symbol = if is_configured { "✔" } else { " " };
             let sym_color = if is_configured {
                 Color::Green
@@ -200,7 +241,12 @@ impl AddProviderView {
                 cell.set_style(Style::default().fg(sym_color));
             }
 
-            let rest = format!("{name}  ({env_var})");
+            let rest = format!(
+                "{}{}  ({})",
+                entry.name,
+                if entry.local { " (local)" } else { "" },
+                entry.hint
+            );
             for (j, ch) in rest.chars().enumerate() {
                 let cx = name_x + j as u16;
                 if cx >= area.right() {
@@ -223,7 +269,7 @@ fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
 fn max_row_width() -> usize {
     all_providers()
         .iter()
-        .map(|(name, env_var)| 2 + name.len() + 4 + env_var.len())
+        .map(|entry| 2 + entry.name.len() + 8 + entry.hint.len())
         .max()
         .unwrap_or(0)
         .max("ADD Provider".len())

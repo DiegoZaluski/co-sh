@@ -1,8 +1,10 @@
-//! Tests for provider lookup helpers: `has_api_key`, `detect_provider`, and
-//! the process-lifetime keyring cache.
+//! Tests for provider lookup helpers: `has_api_key`, `detect_provider`, the
+//! process-lifetime keyring cache, and the local-provider registry.
 
 use super::super::{
-    clear_api_key_cache, detect_provider, get_api_key, has_api_key, invalidate_api_key,
+    clear_api_key_cache, detect_provider, get_api_key, get_provider, has_api_key,
+    invalidate_api_key, is_local_provider, known_local_providers, known_providers,
+    normalize_local_base_url,
 };
 use super::common::{ENV_LOCK, EnvGuard};
 
@@ -62,4 +64,81 @@ async fn get_api_key_caches_hits_until_invalidated() {
 
     let _ = entry.delete_credential();
     clear_api_key_cache();
+}
+
+/// Every registered provider has the expected local flag and default port.
+#[test]
+fn local_providers_registry() {
+    let locals: Vec<&str> = known_local_providers().collect();
+    let expected = [
+        "ollama",
+        "llamacpp",
+        "lmstudio",
+        "vllm",
+        "llamafile",
+        "koboldcpp",
+        "text-generation-webui",
+        "localai",
+        "jan",
+        "gpt4all",
+        "aphrodite",
+        "sglang",
+        "tabbyapi",
+    ];
+    for name in expected {
+        assert!(
+            locals.contains(&name),
+            "{name} should be registered as local"
+        );
+        assert!(is_local_provider(name), "{name} should be local");
+        let cfg = get_provider(name).expect("provider registered");
+        assert!(
+            cfg.base_url.contains("localhost"),
+            "{name} base_url should be localhost, got {}",
+            cfg.base_url
+        );
+    }
+    // A cloud provider is not local.
+    assert!(!is_local_provider("openai"));
+    // Every local provider is also in the full provider list.
+    for name in locals {
+        assert!(known_providers().any(|p| p == name), "{name} missing");
+    }
+}
+
+/// `normalize_local_base_url` appends `/v1` for bare OpenAI-compatible URLs
+/// but leaves URLs with a path (and non-OpenAI providers) untouched.
+#[test]
+fn normalize_local_base_url_adds_v1_when_bare() {
+    assert_eq!(
+        normalize_local_base_url("llamacpp", "http://127.0.0.1:8080"),
+        "http://127.0.0.1:8080/v1"
+    );
+    assert_eq!(
+        normalize_local_base_url("ollama", "http://localhost:11434"),
+        "http://localhost:11434/v1"
+    );
+    assert_eq!(
+        normalize_local_base_url("llamacpp", "http://127.0.0.1:8080/v1"),
+        "http://127.0.0.1:8080/v1"
+    );
+    // A trailing slash must not produce a double slash before `/v1`.
+    assert_eq!(
+        normalize_local_base_url("llamacpp", "http://127.0.0.1:8080/"),
+        "http://127.0.0.1:8080/v1"
+    );
+    assert_eq!(
+        normalize_local_base_url("ollama", "http://localhost:11434/"),
+        "http://localhost:11434/v1"
+    );
+    // A custom path is kept verbatim.
+    assert_eq!(
+        normalize_local_base_url("llamacpp", "http://127.0.0.1:8080/openai"),
+        "http://127.0.0.1:8080/openai"
+    );
+    // Unknown provider: returned verbatim.
+    assert_eq!(
+        normalize_local_base_url("nope", "http://127.0.0.1:1"),
+        "http://127.0.0.1:1"
+    );
 }

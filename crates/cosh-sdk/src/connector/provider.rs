@@ -89,6 +89,9 @@ pub struct ProviderConfig {
     pub base_url: &'static str,
     pub default_model: &'static str,
     pub needs_extra_headers: bool,
+    /// Whether the endpoint runs on the user's machine (`localhost`). Local
+    /// providers have no API key: they are configured with a base URL instead.
+    pub local: bool,
 }
 
 const PROVIDERS: &[(&str, ProviderConfig)] = &[
@@ -100,6 +103,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.openai.com/v1",
             default_model: "gpt-4o-mini",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -110,6 +114,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.groq.com/openai/v1",
             default_model: "llama-3.3-70b-versatile",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -120,6 +125,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.mistral.ai/v1",
             default_model: "mistral-small-latest",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -130,6 +136,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.together.xyz/v1",
             default_model: "meta-llama/Llama-3.1-8B-Instruct-Turbo",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -140,6 +147,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://openrouter.ai/api/v1",
             default_model: "qwen/qwen-2.5-72b-instruct",
             needs_extra_headers: true,
+            local: false,
         },
     ),
     (
@@ -150,6 +158,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.x.ai/v1",
             default_model: "grok-2-1212",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -160,6 +169,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.deepseek.com/v1",
             default_model: "deepseek-chat",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -170,6 +180,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.perplexity.ai",
             default_model: "llama-3.1-sonar-small-128k-chat",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -180,6 +191,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.fireworks.ai/inference/v1",
             default_model: "qwen2.5-72b-instruct",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -190,6 +202,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.cohere.com/compatibility/v1",
             default_model: "command-r-plus",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -200,6 +213,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://router.huggingface.co/v1",
             default_model: "meta-llama/Llama-3.3-70B-Instruct",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -210,6 +224,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.sambanova.ai/v1",
             default_model: "Meta-Llama-3.1-8B-Instruct",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -220,6 +235,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.poe.com/v1",
             default_model: "GPT-4o",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -230,6 +246,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.cerebras.ai/v1",
             default_model: "llama-3.1-8b-chat-completion",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -240,6 +257,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://integrate.api.nvidia.com/v1",
             default_model: "meta/llama-3.1-8b-instruct",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -250,6 +268,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.endpoints.anyscale.com/v1",
             default_model: "meta-llama/Llama-3.1-8B-Instruct",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -260,6 +279,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://ai-gateway.vercel.sh/v1",
             default_model: "meta-llama/Llama-3.1-8B-Instruct",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -270,6 +290,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://gateway.ai.cloudflare.com/v1/_/cloudflare/workers-ai/openai",
             default_model: "@cf/meta/llama-3.1-8b-instruct",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -280,6 +301,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "",
             default_model: "gpt-4o",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -290,6 +312,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "http://localhost:11434/v1",
             default_model: "llama3.3",
             needs_extra_headers: false,
+            local: true,
         },
     ),
     (
@@ -300,6 +323,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "http://localhost:1234/v1",
             default_model: "llama3.3",
             needs_extra_headers: false,
+            local: true,
         },
     ),
     (
@@ -310,6 +334,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "http://localhost:8000/v1",
             default_model: "llama3.3",
             needs_extra_headers: false,
+            local: true,
         },
     ),
     (
@@ -320,6 +345,106 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "http://localhost:8080/v1",
             default_model: "llama3.3",
             needs_extra_headers: false,
+            local: true,
+        },
+    ),
+    (
+        "llamafile",
+        ProviderConfig {
+            name: "llamafile",
+            family: Family::OpenAICompatible,
+            base_url: "http://localhost:8080/v1",
+            default_model: "llama3.3",
+            needs_extra_headers: false,
+            local: true,
+        },
+    ),
+    (
+        "koboldcpp",
+        ProviderConfig {
+            name: "koboldcpp",
+            family: Family::OpenAICompatible,
+            base_url: "http://localhost:5001/v1",
+            default_model: "llama3.3",
+            needs_extra_headers: false,
+            local: true,
+        },
+    ),
+    (
+        "text-generation-webui",
+        ProviderConfig {
+            name: "text-generation-webui",
+            family: Family::OpenAICompatible,
+            base_url: "http://localhost:5000/v1",
+            default_model: "llama3.3",
+            needs_extra_headers: false,
+            local: true,
+        },
+    ),
+    (
+        "localai",
+        ProviderConfig {
+            name: "localai",
+            family: Family::OpenAICompatible,
+            base_url: "http://localhost:8080/v1",
+            default_model: "llama3.3",
+            needs_extra_headers: false,
+            local: true,
+        },
+    ),
+    (
+        "jan",
+        ProviderConfig {
+            name: "jan",
+            family: Family::OpenAICompatible,
+            base_url: "http://localhost:1337/v1",
+            default_model: "llama3.3",
+            needs_extra_headers: false,
+            local: true,
+        },
+    ),
+    (
+        "gpt4all",
+        ProviderConfig {
+            name: "gpt4all",
+            family: Family::OpenAICompatible,
+            base_url: "http://localhost:4891/v1",
+            default_model: "llama3.3",
+            needs_extra_headers: false,
+            local: true,
+        },
+    ),
+    (
+        "aphrodite",
+        ProviderConfig {
+            name: "aphrodite",
+            family: Family::OpenAICompatible,
+            base_url: "http://localhost:2242/v1",
+            default_model: "llama3.3",
+            needs_extra_headers: false,
+            local: true,
+        },
+    ),
+    (
+        "sglang",
+        ProviderConfig {
+            name: "sglang",
+            family: Family::OpenAICompatible,
+            base_url: "http://localhost:30000/v1",
+            default_model: "llama3.3",
+            needs_extra_headers: false,
+            local: true,
+        },
+    ),
+    (
+        "tabbyapi",
+        ProviderConfig {
+            name: "tabbyapi",
+            family: Family::OpenAICompatible,
+            base_url: "http://localhost:5000/v1",
+            default_model: "llama3.3",
+            needs_extra_headers: false,
+            local: true,
         },
     ),
     (
@@ -337,6 +462,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             // free tiers — the docs-recommended gemini-3.6-flash works.
             default_model: "gemini-3.6-flash",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -347,6 +473,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.anthropic.com/v1",
             default_model: "claude-sonnet-4-6",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -357,6 +484,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://api.z.ai/api/paas/v4",
             default_model: "",
             needs_extra_headers: false,
+            local: false,
         },
     ),
     (
@@ -367,6 +495,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             base_url: "https://hyper.charm.land/v1",
             default_model: "",
             needs_extra_headers: false,
+            local: false,
         },
     ),
 ];
@@ -383,7 +512,6 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     ("github", "GITHUB_TOKEN"),
     ("cloudflare", "CLOUDFLARE_API_KEY"),
     ("fireworks", "FIREWORKS_API_KEY"),
-    ("ollama", "OLLAMA_API_KEY"),
     ("xai", "XAI_API_KEY"),
     ("deepseek", "DEEPSEEK_API_KEY"),
     ("perplexity", "PERPLEXITY_API_KEY"),
@@ -430,6 +558,45 @@ pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {
 /// operations (e.g. fetching model lists from every provider).
 pub fn known_providers() -> impl Iterator<Item = &'static str> {
     PROVIDERS.iter().map(|(name, _)| *name)
+}
+
+/// Whether a provider runs a local model server (`localhost`) with no API
+/// key. Local providers are configured with a base URL instead of a key.
+#[must_use]
+pub fn is_local_provider(name: &str) -> bool {
+    get_provider(name).is_some_and(|cfg| cfg.local)
+}
+
+/// Return all known local provider names (ollama, llamacpp, lmstudio, …).
+///
+/// These are configured with a base URL (host + port) rather than an API key.
+pub fn known_local_providers() -> impl Iterator<Item = &'static str> {
+    PROVIDERS
+        .iter()
+        .filter(|(_, cfg)| cfg.local)
+        .map(|(name, _)| *name)
+}
+
+/// Normalize a user-supplied local server URL for an OpenAI-compatible
+/// provider: if the URL has no path, append `/v1` so it matches the endpoint
+/// the server exposes (`/v1/chat/completions`). Non-OpenAI-compatible
+/// providers and URLs that already carry a path are returned verbatim.
+#[must_use]
+pub fn normalize_local_base_url(provider: &str, url: &str) -> String {
+    // Strip a trailing slash so bare URLs with `/` don't produce `//v1`.
+    let url = url.trim().trim_end_matches('/');
+    let Some(cfg) = get_provider(provider) else {
+        return url.to_string();
+    };
+    if cfg.family != Family::OpenAICompatible {
+        return url.to_string();
+    }
+    let parsed = url.split('/').collect::<Vec<_>>();
+    // A path is present when there are 4+ segments (scheme://host/[path…]).
+    if parsed.len() > 3 && !parsed[3].is_empty() {
+        return url.to_string();
+    }
+    format!("{url}/v1")
 }
 
 /// Return the environment variable name for a given provider's API key.
