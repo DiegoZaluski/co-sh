@@ -29,7 +29,7 @@ async fn main() {
     fs.write(vec![TargetFile {
         path: path.to_string(),
         text: v1.to_string(),
-    }])
+     file_hash: None, }])
     .await
     .unwrap();
 
@@ -37,7 +37,7 @@ async fn main() {
         .write(vec![TargetFile {
             path: path.to_string(),
             text: v2.to_string(),
-        }])
+         file_hash: None, }])
         .await
         .unwrap();
 

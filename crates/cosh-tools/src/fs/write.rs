@@ -170,6 +170,57 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
                     continue;
                 }
 
+                // Existing-file hash guard
+                // When the target already exists, the caller must supply a
+                // `file_hash` that matches the live content.  This proves
+                // the model has read the file before overwriting it.
+                let file_exists = fs.read_text(&path_str).await.is_ok();
+                if file_exists {
+                    match target.file_hash.as_deref() {
+                        None => {
+                            let res = WriteResult {
+                                file_hash: String::new(),
+                                header: String::new(),
+                                path: target.path.clone(),
+                                warnings: Some(format!(
+                                    "ERROR: Cannot overwrite `{}` without reading it first. \
+                                     The file already exists. To overwrite it you must: \
+                                     1) Use `fs_read` to read the file (this returns a `file_hash`). \
+                                     2) Include that `file_hash` in your `fs_write` call. \
+                                     This ensures you know the current content before overwriting it.",
+                                    target.path
+                                )),
+                            };
+                            result.push(res);
+                            continue;
+                        }
+                        Some(expected_hash) => {
+                            if let Ok(current) = fs.read_text(&path_str).await {
+                                let actual_hash =
+                                    cosh_sdk::hashline::format::compute_file_hash(&current);
+                                if actual_hash != *expected_hash {
+                                    let res = WriteResult {
+                                        file_hash: String::new(),
+                                        header: String::new(),
+                                        path: target.path.clone(),
+                                        warnings: Some(format!(
+                                            "ERROR: file_hash mismatch for `{}`. \
+                                             The file has been modified since you last read it. \
+                                             The hash you provided ({}) does not match \
+                                             the current file content ({}). \
+                                             To fix this: 1) Use `fs_read` to read the file again. \
+                                             2) Use the new `file_hash` from the read result.",
+                                            target.path, expected_hash, actual_hash
+                                        )),
+                                    };
+                                    result.push(res);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let Ok(current) = fs.read_text(&path_str).await {
                     let _ = rollback::record(&path_str, &current);
                 }

@@ -12,13 +12,15 @@ fn meta() -> FsMetadata {
 
 #[tokio::test]
 async fn write_creates_file_and_returns_hash_header() {
+    // Clean up from previous runs so the file is truly new.
+    let _ = std::fs::remove_file("/home/inky/co-sh/ftest.txt");
     let result = write(
         meta(),
         FsWrite {
             targets: vec![TargetFile {
                 path: "/home/inky/co-sh/ftest.txt".to_string(),
                 text: "hello world".to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -32,6 +34,9 @@ async fn write_creates_file_and_returns_hash_header() {
 
 #[tokio::test]
 async fn write_creates_multiple_files_in_single_call() {
+    // Clean up from previous runs so the files are truly new.
+    let _ = std::fs::remove_file("/home/inky/co-sh/ftest.txt");
+    let _ = std::fs::remove_file("/home/inky/co-sh/ftst2.txt");
     let result = write(
         meta(),
         FsWrite {
@@ -39,11 +44,11 @@ async fn write_creates_multiple_files_in_single_call() {
                 TargetFile {
                     path: "/home/inky/co-sh/ftest.txt".to_string(),
                     text: "hello world".to_string(),
-                },
+                 file_hash: None, },
                 TargetFile {
                     path: "/home/inky/co-sh/ftst2.txt".to_string(),
                     text: "test".to_string(),
-                },
+                 file_hash: None, },
             ],
         },
     )
@@ -73,7 +78,7 @@ async fn write_denied_when_path_is_in_blocklist() {
             targets: vec![TargetFile {
                 path: "/home/inky/co-sh/ftest.txt".to_string(),
                 text: "should not be written".to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -100,7 +105,7 @@ async fn write_reports_empty_text_inline_and_skips_file() {
             targets: vec![TargetFile {
                 path: path.to_string(),
                 text: "".to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -132,7 +137,7 @@ async fn write_allowed_outside_root_when_path_in_allowlist() {
             targets: vec![TargetFile {
                 path: path.to_string(),
                 text: "outside root but explicitly allowed".to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -161,7 +166,7 @@ async fn write_errors_on_inconsistent_blocklist_and_allowlist() {
             targets: vec![TargetFile {
                 path: "/home/inky/co-sh/ftest.txt".to_string(),
                 text: "should never be written".to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -180,7 +185,7 @@ async fn write_strips_hashline_prefixes_and_reports_warning() {
             targets: vec![TargetFile {
                 path: path.to_string(),
                 text: content.to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -214,7 +219,7 @@ async fn write_strips_hashline_prefixes_without_bracket_header() {
             targets: vec![TargetFile {
                 path: path.to_string(),
                 text: content.to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -246,7 +251,7 @@ async fn write_does_not_strip_normal_content() {
             targets: vec![TargetFile {
                 path: path.to_string(),
                 text: content.to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -274,7 +279,7 @@ async fn write_chmods_executable_for_shebang() {
             targets: vec![TargetFile {
                 path: path.to_string(),
                 text: content.to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -309,7 +314,7 @@ async fn write_refuses_to_overwrite_auto_generated_file() {
             targets: vec![TargetFile {
                 path: path.to_string(),
                 text: "replacement".to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -344,7 +349,7 @@ async fn write_allows_creating_file_with_generated_marker() {
             targets: vec![TargetFile {
                 path: path.to_string(),
                 text: content.to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -368,7 +373,7 @@ async fn write_normalizes_crlf_to_lf() {
             targets: vec![TargetFile {
                 path: path.to_string(),
                 text: "line1\r\nline2\r\n".to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -394,7 +399,7 @@ async fn write_does_not_chmod_without_shebang() {
             targets: vec![TargetFile {
                 path: path.to_string(),
                 text: content.to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;

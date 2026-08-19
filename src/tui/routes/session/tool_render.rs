@@ -17,6 +17,16 @@ use crate::component::spinner_highlight::HighlightSpinner;
 use crate::theme::Theme;
 use crate::types::{ToolPart, ToolStatus};
 
+/// Pick the foreground color for an inline tool label based on its status.
+/// Failed tools are red; completed tools are muted; running tools are normal.
+fn tool_label_fg(status: &ToolStatus, theme: &Theme) -> RGBA {
+    match status {
+        ToolStatus::Failed(_) => theme.error,
+        ToolStatus::Completed => theme.text_muted,
+        ToolStatus::Running => theme.text,
+    }
+}
+
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
@@ -505,13 +515,7 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     if output.is_empty() {
         let pending = "Writing command...";
         let label = if is_completed { &command } else { pending };
-        let fg = if is_completed {
-            ctx.theme.text_muted
-        } else if is_running {
-            ctx.theme.text
-        } else {
-            ctx.theme.text_muted
-        };
+        let fg = tool_label_fg(&part.status, ctx.theme);
         *ctx.line_h = 1;
         render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, label, fg, spinner);
     } else {
@@ -734,7 +738,17 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let content = input_content(&part.input).unwrap_or_default();
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
-    if is_completed && !content.is_empty() {
+    // Check if the write produced warnings (e.g. missing file_hash for an
+    // existing file, or hash mismatch).  When warnings exist the write did
+    // NOT modify the file, so we show the warning instead of the content
+    // preview to avoid misleading the user.
+    let has_warnings = part
+        .output
+        .as_deref()
+        .and_then(|o| serde_json::from_str::<serde_json::Value>(o).ok())
+        .and_then(|v| v.as_array()?.first()?.get("warnings")?.as_str().map(String::from));
+
+    if has_warnings.is_none() && is_completed && !content.is_empty() {
         let max_lines = 20u16;
         let display_lines = content.lines().count().min(max_lines as usize) as u16;
         // 1 blank row of internal padding above the title (the bottom-padding
@@ -801,11 +815,7 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         );
     } else {
         let label = format!("Write {filepath}");
-        let fg = if is_completed {
-            ctx.theme.text_muted
-        } else {
-            ctx.theme.text
-        };
+        let fg = tool_label_fg(&part.status, ctx.theme);
         *ctx.line_h = 1;
         render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, None);
     }
@@ -893,11 +903,7 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         diff.render_self(ctx.buf, diff_area);
     } else {
         let label = format!("Edit {filepath}");
-        let fg = if is_completed {
-            ctx.theme.text_muted
-        } else {
-            ctx.theme.text
-        };
+        let fg = tool_label_fg(&part.status, ctx.theme);
         *ctx.line_h = 1;
         render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, None);
     }
@@ -1119,7 +1125,9 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         .get(&tool_id)
         .filter(|s| !s.is_idle());
 
-    let fg = if is_completed {
+    let fg = if matches!(part.status, ToolStatus::Failed(_)) {
+        ctx.theme.error
+    } else if is_completed {
         if status.as_ref().is_some_and(|s| s.warning) {
             ctx.theme.warning
         } else {
@@ -1343,11 +1351,7 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
 
     // Running/failed/no-code reads keep the lightweight single-line label.
     let label = format!("Read {filepath}");
-    let fg = if is_completed {
-        ctx.theme.text_muted
-    } else {
-        ctx.theme.text
-    };
+    let fg = tool_label_fg(&part.status, ctx.theme);
     *ctx.line_h = 1;
     render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, spinner);
 }
@@ -1367,7 +1371,9 @@ pub fn render_grep(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         label.push_str(&summary);
     }
 
-    let fg = if is_completed {
+    let fg = if matches!(part.status, ToolStatus::Failed(_)) {
+        ctx.theme.error
+    } else if is_completed {
         if has_warning {
             ctx.theme.warning
         } else {
@@ -1390,15 +1396,11 @@ pub fn render_grep(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
 
 pub fn render_webfetch(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let url = input_value(&part.input, "url").unwrap_or_default();
-    let is_completed = matches!(part.status, ToolStatus::Completed);
+    let _is_completed = matches!(part.status, ToolStatus::Completed);
     let is_running = matches!(part.status, ToolStatus::Running);
 
     let label = format!("WebFetch {url}");
-    let fg = if is_completed {
-        ctx.theme.text_muted
-    } else {
-        ctx.theme.text
-    };
+    let fg = tool_label_fg(&part.status, ctx.theme);
     let tool_id = format!("webfetch_{}", part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
@@ -1414,16 +1416,12 @@ pub fn render_webfetch(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) 
 pub fn render_websearch(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let query = input_value(&part.input, "query").unwrap_or_default();
     let provider = input_value(&part.input, "provider");
-    let is_completed = matches!(part.status, ToolStatus::Completed);
+    let _is_completed = matches!(part.status, ToolStatus::Completed);
     let is_running = matches!(part.status, ToolStatus::Running);
 
     let provider_label = web_search_provider_label(provider.as_deref());
     let label = format!("{provider_label} \"{query}\"");
-    let fg = if is_completed {
-        ctx.theme.text_muted
-    } else {
-        ctx.theme.text
-    };
+    let fg = tool_label_fg(&part.status, ctx.theme);
     let tool_id = format!("websearch_{}", part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
@@ -1438,7 +1436,7 @@ pub fn render_websearch(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16)
 
 pub fn render_task(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let description = input_value(&part.input, "description").unwrap_or_default();
-    let is_completed = matches!(part.status, ToolStatus::Completed);
+    let _is_completed = matches!(part.status, ToolStatus::Completed);
     let is_running = matches!(part.status, ToolStatus::Running);
 
     let content = if description.is_empty() {
@@ -1447,11 +1445,7 @@ pub fn render_task(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         description
     };
 
-    let fg = if is_completed {
-        ctx.theme.text_muted
-    } else {
-        ctx.theme.text
-    };
+    let fg = tool_label_fg(&part.status, ctx.theme);
     let tool_id = format!("task_{}", part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
@@ -1465,14 +1459,10 @@ pub fn render_task(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
 }
 
 pub fn render_question_tool(ctx: &mut ToolRenderCtx, part: &ToolPart) {
-    let is_completed = matches!(part.status, ToolStatus::Completed);
+    let _is_completed = matches!(part.status, ToolStatus::Completed);
 
     let label = "Asking questions...".to_string();
-    let fg = if is_completed {
-        ctx.theme.text_muted
-    } else {
-        ctx.theme.text
-    };
+    let fg = tool_label_fg(&part.status, ctx.theme);
     *ctx.line_h = 1;
     render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, None);
 }
@@ -1637,11 +1627,7 @@ pub fn render_generic(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     } else {
         format!("Writing {tool_name}...")
     };
-    let fg = if is_completed {
-        ctx.theme.text_muted
-    } else {
-        ctx.theme.text
-    };
+    let fg = tool_label_fg(&part.status, ctx.theme);
     let tool_id = format!("generic_{}", part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);

@@ -159,7 +159,7 @@ async fn write_traversal_via_dotdot_is_denied() {
             targets: vec![TargetFile {
                 path: traversal_path.to_string(),
                 text: "TRAVERSAL_WRITE".to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -201,7 +201,7 @@ async fn write_traversal_blocklist_respected_after_normalization() {
             targets: vec![TargetFile {
                 path: traversal_path.to_string(),
                 text: "BLOCKLIST_BYPASS".to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;
@@ -250,7 +250,7 @@ async fn write_gap_symlink_escape() {
             targets: vec![TargetFile {
                 path: symlink_target.clone(),
                 text: "ESCAPED".to_string(),
-            }],
+             file_hash: None, }],
         },
     )
     .await;

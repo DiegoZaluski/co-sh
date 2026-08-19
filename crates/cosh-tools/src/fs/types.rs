@@ -28,6 +28,12 @@ pub struct FsRead {
 pub struct TargetFile {
     pub text: String,
     pub path: String,
+    /// Optional file hash from a previous `read`. When the target file
+    /// already exists on disk the hash is **required** — the write is
+    /// rejected if it is missing or stale.  For brand-new files the
+    /// field is ignored.
+    #[serde(default)]
+    pub file_hash: Option<String>,
 }
 
 /// Configuration for file write operations.

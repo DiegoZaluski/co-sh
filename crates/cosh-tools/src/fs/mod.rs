@@ -9,7 +9,7 @@
 //! use cosh_tools::fs::Fs;
 //!
 //! let fs = Fs::new().cwd("/home/user/project");
-//! fs.write(vec![TargetFile { path: "foo.txt".to_string(), text: "hello".to_string() }]).await;
+//! fs.write(vec![TargetFile { path: "foo.txt".to_string(), text: "hello".to_string()  file_hash: None, }]).await;
 //! ```
 
 pub mod ast_edit;
@@ -174,7 +174,12 @@ impl Fs {
                 "description": concat!(
                     "Write content to one or more files. Creates new files or ",
                     "overwrites existing ones entirely. Paths are validated against ",
-                    "the project root, allowlist, and blocklist guards before writing."
+                    "the project root, allowlist, and blocklist guards before writing.\n\n",
+                    "IMPORTANT: When overwriting an existing file, you MUST include the ",
+                    "`file_hash` from a previous `fs_read` call. This proves you have ",
+                    "read the file before overwriting it. If you omit `file_hash` on an ",
+                    "existing file, the write will be rejected. For new files (that do ",
+                    "not yet exist), `file_hash` is not needed."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -192,6 +197,14 @@ impl Fs {
                                     "text": {
                                         "type": "string",
                                         "description": "Full text content to write to the file"
+                                    },
+                                    "file_hash": {
+                                        "type": ["string", "null"],
+                                        "description": concat!(
+                                            "The hash from `fs_read` of this file. REQUIRED when overwriting ",
+                                            "an existing file to prove you have read its current content. ",
+                                            "Omit or set to null for new files."
+                                        )
                                     }
                                 },
                                 "required": ["path", "text"]
