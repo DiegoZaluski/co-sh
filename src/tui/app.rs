@@ -2012,12 +2012,9 @@ impl App {
                 let mx = self.last_mouse_x;
                 let my = self.last_mouse_y;
                 let content_start_y = area.y + 2;
-                if my >= content_start_y
-                    && my < area.y + area.height
-                    && mx < sidebar_w
-                {
-                    let idx = self.sidebar.selection.scroll_offset
-                        + (my - content_start_y) as usize;
+                if my >= content_start_y && my < area.y + area.height && mx < sidebar_w {
+                    let idx =
+                        self.sidebar.selection.scroll_offset + (my - content_start_y) as usize;
                     if let Some(summary) = self.state.session_summaries.get(idx)
                         && summary.title_generated
                     {
@@ -3897,18 +3894,17 @@ impl App {
                                             return Ok(false);
                                         }
 
-                                        // Vim-style scroll only when prompt is empty
-                                        // (otherwise these chars are typed normally)
-                                        if ch == 'j' && self.prompt_view.input.is_empty() {
+                                        // Vim-style scroll: j/k scroll the chat view only when
+                                        // the prompt is NOT focused. When focused, all characters
+                                        // type normally so the user can start messages with j/k.
+                                        if (ch == 'j' || ch == 'k') && !self.prompt_view.is_focused
+                                        {
                                             let vh = self.session_view.visible_height.max(1);
-                                            let delta = vh as f64 / 5.0;
-                                            self.session_view.scroll_by_raw(delta);
-                                            self.session_view.reset_scroll_accumulator();
-                                            return Ok(false);
-                                        }
-                                        if ch == 'k' && self.prompt_view.input.is_empty() {
-                                            let vh = self.session_view.visible_height.max(1);
-                                            let delta = -(vh as f64 / 5.0);
+                                            let delta = if ch == 'j' {
+                                                vh as f64 / 5.0
+                                            } else {
+                                                -(vh as f64 / 5.0)
+                                            };
                                             self.session_view.scroll_by_raw(delta);
                                             self.session_view.reset_scroll_accumulator();
                                             return Ok(false);
@@ -4564,12 +4560,10 @@ impl App {
                                         // Persist the updated title to disk.
                                         session_store.update_title(&session_id, &title);
                                         // Update the session title in memory.
-                                        let _ = event_tx.send(
-                                            HarnessEvent::TitleGenerated {
-                                                session_id,
-                                                title,
-                                            },
-                                        );
+                                        let _ = event_tx.send(HarnessEvent::TitleGenerated {
+                                            session_id,
+                                            title,
+                                        });
                                     }
                                 });
                                 self.title_generated = true;

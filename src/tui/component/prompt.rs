@@ -388,137 +388,119 @@ impl PromptView {
         if self.input.is_empty() || text_w == 0 {
             return;
         }
-        let lines: Vec<&str> = self.input.split('\n').collect();
-        let cols = text_w.max(1);
+        let display_lines = Self::wrapped_lines(&self.input, text_w);
+        if display_lines.len() <= 1 {
+            return;
+        }
 
-        // char_pos counts actual Unicode characters from start of input to cursor_pos
-        let char_pos = self.input[..self.cursor_pos].chars().count();
-        let mut acc = 0usize; // accumulated character count (includes newlines)
-        let mut byte_off = 0usize;
-        for (li, line) in lines.iter().enumerate() {
-            let line_chars = line.chars().count();
-            // Check if cursor falls on this logical line (chars + 1 for '\n' after it)
-            if char_pos < acc + line_chars + 1 {
-                let offset = char_pos.saturating_sub(acc);
-                if offset >= line_chars {
-                    // Cursor at end of this logical line.  Only treat it as a
-                    // 'newline position' when there is actually a \n after this
-                    // line (i.e. this is not the last logical line).  When it IS
-                    // the last line the cursor is simply at the end of the text
-                    // and we must fall through to visual-line navigation so
-                    // wrapped lines work correctly.
-                    if li + 1 < lines.len() {
-                        // Cursor is at the newline between lines → go to
-                        // previous logical line preserving visual column.
-                        if li == 0 {
-                            return;
-                        }
-                        let visual_col = offset % cols;
-                        let prev_line = lines[li - 1];
-                        let prev_chars = prev_line.chars().count();
-                        let target_col = visual_col.min(cols.saturating_sub(1));
-                        let target_char_idx = target_col.min(prev_chars.saturating_sub(1));
-                        let prev_byte_start = byte_off - prev_line.len() - 1;
-                        let target_byte = prev_line
-                            .char_indices()
-                            .nth(target_char_idx)
-                            .map_or(prev_line.len(), |(i, _)| i);
-                        self.cursor_pos = prev_byte_start + target_byte;
-                        return;
-                    }
-                    // Last line, cursor at end → fall through to visual
-                    // navigation within this same logical line.
-                }
-                let visual_line = offset / cols;
-                if visual_line == 0 {
-                    if li == 0 {
-                        return; // already at top of text
-                    }
-                    // Move to previous logical line, preserving visual column.
-                    // If the previous line is shorter, clamp to its end.
-                    let visual_col = offset % cols;
-                    let prev_line = lines[li - 1];
-                    let prev_chars = prev_line.chars().count();
-                    let target_col = visual_col.min(cols.saturating_sub(1));
-                    let target_char_idx = target_col.min(prev_chars.saturating_sub(1));
-                    let prev_byte_start = byte_off - prev_line.len() - 1;
-                    let target_byte = prev_line
-                        .char_indices()
-                        .nth(target_char_idx)
-                        .map_or(prev_line.len(), |(i, _)| i);
-                    self.cursor_pos = prev_byte_start + target_byte;
-                    return;
-                }
-                // Move up one visual line within the same logical line
-                let visual_col = offset % cols;
-                let target = (visual_line - 1) * cols + visual_col.min(cols.saturating_sub(1));
-                let target_byte = line
-                    .char_indices()
-                    .nth(target)
-                    .map_or(line.len(), |(i, _)| i);
-                self.cursor_pos = byte_off + target_byte;
+        let input_start = self.input.as_ptr() as usize;
+
+        // When the cursor sits on a '\n', treat it as being at the end of
+        // the preceding display line (visually the newline is at line end).
+        let at_newline =
+            self.cursor_pos < self.input.len() && self.input.as_bytes()[self.cursor_pos] == b'\n';
+
+        let mut cur_line = 0usize;
+        let mut cur_col = 0usize;
+        let mut found = false;
+
+        for (i, line) in display_lines.iter().enumerate() {
+            let line_start = line.as_ptr() as usize - input_start;
+            let line_end = line_start + line.len();
+
+            if at_newline && self.cursor_pos == line_end {
+                cur_line = i;
+                cur_col = line.chars().count();
+                found = true;
+                break;
+            }
+
+            if self.cursor_pos >= line_start && self.cursor_pos < line_end {
+                cur_line = i;
+                cur_col = self.input[line_start..self.cursor_pos].chars().count();
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            // Cursor at the very end of input
+            if let Some(last) = display_lines.last() {
+                cur_line = display_lines.len() - 1;
+                cur_col = last.chars().count();
+            } else {
                 return;
             }
-            acc += line_chars + 1; // +1 for the '\n'
-            byte_off += line.len() + 1; // +1 for '\n'
         }
+
+        if cur_line == 0 {
+            return;
+        }
+
+        let prev_line = display_lines[cur_line - 1];
+        let col = cur_col.min(prev_line.chars().count());
+        let prev_start = prev_line.as_ptr() as usize - input_start;
+        self.cursor_pos = prev_line
+            .char_indices()
+            .nth(col)
+            .map_or(prev_start + prev_line.len(), |(i, _)| prev_start + i);
     }
 
     pub fn cursor_down(&mut self, text_w: usize) {
         if self.input.is_empty() || text_w == 0 {
             return;
         }
-        let lines: Vec<&str> = self.input.split('\n').collect();
-        let cols = text_w.max(1);
-
-        let char_pos = self.input[..self.cursor_pos].chars().count();
-        let mut acc = 0usize;
-        let mut byte_off = 0usize;
-        for (li, line) in lines.iter().enumerate() {
-            let line_chars = line.chars().count();
-            let visual_lines = line_chars.div_ceil(cols).max(1);
-            if char_pos < acc + line_chars + 1 {
-                let offset = char_pos.saturating_sub(acc);
-                if offset >= line_chars {
-                    // Cursor is at the newline → move to start of next line
-                    if li + 1 >= lines.len() {
-                        return; // already at bottom
-                    }
-                    let next_start = byte_off + line.len() + 1;
-                    self.cursor_pos = next_start;
-                    return;
-                }
-                let visual_line = offset / cols;
-                let visual_col = offset % cols;
-                if visual_line + 1 >= visual_lines {
-                    // Last visual line of this logical line → move to next logical line
-                    if li + 1 >= lines.len() {
-                        return; // already at bottom
-                    }
-                    let next = lines[li + 1];
-                    let next_chars = next.chars().count();
-                    let target_col = visual_col.min(cols.saturating_sub(1));
-                    let target_char_idx = target_col.min(next_chars.saturating_sub(1));
-                    let next_start = byte_off + line.len() + 1;
-                    self.cursor_pos = next_start
-                        + next
-                            .char_indices()
-                            .nth(target_char_idx)
-                            .map_or(0, |(i, _)| i);
-                    return;
-                }
-                // Move down one visual line within the same logical line
-                let target = (visual_line + 1) * cols + visual_col.min(cols.saturating_sub(1));
-                let target_byte = line
-                    .char_indices()
-                    .nth(target)
-                    .map_or(line.len(), |(i, _)| i);
-                self.cursor_pos = byte_off + target_byte;
-                return;
-            }
-            acc += line_chars + 1; // +1 for the '\n'
-            byte_off += line.len() + 1; // +1 for '\n'
+        let display_lines = Self::wrapped_lines(&self.input, text_w);
+        if display_lines.is_empty() {
+            return;
         }
+
+        let input_start = self.input.as_ptr() as usize;
+
+        let at_newline =
+            self.cursor_pos < self.input.len() && self.input.as_bytes()[self.cursor_pos] == b'\n';
+
+        let mut cur_line = 0usize;
+        let mut cur_col = 0usize;
+        let mut found = false;
+
+        for (i, line) in display_lines.iter().enumerate() {
+            let line_start = line.as_ptr() as usize - input_start;
+            let line_end = line_start + line.len();
+
+            if at_newline && self.cursor_pos == line_end {
+                // At '\n' → visually at start of next line, column 0
+                if i + 1 < display_lines.len() {
+                    cur_line = i + 1;
+                    cur_col = 0;
+                    found = true;
+                }
+                break;
+            }
+
+            if self.cursor_pos >= line_start && self.cursor_pos < line_end {
+                cur_line = i;
+                cur_col = self.input[line_start..self.cursor_pos].chars().count();
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            return;
+        }
+
+        if cur_line + 1 >= display_lines.len() {
+            return;
+        }
+
+        let next_line = display_lines[cur_line + 1];
+        let col = cur_col.min(next_line.chars().count());
+        let next_start = next_line.as_ptr() as usize - input_start;
+        self.cursor_pos = next_line
+            .char_indices()
+            .nth(col)
+            .map_or(next_start + next_line.len(), |(i, _)| next_start + i);
     }
 
     /// Compute the prompt's height. `max_height` is the vertical budget the
@@ -531,18 +513,12 @@ impl PromptView {
         let content_lines = if self.input.is_empty() || text_w == 0 {
             1
         } else {
-            self.input
-                .split('\n')
-                .map(|line| {
-                    let n = line.chars().count();
-                    n.div_ceil(text_w).max(1)
-                })
-                .sum()
+            Self::wrapped_lines(&self.input, text_w).len()
         };
         let overhead = BASE_H + AGENT_H + CAP_H + FOOTER_H;
         let budget_lines = max_height.saturating_sub(overhead).max(1);
         let lines = content_lines
-            .min(MAX_PROMPT_LINES as usize)
+            .min(MAX_PROMPT_LINES)
             .min(budget_lines as usize);
         overhead + lines as u16
     }
@@ -557,12 +533,41 @@ impl PromptView {
                 result.push(line);
                 continue;
             }
-            let mut s = line;
-            while !s.is_empty() {
-                let line_len = s.chars().take(max_w).count();
-                let split = s.char_indices().nth(line_len).map_or(s.len(), |(i, _)| i);
-                result.push(&s[..split]);
-                s = &s[split..];
+            let mut remaining = line;
+            while !remaining.is_empty() {
+                let char_count = remaining.chars().count();
+                if char_count <= max_w {
+                    result.push(remaining);
+                    break;
+                }
+                // Find the last space within the first max_w characters
+                // so we can break at a word boundary.
+                let mut last_space = None;
+                let mut count = 0;
+                for (i, ch) in remaining.char_indices() {
+                    if ch == ' ' {
+                        last_space = Some(i);
+                    }
+                    count += 1;
+                    if count >= max_w {
+                        break;
+                    }
+                }
+                if let Some(sp) = last_space {
+                    // Break after the space (space goes on current line)
+                    let end = sp + 1;
+                    result.push(&remaining[..end]);
+                    remaining = &remaining[end..];
+                } else {
+                    // No space found within max_w chars — fall back to char break
+                    // (handles very long words without spaces)
+                    let split = remaining
+                        .char_indices()
+                        .nth(max_w)
+                        .map_or(remaining.len(), |(i, _)| i);
+                    result.push(&remaining[..split]);
+                    remaining = &remaining[split..];
+                }
             }
         }
         if result.is_empty() {
@@ -583,11 +588,7 @@ impl PromptView {
         }
         let text_start = area.y + 1; // first content line
         let x_off = area.x + 3; // left margin within border
-        let n = self
-            .input
-            .split('\n')
-            .map(|line| line.chars().count().div_ceil(text_w).max(1))
-            .sum::<usize>();
+        let n = Self::wrapped_lines(&self.input, text_w).len();
         // The visible box is capped responsively (derive the same window as the
         // render does from the allocated `area.height`); clicks can only land on
         // the scrolled-in window, so remap the row to the content line using the
@@ -663,29 +664,31 @@ impl PromptView {
 
         // Locate the cursor's visual (wrapped) line/column so the scroll window
         // below can always keep it visible.
-        let cursor_char = if display_placeholder || self.input.is_empty() {
-            0
+        let (cursor_line_idx, cursor_col_idx) = if display_placeholder || self.input.is_empty() {
+            (0usize, 0usize)
         } else {
-            self.input[..self.cursor_pos].chars().count()
+            let input_start = self.input.as_ptr() as usize;
+            let at_newline = self.cursor_pos < self.input.len()
+                && self.input.as_bytes()[self.cursor_pos] == b'\n';
+            let mut result = (0usize, 0usize);
+            for (i, line) in display_lines.iter().enumerate() {
+                let line_start = line.as_ptr() as usize - input_start;
+                let line_end = line_start + line.len();
+                if at_newline && self.cursor_pos == line_end {
+                    result = (i, line.chars().count());
+                    break;
+                }
+                if self.cursor_pos >= line_start && self.cursor_pos < line_end {
+                    result = (i, self.input[line_start..self.cursor_pos].chars().count());
+                    break;
+                }
+                if i + 1 == display_lines.len() && self.cursor_pos >= line_end {
+                    result = (i, self.input[line_start..self.cursor_pos].chars().count());
+                    break;
+                }
+            }
+            result
         };
-        let mut cursor_line_idx = 0usize;
-        let mut cursor_col_idx = 0usize;
-        let mut acc = 0usize;
-        for (li, line) in display_lines.iter().enumerate() {
-            let line_chars = line.chars().count();
-            if cursor_char <= acc + line_chars {
-                cursor_line_idx = li;
-                cursor_col_idx = cursor_char.saturating_sub(acc);
-                break;
-            }
-            acc += line_chars;
-            if let Some((byte_idx, _)) = self.input.char_indices().nth(acc)
-                && byte_idx < self.input.len()
-                && self.input.as_bytes()[byte_idx] == b'\n'
-            {
-                acc += 1;
-            }
-        }
 
         // Growth limit + scroll-up window. The box height is already capped
         // responsively by `required_height` (`area.height` here); derive the
