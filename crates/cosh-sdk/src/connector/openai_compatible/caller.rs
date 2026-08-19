@@ -549,16 +549,21 @@ fn build_chat_request(
 ///
 /// Local providers are configured by URL and never require a key (most
 /// servers ignore the `Authorization` header entirely); cloud providers fall
-/// back to the OS keyring / environment and must have a key.
-fn optional_api_key(
+/// back to the OS keyring / environment and must have a key. Returns an
+/// error when a cloud provider has no key configured.
+fn resolve_api_key(
     config: &ProviderConfig,
     params: &Parameters,
     service: Option<&str>,
-) -> Option<String> {
-    params
+) -> Result<Option<String>, ConnectorError> {
+    let key = params
         .api_key
         .clone()
-        .or_else(|| get_api_key(config.name, service))
+        .or_else(|| get_api_key(config.name, service));
+    if !is_local_provider(config.name) && key.is_none() {
+        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
+    }
+    Ok(key)
 }
 
 /// Send a non-streaming chat completion request.
@@ -572,10 +577,7 @@ pub async fn chat(
     system_prompt: Option<&str>,
     service: Option<&str>,
 ) -> Result<ChatOutput, ConnectorError> {
-    let api_key = optional_api_key(config, params, service);
-    if !is_local_provider(config.name) && api_key.is_none() {
-        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
-    }
+    let api_key = resolve_api_key(config, params, service)?;
     let model = params
         .model
         .clone()
@@ -632,10 +634,7 @@ pub async fn chat_stream(
     system_prompt: Option<&str>,
     service: Option<&str>,
 ) -> Result<ChatStream, ConnectorError> {
-    let api_key = optional_api_key(config, params, service);
-    if !is_local_provider(config.name) && api_key.is_none() {
-        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
-    }
+    let api_key = resolve_api_key(config, params, service)?;
     let model = params
         .model
         .clone()
@@ -697,10 +696,7 @@ pub async fn chat_stream_with_messages(
     messages: &[ApiChatMessage],
     service: Option<&str>,
 ) -> Result<ChatStream, ConnectorError> {
-    let api_key = optional_api_key(config, params, service);
-    if !is_local_provider(config.name) && api_key.is_none() {
-        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
-    }
+    let api_key = resolve_api_key(config, params, service)?;
     let model = params
         .model
         .clone()
@@ -762,10 +758,7 @@ pub async fn embed(
     input: &str,
     service: Option<&str>,
 ) -> Result<Vec<f32>, ConnectorError> {
-    let api_key = optional_api_key(config, params, service);
-    if !is_local_provider(config.name) && api_key.is_none() {
-        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
-    }
+    let api_key = resolve_api_key(config, params, service)?;
     let model = params
         .model
         .clone()
@@ -811,10 +804,7 @@ pub async fn list_models(
     params: &Parameters,
     service: Option<&str>,
 ) -> Result<LsOutput, ConnectorError> {
-    let api_key = optional_api_key(config, params, service);
-    if !is_local_provider(config.name) && api_key.is_none() {
-        return Err(ConnectorError::MissingApiKey(config.name.to_string()));
-    }
+    let api_key = resolve_api_key(config, params, service)?;
 
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/models");

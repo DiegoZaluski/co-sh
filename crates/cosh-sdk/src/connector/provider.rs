@@ -94,410 +94,96 @@ pub struct ProviderConfig {
     pub local: bool,
 }
 
+impl ProviderConfig {
+    const fn cloud(
+        name: &'static str,
+        family: Family,
+        base_url: &'static str,
+        default_model: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            family,
+            base_url,
+            default_model,
+            needs_extra_headers: false,
+            local: false,
+        }
+    }
+
+    /// Like [`cloud`](Self::cloud) but allows setting `needs_extra_headers`
+    /// (currently only OpenRouter requires this).
+    const fn cloud_extra(
+        name: &'static str,
+        family: Family,
+        base_url: &'static str,
+        default_model: &'static str,
+        needs_extra_headers: bool,
+    ) -> Self {
+        Self {
+            name,
+            family,
+            base_url,
+            default_model,
+            needs_extra_headers,
+            local: false,
+        }
+    }
+
+    const fn local(name: &'static str, base_url: &'static str) -> Self {
+        Self {
+            name,
+            family: Family::OpenAICompatible,
+            base_url,
+            default_model: "llama3.3",
+            needs_extra_headers: false,
+            local: true,
+        }
+    }
+}
+
 const PROVIDERS: &[(&str, ProviderConfig)] = &[
-    (
-        "openai",
-        ProviderConfig {
-            name: "openai",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.openai.com/v1",
-            default_model: "gpt-4o-mini",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "groq",
-        ProviderConfig {
-            name: "groq",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.groq.com/openai/v1",
-            default_model: "llama-3.3-70b-versatile",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "mistral",
-        ProviderConfig {
-            name: "mistral",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.mistral.ai/v1",
-            default_model: "mistral-small-latest",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "together",
-        ProviderConfig {
-            name: "together",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.together.xyz/v1",
-            default_model: "meta-llama/Llama-3.1-8B-Instruct-Turbo",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "openrouter",
-        ProviderConfig {
-            name: "openrouter",
-            family: Family::OpenAICompatible,
-            base_url: "https://openrouter.ai/api/v1",
-            default_model: "qwen/qwen-2.5-72b-instruct",
-            needs_extra_headers: true,
-            local: false,
-        },
-    ),
-    (
-        "xai",
-        ProviderConfig {
-            name: "xai",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.x.ai/v1",
-            default_model: "grok-2-1212",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "deepseek",
-        ProviderConfig {
-            name: "deepseek",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.deepseek.com/v1",
-            default_model: "deepseek-chat",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "perplexity",
-        ProviderConfig {
-            name: "perplexity",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.perplexity.ai",
-            default_model: "llama-3.1-sonar-small-128k-chat",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "fireworks",
-        ProviderConfig {
-            name: "fireworks",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.fireworks.ai/inference/v1",
-            default_model: "qwen2.5-72b-instruct",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "cohere",
-        ProviderConfig {
-            name: "cohere",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.cohere.com/compatibility/v1",
-            default_model: "command-r-plus",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "huggingface",
-        ProviderConfig {
-            name: "huggingface",
-            family: Family::OpenAICompatible,
-            base_url: "https://router.huggingface.co/v1",
-            default_model: "meta-llama/Llama-3.3-70B-Instruct",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "sambanova",
-        ProviderConfig {
-            name: "sambanova",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.sambanova.ai/v1",
-            default_model: "Meta-Llama-3.1-8B-Instruct",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "poe",
-        ProviderConfig {
-            name: "poe",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.poe.com/v1",
-            default_model: "GPT-4o",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "cerebras",
-        ProviderConfig {
-            name: "cerebras",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.cerebras.ai/v1",
-            default_model: "llama-3.1-8b-chat-completion",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "nvidia",
-        ProviderConfig {
-            name: "nvidia",
-            family: Family::OpenAICompatible,
-            base_url: "https://integrate.api.nvidia.com/v1",
-            default_model: "meta/llama-3.1-8b-instruct",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "anyscale",
-        ProviderConfig {
-            name: "anyscale",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.endpoints.anyscale.com/v1",
-            default_model: "meta-llama/Llama-3.1-8B-Instruct",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "vercel",
-        ProviderConfig {
-            name: "vercel",
-            family: Family::OpenAICompatible,
-            base_url: "https://ai-gateway.vercel.sh/v1",
-            default_model: "meta-llama/Llama-3.1-8B-Instruct",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "cloudflare",
-        ProviderConfig {
-            name: "cloudflare",
-            family: Family::OpenAICompatible,
-            base_url: "https://gateway.ai.cloudflare.com/v1/_/cloudflare/workers-ai/openai",
-            default_model: "@cf/meta/llama-3.1-8b-instruct",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "azure",
-        ProviderConfig {
-            name: "azure",
-            family: Family::OpenAICompatible,
-            base_url: "",
-            default_model: "gpt-4o",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "ollama",
-        ProviderConfig {
-            name: "ollama",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:11434/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "lmstudio",
-        ProviderConfig {
-            name: "lmstudio",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:1234/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "vllm",
-        ProviderConfig {
-            name: "vllm",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:8000/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "llamacpp",
-        ProviderConfig {
-            name: "llamacpp",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:8080/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "llamafile",
-        ProviderConfig {
-            name: "llamafile",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:8080/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "koboldcpp",
-        ProviderConfig {
-            name: "koboldcpp",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:5001/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "text-generation-webui",
-        ProviderConfig {
-            name: "text-generation-webui",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:5000/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "localai",
-        ProviderConfig {
-            name: "localai",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:8080/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "jan",
-        ProviderConfig {
-            name: "jan",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:1337/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "gpt4all",
-        ProviderConfig {
-            name: "gpt4all",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:4891/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "aphrodite",
-        ProviderConfig {
-            name: "aphrodite",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:2242/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "sglang",
-        ProviderConfig {
-            name: "sglang",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:30000/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "tabbyapi",
-        ProviderConfig {
-            name: "tabbyapi",
-            family: Family::OpenAICompatible,
-            base_url: "http://localhost:5000/v1",
-            default_model: "llama3.3",
-            needs_extra_headers: false,
-            local: true,
-        },
-    ),
-    (
-        "gemini",
-        ProviderConfig {
-            name: "gemini",
-            family: Family::Gemini,
-            // Stable v1 API surface. The gemini module keeps an internal
-            // v1beta switch for testing experimental features — library
-            // users cannot select the version via the public API.
-            base_url: "https://generativelanguage.googleapis.com/v1",
-            // Current default on the v1 API. Older defaults are gone from
-            // v1: gemini-1.5-flash/2.5-flash return 404 ("not found for
-            // API version v1") and gemini-2.0-flash is rate-limited on
-            // free tiers — the docs-recommended gemini-3.6-flash works.
-            default_model: "gemini-3.6-flash",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "claude",
-        ProviderConfig {
-            name: "claude",
-            family: Family::Claude,
-            base_url: "https://api.anthropic.com/v1",
-            default_model: "claude-sonnet-4-6",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "zai",
-        ProviderConfig {
-            name: "zai",
-            family: Family::OpenAICompatible,
-            base_url: "https://api.z.ai/api/paas/v4",
-            default_model: "",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
-    (
-        "charm",
-        ProviderConfig {
-            name: "charm",
-            family: Family::OpenAICompatible,
-            base_url: "https://hyper.charm.land/v1",
-            default_model: "",
-            needs_extra_headers: false,
-            local: false,
-        },
-    ),
+    // ── Cloud providers ──────────────────────────────────────────────
+    ("openai", ProviderConfig::cloud("openai", Family::OpenAICompatible, "https://api.openai.com/v1", "gpt-4o-mini")),
+    ("groq", ProviderConfig::cloud("groq", Family::OpenAICompatible, "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile")),
+    ("mistral", ProviderConfig::cloud("mistral", Family::OpenAICompatible, "https://api.mistral.ai/v1", "mistral-small-latest")),
+    ("together", ProviderConfig::cloud("together", Family::OpenAICompatible, "https://api.together.xyz/v1", "meta-llama/Llama-3.1-8B-Instruct-Turbo")),
+    ("openrouter", ProviderConfig::cloud_extra("openrouter", Family::OpenAICompatible, "https://openrouter.ai/api/v1", "qwen/qwen-2.5-72b-instruct", true)),
+    ("xai", ProviderConfig::cloud("xai", Family::OpenAICompatible, "https://api.x.ai/v1", "grok-2-1212")),
+    ("deepseek", ProviderConfig::cloud("deepseek", Family::OpenAICompatible, "https://api.deepseek.com/v1", "deepseek-chat")),
+    ("perplexity", ProviderConfig::cloud("perplexity", Family::OpenAICompatible, "https://api.perplexity.ai", "llama-3.1-sonar-small-128k-chat")),
+    ("fireworks", ProviderConfig::cloud("fireworks", Family::OpenAICompatible, "https://api.fireworks.ai/inference/v1", "qwen2.5-72b-instruct")),
+    ("cohere", ProviderConfig::cloud("cohere", Family::OpenAICompatible, "https://api.cohere.com/compatibility/v1", "command-r-plus")),
+    ("huggingface", ProviderConfig::cloud("huggingface", Family::OpenAICompatible, "https://router.huggingface.co/v1", "meta-llama/Llama-3.3-70B-Instruct")),
+    ("sambanova", ProviderConfig::cloud("sambanova", Family::OpenAICompatible, "https://api.sambanova.ai/v1", "Meta-Llama-3.1-8B-Instruct")),
+    ("poe", ProviderConfig::cloud("poe", Family::OpenAICompatible, "https://api.poe.com/v1", "GPT-4o")),
+    ("cerebras", ProviderConfig::cloud("cerebras", Family::OpenAICompatible, "https://api.cerebras.ai/v1", "llama-3.1-8b-chat-completion")),
+    ("nvidia", ProviderConfig::cloud("nvidia", Family::OpenAICompatible, "https://integrate.api.nvidia.com/v1", "meta/llama-3.1-8b-instruct")),
+    ("anyscale", ProviderConfig::cloud("anyscale", Family::OpenAICompatible, "https://api.endpoints.anyscale.com/v1", "meta-llama/Llama-3.1-8B-Instruct")),
+    ("vercel", ProviderConfig::cloud("vercel", Family::OpenAICompatible, "https://ai-gateway.vercel.sh/v1", "meta-llama/Llama-3.1-8B-Instruct")),
+    ("cloudflare", ProviderConfig::cloud("cloudflare", Family::OpenAICompatible, "https://gateway.ai.cloudflare.com/v1/_/cloudflare/workers-ai/openai", "@cf/meta/llama-3.1-8b-instruct")),
+    ("azure", ProviderConfig::cloud("azure", Family::OpenAICompatible, "", "gpt-4o")),
+    // Non-OpenAI cloud providers
+    // gemini-3.6-flash: stable v1 default — older models (1.5-flash, 2.5-flash)
+    // return 404 on v1 and 2.0-flash is rate-limited on free tiers.
+    ("gemini", ProviderConfig::cloud("gemini", Family::Gemini, "https://generativelanguage.googleapis.com/v1", "gemini-3.6-flash")),
+    ("claude", ProviderConfig::cloud("claude", Family::Claude, "https://api.anthropic.com/v1", "claude-sonnet-4-6")),
+    ("zai", ProviderConfig::cloud("zai", Family::OpenAICompatible, "https://api.z.ai/api/paas/v4", "")),
+    ("charm", ProviderConfig::cloud("charm", Family::OpenAICompatible, "https://hyper.charm.land/v1", "")),
+    // ── Local providers (configured by URL, no API key) ──────────────
+    ("ollama", ProviderConfig::local("ollama", "http://localhost:11434/v1")),
+    ("lmstudio", ProviderConfig::local("lmstudio", "http://localhost:1234/v1")),
+    ("vllm", ProviderConfig::local("vllm", "http://localhost:8000/v1")),
+    ("llamacpp", ProviderConfig::local("llamacpp", "http://localhost:8080/v1")),
+    ("llamafile", ProviderConfig::local("llamafile", "http://localhost:8080/v1")),
+    ("koboldcpp", ProviderConfig::local("koboldcpp", "http://localhost:5001/v1")),
+    ("text-generation-webui", ProviderConfig::local("text-generation-webui", "http://localhost:5000/v1")),
+    ("localai", ProviderConfig::local("localai", "http://localhost:8080/v1")),
+    ("jan", ProviderConfig::local("jan", "http://localhost:1337/v1")),
+    ("gpt4all", ProviderConfig::local("gpt4all", "http://localhost:4891/v1")),
+    ("aphrodite", ProviderConfig::local("aphrodite", "http://localhost:2242/v1")),
+    ("sglang", ProviderConfig::local("sglang", "http://localhost:30000/v1")),
+    ("tabbyapi", ProviderConfig::local("tabbyapi", "http://localhost:5000/v1")),
 ];
 
 const API_KEY_ENVS: &[(&str, &str)] = &[
@@ -591,12 +277,14 @@ pub fn normalize_local_base_url(provider: &str, url: &str) -> String {
     if cfg.family != Family::OpenAICompatible {
         return url.to_string();
     }
-    let parsed = url.split('/').collect::<Vec<_>>();
-    // A path is present when there are 4+ segments (scheme://host/[path…]).
-    if parsed.len() > 3 && !parsed[3].is_empty() {
-        return url.to_string();
+    // Use a proper URL parser instead of fragile string splitting — handles
+    // ports, query strings, and edge cases like `http://` or `https://host/`.
+    match reqwest::Url::parse(url) {
+        Ok(parsed) if parsed.path() == "/" || parsed.path().is_empty() => {
+            format!("{url}/v1")
+        }
+        _ => url.to_string(),
     }
-    format!("{url}/v1")
 }
 
 /// Return the environment variable name for a given provider's API key.
