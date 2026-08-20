@@ -4026,3 +4026,299 @@ fn test_running_read_stays_inline() {
     );
     assert_eq!(view.actual_total_height, view.cached_total_height);
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Incremental streaming cache: byte-identity vs a full render
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Build a minimal assistant message with a single non-synthetic Text part.
+fn assistant_text_msg(id: &str, text: &str) -> Message {
+    Message {
+        id: id.into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Text(TextPart {
+            text: text.to_string(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    }
+}
+
+/// Assert that growing a streaming message chunk-by-chunk through the session
+/// view (status `Working`, so the incremental cache is active) produces the
+/// exact same buffer as rendering the fully concatenated message once.
+///
+/// This is the strongest correctness check for the tail-split logic: the
+/// incremental cache patches only the trailing open block each frame, so the
+/// final cells must be byte-identical (glyph, fg, bg, modifiers) to a fresh
+/// full render.
+fn assert_stream_matches_full(chunks: &[&str], area: Rect) {
+    let theme = test_theme();
+    let config = test_config();
+
+    let full_text: String = chunks.concat();
+    let full_state = test_state(assistant_text_msg("msg-stream", &full_text));
+    let mut truth_view = SessionView::new();
+    let mut truth_buf = Buffer::empty(area);
+    truth_view.render(&mut truth_buf, area, &full_state, &theme, &config, 0.016);
+
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+    let mut acc = String::new();
+    for chunk in chunks {
+        acc.push_str(chunk);
+        let state = test_state(assistant_text_msg("msg-stream", &acc));
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    }
+
+    let mut diffs = 0usize;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let (Some(a), Some(b)) = (truth_buf.cell((x, y)), buf.cell((x, y))) else {
+                continue;
+            };
+            if a.symbol() != b.symbol() || a.fg != b.fg || a.bg != b.bg || a.modifier != b.modifier
+            {
+                diffs += 1;
+                if diffs <= 10 {
+                    eprintln!(
+                        "DIFF at ({x},{y}): truth={:?} got={:?}",
+                        (a.symbol(), a.fg, a.bg, a.modifier),
+                        (b.symbol(), b.fg, b.bg, b.modifier)
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        diffs, 0,
+        "incremental streaming render differs from a full render in {diffs} cells"
+    );
+}
+
+/// A paragraph grown line-by-line — the split-invariance for soft breaks.
+#[test]
+fn test_stream_matches_full_paragraph() {
+    assert_stream_matches_full(
+        &[
+            "Intro line one.\n",
+            "Intro line two.\n",
+            "Second paragraph with **bold** and *italic* words that wrap.\n",
+            "Third paragraph completes the message.\n",
+        ],
+        Rect::new(0, 0, 120, 80),
+    );
+}
+
+/// An open then closed code fence.
+#[test]
+fn test_stream_matches_full_fence() {
+    assert_stream_matches_full(
+        &[
+            "```rust\n",
+            "fn main() {\n",
+            "    println!(\"hi\");\n",
+            "}\n",
+            "```\n",
+            "\nTrailing paragraph after the fence.\n",
+        ],
+        Rect::new(0, 0, 120, 80),
+    );
+}
+
+/// A markdown list grown item by item.
+#[test]
+fn test_stream_matches_full_list() {
+    assert_stream_matches_full(
+        &[
+            "- first item\n",
+            "- second item with **bold**\n",
+            "- third item\n",
+        ],
+        Rect::new(0, 0, 120, 80),
+    );
+}
+
+/// A blockquote grown line by line.
+#[test]
+fn test_stream_matches_full_quote() {
+    assert_stream_matches_full(
+        &[
+            "> quote line one\n",
+            "> quote line two\n",
+            "> quote line three\n",
+        ],
+        Rect::new(0, 0, 120, 80),
+    );
+}
+
+/// Mixed content streamed in small increments.
+#[test]
+fn test_stream_matches_full_mixed() {
+    assert_stream_matches_full(
+        &[
+            "## Heading\n\n",
+            "Paragraph with **bold**, *italics*, and `code` spans. ",
+            "continued text that wraps across several lines. ",
+            "\n\n```rust\n",
+            "let x = 1;\n",
+            "let y = 2;\n",
+            "```\n\n",
+            "- list one\n",
+            "- list two\n",
+            "\n",
+            "> quoted wisdom\n",
+            "> more wisdom\n",
+        ],
+        Rect::new(0, 0, 120, 80),
+    );
+}
+
+/// Same byte-identity check when the message overflows the viewport (top
+/// clipped while auto-scroll stays at the bottom). Also verifies the streaming
+/// heights are stable: both paths must anchor to the same bottom offset.
+#[test]
+fn test_stream_matches_full_overflow() {
+    let chunks: Vec<String> = (0..30)
+        .map(|i| {
+            format!("### Section {i}\nSome paragraph text that wraps around to fill rows.\n\n")
+        })
+        .collect();
+    let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+    assert_stream_matches_full(&chunk_refs, Rect::new(0, 0, 60, 24));
+}
+
+/// A streaming text part AFTER a stable reasoning part: the reasoning box is
+/// rendered once (fresh cache) and the text tail patches below it.
+#[test]
+fn test_stream_matches_full_reasoning_then_text() {
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 120, 80);
+
+    let reasoning = "Step-by-step reasoning\nMore reasoning lines.\n";
+
+    let full_text: String = [
+        "Reply paragraph one.\n",
+        "Reply paragraph two with **bold**.\n",
+    ]
+    .concat();
+    let make_msg = |text: &str| Message {
+        id: "msg-stream".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            Part::Reasoning(ReasoningPart {
+                text: reasoning.to_string(),
+                collapsed: false,
+            }),
+            Part::Text(TextPart {
+                text: text.to_string(),
+                synthetic: false,
+            }),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+
+    let truth_state = test_state(make_msg(&full_text));
+    let mut truth_view = SessionView::new();
+    let mut truth_buf = Buffer::empty(area);
+    truth_view.render(&mut truth_buf, area, &truth_state, &theme, &config, 0.016);
+
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+    let mut acc = String::new();
+    for chunk in [
+        "Reply paragraph one.\n",
+        "Reply paragraph two with **bold**.\n",
+    ] {
+        acc.push_str(chunk);
+        let state = test_state(make_msg(&acc));
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    }
+
+    let mut diffs = 0usize;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let (Some(a), Some(b)) = (truth_buf.cell((x, y)), buf.cell((x, y))) else {
+                continue;
+            };
+            if a.symbol() != b.symbol() || a.fg != b.fg || a.bg != b.bg || a.modifier != b.modifier
+            {
+                diffs += 1;
+            }
+        }
+    }
+    assert_eq!(
+        diffs, 0,
+        "reasoning+text streaming render differs from a full render in {diffs} cells"
+    );
+}
+
+/// The incremental path must be far cheaper than re-rendering the whole
+/// message every frame: stream a 4000-word message in 30 growth steps and
+/// compare the total time against one full render of the final text.
+#[test]
+fn test_streaming_growth_is_incremental() {
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 100, 120);
+
+    let msg = build_streaming_message(4000);
+    let Part::Text(t) = &msg.parts[0] else {
+        unreachable!();
+    };
+    let full_text = t.text.clone();
+
+    // Reference: one full render of the final message (cold streaming cache).
+    let full_state = test_state(assistant_text_msg("msg-stream", &full_text));
+    let mut ref_view = SessionView::new();
+    let mut ref_buf = Buffer::empty(area);
+    let t_full = render_and_time(
+        &mut ref_view,
+        &mut ref_buf,
+        area,
+        &full_state,
+        &theme,
+        &config,
+    );
+    eprintln!("[GROWTH] full render of 4000 words: {t_full:?}");
+
+    // Incremental: grow the message 30 times, always to a line boundary so the
+    // split points stay in additive territory.
+    let mut prefixes = Vec::with_capacity(30);
+    for i in 1..=30 {
+        let target = full_text.len() * i / 30;
+        let mut cut = target;
+        if cut < full_text.len() {
+            while cut < full_text.len() && full_text.as_bytes()[cut] != b'\n' {
+                cut += 1;
+            }
+        }
+        prefixes.push(full_text[..cut.min(full_text.len())].to_string());
+    }
+    *prefixes.last_mut().unwrap() = full_text.clone();
+
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+    let mut stream_total = std::time::Duration::ZERO;
+    let mut worst = std::time::Duration::ZERO;
+    for (i, pfx) in prefixes.iter().enumerate() {
+        let state = test_state(assistant_text_msg("msg-stream", pfx));
+        let t = render_and_time(&mut view, &mut buf, area, &state, &theme, &config);
+        stream_total += t;
+        worst = worst.max(t);
+        eprintln!("[GROWTH] frame {i:02}: {t:?}");
+    }
+    eprintln!(
+        "[GROWTH] total incremental: {stream_total:?} (full render {t_full:?}, worst frame {worst:?})"
+    );
+
+    assert!(
+        stream_total < t_full.saturating_mul(3),
+        "streaming growth ({stream_total:?}) should cost far less than 3 full renders ({t_full:?})"
+    );
+}

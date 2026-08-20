@@ -1,4 +1,5 @@
 pub mod footer;
+pub mod streaming;
 pub mod tool_render;
 
 pub mod permission;
@@ -10,7 +11,7 @@ pub mod subagent_footer;
 #[cfg(test)]
 mod tests;
 
-use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::buffer::{Buffer, Cell, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
@@ -426,6 +427,10 @@ pub struct SessionView {
     msg_cache_last_used: Vec<u64>,
     /// Approximate live bytes held by `msg_cache_cells` + `msg_cache_text_regions`.
     msg_cache_bytes: usize,
+    /// Persistent render of the streaming last message: stable non-text parts
+    /// rendered once, the streaming text part patched incrementally (see
+    /// `streaming` module). Freed when nothing is streaming.
+    streaming_msg: Option<streaming::StreamingMessageCache>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -439,14 +444,20 @@ fn text_regions_generation(
     config: &TuiConfig,
     max_w: u16,
     tool_state_version: u64,
+    stream_token: u64,
 ) -> u64 {
     let mut g: u64 = session.messages.len() as u64;
     g = g.wrapping_mul(31).wrapping_add(max_w as u64);
     g = g.wrapping_mul(31).wrapping_add(config_token(config));
     g = g.wrapping_mul(31).wrapping_add(tool_state_version);
-    if let Some(last) = session.messages.last() {
-        g = g.wrapping_mul(31).wrapping_add(msg_change_token(last));
-    }
+    // NOTE: the previous code folded `msg_change_token(last)` (a full content
+    // hash of the last message) into this generation. For a long streamed
+    // message that hash is O(n) and ran on EVERY frame — even after streaming
+    // finished — re-parsing nothing but still forcing `build_text_regions` to
+    // run every frame. The streaming cache now keeps the streaming message's
+    // regions fresh incrementally, so the caller passes a cheap O(1) token
+    // that changes only while the message actually grows.
+    g = g.wrapping_mul(31).wrapping_add(stream_token);
     g
 }
 
@@ -514,6 +525,7 @@ impl SessionView {
             render_frame: 0,
             msg_cache_last_used: Vec::new(),
             msg_cache_bytes: 0,
+            streaming_msg: None,
             last_session_id: None,
             last_tool_state_version: 0,
         }
@@ -1810,7 +1822,7 @@ impl SessionView {
         let click_x = i32::from(mouse.x);
         let click_y = i32::from(mouse.y);
 
-        self.ensure_height_caches_fresh(session, max_w, config);
+        self.ensure_height_caches_fresh(session, max_w, config, None);
 
         // Binary search for the message that contains the click position,
         // using the prefix-y array directly (no O(n) per-click allocation of
@@ -2005,6 +2017,193 @@ impl SessionView {
         y
     }
 
+    /// Maintain the persistent render cache for the streaming last message.
+    ///
+    /// While tokens append to the last `Text` part, this renders the message's
+    /// stable non-text parts once and patches only the streaming text part's
+    /// tail each frame (O(delta)), so the walk can blit the whole message from
+    /// `self.streaming_msg.cells` instead of re-parsing and re-rendering the
+    /// growing message every frame. Returns the per-part heights for the
+    /// height cache, or `None` when nothing is streaming (the caller falls
+    /// back to the regular per-message cache path).
+    fn update_streaming_message_cache(
+        &mut self,
+        session: &crate::types::Session,
+        inner_area: Rect,
+        max_w: u16,
+        config: &TuiConfig,
+        theme: &Theme,
+        streaming: bool,
+    ) -> Option<streaming::StreamState> {
+        if !streaming {
+            self.streaming_msg = None;
+            return None;
+        }
+        let Some(msg) = session.messages.last() else {
+            self.streaming_msg = None;
+            return None;
+        };
+        // Only a non-error assistant message whose LAST part is a growing Text
+        // part can be rendered incrementally. Anything else (a running tool
+        // box, an error message, ...) falls back to the regular full-render
+        // path.
+        if msg.role != MessageRole::Assistant
+            || msg.id.starts_with("msg-err-")
+            || !matches!(msg.parts.last(), Some(Part::Text(t)) if !t.synthetic)
+        {
+            self.streaming_msg = None;
+            return None;
+        }
+        let config_tok = config_token(config);
+        let width = inner_area.width;
+        let text_pi = msg.parts.len() - 1;
+
+        let identity_ok = self.streaming_msg.as_ref().is_some_and(|sc| {
+            sc.message_id == msg.id
+                && sc.width == width
+                && sc.max_w == max_w
+                && sc.config_token == config_tok
+                && sc.tool_state_version == self.tool_state.version
+                && sc.part_hs.len() == msg.parts.len()
+                && sc.text.as_ref().is_some_and(|t| t.part_index == text_pi)
+        });
+
+        let Part::Text(text_part) = &msg.parts[text_pi] else {
+            unreachable!();
+        };
+
+        if !identity_ok {
+            // ── Fresh cache: render the whole message once ──
+            let mut part_hs: Vec<u16> = msg
+                .parts
+                .iter()
+                .enumerate()
+                .map(|(pi, p)| {
+                    if pi == text_pi {
+                        1 // placeholder; patched below from the text cache
+                    } else {
+                        Self::estimate_part_height(p, max_w, config, &msg.role, &self.tool_state)
+                    }
+                })
+                .collect();
+            let mut text_cache = streaming::StreamingTextCache::new(
+                msg.id.clone(),
+                text_pi,
+                max_w,
+                config_tok,
+                theme,
+            );
+            let (_, text_h) =
+                text_cache.update(&text_part.text, max_w, config_tok, config.conceal, theme);
+            part_hs[text_pi] = text_h;
+            let msg_h: u16 = part_hs.iter().sum::<u16>().max(1);
+            let full_area = Rect::new(0, 0, width, msg_h);
+            let temp = self.scratch.get_or_insert_with(|| Buffer::empty(full_area));
+            if *temp.area() != full_area {
+                temp.resize(full_area);
+            }
+            temp.reset();
+            temp.set_style(full_area, Style::default().bg(rgba_color(theme.background)));
+            Self::render_assistant_message(
+                temp,
+                full_area,
+                msg,
+                theme,
+                &mut self.tool_state,
+                config,
+                false,
+                false,
+                &part_hs,
+                true,
+            );
+            let part_offset: u16 = part_hs[..text_pi].iter().sum();
+            let mut cells = Vec::with_capacity(width as usize * msg_h as usize);
+            let temp_cells = temp.content();
+            let stride = width as usize;
+            for dy in 0..msg_h as usize {
+                for dx in 0..stride {
+                    cells.push(temp_cells[dy * stride + dx].clone());
+                }
+            }
+            self.streaming_msg = Some(streaming::StreamingMessageCache {
+                message_id: msg.id.clone(),
+                width,
+                max_w,
+                config_token: config_tok,
+                tool_state_version: self.tool_state.version,
+                part_hs,
+                cells,
+                height: msg_h,
+                text: Some(text_cache),
+                last_tail: Some((part_offset, part_offset + text_h)),
+            });
+        } else {
+            // ── Incremental: patch the streaming text part's tail ──
+            let sc = self.streaming_msg.as_mut().unwrap();
+            let text_cache = sc.text.as_mut().unwrap();
+            let (render_row, text_h) =
+                text_cache.update(&text_part.text, max_w, config_tok, config.conceal, theme);
+            sc.part_hs[text_pi] = text_h;
+            let msg_h: u16 = sc.part_hs.iter().sum::<u16>().max(1);
+            let old_h = sc.height;
+            let x_off = 3u16; // text column within the message cells (area-relative)
+            let part_offset: u16 = sc.part_hs[..text_pi].iter().sum();
+            let row_end = part_offset + text_h;
+
+            // Grow the cell buffer, preserving content; fill the new rows with
+            // the background and carry the border glyph down.
+            let stride = width as usize;
+            let new_cap = stride * msg_h as usize;
+            if new_cap > sc.cells.len() {
+                let border = sc.cells.first().cloned().unwrap_or_default();
+                sc.cells.resize(new_cap, Cell::default());
+                for dy in old_h..msg_h {
+                    let base = dy as usize * stride;
+                    for dx in 1..stride {
+                        let mut c = Cell::default();
+                        c.set_bg(rgba_color(theme.background));
+                        c.set_char(' ');
+                        sc.cells[base + dx] = c;
+                    }
+                    sc.cells[base] = border.clone();
+                }
+            }
+            // Patch the re-rendered text rows from the text cache. The text
+            // cache's buffer rows are indexed absolutely (the re-render was
+            // written into `self.cells` at `area.y = render_row`), so text row
+            // `dy` lives at `dy * tc_w` in the cache's content.
+            let tc_cells = text_cache.content();
+            let tc_w = max_w as usize;
+            for dy in render_row..text_h {
+                let dst_row = part_offset + dy;
+                if dst_row >= msg_h {
+                    break;
+                }
+                let dst_base = dst_row as usize * stride;
+                let src_base = dy as usize * tc_w;
+                for dx in 1..stride {
+                    let mut c = Cell::default();
+                    c.set_bg(rgba_color(theme.background));
+                    c.set_char(' ');
+                    sc.cells[dst_base + dx] = c;
+                }
+                for dx in 0..tc_w {
+                    sc.cells[dst_base + x_off as usize + dx] = tc_cells[src_base + dx].clone();
+                }
+            }
+            sc.height = msg_h;
+            sc.last_tail = Some((part_offset + render_row, row_end));
+        }
+
+        let sc = self.streaming_msg.as_ref().unwrap();
+        Some(streaming::StreamState {
+            message_id: sc.message_id.clone(),
+            part_hs: sc.part_hs.clone(),
+            height: sc.height,
+            raw_len: sc.text.as_ref().map_or(0, |t| t.raw_len()),
+        })
+    }
+
     /// Ensure height caches match the current session. Performs a full rebuild
     /// if terminal width changed or config changed. If only message count grew
     /// (new messages appended), extends the cache incrementally without touching
@@ -2017,6 +2216,7 @@ impl SessionView {
         session: &crate::types::Session,
         max_w: u16,
         config: &TuiConfig,
+        stream_state: Option<&streaming::StreamState>,
     ) -> HeightCacheUpdate {
         let config_tok = config_token(config);
         let session_changed = self.last_session_id.as_deref() != Some(session.id.as_str());
@@ -2184,6 +2384,16 @@ impl SessionView {
             // O(whole transcript) every frame for nothing.
             let mut any_changed = false;
             let mut changed_last = false;
+            // When the streaming cache is live for the last message, its
+            // per-part heights are authoritative and were already brought up to
+            // date by `update_streaming_message_cache` this frame. Skip the
+            // O(n) content hash + per-part re-estimate entirely.
+            let stream_ident = stream_state.filter(|s| {
+                session
+                    .messages
+                    .last()
+                    .is_some_and(|m| s.message_id == m.id)
+            });
             if !self.msg_height_cache.is_empty() {
                 let last_idx = session.messages.len() - 1;
                 // Take last pass's mutable set (carried over to catch an
@@ -2197,6 +2407,27 @@ impl SessionView {
                 };
                 for (idx, msg) in session.messages.iter().enumerate() {
                     if !is_candidate(idx) {
+                        continue;
+                    }
+                    if idx == last_idx
+                        && let Some(s) = stream_ident
+                    {
+                        // Streaming message: use the cache's heights without
+                        // hashing. The stored token is the cache height — a
+                        // cheap monotonic stand-in; once streaming ends the
+                        // normal `msg_change_token` path re-estimates once and
+                        // replaces it.
+                        if self.msg_height_cache.get(idx) != Some(&(s.height as i32)) {
+                            if idx < self.part_heights_cache.len() {
+                                self.part_heights_cache[idx] = s.part_hs.clone();
+                                self.msg_height_cache[idx] = s.height as i32;
+                            }
+                            if idx < self.msg_change_tokens.len() {
+                                self.msg_change_tokens[idx] = s.height as u64;
+                            }
+                            changed_last = true;
+                            any_changed = true;
+                        }
                         continue;
                     }
                     let token = msg_change_token(msg);
@@ -2240,8 +2471,12 @@ impl SessionView {
                 // after the first changed message shifts — rebuild the whole
                 // prefix_y (O(n) sums) and the cached total.
                 self.cached_total_height = self.rebuild_prefix_y();
-                self.last_msg_change_token =
-                    session.messages.last().map(msg_change_token).unwrap_or(0);
+                self.last_msg_change_token = if let Some(s) = stream_ident {
+                    // Streaming: avoid the O(n) hash of the last message.
+                    s.height as u64
+                } else {
+                    session.messages.last().map(msg_change_token).unwrap_or(0)
+                };
                 self.last_session_id = Some(session.id.clone());
                 self.last_tool_state_version = self.tool_state.version;
                 // Sync actual_total_height using .max() — see note above.
@@ -2340,6 +2575,62 @@ impl SessionView {
                     if p_bottom > vp_top && p_top < vp_bottom {
                         match part {
                             crate::types::Part::Text(t) if !t.synthetic => {
+                                // ── Streaming last message: regions straight from the
+                                // incremental cache ── `update_streaming_message_cache`
+                                // (which runs before this in render()) already refreshed
+                                // the text-part cells this frame, so only the viewport
+                                // rows are converted to regions (O(visible)); no re-parse
+                                // and no full-content sanitize per frame.
+                                if msg.role == MessageRole::Assistant
+                                    && self.streaming_msg.as_ref().is_some_and(|sc| {
+                                        sc.message_id == msg.id
+                                            && sc
+                                                .text
+                                                .as_ref()
+                                                .is_some_and(|tc| tc.part_index == pi)
+                                    })
+                                {
+                                    let sc = self.streaming_msg.as_ref().unwrap();
+                                    if let Some(tc) = sc.text.as_ref() {
+                                        let tc_cells = tc.content();
+                                        let tc_w = tc.width as usize;
+                                        let screen_start = p_top.max(vp_top) as u16;
+                                        let screen_end = p_bottom.min(vp_bottom) as u16;
+                                        if screen_start < screen_end {
+                                            let first_dy = (screen_start as i32 - p_top) as u16;
+                                            for (screen_line_y, dy) in
+                                                (screen_start..).zip(first_dy..tc.height)
+                                            {
+                                                if screen_line_y >= screen_end {
+                                                    break;
+                                                }
+                                                let base = dy as usize * tc_w;
+                                                let mut line_text = String::with_capacity(tc_w);
+                                                for dx in 0..tc_w {
+                                                    line_text.push(
+                                                        tc_cells[base + dx]
+                                                            .symbol()
+                                                            .chars()
+                                                            .next()
+                                                            .unwrap_or(' '),
+                                                    );
+                                                }
+                                                let trimmed = line_text.trim_end().to_string();
+                                                let cy = (screen_line_y as i32) - vp_top + scroll;
+                                                text_regions.push(TextRegion {
+                                                    y1: cy,
+                                                    y2: cy + 1,
+                                                    x1: x_off,
+                                                    x2: x_off + max_w,
+                                                    text: trimmed,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    part_y += part_h;
+                                    continue;
+                                }
+
                                 let content = if config.conceal {
                                     conceal_text(&t.text)
                                 } else {
@@ -2779,7 +3070,10 @@ impl SessionView {
         let _frame_start = Instant::now();
 
         let config_tok = config_token(config);
-        let height_update = self.ensure_height_caches_fresh(session, max_w, config);
+        let stream_state = self
+            .update_streaming_message_cache(session, inner_area, max_w, config, theme, streaming);
+        let height_update =
+            self.ensure_height_caches_fresh(session, max_w, config, stream_state.as_ref());
 
         // Ensure render cache vectors match message count
         let n_msgs = session.messages.len();
@@ -2828,7 +3122,25 @@ impl SessionView {
             self.last_content_height = total_height;
         }
 
-        let regions_gen = text_regions_generation(session, config, max_w, self.tool_state.version);
+        let stream_token = stream_state.as_ref().map_or_else(
+            // Not streaming: use the render cache's stored content token
+            // for the last message. `msg_cache_tokens[last]` is refreshed
+            // by the walk whenever a non-streaming message re-renders
+            // (content change or eviction), so an in-place edit of the last
+            // message still rebuilds its selection regions — one frame
+            // later, without the O(n) per-frame hash this generation used
+            // to pay. Streaming ignores it (the streaming cache keeps the
+            // streaming message's regions fresh incrementally).
+            || self.msg_cache_tokens.last().copied().unwrap_or(0),
+            |s| s.raw_len as u64,
+        );
+        let regions_gen = text_regions_generation(
+            session,
+            config,
+            max_w,
+            self.tool_state.version,
+            stream_token,
+        );
         if regions_gen != self.text_regions_gen {
             let _regions_start = Instant::now();
             self.build_text_regions(session, inner_area, max_w, config, theme);
@@ -2915,7 +3227,34 @@ impl SessionView {
             let mut render_actual_h = msg_h;
 
             // Check if message overlaps with viewport (using i32, no u16 wrap)
-            if msg_bottom > vp_top && msg_top < vp_bottom {
+            if stream_state.is_some() && idx == n_msgs - 1 {
+                // ── Streaming last message: blit the incremental cache ──
+                // `update_streaming_message_cache` refreshed the cells this
+                // frame (before the height cache ran), so the blit is O(visible
+                // rows) with no re-parse and no full re-render. Text regions
+                // for this message are built from the same cache in
+                // `build_text_regions`.
+                self.msg_cache_last_used[idx] = self.render_frame;
+                if let Some(sc) = self.streaming_msg.as_ref() {
+                    let cached_w = sc.width as usize;
+                    let cached_h = sc.height;
+                    let src_y = (vp_top - msg_top).max(0) as u16;
+                    let dst_y = msg_top.max(vp_top) as u16;
+                    let vis_h =
+                        ((cached_h as i32).min(vp_bottom - msg_top) - src_y as i32).max(0) as u16;
+                    let dst_x = inner_area.x;
+                    for dy in 0..vis_h {
+                        let base = (src_y + dy) as usize * cached_w;
+                        let dst_line_y = dst_y + dy;
+                        for dx in 0..cached_w {
+                            if let Some(dst) = buf.cell_mut((dst_x + dx as u16, dst_line_y)) {
+                                *dst = sc.cells[base + dx].clone();
+                            }
+                        }
+                    }
+                    render_actual_h = cached_h as i32;
+                }
+            } else if msg_bottom > vp_top && msg_top < vp_bottom {
                 // Recency stamp for the render-cache LRU: any message the user
                 // can currently see counts as recently used.
                 self.msg_cache_last_used[idx] = self.render_frame;
