@@ -144,46 +144,265 @@ impl ProviderConfig {
 
 const PROVIDERS: &[(&str, ProviderConfig)] = &[
     // ── Cloud providers ──────────────────────────────────────────────
-    ("openai", ProviderConfig::cloud("openai", Family::OpenAICompatible, "https://api.openai.com/v1", "gpt-4o-mini")),
-    ("groq", ProviderConfig::cloud("groq", Family::OpenAICompatible, "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile")),
-    ("mistral", ProviderConfig::cloud("mistral", Family::OpenAICompatible, "https://api.mistral.ai/v1", "mistral-small-latest")),
-    ("together", ProviderConfig::cloud("together", Family::OpenAICompatible, "https://api.together.xyz/v1", "meta-llama/Llama-3.1-8B-Instruct-Turbo")),
-    ("openrouter", ProviderConfig::cloud_extra("openrouter", Family::OpenAICompatible, "https://openrouter.ai/api/v1", "qwen/qwen-2.5-72b-instruct", true)),
-    ("xai", ProviderConfig::cloud("xai", Family::OpenAICompatible, "https://api.x.ai/v1", "grok-2-1212")),
-    ("deepseek", ProviderConfig::cloud("deepseek", Family::OpenAICompatible, "https://api.deepseek.com/v1", "deepseek-chat")),
-    ("perplexity", ProviderConfig::cloud("perplexity", Family::OpenAICompatible, "https://api.perplexity.ai", "llama-3.1-sonar-small-128k-chat")),
-    ("fireworks", ProviderConfig::cloud("fireworks", Family::OpenAICompatible, "https://api.fireworks.ai/inference/v1", "qwen2.5-72b-instruct")),
-    ("cohere", ProviderConfig::cloud("cohere", Family::OpenAICompatible, "https://api.cohere.com/compatibility/v1", "command-r-plus")),
-    ("huggingface", ProviderConfig::cloud("huggingface", Family::OpenAICompatible, "https://router.huggingface.co/v1", "meta-llama/Llama-3.3-70B-Instruct")),
-    ("sambanova", ProviderConfig::cloud("sambanova", Family::OpenAICompatible, "https://api.sambanova.ai/v1", "Meta-Llama-3.1-8B-Instruct")),
-    ("poe", ProviderConfig::cloud("poe", Family::OpenAICompatible, "https://api.poe.com/v1", "GPT-4o")),
-    ("cerebras", ProviderConfig::cloud("cerebras", Family::OpenAICompatible, "https://api.cerebras.ai/v1", "llama-3.1-8b-chat-completion")),
-    ("nvidia", ProviderConfig::cloud("nvidia", Family::OpenAICompatible, "https://integrate.api.nvidia.com/v1", "meta/llama-3.1-8b-instruct")),
-    ("anyscale", ProviderConfig::cloud("anyscale", Family::OpenAICompatible, "https://api.endpoints.anyscale.com/v1", "meta-llama/Llama-3.1-8B-Instruct")),
-    ("vercel", ProviderConfig::cloud("vercel", Family::OpenAICompatible, "https://ai-gateway.vercel.sh/v1", "meta-llama/Llama-3.1-8B-Instruct")),
-    ("cloudflare", ProviderConfig::cloud("cloudflare", Family::OpenAICompatible, "https://gateway.ai.cloudflare.com/v1/_/cloudflare/workers-ai/openai", "@cf/meta/llama-3.1-8b-instruct")),
-    ("azure", ProviderConfig::cloud("azure", Family::OpenAICompatible, "", "gpt-4o")),
+    (
+        "openai",
+        ProviderConfig::cloud(
+            "openai",
+            Family::OpenAICompatible,
+            "https://api.openai.com/v1",
+            "gpt-4o-mini",
+        ),
+    ),
+    (
+        "groq",
+        ProviderConfig::cloud(
+            "groq",
+            Family::OpenAICompatible,
+            "https://api.groq.com/openai/v1",
+            "llama-3.3-70b-versatile",
+        ),
+    ),
+    (
+        "mistral",
+        ProviderConfig::cloud(
+            "mistral",
+            Family::OpenAICompatible,
+            "https://api.mistral.ai/v1",
+            "mistral-small-latest",
+        ),
+    ),
+    (
+        "together",
+        ProviderConfig::cloud(
+            "together",
+            Family::OpenAICompatible,
+            "https://api.together.xyz/v1",
+            "meta-llama/Llama-3.1-8B-Instruct-Turbo",
+        ),
+    ),
+    (
+        "openrouter",
+        ProviderConfig::cloud_extra(
+            "openrouter",
+            Family::OpenAICompatible,
+            "https://openrouter.ai/api/v1",
+            "qwen/qwen-2.5-72b-instruct",
+            true,
+        ),
+    ),
+    (
+        "xai",
+        ProviderConfig::cloud(
+            "xai",
+            Family::OpenAICompatible,
+            "https://api.x.ai/v1",
+            "grok-2-1212",
+        ),
+    ),
+    (
+        "deepseek",
+        ProviderConfig::cloud(
+            "deepseek",
+            Family::OpenAICompatible,
+            "https://api.deepseek.com/v1",
+            "deepseek-chat",
+        ),
+    ),
+    (
+        "perplexity",
+        ProviderConfig::cloud(
+            "perplexity",
+            Family::OpenAICompatible,
+            "https://api.perplexity.ai",
+            "llama-3.1-sonar-small-128k-chat",
+        ),
+    ),
+    (
+        "fireworks",
+        ProviderConfig::cloud(
+            "fireworks",
+            Family::OpenAICompatible,
+            "https://api.fireworks.ai/inference/v1",
+            "qwen2.5-72b-instruct",
+        ),
+    ),
+    (
+        "cohere",
+        ProviderConfig::cloud(
+            "cohere",
+            Family::OpenAICompatible,
+            "https://api.cohere.com/compatibility/v1",
+            "command-r-plus",
+        ),
+    ),
+    (
+        "huggingface",
+        ProviderConfig::cloud(
+            "huggingface",
+            Family::OpenAICompatible,
+            "https://router.huggingface.co/v1",
+            "meta-llama/Llama-3.3-70B-Instruct",
+        ),
+    ),
+    (
+        "sambanova",
+        ProviderConfig::cloud(
+            "sambanova",
+            Family::OpenAICompatible,
+            "https://api.sambanova.ai/v1",
+            "Meta-Llama-3.1-8B-Instruct",
+        ),
+    ),
+    (
+        "poe",
+        ProviderConfig::cloud(
+            "poe",
+            Family::OpenAICompatible,
+            "https://api.poe.com/v1",
+            "GPT-4o",
+        ),
+    ),
+    (
+        "cerebras",
+        ProviderConfig::cloud(
+            "cerebras",
+            Family::OpenAICompatible,
+            "https://api.cerebras.ai/v1",
+            "llama-3.1-8b-chat-completion",
+        ),
+    ),
+    (
+        "nvidia",
+        ProviderConfig::cloud(
+            "nvidia",
+            Family::OpenAICompatible,
+            "https://integrate.api.nvidia.com/v1",
+            "meta/llama-3.1-8b-instruct",
+        ),
+    ),
+    (
+        "anyscale",
+        ProviderConfig::cloud(
+            "anyscale",
+            Family::OpenAICompatible,
+            "https://api.endpoints.anyscale.com/v1",
+            "meta-llama/Llama-3.1-8B-Instruct",
+        ),
+    ),
+    (
+        "vercel",
+        ProviderConfig::cloud(
+            "vercel",
+            Family::OpenAICompatible,
+            "https://ai-gateway.vercel.sh/v1",
+            "meta-llama/Llama-3.1-8B-Instruct",
+        ),
+    ),
+    (
+        "cloudflare",
+        ProviderConfig::cloud(
+            "cloudflare",
+            Family::OpenAICompatible,
+            "https://gateway.ai.cloudflare.com/v1/_/cloudflare/workers-ai/openai",
+            "@cf/meta/llama-3.1-8b-instruct",
+        ),
+    ),
+    (
+        "azure",
+        ProviderConfig::cloud("azure", Family::OpenAICompatible, "", "gpt-4o"),
+    ),
     // Non-OpenAI cloud providers
     // gemini-3.6-flash: stable v1 default — older models (1.5-flash, 2.5-flash)
     // return 404 on v1 and 2.0-flash is rate-limited on free tiers.
-    ("gemini", ProviderConfig::cloud("gemini", Family::Gemini, "https://generativelanguage.googleapis.com/v1", "gemini-3.6-flash")),
-    ("claude", ProviderConfig::cloud("claude", Family::Claude, "https://api.anthropic.com/v1", "claude-sonnet-4-6")),
-    ("zai", ProviderConfig::cloud("zai", Family::OpenAICompatible, "https://api.z.ai/api/paas/v4", "")),
-    ("charm", ProviderConfig::cloud("charm", Family::OpenAICompatible, "https://hyper.charm.land/v1", "")),
+    (
+        "gemini",
+        ProviderConfig::cloud(
+            "gemini",
+            Family::Gemini,
+            "https://generativelanguage.googleapis.com/v1",
+            "gemini-3.6-flash",
+        ),
+    ),
+    (
+        "claude",
+        ProviderConfig::cloud(
+            "claude",
+            Family::Claude,
+            "https://api.anthropic.com/v1",
+            "claude-sonnet-4-6",
+        ),
+    ),
+    (
+        "zai",
+        ProviderConfig::cloud(
+            "zai",
+            Family::OpenAICompatible,
+            "https://api.z.ai/api/paas/v4",
+            "",
+        ),
+    ),
+    (
+        "charm",
+        ProviderConfig::cloud(
+            "charm",
+            Family::OpenAICompatible,
+            "https://hyper.charm.land/v1",
+            "",
+        ),
+    ),
     // ── Local providers (configured by URL, no API key) ──────────────
-    ("ollama", ProviderConfig::local("ollama", "http://localhost:11434/v1")),
-    ("lmstudio", ProviderConfig::local("lmstudio", "http://localhost:1234/v1")),
-    ("vllm", ProviderConfig::local("vllm", "http://localhost:8000/v1")),
-    ("llamacpp", ProviderConfig::local("llamacpp", "http://localhost:8080/v1")),
-    ("llamafile", ProviderConfig::local("llamafile", "http://localhost:8080/v1")),
-    ("koboldcpp", ProviderConfig::local("koboldcpp", "http://localhost:5001/v1")),
-    ("text-generation-webui", ProviderConfig::local("text-generation-webui", "http://localhost:5000/v1")),
-    ("localai", ProviderConfig::local("localai", "http://localhost:8080/v1")),
-    ("jan", ProviderConfig::local("jan", "http://localhost:1337/v1")),
-    ("gpt4all", ProviderConfig::local("gpt4all", "http://localhost:4891/v1")),
-    ("aphrodite", ProviderConfig::local("aphrodite", "http://localhost:2242/v1")),
-    ("sglang", ProviderConfig::local("sglang", "http://localhost:30000/v1")),
-    ("tabbyapi", ProviderConfig::local("tabbyapi", "http://localhost:5000/v1")),
+    (
+        "ollama",
+        ProviderConfig::local("ollama", "http://localhost:11434/v1"),
+    ),
+    (
+        "lmstudio",
+        ProviderConfig::local("lmstudio", "http://localhost:1234/v1"),
+    ),
+    (
+        "vllm",
+        ProviderConfig::local("vllm", "http://localhost:8000/v1"),
+    ),
+    (
+        "llamacpp",
+        ProviderConfig::local("llamacpp", "http://localhost:8080/v1"),
+    ),
+    (
+        "llamafile",
+        ProviderConfig::local("llamafile", "http://localhost:8080/v1"),
+    ),
+    (
+        "koboldcpp",
+        ProviderConfig::local("koboldcpp", "http://localhost:5001/v1"),
+    ),
+    (
+        "text-generation-webui",
+        ProviderConfig::local("text-generation-webui", "http://localhost:5000/v1"),
+    ),
+    (
+        "localai",
+        ProviderConfig::local("localai", "http://localhost:8080/v1"),
+    ),
+    (
+        "jan",
+        ProviderConfig::local("jan", "http://localhost:1337/v1"),
+    ),
+    (
+        "gpt4all",
+        ProviderConfig::local("gpt4all", "http://localhost:4891/v1"),
+    ),
+    (
+        "aphrodite",
+        ProviderConfig::local("aphrodite", "http://localhost:2242/v1"),
+    ),
+    (
+        "sglang",
+        ProviderConfig::local("sglang", "http://localhost:30000/v1"),
+    ),
+    (
+        "tabbyapi",
+        ProviderConfig::local("tabbyapi", "http://localhost:5000/v1"),
+    ),
 ];
 
 const API_KEY_ENVS: &[(&str, &str)] = &[
