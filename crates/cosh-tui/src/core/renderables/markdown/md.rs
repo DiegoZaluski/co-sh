@@ -13,7 +13,6 @@ use ratatui::style::{Color, Modifier, Style};
 
 use cosh_sdk::tree_sitter::highlight::{HighlightCategory, HighlightSpan, highlight};
 
-use crate::core::lib::unicode_util::str_display_width;
 use crate::core::renderable::Renderable;
 use crate::core::rgba::RGBA;
 use crate::core::rgba::{ColorInput, parse_color};
@@ -51,6 +50,230 @@ const CODE_PAD_H: u16 = 2;
 const CODE_PAD_V: u16 = 1;
 
 static NEXT_MARKDOWN_NUM: AtomicU64 = AtomicU64::new(1);
+
+/// One open list level while rendering (phase 4). Mirrors OpenTUI's list
+/// layout: markers are drawn at `item_indent`, content starts right after
+/// the aligned marker column, and nested lists indent under the parent's
+/// content column.
+struct ListFrame {
+    ordered: bool,
+    /// Number the next item gets.
+    next_num: usize,
+    /// Total marker column width including the trailing space
+    /// ("• " → 2, "10. " → 4).
+    marker_width: u16,
+    /// Column where this level's markers are drawn.
+    item_indent: u16,
+    /// Column where this level's item content starts/wraps.
+    content_indent: u16,
+}
+
+/// Compute each list's aligned marker-column width by pre-scanning events.
+///
+/// OpenTUI pads markers to the widest one in the list (`padStart`), so "9."
+/// and "10." align their numbers to the right. We don't know how many items a
+/// list has until it ends, hence this cheap pass over already-parsed events;
+/// results are returned in list-start order.
+pub(crate) fn compute_list_marker_widths(events: &[Event<'_>]) -> Vec<Option<u16>> {
+    let mut slots: Vec<Option<u16>> = Vec::new();
+    // (slot index, ordered, first number, item count)
+    let mut open: Vec<(usize, bool, usize, usize)> = Vec::new();
+
+    for event in events {
+        match event {
+            Event::Start(Tag::List(start)) => {
+                open.push((
+                    slots.len(),
+                    start.is_some(),
+                    usize::try_from(start.unwrap_or(1)).unwrap_or(1),
+                    0,
+                ));
+                slots.push(None);
+            }
+            Event::Start(Tag::Item) => {
+                if let Some(frame) = open.last_mut() {
+                    frame.3 += 1;
+                }
+            }
+            Event::End(TagEnd::List(_)) => {
+                if let Some((idx, ordered, first, items)) = open.pop() {
+                    let width = if items == 0 {
+                        2
+                    } else if ordered {
+                        format!("{}", first + items - 1).len() + 2 // digits + ". "
+                    } else {
+                        2 // "• "
+                    };
+                    slots[idx] = Some(u16::try_from(width).unwrap_or(2).max(2));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    slots
+}
+
+/// A styled run of text inside a table cell: inline formatting (bold, code,
+/// emphasis...) survives into tables instead of being flattened to plain
+/// strings.
+#[derive(Clone)]
+struct CellSpan {
+    text: String,
+    style: Style,
+}
+
+/// A table cell: styled spans concatenated left-to-right.
+type TableCell = Vec<CellSpan>;
+
+impl CellSpan {
+    fn display_width(&self) -> usize {
+        crate::core::lib::unicode_util::str_display_width(&self.text)
+    }
+}
+
+/// LRU memo for [`wrap_cell_spans`] keyed by (cell content hash, column
+/// width). Mirrors OpenTUI's per-cell cache (`getTableCellKey` +
+/// `TableContentCache`): when a streaming update re-renders a table block,
+/// unchanged cells reuse their wrapped styled lines instead of re-wrapping.
+/// Memoized wrapped cell lines shared between cache and renderer.
+type WrappedCell = std::sync::Arc<Vec<Vec<CellSpan>>>;
+type CellWrapCacheKey = (u64, u16);
+
+static CELL_WRAP_CACHE: std::sync::LazyLock<Mutex<LruCache<CellWrapCacheKey, WrappedCell>>> =
+    std::sync::LazyLock::new(|| {
+        Mutex::new(LruCache::new(NonZeroUsize::new(2048).expect("non-zero")))
+    });
+
+/// Word-wrap a styled cell into display lines of styled spans, preserving
+/// each grapheme's style. Word semantics mirror `unicode_util::word_wrap`
+/// (whole-word moves, character-level breaking for oversized words).
+fn wrap_cell_spans(cell: &[CellSpan], col_w: u16) -> WrappedCell {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for span in cell {
+        span.text.hash(&mut hasher);
+        span.style.hash(&mut hasher);
+    }
+    let key = (hasher.finish(), col_w);
+
+    #[allow(clippy::unwrap_used)]
+    let mut cache = CELL_WRAP_CACHE.lock().unwrap();
+    if let Some(hit) = cache.get(&key) {
+        return std::sync::Arc::clone(hit);
+    }
+
+    let mut b = SpanLineBuilder::new(col_w);
+    for span in cell {
+        b.push_span_text(&span.text, span.style);
+    }
+    let wrapped = std::sync::Arc::new(b.finish());
+    cache.put(key, std::sync::Arc::clone(&wrapped));
+    wrapped
+}
+
+/// Incremental span-aware line builder used by [`wrap_cell_spans`].
+struct SpanLineBuilder {
+    max_w: u16,
+    lines: Vec<Vec<CellSpan>>,
+    cur: Vec<CellSpan>,
+    cur_w: u16,
+    word: Vec<CellSpan>,
+    word_w: u16,
+}
+
+impl SpanLineBuilder {
+    fn new(max_w: u16) -> Self {
+        Self {
+            max_w,
+            lines: Vec::new(),
+            cur: Vec::new(),
+            cur_w: 0,
+            word: Vec::new(),
+            word_w: 0,
+        }
+    }
+
+    /// Append a grapheme to `vec`, merging runs that share a style.
+    fn append(vec: &mut Vec<CellSpan>, grapheme: &str, style: Style) {
+        if let Some(last) = vec.last_mut()
+            && last.style == style
+        {
+            last.text.push_str(grapheme);
+            return;
+        }
+        vec.push(CellSpan {
+            text: grapheme.to_string(),
+            style,
+        });
+    }
+
+    fn push_span_text(&mut self, text: &str, style: Style) {
+        for (grapheme, gw) in crate::core::lib::unicode_util::graphemes_with_width(text) {
+            match grapheme {
+                "\n" => {
+                    self.flush_word();
+                    self.end_line();
+                }
+                " " => {
+                    self.flush_word();
+                    if self.cur_w < self.max_w {
+                        Self::append(&mut self.cur, " ", style);
+                        self.cur_w += 1;
+                    }
+                }
+                _ => {
+                    Self::append(&mut self.word, grapheme, style);
+                    self.word_w += gw;
+                }
+            }
+        }
+    }
+
+    fn end_line(&mut self) {
+        self.lines.push(std::mem::take(&mut self.cur));
+        self.cur_w = 0;
+    }
+
+    fn flush_word(&mut self) {
+        if self.word_w == 0 {
+            return;
+        }
+        if self.cur_w + self.word_w > self.max_w && !self.cur.is_empty() {
+            self.end_line();
+        }
+        if self.word_w <= self.max_w {
+            let word = std::mem::take(&mut self.word);
+            let word_width = self.word_w;
+            self.word_w = 0;
+            for span in &word {
+                Self::append(&mut self.cur, &span.text, span.style);
+            }
+            self.cur_w += word_width;
+            return;
+        }
+        // The word alone is wider than the whole column: break it at
+        // grapheme level so no line exceeds the width.
+        let word = std::mem::take(&mut self.word);
+        self.word_w = 0;
+        for span in &word {
+            for (grapheme, gw) in crate::core::lib::unicode_util::graphemes_with_width(&span.text) {
+                if self.cur_w + gw > self.max_w && !self.cur.is_empty() {
+                    self.end_line();
+                }
+                Self::append(&mut self.cur, grapheme, span.style);
+                self.cur_w += gw;
+            }
+        }
+    }
+
+    fn finish(mut self) -> Vec<Vec<CellSpan>> {
+        self.flush_word();
+        if !self.cur.is_empty() || self.lines.is_empty() {
+            self.lines.push(self.cur);
+        }
+        self.lines
+    }
+}
 
 #[allow(clippy::unwrap_used)]
 static HIGHLIGHT_CACHE: std::sync::LazyLock<Mutex<LruCache<u64, Vec<HighlightSpan>>>> =
@@ -662,12 +885,12 @@ impl MarkdownRenderable {
         let mut y = 0u16;
         let mut x = 0u16;
 
-        // Table-buffering state
+        // Table-buffering state (cells are styled span lists — see TableCell)
         let mut in_table = false;
-        let mut tbl_headers: Vec<String> = Vec::new();
-        let mut tbl_rows: Vec<Vec<String>> = Vec::new();
-        let mut tbl_cur_row: Vec<String> = Vec::new();
-        let mut tbl_cur_cell = String::new();
+        let mut tbl_headers: Vec<TableCell> = Vec::new();
+        let mut tbl_rows: Vec<Vec<TableCell>> = Vec::new();
+        let mut tbl_cur_row: Vec<TableCell> = Vec::new();
+        let mut tbl_cur_cell: Vec<CellSpan> = Vec::new();
         let mut tbl_in_header = false;
 
         let mut options = Options::empty();
@@ -676,7 +899,22 @@ impl MarkdownRenderable {
         options.insert(Options::ENABLE_STRIKETHROUGH);
         let parser = pulldown_cmark::Parser::new_ext(content, options);
 
-        for event in parser {
+        // Collect events so a cheap pre-pass can compute per-list marker
+        // widths (OpenTUI aligns ordered markers to the widest one, e.g.
+        // " 9." / "10.").
+        let events: Vec<Event<'_>> = parser.collect();
+        let mut list_marker_widths = compute_list_marker_widths(&events);
+
+        // List-nesting state: one frame per open list level. Mirrors
+        // OpenTUI's list layout — markers are drawn at the parent content
+        // indent and item content starts right after the (aligned) marker,
+        // so nested lists indent naturally.
+        let mut list_stack: Vec<ListFrame> = Vec::new();
+        // Content column (relative to area_x) where text of the innermost
+        // open list item wraps; 0 outside lists. Blockquote indent adds 2.
+        let mut cur_indent: u16 = 0;
+
+        for event in &events {
             // max_y is u16::MAX here (blocks render unbounded); this only
             // guards against cursor overflow for absurdly tall documents.
             if !in_table && y >= max_y.saturating_sub(1) {
@@ -687,7 +925,7 @@ impl MarkdownRenderable {
             if in_table {
                 match event {
                     Event::Start(tag) => {
-                        ctx.handle_start(&tag);
+                        ctx.handle_start(tag);
                         match &tag {
                             Tag::TableHead => {
                                 tbl_in_header = true;
@@ -741,13 +979,21 @@ impl MarkdownRenderable {
                             }
                             _ => {}
                         }
-                        ctx.handle_end(&tag_end);
+                        ctx.handle_end(tag_end);
                     }
                     Event::Text(text) | Event::InlineHtml(text) | Event::Code(text) => {
-                        tbl_cur_cell.push_str(&text);
+                        // Keep inline styling inside table cells (bold, code,
+                        // links...) instead of flattening to plain text.
+                        tbl_cur_cell.push(CellSpan {
+                            text: text.to_string(),
+                            style: palette.style_for(ctx.current_element(), ctx.heading_level()),
+                        });
                     }
                     Event::SoftBreak | Event::HardBreak => {
-                        tbl_cur_cell.push('\n');
+                        tbl_cur_cell.push(CellSpan {
+                            text: " ".to_string(),
+                            style: Style::default(),
+                        });
                     }
                     _ => {}
                 }
@@ -757,7 +1003,7 @@ impl MarkdownRenderable {
             match event {
                 // ── Block / inline start ────────────────────────
                 Event::Start(tag) => {
-                    ctx.handle_start(&tag);
+                    ctx.handle_start(tag);
                     match &tag {
                         Tag::Table(_) => {
                             // Start table buffering
@@ -775,19 +1021,29 @@ impl MarkdownRenderable {
                             }
                         }
                         Tag::Paragraph | Tag::Heading { .. } => {
-                            if x != area_x {
-                                if ctx.in_blockquote() {
+                            if !list_stack.is_empty() {
+                                // Inside a list item: the first paragraph
+                                // continues on the marker row; later paragraphs get a
+                                // blank separator and re-apply the content indent.
+                                let content_indent =
+                                    list_stack.last().map_or(0, |f| f.content_indent);
+                                if x == area_x {
+                                    y += 1;
+                                    cur_indent = content_indent;
+                                    x = area_x + content_indent;
+                                }
+                            } else if ctx.in_blockquote() {
+                                if x != area_x {
                                     // Inside a blockquote: x was set to area_x + 2 by
                                     // the BlockQuote handler (bar + indent). Don't advance
                                     // y — content should stay on the same row as the bar.
                                 } else {
-                                    y += 1;
-                                    x = area_x;
+                                    // Second+ paragraph inside blockquote: re-apply indent.
+                                    x = area_x + 2;
                                 }
-                            }
-                            if ctx.in_blockquote() && x == area_x {
-                                // Second+ paragraph inside blockquote: re-apply indent.
-                                x = area_x.saturating_add(2);
+                            } else if x != area_x {
+                                y += 1;
+                                x = area_x;
                             }
                         }
                         Tag::BlockQuote(_) => {
@@ -847,35 +1103,66 @@ impl MarkdownRenderable {
                                 }
                             }
                         }
-                        Tag::List(_start) => {}
+                        Tag::List(start) => {
+                            // Marker column = enclosing item's content indent
+                            // (or the blockquote indent / left edge at root).
+                            let parent_indent = list_stack
+                                .last()
+                                .map_or(if ctx.in_blockquote() { 2 } else { 0 }, |f| {
+                                    f.content_indent
+                                });
+                            let marker_width = list_marker_widths
+                                .iter_mut()
+                                .next()
+                                .and_then(|o| o.take())
+                                .unwrap_or(2)
+                                .max(2);
+                            list_stack.push(ListFrame {
+                                ordered: start.is_some(),
+                                next_num: usize::try_from(start.unwrap_or(1)).unwrap_or(1),
+                                marker_width,
+                                item_indent: parent_indent,
+                                content_indent: parent_indent + marker_width,
+                            });
+                        }
                         Tag::Item => {
                             if x != area_x {
                                 y += 1;
-                                x = area_x;
                             }
+                            let frame = list_stack.last_mut().expect("Item outside List");
                             let marker_style =
                                 Style::default().fg(rgba_to_color(palette.list_marker_color()));
-                            let marker = ctx.list_marker().map_or_else(
-                                || LIST_BULLET.to_string(),
-                                |(ordered, num)| {
-                                    if ordered {
-                                        format!("{num}. ")
-                                    } else {
-                                        LIST_BULLET.to_string()
-                                    }
-                                },
+                            // Right-align ordered numbers to the widest one
+                            // (" 9." / "10.") like OpenTUI's padStart.
+                            let core = if frame.ordered {
+                                let n = frame.next_num;
+                                format!("{n}.")
+                            } else {
+                                "•".to_string()
+                            };
+                            frame.next_num = frame.next_num.saturating_add(1);
+                            let marker = format!(
+                                "{core:>width$} ",
+                                width = usize::from(frame.marker_width - 1)
                             );
-                            Self::render_text(
-                                &marker,
-                                buf,
-                                &mut x,
-                                &mut y,
-                                area_x,
-                                max_x,
-                                max_y,
-                                marker_style,
-                                0,
-                            );
+
+                            // Markers are short and never wrap: draw them
+                            // grapheme-by-grapheme instead of going through
+                            // `render_text`, which deliberately skips LEADING
+                            // spaces at line start and would eat the
+                            // right-alignment padding of " 1.".
+                            x = area_x + frame.item_indent;
+                            for (grapheme, gw) in
+                                crate::core::lib::unicode_util::graphemes_with_width(&marker)
+                            {
+                                if let Some(cell) = buf.cell_mut((x, y)) {
+                                    cell.set_symbol(grapheme);
+                                    cell.set_style(marker_style);
+                                }
+                                x += gw;
+                            }
+                            x = area_x + frame.content_indent;
+                            cur_indent = frame.content_indent;
                         }
                         Tag::TableHead
                         | Tag::TableRow
@@ -908,9 +1195,13 @@ impl MarkdownRenderable {
                         | TagEnd::Table => {
                             y += 1;
                             x = area_x;
+                            cur_indent = list_stack.last().map_or(0, |f| f.content_indent);
                         }
-                        TagEnd::List(_)
-                        | TagEnd::TableHead
+                        TagEnd::List(_) => {
+                            list_stack.pop();
+                            cur_indent = list_stack.last().map_or(0, |f| f.content_indent);
+                        }
+                        TagEnd::TableHead
                         | TagEnd::FootnoteDefinition
                         | TagEnd::DefinitionList
                         | TagEnd::DefinitionListTitle
@@ -928,7 +1219,7 @@ impl MarkdownRenderable {
                             x = x.saturating_add(2);
                         }
                     }
-                    ctx.handle_end(&tag_end);
+                    ctx.handle_end(tag_end);
                 }
 
                 // ── Text content ────────────────────────────────
@@ -947,13 +1238,13 @@ impl MarkdownRenderable {
                             ""
                         };
                         Self::render_code_block(
-                            &text, buf, &mut x, &mut y, area_x, max_x, max_y, palette, hl_lang,
+                            text, buf, &mut x, &mut y, area_x, max_x, max_y, palette, hl_lang,
                         );
                     } else {
                         let element = ctx.current_element();
                         let heading_level = ctx.heading_level();
                         let mut style = palette.style_for(element, heading_level);
-                        let bq_indent = if ctx.in_blockquote() { 2u16 } else { 0u16 };
+                        let bq_indent = if ctx.in_blockquote() { 2u16 } else { 0u16 } + cur_indent;
                         if ctx.in_blockquote() && text.starts_with('⚠') {
                             // Warning blockquote: apply yellow background + black text + bold
                             // (Only for the warning, not regular blockquotes)
@@ -984,7 +1275,7 @@ impl MarkdownRenderable {
                                 .add_modifier(Modifier::BOLD);
                         }
                         Self::render_text(
-                            &text, buf, &mut x, &mut y, area_x, max_x, max_y, style, bq_indent,
+                            text, buf, &mut x, &mut y, area_x, max_x, max_y, style, bq_indent,
                         );
                     }
                 }
@@ -992,18 +1283,40 @@ impl MarkdownRenderable {
                 // ── Inline code ─────────────────────────────────
                 Event::Code(text) => {
                     let style = palette.style_for(Some(MarkdownElement::InlineCode), None);
-                    Self::render_text(&text, buf, &mut x, &mut y, area_x, max_x, max_y, style, 0);
+                    Self::render_text(
+                        text,
+                        buf,
+                        &mut x,
+                        &mut y,
+                        area_x,
+                        max_x,
+                        max_y,
+                        style,
+                        if ctx.in_blockquote() { 2u16 } else { 0 } + cur_indent,
+                    );
                 }
 
                 // ── Raw HTML ────────────────────────────────────
                 Event::Html(html) => {
                     let style = Style::default().fg(rgba_to_color(palette.muted_color()));
-                    Self::render_text(&html, buf, &mut x, &mut y, area_x, max_x, max_y, style, 0);
+                    Self::render_text(
+                        html,
+                        buf,
+                        &mut x,
+                        &mut y,
+                        area_x,
+                        max_x,
+                        max_y,
+                        style,
+                        if ctx.in_blockquote() { 2u16 } else { 0 } + cur_indent,
+                    );
                 }
 
                 // ── Line breaks ─────────────────────────────────
                 Event::SoftBreak | Event::HardBreak => {
-                    x = area_x;
+                    // Continuation lines keep the active indentation
+                    // (blockquote + list content column).
+                    x = area_x + if ctx.in_blockquote() { 2 } else { 0 } + cur_indent;
                     y += 1;
                 }
 
@@ -1025,7 +1338,7 @@ impl MarkdownRenderable {
                 // ── Task list markers ───────────────────────────
                 Event::TaskListMarker(checked) => {
                     // Use Unicode checkbox symbols for a more polished look
-                    let marker = if checked { "☑ " } else { "☐ " };
+                    let marker = if *checked { "☑ " } else { "☐ " };
                     let style = Style::default().fg(rgba_to_color(palette.list_marker_color()));
                     Self::render_text(marker, buf, &mut x, &mut y, area_x, max_x, max_y, style, 0);
                 }
@@ -1268,8 +1581,8 @@ impl MarkdownRenderable {
         area_x: u16,
         max_x: u16,
         max_y: u16,
-        headers: &[String],
-        rows: &[Vec<String>],
+        headers: &[TableCell],
+        rows: &[Vec<TableCell>],
         palette: &MarkdownPalette,
         table_border_color: Option<&RGBA>,
     ) {
@@ -1288,12 +1601,14 @@ impl MarkdownRenderable {
         // which makes ratatui's diff leave stale glyphs behind when the
         // surrounding UI changes (the "leaking table row across views"
         // bug).
-        let mut col_widths: Vec<u16> =
-            headers.iter().map(|h| str_display_width(h) as u16).collect();
+        let cell_display_width = |cell: &TableCell| -> u16 {
+            cell.iter().map(CellSpan::display_width).sum::<usize>() as u16
+        };
+        let mut col_widths: Vec<u16> = headers.iter().map(cell_display_width).collect();
         for row in rows {
             for (ci, cell) in row.iter().enumerate() {
                 if ci < col_count {
-                    let cw = str_display_width(cell) as u16;
+                    let cw = cell_display_width(cell);
                     col_widths[ci] = col_widths[ci].max(cw);
                 }
             }
@@ -1395,45 +1710,12 @@ impl MarkdownRenderable {
             }
         };
 
-        // Helper to compute word-wrapped lines for a cell's content.
-        // Falls back to character-level breaking when words exceed column width.
-        let word_wrap_cell = |content: &str, col_w: u16| -> Vec<String> {
-            if col_w < 1 || content.is_empty() {
-                return vec![String::new()];
-            }
-            // First try word-level wrapping (splits on spaces)
-            let lines = crate::core::lib::unicode_util::word_wrap(content, col_w);
-            // Then break any resulting line that still exceeds col_w at character level
-            let mut final_lines: Vec<String> = Vec::new();
-            for line in &lines {
-                let line_w = crate::core::lib::unicode_util::str_display_width(line) as u16;
-                if line_w <= col_w {
-                    final_lines.push(line.clone());
-                } else {
-                    // Character-level breaking for lines wider than col_w
-                    let mut current = String::new();
-                    let mut current_w = 0u16;
-                    for (g, gw) in crate::core::lib::unicode_util::graphemes_with_width(line) {
-                        if current_w + gw > col_w && !current.is_empty() {
-                            final_lines.push(current);
-                            current = String::new();
-                            current_w = 0;
-                        }
-                        current.push_str(g);
-                        current_w += gw;
-                    }
-                    if !current.is_empty() {
-                        final_lines.push(current);
-                    }
-                }
-            }
-            final_lines
-        };
-
-        // Helper to render a single display line from pre-wrapped cell content
+        // Helper to render a single display line from pre-wrapped cell content.
+        // `wrapped` holds, per column, the styled display lines produced by
+        // [`wrap_cell_spans`].
         let render_cell_line = |buf: &mut GrowBuf,
                                 y: u16,
-                                wrapped: &[Vec<String>],
+                                wrapped: &[std::sync::Arc<Vec<Vec<CellSpan>>>],
                                 is_header: bool,
                                 row_idx: usize,
                                 line_idx: usize| {
@@ -1442,20 +1724,22 @@ impl MarkdownRenderable {
             }
             let cell_style = if is_header { header_style } else { text_style };
 
-            let (actual_border_style, actual_cell_style) =
-                if !is_header && row_idx.is_multiple_of(2) {
-                    (border_style.bg(alt_bg_color), cell_style.bg(alt_bg_color))
-                } else {
-                    (border_style, cell_style)
-                };
+            let (actual_border_style, base_cell_style) = if !is_header && row_idx.is_multiple_of(2)
+            {
+                (border_style.bg(alt_bg_color), cell_style.bg(alt_bg_color))
+            } else {
+                (border_style, cell_style)
+            };
 
             for ci in 0..col_count {
                 let sx = col_starts[ci];
-                // Get the pre-wrapped line for this cell at the given line index
-                let content = wrapped
+                // Get the pre-wrapped styled line for this cell at the given
+                // line index.
+                let spans = wrapped
                     .get(ci)
                     .and_then(|lines| lines.get(line_idx))
-                    .map_or("", |s| s.as_str());
+                    .cloned()
+                    .unwrap_or_default();
 
                 // Vertical border on the left of each cell
                 let vline_x = if ci == 0 { sx } else { sx.saturating_sub(1) };
@@ -1464,34 +1748,39 @@ impl MarkdownRenderable {
                     cell.set_style(actual_border_style);
                 }
 
-                // Render cell content line with padding, grapheme-aware:
+                // Render the cell content line with padding, grapheme-aware:
                 // each grapheme cluster (emoji, "⚙️", CJK, flags) goes into
                 // ONE cell with its trailing columns marked `Skip`, exactly
                 // like `flush_render_word` does for prose. Writing raw chars
-                // here used to split VS16 sequences across cells and left
+                // here used to split VS16 sequences across cells and leave
                 // wide glyphs without shadow marks — both desynchronize the
                 // buffer from the terminal grid and leak stale glyphs across
-                // view switches.
+                // view switches. Inline span styles are patched over the
+                // row's base style so bold/code/links survive inside cells;
+                // headers keep their bold via the base style.
                 let mut cx = sx + padding;
-                for (grapheme, gw) in
-                    crate::core::lib::unicode_util::graphemes_with_width(content)
-                {
-                    if cx + gw > sx + col_widths[ci] + padding {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut((cx, y)) {
-                        cell.set_symbol(grapheme);
-                        cell.set_style(actual_cell_style);
-                    }
-                    if gw > 1 {
-                        for dx in 1..gw {
-                            if let Some(shadow) = buf.cell_mut((cx + dx, y)) {
-                                shadow.set_style(actual_cell_style);
-                                shadow.set_diff_option(CellDiffOption::Skip);
+                for span in &spans {
+                    for (grapheme, gw) in
+                        crate::core::lib::unicode_util::graphemes_with_width(&span.text)
+                    {
+                        if cx + gw > sx + col_widths[ci] + padding {
+                            break;
+                        }
+                        let style = base_cell_style.patch(span.style);
+                        if let Some(cell) = buf.cell_mut((cx, y)) {
+                            cell.set_symbol(grapheme);
+                            cell.set_style(style);
+                        }
+                        if gw > 1 {
+                            for dx in 1..gw {
+                                if let Some(shadow) = buf.cell_mut((cx + dx, y)) {
+                                    shadow.set_style(style);
+                                    shadow.set_diff_option(CellDiffOption::Skip);
+                                }
                             }
                         }
+                        cx += gw;
                     }
-                    cx += gw;
                 }
 
                 // Vertical border on the right of each cell
@@ -1505,17 +1794,19 @@ impl MarkdownRenderable {
 
         // Pre-compute word-wrapped lines for all cells in a logical row.
         // Returns (wrapped_cells, max_line_count).
-        let precompute_wrapped = |cells: &[String]| -> (Vec<Vec<String>>, usize) {
-            let mut wrapped: Vec<Vec<String>> = Vec::with_capacity(col_count);
-            let mut max_lines = 1usize;
-            for (ci, &cw) in col_widths.iter().enumerate() {
-                let content = cells.get(ci).map_or("", |s| s.as_str());
-                let lines = word_wrap_cell(content, cw);
-                max_lines = max_lines.max(lines.len());
-                wrapped.push(lines);
-            }
-            (wrapped, max_lines)
-        };
+        let precompute_wrapped =
+            |cells: &[TableCell]| -> (Vec<std::sync::Arc<Vec<Vec<CellSpan>>>>, usize) {
+                let mut wrapped: Vec<std::sync::Arc<Vec<Vec<CellSpan>>>> =
+                    Vec::with_capacity(col_count);
+                let mut max_lines = 1usize;
+                for (ci, &cw) in col_widths.iter().enumerate() {
+                    let cell = cells.get(ci).map_or(&[][..], |c| c.as_slice());
+                    let lines = wrap_cell_spans(cell, cw);
+                    max_lines = max_lines.max(lines.len());
+                    wrapped.push(lines);
+                }
+                (wrapped, max_lines)
+            };
 
         // Pre-fill alternating background for all display lines of a row.
         // Fills from the left edge to the rightmost border column (no +1 to avoid bleeding).

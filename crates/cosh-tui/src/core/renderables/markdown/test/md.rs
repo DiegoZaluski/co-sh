@@ -770,3 +770,95 @@ fn test_soft_break_in_paragraph() {
     assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "l");
     assert_eq!(buf.cell((5, 1)).unwrap().symbol(), "2");
 }
+
+/// Phase 4: nested lists must indent under the parent item's content column.
+#[test]
+fn test_nested_list_indentation() {
+    let md = make_md("- outer\n    - inner");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 6));
+
+    // Outer marker at the left edge; inner marker indented under the
+    // outer content column (2).
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "•");
+    assert_eq!(
+        buf.cell((2, 1)).unwrap().symbol(),
+        "•",
+        "inner bullet should be indented to col 2"
+    );
+    assert_eq!(buf.cell((1, 1)).unwrap().symbol(), " ");
+    // Inner content starts after the inner marker.
+    assert_eq!(buf.cell((4, 1)).unwrap().symbol(), "i");
+}
+
+/// Phase 4: ordered markers are right-aligned to the widest one (" 9." /
+/// "10.") so all item content starts at the same column (OpenTUI padStart).
+#[test]
+fn test_ordered_markers_align_past_nine() {
+    let items: Vec<String> = (1..=12).map(|i| format!("{i}. x")).collect();
+    let md = make_md(&items.join("\n"));
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 14));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 14));
+
+    for row in 0..12u16 {
+        // All rows: content 'x' at the same aligned column (marker_width = 3+1).
+        assert_eq!(
+            buf.cell((4, row)).unwrap().symbol(),
+            "x",
+            "item {} content should start at column 4",
+            row + 1
+        );
+    }
+    // Right-aligned numbers: single digits get a leading space, "10." does not.
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), " ");
+    assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "1");
+    assert_eq!(buf.cell((0, 9)).unwrap().symbol(), "1");
+    assert_eq!(buf.cell((2, 9)).unwrap().symbol(), ".");
+}
+
+/// Phase 4: loose-list paragraphs stay on the marker row instead of dropping
+/// to the next line.
+#[test]
+fn test_loose_list_paragraph_on_marker_row() {
+    let md = make_md("- alpha\n\n- beta");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 8));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 8));
+
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "•");
+    assert_eq!(
+        buf.cell((2, 0)).unwrap().symbol(),
+        "a",
+        "loose item text should share the marker row"
+    );
+}
+
+/// Phase 3: inline formatting survives into table cells — bold spans keep
+/// their modifier while surrounding padding stays plain.
+#[test]
+fn test_table_cell_inline_styles() {
+    let text = "| k |\n|---|\n| **bold** plain |\n";
+    let md = make_md(text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 8));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 8));
+
+    use ratatui::style::Modifier;
+    // Body row is y=3 (top border, header, separator precede it).
+    // Find the bold run: 'b' starts right after the left border + padding,
+    // with column width sized to "**bold** plain" rendered as "bold plain".
+    let mut found_bold_start = false;
+    for x in 1..20u16 {
+        if buf.cell((x, 3)).is_some_and(|c| c.symbol() == "b") {
+            assert!(
+                buf.cell((x, 3))
+                    .unwrap()
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::BOLD),
+                "'b' of bold should carry BOLD"
+            );
+            found_bold_start = true;
+            break;
+        }
+    }
+    assert!(found_bold_start, "bold cell content not found on body row");
+}
