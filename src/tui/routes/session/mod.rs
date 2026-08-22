@@ -1492,6 +1492,14 @@ impl SessionView {
                 {
                     return 0;
                 }
+                // Completed ask_questions renders its Q&A summary as plain
+                // markdown on the chat background (like an assistant text
+                // part) — use the same markdown height estimator.
+                if tool_render::tool_display(&t.tool) == "question"
+                    && let Some(body) = tool_render::question_markdown(t)
+                {
+                    return estimate_height(&body, max_w).max(1);
+                }
                 // Only tools that render block-style output (shell, write, edit, read, todo, glob)
                 // should allocate height for the full output block. All other tool
                 // types render inline (1 line) regardless of whether they have output.
@@ -2864,10 +2872,15 @@ impl SessionView {
                                 // example, shows its label row only on failure
                                 // (on success it renders just the list box),
                                 // so copying it unconditionally leaked hidden
-                                // text into the selection.
-                                let draws_label = self::tool_render::tool_display(&t.tool)
-                                    != "todo"
-                                    || matches!(t.status, crate::types::ToolStatus::Failed(_));
+                                // text into the selection. Same for a
+                                // completed ask_questions: it draws its Q&A
+                                // markdown summary instead of the label.
+                                let tool_display_name = self::tool_render::tool_display(&t.tool);
+                                let question_summary = tool_display_name == "question"
+                                    && self::tool_render::question_markdown(t).is_some();
+                                let draws_label = !question_summary
+                                    && (tool_display_name != "todo"
+                                        || matches!(t.status, crate::types::ToolStatus::Failed(_)));
                                 if draws_label && p_top >= vp_top {
                                     let label = self::tool_render::tool_inline_text(t);
                                     text_regions.push(TextRegion {

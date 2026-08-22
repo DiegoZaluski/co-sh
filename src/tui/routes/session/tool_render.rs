@@ -7,11 +7,13 @@ use std::path::Path;
 
 use cosh_sdk::hashline::format::{HL_FILE_PREFIX, HL_LINE_BODY_SEP};
 use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
+use cosh_tools::question::types::QuestionOutput;
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
-use cosh_tui::core::lib::rgba::RGBA;
+use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::diff::{DiffRenderable, DiffViewMode};
+use cosh_tui::core::renderables::markdown::{MarkdownRenderable, estimate_height};
 
 use crate::component::spinner_highlight::HighlightSpinner;
 use crate::theme::Theme;
@@ -403,12 +405,12 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
                 desc
             }
         }
-        "question" => "Asking questions...".to_string(),
+        "question" => "Asking questions".to_string(),
         "todo" => {
             if matches!(part.status, ToolStatus::Running)
                 || part.output.as_deref().unwrap_or("").trim().is_empty()
             {
-                format!("Writing {}...", part.tool)
+                format!("Writing {}", part.tool)
             } else {
                 match part.tool.as_str() {
                     "plan_todo_write" => "TODO Write".to_string(),
@@ -425,7 +427,7 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
             if matches!(part.status, ToolStatus::Completed) {
                 part.tool.clone()
             } else {
-                format!("Writing {}...", part.tool)
+                format!("Writing {}", part.tool)
             }
         }
     }
@@ -527,7 +529,7 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         .filter(|s| !s.is_idle());
 
     if output.is_empty() {
-        let pending = "Writing command...";
+        let pending = "Writing command";
         let label = if is_completed { &command } else { pending };
         let fg = tool_label_fg(&part.status, ctx.theme);
         *ctx.line_h = 1;
@@ -1460,7 +1462,7 @@ pub fn render_task(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let is_running = matches!(part.status, ToolStatus::Running);
 
     let content = if description.is_empty() {
-        "Delegating...".to_string()
+        "Delegating".to_string()
     } else {
         description
     };
@@ -1478,10 +1480,61 @@ pub fn render_task(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &content, fg, spinner);
 }
 
-pub fn render_question_tool(ctx: &mut ToolRenderCtx, part: &ToolPart) {
-    let _is_completed = matches!(part.status, ToolStatus::Completed);
+/// Markdown summary of a completed `ask_questions` call: one heading per
+/// question with the user's answer emphasized below it. This is what the chat
+/// renders in place of the old one-line "Asking questions" label, so the
+/// user can re-read what was asked and answered. `None` while the tool is
+/// running/failed or when the output isn't parseable `QuestionOutput` JSON.
+pub fn question_markdown(part: &ToolPart) -> Option<String> {
+    if !matches!(part.status, ToolStatus::Completed) {
+        return None;
+    }
+    let output = part.output.as_deref()?;
+    let parsed = serde_json::from_str::<QuestionOutput>(output).ok()?;
 
-    let label = "Asking questions...".to_string();
+    let mut md = String::new();
+    for (qi, q) in parsed.questions.iter().enumerate() {
+        // Correlate the answer to its question by id; fall back to position.
+        let answer = parsed
+            .answers
+            .iter()
+            .find(|a| a.id == q.id)
+            .or_else(|| parsed.answers.get(qi))
+            .and_then(|a| {
+                a.answer
+                    .clone()
+                    .or_else(|| a.selected.as_ref().map(|s| s.join(", ")))
+            })
+            .unwrap_or_else(|| "no answer".to_string());
+        if !md.is_empty() {
+            md.push_str("\n\n");
+        }
+        // Trim the answer: a trailing space would break the emphasis
+        // delimiters (pulldown_cmark's flanking rules) and leak the raw
+        // asterisks onto the screen.
+        md.push_str(&format!(
+            "# {}\n\n***{}***",
+            q.question.trim(),
+            answer.trim()
+        ));
+    }
+    (!md.is_empty()).then_some(md)
+}
+
+pub fn render_question_tool(ctx: &mut ToolRenderCtx, part: &ToolPart) {
+    // Completed: render the Q&A summary as plain markdown on the chat
+    // background — visually identical to an assistant text part, no box.
+    if let Some(md_text) = question_markdown(part) {
+        let body_h = estimate_height(&md_text, ctx.max_w).max(1);
+        *ctx.line_h = body_h;
+        let mut md = MarkdownRenderable::new(Some(md_text));
+        md.set_fg(Some(ColorInput::RGBA(ctx.theme.text)));
+        md.set_bg(Some(ColorInput::RGBA(ctx.theme.background)));
+        md.render_self(ctx.buf, Rect::new(ctx.x, ctx.y, ctx.max_w, body_h));
+        return;
+    }
+
+    let label = "Asking questions".to_string();
     let fg = tool_label_fg(&part.status, ctx.theme);
     *ctx.line_h = 1;
     render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &label, fg, None);
@@ -1501,6 +1554,8 @@ pub fn tool_copy_text(part: &ToolPart) -> Option<String> {
     let output = part.output.as_deref().unwrap_or("").trim();
     match tool_display(&part.tool) {
         "todo" => (!output.is_empty()).then(|| format_todo_output(output, &part.tool).join("\n")),
+        // The Q&A markdown summary is exactly what's rendered on screen.
+        "question" => question_markdown(part),
         "edit" => {
             if output.is_empty() || !matches!(part.status, ToolStatus::Completed) {
                 return None;
@@ -1689,7 +1744,7 @@ pub fn render_generic(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let label = if is_completed {
         tool_name.clone()
     } else {
-        format!("Writing {tool_name}...")
+        format!("Writing {tool_name}")
     };
     let fg = tool_label_fg(&part.status, ctx.theme);
     let tool_id = format!("generic_{}", part_idx);

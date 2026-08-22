@@ -4322,3 +4322,229 @@ fn test_streaming_growth_is_incremental() {
         "streaming growth ({stream_total:?}) should cost far less than 3 full renders ({t_full:?})"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// ask_questions Q&A markdown summary
+// ────────────────────────────────────────────────────────────────────────────
+
+/// A completed `ask_questions` tool part whose output carries the questions
+/// plus the user's answers (same JSON the harness sends via ToolResult).
+fn question_tool_part(status: ToolStatus) -> ToolPart {
+    let output = serde_json::json!({
+        "questions": [
+            {
+                "id": "db",
+                "question": "Which database should we use?",
+                "type": "SingleChoice",
+                "purpose": null,
+                "options": ["PostgreSQL", "SQLite"],
+                "required": true
+            },
+            {
+                "id": "migrate",
+                "question": "Run migrations now?",
+                "type": "YesNo",
+                "purpose": null,
+                "options": null,
+                "required": true
+            }
+        ],
+        "answers": [
+            {"id": "db", "answer": null, "selected": ["PostgreSQL"]},
+            {"id": "migrate", "answer": "Yes  ", "selected": null}
+        ]
+    });
+    ToolPart {
+        tool: "ask_questions".into(),
+        input: serde_json::json!({}),
+        output: Some(serde_json::to_string(&output).unwrap()),
+        status,
+        tool_call_id: None,
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+    }
+}
+
+#[test]
+fn completed_question_produces_markdown_summary() {
+    use super::tool_render::question_markdown;
+
+    let md = question_markdown(&question_tool_part(ToolStatus::Completed))
+        .expect("completed part with output must produce markdown");
+    assert!(
+        md.contains("# Which database should we use?"),
+        "question heading missing: {md}"
+    );
+    assert!(md.contains("***PostgreSQL***"), "selection missing: {md}");
+    // The text answer is trimmed: a trailing space would break the emphasis
+    // delimiters and leak raw asterisks on screen.
+    assert_eq!(
+        md.split('\n').find(|l| l.contains("Yes")),
+        Some("***Yes***"),
+        "answer must be trimmed: {md}"
+    );
+}
+
+#[test]
+fn running_question_has_no_markdown_summary() {
+    use super::tool_render::question_markdown;
+
+    assert!(question_markdown(&question_tool_part(ToolStatus::Running)).is_none());
+    // No output yet → no summary either.
+    let mut failed = question_tool_part(ToolStatus::Failed("dismissed".into()));
+    failed.output = None;
+    assert!(question_markdown(&failed).is_none());
+}
+
+#[test]
+fn completed_question_renders_answers_on_screen() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, render_question_tool};
+
+    let theme = test_theme();
+    let part = question_tool_part(ToolStatus::Completed);
+    let area = Rect::new(0, 0, 80, 40);
+    let mut buf = Buffer::empty(area);
+    let mut line_h = 0u16;
+    let mut state = ToolRenderState::new();
+
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w: 80,
+            state: &mut state,
+            theme: &theme,
+        };
+        render_question_tool(&mut ctx, &part);
+    }
+
+    assert!(line_h > 1, "markdown body must occupy more than one row");
+
+    let mut screen = String::new();
+    for y in 0..line_h {
+        for x in 0..80u16 {
+            if let Some(cell) = buf.cell((x, y)) {
+                screen.push_str(cell.symbol());
+            }
+        }
+        screen.push('\n');
+    }
+    assert!(
+        screen.contains("Which database"),
+        "question text not rendered:\n{screen}"
+    );
+    assert!(
+        screen.contains("PostgreSQL"),
+        "answer text not rendered:\n{screen}"
+    );
+    // Emphasis must be parsed, never leaked as literal asterisks.
+    assert!(!screen.contains("***"), "raw emphasis leaked:\n{screen}");
+
+    // Height estimate must agree with what the renderer drew.
+    let est = SessionView::estimate_part_height(
+        &Part::Tool(part),
+        80,
+        &test_config(),
+        &MessageRole::Assistant,
+        &ToolRenderState::new(),
+    );
+    assert_eq!(est, line_h, "estimate_part_height must match render height");
+}
+
+#[test]
+fn running_question_still_renders_inline_label() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, render_question_tool};
+
+    let theme = test_theme();
+    let part = question_tool_part(ToolStatus::Running);
+    let area = Rect::new(0, 0, 80, 4);
+    let mut buf = Buffer::empty(area);
+    let mut line_h = 0u16;
+    let mut state = ToolRenderState::new();
+
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w: 80,
+            state: &mut state,
+            theme: &theme,
+        };
+        render_question_tool(&mut ctx, &part);
+    }
+
+    assert_eq!(line_h, 1, "running label is a single inline row");
+    let row: String = (0..80u16)
+        .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
+        .collect();
+    assert!(
+        row.contains("Asking questions"),
+        "running label missing:\n{row}"
+    );
+}
+
+#[test]
+fn question_copy_text_matches_screen() {
+    use super::tool_render::{question_markdown, tool_copy_text};
+
+    let part = question_tool_part(ToolStatus::Completed);
+    assert_eq!(
+        tool_copy_text(&part).as_deref(),
+        question_markdown(&part).as_deref()
+    );
+}
+
+#[test]
+fn tool_inline_texts_have_no_trailing_ellipsis() {
+    use super::tool_render::tool_inline_text;
+
+    let tools = [
+        "ask_questions",
+        "bash_run",
+        "fs_write",
+        "fs_edit",
+        "find_glob",
+        "find_grep",
+        "fs_read",
+        "web_fetch",
+        "web_search",
+        "subagent_call",
+        "plan_todo_write",
+        "unknown_tool",
+    ];
+    for tool in tools {
+        for status in [ToolStatus::Running, ToolStatus::Completed] {
+            let part = ToolPart {
+                tool: tool.into(),
+                input: serde_json::json!({}),
+                output: None,
+                status,
+                tool_call_id: None,
+                is_start: true,
+                is_streaming: false,
+                cached_line_count: None,
+            };
+            let text = tool_inline_text(&part);
+            assert!(
+                !text.ends_with("..."),
+                "inline text for {tool} must not end with an ellipsis: {text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn completed_question_label_is_not_copyable() {
+    use super::tool_render::{question_markdown, tool_inline_text};
+
+    // When the summary is drawn, the inline label is NOT on screen anymore —
+    // so it must never leak into a selection either.
+    let part = question_tool_part(ToolStatus::Completed);
+    assert!(question_markdown(&part).is_some());
+    assert_eq!(tool_inline_text(&part), "Asking questions");
+}
