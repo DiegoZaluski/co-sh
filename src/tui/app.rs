@@ -1337,6 +1337,22 @@ impl App {
         }
     }
 
+    /// Create a fresh empty session and select it — the shared path behind
+    /// Home's "New session" (keyboard + mouse) and the `/new` slash command.
+    /// Selecting the session flips the app into Session mode.
+    fn start_new_session(&mut self) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let id = format!("{now_ms}");
+        let title = format_session_timestamp(now_ms);
+        self.state.add_empty_session(id.clone(), title, now_ms);
+        self.state.current_session_id = Some(id);
+        self.title_generated = false;
+        self.prompt_view.focus();
+    }
+
     /// Execute a slash-menu command (Enter or click). Shared by the keyboard
     /// and mouse handlers so both dispatch identically — a command missed here
     /// silently degrades to filling the prompt with "/name ".
@@ -1349,6 +1365,20 @@ impl App {
             self.open_tool_call_dialog();
         } else if cmd.name == "compact" {
             self.start_manual_compaction();
+        } else if cmd.name == "new" {
+            if self.state.status == crate::types::SessionStatus::Idle {
+                self.start_new_session();
+            } else {
+                use crate::ui::toast::{ToastOptions, ToastVariant};
+                self.toast_state.show(ToastOptions {
+                    title: Some("New session".into()),
+                    message: "The agent is working — wait for it to finish.".into(),
+                    variant: ToastVariant::Warning,
+                    duration_ms: 4000,
+                });
+                self.slash_menu.visible = false;
+                return;
+            }
         } else if cmd.name == "bell" {
             self.bell_enabled = !self.bell_enabled;
             use crate::ui::toast::{ToastOptions, ToastVariant};
@@ -3378,17 +3408,7 @@ impl App {
                             KeyCode::Enter => {
                                 match self.home_view.selected_action() {
                                     HomeAction::NewSession => {
-                                        let now_ms = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_millis()
-                                            as u64;
-                                        let id = format!("{now_ms}");
-                                        let title = format_session_timestamp(now_ms);
-                                        self.state.add_empty_session(id.clone(), title, now_ms);
-                                        self.state.current_session_id = Some(id);
-                                        self.title_generated = false;
-                                        self.prompt_view.focus();
+                                        self.start_new_session();
                                     }
                                     HomeAction::ToggleSidebar => {
                                         self.sidebar.open = !self.sidebar.open;
@@ -5912,16 +5932,7 @@ impl App {
             if let Some(action) = self.home_view.handle_mouse(&mouse, session_area) {
                 match action {
                     crate::routes::home::HomeAction::NewSession => {
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64;
-                        let id = format!("{now_ms}");
-                        let title = format_session_timestamp(now_ms);
-                        self.state.add_empty_session(id.clone(), title, now_ms);
-                        self.state.current_session_id = Some(id);
-                        self.title_generated = false;
-                        self.prompt_view.focus();
+                        self.start_new_session();
                     }
                     crate::routes::home::HomeAction::ToggleSidebar => {
                         self.sidebar.open = !self.sidebar.open;
@@ -6730,6 +6741,54 @@ mod tests {
             "orphaned message is the first next-loop candidate"
         );
         assert!(queues.next_request.is_empty());
+    }
+
+    /// `/new` creates and selects a fresh session straight from the prompt —
+    /// no detour through Home.
+    #[tokio::test]
+    async fn slash_new_creates_and_selects_a_fresh_session() {
+        let mut app = App::new("/tmp".to_string());
+        assert!(app.state.current_session_id.is_none());
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "new".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        assert!(
+            app.state.current_session_id.is_some(),
+            "a session was selected"
+        );
+        assert!(
+            matches!(app.mode(), crate::app::AppMode::Session),
+            "the app flips into Session mode"
+        );
+        assert!(!app.slash_menu.visible);
+        assert!(
+            app.state.session_cache.len() == 1,
+            "exactly one new session exists"
+        );
+    }
+
+    /// `/new` while the agent loop is working is refused with a toast —
+    /// selecting a different session mid-run would route the running loop's
+    /// events into it.
+    #[tokio::test]
+    async fn slash_new_refuses_while_agent_is_working() {
+        let mut app = App::new("/tmp".to_string());
+        app.state.status = crate::types::SessionStatus::Working;
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "new".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        assert!(app.state.current_session_id.is_none(), "no session created");
+        assert!(
+            app.toast_state
+                .current
+                .as_ref()
+                .is_some_and(|t| t.message.contains("wait for it")),
+            "the refusal toast tells the user to wait"
+        );
     }
 
     /// `/compact` while the agent loop is working must be refused with a toast:

@@ -88,6 +88,10 @@ impl SlashMenu {
                 name: "compact".into(),
                 desc: "Compact the session context now".into(),
             },
+            SlashCommand {
+                name: "new".into(),
+                desc: "Start a new session".into(),
+            },
         ];
 
         Self {
