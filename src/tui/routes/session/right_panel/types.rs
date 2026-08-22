@@ -738,7 +738,13 @@ impl RightPanelState {
         if output.len() <= MAX_PTY_OUTPUT_CHARS {
             return;
         }
-        let start = output.len() - MAX_PTY_OUTPUT_CHARS;
+        // Byte offsets can land inside a multi-byte UTF-8 char (PTY output is
+        // arbitrary text); advance to the next char boundary before slicing,
+        // otherwise `&output[start..]` panics.
+        let mut start = output.len() - MAX_PTY_OUTPUT_CHARS;
+        while !output.is_char_boundary(start) {
+            start += 1;
+        }
         let cut = output[start..].find('\n').map_or(start, |i| start + i + 1);
         output.drain(..cut);
     }
@@ -843,6 +849,27 @@ impl Default for RightPanelState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: `truncate_output` cuts at a BYTE offset (`len - cap`).
+    /// When the output contains multi-byte UTF-8 (arrows, accents, emoji —
+    /// common in bash/subagent output), that offset can land inside a char
+    /// and slicing panicked with "byte index is not a char boundary". The
+    /// cut must advance to the next char boundary instead.
+    #[test]
+    fn truncate_output_handles_multibyte_output_without_panic() {
+        let mut state = RightPanelState::new();
+        state.start_pty("cmd".to_string(), None);
+        // 30000 × "é" (2 bytes) + "x" = 60001 bytes > 60_000: the naive byte
+        // offset start = 1 lands inside the first 'é'.
+        state.update_last_pty("é".repeat(30_000) + "x");
+        assert!(state.pty_sessions[0].output.len() <= MAX_PTY_OUTPUT_CHARS);
+
+        // Same for subagent output with the "→ cosh:" prefix.
+        state.complete_last_pty(String::new());
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty(format!("→ cosh: olá\n{}", "→".repeat(30_001)));
+        assert!(state.pty_sessions[1].output.len() <= MAX_PTY_OUTPUT_CHARS);
+    }
 
     #[test]
     fn update_last_pty_appends_output() {
