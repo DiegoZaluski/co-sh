@@ -1328,8 +1328,10 @@ impl SessionView {
                     }
                 }
                 Part::Reasoning(r) => {
-                    let expanded = config.thinking_mode
-                        || tool_state.is_expanded(&r.text[..r.text.floor_char_boundary(32)]);
+                    let expanded = tool_state.is_expanded_or(
+                        &r.text[..r.text.floor_char_boundary(32)],
+                        config.thinking_mode,
+                    );
                     let mut line_h = 0u16;
                     Self::render_reasoning(buf, x, y, &mut line_h, max_w, r, expanded, theme);
                     y += line_h.max(1);
@@ -1579,7 +1581,16 @@ impl SessionView {
                 if r.text.is_empty() {
                     1
                 } else {
-                    (r.text.lines().count().min(10) as u16) + 2
+                    let expanded = tool_state.is_expanded_or(
+                        &r.text[..r.text.floor_char_boundary(32)],
+                        config.thinking_mode,
+                    );
+                    if expanded {
+                        (r.text.lines().count().min(10) as u16) + 2
+                    } else {
+                        // Collapsed: just the "+ Thought" header row.
+                        1
+                    }
                 }
             }
             Part::File(_) => 1,
@@ -1914,7 +1925,11 @@ impl SessionView {
                             if click_y == part_y {
                                 let header_x_end = x_off + 8;
                                 if click_x >= x_off && click_x < header_x_end {
-                                    self.tool_state.toggle_expanded(part_id);
+                                    // Flip relative to the effective state so
+                                    // the first click on a block expanded via
+                                    // the global thinking mode collapses it.
+                                    self.tool_state
+                                        .toggle_with_default(part_id, config.thinking_mode);
                                     return true;
                                 }
                             }
@@ -2870,10 +2885,10 @@ impl SessionView {
                                 }
                             }
                             crate::types::Part::Reasoning(r) => {
-                                let expanded = config.thinking_mode
-                                    || self
-                                        .tool_state
-                                        .is_expanded(&r.text[..r.text.floor_char_boundary(32)]);
+                                let expanded = self.tool_state.is_expanded_or(
+                                    &r.text[..r.text.floor_char_boundary(32)],
+                                    config.thinking_mode,
+                                );
                                 let header = if expanded { "- Thought" } else { "+ Thought" };
                                 if p_top >= vp_top {
                                     text_regions.push(TextRegion {

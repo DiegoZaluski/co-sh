@@ -184,6 +184,20 @@ impl ToolRenderState {
         self.version = self.version.wrapping_add(1);
     }
 
+    /// Effective expansion for an id that inherits `default` until explicitly
+    /// toggled (e.g. reasoning blocks default to the global thinking mode).
+    pub fn is_expanded_or(&self, id: &str, default: bool) -> bool {
+        self.expanded.get(id).copied().unwrap_or(default)
+    }
+
+    /// Flip expansion relative to the id's *effective* state, so the first
+    /// click on a block that starts expanded via `default` collapses it.
+    pub fn toggle_with_default(&mut self, id: &str, default: bool) {
+        let current = self.is_expanded_or(id, default);
+        self.expanded.insert(id.to_string(), !current);
+        self.version = self.version.wrapping_add(1);
+    }
+
     pub fn is_expanded(&self, id: &str) -> bool {
         self.expanded.get(id).copied().unwrap_or(false)
     }
