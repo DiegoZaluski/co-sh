@@ -12,7 +12,11 @@ use super::App;
 
 fn big_rust_file(lines: usize) -> String {
     (0..lines)
-        .map(|i| format!("pub fn handler_{i}(req: Request) -> Response {{ let v = \"{i}\"; Ok(v.into()) }}"))
+        .map(|i| {
+            format!(
+                "pub fn handler_{i}(req: Request) -> Response {{ let v = \"{i}\"; Ok(v.into()) }}"
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -31,7 +35,10 @@ async fn probe_drain_costs() {
             messages.push(Message {
                 id: format!("u-{r}"),
                 role: MessageRole::User,
-                parts: vec![Part::Text(TextPart { text: format!("question {r}"), synthetic: false })],
+                parts: vec![Part::Text(TextPart {
+                    text: format!("question {r}"),
+                    synthetic: false,
+                })],
                 created_at: 0,
                 agent: None,
                 model: None,
@@ -40,7 +47,10 @@ async fn probe_drain_costs() {
                 id: format!("a-{r}"),
                 role: MessageRole::Assistant,
                 parts: vec![
-                    Part::Text(TextPart { text: "### Answer\n\nbody text here\n".repeat(20), synthetic: false }),
+                    Part::Text(TextPart {
+                        text: "### Answer\n\nbody text here\n".repeat(20),
+                        synthetic: false,
+                    }),
                     Part::Tool(ToolPart {
                         tool: "read".into(),
                         input: serde_json::json!({"file": format!("m{r}.rs")}),
@@ -59,7 +69,11 @@ async fn probe_drain_costs() {
         }
         let id = "probe".to_string();
         app.state.add_session(crate::types::Session {
-            id, title: "P".into(), created_at: 0, title_generated: true, messages,
+            id,
+            title: "P".into(),
+            created_at: 0,
+            title_generated: true,
+            messages,
         });
         app.state.current_session_id = Some("probe".into());
     }
@@ -69,17 +83,23 @@ async fn probe_drain_costs() {
     app.state.status = crate::types::SessionStatus::Working;
 
     // A running tool part exists so ToolOutput paths take the real branch.
-    app.event_tx.send(HarnessEvent::ToolCall {
-        tool: "bash_run".into(),
-        input: serde_json::json!({"command": "cargo test"}),
-    }).unwrap();
+    app.event_tx
+        .send(HarnessEvent::ToolCall {
+            tool: "bash_run".into(),
+            input: serde_json::json!({"command": "cargo test"}),
+        })
+        .unwrap();
     app.poll_events();
 
     fn measure(app: &mut App, name: &str, ev: HarnessEvent) {
         app.event_tx.send(ev).unwrap();
         let t = std::time::Instant::now();
         app.poll_events();
-        println!("[PROBE] {:<34} drain={:>8.3}ms", name, t.elapsed().as_secs_f64() * 1000.0);
+        println!(
+            "[PROBE] {:<34} drain={:>8.3}ms",
+            name,
+            t.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     let token = "streamed token chunk of text ";
@@ -88,32 +108,70 @@ async fn probe_drain_costs() {
 
     // Measure each event type several times for stability.
     for i in 0..5 {
-        measure(&mut app, &format!("Token #{i}"), HarnessEvent::Token { text: token.repeat(4) });
-        measure(&mut app, &format!("ToolOutput(bash) #{i}"), HarnessEvent::ToolOutput {
-            tool: "bash_run".into(),
-            output: bash_chunk.clone(),
-            finished: false,
-        });
-        measure(&mut app, &format!("ToolOutput(subagent) #{i}"), HarnessEvent::ToolOutput {
-            tool: "subagent_call".into(),
-            output: sub_chunk.clone(),
-            finished: false,
-        });
-        measure(&mut app, &format!("Reasoning #{i}"), HarnessEvent::Reasoning { text: "thinking ".repeat(50) });
+        measure(
+            &mut app,
+            &format!("Token #{i}"),
+            HarnessEvent::Token {
+                text: token.repeat(4),
+            },
+        );
+        measure(
+            &mut app,
+            &format!("ToolOutput(bash) #{i}"),
+            HarnessEvent::ToolOutput {
+                tool: "bash_run".into(),
+                output: bash_chunk.clone(),
+                finished: false,
+            },
+        );
+        measure(
+            &mut app,
+            &format!("ToolOutput(subagent) #{i}"),
+            HarnessEvent::ToolOutput {
+                tool: "subagent_call".into(),
+                output: sub_chunk.clone(),
+                finished: false,
+            },
+        );
+        measure(
+            &mut app,
+            &format!("Reasoning #{i}"),
+            HarnessEvent::Reasoning {
+                text: "thinking ".repeat(50),
+            },
+        );
 
         // Frame between batches like the real loop.
         terminal.draw(|f| app.render(f, 0.033)).unwrap();
     }
 
     // ToolResult with a big output.
-    measure(&mut app, "ToolResult(1200-line file)", HarnessEvent::ToolResult { output: big_rust_file(1200) });
+    measure(
+        &mut app,
+        "ToolResult(1200-line file)",
+        HarnessEvent::ToolResult {
+            output: big_rust_file(1200),
+        },
+    );
     terminal.draw(|f| app.render(f, 0.033)).unwrap();
 
     // ContextSnapshot → full session save on UI thread.
-    measure(&mut app, "ContextSnapshot(full save)", HarnessEvent::ContextSnapshot { context_state: vec![0u8; 64 * 1024] });
+    measure(
+        &mut app,
+        "ContextSnapshot(full save)",
+        HarnessEvent::ContextSnapshot {
+            context_state: vec![0u8; 64 * 1024],
+        },
+    );
     terminal.draw(|f| app.render(f, 0.033)).unwrap();
 
     // Done → full save + transition.
-    measure(&mut app, "Done(full save)", HarnessEvent::Done { context_state: vec![0u8; 64 * 1024] });
+    measure(
+        &mut app,
+        "Done(full save)",
+        HarnessEvent::Done {
+            context_state: vec![0u8; 64 * 1024],
+        },
+    );
     terminal.draw(|f| app.render(f, 0.033)).unwrap();
 }

@@ -142,7 +142,12 @@ impl SessionStore {
         });
         // If the thread failed to spawn there is no receiver; fall back to a
         // synchronous save rather than dropping the snapshot.
-        if tx.send(SaveJob { session: Box::new(session.clone()) }).is_err() {
+        if tx
+            .send(SaveJob {
+                session: Box::new(session.clone()),
+            })
+            .is_err()
+        {
             self.save_session(session);
         }
     }

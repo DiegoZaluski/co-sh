@@ -79,7 +79,11 @@ async fn probe_real_session() {
         if let Ok(sm) = serde_json::from_str::<StoredMsg>(line) {
             messages.push(Message {
                 id: sm.id,
-                role: if sm.role == "assistant" { MessageRole::Assistant } else { MessageRole::User },
+                role: if sm.role == "assistant" {
+                    MessageRole::Assistant
+                } else {
+                    MessageRole::User
+                },
                 parts: sm.parts,
                 created_at: sm.created_at,
                 agent: sm.agent,
@@ -87,11 +91,7 @@ async fn probe_real_session() {
             });
         }
     }
-    println!(
-        "[REAL] session {}: {} messages",
-        path,
-        messages.len()
-    );
+    println!("[REAL] session {}: {} messages", path, messages.len());
     for (i, m) in messages.iter().enumerate() {
         println!(
             "[REAL]   msg{i} role={:?} parts={} bytes~{}",
@@ -119,16 +119,24 @@ async fn probe_real_session() {
     // ── Baseline idle frame ──
     let t = std::time::Instant::now();
     terminal.draw(|f| app.render(f, 0.016)).unwrap();
-    println!("[PROBE] first frame (cold caches): {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "[PROBE] first frame (cold caches): {:.2}ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
     let t = std::time::Instant::now();
     terminal.draw(|f| app.render(f, 0.016)).unwrap();
-    println!("[PROBE] second frame (warm):       {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "[PROBE] second frame (warm):       {:.2}ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
 
     // ── Agent starts working: ToolCall → active spinner → per-frame redraws ──
-    app.event_tx.send(HarnessEvent::ToolCall {
-        tool: "bash_run".into(),
-        input: serde_json::json!({"command": "cargo build --release"}),
-    }).unwrap();
+    app.event_tx
+        .send(HarnessEvent::ToolCall {
+            tool: "bash_run".into(),
+            input: serde_json::json!({"command": "cargo build --release"}),
+        })
+        .unwrap();
     app.poll_events();
     println!("[PROBE] --- frames with ACTIVE TOOL SPINNER (agent working) ---");
     let mut worst = 0.0f64;
@@ -136,7 +144,9 @@ async fn probe_real_session() {
     let n = 90; // ~3s at 30fps
     for i in 0..n {
         app.event_tx
-            .send(HarnessEvent::Token { text: "streaming answer chunk ".repeat(3) })
+            .send(HarnessEvent::Token {
+                text: "streaming answer chunk ".repeat(3),
+            })
             .unwrap();
         app.event_tx
             .send(HarnessEvent::ToolOutput {
@@ -181,7 +191,10 @@ async fn probe_real_session() {
         app.poll_events();
         let t = std::time::Instant::now();
         terminal.draw(|f| app.render(f, 0.033)).unwrap();
-        println!("[PROBE] panel-appear frame {i}: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+        println!(
+            "[PROBE] panel-appear frame {i}: {:.2}ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     // ── Sustained streaming with BOTH spinner + panel present ──
@@ -191,7 +204,9 @@ async fn probe_real_session() {
     let n2 = 120;
     for i in 0..n2 {
         app.event_tx
-            .send(HarnessEvent::Token { text: "more streamed text ".repeat(4) })
+            .send(HarnessEvent::Token {
+                text: "more streamed text ".repeat(4),
+            })
             .unwrap();
         app.event_tx
             .send(HarnessEvent::ToolOutput {
@@ -222,14 +237,22 @@ async fn probe_real_session() {
         app.session_view.scroll_by_raw(-48.0);
         let t = std::time::Instant::now();
         terminal.draw(|f| app.render(f, 0.016)).unwrap();
-        println!("[PROBE] scroll frame {i}: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+        println!(
+            "[PROBE] scroll frame {i}: {:.2}ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     // ── Done: transition out ──
     app.event_tx
-        .send(HarnessEvent::Done { context_state: vec![0u8; 1024] })
+        .send(HarnessEvent::Done {
+            context_state: vec![0u8; 1024],
+        })
         .unwrap();
     let t = std::time::Instant::now();
     app.poll_events();
-    println!("[PROBE] Done drain: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "[PROBE] Done drain: {:.2}ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
 }

@@ -16,8 +16,8 @@
 
 use ratatui::{Terminal, backend::TestBackend};
 
-use cosh::harness::HarnessEvent;
 use super::App;
+use cosh::harness::HarnessEvent;
 
 const W: u16 = 160;
 const H: u16 = 48;
@@ -32,7 +32,11 @@ struct FrameStats {
 
 impl FrameStats {
     fn new(name: &'static str) -> Self {
-        Self { name, draw_ms: Vec::new(), drain_ms: Vec::new() }
+        Self {
+            name,
+            draw_ms: Vec::new(),
+            drain_ms: Vec::new(),
+        }
     }
     fn report(self) -> bool {
         let mut d = self.draw_ms.clone();
@@ -72,14 +76,24 @@ impl FrameStats {
 
 fn big_rust_file(lines: usize) -> String {
     (0..lines)
-        .map(|i| format!("pub fn handler_{i}(req: Request) -> Response {{ let v = \"{i}\"; Ok(v.into()) }}"))
+        .map(|i| {
+            format!(
+                "pub fn handler_{i}(req: Request) -> Response {{ let v = \"{i}\"; Ok(v.into()) }}"
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 fn shell_out(lines: usize) -> String {
     (0..lines)
-        .map(|i| format!("[{i}] INFO worker handled request bytes={} dur={}ms", i * 37 % 9999, i % 90))
+        .map(|i| {
+            format!(
+                "[{i}] INFO worker handled request bytes={} dur={}ms",
+                i * 37 % 9999,
+                i % 90
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -88,49 +102,85 @@ fn shell_out(lines: usize) -> String {
 fn push_agent_round(app: &mut App, seed: usize) {
     use crate::types::{Message, MessageRole, Part, TextPart};
     app.event_tx
-        .send(HarnessEvent::Token { text: format!("user question {seed}: fix the handler\n") })
+        .send(HarnessEvent::Token {
+            text: format!("user question {seed}: fix the handler\n"),
+        })
         .unwrap();
     app.poll_events();
-    app.state.current_session_mut().unwrap().messages.push(Message {
-        id: format!("u-{seed}"),
-        role: MessageRole::User,
-        parts: vec![Part::Text(TextPart { text: format!("Fix handler {seed} under load"), synthetic: false })],
-        created_at: 0,
-        agent: None,
-        model: None,
-    });
+    app.state
+        .current_session_mut()
+        .unwrap()
+        .messages
+        .push(Message {
+            id: format!("u-{seed}"),
+            role: MessageRole::User,
+            parts: vec![Part::Text(TextPart {
+                text: format!("Fix handler {seed} under load"),
+                synthetic: false,
+            })],
+            created_at: 0,
+            agent: None,
+            model: None,
+        });
     app.poll_events();
 
-    app.event_tx.send(HarnessEvent::Reasoning { text: "thinking about the fix... ".repeat(20) }).unwrap();
-    app.event_tx.send(HarnessEvent::ToolCall {
-        tool: "read".into(),
-        input: serde_json::json!({"file": format!("src/mod_{seed}.rs")}),
-    }).unwrap();
-    app.event_tx.send(HarnessEvent::ToolResult { output: big_rust_file(1200) }).unwrap();
-    app.event_tx.send(HarnessEvent::ToolCall {
-        tool: "bash_run".into(),
-        input: serde_json::json!({"command": "cargo test"}),
-    }).unwrap();
-    for _ in 0..10 {
-        app.event_tx.send(HarnessEvent::ToolOutput {
+    app.event_tx
+        .send(HarnessEvent::Reasoning {
+            text: "thinking about the fix... ".repeat(20),
+        })
+        .unwrap();
+    app.event_tx
+        .send(HarnessEvent::ToolCall {
+            tool: "read".into(),
+            input: serde_json::json!({"file": format!("src/mod_{seed}.rs")}),
+        })
+        .unwrap();
+    app.event_tx
+        .send(HarnessEvent::ToolResult {
+            output: big_rust_file(1200),
+        })
+        .unwrap();
+    app.event_tx
+        .send(HarnessEvent::ToolCall {
             tool: "bash_run".into(),
-            output: format!("{}\n", shell_out(40)),
-            finished: false,
-        }).unwrap();
+            input: serde_json::json!({"command": "cargo test"}),
+        })
+        .unwrap();
+    for _ in 0..10 {
+        app.event_tx
+            .send(HarnessEvent::ToolOutput {
+                tool: "bash_run".into(),
+                output: format!("{}\n", shell_out(40)),
+                finished: false,
+            })
+            .unwrap();
     }
-    app.event_tx.send(HarnessEvent::ToolResult { output: shell_out(300) }).unwrap();
-    app.event_tx.send(HarnessEvent::ToolCall {
-        tool: "subagent_call".into(),
-        input: serde_json::json!({"agent": "explore", "input": "find hot paths"}),
-    }).unwrap();
-    for _ in 0..15 {
-        app.event_tx.send(HarnessEvent::ToolOutput {
+    app.event_tx
+        .send(HarnessEvent::ToolResult {
+            output: shell_out(300),
+        })
+        .unwrap();
+    app.event_tx
+        .send(HarnessEvent::ToolCall {
             tool: "subagent_call".into(),
-            output: "- reading src/**\n- found hot loop in worker.rs\n- summarizing findings\n".repeat(8),
-            finished: false,
-        }).unwrap();
+            input: serde_json::json!({"agent": "explore", "input": "find hot paths"}),
+        })
+        .unwrap();
+    for _ in 0..15 {
+        app.event_tx
+            .send(HarnessEvent::ToolOutput {
+                tool: "subagent_call".into(),
+                output: "- reading src/**\n- found hot loop in worker.rs\n- summarizing findings\n"
+                    .repeat(8),
+                finished: false,
+            })
+            .unwrap();
     }
-    app.event_tx.send(HarnessEvent::ToolResult { output: "done exploring".into() }).unwrap();
+    app.event_tx
+        .send(HarnessEvent::ToolResult {
+            output: "done exploring".into(),
+        })
+        .unwrap();
 }
 
 #[tokio::test]
@@ -147,7 +197,10 @@ async fn bench_e2e_agent_loop() {
             messages.push(Message {
                 id: format!("u-{r}"),
                 role: MessageRole::User,
-                parts: vec![Part::Text(TextPart { text: format!("question number {r} about module {r}"), synthetic: false })],
+                parts: vec![Part::Text(TextPart {
+                    text: format!("question number {r} about module {r}"),
+                    synthetic: false,
+                })],
                 created_at: r as u64 * 1000,
                 agent: None,
                 model: None,
@@ -156,8 +209,16 @@ async fn bench_e2e_agent_loop() {
                 id: format!("a-{r}"),
                 role: MessageRole::Assistant,
                 parts: vec![
-                    Part::Reasoning(ReasoningPart { text: "reasoning... ".repeat(30), collapsed: false }),
-                    Part::Text(TextPart { text: format!("### Answer {r}\n\nDetailed analysis with `code` spans and lists.\n"), synthetic: false }),
+                    Part::Reasoning(ReasoningPart {
+                        text: "reasoning... ".repeat(30),
+                        collapsed: false,
+                    }),
+                    Part::Text(TextPart {
+                        text: format!(
+                            "### Answer {r}\n\nDetailed analysis with `code` spans and lists.\n"
+                        ),
+                        synthetic: false,
+                    }),
                     Part::Tool(ToolPart {
                         tool: "read".into(),
                         input: serde_json::json!({"file": format!("src/m{r}.rs")}),
@@ -223,7 +284,9 @@ async fn bench_e2e_agent_loop() {
             for f in 0..25 {
                 let t = std::time::Instant::now();
                 app.event_tx
-                    .send(HarnessEvent::Token { text: chunk.repeat(3) })
+                    .send(HarnessEvent::Token {
+                        text: chunk.repeat(3),
+                    })
                     .unwrap();
                 app.poll_events();
                 let drained = t.elapsed().as_secs_f64() * 1000.0;
@@ -238,7 +301,9 @@ async fn bench_e2e_agent_loop() {
             if round % 2 == 1 {
                 let t = std::time::Instant::now();
                 app.event_tx
-                    .send(HarnessEvent::ContextSnapshot { context_state: vec![0u8; 1024] })
+                    .send(HarnessEvent::ContextSnapshot {
+                        context_state: vec![0u8; 1024],
+                    })
                     .unwrap();
                 app.poll_events();
                 ft.drain_ms.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -260,7 +325,9 @@ async fn bench_e2e_agent_loop() {
             ft.draw_ms.push(t.elapsed().as_secs_f64() * 1000.0);
             ft.drain_ms.push(0.0);
         }
-        while app.session_view.scroll_y < app.session_view.total_height - app.session_view.visible_height {
+        while app.session_view.scroll_y
+            < app.session_view.total_height - app.session_view.visible_height
+        {
             app.session_view.scroll_by_raw(page);
             let t = std::time::Instant::now();
             terminal.draw(|f| app.render(f, 0.016)).unwrap();
@@ -275,7 +342,9 @@ async fn bench_e2e_agent_loop() {
         let mut ft = FrameStats::new("done_save_transition");
         let t = std::time::Instant::now();
         app.event_tx
-            .send(HarnessEvent::Done { context_state: vec![0u8; 64 * 1024] })
+            .send(HarnessEvent::Done {
+                context_state: vec![0u8; 64 * 1024],
+            })
             .unwrap();
         app.poll_events();
         ft.drain_ms.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -285,5 +354,8 @@ async fn bench_e2e_agent_loop() {
         all_ok &= ft.report();
     }
 
-    assert!(all_ok, "[BENCH] human-perception targets missed — see [BENCH] lines above");
+    assert!(
+        all_ok,
+        "[BENCH] human-perception targets missed — see [BENCH] lines above"
+    );
 }
