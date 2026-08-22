@@ -5474,12 +5474,19 @@ impl App {
                         let max_w = inner_area.width.saturating_sub(6);
 
                         if let Some(session) = self.state.current_session() {
-                            self.session_view.build_text_regions(
+                            // Build regions for the whole content span between
+                            // anchor and focus, not just the currently visible
+                            // window — the drag may have auto-scrolled across
+                            // scroll boundaries.
+                            let (cs_start, cs_end) =
+                                self.session_view.selection_content_range(sy, y);
+                            self.session_view.build_text_regions_for_content_range(
                                 session,
                                 inner_area,
                                 max_w,
                                 &self.config,
                                 &self.theme,
+                                (cs_start, cs_end + 1),
                             );
                         }
 

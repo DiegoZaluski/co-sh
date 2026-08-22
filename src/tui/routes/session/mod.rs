@@ -2515,10 +2515,59 @@ impl SessionView {
         config: &TuiConfig,
         theme: &Theme,
     ) {
-        let scroll = self.scroll_y;
+        self.build_text_regions_impl(session, inner_area, max_w, config, theme, None);
+    }
+
+    /// Like [`Self::build_text_regions`], but builds regions for an arbitrary
+    /// content-space row span instead of the visible viewport. Used on
+    /// drag-release so a selection that crossed scroll boundaries (auto-scroll)
+    /// copies every row between anchor and focus, not just the last window.
+    pub fn build_text_regions_for_content_range(
+        &mut self,
+        session: &crate::types::Session,
+        inner_area: Rect,
+        max_w: u16,
+        config: &TuiConfig,
+        theme: &Theme,
+        content_range: (i32, i32),
+    ) {
+        self.build_text_regions_impl(
+            session,
+            inner_area,
+            max_w,
+            config,
+            theme,
+            Some(content_range),
+        );
+    }
+
+    fn build_text_regions_impl(
+        &mut self,
+        session: &crate::types::Session,
+        inner_area: Rect,
+        max_w: u16,
+        config: &TuiConfig,
+        theme: &Theme,
+        content_range: Option<(i32, i32)>,
+    ) {
+        // With a content range, run the same walk against a virtual viewport
+        // of exactly that span: `scroll` shifts the walk to the range start
+        // and vp_top=0 keeps every `screen - vp_top + scroll` expression
+        // yielding absolute content coordinates.
+        let (scroll, vp_top, vp_bottom) = if let Some((cs_start, cs_end)) = content_range {
+            // Cap the span so a pathological selection can't allocate
+            // unbounded region rows.
+            const MAX_SELECTION_SPAN_ROWS: i32 = 100_000;
+            let span = (cs_end - cs_start).clamp(1, MAX_SELECTION_SPAN_ROWS);
+            (cs_start, 0, span)
+        } else {
+            (
+                self.scroll_y,
+                i32::from(inner_area.y),
+                i32::from(inner_area.bottom()),
+            )
+        };
         let x_off = inner_area.x + 3;
-        let vp_top = i32::from(inner_area.y);
-        let vp_bottom = i32::from(inner_area.bottom());
 
         // Same O(log n + visible) walk as the render: start at the first
         // message that can intersect the viewport and stop past its bottom.
@@ -2810,8 +2859,16 @@ impl SessionView {
                                     part_y += part_h;
                                     continue;
                                 }
-                                // Add inline tool label (only when visible)
-                                if p_top >= vp_top {
+                                // Add inline tool label — but only when the
+                                // renderer actually draws it. render_todo, for
+                                // example, shows its label row only on failure
+                                // (on success it renders just the list box),
+                                // so copying it unconditionally leaked hidden
+                                // text into the selection.
+                                let draws_label = self::tool_render::tool_display(&t.tool)
+                                    != "todo"
+                                    || matches!(t.status, crate::types::ToolStatus::Failed(_));
+                                if draws_label && p_top >= vp_top {
                                     let label = self::tool_render::tool_inline_text(t);
                                     text_regions.push(TextRegion {
                                         y1: content_offset,
@@ -2821,65 +2878,57 @@ impl SessionView {
                                         text: label,
                                     });
                                 }
-                                // Add visible output lines after the label
-                                if let Some(ref output) = t.output {
-                                    let trimmed = output.trim();
-                                    if !trimmed.is_empty() {
-                                        let is_glob =
-                                            self::tool_render::tool_display(&t.tool) == "glob";
-                                        let is_completed =
-                                            matches!(t.status, crate::types::ToolStatus::Completed);
-                                        let preview_collapse = |body: String| {
-                                            let id = t
-                                                .tool_call_id
-                                                .as_deref()
-                                                .unwrap_or(if is_glob { "glob" } else { "shell" });
-                                            let collapsed =
-                                                crate::util::scroll::collapse_tool_output(
-                                                    &body, 10, 800,
-                                                );
-                                            if self.tool_state.is_expanded(id)
-                                                || !collapsed.overflow
-                                            {
-                                                body
-                                            } else {
-                                                collapsed.output
-                                            }
-                                        };
-                                        // Glob results copy as the rendered file
-                                        // list (flat/grouped/tree), not the raw JSON.
-                                        let body = if is_glob {
-                                            self::tool_render::glob_block_text(t)
-                                                .unwrap_or_default()
-                                        } else {
-                                            String::new()
-                                        };
-                                        let display = if is_glob {
-                                            if !body.is_empty() && is_completed {
-                                                preview_collapse(body)
-                                            } else {
-                                                body
-                                            }
-                                        } else if config.show_tool_details || !is_completed {
-                                            trimmed.to_string()
-                                        } else {
-                                            preview_collapse(trimmed.to_string())
-                                        };
-                                        let first_output_screen = (p_top.max(vp_top) + 1) as u16;
-                                        let screen_end = p_bottom.min(vp_bottom) as u16;
-                                        let mut out_screen_y = first_output_screen;
-                                        for display_line in display.lines() {
-                                            if out_screen_y < screen_end {
-                                                let cy = (out_screen_y as i32) - vp_top + scroll;
-                                                text_regions.push(TextRegion {
-                                                    y1: cy,
-                                                    y2: cy + 1,
-                                                    x1: x_off,
-                                                    x2: x_off + max_w,
-                                                    text: display_line.to_string(),
-                                                });
-                                                out_screen_y += 1;
-                                            }
+                                // Add visible output lines after the label.
+                                // The body mirrors what each tool's renderer
+                                // draws (formatted TODO list, extracted diff,
+                                // code preview) — never raw JSON schemas.
+                                let is_completed =
+                                    matches!(t.status, crate::types::ToolStatus::Completed);
+                                let is_glob = self::tool_render::tool_display(&t.tool) == "glob";
+                                let collapsed_body = |body: String, fallback_id: &str| {
+                                    let id = t.tool_call_id.as_deref().unwrap_or(fallback_id);
+                                    let collapsed =
+                                        crate::util::scroll::collapse_tool_output(&body, 10, 800);
+                                    if self.tool_state.is_expanded(id) || !collapsed.overflow {
+                                        body
+                                    } else {
+                                        collapsed.output
+                                    }
+                                };
+                                let display: Option<String> = if is_glob {
+                                    let body =
+                                        self::tool_render::glob_block_text(t).unwrap_or_default();
+                                    if !body.is_empty() && is_completed {
+                                        Some(collapsed_body(body, "glob"))
+                                    } else {
+                                        Some(body)
+                                    }
+                                } else {
+                                    let display_name = self::tool_render::tool_display(&t.tool);
+                                    self::tool_render::tool_copy_text(t).map(|body| {
+                                        match display_name {
+                                            // Read blocks collapse on screen exactly like this.
+                                            "read" => collapsed_body(body, "read"),
+                                            _ if config.show_tool_details || !is_completed => body,
+                                            _ => collapsed_body(body, "shell"),
+                                        }
+                                    })
+                                };
+                                if let Some(display) = display.filter(|d| !d.is_empty()) {
+                                    let first_output_screen = (p_top.max(vp_top) + 1) as u16;
+                                    let screen_end = p_bottom.min(vp_bottom) as u16;
+                                    let mut out_screen_y = first_output_screen;
+                                    for display_line in display.lines() {
+                                        if out_screen_y < screen_end {
+                                            let cy = (out_screen_y as i32) - vp_top + scroll;
+                                            text_regions.push(TextRegion {
+                                                y1: cy,
+                                                y2: cy + 1,
+                                                x1: x_off,
+                                                x2: x_off + max_w,
+                                                text: display_line.to_string(),
+                                            });
+                                            out_screen_y += 1;
                                         }
                                     }
                                 }
@@ -3013,6 +3062,19 @@ impl SessionView {
 
             y += msg_h;
         }
+    }
+
+    /// Content-space row span covered by the current drag selection: the
+    /// anchor converted with the scroll offset captured at mouse-down, the
+    /// focus with the current one. Returned as (start, end), end exclusive.
+    pub fn selection_content_range(&self, anchor_y: u16, focus_y: u16) -> (i32, i32) {
+        let vp_top = self.session_area.map_or(0, |(_, y, _, _)| i32::from(y));
+        let content_anchor = (i32::from(anchor_y)) - vp_top + self.mouse_down_scroll_y;
+        let content_focus = (i32::from(focus_y)) - vp_top + self.scroll_y;
+        (
+            content_anchor.min(content_focus),
+            content_anchor.max(content_focus),
+        )
     }
 
     pub fn get_text_in_region(

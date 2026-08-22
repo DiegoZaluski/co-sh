@@ -411,7 +411,7 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
                 format!("Writing {}...", part.tool)
             } else {
                 match part.tool.as_str() {
-                    "plan_todo_write" => "\u{270F} TODO Write".to_string(),
+                    "plan_todo_write" => "TODO Write".to_string(),
                     "plan_todo_edit" => "\u{270F} TODO Edit".to_string(),
                     "plan_todo_cross_off" => "\u{2713} TODO Cross Off".to_string(),
                     "plan_todo_read" => "\u{2630} TODO Read".to_string(),
@@ -1493,6 +1493,50 @@ pub fn render_question_tool(ctx: &mut ToolRenderCtx, part: &ToolPart) {
 ///
 /// Matches OpenCode's inline TodoWrite style: flat list of items with
 /// bracket status symbols and no group headers or IDs.
+/// The copy/selection body for a tool part: exactly what the renderer draws
+/// for its type (formatted TODO list, extracted diff, code preview), never
+/// the raw JSON schema stored in `output`. Returns `None` when the tool
+/// renders no body on screen.
+pub fn tool_copy_text(part: &ToolPart) -> Option<String> {
+    let output = part.output.as_deref().unwrap_or("").trim();
+    match tool_display(&part.tool) {
+        "todo" => (!output.is_empty()).then(|| format_todo_output(output, &part.tool).join("\n")),
+        "edit" => {
+            if output.is_empty() || !matches!(part.status, ToolStatus::Completed) {
+                return None;
+            }
+            let diff = if looks_like_unified_diff(output) {
+                Some(output.to_string())
+            } else {
+                extract_diff_from_json(output)
+            };
+            // Mirror render_edit's 30-line cap.
+            diff.map(|d| d.lines().take(30).collect::<Vec<_>>().join("\n"))
+        }
+        "read" => read_block_text(part),
+        "write" => {
+            // The screen shows the content from the tool *input*, not the
+            // output; a warnings payload means nothing was written and the
+            // renderer falls back to the label-only view.
+            let has_warnings = serde_json::from_str::<serde_json::Value>(output)
+                .ok()
+                .and_then(|v| {
+                    v.as_array()?
+                        .first()?
+                        .get("warnings")?
+                        .as_str()
+                        .map(String::from)
+                });
+            if has_warnings.is_some() || !matches!(part.status, ToolStatus::Completed) {
+                return None;
+            }
+            let content = input_content(&part.input).unwrap_or_default();
+            (!content.is_empty()).then(|| content.lines().take(20).collect::<Vec<_>>().join("\n"))
+        }
+        _ => (!output.is_empty()).then(|| output.to_string()),
+    }
+}
+
 pub fn format_todo_output(output: &str, tool_name: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
@@ -1573,7 +1617,7 @@ pub fn render_todo(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         let is_failed = matches!(part.status, ToolStatus::Failed(_));
         if is_failed {
             let label = match tool_name {
-                "plan_todo_write" => "\u{270F} TODO Write".to_string(),
+                "plan_todo_write" => "TODO Write".to_string(),
                 _ => tool_name.to_string(),
             };
             let style = Style::default().fg(rgba_color(ctx.theme.text_muted));
