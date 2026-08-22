@@ -741,7 +741,11 @@ impl App {
         self.dialog.visible()
             && matches!(
                 self.dialog.current().map(|d| &d.dialog_type),
-                Some(DialogType::ApiKeyInput { .. } | DialogType::LocalUrlInput { .. })
+                Some(
+                    DialogType::ApiKeyInput { .. }
+                        | DialogType::LocalUrlInput { .. }
+                        | DialogType::RenameSession { .. },
+                )
             )
     }
 
@@ -769,7 +773,8 @@ impl App {
             KeyCode::Left => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput { cursor_pos, .. }
-                    | DialogType::LocalUrlInput { cursor_pos, .. } = &mut d.dialog_type
+                    | DialogType::LocalUrlInput { cursor_pos, .. }
+                    | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                     && *cursor_pos > 0
                 {
                     *cursor_pos -= 1;
@@ -783,6 +788,9 @@ impl App {
                     }
                     | DialogType::LocalUrlInput {
                         input, cursor_pos, ..
+                    }
+                    | DialogType::RenameSession {
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos < input.len()
                 {
@@ -793,7 +801,8 @@ impl App {
             KeyCode::Home => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput { cursor_pos, .. }
-                    | DialogType::LocalUrlInput { cursor_pos, .. } = &mut d.dialog_type
+                    | DialogType::LocalUrlInput { cursor_pos, .. }
+                    | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                 {
                     *cursor_pos = 0;
                 }
@@ -805,6 +814,9 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::LocalUrlInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                 {
@@ -818,6 +830,9 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::LocalUrlInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos < input.len()
@@ -834,6 +849,9 @@ impl App {
                     }
                     | DialogType::LocalUrlInput {
                         input, cursor_pos, ..
+                    }
+                    | DialogType::RenameSession {
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos > 0
                 {
@@ -849,6 +867,9 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::LocalUrlInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                 {
@@ -868,6 +889,38 @@ impl App {
             return false;
         };
         match &d.dialog_type {
+            DialogType::RenameSession { input, .. } => {
+                // An empty/whitespace title just closes the dialog without
+                // touching the session (opencode behavior: cancel, not clear).
+                let trimmed = input.trim();
+                if !trimmed.is_empty()
+                    && let Some(id) = self.state.current_session_id.clone()
+                {
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    if let Some(session) = self.state.session_cache.get_mut(&id) {
+                        session.title = trimmed.to_string();
+                        session.title_generated = true;
+                    }
+                    // Update the sidebar summary.
+                    if let Some(summary) = self
+                        .state
+                        .session_summaries
+                        .iter_mut()
+                        .find(|s| s.session_id == id)
+                    {
+                        summary.title = trimmed.to_string();
+                        summary.title_generated = true;
+                    }
+                    self.session_store.update_title(&id, trimmed);
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Renamed".into()),
+                        message: format!("Session renamed to “{trimmed}”."),
+                        variant: ToastVariant::Success,
+                        duration_ms: 3000,
+                    });
+                }
+                true
+            }
             DialogType::ApiKeyInput {
                 provider,
                 env_var,
@@ -1337,6 +1390,19 @@ impl App {
         }
     }
 
+    /// Open the rename dialog for the current session, prefilled with its
+    /// title (opencode-style prompt: edit in place, Enter applies, Esc
+    /// cancels). No-op without a session.
+    fn open_rename_dialog(&mut self) {
+        let Some(session) = self.state.current_session() else {
+            return;
+        };
+        let input = session.title.clone();
+        let cursor_pos = input.len();
+        self.dialog
+            .show(DialogType::RenameSession { input, cursor_pos });
+    }
+
     /// Create a fresh empty session and select it — the shared path behind
     /// Home's "New session" (keyboard + mouse) and the `/new` slash command.
     /// Selecting the session flips the app into Session mode.
@@ -1379,6 +1445,8 @@ impl App {
                 self.slash_menu.visible = false;
                 return;
             }
+        } else if cmd.name == "rename" {
+            self.open_rename_dialog();
         } else if cmd.name == "bell" {
             self.bell_enabled = !self.bell_enabled;
             use crate::ui::toast::{ToastOptions, ToastVariant};
@@ -6320,6 +6388,8 @@ fn create_cloud_embedder(
 #[cfg(test)]
 mod tests {
     use super::{App, format_tokens};
+    use crate::ui::dialogs::DialogType;
+    use crossterm::event::KeyCode;
 
     #[test]
     fn format_tokens_small_values_have_no_separator() {
@@ -6788,6 +6858,132 @@ mod tests {
                 .as_ref()
                 .is_some_and(|t| t.message.contains("wait for it")),
             "the refusal toast tells the user to wait"
+        );
+    }
+
+    /// `/rename` opens the rename dialog prefilled with the current title;
+    /// editing and pressing Enter applies it to the session (in-memory +
+    /// sidebar) and closes the dialog.
+    #[tokio::test]
+    async fn slash_rename_edits_and_applies_the_session_title() {
+        let mut app = App::new("/tmp".to_string());
+        app.start_new_session();
+        let id = app.state.current_session_id.clone().unwrap();
+        if let Some(s) = app.state.session_cache.get_mut(&id) {
+            s.title = "old title".into();
+        }
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "rename".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        assert!(
+            matches!(
+                app.dialog.current().map(|d| &d.dialog_type),
+                Some(DialogType::RenameSession { input, cursor_pos })
+                    if input == "old title" && *cursor_pos == "old title".len()
+            ),
+            "the dialog opens prefilled with the current title, cursor at end"
+        );
+
+        // Clear the field and type a new name, then apply.
+        for _ in 0.."old title".len() {
+            app.handle_text_input_dialog_key(KeyCode::Backspace);
+        }
+        for ch in "manual name".chars() {
+            app.handle_text_input_dialog_key(KeyCode::Char(ch));
+        }
+        assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+        assert!(!app.dialog.visible(), "Enter closes the dialog");
+        assert_eq!(
+            app.state.session_cache.get(&id).unwrap().title,
+            "manual name",
+            "the in-memory session title is updated"
+        );
+    }
+
+    /// Esc on the rename dialog cancels without touching the title.
+    #[tokio::test]
+    async fn slash_rename_esc_cancels_without_changes() {
+        let mut app = App::new("/tmp".to_string());
+        app.start_new_session();
+        let id = app.state.current_session_id.clone().unwrap();
+        if let Some(s) = app.state.session_cache.get_mut(&id) {
+            s.title = "keep me".into();
+        }
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "rename".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        for ch in "edited".chars() {
+            app.handle_text_input_dialog_key(KeyCode::Char(ch));
+        }
+        app.handle_text_input_dialog_key(KeyCode::Esc);
+        assert!(!app.dialog.visible());
+        assert_eq!(app.state.session_cache.get(&id).unwrap().title, "keep me");
+    }
+
+    /// An empty (whitespace-only) title applies nothing — Enter just closes,
+    /// mirroring opencode's prompt behavior.
+    #[tokio::test]
+    async fn slash_rename_empty_title_applies_nothing() {
+        let mut app = App::new("/tmp".to_string());
+        app.start_new_session();
+        let id = app.state.current_session_id.clone().unwrap();
+        if let Some(s) = app.state.session_cache.get_mut(&id) {
+            s.title = "unchanged".into();
+        }
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "rename".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        // Clear everything, then Enter on an empty field.
+        for _ in 0.."unchanged".len() {
+            app.handle_text_input_dialog_key(KeyCode::Backspace);
+        }
+        assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+        assert!(!app.dialog.visible(), "Enter still closes the dialog");
+        assert_eq!(
+            app.state.session_cache.get(&id).unwrap().title,
+            "unchanged",
+            "an empty title never clears the session name"
+        );
+    }
+
+    /// Regression: the slash menu window must SCROLL. With more commands
+    /// than the 6 visible rows, navigating down used to move the selection
+    /// past the rendered window — the last commands (e.g. /rename) existed
+    /// but were invisible and unreachable by arrow keys.
+    #[tokio::test]
+    async fn slash_menu_scrolls_so_the_selection_stays_visible() {
+        let mut app = App::new("/tmp".to_string());
+        app.prompt_view.input = "/".into();
+        app.slash_menu.update(&app.prompt_view.input);
+        assert!(
+            app.slash_menu.commands.len() > 6,
+            "precondition: more commands than the visible window"
+        );
+
+        // Navigate to the LAST command (past the bottom of the window).
+        for _ in 0..app.slash_menu.commands.len() - 1 {
+            app.slash_menu.select_next();
+        }
+        let selected = app.slash_menu.get_selected_command().unwrap().name.clone();
+
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+        app.slash_menu
+            .render(&mut buf, Rect::new(30, 20, 50, 4), &app.theme);
+
+        // Every row of the menu must be scanned: the selected command's name
+        // must be drawn somewhere in the buffer.
+        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            rendered.contains(&selected),
+            "the selected command '{selected}' must be on screen after scrolling down"
         );
     }
 

@@ -6,6 +6,10 @@ use ratatui::style::{Color, Style};
 
 use crate::theme::Theme;
 
+/// Maximum number of command rows the menu shows at once. More commands than
+/// this scroll inside the window ([`SlashMenu::visible_window`]).
+const MAX_ROWS: usize = 6;
+
 fn rgba_color(rgba: RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
@@ -92,6 +96,10 @@ impl SlashMenu {
                 name: "new".into(),
                 desc: "Start a new session".into(),
             },
+            SlashCommand {
+                name: "rename".into(),
+                desc: "Rename the current session".into(),
+            },
         ];
 
         Self {
@@ -166,6 +174,23 @@ impl SlashMenu {
         Some(&self.commands[idxs[pos]])
     }
 
+    /// The slice of filtered indices shown in the menu's MAX_ROWS window,
+    /// scrolled so the selected item is always on screen. Returns
+    /// `(start, len)` into the filtered list — the same computation for the
+    /// renderer and for mouse hit-testing, so a click always lands on the
+    /// row that is drawn.
+    fn visible_window(&self, idxs: &[usize]) -> (usize, usize) {
+        let len = MAX_ROWS.min(idxs.len());
+        if len == 0 {
+            return (0, 0);
+        }
+        let pos = idxs.iter().position(|&i| i == self.selected).unwrap_or(0);
+        // Keep the selection inside the window (same rule as the model list
+        // dialog): scroll only once it falls past the last visible row.
+        let start = if pos >= len { pos - len + 1 } else { 0 };
+        (start, len)
+    }
+
     /// Handle a mouse click on the slash menu. Returns true if the click selected a command.
     /// `prompt_area` is the same area passed to `render()`.
     pub fn handle_mouse(&mut self, mouse: &MouseEvent, prompt_area: Rect, _theme: &Theme) -> bool {
@@ -173,11 +198,10 @@ impl SlashMenu {
             return false;
         }
         let idxs = self.filtered_indices();
-        let max_rows = if idxs.is_empty() {
-            1
-        } else {
-            6.min(idxs.len())
-        };
+        let (start, visible_rows) = self.visible_window(&idxs);
+        // An empty result still reserves one row for the "No matching items"
+        // placeholder.
+        let max_rows = if idxs.is_empty() { 1 } else { visible_rows };
         let menu_y_start = prompt_area.y.saturating_sub(max_rows as u16);
         let menu_width = prompt_area.width;
 
@@ -193,8 +217,8 @@ impl SlashMenu {
         }
 
         let row = (y - menu_y_start) as usize;
-        if row < idxs.len() {
-            self.selected = idxs[row];
+        if row < visible_rows {
+            self.selected = idxs[start + row];
         }
 
         true
@@ -209,11 +233,8 @@ impl SlashMenu {
         }
 
         let idxs = self.filtered_indices();
-        let max_rows = if idxs.is_empty() {
-            1
-        } else {
-            6.min(idxs.len())
-        };
+        let (start, visible_rows) = self.visible_window(&idxs);
+        let max_rows = if idxs.is_empty() { 1 } else { visible_rows };
 
         // Render just above the prompt input area
         let menu_y_start = prompt_area.y.saturating_sub(max_rows as u16);
@@ -234,7 +255,7 @@ impl SlashMenu {
                     Style::default().fg(rgba_color(theme.text_muted)),
                 )
             } else {
-                let i = idxs[row];
+                let i = idxs[start + row];
                 let cmd = &self.commands[i];
                 let is_selected = i == self.selected;
                 let row_bg = if is_selected {

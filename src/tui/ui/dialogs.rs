@@ -52,6 +52,118 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
+/// Borderless text prompt panel: bold title with an "esc" hint on the first
+/// content row, the input line with the blinking cursor, and an "enter
+/// submit" hint at the bottom — one blank padding row above and below.
+fn render_rename_session_dialog(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    now: SystemTime,
+    cursor: &Cursor,
+    input: &str,
+    cursor_pos: usize,
+) {
+    let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
+    let dialog_h = 8; // 1 padding + header + gap + input + gap + hint + 1 padding
+    let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+    let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+
+    // Solid background panel — the same color as the history sidebar, a bare
+    // floating surface with no border characters.
+    let bg_color = rgba_color(theme.background_panel);
+    for y in dialog_y..dialog_y + dialog_h {
+        for x in dialog_x..dialog_x + dialog_w {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(' ');
+                cell.set_style(
+                    Style::default()
+                        .bg(bg_color)
+                        .remove_modifier(Modifier::all()),
+                );
+                cell.set_diff_option(CellDiffOption::None);
+            }
+        }
+    }
+
+    let content_x = dialog_x + 2;
+    let content_w = dialog_w.saturating_sub(4);
+
+    // Header row (below the top padding): bold title left, muted "esc" right.
+    let header_y = dialog_y + 1;
+    draw_text_line(
+        buf,
+        "Rename Session",
+        content_x,
+        header_y,
+        content_w,
+        Style::default()
+            .fg(rgba_color(theme.text))
+            .add_modifier(Modifier::BOLD),
+    );
+    let esc_hint = "esc";
+    draw_text_line(
+        buf,
+        esc_hint,
+        dialog_x + dialog_w - 2 - esc_hint.len() as u16,
+        header_y,
+        esc_hint.len() as u16,
+        Style::default().fg(rgba_color(theme.text_muted)),
+    );
+
+    // Input row with the blinking block cursor, one blank row below the
+    // header.
+    let input_y = dialog_y + 3;
+    let cursor_state = cursor.current_state(now);
+    let display_chars: Vec<char> = input.chars().collect();
+    for (i, ch) in display_chars.iter().enumerate() {
+        let cx = content_x + i as u16;
+        if cx >= content_x + content_w {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((cx, input_y)) {
+            cell.set_char(*ch);
+            cell.set_style(Style::default().fg(rgba_color(theme.text)).bg(bg_color));
+        }
+    }
+    let cursor_x = content_x + cursor_pos.min(input.len()) as u16;
+    if cursor_x < content_x + content_w
+        && let Some(cell) = buf.cell_mut((cursor_x, input_y))
+    {
+        match cursor_state {
+            CursorState::On => {
+                cell.set_char('\u{2588}');
+                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_color));
+            }
+            CursorState::Off | CursorState::Blur => {
+                cell.set_char('\u{2592}');
+                cell.set_style(Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_color));
+            }
+        }
+    }
+
+    // Bottom hint row ("enter" highlighted + muted "submit"), one blank
+    // padding row above the panel's bottom edge.
+    let submit_y = dialog_y + dialog_h - 2;
+    let enter_hint = "enter";
+    draw_text_line(
+        buf,
+        enter_hint,
+        content_x,
+        submit_y,
+        content_w,
+        Style::default().fg(rgba_color(theme.text)),
+    );
+    draw_text_line(
+        buf,
+        " submit",
+        content_x + enter_hint.len() as u16,
+        submit_y,
+        content_w.saturating_sub(enter_hint.len() as u16),
+        Style::default().fg(rgba_color(theme.text_muted)),
+    );
+}
+
 #[derive(Debug, Clone)]
 pub enum DialogType {
     Alert {
@@ -95,6 +207,12 @@ pub enum DialogType {
     /// to setup.json instead of the keyring.
     LocalUrlInput {
         provider: String,
+        input: String,
+        cursor_pos: usize,
+    },
+    /// Rename the current session: a text prompt prefilled with the current
+    /// title, Enter applies, Esc cancels.
+    RenameSession {
         input: String,
         cursor_pos: usize,
     },
@@ -387,6 +505,23 @@ impl DialogState {
                 // Click outside the dialog box → dismiss
                 let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
                 let dialog_h = 7;
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+
+                if x < dialog_x
+                    || x >= dialog_x + dialog_w
+                    || y_click < dialog_y
+                    || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+                DialogAction::Consumed
+            }
+            DialogType::RenameSession { .. } => {
+                // Click outside the borderless prompt panel → dismiss
+                // (matches render_rename_session_dialog geometry).
+                let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
+                let dialog_h = 8;
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
                 let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
 
@@ -1119,6 +1254,17 @@ impl DialogState {
                     &format!("Server URL for {provider}"),
                     "e.g. http://127.0.0.1:8080",
                     false,
+                    input,
+                    *cursor_pos,
+                );
+            }
+            DialogType::RenameSession { input, cursor_pos } => {
+                render_rename_session_dialog(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
                     input,
                     *cursor_pos,
                 );
