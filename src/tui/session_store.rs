@@ -32,6 +32,11 @@ use crate::types::{Message, MessageRole, Part, Session};
 /// Number of session files to keep on disk per CWD. Oldest files are evicted first.
 const MAX_SESSIONS_ON_DISK: usize = 50;
 
+/// A queued session snapshot for the background save-writer thread.
+struct SaveJob {
+    session: Box<crate::types::Session>,
+}
+
 /// Metadata stored as the first JSONL line in each session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionHeader {
@@ -103,6 +108,43 @@ impl SessionStore {
         }
 
         self.evict_old_sessions();
+    }
+
+    /// Persist a session WITHOUT blocking the caller (the UI thread).
+    ///
+    /// `save_session` re-serializes the whole transcript and rewrites the
+    /// file; for a growing agent session that cost grows without bound and
+    /// ran inline in the event loop — the periodic hitch on every throttled
+    /// `ContextSnapshot` (~every 10 s) and the stall on Done/Stopped, which
+    /// is exactly when the user is staring at the TUI.
+    ///
+    /// This variant clones the session (a memcpy — an order of magnitude
+    /// cheaper than serialization) and hands it to a single background
+    /// writer thread. A single writer keeps FIFO ordering, so a newer
+    /// snapshot can never be clobbered by an older in-flight one.
+    pub fn save_session_async(&self, session: &crate::types::Session) {
+        static WRITER: std::sync::OnceLock<std::sync::mpsc::Sender<SaveJob>> =
+            std::sync::OnceLock::new();
+        let tx = WRITER.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<SaveJob>();
+            let store = self.clone();
+            let spawned = std::thread::Builder::new()
+                .name("session-save".into())
+                .spawn(move || {
+                    while let Ok(job) = rx.recv() {
+                        store.save_session(&job.session);
+                    }
+                });
+            if spawned.is_err() {
+                log::warn!("failed to spawn session-save thread");
+            }
+            tx
+        });
+        // If the thread failed to spawn there is no receiver; fall back to a
+        // synchronous save rather than dropping the snapshot.
+        if tx.send(SaveJob { session: Box::new(session.clone()) }).is_err() {
+            self.save_session(session);
+        }
     }
 
     /// Update only the title in an existing session file on disk.

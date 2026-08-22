@@ -4660,7 +4660,7 @@ impl App {
                         && let Some(session) = self.state.session_cache.get(&id)
                         && is_valid_session(session)
                     {
-                        self.session_store.save_session(session);
+                        self.session_store.save_session_async(session);
                         self.session_store.save_ctx(&id, &context_state);
 
                         // Trigger async title generation for the first response.
@@ -4783,7 +4783,7 @@ impl App {
                         && let Some(session) = self.state.session_cache.get(&id)
                         && is_valid_session(session)
                     {
-                        self.session_store.save_session(session);
+                        self.session_store.save_session_async(session);
                         self.session_store.save_ctx(&id, &context_state);
                         self.state.ensure_session_summary(&id);
                     }
@@ -4954,7 +4954,7 @@ impl App {
             && let Some(session) = self.state.session_cache.get(&id)
             && is_valid_session(session)
         {
-            self.session_store.save_session(session);
+            self.session_store.save_session_async(session);
             self.session_store.save_ctx(&id, context_state);
             self.state.ensure_session_summary(&id);
         }
@@ -6614,3 +6614,13 @@ mod tests {
         assert!(queues.next_request.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "bench/bench_e2e.rs"]
+mod bench_e2e;
+#[cfg(test)]
+#[path = "bench/probe_drain.rs"]
+mod probe_drain;
+#[cfg(test)]
+#[path = "bench/probe_real.rs"]
+mod probe_real;
