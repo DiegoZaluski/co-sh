@@ -63,6 +63,11 @@ pub struct MarkdownContext {
     code_block_lang: String,
     in_blockquote: bool,
 
+    // ── Link tracking (phase 5) ────────────────────────────────
+    /// Destination URL of the innermost open link, empty outside links.
+    /// Nested links are impossible in CommonMark, so a single slot suffices.
+    link_dest: String,
+
     // ── List tracking ──────────────────────────────────────────
     /// Stack — one entry per nesting level. `true` = ordered.
     list_ordered: Vec<bool>,
@@ -82,6 +87,7 @@ impl MarkdownContext {
             in_code_block: false,
             code_block_lang: String::new(),
             in_blockquote: false,
+            link_dest: String::new(),
             list_ordered: Vec::new(),
             list_counters: Vec::new(),
         }
@@ -110,8 +116,9 @@ impl MarkdownContext {
             Tag::Strikethrough => {
                 self.strikethrough_depth += 1;
             }
-            Tag::Link { .. } => {
+            Tag::Link { dest_url, .. } => {
                 self.link_depth += 1;
+                self.link_dest = dest_url.to_string();
             }
             Tag::CodeBlock(kind) => {
                 self.in_code_block = true;
@@ -169,6 +176,9 @@ impl MarkdownContext {
             }
             TagEnd::Link => {
                 self.link_depth = self.link_depth.saturating_sub(1);
+                if self.link_depth == 0 {
+                    self.link_dest.clear();
+                }
             }
             TagEnd::CodeBlock => {
                 self.in_code_block = false;
@@ -252,6 +262,12 @@ impl MarkdownContext {
     #[must_use]
     pub const fn in_blockquote(&self) -> bool {
         self.in_blockquote
+    }
+
+    /// Destination URL of the innermost open link (empty outside links).
+    #[must_use]
+    pub fn link_dest(&self) -> &str {
+        &self.link_dest
     }
 
     /// Whether the innermost list is ordered (`true`) or unordered (`false`).

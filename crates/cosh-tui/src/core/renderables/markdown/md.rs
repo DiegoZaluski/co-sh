@@ -16,6 +16,7 @@ use cosh_sdk::tree_sitter::highlight::{HighlightCategory, HighlightSpan, highlig
 use crate::core::renderable::Renderable;
 use crate::core::rgba::RGBA;
 use crate::core::rgba::{ColorInput, parse_color};
+use crate::core::types::MouseEvent;
 
 use super::canvas::GrowBuf;
 use super::context::{MarkdownContext, MarkdownElement};
@@ -100,7 +101,7 @@ pub(crate) fn compute_list_marker_widths(events: &[Event<'_>]) -> Vec<Option<u16
                     let width = if items == 0 {
                         2
                     } else if ordered {
-                        format!("{}", first + items - 1).len() + 2 // digits + ". "
+                        format!("{}", first.saturating_add(items.saturating_sub(1))).len() + 2 // digits + ". "
                     } else {
                         2 // "• "
                     };
@@ -291,6 +292,26 @@ fn highlight_cache_key(text: &str, lang: &str) -> u64 {
 /// evicted by the LRU.
 const BLOCK_CACHE_CAPACITY: usize = 512;
 
+/// A clickable link region recorded while rendering a block, in
+/// block-relative coordinates (x from 0, y from block start).
+#[derive(Debug, Clone)]
+pub(crate) struct LinkRegion {
+    pub y: u16,
+    pub x0: u16,
+    /// One past the last column.
+    pub x1: u16,
+    pub url: String,
+}
+
+/// A link region in absolute buffer coordinates, rebuilt on every render.
+#[derive(Debug, Clone)]
+pub struct ActiveLink {
+    pub y: u16,
+    pub x0: u16,
+    pub x1: u16,
+    pub url: String,
+}
+
 /// A cached render of one top-level markdown block: styled rows ready to be
 /// blitted, plus the geometry (height) and the inputs it was produced for.
 ///
@@ -303,6 +324,7 @@ struct CachedBlock {
     fingerprint: u64,
     height: u16,
     rows: Arc<Vec<Vec<Cell>>>,
+    links: Vec<LinkRegion>,
 }
 
 /// Renders markdown content into a fixed-area \`Buffer\`.
@@ -337,6 +359,13 @@ pub struct MarkdownRenderable {
     bg: Option<RGBA>,
     /// Optional table border colour. Falls back to the palette's muted colour.
     table_border_color: Option<RGBA>,
+    /// When true (default), link syntax is concealed: only the label is
+    /// shown, styled as a link. When false, links render literally as
+    /// `[label](url)` (OpenTUI's unconcealed mode).
+    conceal: bool,
+    /// Clickable link regions in absolute buffer coordinates, rebuilt on
+    /// every `render_self`.
+    active_links: Mutex<Vec<ActiveLink>>,
 }
 
 impl MarkdownRenderable {
@@ -359,6 +388,8 @@ impl MarkdownRenderable {
             fg: None,
             bg: None,
             table_border_color: None,
+            conceal: true,
+            active_links: Mutex::new(Vec::new()),
         };
         if let Some(content) = content {
             md.set_content(content);
@@ -393,11 +424,25 @@ impl MarkdownRenderable {
         self.table_border_color = value.map(parse_color);
     }
 
+    /// Toggle markdown-syntax concealment (phase 5). Default `true`: link
+    /// labels only; `false` renders `[label](url)` literally.
+    pub fn set_conceal(&mut self, value: bool) {
+        self.conceal = value;
+    }
+
     // ── Accessors ──────────────────────────────────────────────
 
     #[must_use]
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    /// Clickable link regions in absolute buffer coordinates, as of the last
+    /// `render_self`. Empty until the first render.
+    #[must_use]
+    pub fn active_links(&self) -> Vec<ActiveLink> {
+        #[allow(clippy::unwrap_used)]
+        self.active_links.lock().unwrap().clone()
     }
 
     /// Fingerprint of every style-affecting input. Cached block renders are
@@ -413,6 +458,7 @@ impl MarkdownRenderable {
                 None => false.hash(&mut hasher),
             }
         }
+        self.conceal.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -449,6 +495,8 @@ impl MarkdownRenderable {
         max_y: u16,
         style: Style,
         bq_indent: u16,
+        link: Option<&str>,
+        links: &mut Vec<LinkRegion>,
     ) {
         let mut word = String::new();
         let mut word_w = 0u16;
@@ -466,6 +514,8 @@ impl MarkdownRenderable {
                     max_y,
                     style,
                     bq_indent,
+                    link,
+                    links,
                 );
                 if *y >= max_y {
                     return;
@@ -487,6 +537,8 @@ impl MarkdownRenderable {
                     max_y,
                     style,
                     bq_indent,
+                    link,
+                    links,
                 );
                 if *y >= max_y {
                     return;
@@ -495,6 +547,20 @@ impl MarkdownRenderable {
                     if let Some(cell) = buf.cell_mut((*x, *y)) {
                         cell.set_char(' ');
                         cell.set_style(style);
+                    }
+                    // Keep inter-word whitespace inside the link's hit map.
+                    if let Some(url) = link {
+                        match links.last_mut() {
+                            Some(last) if last.y == *y && last.x1 == *x && last.url == url => {
+                                last.x1 = last.x1.saturating_add(1);
+                            }
+                            _ => links.push(LinkRegion {
+                                y: *y,
+                                x0: *x,
+                                x1: x.saturating_add(1),
+                                url: url.to_string(),
+                            }),
+                        }
                     }
                     *x += 1;
                 }
@@ -516,6 +582,8 @@ impl MarkdownRenderable {
             max_y,
             style,
             bq_indent,
+            link,
+            links,
         );
     }
 
@@ -534,6 +602,8 @@ impl MarkdownRenderable {
         max_y: u16,
         style: Style,
         bq_indent: u16,
+        link: Option<&str>,
+        links: &mut Vec<LinkRegion>,
     ) {
         if *word_w == 0 {
             return;
@@ -554,13 +624,42 @@ impl MarkdownRenderable {
         // Write grapheme by grapheme. Words wider than the whole line are
         // broken at character level by wrapping whenever the cursor reaches
         // the right edge (mirrors `flush_layout_word` in layout.rs).
+        // While inside a link, record one region per contiguous row segment
+        // (phase 5 hit-testing).
+        let mut seg_start: Option<u16> = None;
+        let close_segment =
+            |links: &mut Vec<LinkRegion>, seg: &mut Option<u16>, end_x: u16, cy: u16| {
+                if let Some(x0) = seg.take()
+                    && let Some(url) = link
+                    && end_x > x0
+                {
+                    // Merge with an adjacent region of the same link so the
+                    // space-extended prefix and wrapped words form one
+                    // contiguous hit target.
+                    match links.last_mut() {
+                        Some(last) if last.y == cy && last.x1 == x0 && last.url == url => {
+                            last.x1 = end_x;
+                        }
+                        _ => links.push(LinkRegion {
+                            y: cy,
+                            x0,
+                            x1: end_x,
+                            url: url.to_string(),
+                        }),
+                    }
+                }
+            };
         for (g, gw) in crate::core::lib::unicode_util::graphemes_with_width(word) {
             if *x + gw > max_x && *x > min_x {
+                close_segment(links, &mut seg_start, *x, *y);
                 *y += 1;
                 *x = min_x;
             }
             if *y >= max_y {
                 break;
+            }
+            if link.is_some() {
+                seg_start.get_or_insert(*x);
             }
             if let Some(cell) = buf.cell_mut((*x, *y)) {
                 if g.len() == 1 {
@@ -581,6 +680,7 @@ impl MarkdownRenderable {
             }
             *x += gw;
         }
+        close_segment(links, &mut seg_start, *x, *y);
         word.clear();
         *word_w = 0;
     }
@@ -734,6 +834,33 @@ impl Renderable for MarkdownRenderable {
         self.parent_num = parent_num;
     }
 
+    /// Left-click hit-test against the link map rebuilt by the last render;
+    /// a hit opens the URL with the system handler.
+    fn process_mouse_event(&mut self, event: &MouseEvent) -> bool {
+        if !event.is_left_click() {
+            return false;
+        }
+        #[allow(clippy::unwrap_used)]
+        let hit = {
+            let links = self.active_links.lock().unwrap();
+            links
+                .iter()
+                .find(|l| event.y == l.y && event.x >= l.x0 && event.x < l.x1)
+                .map(|l| l.url.clone())
+        };
+        match hit {
+            Some(url) => {
+                // Detached: launchers can block, and this runs on the UI
+                // thread — a slow handler must not freeze rendering.
+                if let Err(err) = open::that_detached(&url) {
+                    log::warn!("failed to open link {url}: {err}");
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -747,6 +874,12 @@ impl Renderable for MarkdownRenderable {
     }
 
     fn render_self(&self, buf: &mut Buffer, area: Rect) {
+        // Clear the click map FIRST: stale absolute-coordinate regions from a
+        // previous frame must never survive content clears / area collapse.
+        #[allow(clippy::unwrap_used)]
+        {
+            self.active_links.lock().unwrap().clear();
+        }
         if self.content.is_empty() || area.width == 0 || area.height == 0 {
             return;
         }
@@ -799,19 +932,21 @@ impl Renderable for MarkdownRenderable {
                     }
                     _ => {
                         let mut canvas = GrowBuf::new(area.width, Style::default().bg(bg_color));
-                        let height = Self::render_block_events(
+                        let (height, block_links) = Self::render_block_events(
                             raw,
                             &mut canvas,
                             area.width,
                             &palette,
                             self.table_border_color.as_ref(),
                             true,
+                            self.conceal,
                         );
                         let entry = CachedBlock {
                             width: area.width,
                             fingerprint,
                             height,
                             rows: Arc::new(canvas.into_rows()),
+                            links: block_links,
                         };
                         cache.put(key, entry.clone());
                         entry
@@ -833,6 +968,25 @@ impl Renderable for MarkdownRenderable {
                     if let Some(dst) = buf.cell_mut((target_x, target_y)) {
                         *dst = cell.clone();
                     }
+                }
+            }
+
+            #[allow(clippy::unwrap_used)]
+            {
+                let mut active = self.active_links.lock().unwrap();
+                for region in &cached.links {
+                    let abs_y = base_y.saturating_add(region.y);
+                    // Rows blit-clipped by the viewport are invisible: never
+                    // register clickable dead zones over other content.
+                    if abs_y >= max_y {
+                        continue;
+                    }
+                    active.push(ActiveLink {
+                        y: abs_y,
+                        x0: area.x.saturating_add(region.x0),
+                        x1: area.x.saturating_add(region.x1),
+                        url: region.url.clone(),
+                    });
                 }
             }
 
@@ -875,7 +1029,8 @@ impl MarkdownRenderable {
         palette: &MarkdownPalette,
         table_border_color: Option<&RGBA>,
         highlight_code: bool,
-    ) -> u16 {
+        conceal: bool,
+    ) -> (u16, Vec<LinkRegion>) {
         let area_x = 0u16;
         let max_x = width;
         let max_y = u16::MAX;
@@ -910,9 +1065,20 @@ impl MarkdownRenderable {
         // indent and item content starts right after the (aligned) marker,
         // so nested lists indent naturally.
         let mut list_stack: Vec<ListFrame> = Vec::new();
-        // Content column (relative to area_x) where text of the innermost
-        // open list item wraps; 0 outside lists. Blockquote indent adds 2.
-        let mut cur_indent: u16 = 0;
+        // Clickable regions recorded while rendering (phase 5).
+        let mut links: Vec<LinkRegion> = Vec::new();
+
+        // Effective indentation is DERIVED from open containers — never
+        // stored-and-restored, which is what kept causing lost/doubled
+        // indents in combinations like quote > list > quote:
+        //     indent = 2 * open-quote-levels + top frame's content column.
+        let mut bq_depth: u16 = 0;
+
+        fn effective_indent(bq_depth: u16, stack: &[ListFrame]) -> u16 {
+            bq_depth
+                .saturating_mul(2)
+                .saturating_add(stack.last().map_or(0, |f| f.content_indent))
+        }
 
         for event in &events {
             // max_y is u16::MAX here (blocks render unbounded); this only
@@ -1023,23 +1189,23 @@ impl MarkdownRenderable {
                         Tag::Paragraph | Tag::Heading { .. } => {
                             if !list_stack.is_empty() {
                                 // Inside a list item: the first paragraph
-                                // continues on the marker row; later paragraphs get a
-                                // blank separator and re-apply the content indent.
-                                let content_indent =
-                                    list_stack.last().map_or(0, |f| f.content_indent);
+                                // continues on the marker row; later paragraphs
+                                // get a blank separator and land back on the
+                                // derived content column.
                                 if x == area_x {
                                     y += 1;
-                                    cur_indent = content_indent;
-                                    x = area_x + content_indent;
+                                    x = area_x
+                                        .saturating_add(effective_indent(bq_depth, &list_stack));
                                 }
                             } else if ctx.in_blockquote() {
                                 if x != area_x {
-                                    // Inside a blockquote: x was set to area_x + 2 by
-                                    // the BlockQuote handler (bar + indent). Don't advance
-                                    // y — content should stay on the same row as the bar.
+                                    // The BlockQuote handler positioned x at
+                                    // the quote indent — keep the row.
                                 } else {
-                                    // Second+ paragraph inside blockquote: re-apply indent.
-                                    x = area_x + 2;
+                                    // Second+ paragraph inside blockquote:
+                                    // re-apply the quote indent.
+                                    x = area_x
+                                        .saturating_add(effective_indent(bq_depth, &list_stack));
                                 }
                             } else if x != area_x {
                                 y += 1;
@@ -1049,10 +1215,13 @@ impl MarkdownRenderable {
                         Tag::BlockQuote(_) => {
                             if x != area_x {
                                 y += 1;
-                                x = area_x;
                             }
+                            // Each open quote level contributes one indent
+                            // step; nested quotes (and quotes inside list
+                            // items) accumulate through `bq_depth`.
+                            bq_depth = bq_depth.saturating_add(1);
                             if y < max_y {
-                                x = area_x.saturating_add(2);
+                                x = area_x.saturating_add(effective_indent(bq_depth, &list_stack));
                             }
                         }
                         Tag::CodeBlock(_) => {
@@ -1104,16 +1273,16 @@ impl MarkdownRenderable {
                             }
                         }
                         Tag::List(start) => {
-                            // Marker column = enclosing item's content indent
-                            // (or the blockquote indent / left edge at root).
-                            let parent_indent = list_stack
-                                .last()
-                                .map_or(if ctx.in_blockquote() { 2 } else { 0 }, |f| {
-                                    f.content_indent
-                                });
+                            // Marker column = enclosing item's content column,
+                            // in PURE list coordinates: quote levels are added
+                            // at use time so they can never be baked twice.
+                            let parent_indent = list_stack.last().map_or(0, |f| f.content_indent);
+                            // Consume THIS list's slot: find the first slot
+                            // still filled, not always index 0 (nested lists
+                            // consume earlier slots first).
                             let marker_width = list_marker_widths
                                 .iter_mut()
-                                .next()
+                                .find(|o| o.is_some())
                                 .and_then(|o| o.take())
                                 .unwrap_or(2)
                                 .max(2);
@@ -1122,11 +1291,19 @@ impl MarkdownRenderable {
                                 next_num: usize::try_from(start.unwrap_or(1)).unwrap_or(1),
                                 marker_width,
                                 item_indent: parent_indent,
-                                content_indent: parent_indent + marker_width,
+                                content_indent: parent_indent.saturating_add(marker_width),
                             });
                         }
                         Tag::Item => {
-                            if x != area_x {
+                            // Advance to a fresh row only when genuinely
+                            // mid-content: an enclosing quote's indentation
+                            // leaves x exactly at our marker column, which is
+                            // NOT mid-content.
+                            let marker_col =
+                                area_x.saturating_add(bq_depth.saturating_mul(2).saturating_add(
+                                    list_stack.last().map_or(0, |f| f.item_indent),
+                                ));
+                            if x != area_x && x != marker_col {
                                 y += 1;
                             }
                             let frame = list_stack.last_mut().expect("Item outside List");
@@ -1151,7 +1328,7 @@ impl MarkdownRenderable {
                             // `render_text`, which deliberately skips LEADING
                             // spaces at line start and would eat the
                             // right-alignment padding of " 1.".
-                            x = area_x + frame.item_indent;
+                            x = marker_col;
                             for (grapheme, gw) in
                                 crate::core::lib::unicode_util::graphemes_with_width(&marker)
                             {
@@ -1161,9 +1338,32 @@ impl MarkdownRenderable {
                                 }
                                 x += gw;
                             }
-                            x = area_x + frame.content_indent;
-                            cur_indent = frame.content_indent;
+                            x = area_x.saturating_add(effective_indent(bq_depth, &list_stack));
                         }
+                        // Unconcealed links render literally: "[" before the
+                        // label (the label itself comes from inner events).
+                        Tag::Link { .. } if !conceal => {
+                            let style =
+                                palette.style_for(Some(MarkdownElement::Link), ctx.heading_level());
+                            let link_dest = ctx.link_dest();
+                            let link = (!link_dest.is_empty()).then_some(link_dest);
+                            Self::render_text(
+                                "[",
+                                buf,
+                                &mut x,
+                                &mut y,
+                                area_x,
+                                max_x,
+                                max_y,
+                                style,
+                                effective_indent(bq_depth, &list_stack),
+                                link,
+                                &mut links,
+                            );
+                        }
+                        // Concealed (default): the label alone represents the
+                        // link — nothing to emit at the boundaries.
+                        Tag::Link { .. } => {}
                         Tag::TableHead
                         | Tag::TableRow
                         | Tag::TableCell
@@ -1174,7 +1374,6 @@ impl MarkdownRenderable {
                         | Tag::Strikethrough
                         | Tag::Emphasis
                         | Tag::Strong
-                        | Tag::Link { .. }
                         | Tag::Image { .. }
                         | Tag::MetadataBlock(_)
                         | Tag::HtmlBlock
@@ -1188,19 +1387,46 @@ impl MarkdownRenderable {
                     match &tag_end {
                         TagEnd::Paragraph
                         | TagEnd::Heading(_)
-                        | TagEnd::BlockQuote(_)
                         | TagEnd::Item
                         | TagEnd::CodeBlock
                         | TagEnd::TableRow
                         | TagEnd::Table => {
                             y += 1;
                             x = area_x;
-                            cur_indent = list_stack.last().map_or(0, |f| f.content_indent);
+                            // No indent bookkeeping: indentation derives from
+                            // the still-open containers.
+                        }
+                        TagEnd::BlockQuote(_) => {
+                            y += 1;
+                            x = area_x;
+                            bq_depth = bq_depth.saturating_sub(1);
                         }
                         TagEnd::List(_) => {
                             list_stack.pop();
-                            cur_indent = list_stack.last().map_or(0, |f| f.content_indent);
                         }
+                        // Unconcealed links render literally: "](url)" after
+                        // the label (link context is still open here).
+                        TagEnd::Link if !conceal => {
+                            let style =
+                                palette.style_for(Some(MarkdownElement::Link), ctx.heading_level());
+                            let url = ctx.link_dest().to_string();
+                            let literal = format!("]({url})");
+                            let link_ref = (!url.is_empty()).then_some(url.as_str());
+                            Self::render_text(
+                                &literal,
+                                buf,
+                                &mut x,
+                                &mut y,
+                                area_x,
+                                max_x,
+                                max_y,
+                                style,
+                                effective_indent(bq_depth, &list_stack),
+                                link_ref,
+                                &mut links,
+                            );
+                        }
+                        TagEnd::Link => {}
                         TagEnd::TableHead
                         | TagEnd::FootnoteDefinition
                         | TagEnd::DefinitionList
@@ -1209,7 +1435,6 @@ impl MarkdownRenderable {
                         | TagEnd::Strikethrough
                         | TagEnd::Emphasis
                         | TagEnd::Strong
-                        | TagEnd::Link
                         | TagEnd::Image
                         | TagEnd::MetadataBlock(_)
                         | TagEnd::HtmlBlock
@@ -1244,7 +1469,7 @@ impl MarkdownRenderable {
                         let element = ctx.current_element();
                         let heading_level = ctx.heading_level();
                         let mut style = palette.style_for(element, heading_level);
-                        let bq_indent = if ctx.in_blockquote() { 2u16 } else { 0u16 } + cur_indent;
+                        let bq_indent = effective_indent(bq_depth, &list_stack);
                         if ctx.in_blockquote() && text.starts_with('⚠') {
                             // Warning blockquote: apply yellow background + black text + bold
                             // (Only for the warning, not regular blockquotes)
@@ -1274,8 +1499,11 @@ impl MarkdownRenderable {
                                 .bg(warning_bg)
                                 .add_modifier(Modifier::BOLD);
                         }
+                        let link_dest = ctx.link_dest();
+                        let link = (!link_dest.is_empty()).then_some(link_dest);
                         Self::render_text(
                             text, buf, &mut x, &mut y, area_x, max_x, max_y, style, bq_indent,
+                            link, &mut links,
                         );
                     }
                 }
@@ -1283,6 +1511,8 @@ impl MarkdownRenderable {
                 // ── Inline code ─────────────────────────────────
                 Event::Code(text) => {
                     let style = palette.style_for(Some(MarkdownElement::InlineCode), None);
+                    let link_dest = ctx.link_dest();
+                    let link = (!link_dest.is_empty()).then_some(link_dest);
                     Self::render_text(
                         text,
                         buf,
@@ -1292,13 +1522,17 @@ impl MarkdownRenderable {
                         max_x,
                         max_y,
                         style,
-                        if ctx.in_blockquote() { 2u16 } else { 0 } + cur_indent,
+                        effective_indent(bq_depth, &list_stack),
+                        link,
+                        &mut links,
                     );
                 }
 
                 // ── Raw HTML ────────────────────────────────────
                 Event::Html(html) => {
                     let style = Style::default().fg(rgba_to_color(palette.muted_color()));
+                    let link_dest = ctx.link_dest();
+                    let link = (!link_dest.is_empty()).then_some(link_dest);
                     Self::render_text(
                         html,
                         buf,
@@ -1308,7 +1542,9 @@ impl MarkdownRenderable {
                         max_x,
                         max_y,
                         style,
-                        if ctx.in_blockquote() { 2u16 } else { 0 } + cur_indent,
+                        effective_indent(bq_depth, &list_stack),
+                        link,
+                        &mut links,
                     );
                 }
 
@@ -1316,7 +1552,7 @@ impl MarkdownRenderable {
                 Event::SoftBreak | Event::HardBreak => {
                     // Continuation lines keep the active indentation
                     // (blockquote + list content column).
-                    x = area_x + if ctx.in_blockquote() { 2 } else { 0 } + cur_indent;
+                    x = area_x.saturating_add(effective_indent(bq_depth, &list_stack));
                     y += 1;
                 }
 
@@ -1340,12 +1576,15 @@ impl MarkdownRenderable {
                     // Use Unicode checkbox symbols for a more polished look
                     let marker = if *checked { "☑ " } else { "☐ " };
                     let style = Style::default().fg(rgba_to_color(palette.list_marker_color()));
-                    Self::render_text(marker, buf, &mut x, &mut y, area_x, max_x, max_y, style, 0);
+                    Self::render_text(
+                        marker, buf, &mut x, &mut y, area_x, max_x, max_y, style, 0, None,
+                        &mut links,
+                    );
                 }
             }
         }
 
-        y
+        (y, links)
     }
 }
 
@@ -1374,10 +1613,11 @@ impl MarkdownRenderable {
         let code_bg = palette.code_bg_color();
         let default_fg = rgba_to_color(palette.text_color());
 
-        // Syntax highlighting strategy:
+        // Syntax highlighting strategy (phase 6):
         // - ``` (no language tag) → no highlighting, render as plain text
         // - ```lang (known/supported) → use tree-sitter highlighting
-        // - ```lang (unknown/unsupported) → fall back to JavaScript (versatile default)
+        // - ```lang (unknown/unsupported) → plain text. The old JavaScript
+        //   fallback produced wrong colors for non-JS code and is gone.
         //
         // Build byte-to-category map for syntax highlighting (cached)
         let spans: Option<Vec<HighlightSpan>> = if hl_lang.is_empty() {
@@ -1386,28 +1626,13 @@ impl MarkdownRenderable {
             let key = highlight_cache_key(text, hl_lang);
             #[allow(clippy::unwrap_used)]
             let mut cache = HIGHLIGHT_CACHE.lock().unwrap();
-            let result = cache.get(&key).cloned().or_else(|| {
+            cache.get(&key).cloned().or_else(|| {
                 let computed = highlight(text, hl_lang);
                 if let Some(ref spans) = computed {
                     cache.push(key, spans.clone());
                 }
                 computed
-            });
-
-            // Fallback: if the specified language is not supported by tree-sitter,
-            // retry with JavaScript as a versatile generic highlighter.
-            if result.is_none() && hl_lang != "javascript" {
-                let js_key = highlight_cache_key(text, "javascript");
-                cache.get(&js_key).cloned().or_else(|| {
-                    let computed = highlight(text, "javascript");
-                    if let Some(ref spans) = computed {
-                        cache.push(js_key, spans.clone());
-                    }
-                    computed
-                })
-            } else {
-                result
-            }
+            })
         };
         let mut cat_map: Vec<Option<HighlightCategory>> = vec![None; text.len()];
         if let Some(ref spans) = spans {
@@ -1933,13 +2158,16 @@ pub(crate) fn estimate_height_impl(text: &str, max_w: u16) -> u16 {
     for block in &blocks.blocks {
         let source = &text[block.range.clone()];
         let mut canvas = GrowBuf::new(max_w, Style::default());
-        let height = MarkdownRenderable::render_block_events(
+        // NOTE: estimation assumes concealment on (the default). Callers that
+        // set_conceal(false) change layout in ways this public API cannot see.
+        let (height, _links) = MarkdownRenderable::render_block_events(
             source,
             &mut canvas,
             max_w,
             &palette,
             None,
             false,
+            true,
         );
         total = total.saturating_add(height);
     }

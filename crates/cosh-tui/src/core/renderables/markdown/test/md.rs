@@ -477,8 +477,9 @@ fn test_bold_with_inline_code() {
 }
 
 #[test]
-fn test_code_block_no_lang_fallback() {
-    // Code block without language specifier - should fall back to javascript and render
+fn test_code_block_no_lang_renders_plain() {
+    // Code block without language specifier - renders as plain text (phase 6
+    // removed the JavaScript fallback for UNKNOWN languages too).
     let md = make_md("```\nfn hello() {}\n```");
     let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
     md.render_self(&mut buf, Rect::new(0, 0, 60, 10));
@@ -861,4 +862,235 @@ fn test_table_cell_inline_styles() {
         }
     }
     assert!(found_bold_start, "bold cell content not found on body row");
+}
+
+/// Regression (review finding): marker-width slots must be consumed per list,
+/// not always from index 0 — a nested ordered list with ≥10 items inside
+/// another list previously fell back to width 2 and its "10."/"11." markers
+/// were overwritten by item text.
+#[test]
+fn test_nested_ordered_list_wide_markers_get_own_slot() {
+    let inner: Vec<String> = (1..=12).map(|i| format!("    {i}. x")).collect();
+    let text = format!("- outer\n{}", inner.join("\n"));
+    let md = make_md(&text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 30));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 30));
+
+    // Inner content column: outer bullet width 2 + inner marker width 4.
+    for row in 1..=12u16 {
+        assert_eq!(
+            buf.cell((6, row)).unwrap().symbol(),
+            "x",
+            "inner item {row} content should start at column 6"
+        );
+        // The number-dot separator must be intact (not overwritten by text).
+        assert_eq!(
+            buf.cell((4, row)).unwrap().symbol(),
+            ".",
+            "marker dot should survive at row {row}"
+        );
+    }
+    // Item 10 (row 10): right-aligned two-digit marker "10. ".
+    assert_eq!(buf.cell((2, 10)).unwrap().symbol(), "1");
+    assert_eq!(buf.cell((3, 10)).unwrap().symbol(), "0");
+    assert_eq!(buf.cell((5, 10)).unwrap().symbol(), " ");
+}
+
+/// Regression (review finding): blockquote indentation must not be
+/// double-counted for wrapped lines of a list item inside a quote.
+#[test]
+fn test_blockquote_list_wrap_indent_single_count() {
+    let md = make_md("> - aaa bbb ccc ddd eee fff ggg hhh");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 8));
+    md.render_self(&mut buf, Rect::new(0, 0, 20, 8));
+
+    // First line starts at col 4 (quote indent 2 + bullet width 2).
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "•");
+    // Wrapped continuation lines return to col 4 too (not 6).
+    let wrap_col = (0..20u16)
+        .find(|&x| buf.cell((x, 1)).is_some_and(|c| c.symbol() != " "))
+        .expect("wrapped continuation line expected");
+    assert_eq!(
+        wrap_col, 4,
+        "continuation line must align with item content, not double-count quote indent"
+    );
+}
+
+/// Nested blockquotes accumulate one indent step per level.
+#[test]
+fn test_nested_blockquote_indent_accumulates() {
+    let md = make_md("> level1\n>\n> > level2");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 8));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 8));
+
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "l");
+    assert_eq!(
+        buf.cell((4, 1)).unwrap().symbol(),
+        "l",
+        "level-2 quote should indent to col 4"
+    );
+}
+
+/// Regression (review round 2): soft-break continuation lines inside a
+/// blockquote must not double-count the quote indent.
+#[test]
+fn test_blockquote_softbreak_indent_single_count() {
+    let md = make_md("> a\n> b");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "a");
+    assert_eq!(
+        buf.cell((2, 1)).unwrap().symbol(),
+        "b",
+        "soft-broken line must stay at the quote indent (col 2), not col 4"
+    );
+}
+
+/// Regression (review round 2): a quote opened INSIDE a list item must keep
+/// its +2 through sibling blocks (code block → paragraph) and when opening a
+/// sublist — indentation derives from open containers, never from stored
+/// restores.
+#[test]
+fn test_quote_inside_list_item_survives_blocks() {
+    let text = "- item\n\n  > ```\n  > code\n  > ```\n  >\n  > after\n";
+    let md = make_md(text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 20));
+
+    // Find the "after" paragraph: its 'a' must sit at item content column
+    // (2) plus one quote level (+2) = column 4.
+    let mut after_col = None;
+    for y in 0..20u16 {
+        for x in 0..30u16 {
+            if buf.cell((x, y)).is_some_and(|c| c.symbol() == "f")
+                && buf.cell((x + 1, y)).is_some_and(|c| c.symbol() == "t")
+                && buf.cell((x - 1, y)).is_some_and(|c| c.symbol() == "a")
+            {
+                // located an "aft" run; record start of the word
+                after_col = Some(x - 1);
+                break;
+            }
+        }
+        if after_col.is_some() {
+            break;
+        }
+    }
+    assert_eq!(
+        after_col,
+        Some(4),
+        "'after' should be indented at content+quote = col 4"
+    );
+
+    // A sublist opened inside that same quote also inherits the quote level:
+    // its bullet lands at content(2)+quote(2) = 4.
+    let text2 = "- item\n\n  > - inner\n";
+    let md2 = make_md(text2);
+    let mut buf2 = Buffer::empty(Rect::new(0, 0, 40, 10));
+    md2.render_self(&mut buf2, Rect::new(0, 0, 40, 10));
+    let bullet_col = (0..20u16).find(|&x| buf2.cell((x, 1)).is_some_and(|c| c.symbol() == "•"));
+    assert_eq!(
+        bullet_col,
+        Some(4),
+        "quote-nested bullet should sit at col 4"
+    );
+}
+
+/// Phase 5: concealed links (default) show only the label.
+#[test]
+fn test_link_concealed_by_default() {
+    let md = make_md("[click](https://example.com)");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 4));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 4));
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "c");
+    let row: String = (0..10u16)
+        .map(|x| {
+            buf.cell((x, 0))
+                .map(|c| c.symbol().to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+    assert!(!row.contains('['), "concealed link must not draw brackets");
+}
+
+/// Phase 5: conceal=false renders links literally as [label](url).
+#[test]
+fn test_link_unconcealed_renders_literal_syntax() {
+    let mut md = make_md("[click](https://x.io)");
+    md.set_conceal(false);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 4));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 4));
+    let row: String = (0..25u16)
+        .map(|x| {
+            buf.cell((x, 0))
+                .map(|c| c.symbol().to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+    assert!(
+        row.starts_with("[click](https://x.io)"),
+        "unconcealed link should render literally, got {row:?}"
+    );
+}
+
+/// Phase 5: rendered links are recorded as active regions covering exactly
+/// the label cells, in absolute coordinates.
+#[test]
+fn test_active_links_hit_map() {
+    let md = make_md("see [docs](https://x.io) now");
+    let mut buf = Buffer::empty(Rect::new(3, 2, 60, 4));
+    md.render_self(&mut buf, Rect::new(3, 2, 60, 4));
+
+    let links = md.active_links();
+    assert_eq!(links.len(), 1, "exactly one link expected");
+    let link = &links[0];
+    assert_eq!(link.url, "https://x.io");
+    // Label starts after "see " (4 cols) from area.x=3 → col 7; width 4 ("docs").
+    assert_eq!((link.y, link.x0, link.x1), (2, 7, 11));
+}
+
+/// Phase 6: an unsupported language renders plain text instead of falling
+/// back to JavaScript highlighting.
+#[test]
+fn test_unknown_lang_no_js_fallback() {
+    let md = make_md("```obscurelang\nlet x = 42;\n```\n");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 60, 10));
+    let has_content = (0..10u16)
+        .any(|row| (0..60u16).any(|col| buf.cell((col, row)).is_some_and(|c| c.symbol() == "l")));
+    assert!(
+        has_content,
+        "unknown-language block must still render its text"
+    );
+}
+
+/// Review fix: multi-word link labels keep the whitespace between words
+/// inside the hit map (no dead zones).
+#[test]
+fn test_link_hit_map_covers_inter_word_spaces() {
+    let md = make_md("[two words](https://x.io)");
+    let mut buf = Buffer::empty(Rect::new(0, 2, 40, 4));
+    md.render_self(&mut buf, Rect::new(0, 2, 40, 4));
+
+    let links = md.active_links();
+    assert_eq!(links.len(), 1, "one contiguous region expected");
+    let link = &links[0];
+    // "two words" = 9 columns starting at 0.
+    assert_eq!((link.y, link.x0, link.x1), (2, 0, 9));
+}
+
+/// Review fix: rows clipped by the viewport never become clickable.
+#[test]
+fn test_active_links_skip_clipped_rows() {
+    let md = make_md("before\n\n[docs](https://x.io)");
+    // Viewport of a single row: the label renders on row 1 — clipped away.
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 1));
+
+    // The label lands on row >= 3 (after "before" + blank), which the
+    // viewport (height 3) clips away entirely.
+    assert!(
+        md.active_links().is_empty(),
+        "clipped link must not be clickable"
+    );
 }
