@@ -163,6 +163,10 @@ pub struct App {
     active_loop_session_id: Option<String>,
     llm_config: LlmConfig,
     stop_signal: Arc<AtomicBool>,
+    /// Re-entry guard for the user-triggered `/compact`: true while the
+    /// one-off compaction task runs (there is no loop status to read —
+    /// between loops the app is Idle). Cleared by the CompactOnDemand event.
+    manual_compaction_active: bool,
     terminal_focused: bool,
     agent_spinner: Option<AgentSpinner>,
     /// Latest context manager info for the budget bar (None if no data yet).
@@ -310,6 +314,7 @@ impl App {
             session_store,
             pending_delete_session_id: None,
             title_generated: false,
+            manual_compaction_active: false,
             #[cfg(feature = "embed")]
             pending_delete_db_name: None,
             #[cfg(feature = "embed")]
@@ -1342,6 +1347,8 @@ impl App {
             self.open_model_dialog();
         } else if cmd.name == "toolcall" {
             self.open_tool_call_dialog();
+        } else if cmd.name == "compact" {
+            self.start_manual_compaction();
         } else if cmd.name == "bell" {
             self.bell_enabled = !self.bell_enabled;
             use crate::ui::toast::{ToastOptions, ToastVariant};
@@ -1364,6 +1371,88 @@ impl App {
             self.prompt_view.cursor_pos = self.prompt_view.input.len();
         }
         self.slash_menu.visible = false;
+    }
+
+    /// User-triggered `/compact`: run the compaction funnel NOW (the
+    /// deterministic phases across every segment, then the LLM summary)
+    /// instead of waiting for the 80% trigger. Refusals are surfaced as
+    /// toasts; the work runs on a one-off tokio task that rebuilds a Harness
+    /// from the persisted `.ctx` snapshot — between loops no harness exists,
+    /// and while a loop runs its context manager is untouchable, so both
+    /// cases refuse.
+    fn start_manual_compaction(&mut self) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        fn refuse(app: &mut App, message: String) {
+            app.toast_state.show(ToastOptions {
+                title: Some("Compact".into()),
+                message,
+                variant: ToastVariant::Warning,
+                duration_ms: 4000,
+            });
+        }
+        if self.manual_compaction_active {
+            refuse(self, "A compaction is already running.".into());
+            return;
+        }
+        if self.state.status != crate::types::SessionStatus::Idle {
+            refuse(
+                self,
+                "The agent is working — /compact runs between messages.".into(),
+            );
+            return;
+        }
+        let Some(id) = self.state.current_session_id.clone() else {
+            self.toast_state.show(ToastOptions {
+                title: Some("Compact".into()),
+                message: "No active session.".into(),
+                variant: ToastVariant::Warning,
+                duration_ms: 4000,
+            });
+            return;
+        };
+        let Some(ctx_bytes) = self.session_store.load_ctx(&id) else {
+            self.toast_state.show(ToastOptions {
+                title: Some("Compact".into()),
+                message: "Nothing to compact yet.".into(),
+                variant: ToastVariant::Warning,
+                duration_ms: 4000,
+            });
+            return;
+        };
+
+        let provider = self.llm_config.provider.clone();
+        let model = self.llm_config.model.clone();
+        let base_url = self.base_url_for(&provider);
+        let cwd = self.state.working_directory.clone();
+        let stop_signal = self.stop_signal.clone();
+        let event_tx = self.event_tx.clone();
+        self.manual_compaction_active = true;
+        self.tokio_handle.spawn(async move {
+            use cosh::harness::{Harness, ManualCompactionOutcome};
+            let outcome = match cosh_sdk::connector::Connector::new(&provider) {
+                Ok(mut connector) => {
+                    if let Some(ref m) = model {
+                        connector = connector.with_model(m);
+                    }
+                    if let Some(ref url) = base_url {
+                        connector = connector.with_base_url(url.clone());
+                    }
+                    let mut harness =
+                        Harness::new(connector, &cwd, std::collections::HashSet::new());
+                    if let Ok(state) =
+                        bincode::deserialize::<cosh::harness::ContextManagerState>(&ctx_bytes)
+                    {
+                        harness.context_manager.restore_state(&state);
+                    }
+                    harness.compact_on_demand(&event_tx, stop_signal).await
+                }
+                Err(e) => {
+                    let _ = event_tx.send(HarnessEvent::Error(format!("connector: {e}")));
+                    ManualCompactionOutcome::Failed
+                }
+            };
+            let _ = event_tx.send(HarnessEvent::CompactOnDemand { outcome });
+        });
     }
 
     /// Add a character to the model filter and reset selection
@@ -4815,6 +4904,35 @@ impl App {
                     self.handle_llm_compaction_token(&text);
                 }
 
+                HarnessEvent::CompactOnDemand { outcome } => {
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    use cosh::harness::ManualCompactionOutcome as Outcome;
+                    self.manual_compaction_active = false;
+                    let (title, message, variant) = match outcome {
+                        Outcome::Compacted => (
+                            "Compacted",
+                            "Session context summarized.".into(),
+                            ToastVariant::Success,
+                        ),
+                        Outcome::NothingToCompact => (
+                            "Compact",
+                            "Nothing to compact yet.".into(),
+                            ToastVariant::Info,
+                        ),
+                        Outcome::Failed => (
+                            "Compact failed",
+                            "The summarization call did not complete.".into(),
+                            ToastVariant::Error,
+                        ),
+                    };
+                    self.toast_state.show(ToastOptions {
+                        title: Some(title.into()),
+                        message,
+                        variant,
+                        duration_ms: 4000,
+                    });
+                }
+
                 HarnessEvent::Toast { message, variant } => {
                     // Route harness notifications (context-window overflow,
                     // exhausted retries) through the existing toast system.
@@ -6430,11 +6548,11 @@ mod tests {
     async fn slash_unknown_command_fills_prompt() {
         let mut app = App::new("/tmp".to_string());
         let cmd = crate::ui::slash_menu::SlashCommand {
-            name: "compact".into(),
+            name: "nonexistent".into(),
             desc: String::new(),
         };
         app.run_slash_command(&cmd);
-        assert_eq!(app.prompt_view.input, "/compact ");
+        assert_eq!(app.prompt_view.input, "/nonexistent ");
         assert!(!app.dialog.visible());
         assert!(!app.slash_menu.visible);
     }
@@ -6612,6 +6730,50 @@ mod tests {
             "orphaned message is the first next-loop candidate"
         );
         assert!(queues.next_request.is_empty());
+    }
+
+    /// `/compact` while the agent loop is working must be refused with a toast:
+    /// the running loop owns the context manager, and the re-entry guard stays
+    /// cleared (no task spawned).
+    #[tokio::test]
+    async fn slash_compact_refuses_while_agent_is_working() {
+        let mut app = App::new("/tmp".to_string());
+        app.state.status = crate::types::SessionStatus::Working;
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "compact".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        assert!(
+            !app.manual_compaction_active,
+            "no compaction task may start while a loop runs"
+        );
+        assert!(!app.slash_menu.visible);
+        assert!(
+            app.toast_state
+                .current
+                .as_ref()
+                .is_some_and(|t| t.message.contains("between messages")),
+            "the refusal toast explains when /compact can run"
+        );
+    }
+
+    /// `/compact` in an idle session with no persisted context is refused too —
+    /// there is no timeline snapshot to rebuild the summarizer from.
+    #[tokio::test]
+    async fn slash_compact_refuses_without_a_session_context() {
+        let mut app = App::new("/tmp".to_string());
+        let cmd = crate::ui::slash_menu::SlashCommand {
+            name: "compact".into(),
+            desc: String::new(),
+        };
+        app.run_slash_command(&cmd);
+        assert!(!app.manual_compaction_active);
+        assert!(app.state.current_session_id.is_none());
+        assert!(
+            app.toast_state.current.is_some(),
+            "the refusal surfaces as a toast"
+        );
     }
 }
 

@@ -762,6 +762,13 @@ pub struct ContextManager {
     /// dominant term of the `run()` compaction pass. Rebuilt wholesale on
     /// restore and on encoding change.
     item_tokens: HashMap<u64, usize>,
+    /// Manual-compaction mode (`/compact`): while set, [`Self::trigger`]
+    /// returns zero so the deterministic funnel in [`Self::run`] grinds
+    /// EVERY segment (not just up to the 80% trigger) before handing off to
+    /// phase 3. Scheduling-only — never persisted; a restored manager is
+    /// never left mid-manual because the harness brackets the whole manual
+    /// pass with `begin_manual_compaction`/`end_manual_compaction`.
+    manual_compaction: bool,
 }
 
 /// Build a plain assistant text message (no tool calls).
@@ -790,6 +797,7 @@ impl ContextManager {
             todo: TodoContext::new(),
             cached_items_tokens: 0,
             item_tokens: HashMap::new(),
+            manual_compaction: false,
         }
     }
 
@@ -1595,6 +1603,9 @@ impl ContextManager {
     /// the scheduling state (cursor + toggle). Returns whether the total is
     /// now below the 80% trigger — the summary should be small enough, but a
     /// degenerate huge summary is surfaced so the harness can report failure.
+    /// The verdict always uses the NORMAL trigger (manual `/compact` mode
+    /// zeroes [`Self::trigger`] only for the deterministic funnel; a manual
+    /// pass legitimately lands far below it).
     pub fn apply_llm_summary(&mut self, summary: String) -> bool {
         let id = self.next_id();
         self.items.clear();
@@ -1608,7 +1619,8 @@ impl ContextManager {
         // A successful compaction is proof the provider accepts the context
         // again — any recorded stuck overflow is no longer relevant.
         self.clear_overflow();
-        self.total_tokens() < self.trigger()
+        let normal_trigger = self.max_tokens.saturating_mul(COMPACT_PCT) / 100;
+        self.total_tokens() < normal_trigger
     }
 
     // Split-and-concatenate (the known-window contingency, driven by the
@@ -2165,8 +2177,40 @@ impl ContextManager {
     }
 
     /// Token count at which the 80% compaction trigger fires.
+    /// Token threshold at which the compaction funnel stops: 80% of the
+    /// budget normally, ZERO while the manual `/compact` mode is active —
+    /// so [`Self::run`] grinds the deterministic phases through every
+    /// segment and hands off to the LLM summary (phase 3) regardless of how
+    /// much budget is free. The LLM-side guards ([`Self::llm_compaction_request`],
+    /// [`Self::apply_llm_summary`) keep their normal semantics (see those).
     fn trigger(&self) -> usize {
+        if self.manual_compaction {
+            return 0;
+        }
         self.max_tokens.saturating_mul(COMPACT_PCT) / 100
+    }
+
+    /// Enter manual-compaction mode (`/compact`): the next [`Self::run`]
+    /// grinds every segment deterministically and ends in
+    /// [`RunOutcome::NeedsLlmCompaction`] whenever anything is left, instead
+    /// of stopping at the 80% trigger. Always paired with
+    /// [`Self::end_manual_compaction`] after the LLM pass.
+    pub fn begin_manual_compaction(&mut self) {
+        self.manual_compaction = true;
+    }
+
+    /// Leave manual-compaction mode. Idempotent.
+    pub fn end_manual_compaction(&mut self) {
+        self.manual_compaction = false;
+    }
+
+    /// True when there is anything worth compacting: at least one timeline
+    /// item beyond a lone previous summary (a session that only holds the
+    /// last `/compact` result has nothing new to fold).
+    pub fn has_compactable_content(&self) -> bool {
+        !self.items.is_empty()
+            && !(self.items.len() == 1
+                && matches!(self.items.front(), Some(ContextItem::Compaction { .. })))
     }
 
     fn total_tokens(&self) -> usize {

@@ -44,6 +44,18 @@ pub enum Mode {
     Yolo,
 }
 
+/// Result of the user-triggered `/compact`
+/// ([`Harness::compact_on_demand`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualCompactionOutcome {
+    /// The deterministic funnel ran and the LLM summary was applied.
+    Compacted,
+    /// Nothing to fold: the timeline holds at most a lone previous summary.
+    NothingToCompact,
+    /// The summarizer call failed (the automatic path already toasted).
+    Failed,
+}
+
 pub struct ServerSession {
     pub name_server: String,
     pub tools: Vec<Tool>,
@@ -1053,6 +1065,66 @@ impl Harness {
     /// legacy drain path applies instead.
     fn known_split_window(&self) -> Option<usize> {
         self.last_context_window.or(self.discovered_window)
+    }
+
+    /// The user-triggered `/compact`: run the deterministic funnel across
+    /// EVERY segment (the trigger floored at zero for this pass) and then the
+    /// LLM summary of whatever remains — the same phases as the automatic 80%
+    /// compaction, started early and unconditionally by explicit request.
+    /// All lifecycle events (phase lines, the "Summarizing" box, streamed
+    /// summary tokens, toasts on failure) reuse the automatic path's events,
+    /// so the TUI needs no dedicated rendering.
+    pub async fn compact_on_demand(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+        stop_signal: Arc<AtomicBool>,
+    ) -> ManualCompactionOutcome {
+        use super::context_manager::RunOutcome;
+        use super::events::HarnessEvent;
+
+        if !self.context_manager.has_compactable_content() {
+            return ManualCompactionOutcome::NothingToCompact;
+        }
+        // Same wiring as a loop start: the shared stop flag reaches the
+        // summarizer's stream loop and the TUI sees the phase lines live.
+        // (The keymap only sets the flag while a loop is Working, so today
+        // nothing sets it during a manual pass — the wiring keeps that door
+        // open without extra code.)
+        self.stop_signal = Some(stop_signal);
+        self.context_manager.set_compaction_observer({
+            let tx = tx.clone();
+            move |event| {
+                let _ = tx.send(HarnessEvent::Compaction { event });
+            }
+        });
+        self.context_manager
+            .set_model(self.connector.effective_model());
+
+        self.context_manager.begin_manual_compaction();
+        let outcome = self.context_manager.run();
+        let ok = if matches!(outcome, RunOutcome::NeedsLlmCompaction) {
+            self.llm_compact(tx).await
+        } else {
+            true
+        };
+        self.context_manager.end_manual_compaction();
+
+        // Refresh the budget display and persist the compacted context via
+        // the TUI's normal paths (the ContextSnapshot handler writes both the
+        // session JSONL and the `.ctx` companion file).
+        let _ = tx.send(HarnessEvent::ContextInfo {
+            info: self.context_manager.display_info(),
+        });
+        if ok && let Ok(state) = bincode::serialize(&self.context_manager.save_state()) {
+            let _ = tx.send(HarnessEvent::ContextSnapshot {
+                context_state: state,
+            });
+        }
+        if ok {
+            ManualCompactionOutcome::Compacted
+        } else {
+            ManualCompactionOutcome::Failed
+        }
     }
 
     /// Drive the split-and-concatenate contingency to completion.

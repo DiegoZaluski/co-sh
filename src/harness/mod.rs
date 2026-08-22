@@ -17,6 +17,7 @@ pub mod truncate;
 mod test;
 
 pub use context_manager::{ContextDisplayInfo, ContextManager, ContextManagerState};
+pub use core::ManualCompactionOutcome;
 pub use core::{Harness, Mode};
 pub use events::HarnessEvent;
 pub use guardrails::{PermissionAction, PermissionCheck, PermissionRequest, check_tool_permission};

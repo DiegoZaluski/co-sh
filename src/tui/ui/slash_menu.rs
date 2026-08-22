@@ -84,6 +84,10 @@ impl SlashMenu {
                 name: "toolcall".into(),
                 desc: "Tool call mode: native | inline".into(),
             },
+            SlashCommand {
+                name: "compact".into(),
+                desc: "Compact the session context now".into(),
+            },
         ];
 
         Self {

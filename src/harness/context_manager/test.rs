@@ -3204,3 +3204,56 @@ fn long_session_useless_sweep_stays_linear() {
         "useless sweep took {ms:.1}ms over {before} items"
     );
 }
+
+// ── Manual /compact (trigger override) ────────────────────────────────────
+
+/// `/compact` below the 80% trigger: the manual flag floors the trigger at
+/// zero, so the deterministic funnel grinds the drafts anyway and hands off
+/// to phase 3 — and the summary verdict still uses the NORMAL trigger.
+#[test]
+fn manual_compaction_grinds_below_the_normal_trigger_and_needs_llm() {
+    let mut cm = cm(100_000); // normal trigger = 80k
+    cm.add_user("explore the repo");
+    for i in 0..3 {
+        cm.add_assistant(&format!("finding {i}: {}", prose_copies(10)), true);
+    }
+    assert!(
+        cm.total_tokens() < cm.trigger(),
+        "precondition: the timeline sits below the normal trigger"
+    );
+    // Normal mode: nothing to do.
+    assert_eq!(cm.run(), RunOutcome::Resolved);
+
+    // Manual mode: the funnel grinds and ends asking for the LLM pass.
+    cm.begin_manual_compaction();
+    assert!(
+        matches!(cm.run(), RunOutcome::NeedsLlmCompaction),
+        "manual run must exhaust the drafts and request the LLM summary"
+    );
+    // Phase 3 has a request while the manual mode is on (its trigger guard
+    // honors the override).
+    assert!(
+        cm.llm_compaction_request().is_some(),
+        "the summarizer request must exist during a manual compaction"
+    );
+    let ok = cm.apply_llm_summary("## Objective\n- compacted".into());
+    cm.end_manual_compaction();
+    assert!(
+        ok,
+        "a small summary of a small timeline is below the NORMAL trigger"
+    );
+    assert_eq!(cm.items.len(), 1, "the timeline folds into one anchor");
+}
+
+/// A session whose timeline holds only the previous summary has nothing new
+/// to fold — `/compact` reports it instead of burning a model call.
+#[test]
+fn has_compactable_content_rejects_a_lone_previous_summary() {
+    let mut cm = cm(1000);
+    assert!(!cm.has_compactable_content(), "empty timeline");
+    let _ = cm.apply_llm_summary("previous anchor".into());
+    assert!(
+        !cm.has_compactable_content(),
+        "a lone previous summary is not compactable content"
+    );
+}

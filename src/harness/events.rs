@@ -105,6 +105,13 @@ pub enum HarnessEvent {
         /// The next chunk of the summary text.
         text: String,
     },
+    /// The user-triggered `/compact` finished (the harness task that ran
+    /// [`Harness::compact_on_demand`](super::core::Harness::compact_on_demand)
+    /// is done). The TUI clears its re-entry guard and toasts the outcome.
+    CompactOnDemand {
+        /// How the manual compaction ended.
+        outcome: super::core::ManualCompactionOutcome,
+    },
     /// A user message queued for the NEXT REQUEST (the TUI's "next
     /// request" queue) was injected into the model context mid-loop. The
     /// harness drains the queued-input channel before every request and adds
