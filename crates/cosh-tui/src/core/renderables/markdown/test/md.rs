@@ -278,6 +278,100 @@ fn test_table_border_color_default_is_muted() {
     );
 }
 
+/// Regression: a VS16 emoji sequence ("⚙️" = U+2699 + U+FE0F) inside a table
+/// cell used to be split char-by-char into TWO cells (one holding a bare
+/// VS16). Terminals render the pair as one 2-column glyph while ratatui's
+/// diff models the cells with mismatched widths — so when the surrounding UI
+/// changed (e.g. switching sessions), the affected physical columns were
+/// never repainted and the row "leaked" into other views.
+///
+/// The cell writer must place each grapheme cluster in ONE cell, size columns
+/// by display width and mark wide-glyph shadow columns as `Skip` — exactly
+/// like the prose renderer does.
+#[test]
+fn test_table_vs16_emoji_never_splits_into_two_cells() {
+    let text = "| Grupo | Tasks |\n|---|---|\n| \u{2699}\u{FE0F} DevOps | 16 tasks |\n";
+    let md = make_md(text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
+
+    // No cell anywhere may hold a bare variation selector.
+    for y in 0..10u16 {
+        for x in 0..40u16 {
+            let symbol = buf.cell((x, y)).unwrap().symbol();
+            assert!(
+                !symbol.contains('\u{FE0F}') || symbol.len() > 1,
+                "bare VS16 leaked into its own cell at ({x},{y}): {symbol:?}"
+            );
+        }
+    }
+
+    // The combined grapheme occupies exactly one cell...
+    let emoji_cell = (0..40u16).find_map(|x| {
+        (0..10u16).find_map(|y| {
+            buf.cell((x, y))
+                .filter(|c| c.symbol() == "\u{2699}\u{FE0F}")
+                .map(|_| (x, y))
+        })
+    });
+    let (ex, ey) = emoji_cell.expect("combined ⚙️ grapheme should occupy a single cell");
+
+    // ...with its shadow column marked Skip so ratatui's diff can track the
+    // 2-column footprint of the rendered emoji.
+    let shadow = buf.cell((ex + 1, ey)).unwrap();
+    assert_eq!(
+        shadow.diff_option,
+        ratatui::buffer::CellDiffOption::Skip,
+        "wide grapheme shadow column must be marked Skip"
+    );
+}
+
+/// Regression companion: column widths must be sized by display width, not
+/// `chars().count()`. A single-char wide emoji (📐) is 1 char but 2 columns;
+/// char counting made the column too narrow and pushed content/borders out
+/// of alignment.
+#[test]
+fn test_table_column_width_uses_display_width() {
+    // Column 1 content: "📐 X" = display width 4 (emoji=2) but 3 chars.
+    let text = "| G | T |\n|---|---|\n| 📐 X | y |\n";
+    let md = make_md(text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 30, 8));
+    md.render_self(&mut buf, Rect::new(0, 0, 30, 8));
+
+    // The right border of column 1 must sit at a position that accounts for
+    // the emoji's 2-column footprint: layout is [│][pad][G col][pad][│]...
+    // With width-by-display-width sizing, the first data column is 2 wide
+    // ("G" padded), so borders land at fixed known positions regardless.
+    // Find the header separator corner on row 0: ┌ at 0, then ┬ must come
+    // AFTER the full display width of column 1 (2 content + 2 padding).
+    let mut sep_x = None;
+    for x in 1..30u16 {
+        if buf.cell((x, 0)).map(|c| c.symbol() == "┬") == Some(true) {
+            sep_x = Some(x);
+            break;
+        }
+    }
+    let sep_x = sep_x.expect("table top border separator missing");
+    // col_widths[0] >= max(display_width("G"), display_width("📐 X")) = 4
+    // → separator sits at 1 (left pad+content+right pad) ≥ 4+2+1.
+    assert!(
+        sep_x >= 6,
+        "column sized by chars().count() would put the separator too early (found at {sep_x})"
+    );
+
+    // The body row must keep the same border positions (no drift caused by
+    // the wide glyph overflowing its column).
+    for probe_y in [1u16, 3u16] {
+        let body_sep = (1..30u16)
+            .find(|&x| buf.cell((x, probe_y)).is_some_and(|c| c.symbol() == "│"))
+            .expect("body vertical border missing");
+        assert_eq!(
+            body_sep, sep_x,
+            "body border drifted from header separator at y={probe_y}"
+        );
+    }
+}
+
 #[test]
 fn test_link_style() {
     let md = make_md("[link](https://example.com)");

@@ -1,23 +1,26 @@
 use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use lru::LruCache;
 
 use pulldown_cmark::{Event, Options, Tag, TagEnd};
-use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::buffer::{Buffer, Cell, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use cosh_sdk::tree_sitter::highlight::{HighlightCategory, HighlightSpan, highlight};
 
+use crate::core::lib::unicode_util::str_display_width;
 use crate::core::renderable::Renderable;
 use crate::core::rgba::RGBA;
 use crate::core::rgba::{ColorInput, parse_color};
 
+use super::canvas::GrowBuf;
 use super::context::{MarkdownContext, MarkdownElement};
+use super::parser::{MdBlocks, parse_blocks_incremental};
 use super::styles::{MarkdownPalette, rgba_to_ratatui as rgba_to_color};
 
 /// Rate-limiter for the markdown renderer's PERF debug logs: at most one
@@ -60,11 +63,32 @@ fn highlight_cache_key(text: &str, lang: &str) -> u64 {
     hasher.finish()
 }
 
+/// Maximum number of cached block renders per `MarkdownRenderable` instance.
+/// Streaming updates reuse entries keyed by block-raw hash; stale entries are
+/// evicted by the LRU.
+const BLOCK_CACHE_CAPACITY: usize = 512;
+
+/// A cached render of one top-level markdown block: styled rows ready to be
+/// blitted, plus the geometry (height) and the inputs it was produced for.
+///
+/// `fingerprint` covers every style-affecting input (fg / bg / table border
+/// colour) and `width` the layout-affecting input, so an entry is reusable
+/// only when both match the current request.
+#[derive(Clone)]
+struct CachedBlock {
+    width: u16,
+    fingerprint: u64,
+    height: u16,
+    rows: Arc<Vec<Vec<Cell>>>,
+}
+
 /// Renders markdown content into a fixed-area \`Buffer\`.
 ///
 /// Mirrors \``OpenTUI`\`'s \``MarkdownRenderable`\` in spirit:
-/// - Processes a `pulldown_cmark` event stream
-/// - Uses a `MarkdownContext` to track nesting (headings, emphasis, lists, etc.)
+/// - Splits content into top-level blocks (`parser::MdBlocks`) and re-parses
+///   only the changed tail on content updates (incremental parsing)
+/// - Caches each block's rendered rows and reuses them while the block's raw
+///   source, width and palette stay unchanged (per-block reconciliation)
 /// - Applies theme-derived styles through `MarkdownPalette`
 /// - Delegates syntax highlighting to tree-sitter for fenced code blocks
 pub struct MarkdownRenderable {
@@ -78,6 +102,12 @@ pub struct MarkdownRenderable {
 
     /// Raw markdown source.
     content: String,
+    /// Top-level blocks of `content`, updated incrementally in `set_content`.
+    blocks: MdBlocks,
+    /// LRU cache of rendered blocks, keyed by hash of the block's raw source.
+    /// `render_self(&self)` fills this through interior mutability; entries
+    /// are validated against width + style fingerprint before reuse.
+    block_cache: Mutex<LruCache<u64, CachedBlock>>,
     /// Foreground colour override (falls back to a light grey).
     fg: Option<RGBA>,
     /// Background colour override (falls back to transparent black).
@@ -90,7 +120,7 @@ impl MarkdownRenderable {
     #[must_use]
     pub fn new(content: Option<String>) -> Self {
         let num = NEXT_MARKDOWN_NUM.fetch_add(1, Ordering::Relaxed);
-        Self {
+        let mut md = Self {
             id: format!("md-{num}"),
             num,
             visible: true,
@@ -98,16 +128,31 @@ impl MarkdownRenderable {
             destroyed: false,
             parent_num: None,
             children: Vec::new(),
-            content: content.unwrap_or_default(),
+            content: String::new(),
+            blocks: MdBlocks::default(),
+            block_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(BLOCK_CACHE_CAPACITY).expect("non-zero"),
+            )),
             fg: None,
             bg: None,
             table_border_color: None,
+        };
+        if let Some(content) = content {
+            md.set_content(content);
         }
+        md
     }
 
     // ── Builder-style setters ──────────────────────────────────
 
     pub fn set_content(&mut self, value: String) {
+        if self.content == value {
+            return;
+        }
+        // Incremental parse: reuse the stable block prefix, re-parse only the
+        // changed tail (see `parser::parse_blocks_incremental`).
+        let prev = std::mem::take(&mut self.blocks);
+        self.blocks = parse_blocks_incremental(&value, Some(&prev));
         self.content = value;
     }
 
@@ -130,6 +175,22 @@ impl MarkdownRenderable {
     #[must_use]
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    /// Fingerprint of every style-affecting input. Cached block renders are
+    /// keyed by this so a theme change invalidates all entries implicitly.
+    fn style_fingerprint(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for color in [&self.fg, &self.bg, &self.table_border_color] {
+            match color {
+                Some(c) => {
+                    let (r, g, b, _) = c.to_ints();
+                    (true, r, g, b).hash(&mut hasher);
+                }
+                None => false.hash(&mut hasher),
+            }
+        }
+        hasher.finish()
     }
 
     fn default_fg(&self) -> RGBA {
@@ -157,7 +218,7 @@ impl MarkdownRenderable {
     #[allow(clippy::too_many_arguments)]
     fn render_text(
         text: &str,
-        buf: &mut Buffer,
+        buf: &mut GrowBuf,
         x: &mut u16,
         y: &mut u16,
         area_x: u16,
@@ -242,7 +303,7 @@ impl MarkdownRenderable {
     fn flush_render_word(
         word: &mut String,
         word_w: &mut u16,
-        buf: &mut Buffer,
+        buf: &mut GrowBuf,
         x: &mut u16,
         y: &mut u16,
         area_x: u16,
@@ -308,7 +369,7 @@ impl MarkdownRenderable {
     fn flush_code_word(
         word_parts: &mut Vec<(&str, u16, Style)>,
         word_w: &mut u16,
-        buf: &mut Buffer,
+        buf: &mut GrowBuf,
         x: &mut u16,
         y: &mut u16,
         area_x: u16,
@@ -371,7 +432,7 @@ impl MarkdownRenderable {
     }
 
     /// Fill a whole row with a solid background style.
-    fn fill_row(buf: &mut Buffer, x: u16, y: u16, max_x: u16, style: Style) {
+    fn fill_row(buf: &mut GrowBuf, x: u16, y: u16, max_x: u16, style: Style) {
         for cx in x..max_x {
             if let Some(cell) = buf.cell_mut((cx, y)) {
                 cell.set_style(style);
@@ -486,10 +547,120 @@ impl Renderable for MarkdownRenderable {
             }
         }
 
+        // ── Blit cached block renders (rendering misses on demand) ──
+        // Blocks are laid out by their measured heights exactly as the
+        // monolithic renderer advanced its cursor: each block's height already
+        // includes the trailing blank row its End handler produced, so the
+        // next block starts right after it — no extra separator is added.
+        let fingerprint = self.style_fingerprint();
+        let mut base_y = area.y;
+        for block in &self.blocks.blocks {
+            if base_y >= max_y {
+                break;
+            }
+
+            let raw = self.blocks.source(block);
+            let key = {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                raw.hash(&mut hasher);
+                hasher.finish()
+            };
+            let cached = {
+                #[allow(clippy::unwrap_used)]
+                let mut cache = self.block_cache.lock().unwrap();
+                match cache.get(&key) {
+                    Some(entry)
+                        if entry.width == area.width && entry.fingerprint == fingerprint =>
+                    {
+                        entry.clone()
+                    }
+                    _ => {
+                        let mut canvas = GrowBuf::new(area.width, Style::default().bg(bg_color));
+                        let height = Self::render_block_events(
+                            raw,
+                            &mut canvas,
+                            area.width,
+                            &palette,
+                            self.table_border_color.as_ref(),
+                            true,
+                        );
+                        let entry = CachedBlock {
+                            width: area.width,
+                            fingerprint,
+                            height,
+                            rows: Arc::new(canvas.into_rows()),
+                        };
+                        cache.put(key, entry.clone());
+                        entry
+                    }
+                }
+            };
+
+            // Blit the cached rows, clipped to the viewport.
+            for (row_idx, row) in cached.rows.iter().enumerate() {
+                let target_y = base_y.saturating_add(row_idx as u16);
+                if target_y >= max_y {
+                    break;
+                }
+                for (col_idx, cell) in row.iter().enumerate() {
+                    let target_x = area.x.saturating_add(col_idx as u16);
+                    if target_x >= max_x {
+                        break;
+                    }
+                    if let Some(dst) = buf.cell_mut((target_x, target_y)) {
+                        *dst = cell.clone();
+                    }
+                }
+            }
+
+            base_y = base_y.saturating_add(cached.height);
+        }
+
+        let elapsed = start.elapsed().as_micros();
+        if elapsed > 500 && perf_log_allowed() {
+            log::debug!(
+                "[PERF] markdown_render_self: content_len={} blocks={} reused={} area={}x{} elapsed={elapsed}us",
+                self.content.len(),
+                self.blocks.blocks.len(),
+                self.blocks.stable_count,
+                area.width,
+                area.height
+            );
+        }
+    }
+}
+
+// ── Per-block rendering (phase 1+2 core) ────────────────────────
+
+impl MarkdownRenderable {
+    /// Render ONE top-level markdown block into a growable canvas.
+    ///
+    /// This is the event loop previously inlined in `render_self`, operating
+    /// on the block's raw source slice with `area_x = 0`, `max_x = width` and
+    /// an unbounded `max_y` so the full block geometry can be measured and
+    /// cached. The returned value is the block's layout height: the final
+    /// cursor row, which includes the trailing blank row that the monolithic
+    /// renderer's `End` handlers used to produce.
+    ///
+    /// When `highlight_code` is false, fenced code blocks skip tree-sitter
+    /// highlighting entirely (styles never affect layout, so this keeps the
+    /// height estimator cheap).
+    fn render_block_events(
+        content: &str,
+        buf: &mut GrowBuf,
+        width: u16,
+        palette: &MarkdownPalette,
+        table_border_color: Option<&RGBA>,
+        highlight_code: bool,
+    ) -> u16 {
+        let area_x = 0u16;
+        let max_x = width;
+        let max_y = u16::MAX;
+
         // ── State ───────────────────────────────────────────────
         let mut ctx = MarkdownContext::new();
-        let mut y = area.y;
-        let mut x = area.x;
+        let mut y = 0u16;
+        let mut x = 0u16;
 
         // Table-buffering state
         let mut in_table = false;
@@ -503,10 +674,12 @@ impl Renderable for MarkdownRenderable {
         options.insert(Options::ENABLE_TABLES);
         options.insert(Options::ENABLE_TASKLISTS);
         options.insert(Options::ENABLE_STRIKETHROUGH);
-        let parser = pulldown_cmark::Parser::new_ext(&self.content, options);
+        let parser = pulldown_cmark::Parser::new_ext(content, options);
 
         for event in parser {
-            if !in_table && y >= max_y {
+            // max_y is u16::MAX here (blocks render unbounded); this only
+            // guards against cursor overflow for absurdly tall documents.
+            if !in_table && y >= max_y.saturating_sub(1) {
                 break;
             }
 
@@ -556,13 +729,13 @@ impl Renderable for MarkdownRenderable {
                                     buf,
                                     &mut x,
                                     &mut y,
-                                    area.x,
+                                    area_x,
                                     max_x,
                                     max_y,
                                     &tbl_headers,
                                     &tbl_rows,
-                                    &palette,
-                                    self.table_border_color.as_ref(),
+                                    palette,
+                                    table_border_color,
                                 );
                                 in_table = false;
                             }
@@ -596,40 +769,40 @@ impl Renderable for MarkdownRenderable {
                             tbl_in_header = false;
 
                             // Ensure we're on a fresh line
-                            if x != area.x {
+                            if x != area_x {
                                 y += 1;
-                                x = area.x;
+                                x = area_x;
                             }
                         }
                         Tag::Paragraph | Tag::Heading { .. } => {
-                            if x != area.x {
+                            if x != area_x {
                                 if ctx.in_blockquote() {
-                                    // Inside a blockquote: x was set to area.x + 2 by
+                                    // Inside a blockquote: x was set to area_x + 2 by
                                     // the BlockQuote handler (bar + indent). Don't advance
                                     // y — content should stay on the same row as the bar.
                                 } else {
                                     y += 1;
-                                    x = area.x;
+                                    x = area_x;
                                 }
                             }
-                            if ctx.in_blockquote() && x == area.x {
+                            if ctx.in_blockquote() && x == area_x {
                                 // Second+ paragraph inside blockquote: re-apply indent.
-                                x = area.x.saturating_add(2);
+                                x = area_x.saturating_add(2);
                             }
                         }
                         Tag::BlockQuote(_) => {
-                            if x != area.x {
+                            if x != area_x {
                                 y += 1;
-                                x = area.x;
+                                x = area_x;
                             }
                             if y < max_y {
-                                x = area.x.saturating_add(2);
+                                x = area_x.saturating_add(2);
                             }
                         }
                         Tag::CodeBlock(_) => {
-                            if x != area.x {
+                            if x != area_x {
                                 y += 1;
-                                x = area.x;
+                                x = area_x;
                             }
                             // The blank row left by the previous block's TagEnd
                             // is the code block's top MARGIN (external spacing).
@@ -643,12 +816,12 @@ impl Renderable for MarkdownRenderable {
                             // blank), N+4 when the label row is present.
                             if !ctx.code_block_lang().is_empty() && y < max_y {
                                 y += 1;
-                                x = area.x;
+                                x = area_x;
                                 if y < max_y {
                                     let cb_bg = palette.code_bg_color();
                                     Self::fill_row(
                                         buf,
-                                        area.x,
+                                        area_x,
                                         y,
                                         max_x,
                                         Style::default().bg(cb_bg),
@@ -660,7 +833,7 @@ impl Renderable for MarkdownRenderable {
                                         .fg(rgba_to_color(palette.muted_color()))
                                         .bg(cb_bg)
                                         .add_modifier(Modifier::ITALIC);
-                                    let mut lx = area.x.saturating_add(2);
+                                    let mut lx = area_x.saturating_add(2);
                                     for ch in lang.chars() {
                                         if lx >= max_x {
                                             break;
@@ -676,9 +849,9 @@ impl Renderable for MarkdownRenderable {
                         }
                         Tag::List(_start) => {}
                         Tag::Item => {
-                            if x != area.x {
+                            if x != area_x {
                                 y += 1;
-                                x = area.x;
+                                x = area_x;
                             }
                             let marker_style =
                                 Style::default().fg(rgba_to_color(palette.list_marker_color()));
@@ -697,7 +870,7 @@ impl Renderable for MarkdownRenderable {
                                 buf,
                                 &mut x,
                                 &mut y,
-                                area.x,
+                                area_x,
                                 max_x,
                                 max_y,
                                 marker_style,
@@ -734,7 +907,7 @@ impl Renderable for MarkdownRenderable {
                         | TagEnd::TableRow
                         | TagEnd::Table => {
                             y += 1;
-                            x = area.x;
+                            x = area_x;
                         }
                         TagEnd::List(_)
                         | TagEnd::TableHead
@@ -765,15 +938,16 @@ impl Renderable for MarkdownRenderable {
                 | Event::DisplayMath(text)
                 | Event::InlineHtml(text) => {
                     if ctx.in_code_block() {
-                        self.render_code_block(
-                            &text,
-                            buf,
-                            &mut x,
-                            &mut y,
-                            area.x,
-                            max_x,
-                            max_y,
-                            ctx.code_block_lang(),
+                        // Height estimation skips tree-sitter (styles never
+                        // affect layout); the label row is drawn by the
+                        // CodeBlock start handler either way.
+                        let hl_lang = if highlight_code {
+                            ctx.code_block_lang()
+                        } else {
+                            ""
+                        };
+                        Self::render_code_block(
+                            &text, buf, &mut x, &mut y, area_x, max_x, max_y, palette, hl_lang,
                         );
                     } else {
                         let element = ctx.current_element();
@@ -790,15 +964,14 @@ impl Renderable for MarkdownRenderable {
                             let text_w =
                                 crate::core::lib::unicode_util::str_display_width(first_line)
                                     as u16;
-                            let box_end = area
-                                .x
+                            let box_end = area_x
                                 .saturating_add(2) // indent
                                 .saturating_add(text_w) // text width
                                 .saturating_add(2) // padding after text
                                 .min(max_x);
 
                             // Fill the background from left edge to past text
-                            for cx in area.x..box_end {
+                            for cx in area_x..box_end {
                                 if let Some(cell) = buf.cell_mut((cx, y)) {
                                     cell.set_style(Style::default().bg(warning_bg));
                                     cell.set_char(' ');
@@ -811,7 +984,7 @@ impl Renderable for MarkdownRenderable {
                                 .add_modifier(Modifier::BOLD);
                         }
                         Self::render_text(
-                            &text, buf, &mut x, &mut y, area.x, max_x, max_y, style, bq_indent,
+                            &text, buf, &mut x, &mut y, area_x, max_x, max_y, style, bq_indent,
                         );
                     }
                 }
@@ -819,18 +992,18 @@ impl Renderable for MarkdownRenderable {
                 // ── Inline code ─────────────────────────────────
                 Event::Code(text) => {
                     let style = palette.style_for(Some(MarkdownElement::InlineCode), None);
-                    Self::render_text(&text, buf, &mut x, &mut y, area.x, max_x, max_y, style, 0);
+                    Self::render_text(&text, buf, &mut x, &mut y, area_x, max_x, max_y, style, 0);
                 }
 
                 // ── Raw HTML ────────────────────────────────────
                 Event::Html(html) => {
                     let style = Style::default().fg(rgba_to_color(palette.muted_color()));
-                    Self::render_text(&html, buf, &mut x, &mut y, area.x, max_x, max_y, style, 0);
+                    Self::render_text(&html, buf, &mut x, &mut y, area_x, max_x, max_y, style, 0);
                 }
 
                 // ── Line breaks ─────────────────────────────────
                 Event::SoftBreak | Event::HardBreak => {
-                    x = area.x;
+                    x = area_x;
                     y += 1;
                 }
 
@@ -838,14 +1011,14 @@ impl Renderable for MarkdownRenderable {
                 Event::Rule => {
                     if y < max_y {
                         let rule_style = Style::default().fg(rgba_to_color(palette.muted_color()));
-                        for cx in area.x..max_x {
+                        for cx in area_x..max_x {
                             if let Some(cell) = buf.cell_mut((cx, y)) {
                                 cell.set_char('─');
                                 cell.set_style(rule_style);
                             }
                         }
                         y += 1;
-                        x = area.x;
+                        x = area_x;
                     }
                 }
 
@@ -854,20 +1027,12 @@ impl Renderable for MarkdownRenderable {
                     // Use Unicode checkbox symbols for a more polished look
                     let marker = if checked { "☑ " } else { "☐ " };
                     let style = Style::default().fg(rgba_to_color(palette.list_marker_color()));
-                    Self::render_text(marker, buf, &mut x, &mut y, area.x, max_x, max_y, style, 0);
+                    Self::render_text(marker, buf, &mut x, &mut y, area_x, max_x, max_y, style, 0);
                 }
             }
         }
 
-        let elapsed = start.elapsed().as_micros();
-        if elapsed > 500 && perf_log_allowed() {
-            log::debug!(
-                "[PERF] markdown_render_self: content_len={} area={}x{} elapsed={elapsed}us",
-                self.content.len(),
-                area.width,
-                area.height
-            );
-        }
+        y
     }
 }
 
@@ -876,20 +1041,23 @@ impl Renderable for MarkdownRenderable {
 impl MarkdownRenderable {
     /// Render a code block segment with syntax highlighting (via tree-sitter)
     /// when a language is declared.
+    ///
+    /// `hl_lang` is the language used for highlighting; pass an empty string
+    /// to render as plain text (also used by the height estimator, which must
+    /// not pay for tree-sitter since styles do not affect layout).
     #[allow(clippy::too_many_arguments)]
     fn render_code_block(
-        &self,
         text: &str,
-        buf: &mut Buffer,
+        buf: &mut GrowBuf,
         x: &mut u16,
         y: &mut u16,
         area_x: u16,
         max_x: u16,
         max_y: u16,
-        lang: &str,
+        palette: &MarkdownPalette,
+        hl_lang: &str,
     ) {
         let cb_start = std::time::Instant::now();
-        let palette = self.palette();
         let code_bg = palette.code_bg_color();
         let default_fg = rgba_to_color(palette.text_color());
 
@@ -899,14 +1067,14 @@ impl MarkdownRenderable {
         // - ```lang (unknown/unsupported) → fall back to JavaScript (versatile default)
         //
         // Build byte-to-category map for syntax highlighting (cached)
-        let spans: Option<Vec<HighlightSpan>> = if lang.is_empty() {
+        let spans: Option<Vec<HighlightSpan>> = if hl_lang.is_empty() {
             None
         } else {
-            let key = highlight_cache_key(text, lang);
+            let key = highlight_cache_key(text, hl_lang);
             #[allow(clippy::unwrap_used)]
             let mut cache = HIGHLIGHT_CACHE.lock().unwrap();
             let result = cache.get(&key).cloned().or_else(|| {
-                let computed = highlight(text, lang);
+                let computed = highlight(text, hl_lang);
                 if let Some(ref spans) = computed {
                     cache.push(key, spans.clone());
                 }
@@ -915,7 +1083,7 @@ impl MarkdownRenderable {
 
             // Fallback: if the specified language is not supported by tree-sitter,
             // retry with JavaScript as a versatile generic highlighter.
-            if result.is_none() && lang != "javascript" {
+            if result.is_none() && hl_lang != "javascript" {
                 let js_key = highlight_cache_key(text, "javascript");
                 cache.get(&js_key).cloned().or_else(|| {
                     let computed = highlight(text, "javascript");
@@ -1068,7 +1236,7 @@ impl MarkdownRenderable {
             log::debug!(
                 "[PERF] code_block_render: text_len={} lang={} elapsed={cb_us}us",
                 text.len(),
-                if lang.is_empty() { "none" } else { lang }
+                if hl_lang.is_empty() { "none" } else { hl_lang }
             );
         }
     }
@@ -1094,7 +1262,7 @@ impl MarkdownRenderable {
     /// Render a markdown table as a grid with borders.
     #[allow(clippy::too_many_arguments)]
     fn render_table(
-        buf: &mut Buffer,
+        buf: &mut GrowBuf,
         x: &mut u16,
         y: &mut u16,
         area_x: u16,
@@ -1112,11 +1280,20 @@ impl MarkdownRenderable {
         let col_count = headers.len();
 
         // ── Calculate column widths ─────────────────────────────
-        let mut col_widths: Vec<u16> = headers.iter().map(|h| h.chars().count() as u16).collect();
+        // Sizing MUST use display width (grapheme-aware), not
+        // `chars().count()`: a single emoji is 1 char but occupies 2
+        // terminal columns, and a VS16 sequence like "⚙️" is 2 chars but
+        // still 2 columns. Char counting under-/over-sizes columns and
+        // desynchronizes the buffer grid from what the terminal renders,
+        // which makes ratatui's diff leave stale glyphs behind when the
+        // surrounding UI changes (the "leaking table row across views"
+        // bug).
+        let mut col_widths: Vec<u16> =
+            headers.iter().map(|h| str_display_width(h) as u16).collect();
         for row in rows {
             for (ci, cell) in row.iter().enumerate() {
                 if ci < col_count {
-                    let cw = cell.chars().count() as u16;
+                    let cw = str_display_width(cell) as u16;
                     col_widths[ci] = col_widths[ci].max(cw);
                 }
             }
@@ -1183,7 +1360,7 @@ impl MarkdownRenderable {
         }
 
         // Helper to render a border line
-        let render_border = |buf: &mut Buffer, y: u16, left: char, right: char, sep: char| {
+        let render_border = |buf: &mut GrowBuf, y: u16, left: char, right: char, sep: char| {
             if y >= max_y {
                 return;
             }
@@ -1254,7 +1431,7 @@ impl MarkdownRenderable {
         };
 
         // Helper to render a single display line from pre-wrapped cell content
-        let render_cell_line = |buf: &mut Buffer,
+        let render_cell_line = |buf: &mut GrowBuf,
                                 y: u16,
                                 wrapped: &[Vec<String>],
                                 is_header: bool,
@@ -1287,17 +1464,34 @@ impl MarkdownRenderable {
                     cell.set_style(actual_border_style);
                 }
 
-                // Render cell content line with padding
+                // Render cell content line with padding, grapheme-aware:
+                // each grapheme cluster (emoji, "⚙️", CJK, flags) goes into
+                // ONE cell with its trailing columns marked `Skip`, exactly
+                // like `flush_render_word` does for prose. Writing raw chars
+                // here used to split VS16 sequences across cells and left
+                // wide glyphs without shadow marks — both desynchronize the
+                // buffer from the terminal grid and leak stale glyphs across
+                // view switches.
                 let mut cx = sx + padding;
-                for ch in content.chars() {
-                    if cx >= sx + col_widths[ci] + padding {
+                for (grapheme, gw) in
+                    crate::core::lib::unicode_util::graphemes_with_width(content)
+                {
+                    if cx + gw > sx + col_widths[ci] + padding {
                         break;
                     }
                     if let Some(cell) = buf.cell_mut((cx, y)) {
-                        cell.set_char(ch);
+                        cell.set_symbol(grapheme);
                         cell.set_style(actual_cell_style);
                     }
-                    cx += 1;
+                    if gw > 1 {
+                        for dx in 1..gw {
+                            if let Some(shadow) = buf.cell_mut((cx + dx, y)) {
+                                shadow.set_style(actual_cell_style);
+                                shadow.set_diff_option(CellDiffOption::Skip);
+                            }
+                        }
+                    }
+                    cx += gw;
                 }
 
                 // Vertical border on the right of each cell
@@ -1325,7 +1519,7 @@ impl MarkdownRenderable {
 
         // Pre-fill alternating background for all display lines of a row.
         // Fills from the left edge to the rightmost border column (no +1 to avoid bleeding).
-        let fill_alt_bg = |buf: &mut Buffer, start_y: u16, nlines: usize| {
+        let fill_alt_bg = |buf: &mut GrowBuf, start_y: u16, nlines: usize| {
             let right_bound = col_starts
                 .last()
                 .copied()
@@ -1399,6 +1593,70 @@ impl MarkdownRenderable {
 
         *x = area_x;
     }
+}
+
+// ── Height estimation ────────────────────────────────────────────
+
+/// LRU cache for [`estimate_height_impl`]: key = (content hash, width).
+/// Callers (chat layout, right panel) re-measure the same content across
+/// frames while only widths or tails change.
+static ESTIMATE_CACHE: std::sync::LazyLock<Mutex<LruCache<(u64, u16), u16>>> =
+    std::sync::LazyLock::new(|| {
+        Mutex::new(LruCache::new(NonZeroUsize::new(1024).expect("non-zero")))
+    });
+
+/// Number of terminal rows `text` occupies when rendered at `max_w` columns.
+///
+/// Measures by actually rendering each top-level block into a growable canvas
+/// (the same code path the renderer uses), so the estimate is exact by
+/// construction and can never drift from the renderer's wrap logic — the
+/// hand-synced mirror algorithms this replaces could (and did) diverge.
+///
+/// Styles are irrelevant to layout, so measurement skips tree-sitter
+/// highlighting entirely.
+pub(crate) fn estimate_height_impl(text: &str, max_w: u16) -> u16 {
+    if text.is_empty() || max_w == 0 {
+        return 1;
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    let key = (hasher.finish(), max_w);
+
+    #[allow(clippy::unwrap_used)]
+    {
+        let mut cache = ESTIMATE_CACHE.lock().unwrap();
+        if let Some(height) = cache.get(&key) {
+            return *height;
+        }
+    }
+
+    let blocks = parse_blocks_incremental(text, None);
+    // Palette colors never affect layout; defaults are fine here.
+    let palette = MarkdownPalette::new(
+        RGBA::from_ints(220, 220, 220, 255),
+        RGBA::from_ints(0, 0, 0, 0),
+    );
+
+    let mut total = 0u16;
+    for block in &blocks.blocks {
+        let source = &text[block.range.clone()];
+        let mut canvas = GrowBuf::new(max_w, Style::default());
+        let height = MarkdownRenderable::render_block_events(
+            source,
+            &mut canvas,
+            max_w,
+            &palette,
+            None,
+            false,
+        );
+        total = total.saturating_add(height);
+    }
+
+    let height = total.max(1);
+    #[allow(clippy::unwrap_used)]
+    ESTIMATE_CACHE.lock().unwrap().put(key, height);
+    height
 }
 
 /// Strip markdown formatting and return the visible text content,

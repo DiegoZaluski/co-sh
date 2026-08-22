@@ -1,6 +1,8 @@
+mod canvas;
 mod context;
 mod layout;
 mod md;
+mod parser;
 mod styles;
 
 pub use context::{MarkdownContext, MarkdownElement};
