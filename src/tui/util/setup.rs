@@ -133,11 +133,27 @@ pub struct HookEntry {
 /// PreToolUse hooks configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct Hooks {
+    /// Master switch for PreToolUse hooks (on unless the user turns it off).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// Hook configs keyed by event name (e.g. "PreToolUse").
     #[serde(flatten)]
     pub events: std::collections::HashMap<String, Vec<HookEntry>>,
+}
+
+impl Default for Hooks {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            events: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Serde default for boolean master switches that start enabled.
+fn default_true() -> bool {
+    true
 }
 
 // Persistence
@@ -244,5 +260,29 @@ mod tests {
             loaded.local_base_url("llamacpp"),
             Some("http://127.0.0.1:9999")
         );
+    }
+
+    #[test]
+    fn hooks_enabled_defaults_true_and_roundtrips() {
+        // Missing field → enabled (preserves behaviour of existing configs).
+        let parsed: Setup = serde_json::from_str(r#"{"hooks": {}}"#).unwrap();
+        assert!(parsed.hooks.enabled);
+
+        let mut setup = Setup::default();
+        setup.hooks.enabled = false;
+        setup.hooks.events.insert(
+            "PreToolUse".to_string(),
+            vec![HookEntry {
+                name: "block rm".to_string(),
+                matcher: "bash_run".to_string(),
+                command: "exit 2".to_string(),
+                timeout: Some(5),
+            }],
+        );
+        let json = serde_json::to_string(&setup).unwrap();
+        let loaded: Setup = serde_json::from_str(&json).unwrap();
+        assert!(!loaded.hooks.enabled);
+        assert_eq!(loaded.hooks.events["PreToolUse"].len(), 1);
+        assert_eq!(loaded.hooks.events["PreToolUse"][0].command, "exit 2");
     }
 }

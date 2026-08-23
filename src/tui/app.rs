@@ -42,6 +42,7 @@ use crate::routes::session::right_panel::{
     RIGHT_PANEL_WIDTH, render_right_panel, should_show_right_panel,
 };
 use crate::routes::session::sidebar::{SidebarAction, SidebarView};
+use crate::routes::settings::SettingsView;
 use crate::routes::tools::InternalToolsView;
 use crate::session_store::{
     SessionStore, format_session_timestamp, generate_session_id, is_valid_session,
@@ -119,6 +120,7 @@ enum AppMode {
     Session,
     InternalTools,
     AddProvider,
+    Settings,
     Router,
     #[cfg(feature = "embed")]
     Rag,
@@ -150,6 +152,8 @@ pub struct App {
     pub show_internal_tools: bool,
     pub add_provider_view: AddProviderView,
     pub show_add_provider: bool,
+    pub settings_view: SettingsView,
+    pub show_settings: bool,
     pub router_view: RouterView,
     pub show_router: bool,
     #[cfg(feature = "embed")]
@@ -302,6 +306,8 @@ impl App {
             show_internal_tools: false,
             add_provider_view: AddProviderView::new(),
             show_add_provider: false,
+            settings_view: SettingsView::new(),
+            show_settings: false,
             router_view: {
                 let mut rv = RouterView::new();
                 rv.set_fallbacks(saved_fallbacks);
@@ -2216,6 +2222,8 @@ impl App {
             AppMode::InternalTools
         } else if self.show_add_provider {
             AppMode::AddProvider
+        } else if self.show_settings {
+            AppMode::Settings
         } else if self.state.current_session().is_some() {
             AppMode::Session
         } else {
@@ -2746,6 +2754,17 @@ impl App {
                     );
                     self.add_provider_view
                         .render(buf, tools_area, &self.theme, &self.setup);
+                }
+                AppMode::Settings => {
+                    self.prompt_view.blur();
+                    let settings_area = Rect::new(
+                        session_area.x,
+                        session_area.y,
+                        session_area.width,
+                        session_area.height.saturating_sub(1),
+                    );
+                    self.settings_view
+                        .render(buf, settings_area, &self.theme, &self.setup);
                 }
                 AppMode::Router => {
                     self.prompt_view.blur();
@@ -3696,6 +3715,9 @@ impl App {
                                     HomeAction::OpenAddProvider => {
                                         self.show_add_provider = true;
                                     }
+                                    HomeAction::OpenSettings => {
+                                        self.show_settings = true;
+                                    }
                                     HomeAction::OpenModelRouter => {
                                         // Refresh fallbacks from prefs cache and models from model cache
                                         let saved = fallback::load_fallbacks(&self.setup);
@@ -3744,6 +3766,33 @@ impl App {
                         }
                     }
 
+                    // Settings mode: navigation and activation keys
+                    // Each matched arm returns early so unmatched keys fall through
+                    // to the keymap action dispatch (e.g. Ctrl+B, Ctrl+K).
+                    if matches!(self.mode(), AppMode::Settings) && !self.dialog.visible() {
+                        match key.code {
+                            KeyCode::Up => {
+                                let list_area = 20; // max visible items estimate based on terminal
+                                self.settings_view.select_prev(list_area);
+                                return Ok(false);
+                            }
+                            KeyCode::Down => {
+                                let list_area = 20;
+                                self.settings_view.select_next(list_area);
+                                return Ok(false);
+                            }
+                            KeyCode::Enter | KeyCode::Char(' ') => {
+                                self.settings_view.activate_current(&mut self.setup);
+                                self.setup.save();
+                                return Ok(false);
+                            }
+                            KeyCode::Esc => {
+                                self.show_settings = false;
+                                return Ok(false);
+                            }
+                            _ => {}
+                        }
+                    }
                     // RAG mode: handle Ctrl+Backspace, Ctrl+Left, Ctrl+Right
                     // before passing key.code (which loses modifier info).
                     #[cfg(feature = "embed")]
@@ -4133,6 +4182,8 @@ impl App {
                                 self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
                             } else if matches!(self.mode(), AppMode::AddProvider) {
                                 self.show_add_provider = false;
+                            } else if matches!(self.mode(), AppMode::Settings) {
+                                self.show_settings = false;
                             } else if self.is_rag_mode() {
                                 self.handle_rag_cancel_action();
                             } else if matches!(self.mode(), AppMode::Home) {
@@ -5748,6 +5799,8 @@ impl App {
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         let list_area = 20;
                         self.add_provider_view.select_prev(list_area);
+                    } else if matches!(self.mode(), AppMode::Settings) {
+                        self.settings_view.select_prev(20);
                     } else if self.try_rag_scroll_up() {
                     }
                     return Ok(true);
@@ -5799,6 +5852,8 @@ impl App {
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         let list_area = 20;
                         self.add_provider_view.select_next(list_area);
+                    } else if matches!(self.mode(), AppMode::Settings) {
+                        self.settings_view.select_next(20);
                     } else if self.try_rag_scroll_down() {
                     }
                     return Ok(true);
@@ -6201,6 +6256,9 @@ impl App {
                     crate::routes::home::HomeAction::OpenAddProvider => {
                         self.show_add_provider = true;
                     }
+                    crate::routes::home::HomeAction::OpenSettings => {
+                        self.show_settings = true;
+                    }
                     crate::routes::home::HomeAction::OpenModelRouter => {
                         let saved = fallback::load_fallbacks(&self.setup);
                         self.router_view.set_fallbacks(saved);
@@ -6248,6 +6306,35 @@ impl App {
                         duration_ms: 3000,
                     });
                 }
+                return Ok(true);
+            }
+        }
+
+        // 8a. Settings view — mouse click on a setting row toggles it
+        if matches!(self.mode(), AppMode::Settings) && !self.dialog.visible() {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            // Matches the render geometry: in non-Session modes the render
+            // path resolves to terminal height - 4 (session_main_area drops
+            // the footer rows and the mode arm subtracts 1 more). Keeping
+            // both rects identical keeps content_start_y — and therefore
+            // hit-tested rows — aligned with the drawn option.
+            let settings_area = Rect::new(
+                main_area.x,
+                area.y + 1,
+                main_area.width,
+                main_area.height.saturating_sub(4),
+            );
+            if let Some(clicked_idx) = self.settings_view.handle_mouse(&mouse, settings_area) {
+                self.settings_view.selection.selected_index = clicked_idx;
+                self.settings_view.activate_current(&mut self.setup);
+                self.setup.save();
                 return Ok(true);
             }
         }
