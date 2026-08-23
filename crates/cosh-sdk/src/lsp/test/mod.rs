@@ -124,6 +124,7 @@ async fn pump_incoming(
 }
 
 mod test_client;
+mod test_diagnostics;
 mod test_jsonrpc;
 mod test_manager;
 mod test_transport;

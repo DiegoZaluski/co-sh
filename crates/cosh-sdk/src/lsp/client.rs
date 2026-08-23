@@ -543,6 +543,63 @@ impl LanguageServer {
             .collect()
     }
 
+    // ── Pull diagnostics (hybrid model; the push side is the dispatcher) ─
+
+    /// Pull diagnostics for one document via `textDocument/diagnostic`.
+    ///
+    /// Only meaningful when the server dynamically registered the pull
+    /// variant ([`Self::registered_methods`]); servers without it answer
+    /// `MethodNotFound`, surfaced verbatim so callers fall back to the push
+    /// stream. `Ok(None)` means the server answered "unchanged" or partial:
+    /// there is nothing new to ingest.
+    #[allow(dead_code)] // consumed by the tools layer (phase 5)
+    pub(crate) async fn pull_diagnostics(
+        &self,
+        path: &Path,
+        timeout: Duration,
+    ) -> Result<Option<PublishDiagnosticsParams>, LspError> {
+        use lsp_types::request::DocumentDiagnosticRequest as DiagnosticPull;
+
+        let request_uri = uri_from_path(path)?;
+        let params = serde_json::to_value(lsp_types::DocumentDiagnosticParams {
+            text_document: TextDocumentIdentifier::new(request_uri.clone()),
+            identifier: None,
+            previous_result_id: None,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .expect("serializable");
+
+        let response = self
+            .inner
+            .transport
+            .request(DiagnosticPull::METHOD, Some(params), timeout)
+            .await?;
+        let report: lsp_types::DocumentDiagnosticReportResult = serde_json::from_value(response)
+            .map_err(|err| {
+                LspError::MalformedMessage(format!("invalid diagnostic report: {err}"))
+            })?;
+
+        match report {
+            lsp_types::DocumentDiagnosticReportResult::Report(
+                lsp_types::DocumentDiagnosticReport::Full(full),
+            ) => {
+                let full = full.full_document_diagnostic_report;
+                Ok(Some(PublishDiagnosticsParams::new(
+                    request_uri,
+                    full.items,
+                    None,
+                )))
+            }
+            // The requested document carries the identity in publish params;
+            // a pull result has none, so related-only answers are unusable.
+            lsp_types::DocumentDiagnosticReportResult::Report(
+                lsp_types::DocumentDiagnosticReport::Unchanged(_),
+            )
+            | lsp_types::DocumentDiagnosticReportResult::Partial(_) => Ok(None),
+        }
+    }
+
     fn close_file_internal(&self, path: &Path) -> Result<(), LspError> {
         let uri = uri_from_path(path)?;
         self.inner.transport.notify(

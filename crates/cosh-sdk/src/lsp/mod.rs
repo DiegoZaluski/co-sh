@@ -21,6 +21,7 @@
 //! over in-memory duplex pipes (see `src/lsp/test/` for executable usage).
 pub(crate) mod catalog;
 pub(crate) mod client;
+pub(crate) mod diagnostics;
 pub(crate) mod error;
 pub(crate) mod jsonrpc;
 pub(crate) mod manager;
@@ -35,6 +36,9 @@ pub use lsp_types;
 
 pub use catalog::{CATALOG, ServerSpec};
 pub use client::{Event, LanguageServer, LanguageServerConfig, ServerState, TouchOutcome};
+pub use diagnostics::{
+    DiagnosticsEngine, SETTLE_DEBOUNCE, SeverityFilter, format_for_model, uri_to_path,
+};
 pub use error::{ExitReason, LspError};
 pub use jsonrpc::{IncomingMessage, RequestId, RpcError, error_codes};
 pub use manager::{ClientKey, ClientLifecycle, ManagedEvent, Manager, ManagerConfig};
