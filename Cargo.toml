@@ -148,3 +148,10 @@ lto = "thin"
 # ___
 [workspace.lints.clippy]
 perf = "deny"
+
+# ─── Shared dependency declarations ──────────────────────────────────────────
+# Single source of truth for cross-crate dependencies. Crates opt in with
+# `<dep>.workspace = true`; pre-existing inline versions keep working until
+# they are migrated one crate at a time.
+[workspace.dependencies]
+lsp-types = "0.97"

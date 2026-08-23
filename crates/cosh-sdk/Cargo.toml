@@ -105,6 +105,11 @@ keyring = { version = "4.1.6", features = [
     "windows-native-keyring-store",
     "zbus-secret-service-keyring-store",
 ] }
+
+# lsp::* — Language Server Protocol types (messages, capabilities, URIs).
+# Kept behind our own re-export surface so the concrete crate can be swapped
+# (e.g. for a maintained fork) without touching call sites.
+lsp-types.workspace = true
 thiserror = "2"
 
 [dev-dependencies]
