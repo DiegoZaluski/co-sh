@@ -1,11 +1,12 @@
 //! Unit tests for JSON-RPC message classification and encoding.
 
-use serde_json::{Value, json};
+use std::path::Path;
 
 use crate::lsp::jsonrpc::{
     IncomingMessage, RequestId, RpcError, classify_message, encode_request, encode_response_err,
     encode_response_ok, error_codes,
 };
+use serde_json::{Value, json};
 
 #[test]
 fn classify_request_notification_and_response() {
@@ -109,4 +110,23 @@ fn encode_response_never_has_both_result_and_error() {
     );
     assert!(!err.contains("\"result\""), "{err}");
     assert!(err.contains("\"error\""));
+}
+
+/// uri_from_path percent-encoding (spaces, accents, windows drive).
+#[test]
+fn uri_from_path_encodes_special_characters() {
+    use crate::lsp::client::uri_from_path;
+
+    let uri = uri_from_path(Path::new("/tmp/my project")).unwrap();
+    assert_eq!(uri.as_str(), "file:///tmp/my%20project");
+
+    let uri = uri_from_path(Path::new("/tmp/caf\u{00e9}")).unwrap();
+    assert_eq!(uri.as_str(), "file:///tmp/caf%C3%A9");
+
+    #[cfg(windows)]
+    {
+        use std::path::PathBuf;
+        let uri = uri_from_path(PathBuf::from(r"C:\\src\\proj")).unwrap();
+        assert_eq!(uri.as_str(), "file:///C:/src/proj");
+    }
 }

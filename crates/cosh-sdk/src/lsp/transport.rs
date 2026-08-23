@@ -115,7 +115,11 @@ impl Shared {
 /// owns the receiving end of the incoming message queue.
 pub struct Transport {
     shared: Arc<Shared>,
-    incoming_rx: mpsc::Receiver<IncomingMessage>,
+    /// Wrapped in an async mutex so `recv` can be reached through `&self`.
+    /// Single-consumer semantics are preserved: each call takes the next
+    /// message. `None` after [`Self::take_incoming_rx`] handed the queue to
+    /// an exclusive owner (the client layer's dispatcher task).
+    incoming_rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
     stderr_tail: Option<Arc<Mutex<VecDeque<String>>>>,
 }
 
@@ -177,9 +181,22 @@ impl Transport {
         log::info!("started LSP transport for `{}`", shared.name);
         Self {
             shared,
-            incoming_rx,
+            incoming_rx: tokio::sync::Mutex::new(Some(incoming_rx)),
             stderr_tail,
         }
+    }
+
+    /// Hand the incoming queue to an exclusive owner.
+    ///
+    /// The client layer's dispatcher task owns the receiver outright — that
+    /// lets it await messages without pinning the client's `Arc` alive
+    /// (holding it across `recv` would make owner-drop wait on the task,
+    /// which waits on owner-drop: a deadlock).
+    pub(crate) fn take_incoming_rx(&mut self) -> mpsc::Receiver<IncomingMessage> {
+        self.incoming_rx
+            .get_mut()
+            .take()
+            .expect("incoming queue taken twice")
     }
 
     /// Server name given at construction (used in logs).
@@ -199,13 +216,13 @@ impl Transport {
     ///
     /// Cancel-safe: dropping the future before the message is consumed leaves
     /// it queued for the next call.
-    pub async fn recv(&mut self) -> Option<IncomingMessage> {
-        self.incoming_rx.recv().await
+    pub async fn recv(&self) -> Option<IncomingMessage> {
+        self.incoming_rx.lock().await.as_mut()?.recv().await
     }
 
     /// Try to receive without waiting (used by tests and polling callers).
-    pub fn try_recv(&mut self) -> Option<IncomingMessage> {
-        self.incoming_rx.try_recv().ok()
+    pub fn try_recv(&self) -> Option<IncomingMessage> {
+        self.incoming_rx.try_lock().ok()?.as_mut()?.try_recv().ok()
     }
 
     /// Send a notification; failures mean the session already ended.

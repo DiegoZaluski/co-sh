@@ -211,7 +211,7 @@ async fn stream_close_fails_pending_and_signals_exit() {
 #[tokio::test]
 async fn garbage_before_headers_is_tolerated() {
     let (mut server, client_stream) = spawn_fake_server(64 * 1024);
-    let mut transport = start_transport("test", client_stream);
+    let transport = start_transport("test", client_stream);
 
     server
         .send_raw(b"[INFO] gopls started\nContent-Type: text/plain\n")
@@ -253,7 +253,7 @@ async fn oversized_frame_terminates_session() {
 #[tokio::test]
 async fn malformed_frame_is_skipped_session_survives() {
     let (mut server, client_stream) = spawn_fake_server(64 * 1024);
-    let mut transport = start_transport("test", client_stream);
+    let transport = start_transport("test", client_stream);
 
     // Valid framing, invalid JSON payload.
     server.send_body(r#"{"jsonrpc":"2.0""#).await;
@@ -277,7 +277,7 @@ async fn malformed_frame_is_skipped_session_survives() {
 #[tokio::test]
 async fn notifications_arrive_in_order() {
     let (mut server, client_stream) = spawn_fake_server(64 * 1024);
-    let mut transport = start_transport("test", client_stream);
+    let transport = start_transport("test", client_stream);
 
     for i in 0..10 {
         server
@@ -303,7 +303,7 @@ async fn notifications_arrive_in_order() {
 async fn bounded_incoming_queue_applies_backpressure() {
     const TOTAL: usize = crate::lsp::transport::INCOMING_CAPACITY * 4;
     let (mut server, client_stream) = spawn_fake_server(256 * 1024);
-    let mut transport = start_transport("test", client_stream);
+    let transport = start_transport("test", client_stream);
 
     let writer = tokio::spawn(async move {
         for i in 0..TOTAL {
@@ -374,7 +374,7 @@ async fn requests_after_death_fail_fast() {
 #[tokio::test]
 async fn respond_answers_server_requests() {
     let (mut server, client_stream) = spawn_fake_server(64 * 1024);
-    let mut transport = start_transport("test", client_stream);
+    let transport = start_transport("test", client_stream);
 
     // Simulate a server asking for configuration (gopls/tsserver do this).
     server

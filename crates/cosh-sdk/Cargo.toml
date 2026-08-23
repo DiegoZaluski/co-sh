@@ -116,6 +116,7 @@ thiserror = "2"
 env_logger = "0.11"
 insta = { version = "1", features = ["filters"] }
 serial_test = "3"
+tempfile = "3"
 ast-grep-core = { version = "0.39", default-features = false, features = ["tree-sitter"] }
 
 [lints]

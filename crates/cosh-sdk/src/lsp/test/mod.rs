@@ -116,10 +116,42 @@ async fn pump_incoming(
                     break;
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                break;
+            }
         }
     }
 }
 
+mod test_client;
 mod test_jsonrpc;
 mod test_transport;
+
+/// Scripted initialize handshake: answers the client's `initialize` request
+/// with `capabilities_json` (raw JSON for the capabilities object) and swallows
+/// the follow-up `initialized` notification.
+pub async fn serve_initialize(server: &mut FakeServer, capabilities_json: &str) {
+    let request = server
+        .next_client_message()
+        .await
+        .expect("initialize request");
+    let parsed: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(
+        parsed["method"], "initialize",
+        "handshake starts with initialize"
+    );
+
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":{},"result":{{"capabilities":{capabilities_json}}}}}"#,
+        parsed["id"]
+    );
+    server.send_body(&body).await;
+
+    // The initialized notification follows; consume it so tests start clean.
+    let notification = server
+        .next_client_message()
+        .await
+        .expect("initialized notification");
+    let parsed: serde_json::Value = serde_json::from_str(&notification).unwrap();
+    assert_eq!(parsed["method"], "initialized");
+}

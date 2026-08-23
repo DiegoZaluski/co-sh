@@ -1459,6 +1459,7 @@ dependencies = [
  "serial_test",
  "similar 3.1.1",
  "smallvec",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

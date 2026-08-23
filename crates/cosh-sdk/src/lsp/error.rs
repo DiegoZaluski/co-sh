@@ -68,6 +68,11 @@ pub enum LspError {
     #[error("outbound queue is full (server stopped reading stdin?)")]
     Backpressure,
 
+    /// The client was used in a lifecycle state that does not allow the
+    /// operation (e.g. `initialize` twice, query after shutdown).
+    #[error("invalid client state: {0}")]
+    InvalidState(&'static str),
+
     /// An incoming message could not be parsed as JSON-RPC.
     ///
     /// Never fatal: the offending frame is logged and skipped so a single bad
