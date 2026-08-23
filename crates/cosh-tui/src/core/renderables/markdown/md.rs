@@ -20,7 +20,7 @@ use crate::core::types::MouseEvent;
 
 use super::canvas::GrowBuf;
 use super::context::{MarkdownContext, MarkdownElement};
-use super::parser::{MdBlocks, parse_blocks_incremental};
+use super::parser::{MdBlocks, needs_inter_block_margin, parse_blocks_incremental};
 use super::styles::{MarkdownPalette, rgba_to_ratatui as rgba_to_color};
 
 /// Rate-limiter for the markdown renderer's PERF debug logs: at most one
@@ -346,6 +346,19 @@ pub(crate) struct RenderPass {
 /// Maximum blockquote recursion before falling back to plain text lines.
 const MAX_QUOTE_DEPTH: u16 = 8;
 
+/// Visible height of a rendered block: the number of canvas rows it actually
+/// painted. The layout `height` may exceed it by virtual feed row(s) that
+/// exist only to position the NEXT block; the LAST block of a document is
+/// laid out by its visible height so no blank row is left at the foot.
+#[allow(clippy::cast_possible_truncation)]
+fn block_content_height(height: u16, rows: &[Vec<Cell>]) -> u16 {
+    if usize::from(height) > rows.len() {
+        rows.len().min(usize::from(u16::MAX)) as u16
+    } else {
+        height
+    }
+}
+
 /// Strip leading blockquote markers from a raw quote slice so it can be
 /// re-parsed as regular markdown by a recursive render pass.
 ///
@@ -406,7 +419,12 @@ fn strip_quote_markers(raw: &str) -> String {
 struct CachedBlock {
     width: u16,
     fingerprint: u64,
+    /// Layout height: content rows plus the trailing feed row that positions
+    /// the next block.
     height: u16,
+    /// Visible height without the trailing feed row; used for the LAST block
+    /// of a document so no blank row is left at its foot.
+    content_height: u16,
     rows: Arc<Vec<Vec<Cell>>>,
     links: Vec<LinkRegion>,
 }
@@ -1017,13 +1035,17 @@ impl Renderable for MarkdownRenderable {
         }
 
         // ── Blit cached block renders (rendering misses on demand) ──
-        // Blocks are laid out by their measured heights exactly as the
-        // monolithic renderer advanced its cursor: each block's height already
-        // includes the trailing blank row its End handler produced, so the
-        // next block starts right after it — no extra separator is added.
+        // Blocks are laid out by their measured heights: each block's cursor
+        // already sits on the row after its content, so the next block starts
+        // right there — unless source semantics call for a blank separator
+        // row between the pair (separated kinds, or an explicit blank line
+        // between paragraphs). The LAST block is laid out by its content
+        // height instead, leaving no blank row at the foot of the document.
         let fingerprint = self.style_fingerprint();
+        let block_count = self.blocks.blocks.len();
         let mut base_y = area.y;
-        for block in &self.blocks.blocks {
+        let mut prev_block: Option<&crate::core::renderables::markdown::parser::BlockInfo> = None;
+        for (block_idx, block) in self.blocks.blocks.iter().enumerate() {
             if base_y >= max_y {
                 break;
             }
@@ -1059,11 +1081,14 @@ impl Renderable for MarkdownRenderable {
                             self.table_border_color.as_ref(),
                             &pass,
                         );
+                        let rows = Arc::new(canvas.into_rows());
+                        let content_height = block_content_height(height, &rows);
                         let entry = CachedBlock {
                             width: area.width,
                             fingerprint,
                             height,
-                            rows: Arc::new(canvas.into_rows()),
+                            content_height,
+                            rows,
                             links: block_links,
                         };
                         cache.put(key, entry.clone());
@@ -1071,6 +1096,17 @@ impl Renderable for MarkdownRenderable {
                     }
                 }
             };
+
+            // Source-semantic separator between this block and its
+            // predecessor (never before the first block).
+            if let Some(prev) = prev_block {
+                let margin = needs_inter_block_margin(
+                    prev.kind,
+                    block.kind,
+                    self.blocks.inter_block_gap(prev, block),
+                );
+                base_y = base_y.saturating_add(u16::from(margin));
+            }
 
             // Blit the cached rows, clipped to the viewport.
             for (row_idx, row) in cached.rows.iter().enumerate() {
@@ -1108,7 +1144,12 @@ impl Renderable for MarkdownRenderable {
                 }
             }
 
-            base_y = base_y.saturating_add(cached.height);
+            base_y = base_y.saturating_add(if block_idx + 1 == block_count {
+                cached.content_height
+            } else {
+                cached.height
+            });
+            prev_block = Some(block);
         }
 
         let elapsed = start.elapsed().as_micros();
@@ -1252,8 +1293,14 @@ impl MarkdownRenderable {
     /// on the block's raw source slice with `area_x = 0`, `max_x = width` and
     /// an unbounded `max_y` so the full block geometry can be measured and
     /// cached. The returned value is the block's layout height: the final
-    /// cursor row, which includes the trailing blank row that the monolithic
-    /// renderer's `End` handlers used to produce.
+    /// cursor row, which includes one virtual trailing feed row produced by
+    /// the last End handler (callers lay out the NEXT block on it; nothing
+    /// paints there).
+    ///
+    /// Inter-block spacing follows source semantics: "separated" kinds
+    /// (headings, lists, code fences, tables, quotes, rules) always get a
+    /// blank row to their neighbours; adjacent paragraphs only when the
+    /// source had an explicit blank line between them.
     ///
     /// Blockquotes recurse: each quote body renders into its own child canvas
     /// offset past the quote bar (see [`Self::render_quote`]).
@@ -1483,48 +1530,11 @@ impl MarkdownRenderable {
                                 y += 1;
                                 x = area_x;
                             }
-                            // The blank row left by the previous block's TagEnd
-                            // is the code block's top MARGIN (external spacing).
-                            // Blocks WITHOUT a language tag get no internal
-                            // top-gap row: the box starts directly at the first
-                            // code line, so their only top spacing is that
-                            // margin. Blocks WITH a language tag keep one
-                            // internal top-gap row that carries the label.
-                            // Cursor advance: N+3 for language-less blocks
-                            // (N lines + bottom padding + separator + TagEnd
-                            // blank), N+4 when the label row is present.
-                            if !ctx.code_block_lang().is_empty() && y < max_y {
-                                y += 1;
-                                x = area_x;
-                                if y < max_y {
-                                    let cb_bg = palette.code_bg_color();
-                                    Self::fill_row(
-                                        buf,
-                                        area_x,
-                                        y,
-                                        max_x,
-                                        Style::default().bg(cb_bg),
-                                    );
-
-                                    // Draw language label on the top gap row
-                                    let lang = ctx.code_block_lang();
-                                    let label_style = Style::default()
-                                        .fg(rgba_to_color(palette.muted_color()))
-                                        .bg(cb_bg)
-                                        .add_modifier(Modifier::ITALIC);
-                                    let mut lx = area_x.saturating_add(2);
-                                    for ch in lang.chars() {
-                                        if lx >= max_x {
-                                            break;
-                                        }
-                                        if let Some(cell) = buf.cell_mut((lx, y)) {
-                                            cell.set_char(ch);
-                                            cell.set_style(label_style);
-                                        }
-                                        lx += 1;
-                                    }
-                                }
-                            }
+                            // The label/gap row for language-tagged blocks is
+                            // drawn INSIDE render_code_block, on the current
+                            // (fresh) row, so the block's geometry is identical
+                            // in the render and estimate passes and no leading
+                            // blank row is ever allocated.
                         }
                         Tag::List(start) => {
                             // Marker column = enclosing item's content column,
@@ -1705,16 +1715,20 @@ impl MarkdownRenderable {
                 | Event::DisplayMath(text)
                 | Event::InlineHtml(text) => {
                     if ctx.in_code_block() {
-                        // Height estimation skips tree-sitter (styles never
-                        // affect layout); the label row is drawn by the
-                        // CodeBlock start handler either way.
-                        let hl_lang = if pass.highlight_code {
-                            ctx.code_block_lang()
-                        } else {
-                            ""
-                        };
+                        // The language tag decides LAYOUT (label/gap row)
+                        // in both passes; `highlight` only gates tree-sitter
+                        // spans, which never affect geometry.
                         Self::render_code_block(
-                            text, buf, &mut x, &mut y, area_x, max_x, max_y, palette, hl_lang,
+                            text,
+                            buf,
+                            &mut x,
+                            &mut y,
+                            area_x,
+                            max_x,
+                            max_y,
+                            palette,
+                            ctx.code_block_lang(),
+                            pass.highlight_code,
                         );
                     } else {
                         let element = ctx.current_element();
@@ -1841,19 +1855,22 @@ impl MarkdownRenderable {
         max_y: u16,
         palette: &MarkdownPalette,
         hl_lang: &str,
+        run_highlight: bool,
     ) {
         let cb_start = std::time::Instant::now();
         let code_bg = palette.code_bg_color();
         let default_fg = rgba_to_color(palette.text_color());
 
         // Syntax highlighting strategy:
+        // - `highlight` off (height estimation) → plain text; LAYOUT still
+        //   matches the highlighted path (the label row is drawn either way)
         // - ``` (no language tag) → no highlighting, render as plain text
         // - ```lang (known/supported) → use tree-sitter highlighting
         // - ```lang (unknown/unsupported) → plain text. The old JavaScript
         //   fallback produced wrong colors for non-JS code and is gone.
         //
         // Build byte-to-category map for syntax highlighting (cached)
-        let spans: Option<Vec<HighlightSpan>> = if hl_lang.is_empty() {
+        let spans: Option<Vec<HighlightSpan>> = if hl_lang.is_empty() || !run_highlight {
             None
         } else {
             let key = highlight_cache_key(text, hl_lang);
@@ -1878,18 +1895,43 @@ impl MarkdownRenderable {
 
         let mut byte_offset = 0;
 
-        // The CodeBlock start handler already drew the top gap row (filled
-        // with the code background), so the first code line begins on the
-        // next row via the loop below. Only a bottom gap is added here.
+        // Language-tagged blocks draw a label row on the CURRENT (fresh)
+        // row and start their code below it; language-less blocks start the
+        // code directly on the current row. Either way no leading blank row
+        // is ever allocated — inter-block margins handle external spacing.
+        if !hl_lang.is_empty() && *y < max_y {
+            Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
+
+            let label_style = Style::default()
+                .fg(rgba_to_color(palette.muted_color()))
+                .bg(code_bg)
+                .add_modifier(Modifier::ITALIC);
+            let mut lx = area_x.saturating_add(2);
+            for ch in hl_lang.chars() {
+                if lx >= max_x {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((lx, *y)) {
+                    cell.set_char(ch);
+                    cell.set_style(label_style);
+                }
+                lx += 1;
+            }
+        }
+        // False when the cursor sits on the just-drawn label row, so the
+        // first code line advances; true for language-less blocks.
+        let mut on_code_row = hl_lang.is_empty();
         *x = area_x.saturating_add(CODE_PAD_H);
 
         for line in text.lines() {
-            // Every code line (including the first) gets its own fresh row,
-            // so the top-gap row above is preserved.
-            if *y >= max_y {
-                break;
+            if !on_code_row {
+                // Advance to a fresh row for this code line.
+                if *y >= max_y {
+                    break;
+                }
+                *y += 1;
             }
-            *y += 1;
+            on_code_row = false;
             *x = area_x.saturating_add(CODE_PAD_H);
             if *y >= max_y {
                 break;
@@ -1993,14 +2035,9 @@ impl MarkdownRenderable {
             Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
         }
 
-        // Blank separator row after code block bottom padding
-        if *y < max_y {
-            *y += 1;
-            *x = area_x;
-            // This row keeps the default background (not code_bg),
-            // providing a true blank separator between the code block
-            // background area and the following content.
-        }
+        // No trailing separator here: inter-block margins (decided by the
+        // caller from source semantics) provide the gap to the next block,
+        // and the End handler's feed positions it.
 
         let cb_us = cb_start.elapsed().as_micros();
         if cb_us > 500 && perf_log_allowed() {
@@ -2364,12 +2401,21 @@ static ESTIMATE_CACHE: std::sync::LazyLock<Mutex<LruCache<(u64, u16), u16>>> =
 /// Styles are irrelevant to layout, so measurement skips tree-sitter
 /// highlighting entirely.
 pub(crate) fn estimate_height_impl(text: &str, max_w: u16) -> u16 {
+    estimate_height_ext(text, max_w, false)
+}
+
+/// Like [`estimate_height_impl`], but when `keep_last_feed` is set the LAST
+/// block keeps its trailing feed row. Used by the streaming layout for
+/// interior slices: a segment that will be followed by more blocks must
+/// reserve that row, or each closed block loses one row of separation.
+pub(crate) fn estimate_height_ext(text: &str, max_w: u16, keep_last_feed: bool) -> u16 {
     if text.is_empty() || max_w == 0 {
         return 1;
     }
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
+    keep_last_feed.hash(&mut hasher);
     let key = (hasher.finish(), max_w);
 
     #[allow(clippy::unwrap_used)]
@@ -2388,7 +2434,8 @@ pub(crate) fn estimate_height_impl(text: &str, max_w: u16) -> u16 {
     );
 
     let mut total = 0u16;
-    for block in &blocks.blocks {
+    let block_count = blocks.blocks.len();
+    for (block_idx, block) in blocks.blocks.iter().enumerate() {
         let source = &text[block.range.clone()];
         let mut canvas = GrowBuf::new(max_w, Style::default());
         // NOTE: estimation assumes concealment on (the default). Callers that
@@ -2407,7 +2454,23 @@ pub(crate) fn estimate_height_impl(text: &str, max_w: u16) -> u16 {
             None,
             &pass,
         );
-        total = total.saturating_add(height);
+        // Inter-block separator, mirroring the blit layout exactly.
+        if block_idx > 0 {
+            let prev = &blocks.blocks[block_idx - 1];
+            total = total.saturating_add(u16::from(needs_inter_block_margin(
+                prev.kind,
+                block.kind,
+                blocks.inter_block_gap(prev, block),
+            )));
+        }
+        // The final block of a DOCUMENT drops its trailing feed row: no blank
+        // line is left at the foot. Interior slices (streaming segments) keep
+        // it — the following blocks position themselves after it.
+        total = total.saturating_add(if block_idx + 1 == block_count && !keep_last_feed {
+            block_content_height(height, canvas.rows())
+        } else {
+            height
+        });
     }
 
     let height = total.max(1);

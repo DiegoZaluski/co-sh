@@ -604,15 +604,16 @@ fn test_consecutive_headings() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
     md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
 
+    // Headings are "separated" blocks: a blank row sits between each pair.
     // H1 on row 0
     assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "H");
     assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "1");
-    // H2 on row 1
-    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "H");
-    assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "2");
-    // H3 on row 2
+    // H2 on row 2 (one blank separator at row 1)
     assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "H");
-    assert_eq!(buf.cell((1, 2)).unwrap().symbol(), "3");
+    assert_eq!(buf.cell((1, 2)).unwrap().symbol(), "2");
+    // H3 on row 4 (one blank separator at row 3)
+    assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "H");
+    assert_eq!(buf.cell((1, 4)).unwrap().symbol(), "3");
 }
 
 #[test]
@@ -703,8 +704,9 @@ fn test_heading_level_color_distinction() {
             .contains(Modifier::BOLD),
         "H1 should be bold"
     );
+    // H6 sits on row 2: a blank separator row separates the two headings.
     assert!(
-        buf.cell((0, 1))
+        buf.cell((0, 2))
             .unwrap()
             .style()
             .add_modifier
@@ -714,7 +716,7 @@ fn test_heading_level_color_distinction() {
     // H1 should be brighter than H6
     if let (Some(Color::Rgb(r1, g1, b1)), Some(Color::Rgb(r2, g2, b2))) = (
         buf.cell((0, 0)).unwrap().style().fg,
-        buf.cell((0, 1)).unwrap().style().fg,
+        buf.cell((0, 2)).unwrap().style().fg,
     ) {
         let lum1 = r1 as u32 + g1 as u32 + b1 as u32;
         let lum2 = r2 as u32 + g2 as u32 + b2 as u32;
@@ -1213,4 +1215,92 @@ fn test_link_inside_blockquote_is_clickable() {
     assert_eq!(link.url, "https://x.io");
     // Bar(1) + space + "see " → label starts at col 6, width 4.
     assert_eq!((link.y, link.x0, link.x1), (0, 6, 10));
+}
+
+// ── Inter-block spacing (source-semantic separators) ────────────
+
+/// A heading is a "separated" block: the content after it starts one blank
+/// row below, mirroring the reference renderer's top-level margin rule.
+#[test]
+fn test_heading_separated_from_following_content() {
+    let md = make_md("# Title\n\nconteudo depois do titulo");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 6));
+
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "T");
+    // Row 1 is a blank separator; content starts at row 2.
+    assert_eq!(
+        buf.cell((0, 1)).unwrap().symbol(),
+        " ",
+        "blank row expected between heading and content"
+    );
+    assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "c");
+}
+
+/// Paragraphs separated by an explicit blank line in the source keep that
+/// separation on screen.
+#[test]
+fn test_paragraphs_separated_by_source_blank_line() {
+    let md = make_md("para um\n\npara dois");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 6));
+
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "p");
+    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), " ");
+    assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "p");
+}
+
+/// Tight lists stay compact: consecutive items occupy consecutive rows with
+/// no separator between them.
+#[test]
+fn test_tight_list_stays_compact() {
+    let md = make_md("- a\n- b\n- c");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 20, 5));
+
+    for (row, ch) in [(0u16, "a"), (1, "b"), (2, "c")] {
+        assert_eq!(buf.cell((2, row)).unwrap().symbol(), ch);
+    }
+}
+
+/// Loose lists keep their internal spacing: the double feed from the item's
+/// paragraph End plus the Item End leaves one blank row between items.
+#[test]
+fn test_loose_list_items_are_spaced() {
+    let md = make_md("- alpha\n\n- beta");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 6));
+    md.render_self(&mut buf, Rect::new(0, 0, 20, 6));
+
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "a");
+    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), " ", "loose separator");
+    assert_eq!(buf.cell((2, 2)).unwrap().symbol(), "b");
+}
+
+/// A code fence following a paragraph gets exactly ONE blank row above it:
+/// the inter-block margin. No phantom leading gap inside the fence itself.
+#[test]
+fn test_code_block_single_blank_above() {
+    let md = make_md("text\n\n```\ncode\n```");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 8));
+    md.render_self(&mut buf, Rect::new(0, 0, 20, 8));
+
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "t");
+    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), " ");
+    // Code text is indented by CODE_PAD_H columns.
+    assert_eq!(
+        buf.cell((2, 2)).unwrap().symbol(),
+        "c",
+        "code starts directly after the single margin row"
+    );
+}
+
+/// The LAST block of a document leaves no trailing blank row: the estimate
+/// counts visible rows only (feed rows exist solely to position the next
+/// block).
+#[test]
+fn test_no_trailing_blank_after_last_block() {
+    use super::super::estimate_height;
+
+    assert_eq!(estimate_height("hello", 40), 1);
+    assert_eq!(estimate_height("# Title\n\ncontent", 40), 3);
 }

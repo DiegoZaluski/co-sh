@@ -18,16 +18,15 @@ fn test_text_wrapping() {
     assert_eq!(h, 3, "200 chars at 80 wide = 3 lines");
 }
 
-/// Language-less code block with 2 lines: no internal top-gap row — the only
-/// top spacing is the margin row left by the previous block — so the height
-/// is 2 code rows + bottom padding (1) + blank separator (1) + TagEnd blank
-/// (1) = 5 rows. Pinned EXACT so a regression in the accounting cannot hide
-/// inside a loose range.
+/// Language-less code block with 2 lines: no label row, so the visible
+/// height is 2 code rows + bottom padding (1) = 3 rows. As the LAST block of
+/// a document it also drops its trailing feed row. Pinned EXACT so a
+/// regression in the accounting cannot hide inside a loose range.
 #[test]
 fn test_code_block_lines() {
     let text = "```\nline1\nline2\n```";
     let h = estimate_height(text, 80);
-    assert_eq!(h, 5, "2-line code block should estimate 5 rows (got {h})");
+    assert_eq!(h, 3, "2-line code block should estimate 3 rows (got {h})");
 }
 
 #[test]
@@ -104,7 +103,8 @@ fn test_nested_list_height() {
     // pulldown-cmark requires 4-space indent for nested lists
     let text = "- outer\n    - inner1\n    - inner2";
     let h = estimate_height(text, 80);
-    assert_eq!(h, 4, "nested list with 3 items + paragraph break = 4 lines");
+    // One list BLOCK: nested items stay compact, one row per item.
+    assert_eq!(h, 3, "nested list with 3 items renders 3 compact rows");
 }
 
 #[test]
@@ -120,16 +120,16 @@ fn test_wide_table_needs_multiple_rows() {
 }
 
 /// Fenced code block with a language tag and 3 code lines: the label row (1)
-/// plus 3 code rows, bottom padding (1), a blank separator (1), and a TagEnd
-/// blank (1) = 7 rows. Pinned EXACT so a regression in the accounting (e.g.
-/// the N+2 vs N+4 mistake) cannot pass inside a loose range.
+/// plus 3 code rows and bottom padding (1) = 5 visible rows; the trailing
+/// feed row is dropped because this is the document's last block. Pinned
+/// EXACT so a regression in the accounting cannot pass inside a loose range.
 #[test]
 fn test_code_block_fenced_height() {
     let text = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```";
     let h = estimate_height(text, 80);
     assert_eq!(
-        h, 7,
-        "3-line fenced code block should estimate 7 rows (got {h})"
+        h, 5,
+        "3-line fenced code block should estimate 5 rows (got {h})"
     );
 }
 
@@ -145,7 +145,8 @@ fn test_content_wraps_at_narrow_width() {
 fn test_consecutive_headings_height() {
     let text = "# H1\n## H2\n### H3";
     let h = estimate_height(text, 80);
-    assert_eq!(h, 3, "three consecutive headings = 3 lines");
+    // Headings are separated blocks: a blank row between each pair.
+    assert_eq!(h, 5, "three consecutive headings + 2 separators = 5 rows");
 }
 
 #[test]
@@ -181,7 +182,8 @@ fn test_table_without_data_rows() {
 fn test_horizontal_rules_sequence() {
     let text = "---\n\n---\n\n---";
     let h = estimate_height(text, 80);
-    assert_eq!(h, 3, "three horizontal rules = 3 lines");
+    // Rules are separated blocks: a blank row between each pair.
+    assert_eq!(h, 5, "three horizontal rules + 2 separators = 5 rows");
 }
 
 /// Count rows from `y=0` that contain at least one non-space glyph (the same

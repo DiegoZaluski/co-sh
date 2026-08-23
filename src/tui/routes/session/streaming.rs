@@ -22,7 +22,9 @@ use ratatui::style::Style;
 
 use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
-use cosh_tui::core::renderables::markdown::{MarkdownRenderable, estimate_height};
+use cosh_tui::core::renderables::markdown::{
+    MarkdownRenderable, boundary_blank_rows, estimate_height, estimate_height_interior_slice,
+};
 
 use crate::theme::Theme;
 
@@ -65,7 +67,7 @@ pub(crate) struct StreamingTextCache {
     block: TailBlock,
     /// Rendered cells of the whole text part at `width` columns.
     cells: Buffer,
-    /// Total height of the text part (`prefix_h + tail_h`).
+    /// Total height of the text part (`prefix_h + connector + tail_h`).
     pub(crate) height: u16,
 }
 
@@ -148,12 +150,23 @@ impl StreamingTextCache {
             0
         } else if split >= prev_split {
             if split > prev_split {
-                prev_prefix_h.saturating_add(estimate_height(&text[prev_split..split], width))
+                // Slice heights are additive EXCEPT for each internal slice
+                // boundary's inter-block separator: fold in both the boundary
+                // consumed by this advance (at prev_split) and its estimate.
+                // The stabilized segment keeps its trailing feed row — it is
+                // an INTERIOR slice; what follows positions itself after it.
+                prev_prefix_h
+                    .saturating_add(boundary_blank_rows(text, prev_split))
+                    .saturating_add(estimate_height_interior_slice(
+                        &text[prev_split..split],
+                        width,
+                    ))
             } else {
                 prev_prefix_h
             }
         } else {
-            estimate_height(&text[..split], width)
+            // Full recompute of a non-final prefix: keep its trailing feed.
+            estimate_height_interior_slice(&text[..split], width)
         };
 
         let tail = &text[split..];
@@ -162,7 +175,34 @@ impl StreamingTextCache {
         } else {
             estimate_height(tail, width).max(1)
         };
-        let height = new_prefix_h.saturating_add(tail_h).max(1);
+
+        // Inter-block separator owed at a slice boundary: slice heights are
+        // additive EXCEPT for the margin between the two sides' boundary
+        // blocks, which only exists in the combined document. The re-rendered
+        // region therefore starts one row below the prefix when the pair of
+        // blocks straddling `render_from` triggers a separator.
+        //
+        // Invariant: `prefix_h` equals the standalone estimate of
+        // `rendered_text[..split]`, and each advance folds in BOTH the
+        // consumed boundary's separator and the stabilized segment's estimate.
+        let render_row = if split >= prev_split {
+            // The slice starts at the OLD boundary: place it after that
+            // boundary's separator (the newly stabilized segment sits between
+            // the old prefix start and the current one).
+            prev_prefix_h.saturating_add(boundary_blank_rows(text, prev_split))
+        } else {
+            new_prefix_h
+        };
+        let connector = if split == 0 {
+            0
+        } else {
+            boundary_blank_rows(text, split)
+        };
+
+        let height = new_prefix_h
+            .saturating_add(connector)
+            .saturating_add(tail_h)
+            .max(1);
 
         // Render from the earlier of the previous/current split so a block that
         // just closed (fence/list ending in the tail) is refreshed in place.
@@ -170,11 +210,6 @@ impl StreamingTextCache {
             prev_split
         } else {
             split
-        };
-        let render_row = if split >= prev_split {
-            prev_prefix_h
-        } else {
-            new_prefix_h
         };
         let area_h = height.saturating_sub(render_row);
 

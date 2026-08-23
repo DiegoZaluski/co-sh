@@ -2129,10 +2129,10 @@ fn test_code_block_bottom_padding_not_overlapped() {
         view.actual_total_height, view.cached_total_height
     );
 
-    // Sanity-check the drawn rows: code lines at rows 1-2 (the top-gap row 0
-    // carries only background, no glyphs), then the bottom padding + separator
-    // (rows 3-4), the inter-message gap (row 5) and the reply at row 6. If the
-    // bottom padding were overlapped, the reply would start at row 4.
+    // Sanity-check the drawn rows: code lines at rows 0-1, the bottom
+    // padding row (2) plus the inter-message gap (row 3), then the reply at
+    // row 4. If the bottom padding were overlapped, the reply would start
+    // at row 2.
     let mut reply_rows = Vec::new();
     for row in 0..12 {
         let has = (5..85).any(|cx| {
@@ -2145,9 +2145,9 @@ fn test_code_block_bottom_padding_not_overlapped() {
     }
     assert_eq!(
         reply_rows,
-        vec![1, 2, 6],
+        vec![0, 1, 4],
         "unexpected glyph layout: the code block's bottom padding should be \
-         preserved (2 blank rows) before the reply"
+         preserved before the reply"
     );
 }
 
@@ -4151,6 +4151,67 @@ fn test_stream_matches_full_quote() {
             "> quote line three\n",
         ],
         Rect::new(0, 0, 120, 80),
+    );
+}
+
+/// A loose list streamed item by item: interior slices keep their trailing
+/// feed row and the boundary margins fold in, converging to the full render.
+#[test]
+fn test_stream_matches_full_loose_list() {
+    assert_stream_matches_full(
+        &[
+            "- alpha
+
+",
+            "- beta
+
+",
+            "After the list.",
+        ],
+        Rect::new(0, 0, 120, 40),
+    );
+}
+
+/// Plain paragraphs separated by blank lines: every consumed boundary adds
+/// exactly one separator row — no more, no less.
+#[test]
+fn test_stream_matches_full_separated_paragraphs() {
+    assert_stream_matches_full(
+        &[
+            "first paragraph
+
+",
+            "second paragraph
+
+",
+            "third paragraph tail.",
+        ],
+        Rect::new(0, 0, 120, 40),
+    );
+}
+
+/// Heading → paragraph → fence: the separated-kind margins materialize the
+/// same way whether parsed fresh or accumulated incrementally.
+#[test]
+fn test_stream_matches_full_heading_then_fence() {
+    assert_stream_matches_full(
+        &[
+            "# Title
+
+",
+            "intro text
+
+",
+            "```rust
+",
+            "let x = 1;
+",
+            "```
+
+",
+            "closing words",
+        ],
+        Rect::new(0, 0, 120, 40),
     );
 }
 

@@ -161,3 +161,72 @@ fn estimate_covers_multi_block_documents() {
         }
     }
 }
+
+/// Streaming a multi-block document through `set_content` must converge to
+/// byte-identical cells with a fresh single-shot render: inter-block
+/// separators make slice heights non-additive, so this pins the margin
+/// accounting across incremental updates.
+#[test]
+fn incremental_streaming_matches_full_with_inter_block_margins() {
+    let chunks: &[&str] = &[
+        "## Heading\n\n",
+        "Paragraph with **bold**, *italics*, and `code` spans. ",
+        "continued text that wraps across several lines. ",
+        "\n\n```rust\n",
+        "let x = 1;\n",
+        "let y = 2;\n",
+        "```\n\n",
+        "- list one\n",
+        "- list two\n",
+        "\n",
+        "> quoted wisdom\n",
+        "> more wisdom\n",
+    ];
+    let full: String = chunks.concat();
+
+    let fresh = MarkdownRenderable::new(Some(full.clone()));
+    let mut full_buf = Buffer::empty(Rect::new(0, 0, 120, 40));
+    fresh.render_self(&mut full_buf, Rect::new(0, 0, 120, 40));
+
+    let mut inc = MarkdownRenderable::new(None);
+    let mut acc = String::new();
+    for chunk in chunks {
+        acc.push_str(chunk);
+        inc.set_content(acc.clone());
+    }
+    let mut inc_buf = Buffer::empty(Rect::new(0, 0, 120, 40));
+    inc.render_self(&mut inc_buf, Rect::new(0, 0, 120, 40));
+
+    for y in 0..40u16 {
+        for x in 0..120u16 {
+            let (a, b) = (
+                full_buf.cell((x, y)).unwrap(),
+                inc_buf.cell((x, y)).unwrap(),
+            );
+            assert_eq!(
+                (a.symbol(), a.fg, a.bg, a.modifier),
+                (b.symbol(), b.fg, b.bg, b.modifier),
+                "cell mismatch at ({x},{y})"
+            );
+        }
+    }
+}
+
+/// Bullet lists interrupt paragraphs (margin 1 even at gap 1); ordered lists
+/// only when they start at 1; larger numbers merge into the paragraph.
+#[test]
+fn boundary_blank_rows_interrupt_rules() {
+    use super::super::boundary_blank_rows;
+
+    // Bullet interrupts: separator despite single newline.
+    assert_eq!(boundary_blank_rows("para\n- item", 5), 1);
+    assert_eq!(boundary_blank_rows("para\n* item", 5), 1);
+    // Ordered starting at 1 also interrupts.
+    assert_eq!(boundary_blank_rows("para\n1. item", 5), 1);
+    // Ordered NOT starting at 1 merges into the paragraph.
+    assert_eq!(boundary_blank_rows("para\n2. item", 5), 0);
+    // Absurdly long marker runs never start a list.
+    assert_eq!(boundary_blank_rows("para\n99999999999999. item", 5), 0);
+    // Blank line forces the separator regardless of kind.
+    assert_eq!(boundary_blank_rows("para\n\n2. item", 6), 1);
+}

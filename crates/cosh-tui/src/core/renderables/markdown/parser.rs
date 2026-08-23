@@ -52,6 +52,24 @@ impl MdBlocks {
     pub(crate) fn source(&self, block: &BlockInfo) -> &str {
         &self.content[block.range.clone()]
     }
+
+    /// Number of line breaks separating the previous block's last VISIBLE
+    /// character from the next block's start.
+    ///
+    /// Trailing newlines are stripped off the previous block first, so the
+    /// result is invariant to how much trailing whitespace pulldown's ranges
+    /// happen to swallow — which differs between a fresh parse and an
+    /// incremental one whose stable blocks keep their original (shorter)
+    /// ranges.
+    pub(crate) fn inter_block_gap(&self, prev: &BlockInfo, cur: &BlockInfo) -> usize {
+        let bytes = self.content.as_bytes();
+        let mut p = prev.range.end.min(bytes.len());
+        while p > 0 && matches!(bytes[p - 1], b'\n' | b'\r' | b' ' | b'\t') {
+            p -= 1;
+        }
+        let end = cur.range.start.min(bytes.len()).max(p);
+        bytes[p..end].iter().filter(|&&b| b == b'\n').count()
+    }
 }
 
 fn parser_options() -> Options {
@@ -61,6 +79,32 @@ fn parser_options() -> Options {
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options
+}
+
+impl BlockKind {
+    /// "Separated" kinds always get a blank row to their neighbours; only
+    /// paragraph-to-paragraph adjacency depends on the source's blank line.
+    pub(crate) fn is_separated(self) -> bool {
+        !matches!(self, Self::Paragraph | Self::Other)
+    }
+}
+
+/// Whether a blank separator row belongs between two consecutive top-level
+/// blocks. Separated kinds (headings, lists, code fences, tables, quotes,
+/// rules) are always spaced from their neighbours; adjacent paragraphs are
+/// separated only when the source had an explicit blank line between them.
+///
+/// Mirrors the reference renderer's top-level margin rule: spacing is a
+/// property of the block PAIR, never of the cursor feed alone.
+pub(crate) fn needs_inter_block_margin(
+    prev: BlockKind,
+    cur: BlockKind,
+    gap_newlines: usize,
+) -> bool {
+    if prev.is_separated() || cur.is_separated() {
+        return true;
+    }
+    gap_newlines > 1
 }
 
 fn classify(tag: &Tag<'_>) -> BlockKind {
