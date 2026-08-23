@@ -24,7 +24,7 @@ pub struct Target {
 pub struct FsRead {
     pub targets: Vec<Target>,
 }
-#[derive(Default, Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Default, Debug, Deserialize, JsonSchema)]
 pub struct TargetFile {
     pub text: String,
     pub path: String,

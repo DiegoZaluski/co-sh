@@ -30,6 +30,7 @@ pub mod restart;
 pub mod support;
 pub mod symbols;
 pub mod types;
+pub use types::{DefinitionsInput, DiagnosticsInput, ReferencesInput, RestartInput, SymbolsInput};
 
 #[cfg(test)]
 mod test;
