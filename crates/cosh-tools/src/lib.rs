@@ -5,6 +5,7 @@
 
 pub mod bash;
 pub mod find;
+pub mod lsp;
 pub mod fs;
 pub mod plan;
 pub mod question;

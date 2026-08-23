@@ -31,16 +31,25 @@ pub(crate) mod transport;
 #[cfg(test)]
 mod test;
 
+/// In-memory fake language-server harness for dependent crates' tests
+/// (Zed's `test-support` pattern). Tiny and inert in production: it only runs
+/// when called.
+pub mod test_support;
+
 /// Re-exported protocol types so call sites never depend on the concrete crate.
 pub use lsp_types;
 
 pub use catalog::{CATALOG, ServerSpec};
-pub use client::{Event, LanguageServer, LanguageServerConfig, ServerState, TouchOutcome};
+pub use client::{
+    Event, LanguageServer, LanguageServerConfig, ServerState, TouchOutcome, uri_from_path,
+};
 pub use diagnostics::{
     DiagnosticsEngine, SETTLE_DEBOUNCE, SeverityFilter, format_for_model, uri_to_path,
 };
 pub use error::{ExitReason, LspError};
 pub use jsonrpc::{IncomingMessage, RequestId, RpcError, error_codes};
-pub use manager::{ClientKey, ClientLifecycle, ManagedEvent, Manager, ManagerConfig};
+pub use manager::{
+    ClientFactory, ClientKey, ClientLifecycle, ManagedEvent, Manager, ManagerConfig, SpawnFuture,
+};
 pub use text::{PositionEncoding, offset_to_position, position_to_offset};
 pub use transport::{RequestFuture, Transport};

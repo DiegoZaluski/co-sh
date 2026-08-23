@@ -217,9 +217,11 @@ impl LanguageServer {
         ))
     }
 
-    /// Test entry point: assemble a client over arbitrary streams.
-    #[cfg(test)]
-    pub(crate) fn from_streams<I, O, E>(
+    /// Assemble a client over arbitrary streams instead of a spawned process.
+    ///
+    /// Public extension point: tests drive it over in-memory pipes; embedders
+    /// can serve LSP over any byte stream.
+    pub fn from_streams<I, O, E>(
         config: LanguageServerConfig,
         input: I,
         output: O,
@@ -318,6 +320,19 @@ impl LanguageServer {
     #[allow(dead_code)]
     pub(crate) fn transport(&self) -> &Transport {
         &self.inner.transport
+    }
+
+    /// Issue one raw request and await its JSON response.
+    ///
+    /// Public query surface for tool layers that build their own typed
+    /// wrappers on top of the shared transport.
+    pub async fn request_raw(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, LspError> {
+        self.transport().request(method, params, timeout).await
     }
 
     /// Methods the server dynamically registered (`textDocument/diagnostic`
@@ -709,7 +724,7 @@ pub enum TouchOutcome {
 /// Known v1 limitations: non-UTF-8 paths are lossily converted, UNC paths
 /// (`\\srv\share`) are not special-cased, and relative paths are resolved
 /// against the URI root rather than rejected.
-pub(crate) fn uri_from_path(path: &Path) -> Result<lsp_types::Uri, LspError> {
+pub fn uri_from_path(path: &Path) -> Result<lsp_types::Uri, LspError> {
     use std::fmt::Write as _;
 
     let raw = path.as_os_str().to_string_lossy();

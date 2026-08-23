@@ -63,10 +63,6 @@ fn ingest(engine: &DiagnosticsEngine, (server, params): &(String, PublishDiagnos
     engine.ingest(server, params);
 }
 
-fn diagnostic_count(params: &PublishDiagnosticsParams) -> usize {
-    params.diagnostics.len()
-}
-
 #[tokio::test]
 async fn replace_whole_document_per_server() {
     let engine = DiagnosticsEngine::new();
@@ -258,6 +254,7 @@ async fn settle_waits_out_burst_before_returning() {
 
 // ── Formatting ───────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn diag_unspecified_severity(message: &str) -> Diagnostic {
     let mut diag = diag_at(0, 1, message);
     diag.severity = None;

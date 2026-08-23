@@ -22,6 +22,10 @@ strip-ansi-escapes = "0.2"
 libc = "0.2"
 tokio-stream = "0.1"
 
+[dev-dependencies]
+cosh-sdk = { path = "../cosh-sdk" }
+tempfile = "3"
+
 [dev-dependencies.tokio]
 version = "1.52.3"
 features = ["rt", "macros"]

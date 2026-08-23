@@ -105,8 +105,8 @@ impl ManagerConfig {
 }
 
 /// Builds and initializes the client for one key.
-type SpawnFuture = Pin<Box<dyn Future<Output = Result<LanguageServer, LspError>> + Send>>;
-pub(crate) type ClientFactory = Arc<dyn Fn(LanguageServerConfig) -> SpawnFuture + Send + Sync>;
+pub type SpawnFuture = Pin<Box<dyn Future<Output = Result<LanguageServer, LspError>> + Send>>;
+pub type ClientFactory = Arc<dyn Fn(LanguageServerConfig) -> SpawnFuture + Send + Sync>;
 
 /// Terminal result of one spawn attempt, shared with every waiter.
 #[derive(Clone)]
@@ -164,7 +164,10 @@ impl Manager {
         Self::build(config, CATALOG.to_vec(), factory)
     }
 
-    pub(crate) fn build(
+    /// Catalog + spawn-factory injection. Production callers keep the default
+    /// PATH-based factory ([`Manager::new`]/[`Self::with_config`]); tests and
+    /// embedders inject their own transports here.
+    pub fn build(
         config: ManagerConfig,
         catalog: Vec<ServerSpec>,
         spawn_client: ClientFactory,
