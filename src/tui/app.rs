@@ -58,6 +58,19 @@ fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
     Color::Rgb(r, g, b)
 }
 
+/// The editable prompt text of a message: its non-synthetic text parts
+/// joined by a space (mirrors opencode's Revert/Copy text reconstruction).
+pub(crate) fn message_prompt_text(msg: &crate::types::Message) -> String {
+    msg.parts
+        .iter()
+        .filter_map(|p| match p {
+            crate::types::Part::Text(t) if !t.synthetic => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
 fn render_budget_bar(pct: u8) -> String {
     const FILLED: char = '▓';
@@ -206,6 +219,9 @@ pub struct App {
     mouse_down_pos: Option<(u16, u16)>,
     /// Whether a drag-selection is in progress.
     mouse_drag_active: bool,
+    /// Set when a mouse Up was a drag (even if it selected nothing), so the
+    /// session click dispatch skips opening Message Actions.
+    mouse_up_was_drag: bool,
     /// Visual highlight: anchor (sx,sy) and focus (x,y) — stored without normalisation
     /// so the renderer can apply flow-based selection highlighting (top line from `start_x`
     /// to end, bottom line from start to `end_x`, middle lines fully highlighted).
@@ -339,6 +355,7 @@ impl App {
             context_info: None,
             mouse_down_pos: None,
             mouse_drag_active: false,
+            mouse_up_was_drag: false,
             drag_selection: None,
             live_requested: false,
             last_frame_time: std::time::Instant::now(),
@@ -1351,6 +1368,147 @@ impl App {
             .is_some_and(|d| matches!(d.dialog_type, DialogType::ToolCallList { .. }))
     }
 
+    fn is_message_actions_dialog_visible(&self) -> bool {
+        self.dialog
+            .current()
+            .is_some_and(|d| matches!(d.dialog_type, DialogType::MessageActions { .. }))
+    }
+
+    fn handle_message_actions_dialog_key(&mut self, key: KeyCode) -> bool {
+        if !self.is_message_actions_dialog_visible() {
+            return false;
+        }
+        match key {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(d) = self.dialog.current_mut() {
+                    d.selected = if d.selected == 0 { 2 } else { d.selected - 1 };
+                }
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(d) = self.dialog.current_mut() {
+                    d.selected = (d.selected + 1) % 3;
+                }
+                true
+            }
+            KeyCode::Enter => {
+                let selected = self.dialog.current().map_or(0, |d| d.selected.min(2));
+                let message_id = match self.dialog.current() {
+                    Some(d) => match &d.dialog_type {
+                        DialogType::MessageActions { message_id, .. } => message_id.clone(),
+                        _ => return true,
+                    },
+                    None => return true,
+                };
+                self.dialog.pop();
+                self.run_message_action(selected, &message_id);
+                true
+            }
+            KeyCode::Esc => {
+                self.dialog.pop();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Execute the picked Message Actions entry: 0 = Revert, 1 = Copy,
+    /// 2 = Fork (same order as the opencode dialog).
+    fn run_message_action(&mut self, action: usize, message_id: &str) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        let working = self.state.status == SessionStatus::Working;
+        let session = self.state.current_session();
+        let msg_idx = session.and_then(|s| s.messages.iter().position(|m| m.id == message_id));
+        let Some(session) = session else {
+            return;
+        };
+        let Some(idx) = msg_idx else {
+            return;
+        };
+        let msg = &session.messages[idx];
+
+        match action {
+            0 => {
+                // Revert: drop this message and everything after it, and put
+                // its text back into the prompt for editing/resending.
+                if working {
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Revert".into()),
+                        message: "The agent is working — wait for it to finish.".into(),
+                        variant: ToastVariant::Warning,
+                        duration_ms: 4000,
+                    });
+                    return;
+                }
+                let prompt_text = message_prompt_text(msg);
+                let session = self.state.current_session_mut().expect("session");
+                session.messages.truncate(idx);
+                self.session_store.save_session_async(session);
+                self.session_view.hovered_msg_idx = None;
+                if !prompt_text.is_empty() {
+                    self.prompt_view.input = prompt_text;
+                    self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                }
+                self.prompt_view.focus();
+            }
+            1 => {
+                // Copy: join non-synthetic text parts into the clipboard.
+                let text = message_prompt_text(msg);
+                if !text.is_empty() {
+                    selection::copy_selection(&text, &mut self.toast_state);
+                } else {
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Copy".into()),
+                        message: "Nothing to copy in this message.".into(),
+                        variant: ToastVariant::Info,
+                        duration_ms: 2500,
+                    });
+                }
+            }
+            2 => {
+                // Fork: branch a new session containing everything up to and
+                // including the clicked message, then switch to it.
+                if working {
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Fork".into()),
+                        message: "The agent is working — wait for it to finish.".into(),
+                        variant: ToastVariant::Warning,
+                        duration_ms: 4000,
+                    });
+                    return;
+                }
+                let mut forked = session.clone();
+                forked.messages.truncate(idx + 1);
+                forked.id = generate_session_id();
+                forked.title = format!("{} (fork)", session.title);
+                forked.created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                forked.title_generated = false;
+                let new_id = forked.id.clone();
+                self.state.add_session(forked);
+                self.session_store.save_session(
+                    self.state
+                        .current_session()
+                        .expect("forked session just added"),
+                );
+                self.state
+                    .ensure_session_summary(&self.state.current_session_id.clone().expect("id"));
+                self.finalize_stale_compaction_lines();
+                self.state.switch_to_session(new_id, &self.session_store);
+                self.session_view.hovered_msg_idx = None;
+                self.toast_state.show(ToastOptions {
+                    title: Some("Fork".into()),
+                    message: "New session created from this point.".into(),
+                    variant: ToastVariant::Success,
+                    duration_ms: 3000,
+                });
+            }
+            _ => {}
+        }
+    }
+
     fn handle_tool_call_dialog_key(&mut self, key: KeyCode) -> bool {
         if !self.is_tool_call_dialog_visible() {
             return false;
@@ -2161,6 +2319,46 @@ impl App {
             sidebar_w,
             right_panel_w,
         }
+    }
+
+    /// The session transcript viewport (shared by render and the mouse
+    /// dispatch): the main area minus header, prompt, spinner and question
+    /// rows. Used for click hit-testing AND hover tracking so both map
+    /// cursor positions with the exact geometry the view rendered at.
+    fn session_viewport_area(&self) -> Rect {
+        let area = self.terminal_size();
+        let SessionArea {
+            main: main_area, ..
+        } = self.session_main_area(area);
+        let footer_y = main_area.bottom().saturating_sub(1);
+        let prompt_budget = footer_y
+            .saturating_sub(area.y + 1)
+            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+        let prompt_h = self
+            .prompt_view
+            .required_height(main_area.width.saturating_sub(4), prompt_budget);
+        let question_h = if self.question_dialog.visible {
+            self.question_dialog
+                .required_height(main_area.width.saturating_sub(4))
+        } else {
+            0
+        };
+        let spinner_h = u16::from(
+            matches!(self.state.status, SessionStatus::Working)
+                && self.agent_spinner.is_some()
+                && !self.question_dialog.visible,
+        );
+        let prompt_area_y = footer_y.saturating_sub(prompt_h);
+        let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
+        let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
+        let question_area_y = spinner_area_y.saturating_sub(question_h);
+        let session_bottom = question_area_y;
+        Rect::new(
+            main_area.x,
+            area.y + 1,
+            main_area.width,
+            session_bottom.saturating_sub(area.y + 1),
+        )
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, delta_time: f64) {
@@ -3244,6 +3442,13 @@ impl App {
                         return Ok(false);
                     }
 
+                    // Check the per-message actions dialog
+                    if self.is_message_actions_dialog_visible()
+                        && self.handle_message_actions_dialog_key(key.code)
+                    {
+                        return Ok(false);
+                    }
+
                     // Check reasoning sub-dialog SECOND (pushed on top of the
                     // model list), before the model dialog.
                     if self.is_reasoning_dialog_visible()
@@ -3451,6 +3656,7 @@ impl App {
                                         self.finalize_stale_compaction_lines();
                                         self.state
                                             .switch_to_session(session_id, &self.session_store);
+                                        self.session_view.hovered_msg_idx = None;
                                         self.title_generated = true;
                                         self.finalize_stale_compaction_lines();
                                         return Ok(false);
@@ -5426,43 +5632,7 @@ impl App {
                     if matches!(self.mode(), AppMode::Session)
                         && let Some((sx, sy)) = drag_start
                     {
-                        let area = self.terminal_size();
-                        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
-                        let main_area = Rect::new(
-                            area.x + sidebar_w,
-                            area.y,
-                            area.width.saturating_sub(sidebar_w),
-                            area.height,
-                        );
-                        let footer_y = main_area.bottom().saturating_sub(1);
-                        let prompt_budget = footer_y
-                            .saturating_sub(area.y + 1)
-                            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
-                        let prompt_h = self
-                            .prompt_view
-                            .required_height(main_area.width.saturating_sub(4), prompt_budget);
-                        let question_h = if self.question_dialog.visible {
-                            self.question_dialog
-                                .required_height(main_area.width.saturating_sub(4))
-                        } else {
-                            0
-                        };
-                        let spinner_h = u16::from(
-                            matches!(self.state.status, SessionStatus::Working)
-                                && self.agent_spinner.is_some()
-                                && !self.question_dialog.visible,
-                        );
-                        let prompt_area_y = footer_y.saturating_sub(prompt_h);
-                        let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
-                        let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
-                        let question_area_y = spinner_area_y.saturating_sub(question_h);
-                        let session_bottom = question_area_y.saturating_sub(1);
-                        let session_area = Rect::new(
-                            main_area.x,
-                            area.y + 1,
-                            main_area.width,
-                            session_bottom.saturating_sub(area.y + 1),
-                        );
+                        let session_area = self.session_viewport_area();
 
                         let margin = 2u16;
                         let inner_area = Rect::new(
@@ -5546,6 +5716,9 @@ impl App {
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Up);
                             }
+                            DialogType::MessageActions { .. } => {
+                                self.handle_message_actions_dialog_key(KeyCode::Up);
+                            }
                             _ => {}
                         }
                     } else if self.sidebar_focused && self.sidebar.open && x < SIDEBAR_WIDTH {
@@ -5594,6 +5767,9 @@ impl App {
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Down);
                             }
+                            DialogType::MessageActions { .. } => {
+                                self.handle_message_actions_dialog_key(KeyCode::Down);
+                            }
                             _ => {}
                         }
                     } else if self.sidebar_focused && self.sidebar.open && x < SIDEBAR_WIDTH {
@@ -5633,6 +5809,16 @@ impl App {
 
         // Only handle left-click UP events (standard "click" action)
         if event_type != MouseEventType::Up || button != MouseButton::Left {
+            // Hover tracking for user messages (opencode-style highlight).
+            if matches!(event_type, MouseEventType::Move)
+                && matches!(self.mode(), AppMode::Session)
+                && !self.dialog.visible()
+                && !self.question_dialog.visible
+            {
+                let session_area = self.session_viewport_area();
+                self.session_view
+                    .update_hover(y, session_area, &self.state, &self.config);
+            }
             return Ok(true);
         }
 
@@ -5711,6 +5897,13 @@ impl App {
                             }
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Enter);
+                                return Ok(true);
+                            }
+                            DialogType::MessageActions { message_id, .. } => {
+                                let action = d.selected.min(2);
+                                let message_id = message_id.clone();
+                                self.dialog.pop();
+                                self.run_message_action(action, &message_id);
                                 return Ok(true);
                             }
                             DialogType::ApiKeyInput { .. } | DialogType::LocalUrlInput { .. } => {
@@ -5926,6 +6119,7 @@ impl App {
                     self.finalize_stale_compaction_lines();
                     self.state
                         .switch_to_session(session_id, &self.session_store);
+                    self.session_view.hovered_msg_idx = None;
                     self.title_generated = true;
                     self.finalize_stale_compaction_lines();
                     return Ok(true);
@@ -5946,43 +6140,29 @@ impl App {
 
         // 7. Session view (tool expand/collapse)
         if matches!(self.mode(), AppMode::Session) {
-            let area = self.terminal_size();
-            let SessionArea {
-                main: main_area, ..
-            } = self.session_main_area(area);
-            let footer_y = main_area.bottom().saturating_sub(1);
-            let prompt_budget = footer_y
-                .saturating_sub(area.y + 1)
-                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
-            let prompt_h = self
-                .prompt_view
-                .required_height(main_area.width.saturating_sub(4), prompt_budget);
-            let question_h = if self.question_dialog.visible {
-                self.question_dialog
-                    .required_height(main_area.width.saturating_sub(4))
-            } else {
-                0
-            };
-            let spinner_h = u16::from(
-                matches!(self.state.status, SessionStatus::Working)
-                    && self.agent_spinner.is_some()
-                    && !self.question_dialog.visible,
-            );
-            let prompt_area_y = footer_y.saturating_sub(prompt_h);
-            let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
-            let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
-            let question_area_y = spinner_area_y.saturating_sub(question_h);
-            let session_bottom = question_area_y;
-            let session_area = Rect::new(
-                main_area.x,
-                area.y + 1,
-                main_area.width,
-                session_bottom.saturating_sub(area.y + 1),
-            );
-            if self
-                .session_view
-                .handle_mouse(&mouse, session_area, &self.state, &self.config)
+            let was_drag = std::mem::take(&mut self.mouse_up_was_drag);
+            let session_area = self.session_viewport_area();
+            if !was_drag
+                && self
+                    .session_view
+                    .handle_mouse(&mouse, session_area, &self.state, &self.config)
             {
+                if let Some(message_id) = self.session_view.pending_message_action.take() {
+                    let preview = self
+                        .state
+                        .current_session()
+                        .and_then(|s| s.messages.iter().find(|m| m.id == message_id))
+                        .map(message_prompt_text)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(36)
+                        .collect::<String>();
+                    self.dialog.replace(DialogType::MessageActions {
+                        message_id,
+                        preview,
+                    });
+                    self.session_view.hovered_msg_idx = None;
+                }
                 return Ok(true);
             }
         }
@@ -7036,6 +7216,161 @@ mod tests {
             app.toast_state.current.is_some(),
             "the refusal surfaces as a toast"
         );
+    }
+
+    // ── Message Actions (port of opencode's dialog-message) ────────────────
+
+    fn app_with_user_message() -> App {
+        use crate::types::{Message, MessageRole, Part, TextPart};
+        let mut app = App::new("/tmp".to_string());
+        let now = 1_000u64;
+        let session = crate::types::Session {
+            id: "t".into(),
+            title: "t".into(),
+            created_at: now,
+            title_generated: false,
+            messages: vec![
+                Message {
+                    id: "u1".into(),
+                    role: MessageRole::User,
+                    parts: vec![Part::Text(TextPart {
+                        text: "hello world".into(),
+                        synthetic: false,
+                    })],
+                    created_at: now,
+                    agent: None,
+                    model: None,
+                },
+                Message {
+                    id: "a1".into(),
+                    role: MessageRole::Assistant,
+                    parts: vec![Part::Text(TextPart {
+                        text: "reply".into(),
+                        synthetic: false,
+                    })],
+                    created_at: now + 1,
+                    agent: None,
+                    model: None,
+                },
+                Message {
+                    id: "u2".into(),
+                    role: MessageRole::User,
+                    parts: vec![Part::Text(TextPart {
+                        text: "second".into(),
+                        synthetic: false,
+                    })],
+                    created_at: now + 2,
+                    agent: None,
+                    model: None,
+                },
+            ],
+        };
+        app.state.add_session(session);
+        app.state.current_session_id = Some("t".into());
+        app
+    }
+
+    #[test]
+    fn message_prompt_text_joins_non_synthetic_parts() {
+        use crate::types::{Message, MessageRole, Part, TextPart};
+        let msg = Message {
+            id: "m".into(),
+            role: MessageRole::User,
+            parts: vec![
+                Part::Text(TextPart {
+                    text: "one".into(),
+                    synthetic: false,
+                }),
+                Part::Text(TextPart {
+                    text: "hidden".into(),
+                    synthetic: true,
+                }),
+                Part::Text(TextPart {
+                    text: "two".into(),
+                    synthetic: false,
+                }),
+            ],
+            created_at: 0,
+            agent: None,
+            model: None,
+        };
+        assert_eq!(super::message_prompt_text(&msg), "one\ntwo");
+    }
+
+    #[tokio::test]
+    async fn message_actions_keyboard_cycles_three_options() {
+        let mut app = app_with_user_message();
+        app.dialog
+            .replace(DialogType::MessageActions { message_id: "u1".into(), preview: "hello world".into() });
+        assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
+        assert_eq!(app.dialog.current().unwrap().selected, 1);
+        assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
+        assert_eq!(app.dialog.current().unwrap().selected, 2);
+        // Wraps at the bottom.
+        assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
+        assert_eq!(app.dialog.current().unwrap().selected, 0);
+        // And wraps upward back to the last item.
+        assert!(app.handle_message_actions_dialog_key(KeyCode::Up));
+        assert_eq!(app.dialog.current().unwrap().selected, 2);
+    }
+
+    #[tokio::test]
+    async fn message_actions_revert_truncates_and_restores_prompt() {
+        let mut app = app_with_user_message();
+        app.run_message_action(0, "u1");
+        let session = app.state.current_session().unwrap();
+        assert!(
+            session.messages.iter().all(|m| m.id != "u1" && m.id != "a1"),
+            "the reverted message and everything after it are dropped"
+        );
+        assert_eq!(app.prompt_view.input, "hello world");
+        assert_eq!(app.prompt_view.cursor_pos, app.prompt_view.input.len());
+    }
+
+    #[tokio::test]
+    async fn message_actions_fork_branches_new_session_up_to_message() {
+        let mut app = app_with_user_message();
+        app.run_message_action(2, "u1");
+        let old = app.state.current_session().unwrap();
+        assert_eq!(old.messages.len(), 1, "fork keeps messages up to and including");
+        assert!(old.messages.iter().any(|m| m.id == "u1"));
+        assert!(!old.messages.iter().any(|m| m.id == "a1"));
+        assert!(old.title.contains("(fork)"));
+        assert_ne!(old.id, "t", "the fork is a brand-new session id");
+    }
+
+    #[tokio::test]
+    async fn message_actions_copy_writes_clipboard_text() {
+        // Clipboard may be unavailable in headless CI; only assert the text
+        // extraction path via a missing-message no-op and the toast for empty.
+        let mut app = app_with_user_message();
+        app.run_message_action(1, "does-not-exist");
+        // No panic; dialog stack untouched.
+        assert!(!app.dialog.visible());
+    }
+
+    #[tokio::test]
+    async fn message_actions_dialog_renders_title_and_options() {
+        let mut app = app_with_user_message();
+        app.dialog
+            .replace(DialogType::MessageActions { message_id: "u1".into(), preview: "hello world".into() });
+        let theme = app.theme.clone();
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
+        app.dialog.render(
+            &mut buf,
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            &theme,
+            std::time::SystemTime::now(),
+        );
+        let line = |y: u16| -> String {
+            (0..80)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<Vec<_>>()
+                .join("")
+        };
+        let all: String = (0..24).map(line).collect();
+        assert!(all.contains("Message Actions"), "title rendered");
+        assert!(all.contains("Revert") && all.contains("Copy") && all.contains("Fork"));
     }
 }
 

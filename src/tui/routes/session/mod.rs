@@ -399,6 +399,13 @@ pub struct SessionView {
     /// ID of the session for which caches were last built.
     /// Forces a full rebuild when switching sessions with the same message count.
     last_session_id: Option<String>,
+    /// Index of the user message currently hovered by the mouse cursor, used
+    /// for the opencode-style hover highlight and click-to-open "Message
+    /// Actions". `None` when the cursor is outside any user message.
+    pub hovered_msg_idx: Option<usize>,
+    /// Message id captured when the user clicks a user message; app.rs reads
+    /// it after `handle_mouse` returns to open the Message Actions dialog.
+    pub pending_message_action: Option<String>,
     /// Expansion version of `tool_state` when the height caches were last built.
     /// A change forces a full rebuild so expanded/collapsed heights stay in sync.
     last_tool_state_version: u64,
@@ -526,6 +533,8 @@ impl SessionView {
             msg_cache_last_used: Vec::new(),
             msg_cache_bytes: 0,
             streaming_msg: None,
+            hovered_msg_idx: None,
+            pending_message_action: None,
             last_session_id: None,
             last_tool_state_version: 0,
         }
@@ -1812,6 +1821,106 @@ impl SessionView {
         banner_h + parts_h
     }
 
+    /// Locate the message index under content row `click_y` using the
+    /// prefix-y binary search. Shared by the click handler and the hover
+    /// tracker.
+    fn message_index_at_y(&self, vp_top: i32, click_y: i32, len: usize) -> Option<usize> {
+        let mut low = 0;
+        let mut high = len;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let msg_top = vp_top - self.scroll_y + self.prefix_y[mid];
+            let msg_bottom = msg_top + self.msg_height_cache[mid];
+            if click_y < msg_top {
+                high = mid;
+            } else if click_y >= msg_bottom {
+                low = mid + 1;
+            } else {
+                return Some(mid);
+            }
+        }
+        None
+    }
+
+    /// Track the hovered user message on mouse-move events (opencode-style).
+    /// Returns `true` when the hover target changed so the caller redraws.
+    pub fn update_hover(
+        &mut self,
+        y: u16,
+        area: Rect,
+        state: &AppState,
+        config: &TuiConfig,
+    ) -> bool {
+        let Some(session) = state.current_session() else {
+            return self.clear_hover();
+        };
+        // Hover stays active while the agent works: the highlight is purely
+        // visual and Copy remains available during streaming.
+        if self.drag_selection.is_some() {
+            return self.clear_hover();
+        }
+
+        let margin = 2;
+        let inner_area = Rect::new(
+            area.x + margin,
+            area.y,
+            area.width.saturating_sub(margin * 2),
+            area.height,
+        );
+        let max_w = inner_area.width.saturating_sub(6).max(2);
+        self.ensure_height_caches_fresh(session, max_w, config, None);
+
+        let next =
+            self.message_index_at_y(i32::from(inner_area.y), i32::from(y), session.messages.len())
+                .filter(|&idx| session.messages[idx].role == MessageRole::User);
+        if next != self.hovered_msg_idx {
+            self.hovered_msg_idx = next;
+            return true;
+        }
+        false
+    }
+
+    fn clear_hover(&mut self) -> bool {
+        if self.hovered_msg_idx.is_some() {
+            self.hovered_msg_idx = None;
+            return true;
+        }
+        false
+    }
+
+    /// Recolor the hovered user message's cells with the element background —
+    /// the same visual swap opencode applies via
+    /// `backgroundColor={hover() ? theme.backgroundElement : ...}`.
+    fn render_hover_highlight(
+        &self,
+        buf: &mut Buffer,
+        inner_area: Rect,
+        session: &crate::types::Session,
+        theme: &Theme,
+    ) {
+        let Some(idx) = self.hovered_msg_idx else {
+            return;
+        };
+        if idx >= self.prefix_y.len().saturating_sub(1) || idx >= self.msg_height_cache.len() {
+            return;
+        }
+        if session.messages.get(idx).is_none_or(|m| m.role != MessageRole::User) {
+            return;
+        }
+        let vp_top = i32::from(inner_area.y);
+        let vp_bottom_excl = i32::from(inner_area.y + inner_area.height);
+        let msg_top = (vp_top - self.scroll_y + self.prefix_y[idx]).max(vp_top);
+        let msg_bottom = (vp_top - self.scroll_y + self.prefix_y[idx] + self.msg_height_cache[idx])
+            .min(vp_bottom_excl);
+        for cy in msg_top..msg_bottom {
+            for cx in inner_area.x..inner_area.x + inner_area.width {
+                if let Some(cell) = buf.cell_mut((cx, u16::try_from(cy).unwrap_or(0))) {
+                    cell.set_bg(rgba_color(theme.background_element));
+                }
+            }
+        }
+    }
+
     #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
     pub fn handle_mouse(
         &mut self,
@@ -1878,6 +1987,13 @@ impl SessionView {
                 && msg_bottom > vp_top
                 && msg_top < vp_bottom
             {
+                // Click on a user message → request the Message Actions
+                // dialog (app.rs opens it). Assistant messages keep the
+                // per-part click handling below.
+                if msg.role == MessageRole::User {
+                    self.pending_message_action = Some(msg.id.clone());
+                    return true;
+                }
                 let border_offset: i32 = match msg.role {
                     MessageRole::User => 1,
                     MessageRole::Assistant => 0,
@@ -3934,6 +4050,9 @@ impl SessionView {
         self.actual_total_height = actual_total;
         self.total_height = self.cached_total_height;
         self.last_content_height = self.cached_total_height;
+
+        // ── Hover highlight for user messages (opencode-style) ────────────────
+        self.render_hover_highlight(buf, inner_area, session, theme);
 
         if let Some((anchor_x, _anchor_screen_y, focus_x, _focus_screen_y)) = self.drag_selection
             && inner_area.height > 0
