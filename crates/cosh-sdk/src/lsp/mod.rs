@@ -19,9 +19,11 @@
 //! [`Transport::start`] is generic over its I/O types: production passes the
 //! stdio of the spawned server process, while tests drive the whole stack
 //! over in-memory duplex pipes (see `src/lsp/test/` for executable usage).
+pub(crate) mod catalog;
 pub(crate) mod client;
 pub(crate) mod error;
 pub(crate) mod jsonrpc;
+pub(crate) mod manager;
 pub(crate) mod text;
 pub(crate) mod transport;
 
@@ -31,8 +33,10 @@ mod test;
 /// Re-exported protocol types so call sites never depend on the concrete crate.
 pub use lsp_types;
 
+pub use catalog::{CATALOG, ServerSpec};
 pub use client::{Event, LanguageServer, LanguageServerConfig, ServerState, TouchOutcome};
 pub use error::{ExitReason, LspError};
 pub use jsonrpc::{IncomingMessage, RequestId, RpcError, error_codes};
+pub use manager::{ClientKey, ClientLifecycle, ManagedEvent, Manager, ManagerConfig};
 pub use text::{PositionEncoding, offset_to_position, position_to_offset};
 pub use transport::{RequestFuture, Transport};

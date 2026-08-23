@@ -125,8 +125,8 @@ async fn pump_incoming(
 
 mod test_client;
 mod test_jsonrpc;
+mod test_manager;
 mod test_transport;
-
 /// Scripted initialize handshake: answers the client's `initialize` request
 /// with `capabilities_json` (raw JSON for the capabilities object) and swallows
 /// the follow-up `initialized` notification.
@@ -154,4 +154,29 @@ pub async fn serve_initialize(server: &mut FakeServer, capabilities_json: &str) 
         .expect("initialized notification");
     let parsed: serde_json::Value = serde_json::from_str(&notification).unwrap();
     assert_eq!(parsed["method"], "initialized");
+}
+
+/// Fully autonomous fake server: answers `initialize` with minimal
+/// capabilities, replies `null` to every other request (including `shutdown`)
+/// and keeps running until the client side closes the pipe.
+pub async fn auto_serve(mut server: FakeServer) {
+    use serde_json::json;
+
+    while let Some(body) = server.next_client_message().await {
+        let parsed: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
+        };
+        let is_request = parsed.get("id").is_some_and(|id| !id.is_null());
+        if !is_request {
+            continue;
+        }
+        let id = parsed["id"].clone();
+        let result = match parsed["method"].as_str() {
+            Some("initialize") => json!({ "capabilities": {} }),
+            _ => serde_json::Value::Null,
+        };
+        let reply = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{result}}}"#);
+        server.send_body(&reply).await;
+    }
 }

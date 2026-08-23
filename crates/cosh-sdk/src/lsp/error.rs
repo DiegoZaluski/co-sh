@@ -73,6 +73,22 @@ pub enum LspError {
     #[error("invalid client state: {0}")]
     InvalidState(&'static str),
 
+    /// A language-server process could not be brought up. `detail` carries
+    /// the spawn/handshake failure description.
+    #[error("failed to start language server `{server}`: {detail}")]
+    Spawn {
+        /// Catalog name of the server.
+        server: Box<str>,
+        /// Failure description.
+        detail: String,
+    },
+
+    /// The server is temporarily unavailable: its key is in the post-failure
+    /// backoff window, or the binary is not on `PATH`. Retrying after the
+    /// backoff (or installing the binary) resolves it.
+    #[error("language server `{0}` is unavailable right now")]
+    Unavailable(Box<str>),
+
     /// An incoming message could not be parsed as JSON-RPC.
     ///
     /// Never fatal: the offending frame is logged and skipped so a single bad
