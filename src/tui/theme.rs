@@ -45,6 +45,8 @@ pub struct Theme {
     pub markdown_image: RGBA,
     pub markdown_image_text: RGBA,
     pub markdown_code_block: RGBA,
+    pub markdown_table_border: RGBA,
+    pub markdown_table_header: RGBA,
     pub syntax_comment: RGBA,
     pub syntax_keyword: RGBA,
     pub syntax_function: RGBA,
@@ -281,6 +283,10 @@ fn full_theme(
         markdown_image: RGBA::from_hex(mi),
         markdown_image_text: RGBA::from_hex(mit),
         markdown_code_block: RGBA::from_hex(mcb),
+        // Table colors default to the theme's rule/heading colors; themes
+        // override below for a dedicated look.
+        markdown_table_border: RGBA::from_hex(mhr),
+        markdown_table_header: RGBA::from_hex(mh),
         syntax_comment: RGBA::from_hex(sc),
         syntax_keyword: RGBA::from_hex(sk),
         syntax_function: RGBA::from_hex(sf),
@@ -301,11 +307,23 @@ fn cosh() -> Theme {
         "#07070A", "#000000", "#11111C", "#777DA7", "#8B93C2", "#1E2030", "#E8F0FF", "#777DA7",
         "#777DE7", "#8B93C2", "#E8F0FF", "#5CB87A", "#D4A742", "#D4575A", "#5FD4CB", "#5CB87A",
         "#D4575A", "#4A4D5E", "#8B93C2", "#66BB6A", "#EF5350", "#0A1A0A", "#1A0A0A", "#07070A",
-        "#4A4D5E", "#0A1A0A", "#1A0A0A", "#E8F0FF", "#777DA7", "#777DE7", "#E8F0FF", "#8B93C2",
-        "#777DA7", "#D4A742", "#777DE7", "#1E2030", "#777DE7", "#8B93C2", "#777DE7", "#8B93C2",
-        "#E8F0FF", "#4A4D5E", "#777DE7", "#8B93C2", "#E8F0FF", "#D4A742", "#CE93D8", "#BA68C8",
+        "#4A4D5E", "#0A1A0A", "#1A0A0A", "#E8F0FF", "#FF7EDB", "#B388FF", "#FF9DE6", "#FFD1F0",
+        "#9D8CFF", "#FFC94D", "#FFFFFF", "#6E5FA8", "#FF7EDB", "#64F0DC", "#FF7EDB", "#FFD1F0",
+        "#F2EAFF", "#565A78", "#82AAFF", "#9D8CFF", "#FFC94D", "#64F0DC", "#FF7EDB", "#C792EA",
         "#8B93C2", "#E8F0FF",
     );
+    // Vivid markdown accents: pink headings/bullets, violet links and bars,
+    // amber emphasis, teal enumeration — a livelier take on the indigo base.
+    t.markdown_table_border = RGBA::from_hex("#8A7BD6");
+    t.markdown_table_header = RGBA::from_hex("#FF9DE6");
+    t.markdown_code_block = RGBA::from_hex("#F2EAFF");
+    t.syntax_comment = RGBA::from_hex("#565A78");
+    t.syntax_keyword = RGBA::from_hex("#9D8CFF");
+    t.syntax_function = RGBA::from_hex("#82AAFF");
+    t.syntax_string = RGBA::from_hex("#FFC94D");
+    t.syntax_number = RGBA::from_hex("#FF7EDB");
+    t.syntax_type = RGBA::from_hex("#C792EA");
+    t.syntax_operator = RGBA::from_hex("#64F0DC");
     t.queue_next_loop = RGBA::from_hex("#3A3116");
     t.queue_next_request = RGBA::from_hex("#123A38");
     t
@@ -416,6 +434,8 @@ fn orng() -> Theme {
         markdown_image: RGBA::from_hex("#EC5B2B"),
         markdown_image_text: RGBA::from_hex("#56b6c2"),
         markdown_code_block: RGBA::from_hex("#eeeeee"),
+        markdown_table_border: RGBA::from_hex("#808080"),
+        markdown_table_header: RGBA::from_hex("#EC5B2B"),
         syntax_comment: RGBA::from_hex("#808080"),
         syntax_keyword: RGBA::from_hex("#EC5B2B"),
         syntax_function: RGBA::from_hex("#EE7948"),

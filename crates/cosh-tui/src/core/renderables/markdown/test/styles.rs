@@ -92,3 +92,122 @@ fn test_h1_is_brighter_than_h6() {
         );
     }
 }
+
+#[test]
+fn test_accent_overrides_heading_ramp() {
+    let text = RGBA::from_ints(220, 220, 220, 255);
+    let bg = RGBA::from_ints(10, 10, 10, 255);
+    let mut palette = MarkdownPalette::new(text, bg);
+    let heading = RGBA::from_ints(255, 126, 219, 255); // hot pink
+    palette.set_accent_colors(super::super::MarkdownAccentColors {
+        heading: Some(heading),
+        ..Default::default()
+    });
+
+    // H1 uses the theme color directly.
+    let h1 = palette.style_for(None, Some(1));
+    assert_eq!(h1.fg, Some(ratatui::style::Color::Rgb(255, 126, 219)));
+    // H6 lands on the derived muted color.
+    let h6 = palette.style_for(None, Some(6));
+    assert_ne!(h6.fg, h1.fg, "H6 must not reuse the accent verbatim");
+}
+
+#[test]
+fn test_accent_overrides_inline_elements() {
+    let text = RGBA::from_ints(220, 220, 220, 255);
+    let bg = RGBA::from_ints(10, 10, 10, 255);
+    let mut palette = MarkdownPalette::new(text, bg);
+    palette.set_accent_colors(super::super::MarkdownAccentColors {
+        emph: Some(RGBA::from_ints(255, 201, 77, 255)),
+        strong: Some(RGBA::from_ints(255, 255, 255, 255)),
+        inline_code_fg: Some(RGBA::from_ints(255, 209, 240, 255)),
+        link_label: Some(RGBA::from_ints(255, 157, 230, 255)),
+        list_enumeration: Some(RGBA::from_ints(100, 240, 220, 255)),
+        ..Default::default()
+    });
+
+    let emph = palette.style_for(Some(MarkdownElement::Emphasis), None);
+    assert_eq!(emph.fg, Some(ratatui::style::Color::Rgb(255, 201, 77)));
+    assert!(emph.add_modifier.contains(ratatui::style::Modifier::ITALIC));
+
+    let strong = palette.style_for(Some(MarkdownElement::Strong), None);
+    assert_eq!(strong.fg, Some(ratatui::style::Color::Rgb(255, 255, 255)));
+
+    let code = palette.style_for(Some(MarkdownElement::InlineCode), None);
+    assert_eq!(code.fg, Some(ratatui::style::Color::Rgb(255, 209, 240)));
+    assert!(code.bg.is_some(), "inline code keeps its derived bg");
+
+    // Concealed label: themed color + underline.
+    let label = palette.link_label_style(false);
+    assert_eq!(label.fg, Some(ratatui::style::Color::Rgb(255, 157, 230)));
+    assert!(
+        label
+            .add_modifier
+            .contains(ratatui::style::Modifier::UNDERLINED)
+    );
+
+    // Ordered numbers take their own color; bullets keep falling back to
+    // the derived marker (text) color.
+    assert_eq!(
+        palette.list_enumeration_color(),
+        RGBA::from_ints(100, 240, 220, 255)
+    );
+    assert_eq!(palette.list_marker_color(), text);
+}
+
+#[test]
+fn test_unspecified_accents_keep_derived_defaults() {
+    let text = RGBA::from_ints(200, 200, 200, 255);
+    let bg = RGBA::from_ints(0, 0, 0, 255);
+    let plain = MarkdownPalette::new(text, bg);
+    let mut partial = MarkdownPalette::new(text, bg);
+    partial.set_accent_colors(super::super::MarkdownAccentColors {
+        horizontal_rule: Some(RGBA::from_ints(1, 2, 3, 255)),
+        ..Default::default()
+    });
+
+    // Only the supplied element changes; everything else matches derivation.
+    assert_eq!(
+        partial.horizontal_rule_color(),
+        RGBA::from_ints(1, 2, 3, 255)
+    );
+    assert_eq!(partial.table_header_color(), plain.table_header_color());
+    assert_eq!(
+        partial.list_enumeration_color(),
+        plain.list_marker_color(),
+        "enumeration falls back to the marker color"
+    );
+}
+
+#[test]
+fn test_syntax_colors_map_to_categories() {
+    use cosh_sdk::tree_sitter::highlight::HighlightCategory;
+
+    let text = RGBA::from_ints(220, 220, 220, 255);
+    let bg = RGBA::from_ints(10, 10, 10, 255);
+    let plain = MarkdownPalette::new(text, bg);
+    assert!(
+        plain.syntax_color(HighlightCategory::Keyword).is_none(),
+        "without overrides categories fall back to built-ins"
+    );
+
+    let mut palette = MarkdownPalette::new(text, bg);
+    palette.set_syntax_colors(super::super::SyntaxColors {
+        keyword: Some(RGBA::from_ints(157, 140, 255, 255)),
+        string: Some(RGBA::from_ints(255, 201, 77, 255)),
+        comment: Some(RGBA::from_ints(86, 90, 120, 255)),
+        function: Some(RGBA::from_ints(130, 170, 255, 255)),
+        number: Some(RGBA::from_ints(255, 126, 219, 255)),
+        r#type: Some(RGBA::from_ints(199, 146, 234, 255)),
+        builtin: Some(RGBA::from_ints(100, 240, 220, 255)),
+    });
+
+    assert_eq!(
+        palette.syntax_color(HighlightCategory::Keyword),
+        Some(RGBA::from_ints(157, 140, 255, 255))
+    );
+    assert_eq!(
+        palette.syntax_color(HighlightCategory::Builtin),
+        Some(RGBA::from_ints(100, 240, 220, 255))
+    );
+}

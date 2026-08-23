@@ -784,7 +784,7 @@ impl SessionView {
         let mut md = cosh_tui::core::renderables::markdown::MarkdownRenderable::new(Some(content));
         md.set_fg(Some(ColorInput::RGBA(theme.text)));
         md.set_bg(Some(ColorInput::RGBA(theme.background_panel)));
-        md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
+        crate::util::markdown::apply_theme(&mut md, theme);
         let overflow = !expanded && body_h > SUMMARIZING_COLLAPSED_LINES;
         if overflow {
             // Collapsed preview: the box shows the LAST
@@ -862,7 +862,7 @@ impl SessionView {
                 cosh_tui::core::renderables::markdown::MarkdownRenderable::new(Some(content));
             md.set_fg(Some(ColorInput::RGBA(theme.text_muted)));
             md.set_bg(Some(ColorInput::RGBA(theme.background)));
-            md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
+            crate::util::markdown::apply_theme(&mut md, theme);
             md.render_self(buf, md_area);
             // Dim the whole reasoning body toward the background so it reads as
             // opaque "thinking" text — white becomes gray and syntax-highlight
@@ -1226,9 +1226,7 @@ impl SessionView {
                     );
                     md.set_fg(Some(ColorInput::RGBA(fg_color)));
                     md.set_bg(Some(ColorInput::RGBA(theme.background)));
-                    md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(
-                        255, 200, 0, 255,
-                    ))));
+                    crate::util::markdown::apply_theme(&mut md, theme);
                     md.render_self(buf, area);
                     // During streaming, skip the expensive scan_content_height
                     // for the last message since it will be re-rendered next
@@ -2773,9 +2771,7 @@ impl SessionView {
                                         );
                                         md.set_fg(Some(ColorInput::RGBA(theme.text)));
                                         md.set_bg(Some(ColorInput::RGBA(theme.background)));
-                                        md.set_table_border_color(Some(ColorInput::RGBA(
-                                            RGBA::from_ints(255, 200, 0, 255),
-                                        )));
+                                        crate::util::markdown::apply_theme(&mut md, theme);
                                         md.render_self(temp, scan_area);
 
                                         let screen_end = p_bottom.min(vp_bottom) as u16;
@@ -3030,9 +3026,7 @@ impl SessionView {
                                         );
                                     md.set_fg(Some(ColorInput::RGBA(theme.text)));
                                     md.set_bg(Some(ColorInput::RGBA(theme.background_panel)));
-                                    md.set_table_border_color(Some(ColorInput::RGBA(
-                                        RGBA::from_ints(255, 200, 0, 255),
-                                    )));
+                                    crate::util::markdown::apply_theme(&mut md, theme);
                                     md.render_self(temp, scan_area);
                                     for k in 0..rows {
                                         let src_y = src_start + k;

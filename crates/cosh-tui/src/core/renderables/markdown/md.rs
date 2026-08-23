@@ -21,7 +21,9 @@ use crate::core::types::MouseEvent;
 use super::canvas::GrowBuf;
 use super::context::{MarkdownContext, MarkdownElement};
 use super::parser::{MdBlocks, needs_inter_block_margin, parse_blocks_incremental};
-use super::styles::{MarkdownPalette, rgba_to_ratatui as rgba_to_color};
+use super::styles::{
+    MarkdownAccentColors, MarkdownPalette, SyntaxColors, rgba_to_ratatui as rgba_to_color,
+};
 
 /// Rate-limiter for the markdown renderer's PERF debug logs: at most one
 /// `[PERF] markdown_render_self` / `code_block_render` line per second across
@@ -461,6 +463,11 @@ pub struct MarkdownRenderable {
     bg: Option<RGBA>,
     /// Optional table border colour. Falls back to the palette's muted colour.
     table_border_color: Option<RGBA>,
+    /// Host-theme accent colors overriding the palette's derived defaults
+    /// per element (headings, links, emphasis, markers, ...).
+    accent_colors: Option<MarkdownAccentColors>,
+    /// Host-theme syntax-highlighting colors for fenced code blocks.
+    syntax_colors: Option<SyntaxColors>,
     /// When true (default), link syntax is concealed: only the label is
     /// shown, styled as a link. When false, links render literally as
     /// `[label](url)` (unconcealed mode).
@@ -492,6 +499,8 @@ impl MarkdownRenderable {
             fg: None,
             bg: None,
             table_border_color: None,
+            accent_colors: None,
+            syntax_colors: None,
             conceal: true,
             warning_theme: None,
             active_links: Mutex::new(Vec::new()),
@@ -527,6 +536,19 @@ impl MarkdownRenderable {
     /// When `None` (the default), the palette's muted colour is used.
     pub fn set_table_border_color(&mut self, value: Option<ColorInput>) {
         self.table_border_color = value.map(parse_color);
+    }
+
+    /// Apply host-theme accent colors (headings, links, emphasis, markers,
+    /// table header, ...). `None` keeps the palette fully derived from
+    /// fg/bg.
+    pub fn set_accent_colors(&mut self, value: Option<MarkdownAccentColors>) {
+        self.accent_colors = value;
+    }
+
+    /// Apply host-theme syntax-highlighting colors for fenced code blocks.
+    /// `None` keeps the built-in fallback category colors.
+    pub fn set_syntax_colors(&mut self, value: Option<SyntaxColors>) {
+        self.syntax_colors = value;
     }
 
     /// Toggle markdown-syntax concealment. Default `true`: link
@@ -575,6 +597,43 @@ impl MarkdownRenderable {
             }
         }
         self.conceal.hash(&mut hasher);
+        fn hash_color_opt(c: Option<RGBA>, hasher: &mut std::collections::hash_map::DefaultHasher) {
+            match c {
+                Some(c) => {
+                    let (r, g, b, _) = c.to_ints();
+                    (true, r, g, b).hash(hasher);
+                }
+                None => false.hash(hasher),
+            }
+        }
+        if let Some(a) = &self.accent_colors {
+            for c in [
+                a.heading,
+                a.link,
+                a.link_label,
+                a.inline_code_fg,
+                a.blockquote_bar,
+                a.emph,
+                a.strong,
+                a.horizontal_rule,
+                a.list_marker,
+                a.list_enumeration,
+                a.table_header,
+            ] {
+                hash_color_opt(c, &mut hasher);
+            }
+        } else {
+            false.hash(&mut hasher);
+        }
+        if let Some(s) = &self.syntax_colors {
+            for c in [
+                s.comment, s.keyword, s.function, s.string, s.number, s.r#type, s.builtin,
+            ] {
+                hash_color_opt(c, &mut hasher);
+            }
+        } else {
+            false.hash(&mut hasher);
+        }
         match &self.warning_theme {
             Some(theme) => {
                 theme.prefix.hash(&mut hasher);
@@ -596,10 +655,16 @@ impl MarkdownRenderable {
         self.bg.unwrap_or(RGBA::from_ints(0, 0, 0, 0))
     }
 
-    /// Build a palette from the configured fg/bg plus any warning-theme
-    /// override.
+    /// Build a palette from the configured fg/bg plus any theme overrides
+    /// (accents, syntax colors, warning theme).
     fn palette(&self) -> MarkdownPalette {
         let mut palette = MarkdownPalette::new(self.default_fg(), self.default_bg());
+        if let Some(accents) = &self.accent_colors {
+            palette.set_accent_colors(accents.clone());
+        }
+        if let Some(syntax) = &self.syntax_colors {
+            palette.set_syntax_colors(syntax.clone());
+        }
         if let Some(theme) = &self.warning_theme {
             palette.set_warning_theme(theme.prefix.clone(), theme.bg, theme.fg);
         }
@@ -895,18 +960,17 @@ impl MarkdownRenderable {
         }
     }
 
-    /// Derive a syntax-highlighted style from a category.
-    fn highlight_style(cat: Option<HighlightCategory>, default_fg: Color, bg: Color) -> Style {
-        let fg = match cat {
-            Some(HighlightCategory::Keyword) => Color::Rgb(255, 180, 100),
-            Some(HighlightCategory::String) => Color::Rgb(150, 200, 150),
-            Some(HighlightCategory::Comment) => Color::Rgb(130, 130, 140),
-            Some(HighlightCategory::Type) => Color::Rgb(100, 180, 255),
-            Some(HighlightCategory::Function) => Color::Rgb(200, 180, 255),
-            Some(HighlightCategory::Number) => Color::Rgb(255, 200, 100),
-            Some(HighlightCategory::Builtin) => Color::Rgb(100, 200, 255),
-            None => default_fg,
-        };
+    /// Derive a syntax-highlighted style from a category. Theme-supplied
+    /// syntax colors win; unset categories keep the built-in fallbacks.
+    fn highlight_style(
+        palette: &MarkdownPalette,
+        cat: Option<HighlightCategory>,
+        default_fg: Color,
+        bg: Color,
+    ) -> Style {
+        let fg = cat
+            .and_then(|c| palette.syntax_color(c))
+            .map_or(default_fg, rgba_to_color);
         Style::default().fg(fg).bg(bg)
     }
 }
@@ -1569,8 +1633,12 @@ impl MarkdownRenderable {
                                 y += 1;
                             }
                             let frame = list_stack.last_mut().expect("Item outside List");
-                            let marker_style =
-                                Style::default().fg(rgba_to_color(palette.list_marker_color()));
+                            let marker_color = if frame.ordered {
+                                palette.list_enumeration_color()
+                            } else {
+                                palette.list_marker_color()
+                            };
+                            let marker_style = Style::default().fg(rgba_to_color(marker_color));
                             // Right-align ordered numbers to the widest one
                             // (" 9." / "10.") right-aligned to the widest one.
                             let core = if frame.ordered {
@@ -1733,7 +1801,14 @@ impl MarkdownRenderable {
                     } else {
                         let element = ctx.current_element();
                         let heading_level = ctx.heading_level();
-                        let mut style = palette.style_for(element, heading_level);
+                        // Concealed links show only the label: style it with
+                        // the theme's label color when one is supplied.
+                        let mut style =
+                            if matches!(element, Some(MarkdownElement::Link)) && pass.conceal {
+                                palette.link_label_style(heading_level.is_some())
+                            } else {
+                                palette.style_for(element, heading_level)
+                            };
                         let bq_indent = effective_indent(&list_stack);
                         if pass.warning {
                             // Palette-driven warning theme: fill the row with
@@ -1806,7 +1881,8 @@ impl MarkdownRenderable {
                 // ── Horizontal rule ─────────────────────────────
                 Event::Rule => {
                     if y < max_y {
-                        let rule_style = Style::default().fg(rgba_to_color(palette.muted_color()));
+                        let rule_style =
+                            Style::default().fg(rgba_to_color(palette.horizontal_rule_color()));
                         for cx in area_x..max_x {
                             if let Some(cell) = buf.cell_mut((cx, y)) {
                                 cell.set_char('─');
@@ -1953,7 +2029,7 @@ impl MarkdownRenderable {
                     .get(byte_offset + remaining_offset)
                     .copied()
                     .flatten();
-                let style = Self::highlight_style(cat, default_fg, code_bg);
+                let style = Self::highlight_style(palette, cat, default_fg, code_bg);
                 remaining_offset += grapheme.len();
 
                 if grapheme == "\n" {
@@ -2150,7 +2226,7 @@ impl MarkdownRenderable {
         let border_style = Style::default().fg(border_color);
         let text_style = Style::default().fg(rgba_to_color(palette.text_color()));
         let header_style = Style::default()
-            .fg(rgba_to_color(palette.text_color()))
+            .fg(rgba_to_color(palette.table_header_color()))
             .add_modifier(ratatui::style::Modifier::BOLD);
 
         // Alternating row background: slightly lighter/dimmer variant of the base bg

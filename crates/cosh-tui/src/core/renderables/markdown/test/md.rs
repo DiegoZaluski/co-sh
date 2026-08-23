@@ -1304,3 +1304,53 @@ fn test_no_trailing_blank_after_last_block() {
     assert_eq!(estimate_height("hello", 40), 1);
     assert_eq!(estimate_height("# Title\n\ncontent", 40), 3);
 }
+
+#[test]
+fn test_theme_accent_and_syntax_colors_reach_buffer() {
+    let heading = RGBA::from_ints(255, 126, 219, 255);
+    let strong = RGBA::from_ints(255, 255, 255, 255);
+
+    let mut md = make_md("# Pink\n\n**bold words**");
+    md.set_accent_colors(Some(super::super::MarkdownAccentColors {
+        heading: Some(heading),
+        strong: Some(strong),
+        ..Default::default()
+    }));
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 6));
+
+    // H1 "P" carries the theme's pink; strong text is white + bold.
+    assert_eq!(
+        buf.cell((0, 0)).unwrap().style().fg,
+        Some(rgba_to_color(heading))
+    );
+    let bold_cell = buf
+        .cell((0, 2))
+        .expect("strong text starts on row 2 (heading margin)");
+    assert_eq!(bold_cell.style().fg, Some(rgba_to_color(strong)));
+    assert!(bold_cell.modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn test_theme_syntax_colors_highlight_code_block() {
+    let keyword = RGBA::from_ints(157, 140, 255, 255); // violet
+
+    let mut md = make_md("```rust\nlet x = 1;\n```");
+    md.set_syntax_colors(Some(super::super::SyntaxColors {
+        keyword: Some(keyword),
+        ..Default::default()
+    }));
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    // The `let` keyword on the first code row (right below the language
+    // label row) must use the theme color.
+    let themed = (2..5).any(|dx| {
+        buf.cell((dx, 1))
+            .is_some_and(|c| c.style().fg == Some(rgba_to_color(keyword)))
+    });
+    assert!(
+        themed,
+        "`let` should be highlighted with the theme keyword color"
+    );
+}

@@ -1,15 +1,62 @@
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::core::rgba::RGBA;
+use cosh_sdk::tree_sitter::highlight::HighlightCategory;
 
 use super::context::MarkdownElement;
+
+/// Explicit per-element colors a host theme can supply. Every field is
+/// optional: `None` keeps the value derived from the base fg/bg, so partial
+/// themes degrade gracefully.
+#[derive(Debug, Clone, Default)]
+pub struct MarkdownAccentColors {
+    /// Base for the H1→H6 ramp (H1 uses it directly; lower levels blend
+    /// toward muted).
+    pub heading: Option<RGBA>,
+    /// Link color: URL/decoration part and unconcealed `[label](url)`.
+    pub link: Option<RGBA>,
+    /// Concealed-mode link label color (the visible text of a link).
+    pub link_label: Option<RGBA>,
+    /// Inline `` `code` `` foreground.
+    pub inline_code_fg: Option<RGBA>,
+    /// Blockquote vertical bar.
+    pub blockquote_bar: Option<RGBA>,
+    /// `*emphasis*` foreground (rendered italic).
+    pub emph: Option<RGBA>,
+    /// `**strong**` foreground (rendered bold).
+    pub strong: Option<RGBA>,
+    /// `---` horizontal rule.
+    pub horizontal_rule: Option<RGBA>,
+    /// Bullets (`•`) and task-list checkboxes.
+    pub list_marker: Option<RGBA>,
+    /// Ordered-list numbers (`1.`).
+    pub list_enumeration: Option<RGBA>,
+    /// Table header row foreground (rendered bold).
+    pub table_header: Option<RGBA>,
+}
+
+/// Syntax-highlighting colors for fenced code blocks, mapped onto
+/// tree-sitter highlight categories. Unset categories keep the built-in
+/// fallback colors.
+#[derive(Debug, Clone, Default)]
+pub struct SyntaxColors {
+    pub comment: Option<RGBA>,
+    pub keyword: Option<RGBA>,
+    pub function: Option<RGBA>,
+    pub string: Option<RGBA>,
+    pub number: Option<RGBA>,
+    pub r#type: Option<RGBA>,
+    pub builtin: Option<RGBA>,
+}
 
 /// Theme-aware palette that maps semantic `MarkdownElement`s to concrete
 /// `ratatui::Style` values.
 ///
 /// Conceptually similar to a syntax style's per-group lookups:
 /// each markdown construct (heading, emphasis, link, etc.) gets a
-/// distinct visual treatment derived from the base text/background colors.
+/// distinct visual treatment derived from the base text/background colors,
+/// overridden per element by anything supplied through
+/// [`MarkdownPalette::set_accent_colors`] / [`MarkdownPalette::set_syntax_colors`].
 #[derive(Debug, Clone)]
 pub struct MarkdownPalette {
     // ── Base colors ────────────────────────────────────────────
@@ -30,6 +77,10 @@ pub struct MarkdownPalette {
     blockquote_bg: RGBA,
     blockquote_bar: RGBA,
     list_marker: RGBA,
+
+    // ── Theme overrides (empty = fully derived from fg/bg) ─────
+    accents: MarkdownAccentColors,
+    syntax: SyntaxColors,
 
     // ── Warning quote theme (configurable) ─────────────────────
     /// A quote whose body starts with this marker renders with the warning
@@ -137,10 +188,63 @@ impl MarkdownPalette {
             blockquote_bg,
             blockquote_bar,
             list_marker,
+            accents: MarkdownAccentColors::default(),
+            syntax: SyntaxColors::default(),
             warning_prefix: "\u{26A0}".to_string(), // ⚠
             warning_bg: RGBA::from_ints(238, 241, 112, 255),
             warning_fg: RGBA::from_ints(0, 0, 0, 255),
         }
+    }
+
+    // ── Theme overrides ────────────────────────────────────────
+
+    /// Apply host-theme accent colors. Supplied values override the
+    /// derived defaults element by element.
+    pub fn set_accent_colors(&mut self, accents: MarkdownAccentColors) {
+        if let Some(heading) = accents.heading {
+            // Rebuild the H1→H6 ramp from the theme color: H1 keeps it in
+            // full, H2–H5 step down toward muted, H6 lands on muted — the
+            // same shape the derivation uses for plain text colors.
+            let (hr, hg, hb, _) = heading.to_ints();
+            let (mr, mg, mb, _) = self.muted.to_ints();
+            let mix = |t: u8, m: u8, num: u16| -> u8 {
+                ((u16::from(t) * num + u16::from(m) * (12 - num)) / 12).min(255) as u8
+            };
+            let ramp = [
+                heading,
+                RGBA::from_ints(mix(hr, mr, 11), mix(hg, mg, 11), mix(hb, mb, 11), 255),
+                RGBA::from_ints(mix(hr, mr, 10), mix(hg, mg, 10), mix(hb, mb, 10), 255),
+                RGBA::from_ints(mix(hr, mr, 9), mix(hg, mg, 9), mix(hb, mb, 9), 255),
+                RGBA::from_ints(mix(hr, mr, 8), mix(hg, mg, 8), mix(hb, mb, 8), 255),
+                self.muted,
+            ];
+            self.heading_colors = ramp;
+        }
+        if let Some(link) = accents.link {
+            self.link = link;
+        }
+        if let Some(bar) = accents.blockquote_bar {
+            self.blockquote_bar = bar;
+        }
+        if let Some(marker) = accents.list_marker {
+            self.list_marker = marker;
+        }
+        self.accents = accents;
+    }
+
+    /// Apply host-theme syntax-highlighting colors for code blocks.
+    pub fn set_syntax_colors(&mut self, syntax: SyntaxColors) {
+        self.syntax = syntax;
+    }
+
+    #[must_use]
+    pub const fn accent_colors(&self) -> &MarkdownAccentColors {
+        &self.accents
+    }
+
+    #[must_use]
+    pub const fn syntax_colors(&self) -> &SyntaxColors {
+        &self.syntax
     }
 
     // ── Warning theme ──────────────────────────────────────────
@@ -206,6 +310,40 @@ impl MarkdownPalette {
         self.list_marker
     }
 
+    /// Ordered-list number color (falls back to the bullet marker color).
+    #[must_use]
+    pub fn list_enumeration_color(&self) -> RGBA {
+        self.accents.list_enumeration.unwrap_or(self.list_marker)
+    }
+
+    /// Horizontal-rule color (falls back to muted).
+    #[must_use]
+    pub fn horizontal_rule_color(&self) -> RGBA {
+        self.accents.horizontal_rule.unwrap_or(self.muted)
+    }
+
+    /// Table header row color (falls back to text).
+    #[must_use]
+    pub fn table_header_color(&self) -> RGBA {
+        self.accents.table_header.unwrap_or(self.text)
+    }
+
+    /// Concealed-mode link label style: label color when the theme supplies
+    /// one, otherwise the regular link treatment.
+    #[must_use]
+    pub fn link_label_style(&self, in_heading: bool) -> Style {
+        match self.accents.link_label {
+            Some(c) => {
+                let mut style = Style::default().fg(rgba_to_ratatui(c));
+                if !in_heading {
+                    style = style.add_modifier(Modifier::UNDERLINED);
+                }
+                style
+            }
+            None => self.style_for(Some(MarkdownElement::Link), None),
+        }
+    }
+
     /// Return the `ratatui::Style` that should be applied to a text segment
     /// belonging to the given element.
     ///
@@ -227,9 +365,15 @@ impl MarkdownPalette {
         match element {
             Some(MarkdownElement::Emphasis) => {
                 style = style.add_modifier(Modifier::ITALIC);
+                if let Some(c) = self.accents.emph {
+                    style = style.fg(rgba_to_ratatui(c));
+                }
             }
             Some(MarkdownElement::Strong) => {
                 style = style.add_modifier(Modifier::BOLD);
+                if let Some(c) = self.accents.strong {
+                    style = style.fg(rgba_to_ratatui(c));
+                }
             }
             Some(MarkdownElement::Strikethrough) => {
                 style = style.add_modifier(Modifier::CROSSED_OUT);
@@ -241,8 +385,12 @@ impl MarkdownPalette {
                 }
             }
             Some(MarkdownElement::InlineCode) => {
+                let mut fg = self.inline_code_fg;
+                if let Some(c) = self.accents.inline_code_fg {
+                    fg = c;
+                }
                 style = style
-                    .fg(rgba_to_ratatui(self.inline_code_fg))
+                    .fg(rgba_to_ratatui(fg))
                     .bg(rgba_to_ratatui(self.inline_code_bg));
             }
             Some(MarkdownElement::CodeBlock) => {
@@ -266,6 +414,23 @@ impl MarkdownPalette {
     #[must_use]
     pub const fn code_bg_color(&self) -> Color {
         rgba_to_ratatui(self.code_block_bg)
+    }
+
+    /// Resolve a tree-sitter highlight category to the palette's syntax
+    /// color for it. `None` categories and unset slots return `None` so the
+    /// caller can fall back to its own defaults.
+    #[must_use]
+    pub fn syntax_color(&self, cat: HighlightCategory) -> Option<RGBA> {
+        let s = &self.syntax;
+        match cat {
+            HighlightCategory::Comment => s.comment,
+            HighlightCategory::Keyword => s.keyword,
+            HighlightCategory::Function => s.function,
+            HighlightCategory::String => s.string,
+            HighlightCategory::Number => s.number,
+            HighlightCategory::Type => s.r#type,
+            HighlightCategory::Builtin => s.builtin,
+        }
     }
 
     /// Convenience: ratatui `Color` for blockquote background fill.

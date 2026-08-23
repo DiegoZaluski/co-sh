@@ -528,9 +528,7 @@ fn render_subagent_section(
                     let mut md = MarkdownRenderable::new(Some(clean));
                     md.set_fg(Some(ColorInput::RGBA(theme.text)));
                     md.set_bg(Some(ColorInput::RGBA(theme.background_element)));
-                    md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(
-                        255, 200, 0, 255,
-                    ))));
+                    crate::util::markdown::apply_theme(&mut md, theme);
                     md.render_self(scratch, area);
 
                     // Keep the rendered cells for the next frames (row-major).

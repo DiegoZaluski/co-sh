@@ -20,7 +20,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
+use cosh_tui::core::lib::rgba::ColorInput;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::markdown::{
     MarkdownRenderable, boundary_blank_rows, estimate_height, estimate_height_interior_slice,
@@ -224,7 +224,7 @@ impl StreamingTextCache {
             let mut md = MarkdownRenderable::new(Some(text[render_from..].to_string()));
             md.set_fg(Some(ColorInput::RGBA(theme.text)));
             md.set_bg(Some(ColorInput::RGBA(theme.background)));
-            md.set_table_border_color(Some(ColorInput::RGBA(RGBA::from_ints(255, 200, 0, 255))));
+            crate::util::markdown::apply_theme(&mut md, theme);
             md.render_self(&mut self.cells, area);
         }
 
