@@ -478,8 +478,8 @@ fn test_bold_with_inline_code() {
 
 #[test]
 fn test_code_block_no_lang_renders_plain() {
-    // Code block without language specifier - renders as plain text (phase 6
-    // removed the JavaScript fallback for UNKNOWN languages too).
+    // Code block without language specifier - renders as plain text (the
+    // JavaScript fallback for unknown languages was removed).
     let md = make_md("```\nfn hello() {}\n```");
     let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
     md.render_self(&mut buf, Rect::new(0, 0, 60, 10));
@@ -772,7 +772,7 @@ fn test_soft_break_in_paragraph() {
     assert_eq!(buf.cell((5, 1)).unwrap().symbol(), "2");
 }
 
-/// Phase 4: nested lists must indent under the parent item's content column.
+/// nested lists must indent under the parent item's content column.
 #[test]
 fn test_nested_list_indentation() {
     let md = make_md("- outer\n    - inner");
@@ -792,8 +792,8 @@ fn test_nested_list_indentation() {
     assert_eq!(buf.cell((4, 1)).unwrap().symbol(), "i");
 }
 
-/// Phase 4: ordered markers are right-aligned to the widest one (" 9." /
-/// "10.") so all item content starts at the same column (OpenTUI padStart).
+/// ordered markers are right-aligned to the widest one (" 9." /
+/// "10.") so all item content starts at the same column.
 #[test]
 fn test_ordered_markers_align_past_nine() {
     let items: Vec<String> = (1..=12).map(|i| format!("{i}. x")).collect();
@@ -817,7 +817,7 @@ fn test_ordered_markers_align_past_nine() {
     assert_eq!(buf.cell((2, 9)).unwrap().symbol(), ".");
 }
 
-/// Phase 4: loose-list paragraphs stay on the marker row instead of dropping
+/// loose-list paragraphs stay on the marker row instead of dropping
 /// to the next line.
 #[test]
 fn test_loose_list_paragraph_on_marker_row() {
@@ -833,7 +833,7 @@ fn test_loose_list_paragraph_on_marker_row() {
     );
 }
 
-/// Phase 3: inline formatting survives into table cells — bold spans keep
+/// inline formatting survives into table cells — bold spans keep
 /// their modifier while surrounding padding stays plain.
 #[test]
 fn test_table_cell_inline_styles() {
@@ -906,14 +906,17 @@ fn test_blockquote_list_wrap_indent_single_count() {
 
     // First line starts at col 4 (quote indent 2 + bullet width 2).
     assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "•");
-    // Wrapped continuation lines return to col 4 too (not 6).
-    let wrap_col = (0..20u16)
+    // Wrapped continuation lines return to col 4 too (bar at 0, content at 4).
+    let wrap_col = (2..20u16)
         .find(|&x| buf.cell((x, 1)).is_some_and(|c| c.symbol() != " "))
         .expect("wrapped continuation line expected");
     assert_eq!(
         wrap_col, 4,
-        "continuation line must align with item content, not double-count quote indent"
+        "continuation line must align with item content (past the bar), not double-count quote indent"
     );
+    // The quote bar is drawn on every row of the quote.
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "│");
+    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "│");
 }
 
 /// Nested blockquotes accumulate one indent step per level.
@@ -996,7 +999,7 @@ fn test_quote_inside_list_item_survives_blocks() {
     );
 }
 
-/// Phase 5: concealed links (default) show only the label.
+/// concealed links (default) show only the label.
 #[test]
 fn test_link_concealed_by_default() {
     let md = make_md("[click](https://example.com)");
@@ -1013,7 +1016,7 @@ fn test_link_concealed_by_default() {
     assert!(!row.contains('['), "concealed link must not draw brackets");
 }
 
-/// Phase 5: conceal=false renders links literally as [label](url).
+/// conceal=false renders links literally as [label](url).
 #[test]
 fn test_link_unconcealed_renders_literal_syntax() {
     let mut md = make_md("[click](https://x.io)");
@@ -1033,7 +1036,7 @@ fn test_link_unconcealed_renders_literal_syntax() {
     );
 }
 
-/// Phase 5: rendered links are recorded as active regions covering exactly
+/// rendered links are recorded as active regions covering exactly
 /// the label cells, in absolute coordinates.
 #[test]
 fn test_active_links_hit_map() {
@@ -1049,7 +1052,7 @@ fn test_active_links_hit_map() {
     assert_eq!((link.y, link.x0, link.x1), (2, 7, 11));
 }
 
-/// Phase 6: an unsupported language renders plain text instead of falling
+/// an unsupported language renders plain text instead of falling
 /// back to JavaScript highlighting.
 #[test]
 fn test_unknown_lang_no_js_fallback() {
@@ -1093,4 +1096,121 @@ fn test_active_links_skip_clipped_rows() {
         md.active_links().is_empty(),
         "clipped link must not be clickable"
     );
+}
+
+/// blockquotes draw a muted bar and their body renders as FULL
+/// markdown (inline formatting survives).
+#[test]
+fn test_blockquote_recursive_inline_formatting() {
+    let md = make_md("> **bold** quote");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    use ratatui::style::Modifier;
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "│", "bar on first row");
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "b");
+    assert!(
+        buf.cell((2, 0))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD),
+        "inline bold must survive inside a recursive quote"
+    );
+}
+
+/// fenced code blocks inside quotes render as code blocks.
+#[test]
+fn test_blockquote_contains_code_fence() {
+    let md = make_md("> ```rust\n> let x = 1;\n> ```\n");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 12));
+
+    let has_code =
+        (0..12u16).any(|y| (2..40u16).any(|x| buf.cell((x, y)).is_some_and(|c| c.symbol() == "l")));
+    assert!(
+        has_code,
+        "code fence inside quote should render its content"
+    );
+    // Bar present next to the code content rows.
+    let bars = (0..12u16)
+        .filter(|&y| buf.cell((0, y)).is_some_and(|c| c.symbol() == "│"))
+        .count();
+    assert!(bars >= 3, "bar expected on multiple quote rows");
+}
+
+/// lists inside quotes get proper markers at the content column.
+#[test]
+fn test_blockquote_contains_list() {
+    let md = make_md("> - alpha\n> - beta");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 8));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 8));
+
+    assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "•");
+    assert_eq!(buf.cell((4, 0)).unwrap().symbol(), "a");
+}
+
+/// nested quotes accumulate one bar per level via geometry.
+#[test]
+fn test_nested_quote_double_bar() {
+    let md = make_md("> level1\n>\n> > level2");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 8));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 8));
+
+    // Outer bar col 0; inner bar col 2; level-2 text at col 4.
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "│");
+    assert_eq!(
+        buf.cell((2, 1)).unwrap().symbol(),
+        "│",
+        "inner bar at col 2"
+    );
+    assert_eq!(
+        buf.cell((4, 1)).unwrap().symbol(),
+        "l",
+        "level-2 text at col 4"
+    );
+}
+
+/// the warning theme is configurable through the renderer — a custom
+/// prefix triggers custom colors instead of the ⚠/yellow defaults.
+#[test]
+fn test_warning_theme_configurable_prefix_and_colors() {
+    use ratatui::style::Color;
+    let mut md = make_md("> ! danger zone");
+    md.set_warning_theme(
+        "!",
+        RGBA::from_ints(180, 30, 30, 255),
+        RGBA::from_ints(255, 255, 255, 255),
+    );
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    let cell = buf.cell((2, 0)).unwrap();
+    assert_eq!(cell.symbol(), "!");
+    assert_eq!(
+        cell.style().bg,
+        Some(Color::Rgb(180, 30, 30)),
+        "custom warning bg"
+    );
+    assert_eq!(
+        cell.style().fg,
+        Some(Color::Rgb(255, 255, 255)),
+        "custom warning fg"
+    );
+}
+
+/// Review fix: links inside blockquotes stay in the click map (translated
+/// through the quote bar/content offset).
+#[test]
+fn test_link_inside_blockquote_is_clickable() {
+    let md = make_md("> see [docs](https://x.io) here");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    let links = md.active_links();
+    assert_eq!(links.len(), 1, "link inside quote must be recorded");
+    let link = &links[0];
+    assert_eq!(link.url, "https://x.io");
+    // Bar(1) + space + "see " → label starts at col 6, width 4.
+    assert_eq!((link.y, link.x0, link.x1), (0, 6, 10));
 }

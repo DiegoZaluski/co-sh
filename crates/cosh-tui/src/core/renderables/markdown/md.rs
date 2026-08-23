@@ -52,10 +52,9 @@ const CODE_PAD_V: u16 = 1;
 
 static NEXT_MARKDOWN_NUM: AtomicU64 = AtomicU64::new(1);
 
-/// One open list level while rendering (phase 4). Mirrors OpenTUI's list
-/// layout: markers are drawn at `item_indent`, content starts right after
-/// the aligned marker column, and nested lists indent under the parent's
-/// content column.
+/// One open list level while rendering: markers are drawn at `item_indent`,
+/// content starts right after the aligned marker column, and nested lists
+/// indent under the parent's content column.
 struct ListFrame {
     ordered: bool,
     /// Number the next item gets.
@@ -71,17 +70,25 @@ struct ListFrame {
 
 /// Compute each list's aligned marker-column width by pre-scanning events.
 ///
-/// OpenTUI pads markers to the widest one in the list (`padStart`), so "9."
+/// Markers are padded to the widest one in the list, so "9."
 /// and "10." align their numbers to the right. We don't know how many items a
 /// list has until it ends, hence this cheap pass over already-parsed events;
 /// results are returned in list-start order.
-pub(crate) fn compute_list_marker_widths(events: &[Event<'_>]) -> Vec<Option<u16>> {
+pub(crate) fn compute_list_marker_widths(
+    events: &[(Event<'_>, std::ops::Range<usize>)],
+) -> Vec<Option<u16>> {
     let mut slots: Vec<Option<u16>> = Vec::new();
     // (slot index, ordered, first number, item count)
     let mut open: Vec<(usize, bool, usize, usize)> = Vec::new();
+    // Lists inside blockquotes are rendered by RECURSIVE passes that compute
+    // their own widths — they must not consume this pass's slots.
+    let mut quote_depth = 0usize;
 
-    for event in events {
+    for (event, _) in events {
         match event {
+            Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
+            Event::End(TagEnd::BlockQuote(_)) => quote_depth -= 1,
+            _ if quote_depth > 0 => {}
             Event::Start(Tag::List(start)) => {
                 open.push((
                     slots.len(),
@@ -134,9 +141,8 @@ impl CellSpan {
 }
 
 /// LRU memo for [`wrap_cell_spans`] keyed by (cell content hash, column
-/// width). Mirrors OpenTUI's per-cell cache (`getTableCellKey` +
-/// `TableContentCache`): when a streaming update re-renders a table block,
-/// unchanged cells reuse their wrapped styled lines instead of re-wrapping.
+/// width): when a streaming update re-renders a table block, unchanged
+/// cells reuse their wrapped styled lines instead of re-wrapping.
 /// Memoized wrapped cell lines shared between cache and renderer.
 type WrappedCell = std::sync::Arc<Vec<Vec<CellSpan>>>;
 type CellWrapCacheKey = (u64, u16);
@@ -312,6 +318,84 @@ pub struct ActiveLink {
     pub url: String,
 }
 
+/// Configurable warning-quote theme override (see
+/// [`MarkdownRenderable::set_warning_theme`]).
+#[derive(Debug, Clone)]
+pub struct WarningTheme {
+    pub prefix: String,
+    pub bg: RGBA,
+    pub fg: RGBA,
+}
+
+/// Per-pass options for [`MarkdownRenderable::render_block_events`].
+///
+/// * `highlight_code` — run tree-sitter on fenced code blocks (off for
+///   height measurement; styles never affect layout);
+/// * `conceal` — hide link syntax (`[label](url)` shown literally when off);
+/// * `depth` — blockquote recursion depth guard;
+/// * `warning` — apply the palette's warning theme to this pass (set for a
+///   quote body that starts with the configured warning prefix).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RenderPass {
+    pub highlight_code: bool,
+    pub conceal: bool,
+    pub depth: u16,
+    pub warning: bool,
+}
+
+/// Maximum blockquote recursion before falling back to plain text lines.
+const MAX_QUOTE_DEPTH: u16 = 8;
+
+/// Strip leading blockquote markers from a raw quote slice so it can be
+/// re-parsed as regular markdown by a recursive render pass.
+///
+/// Handles indented quotes (a quote inside a list item is prefixed by the
+/// item's indentation): leading whitespace is dropped before looking for the
+/// `>` marker, then a single space after the marker is removed.
+fn strip_quote_markers(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let lines: Vec<&str> = raw.lines().collect();
+
+    // Marker lines may be indented (a quote inside a list item carries the
+    // item's indentation), and pulldown's byte range typically starts at the
+    // FIRST line's marker while later lines keep their indent. Handle each
+    // line independently: drop whitespace + '>' + one space on marker lines;
+    // on lazy continuation lines (no marker) strip only the common container
+    // indent so surviving spaces cannot flip text into an indented code block.
+    let base_indent = lines
+        .iter()
+        .filter_map(|l| {
+            let ws = l.len() - l.trim_start().len();
+            (l.trim_start().starts_with('>') && ws > 0).then_some(ws)
+        })
+        .min()
+        .unwrap_or(0);
+
+    for line in lines {
+        let trimmed = line.trim_start();
+        let stripped = if let Some(rest) = trimmed.strip_prefix('>') {
+            // Strip EXACTLY one marker level: deeper nesting (">>inner")
+            // must survive so the child pass renders it as a nested quote.
+            rest.strip_prefix(' ')
+                .or_else(|| rest.strip_prefix('\t'))
+                .unwrap_or(rest)
+        } else {
+            // Lazy continuation line: strip the container indent, capped
+            // below 4 surviving spaces so text cannot flip to an indented
+            // code block in the child pass.
+            let ws = line.len() - trimmed.len();
+            &line[..ws.min(base_indent.max(3))]
+        };
+        out.push_str(stripped);
+        out.push('\n');
+    }
+    // `lines()` drops the trailing newline; restore it for parse fidelity.
+    if !raw.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// A cached render of one top-level markdown block: styled rows ready to be
 /// blitted, plus the geometry (height) and the inputs it was produced for.
 ///
@@ -329,7 +413,7 @@ struct CachedBlock {
 
 /// Renders markdown content into a fixed-area \`Buffer\`.
 ///
-/// Mirrors \``OpenTUI`\`'s \``MarkdownRenderable`\` in spirit:
+/// Architecture:
 /// - Splits content into top-level blocks (`parser::MdBlocks`) and re-parses
 ///   only the changed tail on content updates (incremental parsing)
 /// - Caches each block's rendered rows and reuses them while the block's raw
@@ -361,8 +445,10 @@ pub struct MarkdownRenderable {
     table_border_color: Option<RGBA>,
     /// When true (default), link syntax is concealed: only the label is
     /// shown, styled as a link. When false, links render literally as
-    /// `[label](url)` (OpenTUI's unconcealed mode).
+    /// `[label](url)` (unconcealed mode).
     conceal: bool,
+    /// Optional warning-quote theme override applied to the derived palette.
+    warning_theme: Option<WarningTheme>,
     /// Clickable link regions in absolute buffer coordinates, rebuilt on
     /// every `render_self`.
     active_links: Mutex<Vec<ActiveLink>>,
@@ -389,6 +475,7 @@ impl MarkdownRenderable {
             bg: None,
             table_border_color: None,
             conceal: true,
+            warning_theme: None,
             active_links: Mutex::new(Vec::new()),
         };
         if let Some(content) = content {
@@ -424,10 +511,21 @@ impl MarkdownRenderable {
         self.table_border_color = value.map(parse_color);
     }
 
-    /// Toggle markdown-syntax concealment (phase 5). Default `true`: link
+    /// Toggle markdown-syntax concealment. Default `true`: link
     /// labels only; `false` renders `[label](url)` literally.
     pub fn set_conceal(&mut self, value: bool) {
         self.conceal = value;
+    }
+
+    /// Customize the warning-quote theme: a quote whose body starts with
+    /// `prefix` (default "⚠") renders filled with `bg` and bold `fg` text.
+    /// An empty prefix disables warning styling entirely.
+    pub fn set_warning_theme(&mut self, prefix: impl Into<String>, bg: RGBA, fg: RGBA) {
+        self.warning_theme = Some(WarningTheme {
+            prefix: prefix.into(),
+            bg,
+            fg,
+        });
     }
 
     // ── Accessors ──────────────────────────────────────────────
@@ -459,6 +557,16 @@ impl MarkdownRenderable {
             }
         }
         self.conceal.hash(&mut hasher);
+        match &self.warning_theme {
+            Some(theme) => {
+                theme.prefix.hash(&mut hasher);
+                let (r, g, b, _) = theme.bg.to_ints();
+                (true, r, g, b).hash(&mut hasher);
+                let (r, g, b, _) = theme.fg.to_ints();
+                (r, g, b).hash(&mut hasher);
+            }
+            None => false.hash(&mut hasher),
+        }
         hasher.finish()
     }
 
@@ -470,9 +578,14 @@ impl MarkdownRenderable {
         self.bg.unwrap_or(RGBA::from_ints(0, 0, 0, 0))
     }
 
-    /// Build a palette from the configured fg/bg.
+    /// Build a palette from the configured fg/bg plus any warning-theme
+    /// override.
     fn palette(&self) -> MarkdownPalette {
-        MarkdownPalette::new(self.default_fg(), self.default_bg())
+        let mut palette = MarkdownPalette::new(self.default_fg(), self.default_bg());
+        if let Some(theme) = &self.warning_theme {
+            palette.set_warning_theme(theme.prefix.clone(), theme.bg, theme.fg);
+        }
+        palette
     }
 
     // ── Rendering helpers ──────────────────────────────────────
@@ -625,7 +738,7 @@ impl MarkdownRenderable {
         // broken at character level by wrapping whenever the cursor reaches
         // the right edge (mirrors `flush_layout_word` in layout.rs).
         // While inside a link, record one region per contiguous row segment
-        // (phase 5 hit-testing).
+        // (link hit-testing).
         let mut seg_start: Option<u16> = None;
         let close_segment =
             |links: &mut Vec<LinkRegion>, seg: &mut Option<u16>, end_x: u16, cy: u16| {
@@ -932,14 +1045,19 @@ impl Renderable for MarkdownRenderable {
                     }
                     _ => {
                         let mut canvas = GrowBuf::new(area.width, Style::default().bg(bg_color));
+                        let pass = RenderPass {
+                            highlight_code: true,
+                            conceal: self.conceal,
+                            depth: 0,
+                            warning: false,
+                        };
                         let (height, block_links) = Self::render_block_events(
                             raw,
                             &mut canvas,
                             area.width,
                             &palette,
                             self.table_border_color.as_ref(),
-                            true,
-                            self.conceal,
+                            &pass,
                         );
                         let entry = CachedBlock {
                             width: area.width,
@@ -1007,9 +1125,127 @@ impl Renderable for MarkdownRenderable {
     }
 }
 
-// ── Per-block rendering (phase 1+2 core) ────────────────────────
+// ── Per-block rendering (per-block core) ────────────────────────
 
 impl MarkdownRenderable {
+    /// Render a blockquote body recursively.
+    ///
+    /// The raw slice is stripped of `> ` markers and rendered as regular
+    /// markdown into a child canvas whose width excludes the bar column, so
+    /// paragraphs, lists and code fences inside quotes get the full
+    /// treatment. Every child row is blitted with a muted vertical bar drawn
+    /// at `bar_x`; nested quotes recurse naturally (each level offsets by its
+    /// own bar) up to [`MAX_QUOTE_DEPTH`], beyond which the body degrades to
+    /// plain indented text.
+    #[allow(clippy::too_many_arguments)]
+    fn render_quote(
+        raw: &str,
+        parent: &mut GrowBuf,
+        parent_y: &mut u16,
+        links: &mut Vec<LinkRegion>,
+        bar_x: u16,
+        max_x: u16,
+        max_y: u16,
+        palette: &MarkdownPalette,
+        table_border_color: Option<&RGBA>,
+        pass: &RenderPass,
+    ) {
+        let content_x = bar_x.saturating_add(2);
+        let bg_style = Style::default().bg(palette.bg_color());
+        let width = max_x.saturating_sub(content_x);
+        let stripped = strip_quote_markers(raw);
+
+        if stripped.trim().is_empty() || width == 0 {
+            // Empty quote: just consume the separator row.
+            *parent_y = parent_y.saturating_add(1);
+            return;
+        }
+
+        let bar_style = Style::default().fg(rgba_to_color(palette.blockquote_bar_color()));
+        let text_style = Style::default().fg(rgba_to_color(palette.text_color()));
+
+        if pass.depth >= MAX_QUOTE_DEPTH {
+            // Depth guard: plain indented text, no further recursion.
+            let mut ty = *parent_y;
+            for line in stripped.lines() {
+                if ty >= max_y {
+                    break;
+                }
+                let mut tx = content_x;
+                for (grapheme, gw) in crate::core::lib::unicode_util::graphemes_with_width(line) {
+                    if tx >= max_x {
+                        break;
+                    }
+                    if let Some(cell) = parent.cell_mut((tx, ty)) {
+                        cell.set_symbol(grapheme);
+                        cell.set_style(text_style);
+                    }
+                    tx += gw;
+                }
+                if let Some(cell) = parent.cell_mut((bar_x, ty)) {
+                    cell.set_char('│');
+                    cell.set_style(bar_style);
+                }
+                ty += 1;
+            }
+            *parent_y = ty.saturating_add(1);
+            return;
+        }
+
+        // An empty prefix disables warning styling entirely (API contract).
+        let prefix = palette.warning_prefix();
+        let warning = !prefix.is_empty() && stripped.trim_start().starts_with(prefix);
+        let child_pass = RenderPass {
+            depth: pass.depth + 1,
+            warning,
+            ..*pass
+        };
+
+        let mut child = GrowBuf::new(width, bg_style);
+        let base_y = *parent_y;
+        let (height, child_links) = Self::render_block_events(
+            &stripped,
+            &mut child,
+            width,
+            palette,
+            table_border_color,
+            &child_pass,
+        );
+        // Child link regions are relative to the child canvas: translate them
+        // into this pass's coordinate space so links inside quotes stay
+        // clickable.
+        for region in child_links {
+            links.push(LinkRegion {
+                y: base_y.saturating_add(region.y),
+                x0: content_x.saturating_add(region.x0),
+                x1: content_x.saturating_add(region.x1),
+                url: region.url,
+            });
+        }
+
+        // Blit child rows, drawing the quote bar on every row.
+        for (row_idx, row) in child.rows().iter().enumerate() {
+            let target_y = parent_y.saturating_add(row_idx as u16);
+            if target_y >= max_y {
+                break;
+            }
+            for (col_idx, cell) in row.iter().enumerate() {
+                let tx = content_x.saturating_add(col_idx as u16);
+                if tx >= max_x {
+                    break;
+                }
+                if let Some(dst) = parent.cell_mut((tx, target_y)) {
+                    *dst = cell.clone();
+                }
+            }
+            if let Some(dst) = parent.cell_mut((bar_x, target_y)) {
+                dst.set_char('│');
+                dst.set_style(bar_style);
+            }
+        }
+        *parent_y = parent_y.saturating_add(height).saturating_add(1);
+    }
+
     /// Render ONE top-level markdown block into a growable canvas.
     ///
     /// This is the event loop previously inlined in `render_self`, operating
@@ -1019,17 +1255,15 @@ impl MarkdownRenderable {
     /// cursor row, which includes the trailing blank row that the monolithic
     /// renderer's `End` handlers used to produce.
     ///
-    /// When `highlight_code` is false, fenced code blocks skip tree-sitter
-    /// highlighting entirely (styles never affect layout, so this keeps the
-    /// height estimator cheap).
+    /// Blockquotes recurse: each quote body renders into its own child canvas
+    /// offset past the quote bar (see [`Self::render_quote`]).
     fn render_block_events(
         content: &str,
         buf: &mut GrowBuf,
         width: u16,
         palette: &MarkdownPalette,
         table_border_color: Option<&RGBA>,
-        highlight_code: bool,
-        conceal: bool,
+        pass: &RenderPass,
     ) -> (u16, Vec<LinkRegion>) {
         let area_x = 0u16;
         let max_x = width;
@@ -1054,33 +1288,34 @@ impl MarkdownRenderable {
         options.insert(Options::ENABLE_STRIKETHROUGH);
         let parser = pulldown_cmark::Parser::new_ext(content, options);
 
-        // Collect events so a cheap pre-pass can compute per-list marker
-        // widths (OpenTUI aligns ordered markers to the widest one, e.g.
-        // " 9." / "10.").
-        let events: Vec<Event<'_>> = parser.collect();
+        // Collect events WITH source ranges so blockquotes can be rendered
+        // recursively from their raw slice (their Start range covers the
+        // whole quote, markers included).
+        let events: Vec<(Event<'_>, std::ops::Range<usize>)> = parser.into_offset_iter().collect();
         let mut list_marker_widths = compute_list_marker_widths(&events);
 
-        // List-nesting state: one frame per open list level. Mirrors
-        // OpenTUI's list layout — markers are drawn at the parent content
-        // indent and item content starts right after the (aligned) marker,
-        // so nested lists indent naturally.
+        // List-nesting state: one frame per open list level — markers are
+        // drawn at the parent content indent and item content starts right
+        // after the (aligned) marker, so nested lists indent naturally.
         let mut list_stack: Vec<ListFrame> = Vec::new();
-        // Clickable regions recorded while rendering (phase 5).
+        // Clickable link regions recorded while rendering.
         let mut links: Vec<LinkRegion> = Vec::new();
 
-        // Effective indentation is DERIVED from open containers — never
-        // stored-and-restored, which is what kept causing lost/doubled
-        // indents in combinations like quote > list > quote:
-        //     indent = 2 * open-quote-levels + top frame's content column.
-        let mut bq_depth: u16 = 0;
-
-        fn effective_indent(bq_depth: u16, stack: &[ListFrame]) -> u16 {
-            bq_depth
-                .saturating_mul(2)
-                .saturating_add(stack.last().map_or(0, |f| f.content_indent))
+        /// Effective indentation: the innermost list frame's content column.
+        /// Blockquote indentation is NOT part of this — quotes recurse into
+        /// their own canvas offset by the quote bar, so nesting accumulates
+        /// through geometry instead of state.
+        fn effective_indent(stack: &[ListFrame]) -> u16 {
+            stack.last().map_or(0, |f| f.content_indent)
         }
 
-        for event in &events {
+        // Index of the first event after a skipped blockquote subtree.
+        let mut skip_to: usize = 0;
+
+        for (idx, (event, range)) in events.iter().enumerate() {
+            if idx < skip_to {
+                continue;
+            }
             // max_y is u16::MAX here (blocks render unbounded); this only
             // guards against cursor overflow for absurdly tall documents.
             if !in_table && y >= max_y.saturating_sub(1) {
@@ -1194,18 +1429,7 @@ impl MarkdownRenderable {
                                 // derived content column.
                                 if x == area_x {
                                     y += 1;
-                                    x = area_x
-                                        .saturating_add(effective_indent(bq_depth, &list_stack));
-                                }
-                            } else if ctx.in_blockquote() {
-                                if x != area_x {
-                                    // The BlockQuote handler positioned x at
-                                    // the quote indent — keep the row.
-                                } else {
-                                    // Second+ paragraph inside blockquote:
-                                    // re-apply the quote indent.
-                                    x = area_x
-                                        .saturating_add(effective_indent(bq_depth, &list_stack));
+                                    x = area_x.saturating_add(effective_indent(&list_stack));
                                 }
                             } else if x != area_x {
                                 y += 1;
@@ -1213,16 +1437,46 @@ impl MarkdownRenderable {
                             }
                         }
                         Tag::BlockQuote(_) => {
+                            // ── Recursive blockquote ──────────────────
+                            // The quote's whole subtree is skipped in THIS
+                            // pass; its raw slice (Start range covers the
+                            // full quote, markers included) is stripped of
+                            // "> " markers and rendered recursively into a
+                            // child canvas offset by the quote bar.
+                            let mut depth = 0usize;
+                            let mut end_idx = idx;
+                            for (j, (e, _)) in events.iter().enumerate().skip(idx) {
+                                match e {
+                                    Event::Start(Tag::BlockQuote(_)) => depth += 1,
+                                    Event::End(TagEnd::BlockQuote(_)) => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            end_idx = j;
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let raw = &content[range.start..events[end_idx].1.end];
+                            skip_to = end_idx + 1;
+
                             if x != area_x {
                                 y += 1;
                             }
-                            // Each open quote level contributes one indent
-                            // step; nested quotes (and quotes inside list
-                            // items) accumulate through `bq_depth`.
-                            bq_depth = bq_depth.saturating_add(1);
-                            if y < max_y {
-                                x = area_x.saturating_add(effective_indent(bq_depth, &list_stack));
-                            }
+                            let bar_x = effective_indent(&list_stack);
+                            Self::render_quote(
+                                raw,
+                                buf,
+                                &mut y,
+                                &mut links,
+                                bar_x,
+                                max_x,
+                                max_y,
+                                palette,
+                                table_border_color,
+                                pass,
+                            );
                         }
                         Tag::CodeBlock(_) => {
                             if x != area_x {
@@ -1299,10 +1553,8 @@ impl MarkdownRenderable {
                             // mid-content: an enclosing quote's indentation
                             // leaves x exactly at our marker column, which is
                             // NOT mid-content.
-                            let marker_col =
-                                area_x.saturating_add(bq_depth.saturating_mul(2).saturating_add(
-                                    list_stack.last().map_or(0, |f| f.item_indent),
-                                ));
+                            let marker_col = area_x
+                                .saturating_add(list_stack.last().map_or(0, |f| f.item_indent));
                             if x != area_x && x != marker_col {
                                 y += 1;
                             }
@@ -1310,7 +1562,7 @@ impl MarkdownRenderable {
                             let marker_style =
                                 Style::default().fg(rgba_to_color(palette.list_marker_color()));
                             // Right-align ordered numbers to the widest one
-                            // (" 9." / "10.") like OpenTUI's padStart.
+                            // (" 9." / "10.") right-aligned to the widest one.
                             let core = if frame.ordered {
                                 let n = frame.next_num;
                                 format!("{n}.")
@@ -1338,11 +1590,11 @@ impl MarkdownRenderable {
                                 }
                                 x += gw;
                             }
-                            x = area_x.saturating_add(effective_indent(bq_depth, &list_stack));
+                            x = area_x.saturating_add(effective_indent(&list_stack));
                         }
                         // Unconcealed links render literally: "[" before the
                         // label (the label itself comes from inner events).
-                        Tag::Link { .. } if !conceal => {
+                        Tag::Link { .. } if !pass.conceal => {
                             let style =
                                 palette.style_for(Some(MarkdownElement::Link), ctx.heading_level());
                             let link_dest = ctx.link_dest();
@@ -1356,7 +1608,7 @@ impl MarkdownRenderable {
                                 max_x,
                                 max_y,
                                 style,
-                                effective_indent(bq_depth, &list_stack),
+                                effective_indent(&list_stack),
                                 link,
                                 &mut links,
                             );
@@ -1397,16 +1649,15 @@ impl MarkdownRenderable {
                             // the still-open containers.
                         }
                         TagEnd::BlockQuote(_) => {
-                            y += 1;
-                            x = area_x;
-                            bq_depth = bq_depth.saturating_sub(1);
+                            // Handled by the recursive quote renderer; the
+                            // whole subtree was skipped.
                         }
                         TagEnd::List(_) => {
                             list_stack.pop();
                         }
                         // Unconcealed links render literally: "](url)" after
                         // the label (link context is still open here).
-                        TagEnd::Link if !conceal => {
+                        TagEnd::Link if !pass.conceal => {
                             let style =
                                 palette.style_for(Some(MarkdownElement::Link), ctx.heading_level());
                             let url = ctx.link_dest().to_string();
@@ -1421,7 +1672,7 @@ impl MarkdownRenderable {
                                 max_x,
                                 max_y,
                                 style,
-                                effective_indent(bq_depth, &list_stack),
+                                effective_indent(&list_stack),
                                 link_ref,
                                 &mut links,
                             );
@@ -1457,7 +1708,7 @@ impl MarkdownRenderable {
                         // Height estimation skips tree-sitter (styles never
                         // affect layout); the label row is drawn by the
                         // CodeBlock start handler either way.
-                        let hl_lang = if highlight_code {
+                        let hl_lang = if pass.highlight_code {
                             ctx.code_block_lang()
                         } else {
                             ""
@@ -1469,33 +1720,15 @@ impl MarkdownRenderable {
                         let element = ctx.current_element();
                         let heading_level = ctx.heading_level();
                         let mut style = palette.style_for(element, heading_level);
-                        let bq_indent = effective_indent(bq_depth, &list_stack);
-                        if ctx.in_blockquote() && text.starts_with('⚠') {
-                            // Warning blockquote: apply yellow background + black text + bold
-                            // (Only for the warning, not regular blockquotes)
-                            let warning_bg = Color::Rgb(238, 241, 112);
-
-                            // Calculate box width
-                            let first_line = text.lines().next().unwrap_or("");
-                            let text_w =
-                                crate::core::lib::unicode_util::str_display_width(first_line)
-                                    as u16;
-                            let box_end = area_x
-                                .saturating_add(2) // indent
-                                .saturating_add(text_w) // text width
-                                .saturating_add(2) // padding after text
-                                .min(max_x);
-
-                            // Fill the background from left edge to past text
-                            for cx in area_x..box_end {
-                                if let Some(cell) = buf.cell_mut((cx, y)) {
-                                    cell.set_style(Style::default().bg(warning_bg));
-                                    cell.set_char(' ');
-                                }
-                            }
-
-                            style = style
-                                .fg(Color::Rgb(0, 0, 0))
+                        let bq_indent = effective_indent(&list_stack);
+                        if pass.warning {
+                            // Palette-driven warning theme: fill the row with
+                            // the warning background and force the warning
+                            // fg/bold (configurable via MarkdownPalette).
+                            let warning_bg = rgba_to_color(palette.warning_bg_color());
+                            Self::fill_row(buf, area_x, y, max_x, Style::default().bg(warning_bg));
+                            style = Style::default()
+                                .fg(rgba_to_color(palette.warning_fg_color()))
                                 .bg(warning_bg)
                                 .add_modifier(Modifier::BOLD);
                         }
@@ -1522,7 +1755,7 @@ impl MarkdownRenderable {
                         max_x,
                         max_y,
                         style,
-                        effective_indent(bq_depth, &list_stack),
+                        effective_indent(&list_stack),
                         link,
                         &mut links,
                     );
@@ -1542,7 +1775,7 @@ impl MarkdownRenderable {
                         max_x,
                         max_y,
                         style,
-                        effective_indent(bq_depth, &list_stack),
+                        effective_indent(&list_stack),
                         link,
                         &mut links,
                     );
@@ -1552,7 +1785,7 @@ impl MarkdownRenderable {
                 Event::SoftBreak | Event::HardBreak => {
                     // Continuation lines keep the active indentation
                     // (blockquote + list content column).
-                    x = area_x.saturating_add(effective_indent(bq_depth, &list_stack));
+                    x = area_x.saturating_add(effective_indent(&list_stack));
                     y += 1;
                 }
 
@@ -1613,7 +1846,7 @@ impl MarkdownRenderable {
         let code_bg = palette.code_bg_color();
         let default_fg = rgba_to_color(palette.text_color());
 
-        // Syntax highlighting strategy (phase 6):
+        // Syntax highlighting strategy:
         // - ``` (no language tag) → no highlighting, render as plain text
         // - ```lang (known/supported) → use tree-sitter highlighting
         // - ```lang (unknown/unsupported) → plain text. The old JavaScript
@@ -2160,14 +2393,19 @@ pub(crate) fn estimate_height_impl(text: &str, max_w: u16) -> u16 {
         let mut canvas = GrowBuf::new(max_w, Style::default());
         // NOTE: estimation assumes concealment on (the default). Callers that
         // set_conceal(false) change layout in ways this public API cannot see.
+        let pass = RenderPass {
+            highlight_code: false,
+            conceal: true,
+            depth: 0,
+            warning: false,
+        };
         let (height, _links) = MarkdownRenderable::render_block_events(
             source,
             &mut canvas,
             max_w,
             &palette,
             None,
-            false,
-            true,
+            &pass,
         );
         total = total.saturating_add(height);
     }

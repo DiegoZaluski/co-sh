@@ -2,7 +2,7 @@ use pulldown_cmark::{CodeBlockKind, HeadingLevel, Tag, TagEnd};
 
 /// Semantic element types that influence text styling.
 ///
-/// Mirrors `OpenTUI`'s style-groups (e.g. \`markup.heading\`, \`markup.strong\`)
+/// Style groups (e.g. \`markup.heading\`, \`markup.strong\`)
 /// so that the palette can assign distinct visual styles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkdownElement {
@@ -63,7 +63,7 @@ pub struct MarkdownContext {
     code_block_lang: String,
     in_blockquote: bool,
 
-    // ── Link tracking (phase 5) ────────────────────────────────
+    // ── Link tracking ────────────────────────────────
     /// Destination URL of the innermost open link, empty outside links.
     /// Nested links are impossible in CommonMark, so a single slot suffices.
     link_dest: String,

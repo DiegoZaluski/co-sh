@@ -7,7 +7,7 @@ use super::context::MarkdownElement;
 /// Theme-aware palette that maps semantic `MarkdownElement`s to concrete
 /// `ratatui::Style` values.
 ///
-/// Mirrors \``OpenTUI`\`'s `SyntaxStyle.getStyle("markup.*")` concept:
+/// Conceptually similar to a syntax style's per-group lookups:
 /// each markdown construct (heading, emphasis, link, etc.) gets a
 /// distinct visual treatment derived from the base text/background colors.
 #[derive(Debug, Clone)]
@@ -30,12 +30,18 @@ pub struct MarkdownPalette {
     blockquote_bg: RGBA,
     blockquote_bar: RGBA,
     list_marker: RGBA,
+
+    // ── Warning quote theme (configurable) ─────────────────────
+    /// A quote whose body starts with this marker renders with the warning
+    /// style below. Empty prefix disables the feature.
+    warning_prefix: String,
+    warning_bg: RGBA,
+    warning_fg: RGBA,
 }
 
 impl MarkdownPalette {
     /// Construct a palette derived from the given foreground (text) and
-    /// background colours, following the same tonal logic as `OpenTUI`'s
-    /// default syntax styles.
+    /// background colours.
     #[must_use]
     pub fn new(text: RGBA, background: RGBA) -> Self {
         let (tr, tg, tb, _) = text.to_ints();
@@ -131,7 +137,36 @@ impl MarkdownPalette {
             blockquote_bg,
             blockquote_bar,
             list_marker,
+            warning_prefix: "\u{26A0}".to_string(), // ⚠
+            warning_bg: RGBA::from_ints(238, 241, 112, 255),
+            warning_fg: RGBA::from_ints(0, 0, 0, 255),
         }
+    }
+
+    // ── Warning theme ──────────────────────────────────────────
+
+    /// Customize the warning-quote theme: a quote whose body starts with
+    /// `prefix` renders with `bg`/`fg` instead of the defaults (⚠ / yellow /
+    /// black). An empty prefix disables warning styling entirely.
+    pub fn set_warning_theme(&mut self, prefix: impl Into<String>, bg: RGBA, fg: RGBA) {
+        self.warning_prefix = prefix.into();
+        self.warning_bg = bg;
+        self.warning_fg = fg;
+    }
+
+    #[must_use]
+    pub fn warning_prefix(&self) -> &str {
+        &self.warning_prefix
+    }
+
+    #[must_use]
+    pub const fn warning_bg_color(&self) -> RGBA {
+        self.warning_bg
+    }
+
+    #[must_use]
+    pub const fn warning_fg_color(&self) -> RGBA {
+        self.warning_fg
     }
 
     // ── Queries ────────────────────────────────────────────────

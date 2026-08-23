@@ -4,10 +4,9 @@ use pulldown_cmark::{Event, Options, Parser, Tag};
 
 /// Number of trailing blocks kept "unstable" during incremental parsing.
 ///
-/// Mirrors OpenTUI's `parseMarkdownIncremental` (`trailingUnstable = 2`): the
-/// last blocks of a streaming message may still be incomplete (e.g. an open
-/// fenced code block), so they are re-parsed on every update even when their
-/// source prefix has not changed.
+/// The last blocks of a streaming message may still be incomplete (e.g. an
+/// open fenced code block), so they are re-parsed on every update even when
+/// their source prefix has not changed (`trailingUnstable = 2`).
 pub(crate) const TRAILING_UNSTABLE_BLOCKS: usize = 2;
 
 /// Semantic classification of a top-level block. Rendering re-parses the
@@ -35,8 +34,8 @@ pub(crate) struct BlockInfo {
 
 /// The result of parsing a markdown document into top-level blocks.
 ///
-/// Blocks are the unit of reuse for both incremental parsing (phase 1) and
-/// per-block render caching (phase 2): when content is appended during
+/// Blocks are the unit of reuse for both incremental parsing and
+/// per-block render caching: when content is appended during
 /// streaming, every block whose raw slice is unchanged keeps its cached
 /// render; only the changed tail is re-parsed/re-rendered.
 #[derive(Debug, Clone, Default)]
@@ -136,7 +135,7 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
 /// Parse `new_content`, reusing leading blocks from `prev` when their raw
 /// source is provably unchanged.
 ///
-/// Strategy (mirrors OpenTUI's `parseMarkdownIncremental`):
+/// Strategy:
 /// 1. Compute the common byte prefix between the old and new documents.
 /// 2. Walk the previous blocks and keep those that lie entirely inside the
 ///    shared prefix — their bytes cannot have changed.

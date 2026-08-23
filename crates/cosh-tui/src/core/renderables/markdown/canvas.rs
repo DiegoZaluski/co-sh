@@ -5,7 +5,7 @@ use ratatui::style::Style;
 ///
 /// The block renderer writes into a `GrowBuf` instead of the terminal
 /// `Buffer` so that a block's rendered rows can be measured (height) and
-/// cached (phase 2) independently of the viewport. `cell_mut` mirrors
+/// cached independently of the viewport. `cell_mut` mirrors
 /// `Buffer::cell_mut` semantics: out-of-bounds columns return `None`, rows
 /// grow on demand and start pre-filled with `base_style` (the area background)
 /// so that blitting a cached row reproduces exactly what a direct render
@@ -42,6 +42,12 @@ impl GrowBuf {
             self.rows.push(self.blank.clone());
         }
         Some(&mut self.rows[usize::from(y)][usize::from(x)])
+    }
+
+    /// Read-only access to the rendered rows (used by the recursive quote
+    /// renderer to blit child canvases).
+    pub(crate) fn rows(&self) -> &[Vec<Cell>] {
+        &self.rows
     }
 
     /// Consume the canvas, returning the rendered rows.
