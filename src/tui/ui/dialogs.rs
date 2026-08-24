@@ -216,6 +216,31 @@ pub enum DialogType {
         input: String,
         cursor_pos: usize,
     },
+    /// Create/edit one hook inside a single registration box (same visual
+    /// language as the API-key / server-URL inputs). Four labeled fields
+    /// share the text-input mechanics: Up/Down switch fields, Enter saves,
+    /// Esc cancels.
+    HookInput {
+        /// Lifecycle event the hook belongs to (`PreToolUse`/`PostToolUse`).
+        event: &'static str,
+        /// Index of the hook being edited, or `None` when creating one.
+        editing_index: Option<usize>,
+        name: String,
+        matcher: String,
+        command: String,
+        timeout: String,
+        /// Active field: 0 name · 1 matcher · 2 command · 3 timeout.
+        field: usize,
+        cursor_pos: usize,
+    },
+    /// Per-message action picker shown when clicking a user message in the
+    /// transcript (port of opencode's "Message Actions" dialog): Revert,
+    /// Copy, Fork. `message_id` identifies the clicked message.
+    MessageActions {
+        message_id: String,
+        /// Truncated text of the clicked message shown as context.
+        preview: String,
+    },
     Shortcuts {
         scroll: usize,
     },
@@ -459,6 +484,46 @@ impl DialogState {
 
                 DialogAction::Consumed
             }
+            DialogType::MessageActions { .. } => {
+                // Same compact geometry as the ReasoningList (3 items).
+                let max_w = 64u16.min(area.width.saturating_sub(4));
+                let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+
+                let max_visible = 3usize;
+                let dialog_h = (max_visible + 4) as u16;
+                let dialog_y = area
+                    .y
+                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
+
+                if x < dialog_x
+                    || x >= dialog_x + dialog_w
+                    || y_click < dialog_y
+                    || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+
+                let header_pad = 4;
+                let header_x = dialog_x + header_pad;
+                let header_w = dialog_w.saturating_sub(header_pad * 2);
+                let esc_label = "esc";
+                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
+                if y_click == dialog_y && x >= esc_x && x < esc_x + esc_label.len() as u16 {
+                    return DialogAction::Dismissed;
+                }
+
+                let list_top = dialog_y + 3;
+                if y_click >= list_top {
+                    let row = (y_click - list_top) as usize;
+                    if row < max_visible {
+                        instance.selected = row;
+                        return DialogAction::Confirmed;
+                    }
+                }
+
+                DialogAction::Consumed
+            }
             DialogType::ToolCallList { current: _ } => {
                 // Two-option list with long descriptions: wide enough for
                 // "inline  —  JSON written in the text, parsed locally".
@@ -514,6 +579,44 @@ impl DialogState {
                     || y_click >= dialog_y + dialog_h
                 {
                     return DialogAction::Dismissed;
+                }
+                DialogAction::Consumed
+            }
+            DialogType::HookInput {
+                name,
+                matcher,
+                command,
+                timeout,
+                field,
+                cursor_pos,
+                ..
+            } => {
+                let values = [
+                    name.as_str(),
+                    matcher.as_str(),
+                    command.as_str(),
+                    timeout.as_str(),
+                ];
+                let (dialog_x, dialog_y, dialog_w, dialog_h, ..) = hook_input_metrics(area, values);
+                let inside = x >= dialog_x
+                    && x < dialog_x + dialog_w
+                    && y_click >= dialog_y
+                    && y_click < dialog_y + dialog_h;
+                if !inside {
+                    // Click outside the registration panel → dismiss (same
+                    // rule as the other text-input dialogs).
+                    return DialogAction::Dismissed;
+                }
+                // Inside: labels focus the field, value rows also move the
+                // insertion point; padding just consumes the click.
+                if let Some((clicked_field, char_idx)) =
+                    hook_input_hit_field(area, values, x, y_click)
+                {
+                    *field = clicked_field;
+                    *cursor_pos = match char_idx {
+                        Some(ci) => byte_at_char(values[clicked_field], ci),
+                        None => values[clicked_field].len(),
+                    };
                 }
                 DialogAction::Consumed
             }
@@ -1269,6 +1372,34 @@ impl DialogState {
                     *cursor_pos,
                 );
             }
+            DialogType::HookInput {
+                event,
+                name,
+                matcher,
+                command,
+                timeout,
+                field,
+                cursor_pos,
+                editing_index,
+            } => {
+                let title = if editing_index.is_some() {
+                    "Edit Hook"
+                } else {
+                    "Add Hook"
+                };
+                render_hook_form_dialog(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    title,
+                    event,
+                    [name, matcher, command, timeout],
+                    *field,
+                    *cursor_pos,
+                );
+            }
             DialogType::ModelList {
                 models,
                 current,
@@ -1800,6 +1931,128 @@ impl DialogState {
                     );
                 }
             }
+            DialogType::MessageActions {
+                message_id: _,
+                preview,
+            } => {
+                let selection = instance.selected.min(2);
+                let max_w = 64u16.min(area.width.saturating_sub(4));
+                let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+
+                let items = 3usize;
+                let dialog_h = (items + 4) as u16;
+                let dialog_y = area
+                    .y
+                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
+                let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+                // Solid fill in the same color as the history sidebar panel —
+                // a bare floating surface with no border characters, like the
+                // rename dialog.
+                let bg_color = rgba_color(theme.background_panel);
+                for y in dialog_area.y..dialog_area.bottom() {
+                    for x in dialog_area.x..dialog_area.right() {
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(
+                                Style::default()
+                                    .bg(bg_color)
+                                    .remove_modifier(Modifier::all()),
+                            );
+                            cell.set_diff_option(CellDiffOption::None);
+                        }
+                    }
+                }
+
+                let header_pad = 4;
+                let header_x = dialog_x + header_pad;
+                let header_w = dialog_w.saturating_sub(header_pad * 2);
+
+                // Line 0: bold title + "esc" hint (right-aligned, muted).
+                let title_style = Style::default()
+                    .fg(rgba_color(theme.text))
+                    .add_modifier(Modifier::BOLD);
+                draw_text_line(
+                    buf,
+                    "Message Actions",
+                    header_x,
+                    dialog_y,
+                    header_w,
+                    title_style,
+                );
+                let esc_label = "esc";
+                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
+                draw_text_line(
+                    buf,
+                    esc_label,
+                    esc_x,
+                    dialog_y,
+                    header_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                // Line 1: clicked message preview (muted, truncated).
+                draw_text_line(
+                    buf,
+                    preview,
+                    header_x,
+                    dialog_y + 1,
+                    header_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                // Line 2: gap.
+
+                // Lines 3+: the three actions. Selected row swaps to the
+                // element background (opencode highlights via background
+                // color, not borders).
+                let list_top = dialog_y + 3;
+                let list_pad = 1;
+                let list_x = dialog_x + list_pad;
+                let list_w = dialog_w.saturating_sub(list_pad * 2);
+                let bg_element = rgba_color(theme.background_element);
+                let options = [
+                    ("Revert", "Restore prompt, drop later messages"),
+                    ("Copy", "Copy message text to clipboard"),
+                    ("Fork", "Branch a new session from here"),
+                ];
+
+                for (idx, (name, desc)) in options.iter().enumerate() {
+                    let y = list_top + idx as u16;
+                    let is_selected = idx == selection;
+                    let row_bg = if is_selected { bg_element } else { bg_color };
+
+                    for cx in list_x..list_x + list_w {
+                        if let Some(cell) = buf.cell_mut((cx, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(row_bg));
+                        }
+                    }
+
+                    let name_style = if is_selected {
+                        Style::default()
+                            .fg(rgba_color(theme.primary))
+                            .add_modifier(Modifier::BOLD)
+                            .bg(row_bg)
+                    } else {
+                        Style::default().fg(rgba_color(theme.text)).bg(row_bg)
+                    };
+                    draw_text_line(buf, name, list_x + 1, y, list_w - 1, name_style);
+
+                    let desc_x = list_x + 12;
+                    if desc_x < list_x + list_w {
+                        draw_text_line(
+                            buf,
+                            desc,
+                            desc_x,
+                            y,
+                            list_x + list_w - desc_x,
+                            Style::default().fg(rgba_color(theme.text_muted)).bg(row_bg),
+                        );
+                    }
+                }
+            }
             DialogType::ToolCallList { current } => {
                 let selection = if instance.selected >= 2 {
                     1
@@ -2126,5 +2379,449 @@ fn render_text_input_dialog(
                 cell.set_style(Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_element));
             }
         }
+    }
+}
+// ── Hook registration panel ─────────────────────────────────────────────
+
+const HOOK_FIELDS: usize = 4;
+
+fn hook_field_label(field: usize) -> &'static str {
+    match field {
+        0 => "Name",
+        1 => "Matcher",
+        2 => "Command",
+        _ => "Timeout",
+    }
+}
+
+fn hook_field_hint(field: usize) -> &'static str {
+    match field {
+        0 => "shown in this list · optional",
+        1 => "regex on tool name · empty = all tools",
+        2 => "shell command run for each matched tool call",
+        _ => "seconds before it is killed · empty = 30",
+    }
+}
+
+/// Panel width — matches the other text-input dialogs.
+pub(crate) fn hook_input_dialog_w(area: Rect) -> u16 {
+    56u16.min(area.width.saturating_sub(8)).max(30)
+}
+
+pub(crate) const fn hook_input_content_w(panel_w: u16) -> u16 {
+    panel_w.saturating_sub(4)
+}
+
+/// Rows a value occupies when hard-wrapped at `cols` chars. Char-based on
+/// purpose: identical to `word_ops::move_visual_line`, so cursor math and
+/// rendering can never disagree.
+fn hook_field_row_count(value: &str, cols: usize) -> usize {
+    value.chars().count().div_ceil(cols.max(1)).max(1)
+}
+
+/// Per-field vertical geometry, offsets relative to the panel top.
+pub(crate) struct HookFieldGeometry {
+    /// Row of the highlighted label.
+    pub(crate) label_y: u16,
+    /// First row of the (possibly wrapped) value.
+    pub(crate) value_y: u16,
+    /// How many rows the wrapped value occupies.
+    pub(crate) rows: usize,
+}
+
+pub(crate) fn hook_field_geometries(
+    dialog_y: u16,
+    fields: [&str; HOOK_FIELDS],
+    cols: usize,
+) -> Vec<HookFieldGeometry> {
+    let mut out = Vec::with_capacity(HOOK_FIELDS);
+    let mut y = dialog_y + 4; // top pad · title · subtitle · gap
+    for value in fields {
+        let rows = hook_field_row_count(value, cols);
+        // label · margin · value… · margin (before the next label)
+        out.push(HookFieldGeometry {
+            label_y: y,
+            value_y: y + 2,
+            rows,
+        });
+        y += 3 + rows as u16;
+    }
+    out
+}
+
+/// Shared geometry for the hook registration panel:
+/// `(x, y, w, h, content_x, content_w)`. Mirrors [`render_hook_form_dialog`].
+pub(crate) fn hook_input_metrics(
+    area: Rect,
+    fields: [&str; HOOK_FIELDS],
+) -> (u16, u16, u16, u16, u16, usize) {
+    let w = hook_input_dialog_w(area);
+    let cols = hook_input_content_w(w) as usize;
+    let field_rows: u16 = fields
+        .iter()
+        .map(|v| 3 + hook_field_row_count(v, cols) as u16) // label + margins + values
+        .sum();
+    // top pad · title · subtitle · gap · fields · bottom pad (footer removed)
+    let h = 5 + field_rows;
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    (x, y, w, h, x + 2, cols)
+}
+
+/// WCAG relative luminance — decides which text family stays readable.
+fn relative_luminance(c: RGBA) -> f32 {
+    let channel = |v: u8| {
+        let s = f32::from(v) / 255.0;
+        if s <= 0.03928 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let (r, g, b, _) = c.to_ints();
+    0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+}
+
+/// Marker text color adapted to the THEME, not just the highlight: dark
+/// themes (cosh) get near-white, light themes (sakura) near-black, so the
+/// label keeps contrast both against the primary swatch and the panel.
+fn hook_marker_fg(theme: &Theme) -> Color {
+    if relative_luminance(theme.background) < 0.5 {
+        Color::Rgb(245, 245, 245)
+    } else {
+        Color::Rgb(30, 30, 30)
+    }
+}
+
+/// Map a click position to `(field, char index)` — labels focus the field,
+/// value rows also position the cursor. `None` when the click lands on
+/// padding inside the panel; the caller decides outside-panel dismissal.
+fn hook_input_hit_field(
+    area: Rect,
+    fields: [&str; HOOK_FIELDS],
+    x: u16,
+    y: u16,
+) -> Option<(usize, Option<usize>)> {
+    let (dialog_x, dialog_y, dialog_w, dialog_h, content_x, cols) =
+        hook_input_metrics(area, fields);
+    let inside_panel =
+        x >= dialog_x && x < dialog_x + dialog_w && y >= dialog_y && y < dialog_y + dialog_h;
+    if !inside_panel {
+        return None;
+    }
+    for (field, g) in hook_field_geometries(dialog_y, fields, cols)
+        .into_iter()
+        .enumerate()
+    {
+        if y == g.label_y {
+            return Some((field, None));
+        }
+        if y >= g.value_y && y < g.value_y + g.rows as u16 {
+            let line = (y - g.value_y) as usize;
+            let col = (x.saturating_sub(content_x)) as usize;
+            let char_idx = (line * cols + col).min(fields[field].chars().count());
+            return Some((field, Some(char_idx)));
+        }
+    }
+    None
+}
+
+/// Byte offset of the `char_idx`-th character, clamped to the end.
+fn byte_at_char(value: &str, char_idx: usize) -> usize {
+    value
+        .char_indices()
+        .nth(char_idx)
+        .map_or(value.len(), |(i, _)| i)
+}
+
+/// Registration panel for creating/editing a PreToolUse hook — borderless,
+/// filled with the sidebar's `background_panel` like the rename prompt.
+/// Every field label wears a primary-color marker highlight (text tone
+/// adapts to the theme), values keep breathing margins around them, wrap
+/// onto extra rows instead of running off-panel, and clicking a label or
+/// value focuses that field.
+#[allow(clippy::too_many_arguments)]
+fn render_hook_form_dialog(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    now: SystemTime,
+    cursor: &Cursor,
+    title: &str,
+    event: &'static str,
+    fields: [&str; HOOK_FIELDS],
+    active_field: usize,
+    cursor_pos: usize,
+) {
+    let (dialog_x, dialog_y, dialog_w, dialog_h, content_x, cols) =
+        hook_input_metrics(area, fields);
+    let content_w = cols as u16;
+    let geoms = hook_field_geometries(dialog_y, fields, cols);
+
+    // Solid background panel — same color as the history sidebar, a bare
+    // floating surface with no border characters (rename-prompt style).
+    let bg_color = rgba_color(theme.background_panel);
+    for y in dialog_y..dialog_y + dialog_h {
+        for x in dialog_x..dialog_x + dialog_w {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(' ');
+                cell.set_style(
+                    Style::default()
+                        .bg(bg_color)
+                        .remove_modifier(Modifier::all()),
+                );
+                cell.set_diff_option(CellDiffOption::None);
+            }
+        }
+    }
+
+    // Header row: bold title left, muted "esc" right (rename-prompt style).
+    let header_y = dialog_y + 1;
+    draw_text_line(
+        buf,
+        title,
+        content_x,
+        header_y,
+        content_w,
+        Style::default()
+            .fg(rgba_color(theme.text))
+            .add_modifier(Modifier::BOLD),
+    );
+    let esc_hint = "esc";
+    draw_text_line(
+        buf,
+        esc_hint,
+        dialog_x + dialog_w - 2 - esc_hint.len() as u16,
+        header_y,
+        esc_hint.len() as u16,
+        Style::default().fg(rgba_color(theme.text_muted)),
+    );
+
+    // Subtitle row (muted).
+    draw_text_line(
+        buf,
+        &format!(
+            "{event} · runs {} each tool call",
+            if event == "PostToolUse" { "after" } else { "before" }
+        ),
+        content_x,
+        dialog_y + 2,
+        content_w,
+        Style::default().fg(rgba_color(theme.text_muted)),
+    );
+
+    // Field blocks: marker-highlighted label, margin, wrapped value, margin.
+    let cursor_state = cursor.current_state(now);
+    let marker_fg = hook_marker_fg(theme);
+    for (field, value) in fields.iter().enumerate() {
+        let g = &geoms[field];
+        let focused = field == active_field;
+        let label = hook_field_label(field);
+
+        // Marker-highlighted label: " Name " drawn on the theme's primary —
+        // focused fields go bold so the active one stands out.
+        let marked = format!(" {label} ");
+        let mut mark_style = Style::default().fg(marker_fg).bg(rgba_color(theme.primary));
+        if focused {
+            mark_style = mark_style.add_modifier(Modifier::BOLD);
+        }
+        for (i, ch) in marked.chars().enumerate() {
+            let cx = content_x + i as u16;
+            if cx >= content_x + content_w {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((cx, g.label_y)) {
+                cell.set_char(ch);
+                cell.set_style(mark_style);
+            }
+        }
+        let hint_x = content_x + marked.chars().count() as u16 + 1;
+        draw_text_line(
+            buf,
+            hook_field_hint(field),
+            hint_x,
+            g.label_y,
+            content_w.saturating_sub(marked.chars().count() as u16 + 1),
+            Style::default().fg(rgba_color(theme.text_muted)),
+        );
+
+        // Wrapped value rows with the blinking block cursor on the line that
+        // holds the insertion point.
+        let char_before = value[..cursor_pos.min(value.len())].chars().count();
+        let total_chars = value.chars().count();
+        for r in 0..g.rows {
+            let start_char = r * cols;
+            let end_char = ((r + 1) * cols).min(total_chars);
+            let row_y = g.value_y + r as u16;
+            let line: String = value
+                .chars()
+                .skip(start_char)
+                .take(end_char - start_char)
+                .collect();
+            for (i, ch) in line.chars().enumerate() {
+                let cx = content_x + i as u16;
+                if cx >= content_x + content_w {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((cx, row_y)) {
+                    cell.set_char(ch);
+                    cell.set_style(Style::default().fg(rgba_color(theme.text)).bg(bg_color));
+                }
+            }
+            if focused && char_before >= start_char && char_before <= end_char {
+                let col = char_before - start_char;
+                let cx = content_x + col.min(cols.saturating_sub(1)) as u16;
+                if cx < content_x + content_w
+                    && let Some(cell) = buf.cell_mut((cx, row_y))
+                {
+                    match cursor_state {
+                        CursorState::On => {
+                            cell.set_char('\u{2588}');
+                            cell.set_style(
+                                Style::default().fg(rgba_color(theme.primary)).bg(bg_color),
+                            );
+                        }
+                        CursorState::Off | CursorState::Blur => {
+                            cell.set_char('\u{2592}');
+                            cell.set_style(
+                                Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_color),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod hook_panel_tests {
+    use super::*;
+    use crate::theme::ThemeRegistry;
+    use cosh_tui::core::types::{MouseButton, MouseEventType, MouseModifiers};
+    #[test]
+    fn marker_fg_adapts_to_theme_background() {
+        let registry = ThemeRegistry::new();
+        let cosh = registry
+            .themes
+            .iter()
+            .find(|t| t.name == "cosh")
+            .expect("cosh theme")
+            .theme
+            .clone();
+        let sakura = registry
+            .themes
+            .iter()
+            .find(|t| t.name == "sakura")
+            .expect("sakura theme")
+            .theme
+            .clone();
+
+        // Dark background → light marker text; light background → dark.
+        assert!(
+            relative_luminance(cosh.background) < 0.5,
+            "cosh is a dark theme"
+        );
+        assert!(matches!(hook_marker_fg(&cosh), Color::Rgb(245, 245, 245)));
+        assert!(
+            relative_luminance(sakura.background) >= 0.5,
+            "sakura is a light theme"
+        );
+        assert!(matches!(hook_marker_fg(&sakura), Color::Rgb(30, 30, 30)));
+    }
+
+    #[test]
+    fn hit_field_maps_labels_and_value_rows() {
+        let area = Rect::new(0, 0, 80, 30);
+        let values = ["block rm", "", "exit 2", ""];
+        let (dialog_x, dialog_y, _, _, content_x, cols) = hook_input_metrics(area, values);
+        let geoms = hook_field_geometries(dialog_y, values, cols);
+
+        // Label row focuses the field without moving the cursor.
+        assert_eq!(
+            hook_input_hit_field(area, values, content_x + 2, geoms[0].label_y),
+            Some((0, None))
+        );
+        // Value row positions the cursor at the clicked character.
+        let col_of_x = 3usize; // third char of "exit 2"
+        assert_eq!(
+            hook_input_hit_field(area, values, content_x + col_of_x as u16, geoms[2].value_y),
+            Some((2, Some(col_of_x)))
+        );
+        // Padding inside the panel is not a field.
+        assert_eq!(
+            hook_input_hit_field(area, values, dialog_x + 1, dialog_y + 1),
+            None
+        );
+    }
+
+    #[test]
+    fn dialog_click_focuses_field_and_moves_cursor() {
+        let mut state = DialogState::new();
+        state.show(DialogType::HookInput {
+            event: crate::routes::settings::PRE_TOOL_USE_EVENT,
+            editing_index: None,
+            name: String::new(),
+            matcher: String::new(),
+            command: "exit 2".into(),
+            timeout: String::new(),
+            field: 0,
+            cursor_pos: 0,
+        });
+        let area = Rect::new(0, 0, 80, 30);
+        let values = ["", "", "exit 2", ""];
+        let (dialog_x, dialog_y, _, _, content_x, cols) = hook_input_metrics(area, values);
+
+        // Click the Command value row at the 'i' column.
+        let cmd_geom_row = hook_field_geometries(dialog_y, values, cols)[2].value_y;
+        let click = MouseEvent::new(
+            MouseEventType::Down,
+            MouseButton::Left,
+            content_x + 2,
+            cmd_geom_row,
+            MouseModifiers::none(),
+        );
+        let theme = ThemeRegistry::new().default_theme().clone();
+        assert_eq!(
+            state.handle_mouse(&click, area, &theme),
+            DialogAction::Consumed
+        );
+        assert!(
+            matches!(
+                state.current().map(|d| &d.dialog_type),
+                Some(DialogType::HookInput { field, cursor_pos, .. })
+                    if *field == 2 && *cursor_pos == 2
+            ),
+            "click must focus Command and park the cursor on 'i'"
+        );
+
+        // Outside the panel dismisses.
+        let outside = MouseEvent::new(
+            MouseEventType::Down,
+            MouseButton::Left,
+            1,
+            1,
+            MouseModifiers::none(),
+        );
+        assert_eq!(
+            state.handle_mouse(&outside, area, &theme),
+            DialogAction::Dismissed
+        );
+    }
+
+    #[test]
+    fn margins_and_wrap_grow_the_panel() {
+        let area = Rect::new(0, 0, 80, 60);
+        let single = ["", "", "", ""];
+        let (_, _, _, h_single, _, cols) = hook_input_metrics(area, single);
+
+        // Every field carries label + top/bottom margins.
+        assert_eq!(h_single as usize, 5 + 4 * (3 + 1));
+
+        // A value one char past `cols` adds exactly one wrapped row (+margin).
+        let long = format!("a{}", "b".repeat(cols));
+        let wrapped = ["", "", long.as_str(), ""];
+        let (_, _, _, h_wrapped, _, _) = hook_input_metrics(area, wrapped);
+        assert_eq!(h_wrapped, h_single + 1);
     }
 }

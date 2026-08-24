@@ -130,14 +130,51 @@ pub struct HookEntry {
     pub timeout: Option<u64>,
 }
 
-/// PreToolUse hooks configuration.
+/// Hook lifecycle configuration: one toggle + entry list per event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct Hooks {
+    /// Switch for PreToolUse hooks (on unless the user turns it off).
+    ///
+    /// `alias = "enabled"` keeps pre-split setups loading: their single
+    /// legacy master switch now drives PreToolUse only. Without the alias,
+    /// the old `"enabled": <bool>` key would fall into the flattened events
+    /// map and reject the whole document.
+    #[serde(default = "default_true", alias = "enabled")]
+    pub pre_tool_use_enabled: bool,
+    /// Switch for PostToolUse hooks (on unless the user turns it off).
+    #[serde(default = "default_true")]
+    pub post_tool_use_enabled: bool,
     /// Hook configs keyed by event name (e.g. "PreToolUse").
     #[serde(flatten)]
     pub events: std::collections::HashMap<String, Vec<HookEntry>>,
+}
+
+impl Default for Hooks {
+    fn default() -> Self {
+        Self {
+            pre_tool_use_enabled: true,
+            post_tool_use_enabled: true,
+            events: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl Hooks {
+    /// Whether the given event's hooks are switched on. Unknown events
+    /// default to on so new sections work without schema changes.
+    pub fn is_event_enabled(&self, event: &str) -> bool {
+        match event {
+            "PreToolUse" => self.pre_tool_use_enabled,
+            "PostToolUse" => self.post_tool_use_enabled,
+            _ => true,
+        }
+    }
+}
+
+/// Serde default for boolean switches that start enabled.
+fn default_true() -> bool {
+    true
 }
 
 // Persistence
@@ -244,5 +281,32 @@ mod tests {
             loaded.local_base_url("llamacpp"),
             Some("http://127.0.0.1:9999")
         );
+    }
+
+    #[test]
+    fn hooks_switches_default_on_and_roundtrip_independently() {
+        // Missing fields → both events enabled (preserves old configs that
+        // only carried the single legacy `enabled` switch).
+        let parsed: Setup = serde_json::from_str(r#"{"hooks": {}}"#).unwrap();
+        assert!(parsed.hooks.pre_tool_use_enabled);
+        assert!(parsed.hooks.post_tool_use_enabled);
+
+        let mut setup = Setup::default();
+        setup.hooks.post_tool_use_enabled = false;
+        setup.hooks.events.insert(
+            "PreToolUse".to_string(),
+            vec![HookEntry {
+                name: "block rm".to_string(),
+                matcher: "bash_run".to_string(),
+                command: "exit 2".to_string(),
+                timeout: Some(5),
+            }],
+        );
+        let json = serde_json::to_string(&setup).unwrap();
+        let loaded: Setup = serde_json::from_str(&json).unwrap();
+        assert!(loaded.hooks.pre_tool_use_enabled);
+        assert!(!loaded.hooks.post_tool_use_enabled);
+        assert_eq!(loaded.hooks.events["PreToolUse"].len(), 1);
+        assert_eq!(loaded.hooks.events["PreToolUse"][0].command, "exit 2");
     }
 }

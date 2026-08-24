@@ -3,7 +3,7 @@
 //! Covers: receiving all SSE chunks, system prompt inclusion in the request body,
 //! HTTP error propagation before stream start, and stream termination without
 //! a `[DONE]` signal.
-use super::super::{StreamChunk, user_message};
+use super::super::{Connector, StreamChunk, user_message};
 use super::common::{connector, deepseek_connector, mock_server};
 use tokio_stream::StreamExt;
 
@@ -254,6 +254,110 @@ data: [DONE]\n\n";
     let body = captured.lock().unwrap().take().unwrap();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(json.get("thinking").is_none(), "no effort → no toggle");
+}
+
+/// z.ai (GLM hybrid-thinking) uses the same `thinking` wire shape as DeepSeek
+/// and likewise ignores `reasoning_effort` without it.
+#[tokio::test]
+async fn zai_effort_sends_thinking_toggle() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = Connector::new("zai")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}/v1"))
+        .with_api_key("sk-zai-test")
+        .with_reasoning_effort("high");
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["thinking"]["type"], "enabled",
+        "zai must carry the thinking toggle, got: {body}"
+    );
+    assert!(json.get("chat_template_kwargs").is_none());
+}
+
+/// NVIDIA NIM's hybrid-thinking models (DeepSeek/Qwen on
+/// integrate.api.nvidia.com) ignore `reasoning_effort` unless thinking mode
+/// is opted in via `chat_template_kwargs`.
+#[tokio::test]
+async fn nvidia_effort_sends_chat_template_thinking() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = Connector::new("nvidia")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}/v1"))
+        .with_api_key("nvapi-test")
+        .with_reasoning_effort("high");
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["chat_template_kwargs"]["thinking"], true,
+        "nvidia must opt into NIM thinking mode, got: {body}"
+    );
+    assert!(json.get("thinking").is_none(), "nvidia must not get the deepseek toggle");
+}
+
+/// The NIM opt-in must never leak to the deepseek provider.
+#[tokio::test]
+async fn deepseek_omits_chat_template_kwargs() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = deepseek_connector(port).with_reasoning_effort("high");
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json.get("chat_template_kwargs").is_none());
+}
+
+/// No effort → no NIM opt-in either.
+#[tokio::test]
+async fn nvidia_omits_opt_in_without_effort() {    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = Connector::new("nvidia")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}/v1"))
+        .with_api_key("nvapi-test");
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json.get("chat_template_kwargs").is_none(),
+        "no effort → no opt-in"
+    );
 }
 
 /// Other OpenAI-compatible providers must NEVER receive the DeepSeek-only

@@ -17,15 +17,22 @@ use super::super::params::{
     ChatMessage as ApiChatMessage, system_message, user_message as pub_user_message,
 };
 
-/// DeepSeek's thinking-mode toggle — `thinking: {type: "enabled"}`. Sent ONLY
-/// for the DeepSeek provider alongside a reasoning effort: without the toggle,
-/// several OpenAI-compatible DeepSeek deployments ignore `reasoning_effort`
-/// entirely and the model never enters thinking mode. Other providers must
-/// never receive it (OpenAI rejects unknown top-level fields with 400).
+/// DeepSeek/GLM-style thinking-mode toggle — `thinking: {type: "enabled"}`.
+/// Sent ONLY for providers whose APIs use this exact wire shape (deepseek,
+/// zai) alongside a reasoning effort: without the toggle, such deployments
+/// ignore `reasoning_effort` entirely and the model never enters thinking
+/// mode. Other providers must never receive it (OpenAI rejects unknown
+/// top-level fields with 400).
 #[derive(serde::Serialize)]
 struct ThinkingToggle {
     #[serde(rename = "type")]
     kind: String,
+}
+
+/// NVIDIA NIM's thinking-mode opt-in body (`chat_template_kwargs`).
+#[derive(serde::Serialize)]
+struct ChatTemplateKwargs {
+    thinking: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -62,6 +69,13 @@ struct ChatRequest {
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingToggle>,
+    /// NVIDIA NIM hybrid-thinking opt-in — `chat_template_kwargs:
+    /// {"thinking": true}`. NIM ignores `reasoning_effort` for its
+    /// hybrid-thinking models (DeepSeek, Qwen, …) unless this is present;
+    /// sent ONLY for the nvidia provider for the same unknown-field reason
+    /// as `thinking` above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplateKwargs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     user: Option<String>,
 }
@@ -502,13 +516,24 @@ fn build_chat_request(
     stream: bool,
     provider: &str,
 ) -> ChatRequest {
-    // DeepSeek's thinking mode needs the explicit `thinking` toggle next to
-    // `reasoning_effort` — scoped to the DeepSeek provider so no other
-    // OpenAI-compatible backend ever receives the non-standard field.
-    let thinking =
-        (provider == "deepseek" && params.reasoning_effort.is_some()).then(|| ThinkingToggle {
+    // Providers whose hybrid-thinking deployments ignore `reasoning_effort`
+    // without an explicit toggle — scoped so no other OpenAI-compatible
+    // backend ever receives the non-standard field.
+    let thinking = match provider {
+        "deepseek" | "zai" if params.reasoning_effort.is_some() => Some(ThinkingToggle {
             kind: "enabled".to_string(),
-        });
+        }),
+        _ => None,
+    };
+    // NVIDIA NIM needs a different opt-in shape for its hybrid-thinking
+    // models (DeepSeek/Qwen on integrate.api.nvidia.com).
+    // NVIDIA NIM needs a different opt-in shape for its hybrid-thinking
+    // models (DeepSeek/Qwen on integrate.api.nvidia.com). NOTE: like the
+    // DeepSeek toggle above, this keys off the provider name — a generic
+    // openai connector pointed at a NIM base URL will not receive it.
+    let chat_template_kwargs = (provider == "nvidia"
+        && params.reasoning_effort.is_some())
+        .then_some(ChatTemplateKwargs { thinking: true });
     // In inline mode the request must NOT carry the native `tools` array:
     // the model is instructed to write tool calls as JSON into its text
     // response, and the harness parses them. Without `tools` the API can
@@ -541,6 +566,7 @@ fn build_chat_request(
         },
         reasoning_effort: params.reasoning_effort.clone(),
         thinking,
+        chat_template_kwargs,
         user: params.user.clone(),
     }
 }

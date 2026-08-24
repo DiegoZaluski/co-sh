@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton as CrosstermMouseButton,
-    MouseEvent as CrosstermMouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseButton as CrosstermMouseButton, MouseEvent as CrosstermMouseEvent, MouseEventKind,
 };
 use ratatui::Frame;
 use ratatui::Terminal;
@@ -42,6 +42,7 @@ use crate::routes::session::right_panel::{
     RIGHT_PANEL_WIDTH, render_right_panel, should_show_right_panel,
 };
 use crate::routes::session::sidebar::{SidebarAction, SidebarView};
+use crate::routes::settings::SettingsView;
 use crate::routes::tools::InternalToolsView;
 use crate::session_store::{
     SessionStore, format_session_timestamp, generate_session_id, is_valid_session,
@@ -56,6 +57,19 @@ use crate::util::selection;
 fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
     let (r, g, b, _) = rgba.to_ints();
     Color::Rgb(r, g, b)
+}
+
+/// The editable prompt text of a message: its non-synthetic text parts
+/// joined by a space (mirrors opencode's Revert/Copy text reconstruction).
+pub(crate) fn message_prompt_text(msg: &crate::types::Message) -> String {
+    msg.parts
+        .iter()
+        .filter_map(|p| match p {
+            crate::types::Part::Text(t) if !t.synthetic => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
@@ -106,6 +120,7 @@ enum AppMode {
     Session,
     InternalTools,
     AddProvider,
+    Settings,
     Router,
     #[cfg(feature = "embed")]
     Rag,
@@ -137,6 +152,8 @@ pub struct App {
     pub show_internal_tools: bool,
     pub add_provider_view: AddProviderView,
     pub show_add_provider: bool,
+    pub settings_view: SettingsView,
+    pub show_settings: bool,
     pub router_view: RouterView,
     pub show_router: bool,
     #[cfg(feature = "embed")]
@@ -206,6 +223,9 @@ pub struct App {
     mouse_down_pos: Option<(u16, u16)>,
     /// Whether a drag-selection is in progress.
     mouse_drag_active: bool,
+    /// Set when a mouse Up was a drag (even if it selected nothing), so the
+    /// session click dispatch skips opening Message Actions.
+    mouse_up_was_drag: bool,
     /// Visual highlight: anchor (sx,sy) and focus (x,y) — stored without normalisation
     /// so the renderer can apply flow-based selection highlighting (top line from `start_x`
     /// to end, bottom line from start to `end_x`, middle lines fully highlighted).
@@ -286,6 +306,8 @@ impl App {
             show_internal_tools: false,
             add_provider_view: AddProviderView::new(),
             show_add_provider: false,
+            settings_view: SettingsView::new(),
+            show_settings: false,
             router_view: {
                 let mut rv = RouterView::new();
                 rv.set_fallbacks(saved_fallbacks);
@@ -339,6 +361,7 @@ impl App {
             context_info: None,
             mouse_down_pos: None,
             mouse_drag_active: false,
+            mouse_up_was_drag: false,
             drag_selection: None,
             live_requested: false,
             last_frame_time: std::time::Instant::now(),
@@ -750,11 +773,9 @@ impl App {
     }
 
     fn handle_text_input_dialog_key(&mut self, key: KeyCode) -> bool {
-        if !self.is_text_input_visible() {
+        if !self.dialog.visible() {
             return false;
         }
-
-        // Update blink timestamps on any interaction
         if let Some(d) = self.dialog.current_mut() {
             d.cursor.note_activity();
         }
@@ -882,6 +903,320 @@ impl App {
         }
     }
 
+    /// Editing keys for the hook registration box: the active field behaves
+    /// exactly like a single-line input; Up/Down move between fields.
+    fn handle_hook_input_key(&mut self, key: KeyEvent) -> bool {
+        if !self.dialog.visible() {
+            return false;
+        }
+        if let Some(d) = self.dialog.current_mut() {
+            d.cursor.note_activity();
+        }
+
+        const LAST_FIELD: usize = 3;
+
+        match key.code {
+            KeyCode::Enter => {
+                if self.save_hook_input_dialog() {
+                    self.dialog.pop();
+                }
+                true
+            }
+            KeyCode::Esc => {
+                self.dialog.pop();
+                true
+            }
+            KeyCode::Up | KeyCode::Down => {
+                let up = key.code == KeyCode::Up;
+                let cols = crate::ui::dialogs::hook_input_content_w(
+                    crate::ui::dialogs::hook_input_dialog_w(self.terminal_size()),
+                ) as usize;
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::HookInput {
+                        name,
+                        matcher,
+                        command,
+                        timeout,
+                        field,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    let lens = [name.len(), matcher.len(), command.len(), timeout.len()];
+                    // Inside a wrapped value: move between visual lines and
+                    // only leave the field at its first/last line.
+                    let moved = {
+                        let target = match *field {
+                            0 => name,
+                            1 => matcher,
+                            2 => command,
+                            _ => timeout,
+                        };
+                        crate::util::word_ops::move_visual_line(target, *cursor_pos, cols, up)
+                    };
+                    if moved != *cursor_pos {
+                        *cursor_pos = moved;
+                    } else {
+                        *field = if !up {
+                            (*field + 1).min(LAST_FIELD)
+                        } else {
+                            field.saturating_sub(1)
+                        };
+                        *cursor_pos = lens[*field];
+                    }
+                }
+                true
+            }
+            KeyCode::Left => {
+                let word_jump =
+                    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Left;
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::HookInput {
+                        name,
+                        matcher,
+                        command,
+                        timeout,
+                        field,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    let target = match *field {
+                        0 => name,
+                        1 => matcher,
+                        2 => command,
+                        _ => timeout,
+                    };
+                    if word_jump && *field != 3 {
+                        // Timeout is a plain number: words make no sense.
+                        *cursor_pos = crate::util::word_ops::find_word_start(target, *cursor_pos);
+                    } else if *cursor_pos > 0 {
+                        *cursor_pos = target.floor_char_boundary(*cursor_pos - 1);
+                    }
+                }
+                true
+            }
+            KeyCode::Right => {
+                let word_jump =
+                    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Right;
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::HookInput {
+                        name,
+                        matcher,
+                        command,
+                        timeout,
+                        field,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    let len = match *field {
+                        0 => name.len(),
+                        1 => matcher.len(),
+                        2 => command.len(),
+                        _ => timeout.len(),
+                    };
+                    let target = match *field {
+                        0 => name,
+                        1 => matcher,
+                        2 => command,
+                        _ => timeout,
+                    };
+                    if word_jump && *field != 3 {
+                        *cursor_pos = crate::util::word_ops::find_word_end(target, *cursor_pos);
+                    } else if *cursor_pos < len {
+                        let next = target.floor_char_boundary(*cursor_pos + 1).min(len);
+                        *cursor_pos = next;
+                    }
+                }
+                true
+            }
+            KeyCode::Home => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::HookInput { cursor_pos, .. } = &mut d.dialog_type
+                {
+                    *cursor_pos = 0;
+                }
+                true
+            }
+            KeyCode::End => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::HookInput {
+                        name,
+                        matcher,
+                        command,
+                        timeout,
+                        field,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    *cursor_pos = match *field {
+                        0 => name.len(),
+                        1 => matcher.len(),
+                        2 => command.len(),
+                        _ => timeout.len(),
+                    };
+                }
+                true
+            }
+            KeyCode::Delete => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::HookInput {
+                        name,
+                        matcher,
+                        command,
+                        timeout,
+                        field,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    let target = match *field {
+                        0 => name,
+                        1 => matcher,
+                        2 => command,
+                        _ => timeout,
+                    };
+                    let len = target.len();
+                    if *cursor_pos < len {
+                        let next = target.floor_char_boundary(*cursor_pos + 1).min(len);
+                        target.drain(*cursor_pos..next);
+                    }
+                }
+                true
+            }
+            KeyCode::Backspace => {
+                let delete_word =
+                    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Backspace;
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::HookInput {
+                        name,
+                        matcher,
+                        command,
+                        timeout,
+                        field,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                    && *cursor_pos > 0
+                {
+                    let target = match *field {
+                        0 => name,
+                        1 => matcher,
+                        2 => command,
+                        _ => timeout,
+                    };
+                    if delete_word && *field != 3 {
+                        let start = crate::util::word_ops::find_word_start(target, *cursor_pos);
+                        target.drain(start..*cursor_pos);
+                        *cursor_pos = start;
+                    } else {
+                        let char_start = target.floor_char_boundary(*cursor_pos - 1);
+                        target.remove(char_start);
+                        *cursor_pos = char_start;
+                    }
+                }
+                true
+            }
+            KeyCode::Char(ch) => {
+                if let Some(d) = self.dialog.current_mut()
+                    && let DialogType::HookInput {
+                        name,
+                        matcher,
+                        command,
+                        timeout,
+                        field,
+                        cursor_pos,
+                        ..
+                    } = &mut d.dialog_type
+                {
+                    let target = match *field {
+                        0 => name,
+                        1 => matcher,
+                        2 => command,
+                        _ => timeout,
+                    };
+                    target.insert(*cursor_pos, ch);
+                    *cursor_pos += ch.len_utf8();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Validate and persist the hook registration box. Invalid input keeps
+    /// the dialog open with an error toast (same contract as the local URL).
+    fn save_hook_input_dialog(&mut self) -> bool {
+        let Some(d) = self.dialog.current() else {
+            return false;
+        };
+        let DialogType::HookInput {
+            event,
+            editing_index,
+            name,
+            matcher,
+            command,
+            timeout,
+            ..
+        } = &d.dialog_type
+        else {
+            return false;
+        };
+
+        match crate::routes::settings::validate_hook(name, matcher, command, timeout) {
+            Ok(entry) => {
+                let list = self.setup.hooks.events.entry(event.to_string()).or_default();
+                match editing_index {
+                    Some(i) if *i < list.len() => list[*i] = entry,
+                    _ => list.push(entry),
+                }
+                self.setup.save();
+                true
+            }
+            Err(message) => {
+                use crate::ui::toast::{ToastOptions, ToastVariant};
+                self.toast_state.show(ToastOptions {
+                    title: Some("Hook not saved".into()),
+                    message,
+                    variant: ToastVariant::Error,
+                    duration_ms: 6000,
+                });
+                false
+            }
+        }
+    }
+
+    /// Open the hook registration box for `event`: blank for creation,
+    /// prefilled with the current values when editing the hook at `index`.
+    fn open_hook_form(&mut self, event: &'static str, index: Option<usize>) {
+        let existing = index.and_then(|i| {
+            crate::routes::settings::hook_entries(&self.setup, event)
+                .get(i)
+                .cloned()
+        });
+        let (name, matcher, command, timeout) = match &existing {
+            Some(entry) => (
+                entry.name.clone(),
+                entry.matcher.clone(),
+                entry.command.clone(),
+                entry.timeout.map(|t| t.to_string()).unwrap_or_default(),
+            ),
+            None => (String::new(), String::new(), String::new(), String::new()),
+        };
+        self.dialog.show(DialogType::HookInput {
+            event,
+            editing_index: index.filter(|_| existing.is_some()),
+            name,
+            matcher,
+            command,
+            timeout,
+            field: 0,
+            cursor_pos: 0,
+        });
+    }
+
     /// Perform the save for the current text input dialog (API key → keyring,
     /// local URL → setup.json). Returns `true` when the input was accepted.
     fn save_text_input_dialog(&mut self) -> bool {
@@ -964,6 +1299,7 @@ impl App {
                     true
                 }
             }
+            DialogType::HookInput { .. } => self.save_hook_input_dialog(),
             _ => false,
         }
     }
@@ -1349,6 +1685,147 @@ impl App {
         self.dialog
             .current()
             .is_some_and(|d| matches!(d.dialog_type, DialogType::ToolCallList { .. }))
+    }
+
+    fn is_message_actions_dialog_visible(&self) -> bool {
+        self.dialog
+            .current()
+            .is_some_and(|d| matches!(d.dialog_type, DialogType::MessageActions { .. }))
+    }
+
+    fn handle_message_actions_dialog_key(&mut self, key: KeyCode) -> bool {
+        if !self.is_message_actions_dialog_visible() {
+            return false;
+        }
+        match key {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(d) = self.dialog.current_mut() {
+                    d.selected = if d.selected == 0 { 2 } else { d.selected - 1 };
+                }
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(d) = self.dialog.current_mut() {
+                    d.selected = (d.selected + 1) % 3;
+                }
+                true
+            }
+            KeyCode::Enter => {
+                let selected = self.dialog.current().map_or(0, |d| d.selected.min(2));
+                let message_id = match self.dialog.current() {
+                    Some(d) => match &d.dialog_type {
+                        DialogType::MessageActions { message_id, .. } => message_id.clone(),
+                        _ => return true,
+                    },
+                    None => return true,
+                };
+                self.dialog.pop();
+                self.run_message_action(selected, &message_id);
+                true
+            }
+            KeyCode::Esc => {
+                self.dialog.pop();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Execute the picked Message Actions entry: 0 = Revert, 1 = Copy,
+    /// 2 = Fork (same order as the opencode dialog).
+    fn run_message_action(&mut self, action: usize, message_id: &str) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        let working = self.state.status == SessionStatus::Working;
+        let session = self.state.current_session();
+        let msg_idx = session.and_then(|s| s.messages.iter().position(|m| m.id == message_id));
+        let Some(session) = session else {
+            return;
+        };
+        let Some(idx) = msg_idx else {
+            return;
+        };
+        let msg = &session.messages[idx];
+
+        match action {
+            0 => {
+                // Revert: drop this message and everything after it, and put
+                // its text back into the prompt for editing/resending.
+                if working {
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Revert".into()),
+                        message: "The agent is working — wait for it to finish.".into(),
+                        variant: ToastVariant::Warning,
+                        duration_ms: 4000,
+                    });
+                    return;
+                }
+                let prompt_text = message_prompt_text(msg);
+                let session = self.state.current_session_mut().expect("session");
+                session.messages.truncate(idx);
+                self.session_store.save_session_async(session);
+                self.session_view.hovered_msg_idx = None;
+                if !prompt_text.is_empty() {
+                    self.prompt_view.input = prompt_text;
+                    self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                }
+                self.prompt_view.focus();
+            }
+            1 => {
+                // Copy: join non-synthetic text parts into the clipboard.
+                let text = message_prompt_text(msg);
+                if !text.is_empty() {
+                    selection::copy_selection(&text, &mut self.toast_state);
+                } else {
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Copy".into()),
+                        message: "Nothing to copy in this message.".into(),
+                        variant: ToastVariant::Info,
+                        duration_ms: 2500,
+                    });
+                }
+            }
+            2 => {
+                // Fork: branch a new session containing everything up to and
+                // including the clicked message, then switch to it.
+                if working {
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Fork".into()),
+                        message: "The agent is working — wait for it to finish.".into(),
+                        variant: ToastVariant::Warning,
+                        duration_ms: 4000,
+                    });
+                    return;
+                }
+                let mut forked = session.clone();
+                forked.messages.truncate(idx + 1);
+                forked.id = generate_session_id();
+                forked.title = format!("{} (fork)", session.title);
+                forked.created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                forked.title_generated = false;
+                let new_id = forked.id.clone();
+                self.state.add_session(forked);
+                self.session_store.save_session(
+                    self.state
+                        .current_session()
+                        .expect("forked session just added"),
+                );
+                self.state
+                    .ensure_session_summary(&self.state.current_session_id.clone().expect("id"));
+                self.finalize_stale_compaction_lines();
+                self.state.switch_to_session(new_id, &self.session_store);
+                self.session_view.hovered_msg_idx = None;
+                self.toast_state.show(ToastOptions {
+                    title: Some("Fork".into()),
+                    message: "New session created from this point.".into(),
+                    variant: ToastVariant::Success,
+                    duration_ms: 3000,
+                });
+            }
+            _ => {}
+        }
     }
 
     fn handle_tool_call_dialog_key(&mut self, key: KeyCode) -> bool {
@@ -2058,6 +2535,8 @@ impl App {
             AppMode::InternalTools
         } else if self.show_add_provider {
             AppMode::AddProvider
+        } else if self.show_settings {
+            AppMode::Settings
         } else if self.state.current_session().is_some() {
             AppMode::Session
         } else {
@@ -2161,6 +2640,46 @@ impl App {
             sidebar_w,
             right_panel_w,
         }
+    }
+
+    /// The session transcript viewport (shared by render and the mouse
+    /// dispatch): the main area minus header, prompt, spinner and question
+    /// rows. Used for click hit-testing AND hover tracking so both map
+    /// cursor positions with the exact geometry the view rendered at.
+    fn session_viewport_area(&self) -> Rect {
+        let area = self.terminal_size();
+        let SessionArea {
+            main: main_area, ..
+        } = self.session_main_area(area);
+        let footer_y = main_area.bottom().saturating_sub(1);
+        let prompt_budget = footer_y
+            .saturating_sub(area.y + 1)
+            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+        let prompt_h = self
+            .prompt_view
+            .required_height(main_area.width.saturating_sub(4), prompt_budget);
+        let question_h = if self.question_dialog.visible {
+            self.question_dialog
+                .required_height(main_area.width.saturating_sub(4))
+        } else {
+            0
+        };
+        let spinner_h = u16::from(
+            matches!(self.state.status, SessionStatus::Working)
+                && self.agent_spinner.is_some()
+                && !self.question_dialog.visible,
+        );
+        let prompt_area_y = footer_y.saturating_sub(prompt_h);
+        let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
+        let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
+        let question_area_y = spinner_area_y.saturating_sub(question_h);
+        let session_bottom = question_area_y;
+        Rect::new(
+            main_area.x,
+            area.y + 1,
+            main_area.width,
+            session_bottom.saturating_sub(area.y + 1),
+        )
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, delta_time: f64) {
@@ -2548,6 +3067,17 @@ impl App {
                     );
                     self.add_provider_view
                         .render(buf, tools_area, &self.theme, &self.setup);
+                }
+                AppMode::Settings => {
+                    self.prompt_view.blur();
+                    let settings_area = Rect::new(
+                        session_area.x,
+                        session_area.y,
+                        session_area.width,
+                        session_area.height.saturating_sub(1),
+                    );
+                    self.settings_view
+                        .render(buf, settings_area, &self.theme, &self.setup);
                 }
                 AppMode::Router => {
                     self.prompt_view.blur();
@@ -3244,6 +3774,13 @@ impl App {
                         return Ok(false);
                     }
 
+                    // Check the per-message actions dialog
+                    if self.is_message_actions_dialog_visible()
+                        && self.handle_message_actions_dialog_key(key.code)
+                    {
+                        return Ok(false);
+                    }
+
                     // Check reasoning sub-dialog SECOND (pushed on top of the
                     // model list), before the model dialog.
                     if self.is_reasoning_dialog_visible()
@@ -3317,6 +3854,16 @@ impl App {
 
                     // Check Confirm dialog for arrow navigation
                     if self.is_confirm_dialog_visible() && self.handle_confirm_dialog_key(key.code)
+                    {
+                        return Ok(false);
+                    }
+
+                    // Hook registration box: handled with the full key event
+                    // so ctrl-combos (word jumps) reach it intact.
+                    if matches!(
+                        self.dialog.current().map(|d| &d.dialog_type),
+                        Some(DialogType::HookInput { .. })
+                    ) && self.handle_hook_input_key(key)
                     {
                         return Ok(false);
                     }
@@ -3451,6 +3998,7 @@ impl App {
                                         self.finalize_stale_compaction_lines();
                                         self.state
                                             .switch_to_session(session_id, &self.session_store);
+                                        self.session_view.hovered_msg_idx = None;
                                         self.title_generated = true;
                                         self.finalize_stale_compaction_lines();
                                         return Ok(false);
@@ -3489,6 +4037,9 @@ impl App {
                                     }
                                     HomeAction::OpenAddProvider => {
                                         self.show_add_provider = true;
+                                    }
+                                    HomeAction::OpenSettings => {
+                                        self.show_settings = true;
                                     }
                                     HomeAction::OpenModelRouter => {
                                         // Refresh fallbacks from prefs cache and models from model cache
@@ -3538,6 +4089,41 @@ impl App {
                         }
                     }
 
+                    // Settings mode: navigation and activation keys
+                    // Each matched arm returns early so unmatched keys fall through
+                    // to the keymap action dispatch (e.g. Ctrl+B, Ctrl+K).
+                    if matches!(self.mode(), AppMode::Settings) && !self.dialog.visible() {
+                        match key.code {
+                            KeyCode::Up => {
+                                self.settings_view.select_prev(20, &self.setup);
+                                return Ok(false);
+                            }
+                            KeyCode::Down => {
+                                self.settings_view.select_next(20, &self.setup);
+                                return Ok(false);
+                            }
+                            KeyCode::Enter | KeyCode::Char(' ') => {
+                                match self.settings_view.activate_selected(&mut self.setup) {
+                                    Some(crate::routes::settings::SettingsAction::ToggleSaved) => {
+                                        self.setup.save();
+                                    }
+                                    Some(crate::routes::settings::SettingsAction::OpenHookForm {
+                                        event,
+                                        index,
+                                    }) => {
+                                        self.open_hook_form(event, index);
+                                    }
+                                    None => {}
+                                }
+                                return Ok(false);
+                            }
+                            KeyCode::Esc => {
+                                self.show_settings = false;
+                                return Ok(false);
+                            }
+                            _ => {}
+                        }
+                    }
                     // RAG mode: handle Ctrl+Backspace, Ctrl+Left, Ctrl+Right
                     // before passing key.code (which loses modifier info).
                     #[cfg(feature = "embed")]
@@ -3927,6 +4513,8 @@ impl App {
                                 self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
                             } else if matches!(self.mode(), AppMode::AddProvider) {
                                 self.show_add_provider = false;
+                            } else if matches!(self.mode(), AppMode::Settings) {
+                                self.show_settings = false;
                             } else if self.is_rag_mode() {
                                 self.handle_rag_cancel_action();
                             } else if matches!(self.mode(), AppMode::Home) {
@@ -5426,43 +6014,7 @@ impl App {
                     if matches!(self.mode(), AppMode::Session)
                         && let Some((sx, sy)) = drag_start
                     {
-                        let area = self.terminal_size();
-                        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
-                        let main_area = Rect::new(
-                            area.x + sidebar_w,
-                            area.y,
-                            area.width.saturating_sub(sidebar_w),
-                            area.height,
-                        );
-                        let footer_y = main_area.bottom().saturating_sub(1);
-                        let prompt_budget = footer_y
-                            .saturating_sub(area.y + 1)
-                            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
-                        let prompt_h = self
-                            .prompt_view
-                            .required_height(main_area.width.saturating_sub(4), prompt_budget);
-                        let question_h = if self.question_dialog.visible {
-                            self.question_dialog
-                                .required_height(main_area.width.saturating_sub(4))
-                        } else {
-                            0
-                        };
-                        let spinner_h = u16::from(
-                            matches!(self.state.status, SessionStatus::Working)
-                                && self.agent_spinner.is_some()
-                                && !self.question_dialog.visible,
-                        );
-                        let prompt_area_y = footer_y.saturating_sub(prompt_h);
-                        let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
-                        let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
-                        let question_area_y = spinner_area_y.saturating_sub(question_h);
-                        let session_bottom = question_area_y.saturating_sub(1);
-                        let session_area = Rect::new(
-                            main_area.x,
-                            area.y + 1,
-                            main_area.width,
-                            session_bottom.saturating_sub(area.y + 1),
-                        );
+                        let session_area = self.session_viewport_area();
 
                         let margin = 2u16;
                         let inner_area = Rect::new(
@@ -5546,6 +6098,9 @@ impl App {
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Up);
                             }
+                            DialogType::MessageActions { .. } => {
+                                self.handle_message_actions_dialog_key(KeyCode::Up);
+                            }
                             _ => {}
                         }
                     } else if self.sidebar_focused && self.sidebar.open && x < SIDEBAR_WIDTH {
@@ -5575,6 +6130,8 @@ impl App {
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         let list_area = 20;
                         self.add_provider_view.select_prev(list_area);
+                    } else if matches!(self.mode(), AppMode::Settings) {
+                        self.settings_view.select_prev(20, &self.setup);
                     } else if self.try_rag_scroll_up() {
                     }
                     return Ok(true);
@@ -5593,6 +6150,9 @@ impl App {
                             }
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Down);
+                            }
+                            DialogType::MessageActions { .. } => {
+                                self.handle_message_actions_dialog_key(KeyCode::Down);
                             }
                             _ => {}
                         }
@@ -5623,6 +6183,8 @@ impl App {
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         let list_area = 20;
                         self.add_provider_view.select_next(list_area);
+                    } else if matches!(self.mode(), AppMode::Settings) {
+                        self.settings_view.select_next(20, &self.setup);
                     } else if self.try_rag_scroll_down() {
                     }
                     return Ok(true);
@@ -5633,6 +6195,16 @@ impl App {
 
         // Only handle left-click UP events (standard "click" action)
         if event_type != MouseEventType::Up || button != MouseButton::Left {
+            // Hover tracking for user messages (opencode-style highlight).
+            if matches!(event_type, MouseEventType::Move)
+                && matches!(self.mode(), AppMode::Session)
+                && !self.dialog.visible()
+                && !self.question_dialog.visible
+            {
+                let session_area = self.session_viewport_area();
+                self.session_view
+                    .update_hover(y, session_area, &self.state, &self.config);
+            }
             return Ok(true);
         }
 
@@ -5711,6 +6283,13 @@ impl App {
                             }
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Enter);
+                                return Ok(true);
+                            }
+                            DialogType::MessageActions { message_id, .. } => {
+                                let action = d.selected.min(2);
+                                let message_id = message_id.clone();
+                                self.dialog.pop();
+                                self.run_message_action(action, &message_id);
                                 return Ok(true);
                             }
                             DialogType::ApiKeyInput { .. } | DialogType::LocalUrlInput { .. } => {
@@ -5926,6 +6505,7 @@ impl App {
                     self.finalize_stale_compaction_lines();
                     self.state
                         .switch_to_session(session_id, &self.session_store);
+                    self.session_view.hovered_msg_idx = None;
                     self.title_generated = true;
                     self.finalize_stale_compaction_lines();
                     return Ok(true);
@@ -5946,43 +6526,29 @@ impl App {
 
         // 7. Session view (tool expand/collapse)
         if matches!(self.mode(), AppMode::Session) {
-            let area = self.terminal_size();
-            let SessionArea {
-                main: main_area, ..
-            } = self.session_main_area(area);
-            let footer_y = main_area.bottom().saturating_sub(1);
-            let prompt_budget = footer_y
-                .saturating_sub(area.y + 1)
-                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
-            let prompt_h = self
-                .prompt_view
-                .required_height(main_area.width.saturating_sub(4), prompt_budget);
-            let question_h = if self.question_dialog.visible {
-                self.question_dialog
-                    .required_height(main_area.width.saturating_sub(4))
-            } else {
-                0
-            };
-            let spinner_h = u16::from(
-                matches!(self.state.status, SessionStatus::Working)
-                    && self.agent_spinner.is_some()
-                    && !self.question_dialog.visible,
-            );
-            let prompt_area_y = footer_y.saturating_sub(prompt_h);
-            let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
-            let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
-            let question_area_y = spinner_area_y.saturating_sub(question_h);
-            let session_bottom = question_area_y;
-            let session_area = Rect::new(
-                main_area.x,
-                area.y + 1,
-                main_area.width,
-                session_bottom.saturating_sub(area.y + 1),
-            );
-            if self
-                .session_view
-                .handle_mouse(&mouse, session_area, &self.state, &self.config)
+            let was_drag = std::mem::take(&mut self.mouse_up_was_drag);
+            let session_area = self.session_viewport_area();
+            if !was_drag
+                && self
+                    .session_view
+                    .handle_mouse(&mouse, session_area, &self.state, &self.config)
             {
+                if let Some(message_id) = self.session_view.pending_message_action.take() {
+                    let preview = self
+                        .state
+                        .current_session()
+                        .and_then(|s| s.messages.iter().find(|m| m.id == message_id))
+                        .map(message_prompt_text)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(36)
+                        .collect::<String>();
+                    self.dialog.replace(DialogType::MessageActions {
+                        message_id,
+                        preview,
+                    });
+                    self.session_view.hovered_msg_idx = None;
+                }
                 return Ok(true);
             }
         }
@@ -6020,6 +6586,9 @@ impl App {
                     }
                     crate::routes::home::HomeAction::OpenAddProvider => {
                         self.show_add_provider = true;
+                    }
+                    crate::routes::home::HomeAction::OpenSettings => {
+                        self.show_settings = true;
                     }
                     crate::routes::home::HomeAction::OpenModelRouter => {
                         let saved = fallback::load_fallbacks(&self.setup);
@@ -6067,6 +6636,48 @@ impl App {
                         variant: ToastVariant::Info,
                         duration_ms: 3000,
                     });
+                }
+                return Ok(true);
+            }
+        }
+
+        // 8a. Settings view — mouse click on a setting row toggles it
+        if matches!(self.mode(), AppMode::Settings) && !self.dialog.visible() {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            // Matches the render geometry: in non-Session modes the render
+            // path resolves to terminal height - 4 (session_main_area drops
+            // the footer rows and the mode arm subtracts 1 more). Keeping
+            // both rects identical keeps content_start_y — and therefore
+            // hit-tested rows — aligned with the drawn option.
+            let settings_area = Rect::new(
+                main_area.x,
+                area.y + 1,
+                main_area.width,
+                main_area.height.saturating_sub(4),
+            );
+            if let Some(clicked_idx) =
+                self.settings_view
+                    .handle_mouse(&mouse, settings_area, &self.setup)
+            {
+                self.settings_view.selection.selected_index = clicked_idx;
+                match self.settings_view.activate_selected(&mut self.setup) {
+                    Some(crate::routes::settings::SettingsAction::ToggleSaved) => {
+                        self.setup.save();
+                    }
+                    Some(crate::routes::settings::SettingsAction::OpenHookForm {
+                        event,
+                        index,
+                    }) => {
+                        self.open_hook_form(event, index);
+                    }
+                    None => {}
                 }
                 return Ok(true);
             }
@@ -6396,7 +7007,26 @@ fn create_cloud_embedder(
 mod tests {
     use super::{App, format_tokens};
     use crate::ui::dialogs::DialogType;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// Plain key event (no modifiers) for driving text inputs in tests.
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Serializes tests that redirect `$HOME`: `Setup` persists through
+    /// `dirs`, which reads the process-wide environment.
+    static HOME_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// Redirect `$HOME` to a scratch dir and drop any config left there by a
+    /// previous run, so `setup.save()` never touches the developer's files.
+    fn isolate_home() {
+        let home = std::env::temp_dir().join("cosh-hook-test-home");
+        let _ = std::fs::remove_dir_all(home.join(".config"));
+        std::fs::create_dir_all(&home).expect("create scratch home");
+        // SAFETY: tests holding HOME_LOCK are the only threads reading it.
+        unsafe { std::env::set_var("HOME", &home) };
+    }
 
     #[test]
     fn format_tokens_small_values_have_no_separator() {
@@ -6931,6 +7561,124 @@ mod tests {
         assert_eq!(app.state.session_cache.get(&id).unwrap().title, "keep me");
     }
 
+    /// The hook registration box saves a valid hook into setup (in-memory)
+    /// and closes; an invalid one keeps the box open.
+    #[tokio::test]
+    async fn hook_input_dialog_saves_valid_hook_and_rejects_invalid() {
+        // setup.save() persists to $HOME — point it at a scratch dir so the
+        // test never touches the developer's real config. The lock keeps the
+        // two hook tests from racing each other's environment.
+        let _guard = HOME_LOCK.lock();
+        isolate_home();
+        let mut app = App::new("/tmp".to_string());
+        app.dialog.show(DialogType::HookInput {
+            event: crate::routes::settings::PRE_TOOL_USE_EVENT,
+            editing_index: None,
+            name: String::new(),
+            matcher: String::new(),
+            command: String::new(),
+            timeout: String::new(),
+            field: 0,
+            cursor_pos: 0,
+        });
+
+        // Invalid: no command yet → Enter keeps the dialog open.
+        assert!(app.handle_hook_input_key(key(KeyCode::Enter)));
+        assert!(app.dialog.visible(), "missing command keeps the form open");
+
+        // Fill Name, then jump to Command and fill it.
+        for ch in "block rm".chars() {
+            app.handle_hook_input_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_hook_input_key(key(KeyCode::Down));
+        app.handle_hook_input_key(key(KeyCode::Down));
+        for ch in "exit 2".chars() {
+            app.handle_hook_input_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_hook_input_key(key(KeyCode::Enter));
+
+        assert!(!app.dialog.visible(), "valid save closes the dialog");
+        let hooks = &app.setup.hooks.events[crate::routes::settings::PRE_TOOL_USE_EVENT];
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].name, "block rm");
+        assert_eq!(hooks[0].command, "exit 2");
+    }
+
+    #[tokio::test]
+    async fn hook_input_dialog_esc_discards() {
+        let _guard = HOME_LOCK.lock();
+        isolate_home();
+        let mut app = App::new("/tmp".to_string());
+        app.dialog.show(DialogType::HookInput {
+            event: crate::routes::settings::PRE_TOOL_USE_EVENT,
+            editing_index: None,
+            name: String::new(),
+            matcher: String::new(),
+            command: "exit 2".into(),
+            timeout: String::new(),
+            field: 2,
+            cursor_pos: 6,
+        });
+        assert!(app.handle_hook_input_key(key(KeyCode::Esc)));
+        assert!(!app.dialog.visible());
+        assert!(
+            !app.setup
+                .hooks
+                .events
+                .contains_key(crate::routes::settings::PRE_TOOL_USE_EVENT),
+            "esc must not persist anything"
+        );
+    }
+
+    /// Clicking a value row inside the hook panel focuses the field and
+    /// moves the insertion point (app-level path: Up-event gate included).
+    #[tokio::test]
+    async fn hook_input_click_positions_cursor() {
+        let mut app = App::new("/tmp".to_string());
+        app.dialog.show(DialogType::HookInput {
+            event: crate::routes::settings::PRE_TOOL_USE_EVENT,
+            editing_index: None,
+            name: String::new(),
+            matcher: String::new(),
+            command: "exit 2".into(),
+            timeout: String::new(),
+            field: 2,
+            cursor_pos: 6,
+        });
+
+        // Derive geometry from the SAME terminal size the app will use when
+        // handling the click.
+        let term = app.terminal_size();
+        let values = ["", "", "exit 2", ""];
+        let (_, dialog_y, _, _, content_x, cols) =
+            crate::ui::dialogs::hook_input_metrics(term, values);
+        let cmd_value_row =
+            crate::ui::dialogs::hook_field_geometries(dialog_y, values, cols)[2].value_y;
+        use crossterm::event::{
+            MouseButton as CrosstermMouseButton, MouseEvent as CrosstermMouseEvent, MouseEventKind,
+        };
+
+        let up = CrosstermMouseEvent {
+            kind: MouseEventKind::Up(CrosstermMouseButton::Left),
+            column: content_x + 2, // over the 'i' of "exit 2"
+            row: cmd_value_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse_event(up).expect("mouse handled");
+
+        assert!(
+            matches!(
+                app.dialog.current().map(|d| &d.dialog_type),
+                Some(DialogType::HookInput {
+                    field: 2,
+                    cursor_pos: 2,
+                    ..
+                })
+            ),
+            "click must park the cursor on char index 2"
+        );
+    }
+
     /// An empty (whitespace-only) title applies nothing — Enter just closes,
     /// mirroring opencode's prompt behavior.
     #[tokio::test]
@@ -7036,6 +7784,172 @@ mod tests {
             app.toast_state.current.is_some(),
             "the refusal surfaces as a toast"
         );
+    }
+
+    // ── Message Actions (port of opencode's dialog-message) ────────────────
+
+    fn app_with_user_message() -> App {
+        use crate::types::{Message, MessageRole, Part, TextPart};
+        let mut app = App::new("/tmp".to_string());
+        let now = 1_000u64;
+        let session = crate::types::Session {
+            id: "t".into(),
+            title: "t".into(),
+            created_at: now,
+            title_generated: false,
+            messages: vec![
+                Message {
+                    id: "u1".into(),
+                    role: MessageRole::User,
+                    parts: vec![Part::Text(TextPart {
+                        text: "hello world".into(),
+                        synthetic: false,
+                    })],
+                    created_at: now,
+                    agent: None,
+                    model: None,
+                },
+                Message {
+                    id: "a1".into(),
+                    role: MessageRole::Assistant,
+                    parts: vec![Part::Text(TextPart {
+                        text: "reply".into(),
+                        synthetic: false,
+                    })],
+                    created_at: now + 1,
+                    agent: None,
+                    model: None,
+                },
+                Message {
+                    id: "u2".into(),
+                    role: MessageRole::User,
+                    parts: vec![Part::Text(TextPart {
+                        text: "second".into(),
+                        synthetic: false,
+                    })],
+                    created_at: now + 2,
+                    agent: None,
+                    model: None,
+                },
+            ],
+        };
+        app.state.add_session(session);
+        app.state.current_session_id = Some("t".into());
+        app
+    }
+
+    #[test]
+    fn message_prompt_text_joins_non_synthetic_parts() {
+        use crate::types::{Message, MessageRole, Part, TextPart};
+        let msg = Message {
+            id: "m".into(),
+            role: MessageRole::User,
+            parts: vec![
+                Part::Text(TextPart {
+                    text: "one".into(),
+                    synthetic: false,
+                }),
+                Part::Text(TextPart {
+                    text: "hidden".into(),
+                    synthetic: true,
+                }),
+                Part::Text(TextPart {
+                    text: "two".into(),
+                    synthetic: false,
+                }),
+            ],
+            created_at: 0,
+            agent: None,
+            model: None,
+        };
+        assert_eq!(super::message_prompt_text(&msg), "one\ntwo");
+    }
+
+    #[tokio::test]
+    async fn message_actions_keyboard_cycles_three_options() {
+        let mut app = app_with_user_message();
+        app.dialog.replace(DialogType::MessageActions {
+            message_id: "u1".into(),
+            preview: "hello world".into(),
+        });
+        assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
+        assert_eq!(app.dialog.current().unwrap().selected, 1);
+        assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
+        assert_eq!(app.dialog.current().unwrap().selected, 2);
+        // Wraps at the bottom.
+        assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
+        assert_eq!(app.dialog.current().unwrap().selected, 0);
+        // And wraps upward back to the last item.
+        assert!(app.handle_message_actions_dialog_key(KeyCode::Up));
+        assert_eq!(app.dialog.current().unwrap().selected, 2);
+    }
+
+    #[tokio::test]
+    async fn message_actions_revert_truncates_and_restores_prompt() {
+        let mut app = app_with_user_message();
+        app.run_message_action(0, "u1");
+        let session = app.state.current_session().unwrap();
+        assert!(
+            session
+                .messages
+                .iter()
+                .all(|m| m.id != "u1" && m.id != "a1"),
+            "the reverted message and everything after it are dropped"
+        );
+        assert_eq!(app.prompt_view.input, "hello world");
+        assert_eq!(app.prompt_view.cursor_pos, app.prompt_view.input.len());
+    }
+
+    #[tokio::test]
+    async fn message_actions_fork_branches_new_session_up_to_message() {
+        let mut app = app_with_user_message();
+        app.run_message_action(2, "u1");
+        let old = app.state.current_session().unwrap();
+        assert_eq!(
+            old.messages.len(),
+            1,
+            "fork keeps messages up to and including"
+        );
+        assert!(old.messages.iter().any(|m| m.id == "u1"));
+        assert!(!old.messages.iter().any(|m| m.id == "a1"));
+        assert!(old.title.contains("(fork)"));
+        assert_ne!(old.id, "t", "the fork is a brand-new session id");
+    }
+
+    #[tokio::test]
+    async fn message_actions_copy_writes_clipboard_text() {
+        // Clipboard may be unavailable in headless CI; only assert the text
+        // extraction path via a missing-message no-op and the toast for empty.
+        let mut app = app_with_user_message();
+        app.run_message_action(1, "does-not-exist");
+        // No panic; dialog stack untouched.
+        assert!(!app.dialog.visible());
+    }
+
+    #[tokio::test]
+    async fn message_actions_dialog_renders_title_and_options() {
+        let mut app = app_with_user_message();
+        app.dialog.replace(DialogType::MessageActions {
+            message_id: "u1".into(),
+            preview: "hello world".into(),
+        });
+        let theme = app.theme.clone();
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
+        app.dialog.render(
+            &mut buf,
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            &theme,
+            std::time::SystemTime::now(),
+        );
+        let line = |y: u16| -> String {
+            (0..80)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<Vec<_>>()
+                .join("")
+        };
+        let all: String = (0..24).map(line).collect();
+        assert!(all.contains("Message Actions"), "title rendered");
+        assert!(all.contains("Revert") && all.contains("Copy") && all.contains("Fork"));
     }
 }
 

@@ -93,6 +93,7 @@ pub const MENU_ITEMS: &[&str] = &[
     "Model Router",
     "Internal tools",
     "ADD provider",
+    "Settings",
 ];
 
 #[cfg(not(feature = "embed"))]
@@ -101,6 +102,7 @@ pub const MENU_ITEMS: &[&str] = &[
     "Model Router",
     "Internal tools",
     "ADD provider",
+    "Settings",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -113,6 +115,7 @@ pub enum HomeAction {
     OpenModelRouter,
     OpenInternalTools,
     OpenAddProvider,
+    OpenSettings,
 }
 
 pub struct HomeView {
@@ -165,12 +168,16 @@ impl HomeView {
             3 => HomeAction::OpenInternalTools,
             #[cfg(feature = "embed")]
             4 => HomeAction::OpenAddProvider,
+            #[cfg(feature = "embed")]
+            5 => HomeAction::OpenSettings,
             #[cfg(not(feature = "embed"))]
             1 => HomeAction::OpenModelRouter,
             #[cfg(not(feature = "embed"))]
             2 => HomeAction::OpenInternalTools,
             #[cfg(not(feature = "embed"))]
             3 => HomeAction::OpenAddProvider,
+            #[cfg(not(feature = "embed"))]
+            4 => HomeAction::OpenSettings,
             _ => HomeAction::OpenAddProvider,
         }
     }
@@ -205,12 +212,16 @@ impl HomeView {
                     3 => HomeAction::OpenInternalTools,
                     #[cfg(feature = "embed")]
                     4 => HomeAction::OpenAddProvider,
+                    #[cfg(feature = "embed")]
+                    5 => HomeAction::OpenSettings,
                     #[cfg(not(feature = "embed"))]
                     1 => HomeAction::OpenModelRouter,
                     #[cfg(not(feature = "embed"))]
                     2 => HomeAction::OpenInternalTools,
                     #[cfg(not(feature = "embed"))]
                     3 => HomeAction::OpenAddProvider,
+                    #[cfg(not(feature = "embed"))]
+                    4 => HomeAction::OpenSettings,
                     _ => HomeAction::OpenAddProvider,
                 });
             }
