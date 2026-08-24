@@ -11,6 +11,7 @@ use cosh_sdk::extract_action::{
     ExtractAction, Item, NativeToolCall, StreamAction, ToolCallData, ToolSchema,
 };
 use cosh_tools::TOOL_FORMAT;
+use cosh_tools::lsp::Lsp;
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, Tool};
 use rmcp::service::{RoleClient, RunningService};
@@ -19,6 +20,7 @@ use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use std::collections::HashMap;
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(test))]
@@ -307,6 +309,59 @@ pub struct HarnessTool {
     pub input_schema: serde_json::Value,
 }
 
+/// Build the language-server wrapper bound to `cwd`.
+///
+/// Returns `None` when `COSH_LSP=off|0|false` or no tokio runtime is active.
+fn build_lsp(cwd: &str) -> Option<Arc<Lsp>> {
+    if matches!(
+        std::env::var("COSH_LSP").as_deref(),
+        Ok("off" | "0" | "false")
+    ) {
+        return None;
+    }
+
+    let root = PathBuf::from(cwd);
+    let mut config = cosh_sdk::lsp::ManagerConfig::new(root);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    config.events = Some(event_tx);
+
+    let manager = Arc::new(cosh_sdk::lsp::Manager::with_config(config));
+    let diagnostics = Arc::new(cosh_sdk::lsp::DiagnosticsEngine::new());
+
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let engine = Arc::clone(&diagnostics);
+        runtime.spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                engine.ingest_event(&event);
+            }
+        });
+    } else {
+        return None;
+    }
+
+    Some(Arc::new(Lsp::with_manager(manager, diagnostics)))
+}
+
+/// After a successful fs_write/fs_edit, drain errors-only diagnostics for the
+/// touched file and wrap them in a system-reminder block. `None` when LSP is
+/// unavailable or the file has nothing to report.
+async fn passive_lsp_note(lsp: &Arc<Lsp>, path: &str) -> Option<String> {
+    let input = cosh_tools::lsp::DiagnosticsInput {
+        file_path: Some(path.to_owned()),
+        severity: Some("errors".into()),
+        max_items: Some(20),
+        settle_ms: Some(2_000),
+    };
+    let out = lsp.diagnostics(&input).await.ok()?;
+    if out.formatted.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\n<system-reminder>\nLSP errors detected after writing {path}:\n{}\n</system-reminder>",
+        out.formatted
+    ))
+}
+
 fn default_harness_tools() -> Vec<HarnessTool> {
     vec![HarnessTool {
         name: "stop_agent_loop".into(),
@@ -350,6 +405,10 @@ pub struct Harness {
     tool_issuer: VecDeque<ToolCallData>,
     /// PreToolUse hooks runner (empty when no hooks are configured).
     hook_runner: Option<super::hooks::HookRunner>,
+
+    /// Language-server tooling for passive diagnostics injection after
+    /// fs_write/fs_edit. `None` when `COSH_LSP=off` or no runtime.
+    lsp: Option<Arc<Lsp>>,
 
     /// Monotonic counter for synthetic tool_call ids (inline JSON calls that
     /// the extractor emits without an id).
@@ -523,8 +582,9 @@ impl Harness {
             local_base_urls: std::collections::HashMap::new(),
             last_context_window: None,
             discovered_window: None,
-            last_overflow_toast: None,
             hook_runner: None,
+            lsp: build_lsp(cwd),
+            last_overflow_toast: None,
             compaction_generic_retries: 0,
             snapshot_interval: std::time::Duration::from_secs(10),
             #[cfg(test)]
@@ -3273,6 +3333,28 @@ impl Harness {
             if tool_name.starts_with("plan_") {
                 self.sync_todo_context();
             }
+
+            // Passive LSP feedback: after a successful write/edit, drain
+            // errors-only diagnostics for the touched file and append them as
+            // a system-reminder so the model can fix issues immediately.
+            if matches!(tool_name.as_str(), "fs_write" | "fs_edit")
+                && let Some(lsp) = &self.lsp
+            {
+                let path = args_map
+                    .get("targets")
+                    .and_then(|t| t.get("targets"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|t| t.get("path"))
+                    .and_then(|p| p.as_str())
+                    .unwrap_or_default();
+                if !path.is_empty() {
+                    if let Some(note) = passive_lsp_note(lsp, path).await {
+                        return Ok(format!("{result}{note}"));
+                    }
+                }
+            }
+
             return Ok(result);
         }
 
@@ -3523,6 +3605,7 @@ impl Harness {
             discovered_window: None,
             last_overflow_toast: None,
             hook_runner: None,
+            lsp: None,
             compaction_generic_retries: 0,
             snapshot_interval: std::time::Duration::from_secs(10),
             mock_chat_response: None,
