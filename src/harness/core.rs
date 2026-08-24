@@ -582,10 +582,17 @@ impl Harness {
         self
     }
 
-    /// Set PreToolUse hooks from config entries.
-    pub fn with_hooks(mut self, configs: &[super::hooks::HookConfig], cwd: &str) -> Self {
-        if !configs.is_empty() {
-            self.hook_runner = Some(super::hooks::HookRunner::new(configs, cwd));
+    /// Set lifecycle hooks from config entries: `pre` fires before a tool
+    /// call, `post` after its successful execution.
+    pub fn with_hooks(
+        mut self,
+        pre: &[super::hooks::HookConfig],
+        post: &[super::hooks::HookConfig],
+        cwd: &str,
+    ) -> Self {
+        if !pre.is_empty() || !post.is_empty() {
+            self.hook_runner =
+                Some(super::hooks::HookRunner::new(pre, post, cwd));
         }
         self
     }
@@ -2503,7 +2510,7 @@ impl Harness {
                 // Peek at tool info before consuming the item. The Gemini 3.x
                 // thought signature is captured alongside so it survives the
                 // dispatch and can be replayed in the follow-up request.
-                let info = self
+                let mut info = self
                     .tool_issuer
                     .front()
                     .map(|tc| (tc.id.clone(), tc.name.clone(), tc.arguments.clone()));
@@ -2612,17 +2619,39 @@ impl Harness {
 
                     // PreToolUse hooks: run user-defined shell commands
                     // before the permission check. Deny/halt results block
-                    // the tool call without reaching the permission dialog.
-                    let tool_name_str = info.as_ref().map_or("?", |(_, n, _)| n.as_str());
+                    // the tool call without reaching the permission dialog;
+                    // `updated_input` patches the arguments before dispatch.
+                    let tool_name_str =
+                        info.as_ref().map_or("?".to_string(), |(_, n, _)| n.clone());
                     let tool_input_str = info
                         .as_ref()
                         .map_or("{}".to_string(), |(_, _, a)| a.to_string());
                     let hook_result = self
                         .hook_runner
                         .as_ref()
-                        .map(|r| r.run(tool_name_str, &tool_input_str));
+                        .map(|r| r.run_pre(&tool_name_str, &tool_input_str));
 
-                    if let Some(ref hr) = hook_result
+                    if let Some(hr) = &hook_result
+                        && hr.decision != super::hooks::HookDecision::Deny
+                        && !hr.updated_input.is_empty()
+                        && let Ok(patched) =
+                            serde_json::from_str::<serde_json::Value>(&hr.updated_input)
+                    {
+                        log::debug!(
+                            "run_agent_loop HOOK_REWRITE tool={tool_name_str} input patched by hook"
+                        );
+                        if let Some((_, _, args)) = info.as_mut() {
+                            *args = patched;
+                            // dispatch_next consumes the entry straight from
+                            // tool_issuer; sync it or the tool runs with the
+                            // ORIGINAL arguments while permission/history
+                            // show the patched ones.
+                            if let Some(tc) = self.tool_issuer.front_mut() {
+                                tc.arguments = args.clone();
+                            }
+                        }
+                    }
+                    if let Some(hr) = &hook_result
                         && (hr.decision == super::hooks::HookDecision::Deny || hr.halt)
                     {
                         let reason = if hr.halt {
@@ -2941,7 +2970,59 @@ impl Harness {
                     }
 
                     match dispatch_out {
-                        DispatchOut::Ok(output) => {
+                        DispatchOut::Ok(mut output) => {
+                            // PostToolUse hooks: run after a successful
+                            // execution and BEFORE history/ToolResult, so
+                            // `context` enriches the output the model sees;
+                            // deny (tool already ran) degrades to a warning
+                            // line; halt stops the turn.
+                            let tool_name_str =
+                                info.as_ref().map_or("?", |(_, n, _)| n.as_str());
+                            if let Some(runner) = self.hook_runner.as_ref()
+                                && !runner.is_empty()
+                            {
+                                let tool_input_str = info
+                                    .as_ref()
+                                    .map_or("{}".to_string(), |(_, _, a)| a.to_string());
+                                let post = runner.run_post(tool_name_str, &tool_input_str, &output);
+                                if post.halt {
+                                    let reason = if post.reason.is_empty() {
+                                        "Turn halted by post-tool hook".to_string()
+                                    } else {
+                                        format!("Turn halted by post-tool hook: {}", post.reason)
+                                    };
+                                    log::debug!(
+                                        "run_agent_loop POST_HOOK_HALT tool={tool_name_str}"
+                                    );
+                                    let _ = tx.send(HarnessEvent::Error(reason));
+                                    terminal_sent = true;
+                                    break;
+                                }
+                                let mut extra = String::new();
+                                if !post.context.is_empty() {
+                                    extra.push_str(&post.context);
+                                }
+                                if post.decision == super::hooks::HookDecision::Deny {
+                                    use std::fmt::Write as _;
+                                    if !extra.is_empty() {
+                                        extra.push('\n');
+                                    }
+                                    let _ = writeln!(
+                                        extra,
+                                        "[hook] {}",
+                                        if post.reason.is_empty() {
+                                            "flagged by post-tool hook".to_string()
+                                        } else {
+                                            post.reason.clone()
+                                        }
+                                    );
+                                }
+                                if !extra.is_empty() {
+                                    output.push_str("\n\n");
+                                    output.push_str(&extra);
+                                }
+                            }
+
                             self.tool_failure_count = 0;
                             log::debug!("run_agent_loop dispatch_next OK len={}", output.len());
                             // Record the tool call + result in native history

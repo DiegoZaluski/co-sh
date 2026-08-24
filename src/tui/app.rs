@@ -1153,6 +1153,7 @@ impl App {
             return false;
         };
         let DialogType::HookInput {
+            event,
             editing_index,
             name,
             matcher,
@@ -1166,12 +1167,7 @@ impl App {
 
         match crate::routes::settings::validate_hook(name, matcher, command, timeout) {
             Ok(entry) => {
-                let list = self
-                    .setup
-                    .hooks
-                    .events
-                    .entry(crate::routes::settings::HOOK_EVENT.to_string())
-                    .or_default();
+                let list = self.setup.hooks.events.entry(event.to_string()).or_default();
                 match editing_index {
                     Some(i) if *i < list.len() => list[*i] = entry,
                     _ => list.push(entry),
@@ -1192,11 +1188,11 @@ impl App {
         }
     }
 
-    /// Open the hook registration box: blank for creation, prefilled with the
-    /// current values when editing the hook at `index`.
-    fn open_hook_form(&mut self, index: Option<usize>) {
+    /// Open the hook registration box for `event`: blank for creation,
+    /// prefilled with the current values when editing the hook at `index`.
+    fn open_hook_form(&mut self, event: &'static str, index: Option<usize>) {
         let existing = index.and_then(|i| {
-            crate::routes::settings::hook_entries(&self.setup)
+            crate::routes::settings::hook_entries(&self.setup, event)
                 .get(i)
                 .cloned()
         });
@@ -1210,6 +1206,7 @@ impl App {
             None => (String::new(), String::new(), String::new(), String::new()),
         };
         self.dialog.show(DialogType::HookInput {
+            event,
             editing_index: index.filter(|_| existing.is_some()),
             name,
             matcher,
@@ -1219,6 +1216,7 @@ impl App {
             cursor_pos: 0,
         });
     }
+
     /// Perform the save for the current text input dialog (API key → keyring,
     /// local URL → setup.json). Returns `true` when the input was accepted.
     fn save_text_input_dialog(&mut self) -> bool {
@@ -4109,11 +4107,11 @@ impl App {
                                     Some(crate::routes::settings::SettingsAction::ToggleSaved) => {
                                         self.setup.save();
                                     }
-                                    Some(crate::routes::settings::SettingsAction::EditHook(i)) => {
-                                        self.open_hook_form(Some(i));
-                                    }
-                                    Some(crate::routes::settings::SettingsAction::NewHook) => {
-                                        self.open_hook_form(None);
+                                    Some(crate::routes::settings::SettingsAction::OpenHookForm {
+                                        event,
+                                        index,
+                                    }) => {
+                                        self.open_hook_form(event, index);
                                     }
                                     None => {}
                                 }
@@ -6673,11 +6671,11 @@ impl App {
                     Some(crate::routes::settings::SettingsAction::ToggleSaved) => {
                         self.setup.save();
                     }
-                    Some(crate::routes::settings::SettingsAction::EditHook(i)) => {
-                        self.open_hook_form(Some(i));
-                    }
-                    Some(crate::routes::settings::SettingsAction::NewHook) => {
-                        self.open_hook_form(None);
+                    Some(crate::routes::settings::SettingsAction::OpenHookForm {
+                        event,
+                        index,
+                    }) => {
+                        self.open_hook_form(event, index);
                     }
                     None => {}
                 }
@@ -7574,6 +7572,7 @@ mod tests {
         isolate_home();
         let mut app = App::new("/tmp".to_string());
         app.dialog.show(DialogType::HookInput {
+            event: crate::routes::settings::PRE_TOOL_USE_EVENT,
             editing_index: None,
             name: String::new(),
             matcher: String::new(),
@@ -7599,7 +7598,7 @@ mod tests {
         app.handle_hook_input_key(key(KeyCode::Enter));
 
         assert!(!app.dialog.visible(), "valid save closes the dialog");
-        let hooks = &app.setup.hooks.events[crate::routes::settings::HOOK_EVENT];
+        let hooks = &app.setup.hooks.events[crate::routes::settings::PRE_TOOL_USE_EVENT];
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].name, "block rm");
         assert_eq!(hooks[0].command, "exit 2");
@@ -7611,6 +7610,7 @@ mod tests {
         isolate_home();
         let mut app = App::new("/tmp".to_string());
         app.dialog.show(DialogType::HookInput {
+            event: crate::routes::settings::PRE_TOOL_USE_EVENT,
             editing_index: None,
             name: String::new(),
             matcher: String::new(),
@@ -7625,7 +7625,7 @@ mod tests {
             !app.setup
                 .hooks
                 .events
-                .contains_key(crate::routes::settings::HOOK_EVENT),
+                .contains_key(crate::routes::settings::PRE_TOOL_USE_EVENT),
             "esc must not persist anything"
         );
     }
@@ -7636,6 +7636,7 @@ mod tests {
     async fn hook_input_click_positions_cursor() {
         let mut app = App::new("/tmp".to_string());
         app.dialog.show(DialogType::HookInput {
+            event: crate::routes::settings::PRE_TOOL_USE_EVENT,
             editing_index: None,
             name: String::new(),
             matcher: String::new(),

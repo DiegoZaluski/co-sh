@@ -1,9 +1,11 @@
-//! PreToolUse hooks — user-defined shell commands that fire before each tool
-//! call, returning decisions that control agent behavior.
+//! Lifecycle hooks — user-defined shell commands that fire around each tool
+//! call (`PreToolUse` before, `PostToolUse` after a successful execution),
+//! returning decisions that control agent behavior.
 //!
-//! Hooks are configured in `setup.json` and run via the system shell. Each
-//! hook receives the tool name and input as a JSON payload on stdin, and
-//! responds with a JSON decision on stdout.
+//! Hooks are configured in `setup.json` (sections `PreToolUse` and
+//! `PostToolUse`) and run via the system shell. Each hook receives the tool
+//! name and input as a JSON payload on stdin (`tool_output` is also present
+//! for post-execution hooks), and responds with a JSON decision on stdout.
 //!
 //! # Exit codes
 //!
@@ -306,6 +308,29 @@ fn shallow_merge(base: &str, patch: &str) -> Result<String, String> {
     Ok(serde_json::to_string(&merged).unwrap_or_default())
 }
 
+// ── Events ──────────────────────────────────────────────────────────────────
+
+/// Lifecycle points where hooks can fire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    /// Before a tool call — can deny, allow or rewrite its input.
+    PreToolUse,
+    /// After a tool call completed successfully — can inject context into
+    /// the result or halt the turn.
+    PostToolUse,
+}
+
+impl HookEvent {
+    /// Canonical event name surfaced to hook scripts (`COSH_EVENT` and the
+    /// stdin payload) and used as the `setup.json` section key.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PreToolUse => "PreToolUse",
+            Self::PostToolUse => "PostToolUse",
+        }
+    }
+}
+
 // ── Runner ──────────────────────────────────────────────────────────────────
 
 /// Compiled hook with pre-compiled regex matcher.
@@ -314,89 +339,128 @@ struct CompiledHook {
     matcher: Option<regex::Regex>,
 }
 
+impl CompiledHook {
+    /// Regex match against the tool name; empty matcher = all tools.
+    fn matches(&self, tool_name: &str) -> bool {
+        self.matcher
+            .as_ref()
+            .is_none_or(|re| re.is_match(tool_name))
+    }
+}
+
+fn compile(configs: &[HookConfig]) -> Vec<CompiledHook> {
+    let mut hooks: Vec<CompiledHook> = configs
+        .iter()
+        .filter_map(|cfg| {
+            let matcher = if cfg.matcher.is_empty() {
+                None
+            } else {
+                match regex::Regex::new(&cfg.matcher) {
+                    Ok(re) => Some(re),
+                    Err(e) => {
+                        log::warn!(
+                            "Hook matcher failed to compile; skipping: {} ({e})",
+                            cfg.matcher,
+                        );
+                        return None;
+                    }
+                }
+            };
+            Some(CompiledHook {
+                config: cfg.clone(),
+                matcher,
+            })
+        })
+        .collect();
+
+    // Deduplicate by command string (first wins).
+    let mut seen = std::collections::HashSet::new();
+    hooks.retain(|h| seen.insert(h.config.command.clone()));
+    hooks
+}
+
 /// Executes hook commands and aggregates results.
+///
+/// Holds one compiled list per lifecycle event; both share the same
+/// execution/decision machinery and differ only in when they fire and what
+/// the stdin payload carries.
 pub struct HookRunner {
-    hooks: Vec<CompiledHook>,
+    pre: Vec<CompiledHook>,
+    post: Vec<CompiledHook>,
     cwd: String,
 }
 
 impl HookRunner {
-    /// Create a runner from hook configs. Invalid matchers are skipped.
-    pub fn new(configs: &[HookConfig], cwd: &str) -> Self {
-        let mut hooks: Vec<CompiledHook> = configs
-            .iter()
-            .filter_map(|cfg| {
-                let matcher = if cfg.matcher.is_empty() {
-                    None
-                } else {
-                    match regex::Regex::new(&cfg.matcher) {
-                        Ok(re) => Some(re),
-                        Err(e) => {
-                            log::warn!(
-                                "Hook matcher failed to compile; skipping: {} ({e})",
-                                cfg.matcher,
-                            );
-                            return None;
-                        }
-                    }
-                };
-                Some(CompiledHook {
-                    config: cfg.clone(),
-                    matcher,
-                })
-            })
-            .collect();
-
-        // Deduplicate by command string (first wins).
-        let mut seen = std::collections::HashSet::new();
-        hooks.retain(|h| seen.insert(h.config.command.clone()));
-
+    /// Create a runner from pre/post hook configs. Invalid matchers are
+    /// skipped with a warning.
+    pub fn new(pre: &[HookConfig], post: &[HookConfig], cwd: &str) -> Self {
         Self {
-            hooks,
+            pre: compile(pre),
+            post: compile(post),
             cwd: cwd.to_string(),
         }
     }
 
-    /// Returns true if any hooks are configured.
+    /// Returns true if no hooks are configured at all.
     pub fn is_empty(&self) -> bool {
-        self.hooks.is_empty()
+        self.pre.is_empty() && self.post.is_empty()
     }
 
-    /// Run all matching hooks for the given tool call and return the
-    /// aggregated result.
-    pub fn run(&self, tool_name: &str, tool_input: &str) -> AggregateResult {
-        let matching = self.matching_hooks(tool_name);
+    /// Run all matching PreToolUse hooks for the given tool call.
+    pub fn run_pre(&self, tool_name: &str, tool_input: &str) -> AggregateResult {
+        let matching: Vec<&CompiledHook> =
+            self.pre.iter().filter(|h| h.matches(tool_name)).collect();
         if matching.is_empty() {
             return AggregateResult::default();
         }
+        let payload = build_payload(HookEvent::PreToolUse, tool_name, tool_input, None);
+        self.execute(&matching, &payload, tool_input)
+    }
 
-        // Deduplicate by command string.
-        let mut seen = std::collections::HashSet::new();
-        let deduped: Vec<&CompiledHook> = matching
-            .into_iter()
-            .filter(|h| seen.insert(h.config.command.as_str()))
-            .collect();
+    /// Run all matching PostToolUse hooks for a completed tool call. The
+    /// raw tool output is exposed to scripts as `tool_output` in the stdin
+    /// payload.
+    pub fn run_post(
+        &self,
+        tool_name: &str,
+        tool_input: &str,
+        tool_output: &str,
+    ) -> AggregateResult {
+        let matching: Vec<&CompiledHook> =
+            self.post.iter().filter(|h| h.matches(tool_name)).collect();
+        if matching.is_empty() {
+            return AggregateResult::default();
+        }
+        let payload = build_payload(
+            HookEvent::PostToolUse,
+            tool_name,
+            tool_input,
+            Some(tool_output),
+        );
+        self.execute(&matching, &payload, tool_input)
+    }
 
-        let payload = build_payload(tool_name, tool_input);
-        let results: Vec<(HookConfig, HookResult)> = deduped
+    fn execute(
+        &self,
+        hooks: &[&CompiledHook],
+        payload: &str,
+        orig_input: &str,
+    ) -> AggregateResult {
+        let results: Vec<(HookConfig, HookResult)> = hooks
             .iter()
             .map(|h| {
-                let result = self.run_one(&h.config, &payload);
+                let result = self.run_one(&h.config, payload);
                 (h.config.clone(), result)
             })
             .collect();
-
-        aggregate(&results, tool_input)
-    }
-
-    fn matching_hooks(&self, tool_name: &str) -> Vec<&CompiledHook> {
-        self.hooks
-            .iter()
-            .filter(|h| h.matcher.as_ref().is_none_or(|re| re.is_match(tool_name)))
-            .collect()
+        aggregate(&results, orig_input)
     }
 
     fn run_one(&self, config: &HookConfig, payload: &str) -> HookResult {
+        use std::io::Write;
+        use std::process::Stdio;
+        use std::time::Instant;
+
         let timeout = config.timeout_duration();
         let tool_name = extract_tool_name_from_payload(payload);
 
@@ -404,11 +468,19 @@ impl HookRunner {
         cmd.arg("-c")
             .arg(&config.command)
             .current_dir(&self.cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .env("COSH_EVENT", "PreToolUse")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("COSH_EVENT", payload_event(payload))
             .env("COSH_TOOL_NAME", &tool_name);
+
+        // Own process group so a timeout kill takes grandchildren (jq, cargo,
+        // …) down together with the `sh` wrapper.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -418,20 +490,18 @@ impl HookRunner {
             }
         };
 
-        // Spawn a killer thread that fires after the timeout.
-        let kill_pid = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let kill_flag = kill_pid.clone();
-        let child_pid = child.id();
-        let kill_handle = std::thread::spawn(move || {
-            std::thread::sleep(timeout);
-            kill_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            // Kill the process group (negative PID kills the group).
-            #[cfg(unix)]
-            let _ = std::process::Command::new("kill")
-                .arg("-9")
-                .arg(child_pid.to_string())
-                .output();
-        });
+        // Deliver the JSON payload on its own thread, AFTER the stdout/stderr
+        // readers exist: a payload larger than the pipe buffer (64 KiB —
+        // realistic for PostToolUse, which embeds tool_output) must never
+        // block the timeout loop below. Dropping the handle closes stdin so
+        // scripts reading to EOF (`jq`, `grep`, …) terminate.
+        if let Some(mut stdin) = child.stdin.take() {
+            let owned = payload.to_string();
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(owned.as_bytes());
+                // Drop closes the pipe.
+            });
+        }
 
         // Read stdout/stderr in parallel before wait (avoids deadlock when
         // the pipe buffer fills while we wait).
@@ -452,9 +522,30 @@ impl HookRunner {
             })
         });
 
-        let status = child.wait();
-        let timed_out = kill_pid.load(std::sync::atomic::Ordering::Relaxed);
-        let _ = kill_handle.join();
+        // Poll for completion instead of parking a killer thread: no fixed
+        // latency for fast hooks, kill fires only when actually overdue.
+        let deadline = Instant::now() + timeout;
+        let mut timed_out = false;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        timed_out = true;
+                        #[cfg(unix)]
+                        let _ = std::process::Command::new("kill")
+                            .arg("-9")
+                            .arg(format!("-{}", child.id())) // negative PID = group
+                            .output();
+                        #[cfg(not(unix))]
+                        let _ = child.kill();
+                        break child.wait();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(e) => break Err(e),
+            }
+        };
 
         if timed_out {
             log::warn!("Hook timed out after {timeout:?}: {}", config.command,);
@@ -475,7 +566,6 @@ impl HookRunner {
         let stderr = stderr_handle
             .map(|h| h.join().unwrap_or_default())
             .unwrap_or_default();
-
         match exit_code {
             0 => parse_stdout(&stdout),
             2 => {
@@ -522,16 +612,34 @@ fn extract_tool_name_from_payload(payload: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Build the JSON payload piped to hook commands via stdin.
-fn build_payload(tool_name: &str, tool_input: &str) -> String {
+/// Build the JSON payload piped to hook commands via stdin. `tool_output`
+/// is present only for post-execution events.
+fn build_payload(
+    event: HookEvent,
+    tool_name: &str,
+    tool_input: &str,
+    tool_output: Option<&str>,
+) -> String {
     let tool_input_val: serde_json::Value =
         serde_json::from_str(tool_input).unwrap_or(serde_json::json!({}));
-    serde_json::json!({
-        "event": "PreToolUse",
+    let mut payload = serde_json::json!({
+        "event": event.name(),
         "tool_name": tool_name,
         "tool_input": tool_input_val,
-    })
-    .to_string()
+    });
+    if let Some(output) = tool_output {
+        payload["tool_output"] = serde_json::Value::String(output.to_string());
+    }
+    payload.to_string()
+}
+
+/// Event name carried inside a payload (used for `COSH_EVENT`).
+fn payload_event(payload: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("event").cloned())
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| HookEvent::PreToolUse.name().to_string())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -680,51 +788,44 @@ mod tests {
 
     #[test]
     fn runner_deduplicates_by_command() {
-        let runner = HookRunner::new(
-            &[
-                HookConfig {
-                    name: "a".into(),
-                    matcher: String::new(),
-                    command: "echo allow".into(),
-                    timeout: None,
-                },
-                HookConfig {
-                    name: "b".into(),
-                    matcher: String::new(),
-                    command: "echo allow".into(), // duplicate
-                    timeout: None,
-                },
-            ],
-            "/tmp",
-        );
-        assert_eq!(runner.hooks.len(), 1);
+        let pre = [
+            HookConfig {
+                name: "a".into(),
+                matcher: String::new(),
+                command: "echo allow".into(),
+                timeout: None,
+            },
+            HookConfig {
+                name: "b".into(),
+                matcher: String::new(),
+                command: "echo allow".into(), // duplicate
+                timeout: None,
+            },
+        ];
+        let runner = HookRunner::new(&pre, &[], "/tmp");
+        assert_eq!(runner.pre.len(), 1);
     }
 
     #[test]
-    fn runner_matches_tool_name() {
-        let runner = HookRunner::new(
-            &[
-                HookConfig {
-                    name: "bash-only".into(),
-                    matcher: "bash".into(),
-                    command: "echo bash".into(),
-                    timeout: None,
-                },
-                HookConfig {
-                    name: "all".into(),
-                    matcher: String::new(),
-                    command: "echo all".into(),
-                    timeout: None,
-                },
-            ],
-            "/tmp",
-        );
-        // Both match bash_run (different commands, no dedup)
-        let matching = runner.matching_hooks("bash_run");
-        assert_eq!(matching.len(), 2);
+    fn runner_keeps_events_separate() {
+        let pre = [HookConfig {
+            name: "bash-only".into(),
+            matcher: "bash".into(),
+            command: "echo bash".into(),
+            timeout: None,
+        }];
+        let post = [HookConfig {
+            name: "reads".into(),
+            matcher: "^fs_read$".into(),
+            command: "echo reads".into(),
+            timeout: None,
+        }];
+        let runner = HookRunner::new(&pre, &post, "/tmp");
 
-        // Only "all" matches fs_read
-        let matching = runner.matching_hooks("fs_read");
-        assert_eq!(matching.len(), 1);
+        // Pre hooks never fire for post events and vice versa: matching is
+        // scoped to the event's own list.
+        assert!(runner.pre[0].matches("bash_run"));
+        assert!(!runner.post[0].matches("bash_run"));
+        assert!(runner.post[0].matches("fs_read"));
     }
 }

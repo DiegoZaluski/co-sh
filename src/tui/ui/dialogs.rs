@@ -216,11 +216,13 @@ pub enum DialogType {
         input: String,
         cursor_pos: usize,
     },
-    /// Create/edit one PreToolUse hook inside a single registration box
-    /// (same visual language as the API-key / server-URL inputs). Four
-    /// labeled fields share the text-input mechanics: Up/Down switch fields,
-    /// Enter saves, Esc cancels.
+    /// Create/edit one hook inside a single registration box (same visual
+    /// language as the API-key / server-URL inputs). Four labeled fields
+    /// share the text-input mechanics: Up/Down switch fields, Enter saves,
+    /// Esc cancels.
     HookInput {
+        /// Lifecycle event the hook belongs to (`PreToolUse`/`PostToolUse`).
+        event: &'static str,
         /// Index of the hook being edited, or `None` when creating one.
         editing_index: Option<usize>,
         name: String,
@@ -1371,6 +1373,7 @@ impl DialogState {
                 );
             }
             DialogType::HookInput {
+                event,
                 name,
                 matcher,
                 command,
@@ -1391,6 +1394,7 @@ impl DialogState {
                     now,
                     &instance.cursor,
                     title,
+                    event,
                     [name, matcher, command, timeout],
                     *field,
                     *cursor_pos,
@@ -2394,7 +2398,7 @@ fn hook_field_hint(field: usize) -> &'static str {
     match field {
         0 => "shown in this list · optional",
         1 => "regex on tool name · empty = all tools",
-        2 => "shell command run before each tool call",
+        2 => "shell command run for each matched tool call",
         _ => "seconds before it is killed · empty = 30",
     }
 }
@@ -2544,6 +2548,7 @@ fn render_hook_form_dialog(
     now: SystemTime,
     cursor: &Cursor,
     title: &str,
+    event: &'static str,
     fields: [&str; HOOK_FIELDS],
     active_field: usize,
     cursor_pos: usize,
@@ -2595,7 +2600,10 @@ fn render_hook_form_dialog(
     // Subtitle row (muted).
     draw_text_line(
         buf,
-        "PreToolUse · runs before each tool call",
+        &format!(
+            "{event} · runs {} each tool call",
+            if event == "PostToolUse" { "after" } else { "before" }
+        ),
         content_x,
         dialog_y + 2,
         content_w,
@@ -2751,6 +2759,7 @@ mod hook_panel_tests {
     fn dialog_click_focuses_field_and_moves_cursor() {
         let mut state = DialogState::new();
         state.show(DialogType::HookInput {
+            event: crate::routes::settings::PRE_TOOL_USE_EVENT,
             editing_index: None,
             name: String::new(),
             matcher: String::new(),

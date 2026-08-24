@@ -4,9 +4,9 @@
 //! carries an explanatory description rendered directly above it, telling
 //! the user what the setting controls.
 //!
-//! The Hooks entry owns a sub-list: while hooks are enabled every configured
-//! hook plus an "Add hook" action appears below the toggle; disabling hooks
-//! hides the sub-list entirely. Activating a hook opens the shared
+//! The hook entries own sub-lists: while hooks are enabled every configured
+//! hook plus an "Add hook" action appears below its category; disabling
+//! hooks hides the sub-lists entirely. Activating a hook opens the shared
 //! [`crate::ui::dialogs::DialogType::HookInput`] registration box.
 
 use ratatui::buffer::Buffer;
@@ -19,8 +19,9 @@ use crate::theme::Theme;
 use crate::util::list_selection::ListSelection;
 use crate::util::setup::{HookEntry, Setup};
 
-/// The only event type implemented by the runtime engine today.
-pub const HOOK_EVENT: &str = "PreToolUse";
+/// Event section keys inside `setup.json` (`hooks.events`).
+pub const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
+pub const POST_TOOL_USE_EVENT: &str = "PostToolUse";
 
 /// Maximum characters of a hook command shown in list rows.
 const COMMAND_PREVIEW_LEN: usize = 34;
@@ -29,33 +30,42 @@ const COMMAND_PREVIEW_LEN: usize = 34;
 
 /// One top-level entry of the Settings list. `id` keys the activation
 /// behaviour; `label` is the option name; `description` explains what the
-/// setting does.
+/// setting controls; `event` selects which hook list the entry manages.
 struct SettingsItem {
     id: &'static str,
     label: &'static str,
     description: &'static str,
+    event: &'static str,
 }
 
 fn settings_items() -> &'static [SettingsItem] {
-    &[SettingsItem {
-        id: "hooks",
-        label: "Hooks",
-        description: "Run custom shell commands before every tool call",
-    }]
+    &[
+        SettingsItem {
+            id: "hooks",
+            label: "PreToolUse hooks",
+            description: "Run custom shell commands before every tool call",
+            event: PRE_TOOL_USE_EVENT,
+        },
+        SettingsItem {
+            id: "post_tool_use_hooks",
+            label: "PostToolUse hooks",
+            description: "Run custom shell commands after every successful tool call",
+            event: POST_TOOL_USE_EVENT,
+        },
+    ]
 }
 
+/// Each category owns its own switch, so toggling one never leaks into the
+/// other event.
 fn is_enabled(item: &SettingsItem, setup: &Setup) -> bool {
-    match item.id {
-        "hooks" => setup.hooks.enabled,
-        _ => true,
-    }
+    setup.hooks.is_event_enabled(item.event)
 }
 
-pub fn hook_entries(setup: &Setup) -> &[HookEntry] {
+pub fn hook_entries<'a>(setup: &'a Setup, event: &str) -> &'a [HookEntry] {
     setup
         .hooks
         .events
-        .get(HOOK_EVENT)
+        .get(event)
         .map(|v| v.as_slice())
         .unwrap_or(&[])
 }
@@ -121,10 +131,10 @@ pub fn validate_hook(
 pub enum SettingsRow {
     /// Top-level setting (index into `settings_items()`).
     Category(usize),
-    /// Configured hook (index into `hooks.events[HOOK_EVENT]`).
-    Hook(usize),
-    /// Create a new hook.
-    AddHook,
+    /// Configured hook of one event.
+    Hook { event: &'static str, index: usize },
+    /// Create a new hook for one event.
+    AddHook { event: &'static str },
 }
 
 /// Every rendered line with its vertical offset from the content top.
@@ -139,8 +149,8 @@ enum Line {
     Blank,
     Description(&'static str),
     Category { item: usize },
-    Hook { hook: usize },
-    AddHook,
+    Hook { event: &'static str, hook: usize },
+    AddHook { event: &'static str },
 }
 
 impl Line {
@@ -148,8 +158,11 @@ impl Line {
     fn row(&self) -> Option<SettingsRow> {
         match self {
             Line::Category { item } => Some(SettingsRow::Category(*item)),
-            Line::Hook { hook } => Some(SettingsRow::Hook(*hook)),
-            Line::AddHook => Some(SettingsRow::AddHook),
+            Line::Hook { event, hook } => Some(SettingsRow::Hook {
+                event,
+                index: *hook,
+            }),
+            Line::AddHook { event } => Some(SettingsRow::AddHook { event }),
             _ => None,
         }
     }
@@ -158,10 +171,7 @@ impl Line {
 fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
     let mut lines = Vec::new();
     let mut y = 0u16;
-    lines.push(LayoutLine {
-        y,
-        line: Line::Title,
-    });
+    lines.push(LayoutLine { y, line: Line::Title });
     y += 1;
     for item in 0..settings_items().len() {
         lines.push(LayoutLine {
@@ -174,25 +184,28 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
             line: Line::Category { item },
         });
         y += 1;
-    }
-    if setup.hooks.enabled {
-        lines.push(LayoutLine {
-            y,
-            line: Line::Blank,
-        }); // breathing room under toggle
-        y += 1;
-        for hook in 0..hook_entries(setup).len() {
+        if is_enabled(&settings_items()[item], setup) {
+            lines.push(LayoutLine { y, line: Line::Blank }); // breathing room
+            y += 1;
+            for hook in 0..hook_entries(setup, settings_items()[item].event).len() {
+                lines.push(LayoutLine {
+                    y,
+                    line: Line::Hook {
+                        event: settings_items()[item].event,
+                        hook,
+                    },
+                });
+                y += 1;
+            }
+            // The add action reads as the last entry of the hook list.
             lines.push(LayoutLine {
                 y,
-                line: Line::Hook { hook },
+                line: Line::AddHook {
+                    event: settings_items()[item].event,
+                },
             });
             y += 1;
         }
-        // The add action reads as the last entry of the hook list.
-        lines.push(LayoutLine {
-            y,
-            line: Line::AddHook,
-        });
     }
     lines
 }
@@ -213,10 +226,11 @@ fn content_height(setup: &Setup) -> u16 {
 pub enum SettingsAction {
     /// Persisted state changed; caller must `setup.save()`.
     ToggleSaved,
-    /// Open the hook registration box for the hook at this index.
-    EditHook(usize),
-    /// Open the hook registration box to create a new hook.
-    NewHook,
+    /// Open the registration box: blank when `index` is `None`.
+    OpenHookForm {
+        event: &'static str,
+        index: Option<usize>,
+    },
 }
 
 // ── View ────────────────────────────────────────────────────────────────────
@@ -245,24 +259,32 @@ impl SettingsView {
     /// Activate the row under the selection.
     pub fn activate_selected(&mut self, setup: &mut Setup) -> Option<SettingsAction> {
         let rows = selectable_rows(setup);
-        let idx = self
-            .selection
-            .selected_index
-            .min(rows.len().saturating_sub(1));
+        let idx = self.selection.selected_index.min(rows.len().saturating_sub(1));
         match rows.get(idx)? {
             SettingsRow::Category(i) => {
                 let item = &settings_items()[*i];
-                match item.id {
-                    "hooks" => {
-                        setup.hooks.enabled = !setup.hooks.enabled;
-                        self.selection.clamp(selectable_rows(setup).len());
-                        Some(SettingsAction::ToggleSaved)
+                // Each category flips only its own event's switch.
+                match item.event {
+                    PRE_TOOL_USE_EVENT => {
+                        setup.hooks.pre_tool_use_enabled =
+                            !setup.hooks.pre_tool_use_enabled;
                     }
-                    _ => None,
+                    POST_TOOL_USE_EVENT => {
+                        setup.hooks.post_tool_use_enabled =
+                            !setup.hooks.post_tool_use_enabled;
+                    }
+                    _ => {}
                 }
+                self.selection.clamp(selectable_rows(setup).len());
+                Some(SettingsAction::ToggleSaved)
             }
-            SettingsRow::Hook(i) => Some(SettingsAction::EditHook(*i)),
-            SettingsRow::AddHook => Some(SettingsAction::NewHook),
+            SettingsRow::Hook { event, index } => Some(SettingsAction::OpenHookForm {
+                event,
+                index: Some(*index),
+            }),
+            SettingsRow::AddHook { event } => {
+                Some(SettingsAction::OpenHookForm { event, index: None })
+            }
         }
     }
 
@@ -324,9 +346,9 @@ impl SettingsView {
                     draw_text(buf, text, row_x, y, area, Style::default().fg(muted));
                 }
                 Line::Category { item } => {
-                    let idx = rows
-                        .iter()
-                        .position(|r| matches!(r, SettingsRow::Category(ci) if ci == item));
+                    let idx = rows.iter().position(
+                        |r| matches!(r, SettingsRow::Category(ci) if ci == item),
+                    );
                     let is_selected = idx == Some(selected_idx);
                     let shown = in_window(idx, visible, self.selection.scroll_offset);
                     let item = &settings_items()[*item];
@@ -345,15 +367,15 @@ impl SettingsView {
                         Style::default().fg(if is_selected && shown { primary } else { fg }),
                     );
                 }
-                Line::Hook { hook } => {
-                    let idx = rows
-                        .iter()
-                        .position(|r| matches!(r, SettingsRow::Hook(hi) if hi == hook));
+                Line::Hook { event, hook } => {
+                    let idx = rows.iter().position(
+                        |r| matches!(r, SettingsRow::Hook { event: e, index: hi } if *e == *event && hi == hook),
+                    );
                     let is_selected = idx == Some(selected_idx);
                     if !in_window(idx, visible, self.selection.scroll_offset) {
                         continue;
                     }
-                    let entry = &hook_entries(setup)[*hook];
+                    let entry = &hook_entries(setup, event)[*hook];
                     let name_line = format!("• {}", hook_display_name(entry));
                     draw_text(
                         buf,
@@ -370,8 +392,10 @@ impl SettingsView {
                         draw_text(buf, &preview, cmd_x, y, area, Style::default().fg(muted));
                     }
                 }
-                Line::AddHook => {
-                    let idx = rows.iter().position(|r| r == &SettingsRow::AddHook);
+                Line::AddHook { event } => {
+                    let idx = rows.iter().position(
+                        |r| matches!(r, SettingsRow::AddHook { event: e } if *e == *event),
+                    );
                     let is_selected = idx == Some(selected_idx);
                     if !in_window(idx, visible, self.selection.scroll_offset) {
                         continue;
@@ -404,18 +428,19 @@ fn content_start_y(area: Rect, setup: &Setup) -> u16 {
 fn max_row_width(setup: &Setup) -> usize {
     let mut width = settings_items()
         .iter()
-        .map(|item| item.description.len().max(2 + item.label.len())) // "✔ Hooks"
+        .map(|item| item.description.len().max(2 + item.label.len())) // "✔ PreToolUse hooks"
         .max()
         .unwrap_or(0);
-    if setup.hooks.enabled {
-        for entry in hook_entries(setup) {
+    for item in settings_items() {
+        if !setup.hooks.is_event_enabled(item.event) {
+            continue;
+        }
+        for entry in hook_entries(setup, item.event) {
             // Full drawn line: indent + "• " + name [+ " — command…"].
             let name = hook_display_name(entry);
             let mut len = 4 + 2 + name.chars().count();
             if !entry.name.is_empty() && !entry.command.is_empty() {
-                len += 3 + truncate(&entry.command, COMMAND_PREVIEW_LEN)
-                    .chars()
-                    .count();
+                len += 3 + truncate(&entry.command, COMMAND_PREVIEW_LEN).chars().count();
             }
             width = width.max(len);
         }
@@ -466,14 +491,15 @@ mod tests {
         )
     }
 
-    fn setup_with_hooks(enabled: bool, hooks: &[(&str, &str)]) -> Setup {
+    fn setup_with_hooks(enabled: bool, pre: &[(&str, &str)]) -> Setup {
         let mut setup = Setup::default();
-        setup.hooks.enabled = enabled;
-        for (name, command) in hooks {
+        setup.hooks.pre_tool_use_enabled = enabled;
+        setup.hooks.post_tool_use_enabled = enabled;
+        for (name, command) in pre {
             setup
                 .hooks
                 .events
-                .entry(HOOK_EVENT.to_string())
+                .entry(PRE_TOOL_USE_EVENT.to_string())
                 .or_default()
                 .push(HookEntry {
                     name: name.to_string(),
@@ -497,31 +523,41 @@ mod tests {
             .to_string()
     }
 
-    /// Absolute Y of a layout line for `area` given the current state.
+    /// Absolute Y of a layout line matching `pred`.
     fn abs_y(setup: &Setup, area: Rect, pred: impl Fn(&Line) -> bool) -> u16 {
         let layout = build_layout(setup);
         let start_y = content_start_y(area, setup);
-        start_y
-            + layout
-                .iter()
-                .find(|l| pred(&l.line))
-                .expect("line exists")
-                .y
+        start_y + layout.iter().find(|l| pred(&l.line)).expect("line exists").y
     }
 
     #[test]
-    fn sub_list_follows_enabled_state() {
+    fn sub_lists_follow_enabled_state_per_event() {
         let disabled = setup_with_hooks(false, &[("a", "cmd a")]);
-        assert_eq!(selectable_rows(&disabled), vec![SettingsRow::Category(0)]);
+        assert_eq!(
+            selectable_rows(&disabled),
+            vec![SettingsRow::Category(0), SettingsRow::Category(1)]
+        );
 
         let enabled = setup_with_hooks(true, &[("a", "cmd a"), ("b", "cmd b")]);
         assert_eq!(
             selectable_rows(&enabled),
             vec![
                 SettingsRow::Category(0),
-                SettingsRow::Hook(0),
-                SettingsRow::Hook(1),
-                SettingsRow::AddHook,
+                SettingsRow::Hook {
+                    event: PRE_TOOL_USE_EVENT,
+                    index: 0
+                },
+                SettingsRow::Hook {
+                    event: PRE_TOOL_USE_EVENT,
+                    index: 1
+                },
+                SettingsRow::AddHook {
+                    event: PRE_TOOL_USE_EVENT
+                },
+                SettingsRow::Category(1),
+                SettingsRow::AddHook {
+                    event: POST_TOOL_USE_EVENT
+                },
             ]
         );
     }
@@ -530,7 +566,7 @@ mod tests {
     fn toggling_off_clamps_selection() {
         let mut setup = setup_with_hooks(true, &[("a", "cmd a")]);
         let mut view = SettingsView::new();
-        view.selection.selected_index = 3; // Add hook
+        view.selection.selected_index = 3; // Add hook (pre)
         // User navigates up to the Hooks toggle and activates it.
         for _ in 0..3 {
             view.select_prev(20, &setup);
@@ -540,7 +576,7 @@ mod tests {
             view.activate_selected(&mut setup),
             Some(SettingsAction::ToggleSaved)
         );
-        assert!(!setup.hooks.enabled);
+        assert!(!setup.hooks.pre_tool_use_enabled);
         assert!(view.selection.selected_index < selectable_rows(&setup).len());
     }
 
@@ -549,16 +585,22 @@ mod tests {
         let mut setup = setup_with_hooks(true, &[("block rm", "exit 2")]);
         let mut view = SettingsView::new();
 
-        view.selection.selected_index = 1; // Hook(0)
+        view.selection.selected_index = 1; // Pre-tool hook
         assert_eq!(
             view.activate_selected(&mut setup),
-            Some(SettingsAction::EditHook(0))
+            Some(SettingsAction::OpenHookForm {
+                event: PRE_TOOL_USE_EVENT,
+                index: Some(0)
+            })
         );
 
-        view.selection.selected_index = 2; // Add hook
+        view.selection.selected_index = 2; // Add hook (pre)
         assert_eq!(
             view.activate_selected(&mut setup),
-            Some(SettingsAction::NewHook)
+            Some(SettingsAction::OpenHookForm {
+                event: PRE_TOOL_USE_EVENT,
+                index: None
+            })
         );
     }
 
@@ -593,11 +635,11 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_sublist_only_when_enabled() {
+    fn render_shows_sublists_only_when_enabled() {
         let theme = test_theme();
-        let area = Rect::new(0, 0, 100, 24);
+        let area = Rect::new(0, 0, 100, 30);
 
-        // Disabled: only the toggle, no sub rows.
+        // Disabled: only toggles, no sub rows.
         let setup = setup_with_hooks(false, &[("hidden", "gone")]);
         let mut view = SettingsView::new();
         let mut buf = Buffer::empty(area);
@@ -605,11 +647,12 @@ mod tests {
         let all: String = (area.y..area.bottom())
             .map(|y| format!("{}\n", line_text(&buf, area, y)))
             .collect();
-        assert!(all.contains("✗ Hooks"));
+        assert!(all.contains("✗ PreToolUse hooks"));
+        assert!(all.contains("✗ PostToolUse hooks"));
         assert!(!all.contains("• hidden"));
         assert!(!all.contains("+ Add hook"));
 
-        // Enabled: hooks and the add action appear under the toggle.
+        // Enabled: hooks and the add action appear under each toggle.
         let setup = setup_with_hooks(true, &[("block rm", "exit 2")]);
         let mut view = SettingsView::new();
         let mut buf = Buffer::empty(area);
@@ -617,22 +660,35 @@ mod tests {
         let all: String = (area.y..area.bottom())
             .map(|y| format!("{}\n", line_text(&buf, area, y)))
             .collect();
-        assert!(all.contains("✔ Hooks"));
+        assert!(all.contains("✔ PreToolUse hooks"));
         assert!(all.contains("• block rm — exit 2"));
         assert!(all.contains("+ Add hook"));
+        assert!(all.contains("PostToolUse hooks"));
     }
 
     #[test]
-    fn mouse_hits_hook_row_only_on_its_line() {
+    fn mouse_hits_pre_hook_row_only_on_its_line() {
         let theme = test_theme();
-        let area = Rect::new(0, 0, 100, 24);
+        let area = Rect::new(0, 0, 100, 40);
         let setup = setup_with_hooks(true, &[("block rm", "exit 2")]);
         let mut view = SettingsView::new();
         let mut buf = Buffer::empty(area);
         view.render(&mut buf, area, &theme, &setup);
 
-        let hook_y = abs_y(&setup, area, |l| matches!(l, Line::Hook { hook: 0 }));
-        let desc_y = abs_y(&setup, area, |l| matches!(l, Line::Description(_)));
+        let hook_y = abs_y(&setup, area, |l| {
+            matches!(
+                l,
+                Line::Hook {
+                    event: PRE_TOOL_USE_EVENT,
+                    hook: 0
+                }
+            )
+        });
+        let desc_y = abs_y(
+            &setup,
+            area,
+            |l| matches!(l, Line::Description(_)),
+        );
         // row_x mirrors find_row_for_mouse's centering.
         let row_x = area.x + (area.width.saturating_sub(max_row_width(&setup) as u16)) / 2;
 
@@ -646,12 +702,17 @@ mod tests {
             None
         );
 
-        // Disabled: the list re-centers; the old hook Y hits nothing and the
-        // toggle itself sits where the centered list puts it.
+        // Disabled: the list re-centers; whatever sits under the old hook Y
+        // must be a category row — never a phantom hook/add entry.
         let disabled = setup_with_hooks(false, &[("block rm", "exit 2")]);
-        assert_eq!(
-            view.handle_mouse(&mouse_at(row_x + 6, hook_y), area, &disabled),
-            None
+        let res = view.handle_mouse(&mouse_at(row_x + 6, hook_y), area, &disabled);
+        assert!(
+            res.is_none()
+                || matches!(res, Some(i) if matches!(
+                    selectable_rows(&disabled)[i],
+                    SettingsRow::Category(_)
+                )),
+            "disabled layout must not expose hook/add rows, got {res:?}"
         );
         let toggle_y = abs_y(&disabled, area, |l| matches!(l, Line::Category { item: 0 }));
         assert_eq!(
