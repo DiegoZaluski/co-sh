@@ -247,7 +247,7 @@ impl CoshTools {
         self.lsp.as_ref()
     }
 
-    /// Resolve the effective input
+
 
     /// Resolve the effective input message for a sub-agent call (external
     /// CLI or internal agent): reuse the last message when `input` is
@@ -504,6 +504,7 @@ impl CoshTools {
             v.push(extract_schema(&lsp.description_rename));
             v.push(extract_schema(&lsp.description_call_hierarchy));
             v.push(extract_schema(&lsp.description_restart));
+            v.push(extract_schema(&lsp.description_code_actions));
         }
         v.into_iter()
             .filter(|schema| !is_tool_disabled(&schema.name, disabled_tools))
@@ -749,6 +750,7 @@ impl Tools for CoshTools {
             write_single_tool(out, &lsp.description_rename, true);
             write_single_tool(out, &lsp.description_call_hierarchy, true);
             write_single_tool(out, &lsp.description_restart, true);
+            write_single_tool(out, &lsp.description_code_actions, true);
         }
     }
 
@@ -790,6 +792,7 @@ impl Tools for CoshTools {
             v.push(lsp.description_rename.clone());
             v.push(lsp.description_call_hierarchy.clone());
             v.push(lsp.description_restart.clone());
+            v.push(lsp.description_code_actions.clone());
         }
         v
     }
@@ -832,6 +835,7 @@ impl Tools for CoshTools {
             v.push(extract_schema(&lsp.description_rename));
             v.push(extract_schema(&lsp.description_call_hierarchy));
             v.push(extract_schema(&lsp.description_restart));
+            v.push(extract_schema(&lsp.description_code_actions));
         }
         v
     }
@@ -1234,6 +1238,15 @@ impl Tools for CoshTools {
                     .call_hierarchy(&input)
                     .await
                     .map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+            "lsp_code_actions" => {
+                let Some(lsp) = &self.lsp else {
+                    return Err("LSP tooling is disabled".into());
+                };
+                let input: cosh_tools::lsp::types::CodeActionsInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = lsp.code_actions(&input).await.map_err(|e| e.to_string())?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
             "lsp_restart" => {

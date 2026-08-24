@@ -161,3 +161,173 @@ pub struct RestartOutput {
     /// files touched during restart are re-opened immediately).
     pub restarted: Vec<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Rename
+// ---------------------------------------------------------------------------
+
+/// Parameters for `lsp_rename`.
+///
+/// Two-phase by default: without `confirm` the tool returns the rename PLAN
+/// (files + edit counts + preview) and changes nothing. Re-call with
+/// `confirm: true` to apply.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct RenameInput {
+    /// File containing the symbol to rename.
+    pub file_path: String,
+    /// Target position (1-based). Provide this OR `symbol`.
+    pub position: Option<Position1>,
+    /// Symbol name to locate in the file (first whole-word match).
+    pub symbol: Option<String>,
+    /// The new name.
+    pub new_name: String,
+    /// Apply the plan. Default false (dry-run).
+    pub confirm: Option<bool>,
+}
+
+/// One file touched by a rename plan.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct RenameFilePlan {
+    pub path: String,
+    /// Number of edits inside this file.
+    pub edits: usize,
+    /// First replacements (`L{line} → {new}`), capped at 3. Empty on applied
+    /// output.
+    pub preview: Vec<String>,
+}
+
+/// Result of `lsp_rename`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RenameOutput {
+    /// `true` when edits were written to disk.
+    pub applied: bool,
+    pub files: Vec<RenameFilePlan>,
+    pub total_edits: usize,
+    pub formatted: String,
+}
+
+// ---------------------------------------------------------------------------
+// Hover
+// ---------------------------------------------------------------------------
+
+/// Parameters for `lsp_hover`. Same hybrid addressing as definitions.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct HoverInput {
+    pub file_path: String,
+    pub position: Option<Position1>,
+    pub symbol: Option<String>,
+}
+
+/// Result of `lsp_hover`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct HoverOutput {
+    /// Rendered hover contents (markdown when the server provides it).
+    pub formatted: String,
+}
+
+// ---------------------------------------------------------------------------
+// Workspace symbols
+// ---------------------------------------------------------------------------
+
+/// Parameters for `lsp_workspace_symbols`.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct WorkspaceSymbolsInput {
+    /// Substring query matched against symbol names. Empty = all symbols.
+    pub query: Option<String>,
+    /// Maximum symbols returned. Default 100.
+    pub max_items: Option<u32>,
+}
+
+/// One workspace-wide symbol hit.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WorkspaceSymbolEntry {
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    pub line: u32,
+    pub character: u32,
+}
+
+/// Result of `lsp_workspace_symbols`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WorkspaceSymbolsOutput {
+    pub symbols: Vec<WorkspaceSymbolEntry>,
+    pub total: usize,
+    pub formatted: String,
+}
+
+// ---------------------------------------------------------------------------
+// Call hierarchy
+// ---------------------------------------------------------------------------
+
+/// Parameters for `lsp_call_hierarchy`.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct CallHierarchyInput {
+    pub file_path: String,
+    pub position: Option<Position1>,
+    pub symbol: Option<String>,
+    /// `"outgoing"` (what this calls) or `"incoming"` (what calls this).
+    /// Default `"outgoing"`.
+    pub direction: Option<String>,
+    /// Maximum calls returned. Default 50.
+    pub max_items: Option<u32>,
+}
+
+/// One call relationship.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CallEntry {
+    /// Callee name for outgoing; caller name for incoming.
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    pub line: u32,
+    pub character: u32,
+    /// Call-site positions inside the caller (incoming only).
+    pub sites: Vec<(u32, u32)>,
+}
+
+/// Result of `lsp_call_hierarchy`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CallHierarchyOutput {
+    pub direction: String,
+    pub calls: Vec<CallEntry>,
+    pub formatted: String,
+}
+
+// ---------------------------------------------------------------------------
+// Code actions
+// ---------------------------------------------------------------------------
+
+/// Parameters for `lsp_code_actions`.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct CodeActionsInput {
+    /// File containing the diagnostic/error.
+    pub file_path: String,
+    /// 1-based line where the problem is.
+    pub line: u32,
+    /// Apply the Nth action's edit instead of listing. Default: list only.
+    pub apply_index: Option<usize>,
+}
+
+/// One available code action.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeActionEntry {
+    pub index: usize,
+    /// Human-readable title from the server (e.g. "Import `HashMap`").
+    pub title: String,
+    /// Action kind (`quickfix`, `refactor`, `source`…).
+    pub kind: Option<String>,
+    /// Whether this action carries file edits (vs just a command).
+    pub has_edit: bool,
+    /// Files the edit touches.
+    pub files: Vec<String>,
+}
+
+/// Result of `lsp_code_actions`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeActionsOutput {
+    /// `true` when an action was applied to disk.
+    pub applied: bool,
+    pub actions: Vec<CodeActionEntry>,
+    pub formatted: String,
+}

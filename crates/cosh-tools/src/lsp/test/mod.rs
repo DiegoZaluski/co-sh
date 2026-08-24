@@ -401,3 +401,311 @@ async fn unsupported_files_report_no_server_without_error() {
 
     assert!(out.contains("no language server"), "{out}");
 }
+
+// ── Phase 6a tools ────────────────────────────────────────────────────────
+
+/// Rename two-phase: dry-run returns plan without writing; confirm applies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rename_two_phase_dry_run_then_apply() {
+    let (dir, file) = workspace();
+    std::fs::write(&file, "fn target() {}\nfn caller() { target(); }\n").unwrap();
+
+    // The fake server echoes a single-file WorkspaceEdit renaming `target`
+    // → `renamed` at both occurrences.
+    let replies = vec![(
+        "textDocument/rename",
+        json!({ "changes": {
+            &format!("file://{}", file.display()): [
+                { "range": { "start": {"line":0,"character":3}, "end": {"line":0,"character":9} }, "newText": "renamed" },
+                { "range": { "start": {"line":1,"character":14}, "end": {"line":1,"character":20} }, "newText": "renamed" }
+            ]
+        }}),
+    )];
+    let (lsp, _counter) = lsp_for(dir.path(), r#"{"renameProvider":true}"#, replies);
+
+    // Phase 1: dry-run — no writes.
+    let plan = lsp
+        .rename(&RenameInput {
+            file_path: file.display().to_string(),
+            position: Some(Position1 {
+                line: 1,
+                character: 15,
+            }),
+            symbol: None,
+            new_name: "renamed".into(),
+            confirm: None,
+        })
+        .await
+        .unwrap();
+    assert!(!plan.applied);
+    assert_eq!(plan.total_edits, 2);
+    assert!(
+        plan.formatted.contains("confirm: true"),
+        "{}",
+        plan.formatted
+    );
+
+    // File untouched on disk.
+    let on_disk = std::fs::read_to_string(&file).unwrap();
+    assert!(on_disk.contains("target()"), "dry-run must not write");
+
+    // Phase 2: apply.
+    let applied = lsp
+        .rename(&RenameInput {
+            file_path: file.display().to_string(),
+            position: Some(Position1 {
+                line: 1,
+                character: 15,
+            }),
+            symbol: None,
+            new_name: "renamed".into(),
+            confirm: Some(true),
+        })
+        .await
+        .unwrap();
+    assert!(applied.applied);
+    assert_eq!(applied.total_edits, 2);
+
+    let on_disk = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(on_disk, "fn renamed() {}\nfn caller() { renamed(); }\n");
+}
+
+#[tokio::test]
+async fn rename_empty_name_is_rejected() {
+    let (dir, file) = workspace();
+    let (lsp, _counter) = lsp_for(dir.path(), r#"{"renameProvider":true}"#, vec![]);
+
+    let err = lsp
+        .rename(&RenameInput {
+            file_path: file.display().to_string(),
+            position: None,
+            symbol: Some("x".into()),
+            new_name: "  ".into(),
+            confirm: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.contains("cannot be empty"));
+}
+
+#[tokio::test]
+async fn hover_returns_markdown_contents() {
+    let (dir, file) = workspace();
+    let hover_text = "```rust\nfn target()\n```\nDoes things.";
+    let replies = vec![(
+        "textDocument/hover",
+        json!({
+            "contents": { "kind": "markdown", "value": hover_text }
+        }),
+    )];
+    let (lsp, _counter) = lsp_for(dir.path(), r#"{"hoverProvider":true}"#, replies);
+
+    let out = lsp
+        .hover(&HoverInput {
+            file_path: file.display().to_string(),
+            position: Some(Position1 {
+                line: 1,
+                character: 5,
+            }),
+            symbol: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(out.formatted.contains("fn target()"), "{}", out.formatted);
+}
+
+#[tokio::test]
+async fn workspace_symbols_requires_running_servers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("marker.txt"), "m").unwrap();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let mut config = ManagerConfig::new(dir.path().to_path_buf());
+    config.resolves_binaries = false;
+    let factory: ClientFactory = {
+        Arc::new(move |cfg| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let (server, client_stream) = spawn_fake_server(32 * 1024);
+                let (dead_stderr, _dead_peer) = tokio::io::duplex(1);
+                tokio::spawn(auto_respond(
+                    server,
+                    vec![
+                        (
+                            "initialize".to_owned(),
+                            json!({ "capabilities": {"workspaceSymbolProvider":true} }),
+                        ),
+                        ("workspace/symbol".to_owned(), json!([])),
+                    ],
+                ));
+                let (read_half, write_half) = tokio::io::split(client_stream);
+                let client =
+                    LanguageServer::from_streams(cfg, read_half, write_half, Some(dead_stderr));
+                client.initialize(Duration::from_secs(5)).await?;
+                Ok(client)
+            })
+        })
+    };
+    let catalog = vec![ServerSpec {
+        name: "fake",
+        command: "unused",
+        args: &[],
+        extensions: &[".fake"],
+        root_markers: &["marker.txt"],
+    }];
+    let manager = Arc::new(Manager::build(config, catalog, factory));
+    let lsp = Lsp::with_manager(manager, Arc::new(DiagnosticsEngine::new()));
+
+    // No servers running yet (nothing touched).
+    let err = lsp
+        .workspace_symbols(&WorkspaceSymbolsInput {
+            query: None,
+            max_items: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.contains("no language servers are running"), "{err}");
+}
+
+#[tokio::test]
+async fn workspace_symbols_after_touch_returns_canned_hits() {
+    let (dir, file) = workspace();
+    let symbol_hits = json!([
+        {
+            "name": "make_thing",
+            "kind": 12,
+            "location": {
+                "uri": format!("file://{}", file.display()),
+                "range": { "start": {"line":3,"character":4}, "end": {"line":3,"character":14} }
+            }
+        }
+    ]);
+    let replies = vec![("workspace/symbol", symbol_hits)];
+    // Touch any project file so a server starts.
+    let anchor = dir.path().join("anchor.fake");
+    std::fs::write(&anchor, "").unwrap();
+    let (lsp, _counter) = lsp_for(dir.path(), r#"{"workspaceSymbolProvider":true}"#, replies);
+    lsp.manager().ensure_for_file(&anchor).await.unwrap();
+
+    let out = lsp
+        .workspace_symbols(&WorkspaceSymbolsInput {
+            query: Some("thing".into()),
+            max_items: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(out.total, 1);
+    assert_eq!(out.symbols[0].name, "make_thing");
+    assert_eq!(out.symbols[0].kind, "function");
+    assert!(
+        out.formatted.contains("function make_thing"),
+        "{}",
+        out.formatted
+    );
+}
+
+#[tokio::test]
+async fn call_hierarchy_outgoing_direction() {
+    let (dir, file) = workspace();
+    let item_json = |name: &str| {
+        json!({
+            "name": name,
+            "kind": 12,
+            "uri": format!("file://{}", file.display()),
+            "range": { "start": {"line":0,"character":0}, "end": {"line":2,"character":0} },
+            "selectionRange": { "start": {"line":0,"character":3}, "end": {"line":0,"character":9} }
+        })
+    };
+    let replies = vec![
+        (
+            "textDocument/prepareCallHierarchy",
+            json!([item_json("caller")]),
+        ),
+        (
+            "callHierarchy/outgoingCalls",
+            json!([
+                {
+                    "to": item_json("callee"),
+                    "fromRanges": [
+                        { "start": {"line":1,"character":13}, "end": {"line":1,"character":19} }
+                    ]
+                }
+            ]),
+        ),
+    ];
+    let (lsp, _counter) = lsp_for(dir.path(), r#"{"callHierarchyProvider":true}"#, replies);
+
+    let out = lsp
+        .call_hierarchy(&CallHierarchyInput {
+            file_path: file.display().to_string(),
+            position: Some(Position1 {
+                line: 1,
+                character: 4,
+            }),
+            symbol: None,
+            direction: Some("outgoing".into()),
+            max_items: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(out.direction, "outgoing");
+    assert!(out.formatted.contains("callee"), "{}", out.formatted);
+}
+
+#[tokio::test]
+async fn code_actions_list_and_apply() {
+    let (dir, file) = workspace();
+    std::fs::write(&file, "let x: String = 1;\n").unwrap();
+
+    // Fake server returns one quickfix that replaces the whole line.
+    let file_uri = format!("file://{}", file.display());
+    let mut changes_map = serde_json::Map::new();
+    changes_map.insert(
+        file_uri,
+        json!([{ "range": {"start":{"line":0,"character":0},"end":{"line":0,"character":20}}, "newText": "let x: i32 = 1;" }]),
+    );
+    let edit_payload = json!([{
+        "title": "Change type to i32",
+        "kind": "quickfix",
+        "edit": { "changes": changes_map }
+    }]);
+    const CAPS: &str = r#"{"codeActionProvider":true}"#;
+    let replies = vec![("textDocument/codeAction", edit_payload)];
+    let (lsp, _counter) = lsp_for(dir.path(), CAPS, replies);
+
+    // Phase 1: list.
+    let out = lsp
+        .code_actions(&CodeActionsInput {
+            file_path: file.display().to_string(),
+            line: 1,
+            apply_index: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(!out.applied);
+    assert_eq!(out.actions.len(), 1);
+    assert_eq!(out.actions[0].title, "Change type to i32");
+    assert_eq!(out.actions[0].kind.as_deref(), Some("quickfix"));
+    assert!(out.formatted.contains("[0] (quickfix)"));
+
+    // Phase 2: apply.
+    let applied = lsp
+        .code_actions(&CodeActionsInput {
+            file_path: file.display().to_string(),
+            line: 1,
+            apply_index: Some(0),
+        })
+        .await
+        .unwrap();
+
+    assert!(applied.applied);
+    assert!(applied.formatted.contains("Applied: Change type to i32"));
+
+    // Verify disk content changed.
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(content, "let x: i32 = 1;\n");
+}

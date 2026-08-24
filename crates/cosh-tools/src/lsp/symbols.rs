@@ -1,7 +1,7 @@
 //! `lsp_symbols` engine: hierarchical document symbols, flattened for models.
 
 use cosh_sdk::lsp::lsp_types::request::{DocumentSymbolRequest, Request as _};
-use cosh_sdk::lsp::lsp_types::{DocumentSymbol, DocumentSymbolResponse, SymbolKind};
+use cosh_sdk::lsp::lsp_types::{DocumentSymbol, DocumentSymbolResponse};
 use serde_json::json;
 
 use super::{
@@ -61,7 +61,7 @@ fn walk(
         if matches_query {
             out.push(SymbolEntry {
                 name: node.name.clone(),
-                kind: kind_name(node.kind),
+                kind: super::support::symbol_kind_name(node.kind),
                 line: node.range.start.line + 1,
                 character: node.range.start.character + 1,
                 container: container.clone(),
@@ -91,61 +91,4 @@ fn render(symbols: &[SymbolEntry]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Common LSP symbol kinds; unknown numbers degrade to a numeric label
-/// instead of being dropped (dropping would silently hide declarations).
-fn kind_name(kind: SymbolKind) -> String {
-    // SymbolKind is a transparent newtype over i32 in lsp-types 0.97 with
-    // associated consts for every spec kind.
-    const FILE: SymbolKind = SymbolKind::FILE;
-    const MODULE: SymbolKind = SymbolKind::MODULE;
-    const NAMESPACE: SymbolKind = SymbolKind::NAMESPACE;
-    const PACKAGE: SymbolKind = SymbolKind::PACKAGE;
-    const CLASS: SymbolKind = SymbolKind::CLASS;
-    const METHOD: SymbolKind = SymbolKind::METHOD;
-    const PROPERTY: SymbolKind = SymbolKind::PROPERTY;
-    const FIELD: SymbolKind = SymbolKind::FIELD;
-    const CONSTRUCTOR: SymbolKind = SymbolKind::CONSTRUCTOR;
-    const ENUM: SymbolKind = SymbolKind::ENUM;
-    const INTERFACE: SymbolKind = SymbolKind::INTERFACE;
-    const FUNCTION: SymbolKind = SymbolKind::FUNCTION;
-    const VARIABLE: SymbolKind = SymbolKind::VARIABLE;
-    const CONSTANT: SymbolKind = SymbolKind::CONSTANT;
-    const STRING: SymbolKind = SymbolKind::STRING;
-    const NUMBER: SymbolKind = SymbolKind::NUMBER;
-    const BOOLEAN: SymbolKind = SymbolKind::BOOLEAN;
-    const ARRAY: SymbolKind = SymbolKind::ARRAY;
-    const OBJECT: SymbolKind = SymbolKind::OBJECT;
-    const KEY: SymbolKind = SymbolKind::KEY;
-    const NULL: SymbolKind = SymbolKind::NULL;
-    const ENUM_MEMBER: SymbolKind = SymbolKind::ENUM_MEMBER;
-    const STRUCT: SymbolKind = SymbolKind::STRUCT;
-    const EVENT: SymbolKind = SymbolKind::EVENT;
-    const OPERATOR: SymbolKind = SymbolKind::OPERATOR;
-    const TYPE_PARAMETER: SymbolKind = SymbolKind::TYPE_PARAMETER;
-
-    match kind {
-        FILE => "file".into(),
-        MODULE | NAMESPACE | PACKAGE => "module".into(),
-        CLASS => "class".into(),
-        METHOD => "method".into(),
-        PROPERTY => "property".into(),
-        FIELD => "field".into(),
-        CONSTRUCTOR => "constructor".into(),
-        ENUM => "enum".into(),
-        INTERFACE => "interface".into(),
-        FUNCTION => "function".into(),
-        VARIABLE => "variable".into(),
-        CONSTANT => "constant".into(),
-        STRING | NUMBER | BOOLEAN | ARRAY | OBJECT | KEY | NULL => "literal".into(),
-        ENUM_MEMBER => "enum-member".into(),
-        STRUCT => "struct".into(),
-        EVENT => "event".into(),
-        OPERATOR => "operator".into(),
-        TYPE_PARAMETER => "type-parameter".into(),
-        // Unrecognized kinds still show up — silently hiding declarations
-        // would be worse than a generic label.
-        _ => "symbol".into(),
-    }
 }

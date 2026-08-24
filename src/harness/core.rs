@@ -3348,10 +3348,10 @@ impl Harness {
                     .and_then(|t| t.get("path"))
                     .and_then(|p| p.as_str())
                     .unwrap_or_default();
-                if !path.is_empty() {
-                    if let Some(note) = passive_lsp_note(lsp, path).await {
-                        return Ok(format!("{result}{note}"));
-                    }
+                if !path.is_empty()
+                    && let Some(note) = passive_lsp_note(lsp, path).await
+                {
+                    return Ok(format!("{result}{note}"));
                 }
             }
 

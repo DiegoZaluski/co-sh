@@ -5,6 +5,12 @@
 //! - [`references::run_references`]: find references grouped by file.
 //! - [`symbols::run_symbols`]: document symbols with hierarchy.
 //! - [`restart::run_restart`]: targeted or workspace-wide server restart.
+//! - [`rename::run_rename`]: two-phase rename (plan → confirm) applying
+//!   WorkspaceEdit to disk with negotiated-encoding offsets.
+//! - [`hover::run_hover`]: type/signature documentation at a position.
+//! - [`workspace_symbols::run_workspace_symbols`]: project-wide symbol search.
+//! - [`call_hierarchy::run_call_hierarchy`]: incoming/outgoing calls.
+//! - [`code_actions::run_code_actions`]: quickfixes at a diagnostic position.
 //!
 //! [`Lsp`] bundles the [`Manager`] + [`DiagnosticsEngine`] pair every engine
 //! shares, plus the path guard applied to model-supplied paths. Server
@@ -23,13 +29,18 @@
 //! }).await;
 //! ```
 
+pub mod call_hierarchy;
+pub mod code_actions;
 pub mod definitions;
 pub mod diagnostics;
+pub mod hover;
 pub mod references;
+pub mod rename;
 pub mod restart;
 pub mod support;
 pub mod symbols;
 pub mod types;
+pub mod workspace_symbols;
 pub use types::{DefinitionsInput, DiagnosticsInput, ReferencesInput, RestartInput, SymbolsInput};
 
 #[cfg(test)]
@@ -66,6 +77,16 @@ pub struct Lsp {
     pub description_symbols: ToolDescription,
     /// MCP Tool description for `lsp_restart`.
     pub description_restart: ToolDescription,
+    /// MCP Tool description for `lsp_rename`.
+    pub description_rename: ToolDescription,
+    /// MCP Tool description for `lsp_hover`.
+    pub description_hover: ToolDescription,
+    /// MCP Tool description for `lsp_workspace_symbols`.
+    pub description_workspace_symbols: ToolDescription,
+    /// MCP Tool description for `lsp_call_hierarchy`.
+    pub description_call_hierarchy: ToolDescription,
+    /// MCP Tool description for `lsp_code_actions`.
+    pub description_code_actions: ToolDescription,
 }
 
 impl Lsp {
@@ -185,6 +206,103 @@ impl Lsp {
                     "type": "object",
                     "properties": {
                         "file_path": { "type": "string", "description": "Restart only the server(s) serving this file. Omitted: restart everything running." }
+                    }
+                }),
+            ),
+            description_rename: json_description(
+                "lsp_rename",
+                concat!(
+                    "Rename a symbol across the workspace via the language ",
+                    "server. TWO-PHASE by design: the first call (confirm ",
+                    "omitted/false) returns the PLAN — files, edit counts, ",
+                    "preview lines — and changes nothing. Review it, then ",
+                    "re-call with confirm=true to write.\n\n",
+                    "Addressing matches definitions: position OR bare symbol ",
+                    "name. Always run lsp_diagnostics after applying to catch ",
+                    "fallout."
+                ),
+                &{
+                    let mut schema = location_schema();
+                    schema["properties"]["new_name"] = serde_json::json!({
+                        "type": "string",
+                        "description": "The new name for the symbol."
+                    });
+                    schema["properties"]["confirm"] = serde_json::json!({
+                        "type": "boolean",
+                        "description": "Apply the rename. Default false: returns the plan only."
+                    });
+                    schema
+                },
+            ),
+            description_hover: json_description(
+                "lsp_hover",
+                concat!(
+                    "Show type signature and documentation for the symbol at a ",
+                    "position. Same hybrid addressing as definitions (position ",
+                    "OR symbol).\n\n",
+                    "Use when you need the exact type or doc comment without ",
+                    "navigating away."
+                ),
+                &location_schema(),
+            ),
+            description_workspace_symbols: json_description(
+                "lsp_workspace_symbols",
+                concat!(
+                    "Search symbols across the whole workspace (functions, ",
+                    "structs, methods…) using the language server's index. ",
+                    "Substring query on names.\n\n",
+                    "Requires at least one server already running — touch any ",
+                    "project file first if servers have not started."
+                ),
+                &serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Substring filter on symbol names. Empty: return all." },
+                        "max_items": { "type": "integer", "minimum": 1, "description": "Maximum symbols returned. Default 100." }
+                    }
+                }),
+            ),
+            description_call_hierarchy: json_description(
+                "lsp_call_hierarchy",
+                concat!(
+                    "Incoming or outgoing calls around a symbol: what it calls ",
+                    "(outgoing) or what calls it (incoming). Same hybrid ",
+                    "addressing as definitions.\n\n",
+                    "Use to trace call chains before refactoring or to map a ",
+                    "code path end-to-end."
+                ),
+                &{
+                    let mut schema = location_schema();
+                    schema["properties"]["direction"] = serde_json::json!({
+                        "type": "string",
+                        "enum": ["incoming", "outgoing"],
+                        "description": "Direction of the hierarchy. Default outgoing."
+                    });
+                    schema["properties"]["max_items"] = serde_json::json!({
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum calls returned. Default 50."
+                    });
+                    schema
+                },
+            ),
+            description_code_actions: json_description(
+                "lsp_code_actions",
+                concat!(
+                    "Quickfixes and refactoring suggestions for the error at ",
+                    "the given line. The language server knows how to fix its ",
+                    "own diagnostics — missing imports, wrong types, unused ",
+                    "variables.\n\n",
+                    "Two-phase: first call lists available actions. Re-call ",
+                    "with apply_index to apply one to disk."
+                ),
+                &serde_json::json!({
+                    "type": "object",
+                    "required": ["file_path", "line"],
+                    "properties": {
+                        "file_path": { "type": "string", "description": "File containing the error." },
+                        "line": { "type": "integer", "minimum": 1, "description": "1-based line where the problem is." },
+                        "apply_index": { "type": "integer", "minimum": 0, "description": "Apply the Nth action's edit instead of listing." }
                     }
                 }),
             ),
@@ -314,6 +432,48 @@ impl Lsp {
             scoped.file_path = Some(self.resolve(file_path)?.display().to_string());
         }
         restart::run_restart(&self.deps(), &scoped).await
+    }
+
+    /// `lsp_rename` entry point.
+    pub async fn rename(&self, input: &types::RenameInput) -> Result<types::RenameOutput, String> {
+        let mut scoped = input.clone();
+        scoped.file_path = self.resolve(&input.file_path)?.display().to_string();
+        rename::run_rename(&self.deps(), &scoped).await
+    }
+
+    /// `lsp_hover` entry point.
+    pub async fn hover(&self, input: &types::HoverInput) -> Result<types::HoverOutput, String> {
+        let mut scoped = input.clone();
+        scoped.file_path = self.resolve(&input.file_path)?.display().to_string();
+        hover::run_hover(&self.deps(), &scoped).await
+    }
+
+    /// `lsp_workspace_symbols` entry point.
+    pub async fn workspace_symbols(
+        &self,
+        input: &types::WorkspaceSymbolsInput,
+    ) -> Result<types::WorkspaceSymbolsOutput, String> {
+        workspace_symbols::run_workspace_symbols(&self.deps(), input).await
+    }
+
+    /// `lsp_call_hierarchy` entry point.
+    pub async fn call_hierarchy(
+        &self,
+        input: &types::CallHierarchyInput,
+    ) -> Result<types::CallHierarchyOutput, String> {
+        let mut scoped = input.clone();
+        scoped.file_path = self.resolve(&input.file_path)?.display().to_string();
+        call_hierarchy::run_call_hierarchy(&self.deps(), &scoped).await
+    }
+
+    /// `lsp_code_actions` entry point.
+    pub async fn code_actions(
+        &self,
+        input: &types::CodeActionsInput,
+    ) -> Result<types::CodeActionsOutput, String> {
+        let mut scoped = input.clone();
+        scoped.file_path = self.resolve(&input.file_path)?.display().to_string();
+        code_actions::run_code_actions(&self.deps(), &scoped).await
     }
 
     /// Key lookup helper for session layers driving `stop_client` directly.

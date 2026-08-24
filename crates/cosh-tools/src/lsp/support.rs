@@ -3,7 +3,7 @@
 //! Private to the module: engines take these deps explicitly so they stay
 //! testable without the wrapper.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{ops::Range, path::Path, sync::Arc, time::Duration};
 
 use cosh_sdk::lsp::{
     DiagnosticsEngine, LanguageServer, LspError, Manager, lsp_types::OneOf, lsp_types::Position,
@@ -199,4 +199,76 @@ where
         Some(err) => Err(err),
         None => Ok(None),
     }
+}
+
+/// LSP SymbolKind → readable label. Unrecognized numbers degrade to
+/// `"symbol"` instead of being dropped (hiding declarations is worse).
+pub(crate) fn symbol_kind_name(kind: cosh_sdk::lsp::lsp_types::SymbolKind) -> String {
+    use cosh_sdk::lsp::lsp_types::SymbolKind as K;
+    match kind {
+        K::FILE => "file".into(),
+        K::MODULE | K::NAMESPACE | K::PACKAGE => "module".into(),
+        K::CLASS => "class".into(),
+        K::METHOD => "method".into(),
+        K::PROPERTY => "property".into(),
+        K::FIELD => "field".into(),
+        K::CONSTRUCTOR => "constructor".into(),
+        K::ENUM => "enum".into(),
+        K::INTERFACE => "interface".into(),
+        K::FUNCTION => "function".into(),
+        K::VARIABLE => "variable".into(),
+        K::CONSTANT => "constant".into(),
+        K::STRING | K::NUMBER | K::BOOLEAN | K::ARRAY | K::OBJECT | K::KEY | K::NULL => {
+            "literal".into()
+        }
+        K::ENUM_MEMBER => "enum-member".into(),
+        K::STRUCT => "struct".into(),
+        K::EVENT => "event".into(),
+        K::OPERATOR => "operator".into(),
+        K::TYPE_PARAMETER => "type-parameter".into(),
+        _ => "symbol".into(),
+    }
+}
+
+// ── WorkspaceEdit application (shared by rename + code_actions) ────────
+
+/// One concrete replacement on disk.
+pub struct PlannedEdit {
+    /// Byte range to replace.
+    pub span: Range<usize>,
+    pub new_text: String,
+    /// 1-based line for previews.
+    pub line: usize,
+}
+
+/// Splice one file's edits back-to-front. Overlaps abort before any write.
+pub fn apply_edits(path: &Path, planned: &[PlannedEdit]) -> Result<(), String> {
+    let mut sorted: Vec<&PlannedEdit> = planned.iter().collect();
+    sorted.sort_by_key(|edit| std::cmp::Reverse(edit.span.start));
+
+    for pair in sorted.windows(2) {
+        let later = pair[0];
+        let earlier = pair[1];
+        if earlier.span.end > later.span.start {
+            return Err(format!(
+                "overlapping edits in {} — aborting without writing",
+                path.display()
+            ));
+        }
+    }
+
+    let mut content = std::fs::read_to_string(path)
+        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
+
+    for edit in &sorted {
+        if !content.is_char_boundary(edit.span.start) || !content.is_char_boundary(edit.span.end) {
+            return Err(format!("edits no longer fit `{}`", path.display()));
+        }
+    }
+
+    for edit in &sorted {
+        content.replace_range(edit.span.clone(), &edit.new_text);
+    }
+
+    std::fs::write(path, content).map_err(|err| format!("cannot write `{}`: {err}", path.display()))
 }
