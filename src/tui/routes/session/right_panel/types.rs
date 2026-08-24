@@ -1,14 +1,21 @@
-/// Maximum number of PTY sessions (bash + subagent) kept in the right panel.
-/// Older sessions are evicted first so the panel cannot grow without bound
-/// over the process lifetime (restarting the app used to be the only way to
-/// clear the accumulated output).
-const MAX_PTY_SESSIONS: usize = 20;
+/// Maximum number of PTY sessions whose output stays IN MEMORY. Sessions
+/// never leave the panel's history (metadata is tiny); older FINISHED
+/// sessions have their output spilled to a temp file (the state's private
+/// `spill_dir`, removed on drop)
+/// and reloaded lazily when displayed again (history navigation).
+const MEMORY_KEEP_SESSIONS: usize = 8;
 
 /// Maximum number of characters of output retained per PTY session.
 /// Only the TAIL is kept, since the panel renders the most recent output.
 const MAX_PTY_OUTPUT_CHARS: usize = 60_000;
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+use cosh_tui::core::lib::rgba::RGBA;
+
+use super::RIGHT_PANEL_WIDTH;
 
 use cosh_tui::core::renderables::markdown::estimate_height;
 use ratatui::buffer::{Buffer, Cell};
@@ -23,6 +30,32 @@ use crate::util::text_region::{TextRegion, extract_text_in_region};
 /// serve the previous cells, stale by less than one interval, which is
 /// invisible in a streaming panel.
 pub(crate) const SUBAGENT_REBUILD_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Minimum useful height (content rows) of one subagent window. Used as the
+/// budget floor so a squeezed section still shows the top-ranked window's
+/// header instead of hiding every subagent.
+pub(crate) const MIN_WINDOW_ROWS: i32 = 3;
+
+/// Distinguishable, CHEERFUL highlighter-style area colors for subagent
+/// CLIs — light pinks, lavenders, baby blues, mints (marca-texto feel). One
+/// is drawn ONCE per agent CLI per session (see [`RightPanelState::pick_color`])
+/// and never reused by another CLI, so each spawned agent keeps the same
+/// visual identity while it runs. Blended over the section background they
+/// read as a clear, bright per-agent hue.
+const AGENT_PALETTE: [(u8, u8, u8); 12] = [
+    (255, 153, 204), // pink highlighter
+    (255, 179, 186), // light rose
+    (255, 214, 165), // peach
+    (255, 236, 139), // pastel yellow
+    (177, 240, 134), // light lime
+    (134, 239, 172), // mint green
+    (110, 231, 183), // teal mint
+    (103, 232, 249), // cheerful cyan
+    (125, 211, 252), // baby blue
+    (147, 197, 253), // periwinkle
+    (196, 181, 253), // lavender
+    (233, 168, 253), // orchid
+];
 
 /// Split a subagent PTY output into the optional main-agent input line
 /// (`→ cosh: ...`, prepended by `app.rs` when the tool call carries an
@@ -48,6 +81,30 @@ pub(crate) fn sanitize_subagent_text(text: &str) -> String {
         .collect()
 }
 
+/// Wrap one logical line into visual rows of at most `wrap_w` chars
+/// (character-count based, matching the panel's draw-time truncation).
+/// An empty line yields a single empty row; `wrap_w == 0` yields one row.
+pub(crate) fn wrap_chars(line: &str, wrap_w: u16) -> Vec<String> {
+    let w = wrap_w as usize;
+    if w == 0 {
+        return vec![line.to_string()];
+    }
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    chars
+        .chunks(w)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
+/// Number of visual rows a logical line occupies at `wrap_w`.
+fn wrap_count(line: &str, wrap_w: u16) -> u16 {
+    let rows = line.chars().count().div_ceil(usize::from(wrap_w).max(1));
+    u16::try_from(rows).unwrap_or(u16::MAX)
+}
+
 /// Cached rendered markdown cells of one subagent body. Frames between
 /// streamed chunks blit these cells instead of re-running the markdown
 /// renderer over the whole (up to 60k-char) body every frame.
@@ -67,6 +124,10 @@ pub(crate) struct SubagentBodyCache {
     /// Theme colors the cells were styled with (fg + box bg) — the palette
     /// derives from these, so a live theme switch must invalidate.
     pub(crate) theme_key: u64,
+    /// The area tint (agent color blended over the theme background) the
+    /// body was rendered on — a different agent window at the same slot
+    /// must re-render with its own tint.
+    pub(crate) bg: RGBA,
     /// Row-major rendered cells, `wrap_w` × `h`.
     pub(crate) cells: Vec<Cell>,
 }
@@ -94,6 +155,44 @@ pub struct PtySession {
     pub output: String,
     pub workdir: Option<String>,
     pub status: PtyStatus,
+    /// A newer session of the same kind arrived (same agent CLI for
+    /// subagents): this entry leaves the DEFAULT live display (the report
+    /// was already delivered) and is reachable only through history
+    /// navigation. Nothing is ever deleted from the panel.
+    pub superseded: bool,
+    /// When `true`, `output` is EMPTY and its content lives in the file at
+    /// `spilled_path`. Reloaded lazily by [`RightPanelState::session_output`].
+    pub spilled: bool,
+    pub spilled_path: Option<PathBuf>,
+}
+
+impl PtySession {
+    pub(crate) fn new(id: String, command: String, workdir: Option<String>) -> Self {
+        Self {
+            id,
+            command,
+            output: String::new(),
+            workdir,
+            status: PtyStatus::Running,
+            superseded: false,
+            spilled: false,
+            spilled_path: None,
+        }
+    }
+
+    /// The agent CLI of a subagent session (`command` is `subagent: {agent}`).
+    pub(crate) fn subagent_agent(&self) -> Option<&str> {
+        self.command.strip_prefix("subagent: ")
+    }
+
+    pub(crate) fn is_subagent(&self) -> bool {
+        self.command.starts_with("subagent:")
+    }
+
+    /// Finished sessions are never updated again and can be spilled/hidden.
+    pub(crate) fn is_finished(&self) -> bool {
+        !matches!(self.status, PtyStatus::Running)
+    }
 }
 
 /// Identifies which section of the right panel.
@@ -102,6 +201,32 @@ pub enum SectionKind {
     Todo,
     Bash,
     Subagent,
+}
+
+/// Keyboard focus within the right panel, set by clicking a section and
+/// consumed by the ← / → history keys. Subagent focus is per agent CLI:
+/// each queue navigates independently (Kilo never pulls OpenCode entries).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PanelFocus {
+    Bash,
+    Agent(String),
+}
+
+/// Navigation state of one subagent queue (all sessions of ONE agent CLI).
+///
+/// `index` is anchored to ABSOLUTE queue positions so new sessions never
+/// shift what the user selected: `None` = live view (auto follows the
+/// newest), `Some(i)` = pinned to `queue[i]`. Pinning at the newest entry
+/// behaves like live for auto-switch purposes.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AgentNav {
+    /// Selected queue position (`None` = live).
+    pub(crate) index: Option<usize>,
+    /// When the user last manually navigated this queue. Drives the
+    /// eviction heuristic: when display space must be reclaimed among
+    /// PINNED windows, the ones navigated longest ago are hidden first —
+    /// the most recently visited is the one the user was last looking at.
+    pub(crate) last_nav: Option<Instant>,
 }
 
 pub(crate) const fn section_kind_index(kind: SectionKind) -> usize {
@@ -135,7 +260,11 @@ const AUTO_SCROLL_SPEED_MEDIUM: f64 = 36.0;
 const AUTO_SCROLL_SPEED_FAST: f64 = 72.0;
 
 /// State for the right panel.
-#[derive(Debug, Clone)]
+///
+/// NOT `Clone`: it owns the spill directory and cleans it up on `Drop`; a
+/// clone would share the path and the first drop would delete the other's
+/// spilled files.
+#[derive(Debug)]
 pub struct RightPanelState {
     /// Current list of TODOs.
     pub todos: Vec<TodoItem>,
@@ -155,9 +284,16 @@ pub struct RightPanelState {
     section_activity_order: [u64; 3],
 
     // ── Derived buffer caches (avoid rebuilding all accumulated output per frame) ──
-    /// Cached bash line buffer (`$ command` + output lines), keyed to `pty_gen`.
+    /// Cached bash line buffer (`$ command` + output lines, wrapped to the
+    /// section width), keyed to `pty_gen` + `bash_cache_w`.
     bash_buffer_cache: Vec<String>,
     bash_cache_gen: u64,
+    /// Width the bash buffer was wrapped at (cache key alongside gen).
+    bash_cache_w: u16,
+    /// Wrap width of the bash section as of the last layout pass — lets
+    /// scroll math (`section_max_scroll`) match the renderer without a
+    /// width parameter.
+    pub(crate) bash_wrap_w: u16,
     /// Cached subagent line buffer (command header + output lines), keyed to `pty_gen`.
     subagent_buffer_cache: Vec<String>,
     subagent_cache_gen: u64,
@@ -206,6 +342,40 @@ pub struct RightPanelState {
     /// a large buffer per frame.
     pub(crate) subagent_scratch: Option<Buffer>,
 
+    // ── History navigation (bash toggle + per-agent queues) ────────
+    /// Keyboard focus inside the panel (set by clicking a section). Plain
+    /// ←/→ drive the focused slot's history; without focus they keep the
+    /// prompt-cursor behavior.
+    pub panel_focus: Option<PanelFocus>,
+    /// Bash view mode: `false` = live (only the most recent command +
+    /// output), `true` = history (ALL commands stacked linearly, exactly
+    /// the pre-history rendering).
+    pub bash_history_mode: bool,
+    /// Per-agent-CLI navigation state for the subagent section.
+    agent_navs: HashMap<String, AgentNav>,
+    /// Subagent sessions displayed this frame (indices into
+    /// `pty_sessions`), resolved by [`Self::resolve_visible_subagents`]
+    /// at the start of every render. All subagent render consumers iterate
+    /// this set.
+    pub(crate) visible_subagents: Vec<usize>,
+    /// Screen bands of each rendered subagent window from the last frame
+    /// (`session index in pty_sessions`, top, bottom exclusive) — resolves
+    /// which AGENT queue a click targeted.
+    pub(crate) subagent_window_layouts: Vec<(usize, i32, i32)>,
+    /// Area color assigned to each EXTERNAL agent CLI on first sight
+    /// (random palette draw, never reused by another CLI). Internal
+    /// subagents are NOT in this map: they always use [`Self::host_color`].
+    agent_colors: HashMap<String, RGBA>,
+    /// The main (cosh) agent's own area color; shared by every internal
+    /// subagent. Drawn once per session like the external ones.
+    host_color: RGBA,
+    /// Entropy counter for the random palette draws (`RandomState` is
+    /// re-seeded per instance; this keeps consecutive draws distinct).
+    rng_counter: u64,
+    /// Directory holding this state instance's spilled outputs. Unique per
+    /// instance; removed on drop.
+    spill_dir: PathBuf,
+
     // ── Auto-scroll tracking ────────────────────────────────────────
     /// Set to `true` when the user manually scrolls (up/down);
     /// set to `false` by `scroll_to_bottom()`. Used by `is_scrolled_up()`
@@ -235,13 +405,17 @@ pub struct RightPanelState {
     auto_scroll_speed: f64,
 
     // ── Text regions (selection extraction) ─────────────────────────
-    /// One region per bash content row (`bash_buffer()` line). Keyed to
+    /// One region per bash content row (wrapped `bash_buffer` line). Keyed to
     /// `pty_gen` + width via `text_regions_gen`/`text_regions_w`.
     pub(crate) bash_text_regions: Vec<TextRegion>,
     /// One region per subagent content row (header + input + body rows).
     pub(crate) subagent_text_regions: Vec<TextRegion>,
     /// `pty_gen` the text regions were last rebuilt for.
     pub(crate) text_regions_gen: u64,
+    /// Wrap width of the SUBAGENT section as of the last layout pass —
+    /// lets scroll math (`section_max_scroll`) match the renderer's
+    /// `max_w − LEFT_PAD − RIGHT_PAD` without a width parameter.
+    pub(crate) subagent_wrap_w: u16,
     /// Wrap width the subagent regions were laid out at.
     pub(crate) text_regions_w: u16,
 
@@ -253,7 +427,7 @@ pub struct RightPanelState {
 
 impl RightPanelState {
     pub fn new() -> Self {
-        Self {
+        let mut state = Self {
             todos: Vec::new(),
             pty_sessions: Vec::new(),
             pending_todo_update_count: 0,
@@ -264,6 +438,8 @@ impl RightPanelState {
             subagent_body_cache: Vec::new(),
             bash_buffer_cache: Vec::new(),
             bash_cache_gen: 0,
+            bash_cache_w: 0,
+            bash_wrap_w: RIGHT_PANEL_WIDTH.saturating_sub(5),
             subagent_buffer_cache: Vec::new(),
             subagent_cache_gen: 0,
             todo_scroll_y: 0,
@@ -290,11 +466,133 @@ impl RightPanelState {
             bash_text_regions: Vec::new(),
             subagent_text_regions: Vec::new(),
             text_regions_gen: 0,
+            subagent_wrap_w: RIGHT_PANEL_WIDTH.saturating_sub(6),
             text_regions_w: 0,
+            panel_focus: None,
+            bash_history_mode: false,
+            agent_navs: HashMap::new(),
+            visible_subagents: Vec::new(),
+            subagent_window_layouts: Vec::new(),
+            agent_colors: HashMap::new(),
+            host_color: RGBA::from_ints(
+                AGENT_PALETTE[0].0,
+                AGENT_PALETTE[0].1,
+                AGENT_PALETTE[0].2,
+                255,
+            ),
+            rng_counter: 0,
+            spill_dir: Self::fresh_spill_dir(),
             scroll_y: 0,
             content_height: 0,
             visible_height: 0,
+        };
+        // The host agent draws its own area color once per session; every
+        // internal subagent inherits it.
+        state.host_color = state.pick_color();
+        state
+    }
+
+    /// Draw a random, not-yet-used palette color for a new agent CLI.
+    /// Randomness is native (`RandomState` is seeded uniquely per instance)
+    /// plus a monotonic counter; when the palette is exhausted, distinct
+    /// variants are derived by mixing toward white/black until unused.
+    fn pick_color(&mut self) -> RGBA {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        // Colors already spoken for: every assigned CLI AND the host's own
+        // (internal subagents share it, so nobody else may take it).
+        let mut used: Vec<RGBA> = self.agent_colors.values().copied().collect();
+        used.push(self.host_color);
+        self.rng_counter = self.rng_counter.wrapping_add(1);
+        let seed = {
+            let mut hasher = RandomState::new().build_hasher();
+            hasher.write_u64(self.rng_counter);
+            hasher.write_u64(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as u64)
+                    .unwrap_or(0),
+            );
+            hasher.finish()
+        };
+
+        // First pass: an unused palette entry picked by the seed.
+        let free: Vec<usize> = AGENT_PALETTE
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                let c = RGBA::from_ints(c.0, c.1, c.2, 255);
+                !used.contains(&c)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if let Some(&idx) = free.get((seed % free.len().max(1) as u64) as usize) {
+            let (r, g, b) = AGENT_PALETTE[idx];
+            return RGBA::from_ints(r, g, b, 255);
         }
+        // Palette exhausted: mix the seed-indexed entry toward white/black
+        // in alternating steps (delta computed in i32 so BOTH directions
+        // produce real variants) until a color nobody holds is found.
+        let base = AGENT_PALETTE[(seed % AGENT_PALETTE.len() as u64) as usize];
+        for step in 1..=8u32 {
+            let t = step as f32 / 9.0;
+            let target = if step % 2 == 1 { 255 } else { 0 };
+            let mix = |ch: u8| -> u8 {
+                let v = i32::from(ch) as f32 + (target - i32::from(ch)) as f32 * t;
+                v.round().clamp(0.0, 255.0) as u8
+            };
+            let candidate = RGBA::from_ints(mix(base.0), mix(base.1), mix(base.2), 255);
+            if !used.contains(&candidate) {
+                return candidate;
+            }
+        }
+        // Practically unreachable: derive hash-based candidates until one
+        // is unused (bounded, then the last derived value wins).
+        for j in 0..64u64 {
+            let candidate = RGBA::from_ints(
+                (seed >> j) as u8,
+                (seed >> (8 + j)) as u8,
+                (seed >> (16 + j)) as u8,
+                255,
+            );
+            if !used.contains(&candidate) {
+                return candidate;
+            }
+        }
+        RGBA::from_ints(seed as u8, (seed >> 8) as u8, (seed >> 16) as u8, 255)
+    }
+
+    /// The area color of an agent queue: external CLIs keep their assigned
+    /// draw; INTERNAL subagents (empty agent name) always share the main
+    /// agent's own color.
+    pub fn agent_area_color(&self, agent: &str) -> RGBA {
+        if agent.is_empty() {
+            self.host_color
+        } else {
+            self.agent_colors
+                .get(agent)
+                .copied()
+                .unwrap_or(self.host_color)
+        }
+    }
+
+    /// Unique spill directory for a new state instance:
+    /// `<tmp>/cosh/right-panel/<pid>-<nanos>/`. Removed by `Drop`.
+    fn fresh_spill_dir() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir()
+            .join("cosh")
+            .join("right-panel")
+            .join(format!("{}-{nanos}", std::process::id()))
+    }
+
+    /// Remove this instance's spilled files. Best-effort: failures (already
+    /// gone, permission) are ignored — temp dirs are expendable.
+    fn remove_spill_dir(dir: &Path) {
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Mark a section as recently activated. The section with the highest
@@ -311,10 +609,277 @@ impl RightPanelState {
         self.section_activity_order[idx]
     }
 
+    // ── History navigation keys ─────────────────────────────────────
+    /// ← on the focused slot. Bash toggles history mode; an agent queue
+    /// steps one entry back from the current selection (manual navigation
+    /// is never overridden by auto-follow).
+    pub fn panel_left(&mut self) {
+        match self.panel_focus.clone() {
+            Some(PanelFocus::Bash) => {
+                if !self.bash_history_mode {
+                    self.bash_history_mode = true;
+                    self.bump_gen_for_layout();
+                }
+            }
+            Some(PanelFocus::Agent(agent)) => {
+                let queue = self.agent_queue(&agent);
+                if queue.len() < 2 {
+                    return;
+                }
+                let nav = self.agent_navs.entry(agent).or_default();
+                nav.index = match nav.index {
+                    // Live → the entry before the newest.
+                    None => Some(queue.len() - 2),
+                    Some(i) => Some(i.saturating_sub(1)),
+                };
+                nav.last_nav = Some(Instant::now());
+                self.bump_gen_for_layout();
+            }
+            None => {}
+        }
+    }
+
+    /// → on the focused slot. Bash returns to live; an agent queue steps
+    /// forward, and reaching the newest entry re-arms auto-follow.
+    pub fn panel_right(&mut self) {
+        match self.panel_focus.clone() {
+            Some(PanelFocus::Bash) => {
+                if self.bash_history_mode {
+                    self.bash_history_mode = false;
+                    self.bump_gen_for_layout();
+                }
+            }
+            Some(PanelFocus::Agent(agent)) => {
+                let queue = self.agent_queue(&agent);
+                let nav = self.agent_navs.entry(agent).or_default();
+                let next = match nav.index {
+                    // Already live.
+                    None => None,
+                    Some(i) => {
+                        if i + 1 >= queue.len().saturating_sub(1) {
+                            // Stepped onto the newest → back to live.
+                            None
+                        } else {
+                            Some(i + 1)
+                        }
+                    }
+                };
+                if next != nav.index {
+                    nav.index = next;
+                    nav.last_nav = Some(Instant::now());
+                    self.bump_gen_for_layout();
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Alt+← / Alt+→ cycle the focus across agent queues (alphabetical
+    /// order, wrapping). This is how HIDDEN queues — those with no window
+    /// on screen, unreachable by plain ←/→ which only navigate the focused
+    /// queue — are reached. Works from any panel focus.
+    pub fn cycle_agent_queue(&mut self, dir: i32) -> bool {
+        let mut agents: Vec<String> = self
+            .pty_sessions
+            .iter()
+            .filter_map(|s| s.subagent_agent().map(str::to_string))
+            .collect();
+        agents.sort();
+        agents.dedup();
+        if agents.is_empty() {
+            return false;
+        }
+        let cur = match &self.panel_focus {
+            Some(PanelFocus::Agent(a)) => agents.iter().position(|x| x == a),
+            _ => None,
+        };
+        let n = agents.len() as i32;
+        let next = match cur {
+            Some(i) => (i as i32 + dir).rem_euclid(n) as usize,
+            // From Bash/no focus: ← enters the FIRST queue alphabetically,
+            // → the LAST one.
+            None => {
+                if dir < 0 {
+                    0
+                } else {
+                    agents.len() - 1
+                }
+            }
+        };
+        self.panel_focus = Some(PanelFocus::Agent(agents[next].clone()));
+        true
+    }
+
+    /// Whether the given agent queue is pinned away from its latest entry
+    /// (manual navigation active → no auto-follow).
+    pub(crate) fn queue_is_pinned(&self, agent: &str) -> bool {
+        let len = self.queue_len(agent);
+        match self.agent_navs.get(agent).and_then(|n| n.index) {
+            None => false,
+            Some(i) => i + 1 < len,
+        }
+    }
+
+    /// The pinned session index (into `pty_sessions`) of an agent queue, if
+    /// the user navigated away from live.
+    pub(crate) fn pinned_session(&self, agent: &str) -> Option<usize> {
+        if !self.queue_is_pinned(agent) {
+            return None;
+        }
+        let queue = self.agent_queue(agent);
+        let i = self.agent_navs.get(agent)?.index?;
+        queue.get(i).copied()
+    }
+
+    /// Invalidate the derived layout caches after a nav change (the visible
+    /// window set changes even though outputs did not).
+    fn bump_gen_for_layout(&mut self) {
+        self.pty_gen = self.pty_gen.wrapping_add(1);
+    }
+
+    // ── Subagent dynamic windows ────────────────────────────────────
+    /// Resolve which subagent sessions are DISPLAYED this frame and store
+    /// them in `visible_subagents` (display order: chronological).
+    ///
+    /// Candidates ranked best-first:
+    ///   1. PINNED queues (user navigated there deliberately), most recently
+    ///      navigated first — that is where the user was last looking. When
+    ///      space must be reclaimed among pinned windows, the ones with the
+    ///      OLDEST navigation activity are hidden first.
+    ///   2. Live RUNNING sessions (not superseded), newest first.
+    ///   3. Live finished sessions (not superseded), newest first.
+    ///
+    /// Windows are included greedily while they fit `budget_rows`; the
+    /// top-ranked window is always kept (scrolling internally when it alone
+    /// exceeds the budget). Superseded sessions never enter the default
+    /// display — they are reachable only via navigation.
+    pub(crate) fn resolve_visible_subagents(&mut self, wrap_w: u16, budget_rows: i32) {
+        // ONE pass over the sessions builds every per-queue view used
+        // below (absolute index list + pinned state), instead of the
+        // O(N) `queue_*` scans per candidate.
+        let mut queues: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, s) in self.pty_sessions.iter().enumerate() {
+            if let Some(agent) = s.subagent_agent() {
+                queues.entry(agent.to_string()).or_default().push(i);
+            }
+        }
+        let is_pinned = |agent: &str,
+                         navs: &HashMap<String, AgentNav>,
+                         queues: &HashMap<String, Vec<usize>>| {
+            navs.get(agent)
+                .and_then(|n| n.index)
+                .is_some_and(|i| i + 1 < queues.get(agent).map_or(0, Vec::len))
+        };
+
+        // (rank class, tiebreak, session idx)
+        let mut ranked: Vec<(u8, u64, usize)> = Vec::new();
+
+        // 1. Pinned queues — most recent manual navigation first. A pinned
+        //    queue contributes exactly ONE window: its selected entry.
+        let mut pinned: Vec<(Instant, usize)> = self
+            .pinned_agents()
+            .iter()
+            .filter_map(|agent| {
+                if !is_pinned(agent, &self.agent_navs, &queues) {
+                    return None;
+                }
+                let nav = self.agent_navs.get(agent)?;
+                let idx = nav.index.and_then(|i| queues.get(agent)?.get(i)).copied()?;
+                Some((nav.last_nav?, idx))
+            })
+            .collect();
+        pinned.sort_by_key(|p| std::cmp::Reverse(p.0));
+        for (_, idx) in pinned {
+            ranked.push((0, 0, idx));
+        }
+
+        // 2 + 3. Live candidates, newest first (higher pty index = newer).
+        for (idx, s) in self.pty_sessions.iter().enumerate().rev() {
+            if s.superseded || !s.is_subagent() {
+                continue;
+            }
+            let agent = s.subagent_agent().unwrap_or("");
+            if is_pinned(agent, &self.agent_navs, &queues) {
+                continue; // this queue already contributed its pinned window
+            }
+            let class = if s.is_finished() { 2 } else { 1 };
+            ranked.push((class, idx as u64, idx));
+        }
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+
+        // Pinned windows WILL be displayed — load them so their heights are
+        // accurate for the fit (spilled live candidates stay unloaded; they
+        // fit as header-only and scroll internally if chosen).
+        let pinned_idx: Vec<usize> = ranked
+            .iter()
+            .filter(|(class, _, _)| *class == 0)
+            .map(|&(_, _, i)| i)
+            .collect();
+        self.ensure_outputs_loaded(&pinned_idx);
+
+        // Greedy fit against the available budget.
+        let rows = self.subagent_section_rows_for_display(wrap_w);
+        let mut chosen: Vec<usize> = Vec::new();
+        let mut used: i32 = 0;
+        for &(_, _, idx) in &ranked {
+            let need = i32::from(rows.get(idx).copied().unwrap_or(1));
+            if used + need <= budget_rows || chosen.is_empty() {
+                chosen.push(idx);
+                used += need;
+            }
+        }
+        chosen.sort_unstable();
+        self.visible_subagents = chosen;
+    }
+
+    /// Agent CLIs whose queue is currently pinned away from live.
+    fn pinned_agents(&self) -> Vec<String> {
+        self.agent_navs
+            .iter()
+            .filter(|(agent, nav)| nav.last_nav.is_some() && self.queue_is_pinned(agent))
+            .map(|(a, _)| a.clone())
+            .collect()
+    }
+
+    /// Rows of ALL subagent sessions aligned with `pty_sessions` indices
+    /// (0 for non-subagent entries). Only the sessions currently DISPLAYED
+    /// have their spill files reloaded — reloading everything would defeat
+    /// the memory window every frame. Unloaded entries contribute a
+    /// header-only height for fitting; once a session becomes visible,
+    /// [`Self::session_output`] loads it and bumps `pty_gen`, rebuilding
+    /// the rows with real content.
+    pub(crate) fn subagent_section_rows_for_display(&mut self, wrap_w: u16) -> Vec<u16> {
+        let visible = self.visible_subagents.clone();
+        self.ensure_outputs_loaded(&visible);
+        self.subagent_section_rows(wrap_w);
+        let mut out = vec![0u16; self.pty_sessions.len()];
+        let mut it = self.subagent_rows_cache.iter();
+        for (i, s) in self.pty_sessions.iter().enumerate() {
+            if s.is_subagent()
+                && let Some(&r) = it.next()
+            {
+                out[i] = r;
+            }
+        }
+        out
+    }
+
+    /// Reload the spill files of the given sessions (if any), so heights and
+    /// rendered bodies see real content.
+    fn ensure_outputs_loaded(&mut self, idxs: &[usize]) {
+        for &i in idxs {
+            if self.pty_sessions.get(i).is_some_and(|s| s.spilled) {
+                self.session_output(i);
+            }
+        }
+    }
+
     // ── Section layout (for cursor-based targeting) ──────────────────
     /// Reset the section layout list (call when the panel is hidden).
     pub fn clear_section_layouts(&mut self) {
         self.section_layouts.clear();
+        // Stale window bands must never map a click to an agent queue.
+        self.subagent_window_layouts.clear();
     }
 
     /// Record the layout of one visible section (called by the renderer).
@@ -335,6 +900,42 @@ impl RightPanelState {
             .iter()
             .find(|l| y >= l.top && y < l.bottom)
             .map(|l| l.kind)
+    }
+
+    /// Focus the panel slot at screen row `y` (called on mouse-down):
+    /// bash focuses the bash toggle; a subagent window focuses THAT
+    /// window's agent queue — each CLI navigates independently. Returns
+    /// whether a focusable slot was hit.
+    pub fn focus_at(&mut self, y: u16) -> bool {
+        let Some(kind) = self.section_at(y) else {
+            return false;
+        };
+        match kind {
+            SectionKind::Todo => false,
+            SectionKind::Bash => {
+                self.panel_focus = Some(PanelFocus::Bash);
+                true
+            }
+            SectionKind::Subagent => {
+                let ys = i32::from(y);
+                let agent = self
+                    .subagent_window_layouts
+                    .iter()
+                    .find(|&(_, top, bottom)| ys >= *top && ys < *bottom)
+                    .and_then(|&(idx, _, _)| {
+                        self.pty_sessions
+                            .get(idx)
+                            .and_then(|s| s.subagent_agent().map(str::to_string))
+                    });
+                match agent {
+                    Some(agent) => {
+                        self.panel_focus = Some(PanelFocus::Agent(agent));
+                        true
+                    }
+                    None => false,
+                }
+            }
+        }
     }
 
     fn section_layout(&self, kind: SectionKind) -> Option<&SectionLayout> {
@@ -597,12 +1198,13 @@ impl RightPanelState {
         let inner_h = (layout.bottom - layout.top).saturating_sub(3).max(1);
         let total = match kind {
             SectionKind::Todo => self.todos.len() as i32,
-            SectionKind::Bash => self.bash_buffer().len() as i32,
+            SectionKind::Bash => self.bash_buffer(self.bash_wrap_w).len() as i32,
             SectionKind::Subagent => {
-                let wrap_w = self.text_regions_w.max(1);
-                self.subagent_section_rows(wrap_w)
+                let wrap_w = self.subagent_wrap_w.max(1);
+                let rows = self.subagent_section_rows_for_display(wrap_w);
+                self.visible_subagents
                     .iter()
-                    .map(|&r| i32::from(r))
+                    .map(|&i| i32::from(rows.get(i).copied().unwrap_or(1)))
                     .sum()
             }
         };
@@ -653,26 +1255,150 @@ impl RightPanelState {
         } else {
             SectionKind::Bash
         };
+        // A new subagent of the same CLI supersedes the previous entries of
+        // that queue (the report was delivered); they leave the default
+        // display but stay reachable through ← navigation. Bash needs no
+        // flag: live shows only the newest, history shows everything.
+        if let Some(agent) = command.strip_prefix("subagent: ") {
+            let prefix = format!("subagent: {agent}");
+            for s in &mut self.pty_sessions {
+                if s.command == prefix && s.is_finished() {
+                    s.superseded = true;
+                }
+            }
+            // External CLIs draw their area color ONCE (first spawn) and
+            // keep it for the whole session; internal subagents (empty
+            // agent) share the host color and never enter the draw.
+            if !agent.is_empty() && !self.agent_colors.contains_key(agent) {
+                let color = self.pick_color();
+                self.agent_colors.insert(agent.to_string(), color);
+            }
+            // Auto-follow only applies when the user is AT the latest entry
+            // (live or pinned-at-newest). While navigating older entries the
+            // manual selection is never moved.
+            let len = self.queue_len(agent);
+            let nav = self.agent_navs.entry(agent.to_string()).or_default();
+            if nav.index.is_none_or(|i| i + 1 >= len) {
+                nav.index = None;
+            }
+        } else {
+            // New bash command returns the section to the live view.
+            self.bash_history_mode = false;
+        }
         self.mark_activity(kind);
-        self.pty_sessions.push(PtySession {
-            id,
-            command,
-            output: String::new(),
-            workdir,
-            status: PtyStatus::Running,
-        });
-        // Bound memory: evict the oldest COMPLETED sessions beyond the cap.
-        // A running session is never evicted (output updates target the last
-        // running one), but the agent runs commands sequentially, so the oldest
-        // entries are always finished.
+        self.pty_sessions
+            .push(PtySession::new(id, command, workdir));
+        // Bound MEMORY: sessions are kept forever (metadata is tiny), but
+        // finished sessions beyond the in-memory window have their output
+        // spilled to disk.
         self.pty_gen = self.pty_gen.wrapping_add(1);
-        while self.pty_sessions.len() > MAX_PTY_SESSIONS
-            && !matches!(
-                self.pty_sessions.first(),
-                Some(p) if matches!(p.status, PtyStatus::Running)
-            )
+        self.spill_old_outputs();
+    }
+
+    /// Number of sessions in one agent's queue.
+    pub(crate) fn queue_len(&self, agent: &str) -> usize {
+        self.pty_sessions
+            .iter()
+            .filter(|s| s.subagent_agent() == Some(agent))
+            .count()
+    }
+
+    /// The pinned absolute index of an agent's queue (`None` = live).
+    pub(crate) fn queue_nav_index(&self, agent: &str) -> Option<usize> {
+        self.agent_navs.get(agent).and_then(|nav| nav.index)
+    }
+
+    /// When the user last manually navigated this queue (recency ranking).
+    pub(crate) fn queue_last_nav(&self, agent: &str) -> Option<Instant> {
+        self.agent_navs.get(agent).and_then(|nav| nav.last_nav)
+    }
+
+    /// Force a queue's selected index (tests / programmatic pinning).
+    #[cfg(test)]
+    pub(crate) fn set_queue_index(&mut self, agent: &str, index: usize) {
+        let nav = self.agent_navs.entry(agent.to_string()).or_default();
+        nav.index = Some(index);
+        nav.last_nav = Some(Instant::now());
+    }
+
+    /// Absolute indices into `pty_sessions` of one agent's queue (oldest
+    /// first). The positions are stable: new sessions append, never shift.
+    pub(crate) fn agent_queue(&self, agent: &str) -> Vec<usize> {
+        self.pty_sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.subagent_agent() == Some(agent))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Indices of all bash sessions (oldest first).
+    pub(crate) fn bash_queue(&self) -> Vec<usize> {
+        self.pty_sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_subagent())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Output of a session, lazily reloading it from its spill file when it
+    /// was evicted from memory.
+    pub(crate) fn session_output(&mut self, idx: usize) -> &str {
+        let Some(s) = self.pty_sessions.get_mut(idx) else {
+            return "";
+        };
+        if s.spilled
+            && let Some(path) = s.spilled_path.clone()
+            && let Ok(content) = std::fs::read_to_string(&path)
         {
-            self.pty_sessions.remove(0);
+            s.output = content;
+            s.spilled = false;
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+        }
+        &self.pty_sessions[idx].output
+    }
+
+    /// Spill the outputs of the oldest FINISHED sessions that no longer fit
+    /// the in-memory window. Running sessions always stay in memory.
+    fn spill_old_outputs(&mut self) {
+        let in_memory = self
+            .pty_sessions
+            .iter()
+            .filter(|s| !s.spilled && !s.output.is_empty())
+            .count();
+        if in_memory <= MEMORY_KEEP_SESSIONS {
+            return;
+        }
+        let mut excess = in_memory - MEMORY_KEEP_SESSIONS;
+        let dir = self.spill_dir.clone();
+        for s in &mut self.pty_sessions {
+            if excess == 0 {
+                break;
+            }
+            // Oldest-first; running/newest-in-window sessions sit at the end.
+            if s.spilled || !s.is_finished() || s.output.is_empty() {
+                continue;
+            }
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join(format!("{}.txt", s.id));
+            // Retry once: a concurrent removal of the parent dir (another
+            // instance dropping) can fail a single write; recreating fixes it.
+            if std::fs::write(&path, &s.output).is_err() {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(&path, &s.output);
+            }
+            match std::fs::metadata(&path) {
+                Ok(m) if m.len() as usize == s.output.len() => {
+                    s.output = String::new();
+                    s.spilled = true;
+                    s.spilled_path = Some(path);
+                    excess -= 1;
+                }
+                // Best-effort: keep THIS session in memory on failure and
+                // keep spilling the remaining ones.
+                _ => continue,
+            }
         }
     }
 
@@ -749,41 +1475,62 @@ impl RightPanelState {
         output.drain(..cut);
     }
 
-    /// Derived line buffer of all bash PTY sessions (`$ command` + output lines)
-    /// in order. Cached until the next PTY mutation: rebuilding the entire
-    /// accumulated output on every frame was the dominant per-frame cost of the
-    /// right panel as a session grew long.
-    pub(crate) fn bash_buffer(&mut self) -> &[String] {
-        if self.pty_gen != self.bash_cache_gen {
+    /// Derived line buffer of the bash PTY sessions (`$ command` + output
+    /// lines), WRAPPED to `wrap_w` columns: long words/lines break onto the
+    /// following rows instead of disappearing past the box edge. LIVE mode
+    /// (default) renders ONLY the most recent bash session — one command +
+    /// its output per view; HISTORY mode (←) shows ALL commands stacked
+    /// linearly, exactly like the pre-history panel. Cached until the next
+    /// PTY mutation or mode/width change: rebuilding the entire accumulated
+    /// output on every frame was the dominant per-frame cost of the right
+    /// panel as a session grew long.
+    pub(crate) fn bash_buffer(&mut self, wrap_w: u16) -> &[String] {
+        let width_changed = wrap_w != self.bash_cache_w;
+        if self.pty_gen != self.bash_cache_gen || width_changed {
             self.bash_buffer_cache.clear();
-            for pty in &self.pty_sessions {
-                if pty.command.starts_with("subagent:") {
-                    continue;
+            let queue = self.bash_queue();
+            let shown: &[usize] = if self.bash_history_mode {
+                &queue
+            } else {
+                match queue.last() {
+                    Some(last) => std::slice::from_ref(last),
+                    None => &[],
                 }
+            };
+            for &i in shown {
+                let command = self.pty_sessions[i].command.clone();
                 // Header: $ command (simulating a shell prompt)
-                self.bash_buffer_cache.push(format!("$ {}", pty.command));
-                for line in pty.output.lines() {
-                    self.bash_buffer_cache.push(line.to_string());
+                let header = format!("$ {command}");
+                self.bash_buffer_cache.extend(wrap_chars(&header, wrap_w));
+                let output = self.session_output(i).to_string();
+                for line in output.lines() {
+                    self.bash_buffer_cache.extend(wrap_chars(line, wrap_w));
                 }
             }
             self.bash_cache_gen = self.pty_gen;
+            self.bash_cache_w = wrap_w;
         }
         &self.bash_buffer_cache
     }
 
-    /// Derived line buffer of all subagent PTY sessions (command header + output
-    /// lines) in order. Same-agent entries are deduplicated by `app.rs`.
+    /// Derived line buffer of ALL subagent sessions (command header +
+    /// output lines). WARNING: reloads every spilled output when the cache
+    /// rebuilds — do NOT wire this into the render path (the memory window
+    /// would be defeated); it exists for diagnostics/tests.
+    /// Same-agent entries are superseded, never removed.
     /// Cached until the next PTY mutation (see [`Self::bash_buffer`]).
     pub(crate) fn subagent_buffer(&mut self) -> &[String] {
         if self.pty_gen != self.subagent_cache_gen {
             self.subagent_buffer_cache.clear();
-            for pty in &self.pty_sessions {
-                if !pty.command.starts_with("subagent:") {
+            for i in 0..self.pty_sessions.len() {
+                let command = self.pty_sessions[i].command.clone();
+                if !command.starts_with("subagent:") {
                     continue;
                 }
                 // Header: the command line (e.g., "subagent: opencode")
-                self.subagent_buffer_cache.push(pty.command.clone());
-                for line in pty.output.lines() {
+                self.subagent_buffer_cache.push(command);
+                let output = self.session_output(i).to_string();
+                for line in output.lines() {
                     self.subagent_buffer_cache.push(line.to_string());
                 }
             }
@@ -819,9 +1566,12 @@ impl RightPanelState {
                     continue;
                 }
                 let (input, body) = split_subagent_output(&pty.output);
-                let mut rows: u16 = 1; // command header
-                if input.is_some() {
-                    rows += 1;
+                // Command header AND input line wrap like any text: long
+                // ones occupy multiple visual rows (the renderer splits
+                // them the same way).
+                let mut rows: u16 = wrap_count(&pty.command, wrap_w);
+                if let Some(input) = input {
+                    rows = rows.saturating_add(wrap_count(input, wrap_w));
                 }
                 let clean = sanitize_subagent_text(body);
                 if !clean.trim().is_empty() {
@@ -844,6 +1594,23 @@ impl Default for RightPanelState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl Drop for RightPanelState {
+    fn drop(&mut self) {
+        // Session switched or app exited: remove this instance's spilled
+        // outputs. Best-effort. NOTE: only THIS instance's directory is
+        // removed — pruning the shared parents would race with other
+        // instances creating their own directories (parallel tests, two
+        // app processes), making their writes fail sporadically.
+        Self::remove_spill_dir(&self.spill_dir);
+    }
+}
+
+/// Palette entries for tests (light/vivid property checks).
+#[cfg(test)]
+pub(crate) fn palette_entries() -> Vec<(u8, u8, u8)> {
+    AGENT_PALETTE.to_vec()
 }
 
 #[cfg(test)]
@@ -978,38 +1745,233 @@ mod tests {
         assert_eq!(todos.todo_scroll_y, i32::MAX - 5);
     }
 
-    /// The right panel must not accumulate every bash command of the process
-    /// lifetime — the oldest COMPLETED sessions are evicted beyond the cap.
+    /// Sessions are NEVER evicted (history stays navigable); beyond the
+    /// in-memory window the oldest FINISHED outputs are spilled to disk and
+    /// reloaded lazily. Running sessions always stay in memory.
     #[test]
-    fn pty_sessions_are_evicted_beyond_cap() {
+    fn pty_sessions_spill_outputs_beyond_memory_window() {
         let mut state = RightPanelState::new();
-        for i in 0..(MAX_PTY_SESSIONS + 10) {
+        for i in 0..(MEMORY_KEEP_SESSIONS + 5) {
             state.start_pty(format!("cmd{i}"), None);
             state.complete_last_pty(format!("out{i}"));
         }
-        assert!(state.pty_sessions.len() <= MAX_PTY_SESSIONS);
-        // The most recent commands survive; the oldest are gone.
-        assert!(
-            state
-                .pty_sessions
-                .iter()
-                .any(|p| p.command == format!("cmd{}", MAX_PTY_SESSIONS + 9))
-        );
-        assert!(!state.pty_sessions.iter().any(|p| p.command == "cmd0"));
-    }
+        // Nothing is deleted: every command remains in history.
+        assert_eq!(state.pty_sessions.len(), MEMORY_KEEP_SESSIONS + 5);
+        assert!(state.pty_sessions.iter().any(|p| p.command == "cmd0"));
 
-    /// A running session is never evicted (output updates target the last
-    /// running session), even when the cap is exceeded.
-    #[test]
-    fn running_pty_is_never_evicted() {
-        let mut state = RightPanelState::new();
-        for i in 0..(MAX_PTY_SESSIONS + 5) {
+        let spilled = state.pty_sessions.iter().filter(|p| p.spilled).count();
+        assert!(
+            spilled >= 1 && spilled <= 5,
+            "oldest finished outputs moved to disk (got {spilled})"
+        );
+        assert!(
+            !state.pty_sessions.last().unwrap().spilled,
+            "the newest session stays in memory"
+        );
+
+        // Lazy reload through the accessor restores content transparently.
+        assert_eq!(state.session_output(0), "out0");
+        assert!(!state.pty_sessions[0].spilled);
+
+        // A RUNNING session is never spilled even when it is old.
+        for i in 0..(MEMORY_KEEP_SESSIONS + 3) {
             state.start_pty(format!("done{i}"), None);
             state.complete_last_pty("ok".to_string());
         }
-        // Leave the newest session running while over the cap.
         state.start_pty("running".to_string(), None);
-        assert!(state.pty_sessions.iter().any(|p| p.command == "running"));
+        state.update_last_pty("streaming...".to_string());
+        assert!(!state.pty_sessions.last().unwrap().spilled);
+    }
+
+    /// Bash LIVE mode shows only the most recent command + output; HISTORY
+    /// mode (←) stacks all commands exactly like the pre-history panel.
+    /// A new command always returns to live.
+    #[test]
+    fn bash_live_and_history_modes() {
+        let mut state = RightPanelState::new();
+        state.start_pty("echo one".to_string(), None);
+        state.complete_last_pty("one".to_string());
+        state.start_pty("echo two".to_string(), None);
+        state.complete_last_pty("two".to_string());
+
+        assert!(!state.bash_history_mode);
+        assert_eq!(
+            state.bash_buffer(80),
+            &["$ echo two".to_string(), "two".to_string()],
+            "live shows only the latest command"
+        );
+
+        state.panel_focus = Some(PanelFocus::Bash);
+        state.panel_left();
+        assert!(state.bash_history_mode);
+        assert_eq!(
+            state.bash_buffer(80),
+            &[
+                "$ echo one".to_string(),
+                "one".to_string(),
+                "$ echo two".to_string(),
+                "two".to_string(),
+            ],
+            "history stacks all commands linearly"
+        );
+
+        state.panel_right();
+        assert!(!state.bash_history_mode, "→ returns to live");
+
+        // A new command resets to live even if history was active.
+        state.panel_left();
+        state.start_pty("echo three".to_string(), None);
+        assert!(!state.bash_history_mode);
+        assert_eq!(
+            state.bash_buffer(80).first(),
+            Some(&"$ echo three".to_string())
+        );
+    }
+
+    /// Spill reload is LAZY per DISPLAYED window: rendering frames must not
+    /// bulk-reload every spilled output (that would defeat the memory
+    /// window and cause disk churn), but a window the user navigates to IS
+    /// reloaded.
+    #[test]
+    fn spill_reload_is_limited_to_displayed_windows() {
+        let mut state = RightPanelState::new();
+        let n = MEMORY_KEEP_SESSIONS + 4;
+        for i in 0..n {
+            state.start_pty("subagent: kilo".to_string(), None);
+            state.complete_last_pty(format!("report {i}\nsecond line\n"));
+        }
+        state.subagent_rebuild_interval = Duration::ZERO;
+        state.text_regions_w = 20;
+        assert!(
+            state.pty_sessions.iter().any(|s| s.spilled),
+            "oldest outputs were spilled"
+        );
+
+        // Live view shows only the newest (older same-CLI entries are
+        // superseded): repeated render passes must keep them on disk.
+        state.resolve_visible_subagents(20, 6);
+        for _ in 0..2 {
+            let _ = state.subagent_section_rows_for_display(20);
+        }
+        let in_memory = state
+            .pty_sessions
+            .iter()
+            .filter(|s| !s.spilled && !s.output.is_empty())
+            .count();
+        assert!(
+            in_memory <= MEMORY_KEEP_SESSIONS + 1,
+            "memory window respected across frames (got {in_memory})"
+        );
+        assert!(state.pty_sessions[0].spilled, "hidden entry stays spilled");
+
+        // Navigating to an old SPILLED entry loads exactly that window.
+        state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+        state.panel_left();
+        if let Some(nav) = state.agent_navs.get_mut("kilo") {
+            nav.index = Some(1); // absolute queue position 1 (spilled)
+        }
+        state.resolve_visible_subagents(20, 6);
+        let _ = state.subagent_section_rows_for_display(20);
+        let target = state.pinned_session("kilo").unwrap();
+        assert_eq!(target, 1);
+        assert!(
+            !state.pty_sessions[target].spilled,
+            "displayed window reloaded"
+        );
+        assert!(
+            state.pty_sessions[0].spilled || target == 0,
+            "other hidden entries stay spilled"
+        );
+    }
+
+    /// Long bash lines wrap onto following visual rows at the section
+    /// width instead of being truncated away; the header wraps too.
+    #[test]
+    fn bash_buffer_wraps_long_lines() {
+        let mut state = RightPanelState::new();
+        let long_cmd = "a".repeat(30);
+        state.start_pty(long_cmd, None);
+        state.complete_last_pty("short out\n".to_string());
+
+        // Width 10: "$ " + 30 chars = 32 chars → 4 visual rows.
+        let buf = state.bash_buffer(10).to_vec();
+        assert_eq!(buf.len(), 4 + 1, "header wraps, output fits one row");
+        assert_eq!(buf[0], "$ aaaaaaaa");
+        assert_eq!(buf[3].chars().count(), 2);
+
+        // Same content, wider box → fewer rows (width is part of the key).
+        assert!(state.bash_buffer(40).len() < buf.len());
+    }
+
+    // ── Per-CLI area colors ─────────────────────────────────────────
+
+    /// Every external agent CLI draws its area color ONCE and keeps it for
+    /// the whole session; no two CLIs ever share a color; internal
+    /// subagents (empty agent name) share the HOST color instead.
+    #[test]
+    fn agent_area_colors_are_unique_stable_and_host_shared() {
+        let mut state = RightPanelState::new();
+        let host = state.agent_area_color("");
+
+        for agent in ["opencode", "clint", "kilo", "codex"] {
+            state.start_pty(format!("subagent: {agent}"), None);
+            state.complete_last_pty("report\n".to_string());
+        }
+        // Re-spawn the same CLI: same color, still unique across CLIs.
+        state.start_pty("subagent: opencode".to_string(), None);
+
+        let opencode = state.agent_area_color("opencode");
+        assert_eq!(
+            state.agent_area_color("opencode"),
+            opencode,
+            "same CLI keeps its color across spawns"
+        );
+
+        let mut all: Vec<RGBA> = vec![host];
+        for agent in ["opencode", "clint", "kilo", "codex"] {
+            let c = state.agent_area_color(agent);
+            assert!(!all.contains(&c), "{agent} color collides: {c:?}");
+            all.push(c);
+        }
+        assert_eq!(
+            state.agent_area_color(""),
+            host,
+            "internal subagents always share the HOST color"
+        );
+    }
+
+    /// The whole palette can be consumed without panic or collision; after
+    /// exhaustion, derived colors are still unique.
+    #[test]
+    fn color_draw_survives_palette_exhaustion() {
+        let mut state = RightPanelState::new();
+        for i in 0..AGENT_PALETTE.len() + 4 {
+            state.start_pty(format!("subagent: agent{i}"), None);
+        }
+        let mut seen: Vec<RGBA> = vec![state.agent_area_color("")];
+        for i in 0..AGENT_PALETTE.len() + 4 {
+            let c = state.agent_area_color(&format!("agent{i}"));
+            assert!(
+                !seen.contains(&c),
+                "agent{i} reused a color: {c:?} in {seen:?}"
+            );
+            seen.push(c);
+        }
+    }
+
+    /// The subagent rows account for wrapped command-header and input
+    /// lines, so the box never clips a window whose input is long.
+    #[test]
+    fn subagent_rows_include_wrapped_header_and_input() {
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = Duration::ZERO;
+        state.start_pty("subagent: opencode".to_string(), None);
+        let long_input = format!("→ cosh: {}\n", "x".repeat(50));
+        state.update_last_pty(long_input); // no body yet
+
+        // Width 20: 18-char header → 1 row; 51-char input → 3 rows.
+        assert_eq!(state.subagent_section_rows(20), &[1 + 3]);
+        assert_eq!(state.subagent_section_rows(80), &[2]);
     }
 
     /// Output is truncated to `MAX_PTY_OUTPUT_CHARS`, keeping the TAIL (the
@@ -1034,17 +1996,24 @@ mod tests {
         state.start_pty("echo hi".to_string(), None);
         state.complete_last_pty("hi".to_string());
 
-        let first = state.bash_buffer().to_vec();
+        let first = state.bash_buffer(80).to_vec();
         assert_eq!(first, vec!["$ echo hi".to_string(), "hi".to_string()]);
 
         // No mutation → the cached slice is served unchanged.
-        assert_eq!(state.bash_buffer(), first);
+        assert_eq!(state.bash_buffer(80), first);
 
         // Mutation bumps the generation → the cache is rebuilt with new output.
         state.start_pty("echo yo".to_string(), None);
         state.complete_last_pty("yo".to_string());
+        // LIVE mode shows only the newest; history mode stacks everything.
         assert_eq!(
-            state.bash_buffer(),
+            state.bash_buffer(80),
+            vec!["$ echo yo".to_string(), "yo".to_string()]
+        );
+        state.panel_focus = Some(PanelFocus::Bash);
+        state.panel_left();
+        assert_eq!(
+            state.bash_buffer(80),
             vec![
                 "$ echo hi".to_string(),
                 "hi".to_string(),
@@ -1063,10 +2032,159 @@ mod tests {
         state.start_pty("echo hi".to_string(), None);
         state.complete_last_pty("hi".to_string());
 
-        assert_eq!(state.bash_buffer().len(), 2);
+        assert_eq!(state.bash_buffer(80).len(), 2);
         assert_eq!(
             state.subagent_buffer().to_vec(),
             vec!["subagent: opencode".to_string(), "agent output".to_string()]
+        );
+    }
+
+    /// A new session of the same agent CLI supersedes the old one (it
+    /// leaves the default display), while other CLIs coexist. Superseded
+    /// entries stay in memory and are reachable via ← navigation.
+    #[test]
+    fn same_cli_supersedes_but_stays_navigable() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.complete_last_pty("report v1".to_string());
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("kilo report".to_string());
+
+        // Same CLI again → the old entry is superseded, nothing is deleted.
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty("report v2".to_string());
+        state.complete_last_pty(String::new());
+
+        assert_eq!(state.pty_sessions.len(), 3, "nothing deleted");
+        assert!(state.pty_sessions[0].superseded);
+        assert!(!state.pty_sessions[1].superseded, "other CLI untouched");
+
+        let visible = {
+            state.subagent_rebuild_interval = Duration::ZERO;
+            state.text_regions_w = 38;
+            state.resolve_visible_subagents(38, 1000);
+            state.visible_subagents.clone()
+        };
+        // Live shows the newest opencode + the kilo session (plenty of space).
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible, vec![1, 2]);
+
+        // ← on the opencode queue reaches the superseded report.
+        state.panel_focus = Some(PanelFocus::Agent("opencode".to_string()));
+        state.panel_left();
+        assert_eq!(state.pinned_session("opencode"), Some(0));
+
+        // → → returns to live (auto-follow re-armed).
+        state.panel_right(); // back to newest (index 2)
+        state.panel_right(); // newest → live
+        assert!(!state.queue_is_pinned("opencode"));
+    }
+
+    /// Auto-follow only applies when the user is AT the latest queue entry:
+    /// while navigating older entries, a new same-CLI session never moves
+    /// the manual selection.
+    #[test]
+    fn navigation_pins_queue_against_auto_follow() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("v1".to_string());
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("v2".to_string());
+
+        state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+        state.panel_left(); // pin at v1 (queue [v1, v2], absolute index 0)
+        assert!(state.queue_is_pinned("kilo"));
+
+        // New session arrives while navigating → selection stays put.
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.update_last_pty("v3 streaming".to_string());
+        assert_eq!(
+            state.pinned_session("kilo"),
+            Some(0),
+            "manual selection never moved by new sessions"
+        );
+
+        // Returning to the newest re-arms auto-follow.
+        state.panel_right();
+        state.panel_right();
+        assert!(!state.queue_is_pinned("kilo"));
+    }
+
+    /// When space is reclaimed among PINNED windows, the ones with the
+    /// OLDEST manual navigation are hidden first — the most recently
+    /// visited is the one the user was last looking at.
+    #[test]
+    fn pinned_eviction_prefers_most_recently_navigated() {
+        let mut state = RightPanelState::new();
+        for agent in ["a", "b", "c", "d"] {
+            state.start_pty(format!("subagent: {agent}"), None);
+            state.complete_last_pty(format!("{agent} body\nline2\nline3\n"));
+        }
+        state.subagent_rebuild_interval = Duration::ZERO;
+        state.text_regions_w = 20;
+
+        // User navigates back through ALL queues.
+        for agent in ["a", "b", "c", "d"] {
+            state.panel_focus = Some(PanelFocus::Agent(agent.to_string()));
+            state.panel_left();
+        }
+        // Deterministic recency: a oldest … d most recent (no sleeps —
+        // equal Instants would fall back to HashMap iteration order).
+        let base = Instant::now();
+        for (k, agent) in ["a", "b", "c", "d"].iter().enumerate() {
+            if let Some(nav) = state.agent_navs.get_mut(*agent) {
+                nav.last_nav = Some(base + Duration::from_millis(k as u64 * 1_000));
+            }
+        }
+
+        // Tiny budget: only ONE window fits.
+        state.resolve_visible_subagents(20, 4);
+        assert_eq!(state.visible_subagents.len(), 1);
+        // Queue d was navigated last → its window survives.
+        let kept = state.pty_sessions[state.visible_subagents[0]]
+            .command
+            .clone();
+        assert_eq!(kept, "subagent: d", "most recently navigated wins");
+    }
+
+    /// Alt+← / Alt+→ cycle focus across agent queues — including HIDDEN
+    /// queues that have no window to click — without ever mixing entries
+    /// from different CLIs into one queue's navigation.
+    #[test]
+    fn alt_arrows_cycle_agent_queues() {
+        let mut state = RightPanelState::new();
+        for agent in ["kilo", "opencode"] {
+            state.start_pty(format!("subagent: {agent}"), None);
+            state.complete_last_pty(format!("{agent} report\n"));
+        }
+        state.panel_focus = Some(PanelFocus::Agent("opencode".to_string()));
+
+        assert!(state.cycle_agent_queue(-1));
+        assert_eq!(
+            state.panel_focus,
+            Some(PanelFocus::Agent("kilo".to_string())),
+            "Alt+← reaches the other queue"
+        );
+        assert!(state.cycle_agent_queue(1));
+        assert_eq!(
+            state.panel_focus,
+            Some(PanelFocus::Agent("opencode".to_string()))
+        );
+
+        // Plain arrows still navigate ONLY the focused CLI's queue.
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("kilo report v2\n".to_string());
+        state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+        state.panel_left();
+        let kilo_q = state.agent_queue("kilo");
+        assert_eq!(state.pinned_session("kilo"), Some(kilo_q[0]));
+        // The other CLI's queue is untouched (not pinned, not superseded).
+        assert!(state.pinned_session("opencode").is_none());
+        assert!(
+            state
+                .agent_queue("opencode")
+                .iter()
+                .all(|&i| !state.pty_sessions[i].superseded)
         );
     }
 
@@ -1113,8 +2231,10 @@ mod tests {
             rows[0], expected,
             "header + input line + markdown body rows"
         );
-        // A code block is taller than its raw line count (padding rows).
-        assert!(u32::from(rows[0]) > body.lines().count() as u32 + 2);
+        // The fence's painted layout keeps its inner content rows but NOT
+        // a phantom trailing blank: estimate == painted by contract.
+        let painted_estimate = estimate_height(&sanitize_subagent_text(body), w);
+        assert_eq!(rows[0], 1 + 1 + painted_estimate);
     }
 
     /// The height cache is rebuilt only when output (`pty_gen`) or the wrap

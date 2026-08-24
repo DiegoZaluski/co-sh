@@ -352,13 +352,21 @@ const MAX_QUOTE_DEPTH: u16 = 8;
 /// painted. The layout `height` may exceed it by virtual feed row(s) that
 /// exist only to position the NEXT block; the LAST block of a document is
 /// laid out by its visible height so no blank row is left at the foot.
+///
+/// Trailing all-blank rows are also excluded: code fences emit one after
+/// their last source line, and reserving that phantom row leaves an empty
+/// strip at the foot of every document ending in a fence (and inflated
+/// height estimates for consumers like the right panel). INTERIOR blank
+/// rows (spacing between a block's own elements) are untouched — only the
+/// tail is trimmed.
 #[allow(clippy::cast_possible_truncation)]
 fn block_content_height(height: u16, rows: &[Vec<Cell>]) -> u16 {
-    if usize::from(height) > rows.len() {
-        rows.len().min(usize::from(u16::MAX)) as u16
-    } else {
-        height
-    }
+    let last_painted = rows
+        .iter()
+        .rposition(|row| row.iter().any(|cell| cell.symbol() != " "));
+    #[allow(clippy::cast_possible_truncation)]
+    let content = last_painted.map_or(0u16, |i| (i + 1) as u16);
+    content.min(height)
 }
 
 /// Strip leading blockquote markers from a raw quote slice so it can be

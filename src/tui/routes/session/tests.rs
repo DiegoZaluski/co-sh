@@ -2129,9 +2129,10 @@ fn test_code_block_bottom_padding_not_overlapped() {
         view.actual_total_height, view.cached_total_height
     );
 
-    // Sanity-check the drawn rows: code lines at rows 0-1, the bottom
-    // padding row (2) plus the inter-message gap (row 3), then the reply at
-    // row 4. If the bottom padding were overlapped, the reply would start
+    // Sanity-check the drawn rows: code lines at rows 0-1, then the
+    // reply right after the block's real content (the fence's PHANTOM
+    // trailing blank is no longer reserved) plus the inter-message gap:
+    // reply at row 3. If the block overlapped the reply, it would start
     // at row 2.
     let mut reply_rows = Vec::new();
     for row in 0..12 {
@@ -2145,9 +2146,9 @@ fn test_code_block_bottom_padding_not_overlapped() {
     }
     assert_eq!(
         reply_rows,
-        vec![0, 1, 4],
-        "unexpected glyph layout: the code block's bottom padding should be \
-         preserved before the reply"
+        vec![0, 1, 3],
+        "unexpected glyph layout: the reply must follow the fence's painted \
+         rows with only the inter-message gap between them"
     );
 }
 

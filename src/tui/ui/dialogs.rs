@@ -31,6 +31,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+D", "Toggle tool details (show/hide completed)"),
     ("Ctrl+G", "Toggle generic tool output"),
     ("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
+    ("\u{2190}/\u{2192}", "Right panel history (focused slot)"),
+    ("Alt+\u{2190}/\u{2192}", "Switch agent queue (right panel)"),
 ];
 
 fn rgba_color(rgba: RGBA) -> Color {

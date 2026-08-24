@@ -26,7 +26,11 @@ fn test_text_wrapping() {
 fn test_code_block_lines() {
     let text = "```\nline1\nline2\n```";
     let h = estimate_height(text, 80);
-    assert_eq!(h, 3, "2-line code block should estimate 3 rows (got {h})");
+    assert_eq!(
+        h, 2,
+        "2-line code block estimates its PAINTED rows only — the phantom \
+         trailing blank is not reserved (got {h})"
+    );
 }
 
 #[test]
@@ -128,8 +132,9 @@ fn test_code_block_fenced_height() {
     let text = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```";
     let h = estimate_height(text, 80);
     assert_eq!(
-        h, 5,
-        "3-line fenced code block should estimate 5 rows (got {h})"
+        h, 4,
+        "fenced block with padding paints 4 rows; the trailing blank feed \
+         row is NOT reserved (got {h})"
     );
 }
 
