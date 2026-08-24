@@ -119,9 +119,10 @@ impl Fs {
                     "lines without AST resolution. `line_range` takes precedence ",
                     "over `line`/`symbol`. Every result carries a \u{00b6}path#TAG ",
                     "header; lines are numbered `N| text` so edits can anchor ",
-                    "directly. Blocks larger than 24 lines are elided to their ",
-                    "head/tail with a footer naming the exact `line_range` to ",
-                    "re-read when you need the elided body. Lines longer than 200 ",
+                    "directly. After an fs_edit the response also carries the ",
+                    "updated header — you only need to re-read when you want ",
+                    "to SEE new content, not to edit again. Blocks larger ",
+                    "than 24 lines are elided to their head/tail with a footer ",
                     "columns are truncated with `...` and flagged. After a range ",
                     "read a footer reports how many lines remain and how to ",
                     "continue — read only what you need instead of whole files."
@@ -409,7 +410,9 @@ impl Fs {
                 "anchored by the file's content hash for safety — if the file changed ",
                 "since it was read, the tool attempts automatic 3-way merge recovery. ",
                 "Supports replace, delete, insert (before/after/head/tail), and ",
-                "tree-sitter block operations."
+                "tree-sitter block operations. Successful edits return the ",
+                "updated \u{00B6}path#TAG header — use it directly for follow-up ",
+                "edits on the same file without re-reading."
             ),
             "inputSchema": {
                 "type": "object",
@@ -427,10 +430,10 @@ impl Fs {
                                 "file_hash": {
                                     "type": "string",
                                     "description": concat!(
-                                        "4-hex content hash tag from the ",
-                                        "\u{00B6}path#TAG header in read/search output ",
-                                        "(e.g. \u{00B6}src/foo.ts#1A2B). ",
-                                        "Copy the tag verbatim from the read response."
+                                        "4-hex content hash tag: the \u{00B6}path#TAG anchor. ",
+                                        "Get it from your last fs_read OR from a previous ",
+                                        "fs_edit result (the `header` field carries the ",
+                                        "updated tag). Copy verbatim."
                                     )
                                 },
                                 "ops": {
@@ -557,7 +560,10 @@ impl Fs {
                 "e.g. `pat` `console.log(\"$M\")` for `out` `console.log(\"[$M]\")`. ",
                 "If you only need to replace literal text (no restructuring), prefer ",
                 "`targets`. If a populated argument is filled with the other ",
-                "engine's schema, a correction is returned."
+                "engine's schema, a correction is returned. ",
+                "Successful edits return the updated \u{00B6}path#TAG header — ",
+                "use it directly for follow-up edits on the same file without ",
+                "re-reading."
             ),
             "inputSchema": {
                 "type": "object",
@@ -575,10 +581,10 @@ impl Fs {
                                 "file_hash": {
                                     "type": "string",
                                     "description": concat!(
-                                        "4-hex content hash tag from the ",
-                                        "\u{00B6}path#TAG header in read/search output ",
-                                        "(e.g. \u{00B6}src/foo.ts#1A2B). ",
-                                        "Copy the tag verbatim from the read response."
+                                        "4-hex content hash tag: the \u{00B6}path#TAG anchor. ",
+                                        "Get it from your last fs_read OR from a previous ",
+                                        "fs_edit result (the `header` field carries the ",
+                                        "updated tag). Copy verbatim."
                                     )
                                 },
                                 "ops": {

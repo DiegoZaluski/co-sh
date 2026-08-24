@@ -247,8 +247,6 @@ impl CoshTools {
         self.lsp.as_ref()
     }
 
-
-
     /// Resolve the effective input message for a sub-agent call (external
     /// CLI or internal agent): reuse the last message when `input` is
     /// omitted/empty, error when nothing is stored yet.

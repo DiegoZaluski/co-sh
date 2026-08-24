@@ -82,6 +82,8 @@ pub const INSTRUCTIONS_BUILD: &str = concat!(
     "- When the current user request has been fully completed and no further action is required, invoke `stop_agent_loop`.\n",
     "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
     "  Use that result to continue your response — do not call the same tool again with the same arguments.\n",
+    "  After fs_edit, the result carries the updated \u{00B6}path#TAG header — use it directly\n",
+    "  for subsequent edits on the same file. Do NOT re-read a file just to get a new tag.\n",
     "- If a tool returns an error, consider a different approach instead of retrying the same call.\n\n",
     "## Self-Review Loop\n",
     "- After completing any code changes, you MUST call a subagent for code review using `subagent_call`.\n",
@@ -356,10 +358,12 @@ async fn passive_lsp_note(lsp: &Arc<Lsp>, path: &str) -> Option<String> {
     if out.formatted.is_empty() {
         return None;
     }
-    Some(format!(
+    let reminder = format!(
         "\n\n<system-reminder>\nLSP errors detected after writing {path}:\n{}\n</system-reminder>",
         out.formatted
-    ))
+    );
+    let guidance = "\nFix these using the \u{00B6}header from your last edit result — no need to re-read the file.";
+    Some(format!("{reminder}{guidance}"))
 }
 
 fn default_harness_tools() -> Vec<HarnessTool> {
@@ -651,8 +655,7 @@ impl Harness {
         cwd: &str,
     ) -> Self {
         if !pre.is_empty() || !post.is_empty() {
-            self.hook_runner =
-                Some(super::hooks::HookRunner::new(pre, post, cwd));
+            self.hook_runner = Some(super::hooks::HookRunner::new(pre, post, cwd));
         }
         self
     }
@@ -3036,8 +3039,7 @@ impl Harness {
                             // `context` enriches the output the model sees;
                             // deny (tool already ran) degrades to a warning
                             // line; halt stops the turn.
-                            let tool_name_str =
-                                info.as_ref().map_or("?", |(_, n, _)| n.as_str());
+                            let tool_name_str = info.as_ref().map_or("?", |(_, n, _)| n.as_str());
                             if let Some(runner) = self.hook_runner.as_ref()
                                 && !runner.is_empty()
                             {

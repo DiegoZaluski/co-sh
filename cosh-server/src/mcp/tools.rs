@@ -364,7 +364,7 @@ async fn passive_error_note(lsp: &Arc<Lsp>, path: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "\n\n<system-reminder>\nLSP errors detected after writing {path}:\n{}\n</system-reminder>",
+        "\n\n<system-reminder>\nLSP errors detected after writing {path}:\n{}\nFix these using the ¶header from your last edit result — no need to re-read the file.\n</system-reminder>",
         out.formatted
     ))
 }

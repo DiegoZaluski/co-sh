@@ -160,8 +160,8 @@ impl MismatchError {
                 format!(
                     "Section is bound to {}{}, but the current file hashes to {}{}. \
                      If a prior edit in this session modified this file, copy the \
-                     {}{}{}newhash header from that edit's response; otherwise re-read \
-                     the file with `read` to refresh the tag before retrying.",
+                     {}{}{}newhash header from that edit's response (do NOT re-read). \
+                     Only re-read if no prior edit touched this file.",
                     HL_FILE_HASH_SEP,
                     details.expected_file_hash,
                     HL_FILE_HASH_SEP,
