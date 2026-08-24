@@ -260,6 +260,23 @@ impl Manager {
             .collect()
     }
 
+    /// Every currently-ready client, regardless of language.
+    ///
+    /// Workspace-level queries (symbol search) fan out over these instead of
+    /// a per-file anchor.
+    pub fn running_clients(&self) -> Vec<Arc<LanguageServer>> {
+        self.inner
+            .outcomes
+            .lock()
+            .expect("outcomes lock")
+            .values()
+            .filter_map(|rx| match rx.borrow().clone() {
+                SpawnOutcome::Ready(client) => Some(client),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Snapshot of every tracked key's lifecycle state.
     pub fn states(&self) -> Vec<(ClientKey, ClientLifecycle)> {
         self.inner
