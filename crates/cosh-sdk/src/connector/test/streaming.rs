@@ -312,7 +312,10 @@ data: [DONE]\n\n";
         json["chat_template_kwargs"]["thinking"], true,
         "nvidia must opt into NIM thinking mode, got: {body}"
     );
-    assert!(json.get("thinking").is_none(), "nvidia must not get the deepseek toggle");
+    assert!(
+        json.get("thinking").is_none(),
+        "nvidia must not get the deepseek toggle"
+    );
 }
 
 /// The NIM opt-in must never leak to the deepseek provider.
@@ -337,7 +340,8 @@ data: [DONE]\n\n";
 
 /// No effort → no NIM opt-in either.
 #[tokio::test]
-async fn nvidia_omits_opt_in_without_effort() {    let sse = "\
+async fn nvidia_omits_opt_in_without_effort() {
+    let sse = "\
 data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
 data: [DONE]\n\n";
     let (port, captured, _raw, handle) = mock_server(sse, 200);

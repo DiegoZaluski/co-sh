@@ -522,7 +522,7 @@ impl CoshTools {
 #[cfg(any(feature = "fastembed", feature = "cloud"))]
 fn config_to_embedder(
     config: &RecallEmbedderConfig,
-    base_urls: &std::collections::HashMap<String, String>,
+    _base_urls: &std::collections::HashMap<String, String>,
 ) -> Result<cosh_recall::embed::Embedder, String> {
     match config {
         #[cfg(feature = "fastembed")]
@@ -544,7 +544,7 @@ fn config_to_embedder(
             let mut connector = cosh_sdk::connector::Connector::new(provider)
                 .map_err(|e| format!("connector error: {e}"))?
                 .with_model(model);
-            if let Some(url) = base_urls.get(provider) {
+            if let Some(url) = _base_urls.get(provider) {
                 connector = connector.with_base_url(url.clone());
             }
             Ok(cosh_recall::embed::Embedder::new_cloud(connector, *dim))

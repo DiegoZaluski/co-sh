@@ -1167,7 +1167,12 @@ impl App {
 
         match crate::routes::settings::validate_hook(name, matcher, command, timeout) {
             Ok(entry) => {
-                let list = self.setup.hooks.events.entry(event.to_string()).or_default();
+                let list = self
+                    .setup
+                    .hooks
+                    .events
+                    .entry(event.to_string())
+                    .or_default();
                 match editing_index {
                     Some(i) if *i < list.len() => list[*i] = entry,
                     _ => list.push(entry),
@@ -4107,10 +4112,12 @@ impl App {
                                     Some(crate::routes::settings::SettingsAction::ToggleSaved) => {
                                         self.setup.save();
                                     }
-                                    Some(crate::routes::settings::SettingsAction::OpenHookForm {
-                                        event,
-                                        index,
-                                    }) => {
+                                    Some(
+                                        crate::routes::settings::SettingsAction::OpenHookForm {
+                                            event,
+                                            index,
+                                        },
+                                    ) => {
                                         self.open_hook_form(event, index);
                                     }
                                     None => {}

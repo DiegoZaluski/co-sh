@@ -1870,9 +1870,13 @@ impl SessionView {
         let max_w = inner_area.width.saturating_sub(6).max(2);
         self.ensure_height_caches_fresh(session, max_w, config, None);
 
-        let next =
-            self.message_index_at_y(i32::from(inner_area.y), i32::from(y), session.messages.len())
-                .filter(|&idx| session.messages[idx].role == MessageRole::User);
+        let next = self
+            .message_index_at_y(
+                i32::from(inner_area.y),
+                i32::from(y),
+                session.messages.len(),
+            )
+            .filter(|&idx| session.messages[idx].role == MessageRole::User);
         if next != self.hovered_msg_idx {
             self.hovered_msg_idx = next;
             return true;
@@ -1904,7 +1908,11 @@ impl SessionView {
         if idx >= self.prefix_y.len().saturating_sub(1) || idx >= self.msg_height_cache.len() {
             return;
         }
-        if session.messages.get(idx).is_none_or(|m| m.role != MessageRole::User) {
+        if session
+            .messages
+            .get(idx)
+            .is_none_or(|m| m.role != MessageRole::User)
+        {
             return;
         }
         let vp_top = i32::from(inner_area.y);

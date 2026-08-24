@@ -440,12 +440,7 @@ impl HookRunner {
         self.execute(&matching, &payload, tool_input)
     }
 
-    fn execute(
-        &self,
-        hooks: &[&CompiledHook],
-        payload: &str,
-        orig_input: &str,
-    ) -> AggregateResult {
+    fn execute(&self, hooks: &[&CompiledHook], payload: &str, orig_input: &str) -> AggregateResult {
         let results: Vec<(HookConfig, HookResult)> = hooks
             .iter()
             .map(|h| {

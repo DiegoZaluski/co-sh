@@ -2602,7 +2602,11 @@ fn render_hook_form_dialog(
         buf,
         &format!(
             "{event} · runs {} each tool call",
-            if event == "PostToolUse" { "after" } else { "before" }
+            if event == "PostToolUse" {
+                "after"
+            } else {
+                "before"
+            }
         ),
         content_x,
         dialog_y + 2,
@@ -2770,7 +2774,7 @@ mod hook_panel_tests {
         });
         let area = Rect::new(0, 0, 80, 30);
         let values = ["", "", "exit 2", ""];
-        let (dialog_x, dialog_y, _, _, content_x, cols) = hook_input_metrics(area, values);
+        let (_dialog_x, dialog_y, _, _, content_x, cols) = hook_input_metrics(area, values);
 
         // Click the Command value row at the 'i' column.
         let cmd_geom_row = hook_field_geometries(dialog_y, values, cols)[2].value_y;

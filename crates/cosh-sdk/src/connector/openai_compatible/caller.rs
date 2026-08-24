@@ -531,8 +531,7 @@ fn build_chat_request(
     // models (DeepSeek/Qwen on integrate.api.nvidia.com). NOTE: like the
     // DeepSeek toggle above, this keys off the provider name — a generic
     // openai connector pointed at a NIM base URL will not receive it.
-    let chat_template_kwargs = (provider == "nvidia"
-        && params.reasoning_effort.is_some())
+    let chat_template_kwargs = (provider == "nvidia" && params.reasoning_effort.is_some())
         .then_some(ChatTemplateKwargs { thinking: true });
     // In inline mode the request must NOT carry the native `tools` array:
     // the model is instructed to write tool calls as JSON into its text

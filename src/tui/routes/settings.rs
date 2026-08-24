@@ -171,7 +171,10 @@ impl Line {
 fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
     let mut lines = Vec::new();
     let mut y = 0u16;
-    lines.push(LayoutLine { y, line: Line::Title });
+    lines.push(LayoutLine {
+        y,
+        line: Line::Title,
+    });
     y += 1;
     for item in 0..settings_items().len() {
         lines.push(LayoutLine {
@@ -185,7 +188,10 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
         });
         y += 1;
         if is_enabled(&settings_items()[item], setup) {
-            lines.push(LayoutLine { y, line: Line::Blank }); // breathing room
+            lines.push(LayoutLine {
+                y,
+                line: Line::Blank,
+            }); // breathing room
             y += 1;
             for hook in 0..hook_entries(setup, settings_items()[item].event).len() {
                 lines.push(LayoutLine {
@@ -259,19 +265,20 @@ impl SettingsView {
     /// Activate the row under the selection.
     pub fn activate_selected(&mut self, setup: &mut Setup) -> Option<SettingsAction> {
         let rows = selectable_rows(setup);
-        let idx = self.selection.selected_index.min(rows.len().saturating_sub(1));
+        let idx = self
+            .selection
+            .selected_index
+            .min(rows.len().saturating_sub(1));
         match rows.get(idx)? {
             SettingsRow::Category(i) => {
                 let item = &settings_items()[*i];
                 // Each category flips only its own event's switch.
                 match item.event {
                     PRE_TOOL_USE_EVENT => {
-                        setup.hooks.pre_tool_use_enabled =
-                            !setup.hooks.pre_tool_use_enabled;
+                        setup.hooks.pre_tool_use_enabled = !setup.hooks.pre_tool_use_enabled;
                     }
                     POST_TOOL_USE_EVENT => {
-                        setup.hooks.post_tool_use_enabled =
-                            !setup.hooks.post_tool_use_enabled;
+                        setup.hooks.post_tool_use_enabled = !setup.hooks.post_tool_use_enabled;
                     }
                     _ => {}
                 }
@@ -346,9 +353,9 @@ impl SettingsView {
                     draw_text(buf, text, row_x, y, area, Style::default().fg(muted));
                 }
                 Line::Category { item } => {
-                    let idx = rows.iter().position(
-                        |r| matches!(r, SettingsRow::Category(ci) if ci == item),
-                    );
+                    let idx = rows
+                        .iter()
+                        .position(|r| matches!(r, SettingsRow::Category(ci) if ci == item));
                     let is_selected = idx == Some(selected_idx);
                     let shown = in_window(idx, visible, self.selection.scroll_offset);
                     let item = &settings_items()[*item];
@@ -440,7 +447,9 @@ fn max_row_width(setup: &Setup) -> usize {
             let name = hook_display_name(entry);
             let mut len = 4 + 2 + name.chars().count();
             if !entry.name.is_empty() && !entry.command.is_empty() {
-                len += 3 + truncate(&entry.command, COMMAND_PREVIEW_LEN).chars().count();
+                len += 3 + truncate(&entry.command, COMMAND_PREVIEW_LEN)
+                    .chars()
+                    .count();
             }
             width = width.max(len);
         }
@@ -527,7 +536,12 @@ mod tests {
     fn abs_y(setup: &Setup, area: Rect, pred: impl Fn(&Line) -> bool) -> u16 {
         let layout = build_layout(setup);
         let start_y = content_start_y(area, setup);
-        start_y + layout.iter().find(|l| pred(&l.line)).expect("line exists").y
+        start_y
+            + layout
+                .iter()
+                .find(|l| pred(&l.line))
+                .expect("line exists")
+                .y
     }
 
     #[test]
@@ -684,11 +698,7 @@ mod tests {
                 }
             )
         });
-        let desc_y = abs_y(
-            &setup,
-            area,
-            |l| matches!(l, Line::Description(_)),
-        );
+        let desc_y = abs_y(&setup, area, |l| matches!(l, Line::Description(_)));
         // row_x mirrors find_row_for_mouse's centering.
         let row_x = area.x + (area.width.saturating_sub(max_row_width(&setup) as u16)) / 2;
 
