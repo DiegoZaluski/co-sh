@@ -13,6 +13,7 @@ use cosh_tools::{
     bash::{Bash, BashRunInput},
     find::{Find, GlobCallOptions, GlobMatchCallback, GrepMatchCallback},
     fs::{Fs, FsRollbackInput, Target, TargetFile},
+    lsp::Lsp,
     plan::{
         Plan,
         types::{
@@ -137,6 +138,7 @@ pub struct CoshTools {
     web: Web,
     plan: Mutex<Plan>,
     question: Question,
+    lsp: Option<Arc<cosh_tools::lsp::Lsp>>,
     #[cfg(feature = "embed")]
     recall: Recall,
     #[cfg(feature = "embed")]
@@ -160,6 +162,7 @@ impl CoshTools {
             web: Web::new(),
             plan: Mutex::new(Plan::new()),
             question: Question::new(),
+            lsp: build_lsp(cwd),
             #[cfg(feature = "embed")]
             recall: Recall::new(),
             #[cfg(feature = "embed")]
@@ -235,8 +238,16 @@ impl CoshTools {
     /// description (the harness tells the model that omitting `agent`
     /// routes the call to an internal agent).
     pub fn set_subagent_note(&mut self, note: impl Into<String>) {
-        self.subagent.set_note(note);
+        self.subagent.set_note(note.into());
     }
+
+    /// Access the LSP wrapper for passive diagnostics injection.
+    #[must_use]
+    pub fn lsp(&self) -> Option<&Arc<Lsp>> {
+        self.lsp.as_ref()
+    }
+
+    /// Resolve the effective input
 
     /// Resolve the effective input message for a sub-agent call (external
     /// CLI or internal agent): reuse the last message when `input` is
@@ -302,10 +313,21 @@ impl CoshTools {
         v.push(self.skills.description_read.clone());
         v.push(self.skills.description_read_asset.clone());
         v.push(self.skills.description_match_skills.clone());
+        if let Some(lsp) = &self.lsp {
+            v.push(lsp.description_diagnostics.clone());
+            v.push(lsp.description_definitions.clone());
+            v.push(lsp.description_references.clone());
+            v.push(lsp.description_symbols.clone());
+            v.push(lsp.description_hover.clone());
+            v.push(lsp.description_workspace_symbols.clone());
+            v.push(lsp.description_rename.clone());
+            v.push(lsp.description_call_hierarchy.clone());
+            v.push(lsp.description_restart.clone());
+        }
         v.into_iter()
             .filter(|desc| {
                 let name = desc["name"].as_str().unwrap_or_default();
-                !disabled_tools.contains(name)
+                !is_tool_disabled(name, disabled_tools)
             })
             .collect()
     }
@@ -472,8 +494,19 @@ impl CoshTools {
         v.push(extract_schema(&self.skills.description_read));
         v.push(extract_schema(&self.skills.description_read_asset));
         v.push(extract_schema(&self.skills.description_match_skills));
+        if let Some(lsp) = &self.lsp {
+            v.push(extract_schema(&lsp.description_diagnostics));
+            v.push(extract_schema(&lsp.description_definitions));
+            v.push(extract_schema(&lsp.description_references));
+            v.push(extract_schema(&lsp.description_symbols));
+            v.push(extract_schema(&lsp.description_hover));
+            v.push(extract_schema(&lsp.description_workspace_symbols));
+            v.push(extract_schema(&lsp.description_rename));
+            v.push(extract_schema(&lsp.description_call_hierarchy));
+            v.push(extract_schema(&lsp.description_restart));
+        }
         v.into_iter()
-            .filter(|schema| !disabled_tools.contains(&schema.name))
+            .filter(|schema| !is_tool_disabled(&schema.name, disabled_tools))
             .collect()
     }
 }
@@ -620,6 +653,18 @@ fn write_single_tool(out: &mut String, desc: &serde_json::Value, include_schema:
 }
 
 /// Write a single tool description only if its name is not in the disabled set.
+/// A tool is disabled when its exact name is in `disabled`, OR when its
+/// namespace prefix (e.g. `lsp`) is disabled as a group toggle.
+fn is_tool_disabled(name: &str, disabled: &HashSet<String>) -> bool {
+    if disabled.contains(name) {
+        return true;
+    }
+    if let Some((namespace, _)) = name.split_once('_') {
+        return disabled.contains(namespace);
+    }
+    false
+}
+
 fn write_tool_if_enabled(
     out: &mut String,
     disabled: &HashSet<String>,
@@ -627,9 +672,42 @@ fn write_tool_if_enabled(
     include_schema: bool,
 ) {
     let name = desc["name"].as_str().unwrap_or_default();
-    if !disabled.contains(name) {
+    if !is_tool_disabled(name, disabled) {
         write_single_tool(out, desc, include_schema);
     }
+}
+
+/// Build the language-server wrapper bound to `cwd`.
+///
+/// Returns `None` when `COSH_LSP=off|0|false` or no tokio runtime is active.
+fn build_lsp(cwd: &str) -> Option<Arc<Lsp>> {
+    if matches!(
+        std::env::var("COSH_LSP").as_deref(),
+        Ok("off" | "0" | "false")
+    ) {
+        return None;
+    }
+
+    let root = std::path::PathBuf::from(cwd);
+    let mut config = cosh_sdk::lsp::ManagerConfig::new(root);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    config.events = Some(event_tx);
+
+    let manager = Arc::new(cosh_sdk::lsp::Manager::with_config(config));
+    let diagnostics = Arc::new(cosh_sdk::lsp::DiagnosticsEngine::new());
+
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let engine = Arc::clone(&diagnostics);
+        runtime.spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                engine.ingest_event(&event);
+            }
+        });
+    } else {
+        return None;
+    }
+
+    Some(Arc::new(Lsp::with_manager(manager, diagnostics)))
 }
 
 impl Tools for CoshTools {
@@ -661,6 +739,17 @@ impl Tools for CoshTools {
         write_single_tool(out, &self.skills.description_read, true);
         write_single_tool(out, &self.skills.description_read_asset, true);
         write_single_tool(out, &self.skills.description_match_skills, true);
+        if let Some(lsp) = &self.lsp {
+            write_single_tool(out, &lsp.description_diagnostics, true);
+            write_single_tool(out, &lsp.description_definitions, true);
+            write_single_tool(out, &lsp.description_references, true);
+            write_single_tool(out, &lsp.description_symbols, true);
+            write_single_tool(out, &lsp.description_hover, true);
+            write_single_tool(out, &lsp.description_workspace_symbols, true);
+            write_single_tool(out, &lsp.description_rename, true);
+            write_single_tool(out, &lsp.description_call_hierarchy, true);
+            write_single_tool(out, &lsp.description_restart, true);
+        }
     }
 
     fn tool_descriptions(&self) -> Vec<serde_json::Value> {
@@ -691,6 +780,17 @@ impl Tools for CoshTools {
         v.push(self.skills.description_read.clone());
         v.push(self.skills.description_read_asset.clone());
         v.push(self.skills.description_match_skills.clone());
+        if let Some(lsp) = &self.lsp {
+            v.push(lsp.description_diagnostics.clone());
+            v.push(lsp.description_definitions.clone());
+            v.push(lsp.description_references.clone());
+            v.push(lsp.description_symbols.clone());
+            v.push(lsp.description_hover.clone());
+            v.push(lsp.description_workspace_symbols.clone());
+            v.push(lsp.description_rename.clone());
+            v.push(lsp.description_call_hierarchy.clone());
+            v.push(lsp.description_restart.clone());
+        }
         v
     }
 
@@ -722,6 +822,17 @@ impl Tools for CoshTools {
         v.push(extract_schema(&self.skills.description_read));
         v.push(extract_schema(&self.skills.description_read_asset));
         v.push(extract_schema(&self.skills.description_match_skills));
+        if let Some(lsp) = &self.lsp {
+            v.push(extract_schema(&lsp.description_diagnostics));
+            v.push(extract_schema(&lsp.description_definitions));
+            v.push(extract_schema(&lsp.description_references));
+            v.push(extract_schema(&lsp.description_symbols));
+            v.push(extract_schema(&lsp.description_hover));
+            v.push(extract_schema(&lsp.description_workspace_symbols));
+            v.push(extract_schema(&lsp.description_rename));
+            v.push(extract_schema(&lsp.description_call_hierarchy));
+            v.push(extract_schema(&lsp.description_restart));
+        }
         v
     }
 
@@ -1044,6 +1155,94 @@ impl Tools for CoshTools {
                     .skills
                     .match_skills(input.match_paths)
                     .map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "lsp_diagnostics" => {
+                let Some(lsp) = &self.lsp else {
+                    return Err("LSP tooling is disabled".into());
+                };
+                let input: cosh_tools::lsp::types::DiagnosticsInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = lsp.diagnostics(&input).await.map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+            "lsp_definitions" => {
+                let Some(lsp) = &self.lsp else {
+                    return Err("LSP tooling is disabled".into());
+                };
+                let input: cosh_tools::lsp::types::DefinitionsInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = lsp.definitions(&input).await.map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+            "lsp_references" => {
+                let Some(lsp) = &self.lsp else {
+                    return Err("LSP tooling is disabled".into());
+                };
+                let input: cosh_tools::lsp::types::ReferencesInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = lsp.references(&input).await.map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+            "lsp_symbols" => {
+                let Some(lsp) = &self.lsp else {
+                    return Err("LSP tooling is disabled".into());
+                };
+                let input: cosh_tools::lsp::types::SymbolsInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = lsp.symbols(&input).await.map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+            "lsp_hover" => {
+                let Some(lsp) = &self.lsp else {
+                    return Err("LSP tooling is disabled".into());
+                };
+                let input: cosh_tools::lsp::types::HoverInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = lsp.hover(&input).await.map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+            "lsp_workspace_symbols" => {
+                let Some(lsp) = &self.lsp else {
+                    return Err("LSP tooling is disabled".into());
+                };
+                let input: cosh_tools::lsp::types::WorkspaceSymbolsInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = lsp
+                    .workspace_symbols(&input)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+            "lsp_rename" => {
+                let Some(lsp) = &self.lsp else {
+                    return Err("LSP tooling is disabled".into());
+                };
+                let input: cosh_tools::lsp::types::RenameInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = lsp.rename(&input).await.map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+            "lsp_call_hierarchy" => {
+                let Some(lsp) = &self.lsp else {
+                    return Err("LSP tooling is disabled".into());
+                };
+                let input: cosh_tools::lsp::types::CallHierarchyInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = lsp
+                    .call_hierarchy(&input)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+            "lsp_restart" => {
+                let Some(lsp) = &self.lsp else {
+                    return Err("LSP tooling is disabled".into());
+                };
+                let input: cosh_tools::lsp::types::RestartInput =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = lsp.restart(&input).await.map_err(|e| e.to_string())?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 
