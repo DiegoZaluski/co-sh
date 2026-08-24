@@ -1396,6 +1396,7 @@ dependencies = [
  "lru",
  "nalgebra",
  "open",
+ "parking_lot",
  "pulldown-cmark",
  "ratatui",
  "regex",
