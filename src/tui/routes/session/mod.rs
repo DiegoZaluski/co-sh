@@ -57,6 +57,41 @@ fn rgba_color(rgba: RGBA) -> Color {
     Color::Rgb(r, g, b)
 }
 
+/// Draws the expand/collapse hint styled as a button: highlighted with the
+/// theme primary color as a marker-like background so it reads as clickable.
+fn draw_hint_button(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, theme: &Theme) {
+    let style = Style::default()
+        .fg(rgba_color(theme.background))
+        .bg(rgba_color(theme.primary));
+    let width = (text.chars().count() as u16).saturating_add(2);
+    let Some(right) = x.checked_add(max_w) else {
+        return;
+    };
+    let right = right.min(x.saturating_add(width));
+    for cx in x..right {
+        if let Some(cell) = buf.cell_mut((cx, y)) {
+            cell.set_style(style);
+        }
+    }
+    let inner_x = x.saturating_add(1);
+    let inner_max_w = max_w.saturating_sub(2);
+    for (i, ch) in text.chars().enumerate() {
+        if ch.is_control() {
+            continue;
+        }
+        let Some(cx) = inner_x.checked_add(i as u16) else {
+            break;
+        };
+        if cx >= inner_x.saturating_add(inner_max_w) {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((cx, y)) {
+            cell.set_char(ch);
+            cell.set_style(style);
+        }
+    }
+}
+
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let Some(right) = x.checked_add(max_w) else {
         return;
@@ -831,14 +866,7 @@ impl SessionView {
         }
         if overflow {
             let hint_y = y + SUMMARIZING_PAD_V + 1 + SUMMARIZING_COLLAPSED_LINES;
-            draw_text_line(
-                buf,
-                "Click to expand",
-                x_off,
-                hint_y,
-                wrap_w,
-                Style::default().fg(rgba_color(theme.text_muted)),
-            );
+            draw_hint_button(buf, "Click to expand", x_off, hint_y, wrap_w, theme);
         }
         total_h
     }

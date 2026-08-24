@@ -53,6 +53,38 @@ pub(crate) fn tool_color(display: &str) -> Option<Color> {
     Some(Color::Rgb(r, g, b))
 }
 
+/// Draws the expand/collapse hint styled as a button: highlighted with the
+/// theme primary color as a marker-like background so it reads as clickable.
+pub fn draw_hint_button(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, theme: &Theme) {
+    let style = Style::default()
+        .fg(rgba_color(theme.background))
+        .bg(rgba_color(theme.primary));
+    let width = (text.chars().count() as u16).saturating_add(2);
+    let right = x.saturating_add(max_w).min(x.saturating_add(width));
+    if right > x {
+        for cx in x..right {
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                cell.set_style(style);
+            }
+        }
+    }
+    let inner_x = x.saturating_add(1);
+    let inner_max_w = max_w.saturating_sub(2);
+    for (i, ch) in text.chars().enumerate() {
+        if ch.is_control() {
+            continue;
+        }
+        let cx = inner_x + i as u16;
+        if cx >= inner_x.saturating_add(inner_max_w) {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((cx, y)) {
+            cell.set_char(ch);
+            cell.set_style(style);
+        }
+    }
+}
+
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;
     for (i, ch) in text.chars().enumerate() {
@@ -612,13 +644,13 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
             } else {
                 "Click to expand"
             };
-            draw_text_line(
+            draw_hint_button(
                 ctx.buf,
                 hint,
                 x_off,
                 hint_y,
                 ctx.max_w.saturating_sub(3),
-                Style::default().fg(rgba_color(ctx.theme.text_muted)),
+                ctx.theme,
             );
         }
     }
@@ -1250,13 +1282,13 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         } else {
             "Click to expand"
         };
-        draw_text_line(
+        draw_hint_button(
             ctx.buf,
             hint,
             x_off,
             hint_y,
             ctx.max_w.saturating_sub(3),
-            Style::default().fg(rgba_color(ctx.theme.text_muted)),
+            ctx.theme,
         );
     }
 }
@@ -1359,13 +1391,13 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
             } else {
                 "Click to expand"
             };
-            draw_text_line(
+            draw_hint_button(
                 ctx.buf,
                 hint,
                 ctx.x + 3,
                 hint_y,
                 ctx.max_w.saturating_sub(3),
-                Style::default().fg(rgba_color(ctx.theme.text_muted)),
+                ctx.theme,
             );
         }
         return;
