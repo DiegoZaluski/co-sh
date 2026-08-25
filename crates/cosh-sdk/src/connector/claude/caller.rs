@@ -202,6 +202,35 @@ fn effective_max_tokens(user_max: Option<u32>, thinking: &Option<ThinkingConfig>
     }
 }
 
+/// Top-level automatic prompt-cache control sent on Claude requests.
+///
+/// With a single `cache_control` at the request root, the API applies the
+/// cache breakpoint to the last cacheable block and moves it forward as the
+/// conversation grows — the prefix (tools → system → messages) is read from
+/// cache on subsequent requests at 10% of the base input price. See the
+/// Anthropic prompt-caching docs (automatic caching).
+#[derive(serde::Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<String>,
+}
+
+fn cache_control_for(params: &Parameters) -> Option<CacheControl> {
+    if !params.prompt_cache.enabled {
+        return None;
+    }
+    Some(CacheControl {
+        kind: "ephemeral".to_string(),
+        ttl: if params.prompt_cache.one_hour {
+            Some("1h".to_string())
+        } else {
+            None
+        },
+    })
+}
+
 #[derive(serde::Serialize)]
 struct MessageRequest {
     model: String,
@@ -223,6 +252,8 @@ struct MessageRequest {
     tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<Metadata>,
 }
@@ -254,6 +285,10 @@ struct Usage {
     input_tokens: u32,
     #[serde(default)]
     output_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
 }
 
 // Helpers
@@ -342,6 +377,7 @@ fn build_request(
         tools,
         tool_choice,
         thinking,
+        cache_control: cache_control_for(params),
         metadata,
     }
 }
@@ -582,6 +618,8 @@ struct ClaudeMessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<Metadata>,
 }
 
@@ -637,6 +675,7 @@ pub async fn chat_stream_with_messages(
         tools,
         tool_choice,
         thinking,
+        cache_control: cache_control_for(params),
         metadata,
     };
 

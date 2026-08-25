@@ -657,3 +657,77 @@ async fn assistant_tool_turn_without_blocks_has_no_thinking_content() {
     assert_eq!(content.len(), 1, "only the tool_use block");
     assert_eq!(content[0]["type"], "tool_use");
 }
+
+#[tokio::test]
+async fn prompt_cache_control_sent_by_default() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":2}}"#,
+        200,
+    );
+    let _ = claude_connector(port).chat("hello").await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["cache_control"], serde_json::json!({"type": "ephemeral"}));
+}
+
+#[tokio::test]
+async fn prompt_cache_disabled_omits_field() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port)
+        .with_prompt_cache(false)
+        .chat("hello")
+        .await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json.get("cache_control").is_none());
+}
+
+#[tokio::test]
+async fn prompt_cache_ttl_1h_serialized() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port)
+        .with_prompt_cache_ttl_1h(true)
+        .chat("hello")
+        .await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["cache_control"],
+        serde_json::json!({"type": "ephemeral", "ttl": "1h"})
+    );
+}
+
+#[tokio::test]
+async fn token_usage_reads_cache_fields() {
+    let (port, _captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":50,"output_tokens":10,"cache_read_input_tokens":1800,"cache_creation_input_tokens":248}}"#,
+        200,
+    );
+    let connector = claude_connector(port);
+    let out = connector.chat("hello").await.unwrap();
+    handle.join().unwrap();
+
+    assert_eq!(
+        connector.token_usage(out.raw()),
+        Some(super::super::TokenUsage {
+            input_tokens: 50,
+            output_tokens: 10,
+            cache_creation_input_tokens: 248,
+            cache_read_input_tokens: 1800,
+        })
+    );
+    // The extractor also works standalone on a minimal usage object.
+    assert!(connector.token_usage(r#"{"usage":{"input_tokens":1}}"#).is_some());
+}

@@ -2,6 +2,7 @@ use super::error::ConnectorError;
 use super::output::{ChatOutput, ChatStream, LsOutput};
 use super::params::{ChatMessage, Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
 use super::provider::{Family, ProviderConfig, get_provider};
+use super::TokenUsage;
 
 use super::claude;
 use super::gemini;
@@ -184,6 +185,35 @@ impl Connector {
 
     pub fn with_service_keyring(mut self, v: impl Into<String>) -> Self {
         self.params.service_keyring = Some(v.into());
+        self
+    }
+
+    /// Enable/disable Anthropic prompt caching on Claude requests (default:
+    /// enabled).
+    ///
+    /// Enabled requests carry a single top-level `cache_control: {"type":
+    // "ephemeral"}` — the API's automatic-caching mode (the same field the
+    /// Messages API reference documents at the request root). The cache
+    /// breakpoint moves to the last cacheable block on every request, so
+    /// the growing conversation prefix is read from cache at 10% of the
+    /// base input price. Other providers are unaffected.
+    ///
+    /// Note: changing `tool_choice`, the thinking configuration, or the
+    /// reasoning effort between turns invalidates the cached message
+    /// prefix (per Anthropic's invalidation rules) and forces a re-write.
+    pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
+        self.params.prompt_cache.enabled = enabled;
+        self
+    }
+
+    /// Use the 1-hour prompt-cache TTL instead of the 5-minute default
+    /// (Claude only).
+    ///
+    /// 1h cache writes cost 2x the base input price (vs 1.25x for 5m), but
+    /// survive turn gaps longer than 5 minutes. Cache reads cost the same
+    /// 10% either way.
+    pub fn with_prompt_cache_ttl_1h(mut self, one_hour: bool) -> Self {
+        self.params.prompt_cache.one_hour = one_hour;
         self
     }
 
@@ -422,6 +452,27 @@ impl Connector {
             Family::OpenAICompatible => openai_compatible::extract_tokens(raw),
             Family::Claude => claude::extract_tokens(raw),
             Family::Gemini => gemini::extract_tokens(raw),
+        }
+    }
+
+    /// Extract the full token usage (including prompt-cache accounting) from
+    /// a raw API response.
+    ///
+    /// Works with a complete response body, a streaming `message_start`
+    /// frame (Claude), or the final `message_delta` frame. For Claude the
+    /// [`TokenUsage`] carries the cache fields: `cache_read_input_tokens`
+    /// (tokens served from cache at 10% of input price) and
+    /// `cache_creation_input_tokens` (tokens written to the cache at a 25%
+    /// or 100% premium). Total input tokens =
+    /// `input_tokens + cache_read + cache_creation`.
+    ///
+    /// Returns `None` when no usage object is present or the JSON is invalid.
+    #[must_use]
+    pub fn token_usage(&self, raw: &str) -> Option<TokenUsage> {
+        let provider = self.provider().ok()?;
+        match provider.family {
+            Family::Claude => claude::extract_usage(raw),
+            Family::OpenAICompatible | Family::Gemini => None,
         }
     }
 

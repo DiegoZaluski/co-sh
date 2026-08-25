@@ -28,6 +28,10 @@ pub use discovery::{
 };
 pub use error::ConnectorError;
 pub use output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
+pub use provider::Family;
+// Re-exported so `Connector::token_usage` consumers name the type without
+// reaching into the private claude module path.
+pub use claude::TokenUsage;
 pub use params::{
     ChatMessage, ClaudeThinkingBlock, ResponseFormat, ToolCallFunctionMsg, ToolCallMode,
     ToolCallMsg, ToolDefinition, ToolFunction, assistant_tool_call_message, system_message,
