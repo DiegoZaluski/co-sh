@@ -1,6 +1,6 @@
 use super::super::common::{
-    SSE_CHUNK_TIMEOUT, SseBuffer, apply_provider_headers, retry_mid_stream, send_get_request,
-    send_request, send_request_stream, send_with_retry, shared_client,
+    SSE_CHUNK_TIMEOUT, SseBuffer, apply_provider_headers, apply_session_headers, retry_mid_stream,
+    send_get_request, send_request, send_request_stream, send_with_retry, shared_client,
 };
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
@@ -437,11 +437,15 @@ pub async fn chat(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/messages");
 
-    let headers = &[
-        ("x-api-key", ctx.api_key.as_str()),
-        ("anthropic-version", "2023-06-01"),
+    let mut headers: Vec<(&str, String)> = vec![
+        ("x-api-key", ctx.api_key.clone()),
+        ("anthropic-version", "2023-06-01".to_string()),
     ];
-    let response_text = send_request(config, &url, &ctx.request, headers).await?;
+    if let Some(sid) = params.session_id.as_deref() {
+        headers.push(("x-session-id", sid.to_string()));
+        headers.push(("x-session-affinity", sid.to_string()));
+    }
+    let response_text = send_request(config, &url, &ctx.request, &headers).await?;
     let chat_response: MessageResponse = serde_json::from_str(&response_text)?;
     let message = extract_response_text(&chat_response)?;
     Ok(ChatOutput {
@@ -682,10 +686,14 @@ pub async fn chat_stream_with_messages(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/messages");
 
-    let headers = &[
-        ("x-api-key", api_key.as_str()),
-        ("anthropic-version", "2023-06-01"),
+    let mut headers: Vec<(&str, String)> = vec![
+        ("x-api-key", api_key.clone()),
+        ("anthropic-version", "2023-06-01".to_string()),
     ];
+    if let Some(sid) = params.session_id.as_deref() {
+        headers.push(("x-session-id", sid.to_string()));
+        headers.push(("x-session-affinity", sid.to_string()));
+    }
     log::debug!("chat_stream_with_messages (Claude): sending request to {url}");
     let stream = if params.retry_enabled {
         let json_body = serde_json::to_string(&request)?;
@@ -697,10 +705,12 @@ pub async fn chat_stream_with_messages(
         )
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01");
+        let request_builder = apply_session_headers(request_builder, params.session_id.as_deref());
         let response = send_with_retry(
             &request_builder,
             json_body.clone(),
             params.retry_delay_override,
+            params.max_retries,
         )
         .await?;
         retry_mid_stream(
@@ -708,10 +718,11 @@ pub async fn chat_stream_with_messages(
             request_builder,
             json_body,
             params.retry_delay_override,
+            params.max_retries,
             parse_sse_stream_with_tools,
         )
     } else {
-        let response = send_request_stream(config, &url, &request, headers).await?;
+        let response = send_request_stream(config, &url, &request, &headers).await?;
         parse_sse_stream_with_tools(response)
     };
     Ok(ChatStream::new(stream))
@@ -994,10 +1005,12 @@ pub async fn chat_stream(
         )
         .header("x-api-key", ctx.api_key)
         .header("anthropic-version", "2023-06-01");
+        let request_builder = apply_session_headers(request_builder, params.session_id.as_deref());
         let response = send_with_retry(
             &request_builder,
             json_body.clone(),
             params.retry_delay_override,
+            params.max_retries,
         )
         .await?;
         retry_mid_stream(
@@ -1005,14 +1018,19 @@ pub async fn chat_stream(
             request_builder,
             json_body,
             params.retry_delay_override,
+            params.max_retries,
             parse_sse_stream,
         )
     } else {
-        let headers = &[
-            ("x-api-key", ctx.api_key.as_str()),
-            ("anthropic-version", "2023-06-01"),
+        let mut headers: Vec<(&str, String)> = vec![
+            ("x-api-key", ctx.api_key.clone()),
+            ("anthropic-version", "2023-06-01".to_string()),
         ];
-        let response = send_request_stream(config, &url, &ctx.request, headers).await?;
+        if let Some(sid) = params.session_id.as_deref() {
+            headers.push(("x-session-id", sid.to_string()));
+            headers.push(("x-session-affinity", sid.to_string()));
+        }
+        let response = send_request_stream(config, &url, &ctx.request, &headers).await?;
         parse_sse_stream(response)
     };
     Ok(ChatStream::new(stream))
@@ -1137,11 +1155,15 @@ pub async fn list_models(
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
     let url = format!("{base_url}/models");
 
-    let headers = &[
-        ("x-api-key", api_key.as_str()),
-        ("anthropic-version", "2023-06-01"),
+    let mut headers: Vec<(&str, String)> = vec![
+        ("x-api-key", api_key.clone()),
+        ("anthropic-version", "2023-06-01".to_string()),
     ];
-    let response_text = send_get_request(config, &url, headers).await?;
+    if let Some(sid) = params.session_id.as_deref() {
+        headers.push(("x-session-id", sid.to_string()));
+        headers.push(("x-session-affinity", sid.to_string()));
+    }
+    let response_text = send_get_request(config, &url, &headers).await?;
 
     let list: ClaudeListModelsResponse = serde_json::from_str(&response_text)?;
     let models: Vec<ModelInfo> = list

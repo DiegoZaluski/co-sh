@@ -2,7 +2,7 @@ mod caller;
 pub mod tokens;
 
 pub use caller::{chat, chat_stream, chat_stream_with_messages, embed, list_models};
-pub use tokens::extract_tokens;
+pub use tokens::{extract_tokens, extract_usage};
 
 // Internal, but visible to the crate's own test suite.
 #[cfg(test)]

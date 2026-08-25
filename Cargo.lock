@@ -1521,6 +1521,7 @@ dependencies = [
  "tree-sitter-xml",
  "tree-sitter-yaml",
  "tree-sitter-zig",
+ "url",
  "xxhash-rust",
  "zeroize",
 ]

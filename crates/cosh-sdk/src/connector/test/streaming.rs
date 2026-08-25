@@ -466,3 +466,109 @@ data: [DONE]\n\n";
         "no effort → no reasoning_effort field"
     );
 }
+
+/// Streaming requests must ask the server for token accounting
+/// (`stream_options: {"include_usage": true}`); non-streaming requests must
+/// NOT carry the field (strict servers reject it there).
+#[tokio::test]
+async fn stream_request_includes_usage_options() {
+    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = connector(port);
+    let mut stream = c.stream_chat("hi").await.unwrap();
+    handle.join().unwrap();
+    while stream.next().await.is_some() {}
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["stream"], true);
+    assert_eq!(
+        json["stream_options"],
+        serde_json::json!({"include_usage": true})
+    );
+}
+
+#[tokio::test]
+async fn non_stream_request_omits_stream_options() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+        200,
+    );
+    let _ = connector(port).chat("hi").await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json.get("stream").is_none());
+    assert!(json.get("stream_options").is_none());
+}
+
+/// Real-world include_usage wire format: the usage arrives in a SEPARATE
+/// frame AFTER finish_reason, with empty `choices`, right before [DONE].
+/// `ChatStream::raw()` must surface THAT frame (it carries usage).
+#[tokio::test]
+async fn usage_frame_after_finish_reason_is_last_raw() {
+    let sse = concat!(
+        r#"data: {"choices":[{"delta":{"content":"ok"}}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+        "\n\n",
+        r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":8}}}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = connector(port);
+    let mut stream = c.stream_chat("hi").await.unwrap();
+    handle.join().unwrap();
+
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+
+    let raw = stream.raw().await.unwrap();
+    assert!(
+        raw.contains("prompt_tokens"),
+        "last frame should be the usage-only frame, got: {raw}"
+    );
+    assert_eq!(c.token_usage(raw).unwrap().cache_read_input_tokens, 8);
+}
+
+/// A stream that ends (server closes) right after finish_reason — without a
+/// usage frame and without [DONE] — must still complete cleanly.
+#[tokio::test]
+async fn stream_end_without_done_after_finish_is_ok() {
+    let sse = concat!(
+        r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+        "\n\n",
+    );
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let c = connector(port);
+    let mut stream = c.stream_chat("hi").await.unwrap();
+    handle.join().unwrap();
+
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap_or_else(|e| panic!("no error expected after finish_reason: {e}"));
+    }
+}
+
+/// Session affinity headers must ALSO ride the retry-enabled streaming path
+/// (the production default), not just the non-retry branch.
+#[tokio::test]
+async fn session_headers_on_streaming_path() {
+    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n\n";
+    let (port, _body, raw, handle) = mock_server(sse, 200);
+    let c = connector(port).with_session_id("sess-stream-1");
+    let mut stream = c.stream_chat("hi").await.unwrap();
+    handle.join().unwrap();
+    while stream.next().await.is_some() {}
+
+    let raw = raw.lock().unwrap().take().unwrap();
+    assert!(raw.contains("x-session-id: sess-stream-1"), "raw: {raw}");
+    assert!(
+        raw.contains("x-session-affinity: sess-stream-1"),
+        "raw: {raw}"
+    );
+}

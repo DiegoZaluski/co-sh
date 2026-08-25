@@ -105,7 +105,7 @@ pub async fn send_request(
     config: &ProviderConfig,
     url: &str,
     body: &(impl serde::Serialize + Sync),
-    headers: &[(&str, &str)],
+    headers: &[(&str, String)],
 ) -> Result<String, ConnectorError> {
     let response = send_request_stream(config, url, body, headers).await?;
     // Non-streaming call: the whole body must arrive within the request
@@ -119,12 +119,12 @@ pub async fn send_request(
 pub async fn send_get_request(
     config: &ProviderConfig,
     url: &str,
-    headers: &[(&str, &str)],
+    headers: &[(&str, String)],
 ) -> Result<String, ConnectorError> {
     let mut request_builder = shared_client().get(url).timeout(Duration::from_mins(1));
 
-    for &(key, value) in headers {
-        request_builder = request_builder.header(key, value);
+    for (key, value) in headers {
+        request_builder = request_builder.header(*key, value.as_str());
     }
 
     if config.needs_extra_headers {
@@ -154,14 +154,14 @@ pub(crate) async fn send_request_stream(
     config: &ProviderConfig,
     url: &str,
     body: &(impl serde::Serialize + Sync),
-    headers: &[(&str, &str)],
+    headers: &[(&str, String)],
 ) -> Result<reqwest::Response, ConnectorError> {
     let mut request_builder = shared_client()
         .post(url)
         .header("Content-Type", "application/json");
 
-    for &(key, value) in headers {
-        request_builder = request_builder.header(key, value);
+    for (key, value) in headers {
+        request_builder = request_builder.header(*key, value.as_str());
     }
 
     if config.needs_extra_headers {
@@ -172,6 +172,21 @@ pub(crate) async fn send_request_stream(
 
     let json_body = serde_json::to_string(body)?;
     send_builder(request_builder, json_body).await
+}
+
+/// Attach cache-affinity session headers (`x-session-id` /
+/// `x-session-affinity`, same opaque value) to a request builder. No-op when
+/// no session id is configured.
+pub(crate) fn apply_session_headers(
+    request_builder: reqwest::RequestBuilder,
+    session: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match session {
+        Some(id) => request_builder
+            .header("x-session-id", id)
+            .header("x-session-affinity", id),
+        None => request_builder,
+    }
 }
 
 /// Build the provider-extra headers (HTTP-Referer / X-Title) for the given
@@ -251,8 +266,9 @@ pub async fn send_with_retry(
     request_builder: &reqwest::RequestBuilder,
     json_body: String,
     retry_delay_override: Option<Duration>,
+    max_retries: Option<usize>,
 ) -> Result<reqwest::Response, ConnectorError> {
-    use super::retry::{RETRY_MAX_RETRIES, is_retryable_error, retry_delay};
+    use super::retry::{RETRY_MAX_RETRIES, is_retryable_error, jittered, retry_delay};
 
     let mut attempts = 0usize;
     loop {
@@ -263,9 +279,13 @@ pub async fn send_with_retry(
             ));
         };
         match send_builder(builder, json_body.clone()).await {
-            Err(e) if attempts <= RETRY_MAX_RETRIES && is_retryable_error(&e) => {
+            Err(e)
+                if attempts <= max_retries.unwrap_or(RETRY_MAX_RETRIES)
+                    && is_retryable_error(&e) =>
+            {
                 log::warn!("retry #{attempts} after request error: {e}");
-                let delay = retry_delay_override.unwrap_or_else(|| retry_delay(&e, attempts));
+                let delay =
+                    retry_delay_override.unwrap_or_else(|| jittered(retry_delay(&e, attempts)));
                 tokio::time::sleep(delay).await;
             }
             other => return other,
@@ -289,13 +309,14 @@ pub fn retry_mid_stream(
     request_builder: reqwest::RequestBuilder,
     json_body: String,
     retry_delay_override: Option<Duration>,
+    max_retries: Option<usize>,
     parse: impl Fn(
         reqwest::Response,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>>
     + Send
     + 'static,
 ) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>> {
-    use super::retry::{RETRY_MAX_RETRIES, is_retryable_error, retry_delay};
+    use super::retry::{RETRY_MAX_RETRIES, is_retryable_error, jittered, retry_delay};
     use tokio_stream::StreamExt;
 
     Box::pin(stream! {
@@ -310,7 +331,11 @@ pub fn retry_mid_stream(
                         emitted_any = true;
                         yield Ok(chunk);
                     }
-                    Err(e) if attempts <= RETRY_MAX_RETRIES && is_retryable_error(&e) => {
+                    Err(e)
+                    if attempts
+                        <= max_retries.unwrap_or(RETRY_MAX_RETRIES)
+                        && is_retryable_error(&e) =>
+                {
                         log::warn!("retry #{attempts} after mid-stream error: {e}");
                         if emitted_any {
                             // The consumer must drop the partial content of
@@ -322,7 +347,9 @@ pub fn retry_mid_stream(
                         loop {
                             attempts += 1;
                             let delay = retry_delay_override
-                                .unwrap_or_else(|| retry_delay(&e, attempts));
+                                .unwrap_or_else(|| {
+                                    jittered(retry_delay(&e, attempts))
+                                });
                             tokio::time::sleep(delay).await;
                             let Some(builder) = request_builder.try_clone() else {
                                 yield Err(ConnectorError::Network(
@@ -335,8 +362,10 @@ pub fn retry_mid_stream(
                                     response = r;
                                     continue 'stream;
                                 }
-                                Err(e2) if attempts <= RETRY_MAX_RETRIES
-                                    && is_retryable_error(&e2) =>
+                                Err(e2)
+                                    if attempts
+                                        <= max_retries.unwrap_or(RETRY_MAX_RETRIES)
+                                        && is_retryable_error(&e2) =>
                                 {
                                     log::warn!("retry #{attempts} after re-request error: {e2}");
                                 }

@@ -1,6 +1,6 @@
 use super::super::common::{
-    SSE_CHUNK_TIMEOUT, SseBuffer, apply_provider_headers, retry_mid_stream, send_get_request,
-    send_request, send_request_stream, send_with_retry, shared_client,
+    SSE_CHUNK_TIMEOUT, SseBuffer, apply_provider_headers, apply_session_headers, retry_mid_stream,
+    send_get_request, send_request, send_request_stream, send_with_retry, shared_client,
 };
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
@@ -35,12 +35,24 @@ struct ChatTemplateKwargs {
     thinking: bool,
 }
 
+/// Ask the server to include a final `usage` object in the stream. Without
+/// this, OpenAI-compatible backends send only text deltas and no token
+/// accounting ever reaches the consumer of a streamed response.
+#[derive(serde::Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
 #[derive(serde::Serialize)]
 struct ChatRequest {
     model: String,
     messages: Vec<ApiChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    /// Only meaningful together with `stream: true` (some servers reject
+    /// the field on non-streaming requests, hence `skip_serializing_if`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,7 +183,14 @@ fn is_transient_error_type(err: &ApiErrorDetail) -> bool {
 
 #[derive(serde::Deserialize)]
 struct ChatChunkResponse {
+    /// The final usage-only frame (with `stream_options.include_usage`)
+    /// carries an empty or absent `choices` array.
+    #[serde(default)]
     choices: Vec<ChunkChoice>,
+    /// Present on the usage-only frame; absent on text-delta frames and
+    /// keep-alives.
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[allow(dead_code)]
@@ -353,6 +372,12 @@ fn process_sse_response(
         // Keep the raw text of the last non-DONE data frame so we can
         // use it when yielding synthetic tool-call tokens.
         let mut last_raw: Option<String> = None;
+        // Set once the finish_reason chunk was emitted; after that the
+        // stream may end (or be closed by the server) WITHOUT [DONE] —
+        // that is a normal end, not a termination failure. The server may
+        // also send one more usage-only frame (include_usage) which we keep
+        // consuming so `last_raw` captures it.
+        let mut saw_finish = false;
         loop {
             let (frames, ended) =
                 match tokio::time::timeout(SSE_CHUNK_TIMEOUT, response.chunk()).await {
@@ -365,10 +390,19 @@ fn process_sse_response(
                         (buf.flush(), true)
                     }
                     Ok(Err(e)) => {
+                        // A connection reset AFTER finish_reason is just the
+                        // server closing early (mocks and some proxies do
+                        // this) — the turn already completed successfully.
+                        if saw_finish {
+                            return;
+                        }
                         yield Err(ConnectorError::Network(e.to_string()));
                         return;
                     }
                     Err(_) => {
+                        if saw_finish {
+                            return;
+                        }
                         yield Err(ConnectorError::Network(format!(
                             "stream timed out after {}s",
                             SSE_CHUNK_TIMEOUT.as_secs()
@@ -382,11 +416,48 @@ fn process_sse_response(
                     for chunk in flush_tool_calls(&mut pending_tool_calls, &mut last_raw) {
                         yield Ok(chunk);
                     }
+                    // Normal end: `last_raw` already holds the usage-only
+                    // frame (or the finish_reason frame when the server
+                    // doesn't send one).
                     return;
                 }
                 match serde_json::from_str::<ChatChunkResponse>(&data) {
                     Ok(ccr) => {
                         last_raw = Some(data.clone());
+
+                        // An empty-`choices` frame is either an API error
+                        // event (`{"error": {...}}`) or a usage-only /
+                        // keep-alive frame. Errors surface immediately;
+                        // anything else is kept only via `last_raw`.
+                        if ccr.choices.is_empty() {
+                            if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&data) {
+                                let transient = is_transient_error_type(&api_err.error);
+                                let err = ConnectorError::classify_http(200, api_err.error.message);
+                                yield Err(if transient {
+                                    err.mark_transient()
+                                } else {
+                                    err
+                                });
+                                return;
+                            }
+                            // Usage-only frame (include_usage): surface it
+                            // as an empty-content chunk so consumers tracking
+                            // the last raw frame see it (it carries usage).
+                            // Pure keep-alives have neither usage nor error
+                            // and are skipped.
+                            if ccr.usage.is_some() {
+                                yield Ok(StreamChunk {
+                                    raw: data,
+                                    token: String::new(),
+                                    reasoning: String::new(),
+                                    finish_reason: None,
+                                    thinking_blocks: None,
+                                    tool_call: None,
+                                    reset: false,
+                                });
+                            }
+                            continue;
+                        }
 
                         // Accumulate tool call deltas from this chunk.
                         if let Some(tcs) = ccr.choices.first()
@@ -457,7 +528,7 @@ fn process_sse_response(
 
                         // If the model signalled a tool call via the API-level
                         // mechanism, convert the accumulated tool calls to inline
-                        // JSON text so the harness extractor can parse them.
+                        // JSON text so the harness extractor can parse it.
                         if should_stop && !pending_tool_calls.is_empty() {
                             for chunk in flush_tool_calls(&mut pending_tool_calls, &mut last_raw) {
                                 yield Ok(chunk);
@@ -466,8 +537,9 @@ fn process_sse_response(
                         }
 
                         if should_stop {
+                            saw_finish = true;
                             yield Ok(StreamChunk {
-                                raw: data,
+                                raw: data.clone(),
                                 token: String::new(),
                                 reasoning: String::new(),
                                 finish_reason,
@@ -475,7 +547,13 @@ fn process_sse_response(
                                 tool_call: None,
                                 reset: false,
                             });
-                            return;
+                            // With `stream_options.include_usage` the server
+                            // sends ONE MORE frame after this one — a
+                            // usage-only frame with empty `choices` — before
+                            // [DONE]. Keep consuming so `last_raw` (what
+                            // `ChatStream::raw()` and `token_usage()` see)
+                            // captures it; only tool-call turns end here.
+                            continue;
                         }
                     }
                     Err(e) => {
@@ -504,6 +582,9 @@ fn process_sse_response(
         // Stream ended without [DONE]
         for chunk in flush_tool_calls(&mut pending_tool_calls, &mut last_raw) {
             yield Ok(chunk);
+        }
+        if saw_finish {
+            return;
         }
         yield Err(ConnectorError::StreamTerminated);
     })
@@ -543,6 +624,9 @@ fn build_chat_request(
         model,
         messages,
         stream: if stream { Some(true) } else { None },
+        stream_options: stream.then_some(StreamOptions {
+            include_usage: true,
+        }),
         max_tokens: params.max_tokens,
         temperature: params.temperature,
         top_p: params.top_p,
@@ -614,9 +698,13 @@ pub async fn chat(
     let url = format!("{base_url}/chat/completions");
 
     let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
-    let mut headers: Vec<(&str, &str)> = Vec::new();
+    let mut headers: Vec<(&str, String)> = Vec::new();
+    if let Some(sid) = params.session_id.as_deref() {
+        headers.push(("x-session-id", sid.to_string()));
+        headers.push(("x-session-affinity", sid.to_string()));
+    }
     if let Some(a) = &auth {
-        headers.push(("Authorization", a.as_str()));
+        headers.push(("Authorization", a.to_string()));
     }
     let response_text = send_request(config, &url, &request, &headers).await?;
     let chat_response: ChatResponse = match serde_json::from_str(&response_text) {
@@ -683,10 +771,12 @@ pub async fn chat_stream(
         if let Some(a) = &auth {
             request_builder = request_builder.header("Authorization", a.as_str());
         }
+        request_builder = apply_session_headers(request_builder, params.session_id.as_deref());
         let response = send_with_retry(
             &request_builder,
             json_body.clone(),
             params.retry_delay_override,
+            params.max_retries,
         )
         .await?;
         retry_mid_stream(
@@ -694,12 +784,17 @@ pub async fn chat_stream(
             request_builder,
             json_body,
             params.retry_delay_override,
+            params.max_retries,
             process_sse_response,
         )
     } else {
-        let mut headers: Vec<(&str, &str)> = Vec::new();
+        let mut headers: Vec<(&str, String)> = Vec::new();
+        if let Some(sid) = params.session_id.as_deref() {
+            headers.push(("x-session-id", sid.to_string()));
+            headers.push(("x-session-affinity", sid.to_string()));
+        }
         if let Some(a) = &auth {
-            headers.push(("Authorization", a.as_str()));
+            headers.push(("Authorization", a.to_string()));
         }
         let response = send_request_stream(config, &url, &request, &headers).await?;
         process_sse_response(response)
@@ -749,10 +844,12 @@ pub async fn chat_stream_with_messages(
         if let Some(a) = &auth {
             request_builder = request_builder.header("Authorization", a.as_str());
         }
+        request_builder = apply_session_headers(request_builder, params.session_id.as_deref());
         let response = send_with_retry(
             &request_builder,
             json_body.clone(),
             params.retry_delay_override,
+            params.max_retries,
         )
         .await?;
         retry_mid_stream(
@@ -760,12 +857,17 @@ pub async fn chat_stream_with_messages(
             request_builder,
             json_body,
             params.retry_delay_override,
+            params.max_retries,
             process_sse_response,
         )
     } else {
-        let mut headers: Vec<(&str, &str)> = Vec::new();
+        let mut headers: Vec<(&str, String)> = Vec::new();
+        if let Some(sid) = params.session_id.as_deref() {
+            headers.push(("x-session-id", sid.to_string()));
+            headers.push(("x-session-affinity", sid.to_string()));
+        }
         if let Some(a) = &auth {
-            headers.push(("Authorization", a.as_str()));
+            headers.push(("Authorization", a.to_string()));
         }
         let response = send_request_stream(config, &url, &request, &headers).await?;
         process_sse_response(response)
@@ -797,9 +899,13 @@ pub async fn embed(
     let url = format!("{base_url}/embeddings");
 
     let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
-    let mut headers: Vec<(&str, &str)> = Vec::new();
+    let mut headers: Vec<(&str, String)> = Vec::new();
+    if let Some(sid) = params.session_id.as_deref() {
+        headers.push(("x-session-id", sid.to_string()));
+        headers.push(("x-session-affinity", sid.to_string()));
+    }
     if let Some(a) = &auth {
-        headers.push(("Authorization", a.as_str()));
+        headers.push(("Authorization", a.to_string()));
     }
     let response_text = send_request(config, &url, &request, &headers).await?;
     let embed_response: EmbeddingResponse = serde_json::from_str(&response_text)?;
@@ -835,9 +941,13 @@ pub async fn list_models(
     let url = format!("{base_url}/models");
 
     let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
-    let mut headers: Vec<(&str, &str)> = Vec::new();
+    let mut headers: Vec<(&str, String)> = Vec::new();
+    if let Some(sid) = params.session_id.as_deref() {
+        headers.push(("x-session-id", sid.to_string()));
+        headers.push(("x-session-affinity", sid.to_string()));
+    }
     if let Some(a) = &auth {
-        headers.push(("Authorization", a.as_str()));
+        headers.push(("Authorization", a.to_string()));
     }
     let response_text = send_get_request(config, &url, &headers).await?;
 

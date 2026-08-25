@@ -1,41 +1,11 @@
 //! Token usage extraction for the Claude caller.
 //!
 //! [`extract_tokens`] keeps the historical completion-only count;
-//! [`extract_usage`] returns the full typed [`TokenUsage`], including the
+//! [`extract_usage`] returns the full [`TokenUsage`], including the
 //! prompt-cache fields (`cache_read_input_tokens`,
 //! `cache_creation_input_tokens`) used to track cache savings.
 
-/// Full token usage from a Claude response (or a streaming `message_start`
-/// frame).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TokenUsage {
-    /// Input tokens NOT served from or written to the cache (the tokens
-    /// after the last cache breakpoint).
-    #[serde(default)]
-    pub input_tokens: u32,
-    /// Completion tokens.
-    #[serde(default)]
-    pub output_tokens: u32,
-    /// Tokens written to the prompt cache by this request (billed at 1.25x
-    /// base input price with the 5-minute TTL, 2x with 1h).
-    #[serde(default)]
-    pub cache_creation_input_tokens: u32,
-    /// Tokens read from the prompt cache (billed at 10% of base input
-    /// price). This is where the caching savings show up.
-    #[serde(default)]
-    pub cache_read_input_tokens: u32,
-}
-
-impl TokenUsage {
-    /// Total input tokens processed:
-    /// `input + cache_creation + cache_read`.
-    #[must_use]
-    pub fn total_input_tokens(&self) -> u64 {
-        u64::from(self.input_tokens)
-            + u64::from(self.cache_creation_input_tokens)
-            + u64::from(self.cache_read_input_tokens)
-    }
-}
+use crate::connector::usage::TokenUsage;
 
 fn parse_usage(raw: &str) -> Option<TokenUsage> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
@@ -60,9 +30,7 @@ fn parse_usage(raw: &str) -> Option<TokenUsage> {
 /// (e.g. a pre-warm request), which callers treat as no usage.
 #[must_use]
 pub fn extract_tokens(raw: &str) -> Option<u32> {
-    parse_usage(raw)
-        .map(|u| u.output_tokens)
-        .filter(|n| *n > 0)
+    parse_usage(raw).map(|u| u.output_tokens).filter(|n| *n > 0)
 }
 
 /// Extract the full token usage (including prompt-cache accounting) from a
@@ -121,7 +89,10 @@ mod tests {
 
     #[test]
     fn zero_output_tokens_is_none() {
-        assert_eq!(extract_tokens(r#"{"usage":{"input_tokens":8,"output_tokens":0}}"#), None);
+        assert_eq!(
+            extract_tokens(r#"{"usage":{"input_tokens":8,"output_tokens":0}}"#),
+            None
+        );
     }
 
     #[test]

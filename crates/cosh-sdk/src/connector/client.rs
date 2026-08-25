@@ -1,8 +1,8 @@
+use super::TokenUsage;
 use super::error::ConnectorError;
 use super::output::{ChatOutput, ChatStream, LsOutput};
 use super::params::{ChatMessage, Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
 use super::provider::{Family, ProviderConfig, get_provider};
-use super::TokenUsage;
 
 use super::claude;
 use super::gemini;
@@ -180,6 +180,15 @@ impl Connector {
     /// Set the API key explicitly (otherwise resolved from env vars).
     pub fn with_api_key(mut self, v: impl Into<String>) -> Self {
         self.params.api_key = Some(v.into());
+        self
+    }
+
+    /// Set an opaque session identifier sent as `x-session-id` /
+    /// `x-session-affinity` headers on every request, enabling cache-affinity
+    /// routing at gateways/proxies. Pass a non-identifying value (hash or
+    /// UUID), never raw user data.
+    pub fn with_session_id(mut self, v: impl Into<String>) -> Self {
+        self.params.session_id = Some(v.into());
         self
     }
 
@@ -466,13 +475,20 @@ impl Connector {
     /// or 100% premium). Total input tokens =
     /// `input_tokens + cache_read + cache_creation`.
     ///
+    /// Streaming note: each call extracts the usage of a SINGLE frame —
+    /// Claude splits input/cache counters into the `message_start` frame and
+    /// the final output count into `message_delta`, so consumers must merge
+    /// per-frame results (take input/cache from `message_start`, take the
+    /// latest non-zero output from `message_delta`) rather than summing.
+    ///
     /// Returns `None` when no usage object is present or the JSON is invalid.
     #[must_use]
     pub fn token_usage(&self, raw: &str) -> Option<TokenUsage> {
         let provider = self.provider().ok()?;
         match provider.family {
             Family::Claude => claude::extract_usage(raw),
-            Family::OpenAICompatible | Family::Gemini => None,
+            Family::OpenAICompatible => openai_compatible::extract_usage(raw),
+            Family::Gemini => gemini::extract_usage(raw),
         }
     }
 
@@ -511,9 +527,18 @@ impl Connector {
         self
     }
 
+    /// Override the maximum number of retries per request (default: 3, i.e.
+    /// up to 4 total attempts). `0` disables retries entirely (same as
+    /// [`with_retry(false)](Self::with_retry)` but per-request-count).
+    pub fn with_max_retries(mut self, n: usize) -> Self {
+        self.params.max_retries = Some(n);
+        self
+    }
+
     /// Override the retry backoff base delay (default 5s → 10s → 20s).
     /// Primarily for tests: a tiny delay makes retry tests run in
-    /// milliseconds instead of sleeping real backoffs.
+    /// milliseconds instead of sleeping real backoffs. The value is used
+    /// VERBATIM — the production equal-jitter spread is not applied.
     pub fn with_retry_delay(mut self, delay: std::time::Duration) -> Self {
         self.params.retry_delay_override = Some(delay);
         self
@@ -534,7 +559,33 @@ impl Connector {
             .as_deref()
             .or_else(|| self.provider.map(|p| p.base_url))
             .unwrap_or_default();
-        base_url.contains("localhost") || base_url.contains("127.0.0.1") || base_url.contains("::1")
+        // Parse the URL and compare the HOST component only: substring
+        // matching misfires on paths/query strings (e.g.
+        // `https://api.example.com/v1?mirror=127.0.0.1`) and on hosts that
+        // merely CONTAIN "localhost" in their name.
+        url::Url::parse(base_url)
+            .ok()
+            .and_then(|u| {
+                // IPv6 hosts come back bracketed from host_str in some
+                // versions; normalize by stripping brackets.
+                u.host_str()
+                    .map(|h| h.trim_matches(['[', ']']).to_ascii_lowercase())
+            })
+            .is_some_and(|host| {
+                host == "localhost"
+                    || host.ends_with(".localhost")
+                    // The whole IPv4 loopback block is 127.0.0.0/8.
+                    || host
+                        .split('.')
+                        .try_fold((0u32, 0usize), |(acc, i), octet| {
+                            octet
+                                .parse::<u8>()
+                                .map(|o| ((acc << 8) | u32::from(o), i + 1))
+                                .map_err(|_| ())
+                        })
+                        .is_ok_and(|(ip, octets)| octets == 4 && (ip >> 24) == 127)
+                    || host == "::1"
+            })
     }
 
     /// The model override, if one was set via [`with_model`](Self::with_model).

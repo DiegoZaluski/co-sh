@@ -303,6 +303,11 @@ pub struct Parameters {
     /// `true`; tests disable it to keep single-shot mock-server semantics.
     #[zeroize(skip)]
     pub(crate) retry_enabled: bool,
+    /// Maximum number of RETRIES per request (see
+    /// [`crate::connector::retry::RETRY_MAX_RETRIES`] for the default).
+    /// `None` uses the production default; tests may lower it.
+    #[zeroize(skip)]
+    pub(crate) max_retries: Option<usize>,
     /// Override for the retry backoff base delay (see
     /// [`crate::connector::retry::RETRY_INITIAL_DELAY`]). `None` uses the
     /// production 5s → 10s → 20s schedule; tests set a tiny value so retry
@@ -315,6 +320,12 @@ pub struct Parameters {
     /// the conversation grows, which is what agentic multi-turn loops want.
     #[zeroize(skip)]
     pub(crate) prompt_cache: PromptCacheConfig,
+    /// Opaque session identifier for cache-affinity routing. When set,
+    /// requests carry `x-session-id` and `x-session-affinity` headers with
+    /// this value so gateways/proxies can pin a session's requests (and
+    /// their prompt-cache entries) to the same backend.
+    #[zeroize(skip)]
+    pub(crate) session_id: Option<String>,
     #[zeroize(skip)]
     pub(crate) user: Option<String>,
     #[zeroize(skip)]
@@ -344,7 +355,9 @@ impl Default for Parameters {
             tool_call_mode: ToolCallMode::Native,
             retry_enabled: true,
             retry_delay_override: None,
+            max_retries: None,
             prompt_cache: PromptCacheConfig::default(),
+            session_id: None,
             user: None,
             base_url: None,
             // Default to the canonical cosh keyring service so callers only
