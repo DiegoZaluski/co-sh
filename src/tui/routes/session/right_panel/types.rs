@@ -81,28 +81,89 @@ pub(crate) fn sanitize_subagent_text(text: &str) -> String {
         .collect()
 }
 
-/// Wrap one logical line into visual rows of at most `wrap_w` chars
-/// (character-count based, matching the panel's draw-time truncation).
-/// An empty line yields a single empty row; `wrap_w == 0` yields one row.
+/// Wrap one logical line into visual rows of at most `wrap_w` columns,
+/// breaking at SPACES with whole-word moves — the same word semantics as
+/// the chat's markdown renderer: a word that doesn't fit next to the
+/// current content starts a fresh row, and a word wider than the column
+/// breaks at character level; a space that would overflow is dropped
+/// instead of starting the next row. An empty line yields a single empty
+/// row; `wrap_w == 0` yields one row.
 pub(crate) fn wrap_chars(line: &str, wrap_w: u16) -> Vec<String> {
-    let w = wrap_w as usize;
-    if w == 0 {
+    let max = usize::from(wrap_w);
+    if max == 0 {
         return vec![line.to_string()];
     }
-    let chars: Vec<char> = line.chars().collect();
-    if chars.is_empty() {
-        return vec![String::new()];
+    let mut rows: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    let mut word = String::new();
+
+    // Place the pending word on the current row when it fits next to it,
+    // otherwise start a new row (hard-breaking oversized words).
+    fn flush_word(
+        rows: &mut Vec<String>,
+        cur: &mut String,
+        cur_w: &mut usize,
+        word: &mut String,
+        max: usize,
+    ) {
+        if word.is_empty() {
+            return;
+        }
+        let word_w = word.chars().count();
+        // Whole-word move: any word that doesn't fit next to the current
+        // content starts on a fresh row (oversized words included).
+        if *cur_w + word_w > max && !cur.is_empty() {
+            rows.push(std::mem::take(cur));
+            *cur_w = 0;
+        }
+        if word_w <= max {
+            cur.push_str(word);
+            *cur_w += word_w;
+            word.clear();
+            return;
+        }
+        // The word alone is wider than the whole column: break it at
+        // character level so no row exceeds the width.
+        for ch in word.drain(..) {
+            if *cur_w + 1 > max && !cur.is_empty() {
+                rows.push(std::mem::take(cur));
+                *cur_w = 0;
+            }
+            cur.push(ch);
+            *cur_w += 1;
+        }
     }
-    chars
-        .chunks(w)
-        .map(|chunk| chunk.iter().collect())
-        .collect()
+
+    for ch in line.chars() {
+        match ch {
+            '\n' => {
+                flush_word(&mut rows, &mut cur, &mut cur_w, &mut word, max);
+                rows.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            ' ' => {
+                flush_word(&mut rows, &mut cur, &mut cur_w, &mut word, max);
+                if cur_w < max {
+                    cur.push(' ');
+                    cur_w += 1;
+                }
+            }
+            _ => word.push(ch),
+        }
+    }
+    flush_word(&mut rows, &mut cur, &mut cur_w, &mut word, max);
+    if !cur.is_empty() || rows.is_empty() {
+        rows.push(cur);
+    }
+    rows
 }
 
-/// Number of visual rows a logical line occupies at `wrap_w`.
+/// Number of visual rows a logical line occupies at `wrap_w` — derived
+/// from [`wrap_chars`] itself so height estimates can never diverge from
+/// what the renderer draws.
 fn wrap_count(line: &str, wrap_w: u16) -> u16 {
-    let rows = line.chars().count().div_ceil(usize::from(wrap_w).max(1));
-    u16::try_from(rows).unwrap_or(u16::MAX)
+    u16::try_from(wrap_chars(line, wrap_w).len()).unwrap_or(u16::MAX)
 }
 
 /// Cached rendered markdown cells of one subagent body. Frames between
@@ -1668,6 +1729,80 @@ pub(crate) fn palette_entries() -> Vec<(u8, u8, u8)> {
 mod tests {
     use super::*;
 
+    /// Regression: wrapping must break at WORD boundaries — a line never
+    /// cuts mid-word when spaces allow the move, matching the chat's
+    /// markdown renderer semantics. A space kept before a forced break
+    /// trails the row invisibly (same as the markdown output).
+    #[test]
+    fn wrap_chars_breaks_at_word_boundaries() {
+        // "report" doesn't fit next to "kilo " → moves whole to row 2.
+        assert_eq!(wrap_chars("kilo report", 8), vec!["kilo ", "report"]);
+        // Multiple words pack greedily up to the width.
+        assert_eq!(wrap_chars("aa bb cc dd", 8), vec!["aa bb cc", "dd"]);
+    }
+
+    /// A word WIDER than the column cannot fit anywhere: it starts on its
+    /// own row and hard-breaks at character level so no row exceeds the
+    /// width (markdown parity).
+    #[test]
+    fn wrap_chars_hard_breaks_oversized_words() {
+        assert_eq!(wrap_chars("abcdef", 4), vec!["abcd", "ef"]);
+        // Oversized word after content: fresh row, then char-level breaks.
+        assert_eq!(wrap_chars("ok abcdefgh", 4), vec!["ok ", "abcd", "efgh"]);
+        // Bash header shape: prefix alone, then the oversized run breaks.
+        assert_eq!(
+            wrap_chars(&format!("$ {}", "a".repeat(30)), 10),
+            vec!["$ ", "aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa"]
+        );
+        // Discriminates word-wrap from char-chunking ("aa bb|b cc |dd").
+        assert_eq!(wrap_chars("aa bbb cc dd", 5), vec!["aa ", "bbb ", "cc dd"]);
+    }
+
+    /// Edge contracts preserved: empty line → one empty row; width 0 → one
+    /// row; `wrap_count` always agrees with `wrap_chars` (estimates ==
+    /// rendering), including multi-byte characters.
+    #[test]
+    fn wrap_chars_edges_and_count_agreement() {
+        assert_eq!(wrap_chars("", 10), vec![""]);
+        assert_eq!(wrap_chars("qualquer coisa", 0), vec!["qualquer coisa"]);
+        for line in [
+            "coração pinga e anda".to_string(),
+            "→ cosh: ação é útil".to_string(),
+            "x".repeat(200),
+            "ab ".repeat(40),
+        ] {
+            for w in [1u16, 5, 12, 48] {
+                let rows = wrap_chars(&line, w);
+                assert_eq!(
+                    u16::try_from(rows.len()).unwrap(),
+                    wrap_count(&line, w),
+                    "count divergence for {line:?} at width {w}"
+                );
+                // Every visual row respects the width…
+                assert!(
+                    rows.iter().all(|r| r.chars().count() <= usize::from(w)),
+                    "row overflow for {line:?} at width {w}: {rows:?}"
+                );
+                // …and rejoining rows recovers the content (spaces may be
+                // dropped only where a break happened). Words wider than
+                // the column legitimately hard-break, so word identity is
+                // only asserted when every word fits.
+                let rejoined: String = rows.join(" ");
+                let original_words: Vec<&str> = line.split_whitespace().collect();
+                if original_words
+                    .iter()
+                    .all(|wd| wd.chars().count() <= usize::from(w))
+                {
+                    assert_eq!(
+                        rejoined.split_whitespace().collect::<Vec<_>>(),
+                        original_words,
+                        "word loss for {line:?} at width {w}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Regression: `truncate_output` cuts at a BYTE offset (`len - cap`).
     /// When the output contains multi-byte UTF-8 (arrows, accents, emoji —
     /// common in bash/subagent output), that offset can land inside a char
@@ -1944,11 +2079,12 @@ mod tests {
         state.start_pty(long_cmd, None);
         state.complete_last_pty("short out\n".to_string());
 
-        // Width 10: "$ " + 30 chars = 32 chars → 4 visual rows.
+        // Width 10: "$ " + 30 chars → word semantics: the oversized run
+        // starts on its own row and breaks per char → 4 header rows.
         let buf = state.bash_buffer(10).to_vec();
         assert_eq!(buf.len(), 4 + 1, "header wraps, output fits one row");
-        assert_eq!(buf[0], "$ aaaaaaaa");
-        assert_eq!(buf[3].chars().count(), 2);
+        assert_eq!(buf[0], "$ ");
+        assert_eq!(buf[3].chars().count(), 10);
 
         // Same content, wider box → fewer rows (width is part of the key).
         assert!(state.bash_buffer(40).len() < buf.len());
@@ -2020,8 +2156,9 @@ mod tests {
         let long_input = format!("→ cosh: {}\n", "x".repeat(50));
         state.update_last_pty(long_input); // no body yet
 
-        // Width 20: 18-char header → 1 row; 51-char input → 3 rows.
-        assert_eq!(state.subagent_section_rows(20), &[1 + 3]);
+        // Width 20: 18-char header → 1 row; input = "→ cosh: " prefix row
+        // + the oversized x-run hard-broken into 20/20/10 → 4 rows.
+        assert_eq!(state.subagent_section_rows(20), &[1 + 4]);
         assert_eq!(state.subagent_section_rows(80), &[2]);
     }
 
