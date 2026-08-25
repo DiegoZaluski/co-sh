@@ -710,6 +710,13 @@ impl RightPanelState {
             }
         };
         let next_agent = agents[next].clone();
+        // Cycling within a SINGLE queue is a no-op: re-selecting the
+        // already-focused queue must not drop its navigation pin.
+        if let Some(PanelFocus::Agent(cur)) = &self.panel_focus
+            && cur == &next_agent
+        {
+            return true;
+        }
         self.panel_focus = Some(PanelFocus::Agent(next_agent.clone()));
         // The newest entry of the newly focused queue takes over: drop any
         // previous manual navigation (live/auto-follow) and force the layout
@@ -750,6 +757,14 @@ impl RightPanelState {
     }
 
     // ── Subagent dynamic windows ────────────────────────────────────
+    /// Separator rows between DISPLAYED subagent windows: a 1-row margin
+    /// exists ONLY between consecutive windows. The LAST window leans on
+    /// the box's own bottom padding, so a lone or trailing window never
+    /// gets doubled bottom padding.
+    pub(crate) fn subagent_window_margins(window_count: usize) -> i32 {
+        window_count.saturating_sub(1) as i32
+    }
+
     /// Resolve which subagent sessions are DISPLAYED this frame and store
     /// them in `visible_subagents` (display order: chronological).
     ///
@@ -808,13 +823,13 @@ impl RightPanelState {
         //    queue contributes exactly ONE window: its selected entry. The
         //    focused queue is already represented above.
         let focused_agent = match &self.panel_focus {
-            Some(PanelFocus::Agent(a)) => Some(a.clone()),
+            Some(PanelFocus::Agent(a)) => Some(a.as_str()),
             _ => None,
         };
         let mut pinned: Vec<(Instant, usize)> = self
             .pinned_agents()
             .iter()
-            .filter(|agent| Some((*agent).clone()) != focused_agent)
+            .filter(|agent| focused_agent != Some(agent.as_str()))
             .filter_map(|agent| {
                 if !is_pinned(agent, &self.agent_navs, &queues) {
                     return None;
@@ -856,14 +871,14 @@ impl RightPanelState {
             .collect();
         self.ensure_outputs_loaded(&pinned_idx);
 
-        // Greedy fit against the available budget. Each displayed window
-        // also carries a 1-row bottom margin (blank separator below it),
-        // so it consumes its content rows plus one.
+        // Greedy fit against the available budget. Every window AFTER the
+        // first adds its 1-row separator margin (margins exist only
+        // BETWEEN windows — see [`Self::subagent_window_margins`]).
         let rows = self.subagent_section_rows_for_display(wrap_w);
         let mut chosen: Vec<usize> = Vec::new();
         let mut used: i32 = 0;
         for &(_, _, idx) in &ranked {
-            let need = i32::from(rows.get(idx).copied().unwrap_or(1)) + 1;
+            let need = i32::from(rows.get(idx).copied().unwrap_or(1)) + !chosen.is_empty() as i32;
             if used + need <= budget_rows || chosen.is_empty() {
                 chosen.push(idx);
                 used += need;
@@ -1347,11 +1362,6 @@ impl RightPanelState {
     /// The pinned absolute index of an agent's queue (`None` = live).
     pub(crate) fn queue_nav_index(&self, agent: &str) -> Option<usize> {
         self.agent_navs.get(agent).and_then(|nav| nav.index)
-    }
-
-    /// When the user last manually navigated this queue (recency ranking).
-    pub(crate) fn queue_last_nav(&self, agent: &str) -> Option<Instant> {
-        self.agent_navs.get(agent).and_then(|nav| nav.last_nav)
     }
 
     /// Force a queue's selected index (tests / programmatic pinning).
@@ -2248,7 +2258,8 @@ mod tests {
         state.set_queue_index("kilo", 0);
 
         let wrap_w = 48;
-        let budget = i32::from(state.subagent_section_rows(wrap_w)[1]) + 1;
+        // Budget fits exactly ONE window (a lone window carries no margin).
+        let budget = i32::from(state.subagent_section_rows(wrap_w)[1]);
         state.resolve_visible_subagents(wrap_w, budget);
         assert_eq!(
             state.visible_subagents,
@@ -2303,6 +2314,32 @@ mod tests {
         }
         assert_eq!(state.queue_nav_index("opencode"), None);
         assert!(state.queue_nav_index("kilo").is_none());
+    }
+
+    /// REGRESSION: cycling with a SINGLE queue is a no-op — re-selecting
+    /// the already-focused queue must not drop its navigation pin.
+    #[test]
+    fn cycling_sole_queue_keeps_its_pin() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("kilo v1\n".to_string());
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("kilo v2\n".to_string());
+
+        state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+        state.set_queue_index("kilo", 0);
+
+        assert!(state.cycle_agent_queue(1));
+        assert!(state.cycle_agent_queue(-1));
+        assert_eq!(
+            state.queue_nav_index("kilo"),
+            Some(0),
+            "cycling the only queue must preserve its pin"
+        );
+        assert_eq!(
+            state.panel_focus,
+            Some(PanelFocus::Agent("kilo".to_string()))
+        );
     }
 
     /// The first "→ cosh:" line of a subagent output is the main agent's

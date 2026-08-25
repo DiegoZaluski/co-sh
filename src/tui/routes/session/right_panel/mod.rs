@@ -47,7 +47,7 @@ fn blend(base: RGBA, accent: RGBA, t: f32) -> RGBA {
 }
 
 /// Draw a highlighted label ("highlighter pen" chip): a colored background
-/// pill with padded text, used for mode badges and queue counters.
+/// pill with padded text, used for mode badges (bash live/history).
 fn draw_chip(buf: &mut Buffer, x: u16, y: u16, label: &str, bg: RGBA) {
     let style = Style::default()
         .fg(rgba_color(contrast_fg(bg)))
@@ -141,8 +141,9 @@ fn natural_section_height(
 }
 
 /// Natural height of the SUBAGENT section for the resolved window set:
-/// sum of each visible session's content rows plus a 1-row bottom margin
-/// per window, plus box overhead. Must be called AFTER
+/// sum of each visible session's content rows, plus the between-window
+/// separator margins ([`RightPanelState::subagent_window_margins`] — none
+/// after the last window), plus box overhead. Must be called AFTER
 /// [`RightPanelState::resolve_visible_subagents`].
 fn subagent_natural_height(state: &mut RightPanelState, wrap_w: u16) -> i32 {
     let rows = state.subagent_section_rows_for_display(wrap_w);
@@ -154,7 +155,9 @@ fn subagent_natural_height(state: &mut RightPanelState, wrap_w: u16) -> i32 {
     if total == 0 {
         0
     } else {
-        BOX_OVERHEAD + total + state.visible_subagents.len() as i32
+        BOX_OVERHEAD
+            + total
+            + types::RightPanelState::subagent_window_margins(state.visible_subagents.len())
     }
 }
 
@@ -188,11 +191,11 @@ pub fn render_right_panel(
     // The subagent section owns its area and may BORROW leftover space
     // from the todo/bash areas (loans have no time guarantee — owners
     // reclaim whenever they need it). The budget below IS that space;
-    // window selection ranks pinned > running > finished so active work
-    // is never hidden by stale content.
+    // window selection ranks focused > pinned > running > finished so
+    // the queue being navigated is never hidden by stale content.
     let wrap_w = inner_w.saturating_sub(2);
+    let (has_todos, has_bash, has_subagent) = count_sections(state);
     {
-        let (has_todos, has_bash, has_subagent) = count_sections(state);
         let fixed_nat = natural_section_height(state, inner_w, types::SectionKind::Todo)
             + natural_section_height(state, inner_w, types::SectionKind::Bash);
         let present = i32::from(has_todos) + i32::from(has_bash) + i32::from(has_subagent);
@@ -213,9 +216,9 @@ pub fn render_right_panel(
 
     // ── Phase 1: collect visible sections and their natural heights ──
     let sections_info = [
-        (types::SectionKind::Todo, count_sections(state).0),
-        (types::SectionKind::Bash, count_sections(state).1),
-        (types::SectionKind::Subagent, count_sections(state).2),
+        (types::SectionKind::Todo, has_todos),
+        (types::SectionKind::Bash, has_bash),
+        (types::SectionKind::Subagent, has_subagent),
     ];
 
     let visible: Vec<(types::SectionKind, i32)> = sections_info
@@ -478,8 +481,9 @@ fn render_bash_section(
 /// Render the resolved subagent windows as one scrollable markdown document.
 ///
 /// The visible set comes from [`RightPanelState::visible_subagents`]
-/// (dynamic windows: pinned queues first, then running, then finished —
-/// superseded entries return only via ← navigation). Each session renders
+/// (dynamic windows: the focused queue's window first, then pinned
+/// queues, then running, then finished — superseded entries return only
+/// via ← navigation). Each session renders
 /// as: the command header line (normal text), the optional "→ cosh:"
 /// main-agent input line (normal text), then the subagent body as
 /// **markdown** — the same renderer the chat uses for its content, so the
@@ -552,7 +556,7 @@ fn render_subagent_section(
         .iter()
         .map(|&i| i32::from(rows_all.get(i).copied().unwrap_or(1)))
         .sum::<i32>()
-        + visible.len() as i32; // 1-row bottom margin per window
+        + types::RightPanelState::subagent_window_margins(visible.len());
     if total_rows == 0 {
         return;
     }
@@ -634,15 +638,23 @@ fn render_subagent_section(
         let input_h = input_rows.len() as i32;
         let body_start = content_row + head_h + input_h;
         let sess_end = content_row + sess_rows;
+        // The 1-row separator margin exists only BELOW non-last windows —
+        // the last window leans on the box's own bottom padding instead.
+        let has_next_window = window + 1 < sessions.len();
 
         // Area tint of THIS window: fill its visible slice (clipped to the
         // section's inner band) with the blended color before any text or
-        // body cells land on it. The window's 1-row bottom margin shares
-        // the tint so each CLI reads as one continuous colored block.
+        // body cells land on it. A following margin row shares the tint so
+        // consecutive windows read as separated colored blocks.
         let tint = tints[window];
         {
             let vis_top = content_row.max(scroll_y);
-            let vis_bottom = (sess_end + 1).min(content_bottom);
+            let tint_end = if has_next_window {
+                sess_end + 1
+            } else {
+                sess_end
+            };
+            let vis_bottom = tint_end.min(content_bottom);
             if vis_bottom > vis_top && wrap_w > 0 {
                 let rect = Rect::new(
                     x,
@@ -807,8 +819,8 @@ fn render_subagent_section(
                 }
             }
         }
-        // Next window starts below THIS window's 1-row bottom margin.
-        content_row = sess_end + 1;
+        // Next window starts below THIS window's 1-row separator margin.
+        content_row = sess_end + i32::from(has_next_window);
     }
 
     highlight_section_selection(
@@ -893,6 +905,8 @@ fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: St
 /// converted back to screen rows with the current scroll offset and clamped
 /// to the section's visible content band. Rows between the band edges are
 /// selected full-width, the first/last row only from the drag x positions.
+/// `kind` must be the section being rendered: content rows are per-section,
+/// so only the section that OWNS the selection may draw it.
 fn highlight_section_selection(
     buf: &mut Buffer,
     state: &RightPanelState,
@@ -1111,6 +1125,24 @@ mod tests {
                 "margin row must be blank: {margin:?}"
             );
         }
+
+        // REGRESSION: a LONE (== last) window gets NO margin — the box's
+        // own bottom padding frames it, so nothing is tinted right below
+        // its content.
+        let mut solo = RightPanelState::new();
+        solo.subagent_rebuild_interval = std::time::Duration::ZERO;
+        solo.start_pty("subagent: kilo".to_string(), None);
+        solo.complete_last_pty("report line\n".to_string());
+        let mut sbuf = Buffer::empty(Rect::new(0, 0, 50, 30));
+        render_subagent_section(&mut sbuf, 0, 0, 50, 30, &mut solo, &theme, true);
+        assert_eq!(solo.subagent_window_layouts.len(), 1);
+        let (_, _, solo_bottom) = solo.subagent_window_layouts[0];
+        let plain = rgba_color(theme.background_element);
+        assert_eq!(
+            sbuf.cell((1u16, solo_bottom as u16)).map(|c| c.bg),
+            Some(plain),
+            "no margin row below the last displayed window"
+        );
     }
 
     /// Each rendered subagent window carries its OWN area tint: external
@@ -1131,7 +1163,7 @@ mod tests {
 
         // One content row pair per session (header + 1 body row), stacked
         // in chronological order from inner_y = TOP_GAP + TOP_PAD = 2,
-        // separated by each window's 1-row bottom margin.
+        // separated by the 1-row margin between consecutive windows.
         let expected: Vec<ratatui::style::Color> = ["kilo", "opencode", ""]
             .iter()
             .map(|a| {
@@ -1560,13 +1592,12 @@ mod tests {
             .expect("subagent section rendered");
         let band_h = sub.bottom - sub.top;
         assert_eq!(
-            band_h, 14,
-            "section height must equal its natural height (3 overhead + 10 content + 1 margin)"
+            band_h, 13,
+            "section height must equal its natural height (3 overhead + 10 content; a lone window carries no margin)"
         );
 
         // Painted check inside the band: only TOP_GAP+TOP_PAD above and the
-        // single BOTTOM_PAD row plus this window's own bottom margin row may
-        // be blank.
+        // single BOTTOM_PAD row may be blank (a lone window has no margin).
         let mut last_paint = sub.top;
         for y in sub.content_top..sub.bottom {
             let t = row_text(&buf, y as u16);
@@ -1575,7 +1606,7 @@ mod tests {
             }
         }
         assert!(
-            last_paint >= sub.bottom - 3,
+            last_paint >= sub.bottom - 2,
             "unpainted void of {} rows inside the subagent box",
             sub.bottom - 1 - last_paint
         );
