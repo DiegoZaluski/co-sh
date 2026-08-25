@@ -72,6 +72,10 @@ impl RagView {
                 RagMode::Idle => {
                     let input = self.url_input.as_str().to_string();
                     if input.is_empty() {
+                        // No URL typed: Enter toggles the highlighted DB row,
+                        // mirroring the mouse-click behaviour.
+                        let idx = self.selected_db_index;
+                        self.toggle_db(idx);
                         return Some(RagAction::Consumed);
                     }
                     if !self.has_selected_db() {
