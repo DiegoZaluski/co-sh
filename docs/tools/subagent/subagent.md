@@ -78,9 +78,11 @@ description says to install one.
 
 ### External CLI (when `agent` is provided)
 
-The named agent's binary is spawned with its static arguments plus the input
-message as the final argument (e.g. `opencode run --auto "<input>"`), and
-its output is streamed back. The engine is documented on the
+The named agent's binary is spawned with its static arguments and the input
+message — passed either as the final positional argument (e.g.
+`opencode run --auto "<input>"`) or, for CLIs whose prompt is a named flag
+(e.g. `aider --message`, via `input_flag`), as the value of that flag. The
+output is streamed back. The engine is documented on the
 [call page](call.md). Only agents with a **non-interactive / headless mode**
 are supported — purely interactive TUIs cannot be driven this way.
 

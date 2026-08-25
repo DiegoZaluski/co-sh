@@ -98,8 +98,8 @@ fn main() {
     // ── 6. The registry (display only — nothing is executed) ----------------
     println!("== 6. sample AGENTS invocations ==");
     for name in ["opencode", "claude", "aider"] {
-        if let Some((_, binary, args)) = AGENTS.iter().find(|(n, _, _)| *n == name) {
-            println!("  {name}: {binary} {} \"<input>\"", args.join(" "));
+        if let Some(entry) = AGENTS.iter().find(|a| a.name == name) {
+            println!("  {name}: {}", entry.invocation());
         }
     }
     println!("\n  ({} agents registered)", AGENTS.len());
