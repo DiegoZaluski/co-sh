@@ -620,6 +620,12 @@ impl App {
 #[path = "../bench/bench_e2e.rs"]
 mod bench_e2e;
 #[cfg(test)]
+#[path = "../bench/stress_rebuild.rs"]
+mod stress_rebuild;
+#[cfg(test)]
+#[path = "../bench/stress_streaming.rs"]
+mod stress_streaming;
+#[cfg(test)]
 #[path = "../bench/probe_drain.rs"]
 mod probe_drain;
 #[cfg(test)]

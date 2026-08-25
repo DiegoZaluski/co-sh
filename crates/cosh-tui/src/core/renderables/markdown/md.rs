@@ -2475,6 +2475,25 @@ static ESTIMATE_CACHE: std::sync::LazyLock<Mutex<LruCache<(u64, u16), u16>>> =
         Mutex::new(LruCache::new(NonZeroUsize::new(1024).expect("non-zero")))
     });
 
+/// Per-block height memo for [`estimate_height_ext`].
+///
+/// Key = (block source hash, width, keeps trailing feed row). The streaming
+/// layout re-measures a growing document EVERY frame (`estimate_height(tail)`),
+/// and without this memo every closed block was re-rendered into a throwaway
+/// canvas on each of those misses — O(tail) per frame. With it, only the
+/// unstable trailing blocks pay for measurement; closed blocks hit their
+/// cached height.
+///
+/// The measurement path is STYLE-FREE BY CONSTRUCTION (fixed palette, no
+/// table border colour, `highlight_code: false`, conceal on). Do not thread
+/// any style input through it, or this memo silently returns stale heights
+/// across themes.
+type BlockHeightCacheKey = (u64, u16, bool);
+static BLOCK_HEIGHT_CACHE: std::sync::LazyLock<Mutex<LruCache<BlockHeightCacheKey, u16>>> =
+    std::sync::LazyLock::new(|| {
+        Mutex::new(LruCache::new(NonZeroUsize::new(4096).expect("non-zero")))
+    });
+
 /// Number of terminal rows `text` occupies when rendered at `max_w` columns.
 ///
 /// Measures by actually rendering each top-level block into a growable canvas
@@ -2521,23 +2540,6 @@ pub(crate) fn estimate_height_ext(text: &str, max_w: u16, keep_last_feed: bool) 
     let block_count = blocks.blocks.len();
     for (block_idx, block) in blocks.blocks.iter().enumerate() {
         let source = &text[block.range.clone()];
-        let mut canvas = GrowBuf::new(max_w, Style::default());
-        // NOTE: estimation assumes concealment on (the default). Callers that
-        // set_conceal(false) change layout in ways this public API cannot see.
-        let pass = RenderPass {
-            highlight_code: false,
-            conceal: true,
-            depth: 0,
-            warning: false,
-        };
-        let (height, _links) = MarkdownRenderable::render_block_events(
-            source,
-            &mut canvas,
-            max_w,
-            &palette,
-            None,
-            &pass,
-        );
         // Inter-block separator, mirroring the blit layout exactly.
         if block_idx > 0 {
             let prev = &blocks.blocks[block_idx - 1];
@@ -2550,11 +2552,51 @@ pub(crate) fn estimate_height_ext(text: &str, max_w: u16, keep_last_feed: bool) 
         // The final block of a DOCUMENT drops its trailing feed row: no blank
         // line is left at the foot. Interior slices (streaming segments) keep
         // it — the following blocks position themselves after it.
-        total = total.saturating_add(if block_idx + 1 == block_count && !keep_last_feed {
-            block_content_height(height, canvas.rows())
-        } else {
-            height
-        });
+        let keeps_feed = !(block_idx + 1 == block_count && !keep_last_feed);
+        let height = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            source.hash(&mut hasher);
+            let block_key = (hasher.finish(), max_w, keeps_feed);
+            #[allow(clippy::unwrap_used)]
+            let mut memo = BLOCK_HEIGHT_CACHE.lock().unwrap();
+            if let Some(cached) = memo.get(&block_key) {
+                *cached
+            } else {
+                drop(memo);
+                let mut canvas = GrowBuf::new(max_w, Style::default());
+                // NOTE: estimation assumes concealment on (the default).
+                // Callers that set_conceal(false) change layout in ways this
+                // public API cannot see.
+                let pass = RenderPass {
+                    highlight_code: false,
+                    conceal: true,
+                    depth: 0,
+                    warning: false,
+                };
+                let (h, _links) = MarkdownRenderable::render_block_events(
+                    source,
+                    &mut canvas,
+                    max_w,
+                    &palette,
+                    None,
+                    &pass,
+                );
+                // A document-final block is measured by its visible height
+                // (no trailing feed row / phantom blank strip).
+                let measured = if keeps_feed {
+                    h
+                } else {
+                    block_content_height(h, canvas.rows())
+                };
+                #[allow(clippy::unwrap_used)]
+                BLOCK_HEIGHT_CACHE
+                    .lock()
+                    .unwrap()
+                    .put(block_key, measured);
+                measured
+            }
+        };
+        total = total.saturating_add(height);
     }
 
     let height = total.max(1);

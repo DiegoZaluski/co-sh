@@ -253,3 +253,62 @@ fn test_code_block_estimate_matches_render() {
         }
     }
 }
+
+/// Regression guard for the per-block height memo (`BLOCK_HEIGHT_CACHE`):
+/// the same fenced block measured as a document-FINAL block (drops its
+/// trailing feed row) and as an INTERIOR block (keeps it) must get DISTINCT
+/// memo entries. If the `keeps_feed` flag were dropped from the key, one of
+/// these exact totals would come back wrong depending on call order.
+#[test]
+fn test_block_height_memo_distinguishes_final_vs_interior() {
+    // Same fenced block, once as the document-FINAL block (its trailing feed
+    // row is dropped from the total) and once INTERIOR followed by a
+    // paragraph (feed row kept). Pinned exact totals measured against the
+    // from-scratch renderer; if the `keeps_feed` flag were dropped from the
+    // memo key, whichever variant was measured FIRST would poison the other.
+    let fence_final = "intro\n\n```\ncode\n```";
+    let fence_interior = "intro\n\n```\ncode\n```\n\ntail";
+    let h_final = estimate_height(fence_final, 80);
+    let h_interior = estimate_height(fence_interior, 80);
+    assert_eq!(h_final, 3);
+    assert_eq!(h_interior, 6);
+
+    // Re-measure both in the opposite order: warm memo hits must return
+    // identical values.
+    assert_eq!(estimate_height(fence_interior, 80), h_interior);
+    assert_eq!(estimate_height(fence_final, 80), h_final);
+}
+
+/// The streaming layout re-measures a growing document every frame while the
+/// memo warms up incrementally. Whatever is measured through the cache must
+/// equal the from-scratch value for the same text and width — here exercised
+/// by measuring the long doc first (populating entries) and then verifying a
+/// longer doc whose prefix shares blocks still lands on the expected total.
+#[test]
+fn test_block_height_memo_warm_matches_cold() {
+    let short = "# Title\n\ntext with `code`.\n\n```rust\nlet x = 1;\n```\n\n- a\n- b";
+    let long = format!("{short}\n\nafterword");
+    let w = 60;
+
+    let cold_long = estimate_height(&long, w); // no relevant entries yet? (best effort)
+    let _ = estimate_height(short, w); // warm shared-block entries
+    let warm_long = estimate_height(&long, w);
+
+    assert_eq!(
+        cold_long, warm_long,
+        "memoized block heights drifted from from-scratch measurement"
+    );
+
+    // Interior slices keep the final feed row. For THIS doc the trailing
+    // block is a list without a phantom row, so append a fence to make the
+    // difference observable: fence-terminated docs measure exactly one row
+    // more through the interior API.
+    let fenced_short = format!("{short}\n\n```\ncode\n```");
+    let fenced_long = format!("{long}\n\n```\ncode\n```");
+    assert_eq!(
+        super::super::estimate_height_interior_slice(&fenced_long, w),
+        super::super::estimate_height(&fenced_long, w) + 1,
+        "interior slice must keep the trailing feed row of its last block"
+    );
+    let _ = (fenced_short, fenced_long);
+}

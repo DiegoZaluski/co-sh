@@ -2267,7 +2267,7 @@ impl SessionView {
                 theme,
             );
             let (_, text_h) =
-                text_cache.update(&text_part.text, max_w, config_tok, config.conceal, theme);
+                text_cache.update(&text_part.text, max_w, config_tok, config.conceal);
             part_hs[text_pi] = text_h;
             let msg_h: u16 = part_hs.iter().sum::<u16>().max(1);
             let full_area = Rect::new(0, 0, width, msg_h);
@@ -2315,7 +2315,7 @@ impl SessionView {
             let sc = self.streaming_msg.as_mut().unwrap();
             let text_cache = sc.text.as_mut().unwrap();
             let (render_row, text_h) =
-                text_cache.update(&text_part.text, max_w, config_tok, config.conceal, theme);
+                text_cache.update(&text_part.text, max_w, config_tok, config.conceal);
             sc.part_hs[text_pi] = text_h;
             let msg_h: u16 = sc.part_hs.iter().sum::<u16>().max(1);
             let old_h = sc.height;

@@ -11,10 +11,14 @@
 //!
 //! This module keeps a persistent render of the streaming text part and only
 //! re-renders the trailing open block each frame — the current paragraph line,
-//! an open code fence, a list, or a blockquote — so streaming costs O(delta)
-//! per frame instead of O(total). The trailing block is re-rendered from a
-//! stable split point (see [`tail_scan`]); the prefix before it is rendered
-//! once and reused verbatim.
+//! an open code fence, a list, or a blockquote — from a stable split point
+//! (see [`tail_scan`]); the prefix before it is rendered once and reused
+//! verbatim. Per-frame cost is therefore O(delta) for the common shapes:
+//! paragraphs (split at the last line) and multi-block tails (closed blocks
+//! are reused through the renderer's per-block cache). A SINGLE open block
+//! that grows without bound (one huge fence/list) is still re-rendered whole
+//! per frame — linear, but bounded by that block and unchanged for
+//! realistic snippet sizes.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -69,6 +73,16 @@ pub(crate) struct StreamingTextCache {
     cells: Buffer,
     /// Total height of the text part (`prefix_h + connector + tail_h`).
     pub(crate) height: u16,
+    /// Persistent tail renderer.
+    ///
+    /// A fresh `MarkdownRenderable` per frame would throw away its
+    /// incremental parser state and per-block render cache every frame, so
+    /// an open list/fence/quote tail (one huge growing top-level block, or
+    /// many stabilized blocks) was fully re-parsed and re-rendered each
+    /// frame — O(tail) per frame, O(n²) over a long stream. Persisting the
+    /// instance keeps closed blocks' rendered rows cached across frames;
+    /// only the unstable trailing blocks re-render per frame (O(delta)).
+    tail_md: MarkdownRenderable,
 }
 
 impl StreamingTextCache {
@@ -92,8 +106,15 @@ impl StreamingTextCache {
             block: TailBlock::Paragraph,
             cells: Buffer::empty(Rect::new(0, 0, width.max(1), 1)),
             height: 0,
+            tail_md: {
+                let mut md = MarkdownRenderable::new(None);
+                md.set_fg(Some(ColorInput::RGBA(theme.text)));
+                md.set_bg(Some(ColorInput::RGBA(theme.background)));
+                crate::util::markdown::apply_theme(&mut md, theme);
+                md
+            },
         };
-        cache.update("", width, config_token, false, theme);
+        cache.update("", width, config_token, false);
         cache
     }
 
@@ -101,13 +122,16 @@ impl StreamingTextCache {
     /// changed tail. Returns the row range `(row, end)` of the text part that
     /// was (re)rendered this frame, so the caller can patch the surrounding
     /// message cache.
+    ///
+    /// The theme is applied once at construction; a theme change carries a new
+    /// `config_token` (it includes `theme_gen`), which makes the caller drop
+    /// this cache and build a fresh one.
     pub(crate) fn update(
         &mut self,
         raw_text: &str,
         width: u16,
         config_token: u64,
         conceal: bool,
-        theme: &Theme,
     ) -> (u16, u16) {
         // Sanitize only the appended delta: `sanitize`/`conceal` are per-char,
         // so `f(prefix) + f(delta) == f(whole)`.
@@ -204,8 +228,19 @@ impl StreamingTextCache {
             .saturating_add(tail_h)
             .max(1);
 
-        // Render from the earlier of the previous/current split so a block that
-        // just closed (fence/list ending in the tail) is refreshed in place.
+        // ── Render ──
+        // Render from the earlier of the previous/current split so a block
+        // that just closed (fence/list ending in the tail) is refreshed in
+        // place. The renderer instance PERSISTS across frames, so its
+        // per-block render cache survives: closed blocks of the slice are
+        // reused verbatim and only the unstable trailing blocks re-render,
+        // instead of re-rendering the whole slice from a cold cache like a
+        // fresh-per-frame instance did.
+        //
+        // The theme setters were applied once at construction — a theme or
+        // width change replaces this whole cache via the caller's identity
+        // check (config_token includes theme_gen), and cached block entries
+        // additionally validate width + style fingerprint on every hit.
         let render_from = if split >= prev_split {
             prev_split
         } else {
@@ -218,16 +253,12 @@ impl StreamingTextCache {
             self.cells.resize(new_area);
         }
         if area_h > 0 {
-            // `render_self` fills the whole area with the background first, so
-            // no separate clearing is needed.
+            // `render_self` fills the whole area with the background first,
+            // so no separate clearing is needed.
             let area = Rect::new(0, render_row, width, area_h);
-            let mut md = MarkdownRenderable::new(Some(text[render_from..].to_string()));
-            md.set_fg(Some(ColorInput::RGBA(theme.text)));
-            md.set_bg(Some(ColorInput::RGBA(theme.background)));
-            crate::util::markdown::apply_theme(&mut md, theme);
-            md.render_self(&mut self.cells, area);
+            self.tail_md.set_content(text[render_from..].to_string());
+            self.tail_md.render_self(&mut self.cells, area);
         }
-
         self.split = split;
         self.prefix_h = new_prefix_h;
         self.tail_h = tail_h;

@@ -1,5 +1,8 @@
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
+use std::cell::RefCell;
+use std::sync::{Arc, LazyLock, Mutex};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HighlightCategory {
     Keyword,
@@ -11,7 +14,15 @@ pub enum HighlightCategory {
     Builtin,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+struct CompiledHighlighter {
+    language: Language,
+    query: Query,
+    /// Capture index → category (`None` for captures we do not style).
+    categories: Vec<Option<HighlightCategory>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HighlightSpan {
     pub start: usize,
     pub end: usize,
@@ -179,46 +190,98 @@ fn query_for_language(lang: &str) -> Option<&'static str> {
     })
 }
 
+/// Compiled query + capture table per fence language, built once.
+///
+/// `Query::new` compiles the pattern list from source text and dominated the
+/// cost of every highlight call (measured ~2ms per fenced block); a chat
+/// stream discovers several new fences per frame, so this cache is what
+/// makes incremental streaming affordable. Unknown languages are cached as
+/// `None` so repeated misses stay cheap too. The language tag comes from the
+/// fence info string (model-controlled), so entries are LRU-capped instead
+/// of growing without bound.
+type CompiledCache = lru::LruCache<String, Option<Arc<CompiledHighlighter>>>;
+
+fn compiled_cache() -> &'static Mutex<CompiledCache> {
+    static COMPILED: LazyLock<Mutex<CompiledCache>> = LazyLock::new(|| {
+        Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(256).expect("non-zero"),
+        ))
+    });
+    &COMPILED
+}
+
+fn compiled_highlighter(lang: &str) -> Option<Arc<CompiledHighlighter>> {
+    // Poisoning follows the codebase's other render caches (panic on a
+    // poisoned lock rather than silently losing highlighting forever).
+    #[allow(clippy::unwrap_used)]
+    let mut map = compiled_cache().lock().unwrap();
+    if let Some(cached) = map.get(lang) {
+        return cached.clone();
+    }
+    let compiled = lang_from_name(lang).and_then(|language| {
+        let query = Query::new(&language, query_for_language(lang)?).ok()?;
+        let categories = query
+            .capture_names()
+            .iter()
+            .map(|name| match *name {
+                "keyword" => Some(HighlightCategory::Keyword),
+                "string" => Some(HighlightCategory::String),
+                "comment" => Some(HighlightCategory::Comment),
+                "type" => Some(HighlightCategory::Type),
+                "function" => Some(HighlightCategory::Function),
+                "number" => Some(HighlightCategory::Number),
+                "builtin" => Some(HighlightCategory::Builtin),
+                _ => None,
+            })
+            .collect();
+        Some(Arc::new(CompiledHighlighter {
+            language,
+            query,
+            categories,
+        }))
+    });
+    map.put(lang.to_string(), compiled.clone());
+    compiled
+}
+
+// One reusable parser per thread (parsers are not `Sync`; the TUI render
+// path is single-threaded, so a thread-local avoids re-allocating the
+// tree-sitter parser on every fenced block).
+thread_local! {
+    static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
+}
+
 #[must_use]
 pub fn highlight(source: &str, lang: &str) -> Option<Vec<HighlightSpan>> {
-    let language = lang_from_name(lang)?;
-    let query_str = query_for_language(lang)?;
+    let compiled = compiled_highlighter(lang)?;
 
-    let mut parser = Parser::new();
-    parser.set_language(&language).ok()?;
-    let tree = parser.parse(source, None)?;
-    let root = tree.root_node();
+    PARSER.with_borrow_mut(|parser| {
+        parser.set_language(&compiled.language).ok()?;
+        let tree = parser.parse(source, None)?;
+        let root = tree.root_node();
 
-    let query = Query::new(&language, query_str).ok()?;
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, source.as_bytes());
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&compiled.query, root, source.as_bytes());
 
-    let mut spans: Vec<HighlightSpan> = Vec::new();
-    while let Some(match_) = matches.next() {
-        for capture in match_.captures {
-            let node = capture.node;
-            let range = node.byte_range();
-            let name = query.capture_names()[capture.index as usize];
-            let category = match name {
-                "keyword" => HighlightCategory::Keyword,
-                "string" => HighlightCategory::String,
-                "comment" => HighlightCategory::Comment,
-                "type" => HighlightCategory::Type,
-                "function" => HighlightCategory::Function,
-                "number" => HighlightCategory::Number,
-                "builtin" => HighlightCategory::Builtin,
-                _ => continue,
-            };
-            spans.push(HighlightSpan {
-                start: range.start,
-                end: range.end,
-                category,
-            });
+        let mut spans: Vec<HighlightSpan> = Vec::new();
+        while let Some(match_) = matches.next() {
+            for capture in match_.captures {
+                let node = capture.node;
+                let range = node.byte_range();
+                let Some(category) = compiled.categories[capture.index as usize] else {
+                    continue;
+                };
+                spans.push(HighlightSpan {
+                    start: range.start,
+                    end: range.end,
+                    category,
+                });
+            }
         }
-    }
 
-    spans.sort_by_key(|s| s.start);
-    Some(spans)
+        spans.sort_by_key(|s| s.start);
+        Some(spans)
+    })
 }
 
 #[cfg(test)]
@@ -321,6 +384,27 @@ mod tests {
             result.is_none(),
             "highlight should return None for unknown lang"
         );
+    }
+
+    /// The compiled-highlighter cache stores unknown languages as an
+    /// explicit `None`: repeated misses must keep returning `None` (a bug
+    /// here would silently start highlighting garbage) and stay cheap.
+    #[test]
+    fn test_highlight_unknown_lang_repeated_is_stable() {
+        for _ in 0..3 {
+            assert!(highlight("some text", "unknown_lang").is_none());
+            assert!(highlight("other text", "unknown_lang2").is_none());
+        }
+    }
+
+    /// The second call for the same language hits the compiled-query cache;
+    /// results must be byte-identical to the cold first call.
+    #[test]
+    fn test_highlight_cached_call_matches_cold() {
+        let source = "fn main() {\n    let x = \"s\";\n}\n";
+        let cold = highlight(source, "rust");
+        let warm = highlight(source, "rust");
+        assert_eq!(cold, warm, "cached highlighter changed the output");
     }
 
     #[test]
