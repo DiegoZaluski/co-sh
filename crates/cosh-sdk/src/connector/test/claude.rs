@@ -657,3 +657,139 @@ async fn assistant_tool_turn_without_blocks_has_no_thinking_content() {
     assert_eq!(content.len(), 1, "only the tool_use block");
     assert_eq!(content[0]["type"], "tool_use");
 }
+
+#[tokio::test]
+async fn prompt_cache_control_sent_by_default() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":2}}"#,
+        200,
+    );
+    let _ = claude_connector(port).chat("hello").await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["cache_control"],
+        serde_json::json!({"type": "ephemeral"})
+    );
+}
+
+#[tokio::test]
+async fn prompt_cache_disabled_omits_field() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port)
+        .with_prompt_cache(false)
+        .chat("hello")
+        .await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json.get("cache_control").is_none());
+}
+
+#[tokio::test]
+async fn prompt_cache_ttl_1h_serialized() {
+    let (port, captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port)
+        .with_prompt_cache_ttl_1h(true)
+        .chat("hello")
+        .await;
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["cache_control"],
+        serde_json::json!({"type": "ephemeral", "ttl": "1h"})
+    );
+}
+
+#[tokio::test]
+async fn token_usage_reads_cache_fields() {
+    let (port, _captured, _raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":50,"output_tokens":10,"cache_read_input_tokens":1800,"cache_creation_input_tokens":248}}"#,
+        200,
+    );
+    let connector = claude_connector(port);
+    let out = connector.chat("hello").await.unwrap();
+    handle.join().unwrap();
+
+    assert_eq!(
+        connector.token_usage(out.raw()),
+        Some(super::super::TokenUsage {
+            input_tokens: 50,
+            output_tokens: 10,
+            cache_creation_input_tokens: 248,
+            cache_read_input_tokens: 1800,
+            reasoning_tokens: 0,
+        })
+    );
+    // The extractor also works standalone on a minimal usage object.
+    assert!(
+        connector
+            .token_usage(r#"{"usage":{"input_tokens":1}}"#)
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn session_headers_sent_when_configured() {
+    let (port, _body, raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port)
+        .with_session_id("sess-abc123")
+        .chat("hello")
+        .await;
+    handle.join().unwrap();
+
+    let raw = raw.lock().unwrap().take().unwrap();
+    assert!(raw.contains("x-session-id: sess-abc123"), "raw: {raw}");
+    assert!(
+        raw.contains("x-session-affinity: sess-abc123"),
+        "raw: {raw}"
+    );
+}
+
+#[tokio::test]
+async fn session_headers_absent_by_default() {
+    let (port, _body, raw, handle) = mock_server(
+        r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+        200,
+    );
+    let _ = claude_connector(port).chat("hello").await;
+    handle.join().unwrap();
+
+    let raw = raw.lock().unwrap().take().unwrap();
+    assert!(!raw.contains("x-session-id"), "raw: {raw}");
+}
+
+#[test]
+fn is_local_parses_host_component_only() {
+    let local = |base: &str| {
+        crate::connector::Connector::new("claude")
+            .unwrap()
+            .with_base_url(base)
+            .is_local()
+    };
+    // loopback hosts
+    assert!(local("http://localhost:11434"));
+    assert!(local("http://127.0.0.1:8080/v1"));
+    assert!(local("http://127.0.0.2:9")); // whole 127.0.0.0/8
+    assert!(local("http://[::1]:9000"));
+    assert!(local("http://my.localhost"));
+    // remote hosts, even when the URL MENTIONS a loopback address
+    assert!(!local("https://api.anthropic.com"));
+    assert!(!local("https://example.com/v1?mirror=127.0.0.1"));
+    assert!(!local("http://localhost.evil.com")); // host is localhost.evil.com
+    assert!(!local("not a url at all"));
+}

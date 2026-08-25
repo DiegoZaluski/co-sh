@@ -1,3 +1,4 @@
+use super::TokenUsage;
 use super::error::ConnectorError;
 use super::output::{ChatOutput, ChatStream, LsOutput};
 use super::params::{ChatMessage, Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
@@ -182,8 +183,46 @@ impl Connector {
         self
     }
 
+    /// Set an opaque session identifier sent as `x-session-id` /
+    /// `x-session-affinity` headers on every request, enabling cache-affinity
+    /// routing at gateways/proxies. Pass a non-identifying value (hash or
+    /// UUID), never raw user data.
+    pub fn with_session_id(mut self, v: impl Into<String>) -> Self {
+        self.params.session_id = Some(v.into());
+        self
+    }
+
     pub fn with_service_keyring(mut self, v: impl Into<String>) -> Self {
         self.params.service_keyring = Some(v.into());
+        self
+    }
+
+    /// Enable/disable Anthropic prompt caching on Claude requests (default:
+    /// enabled).
+    ///
+    /// Enabled requests carry a single top-level `cache_control: {"type":
+    // "ephemeral"}` — the API's automatic-caching mode (the same field the
+    /// Messages API reference documents at the request root). The cache
+    /// breakpoint moves to the last cacheable block on every request, so
+    /// the growing conversation prefix is read from cache at 10% of the
+    /// base input price. Other providers are unaffected.
+    ///
+    /// Note: changing `tool_choice`, the thinking configuration, or the
+    /// reasoning effort between turns invalidates the cached message
+    /// prefix (per Anthropic's invalidation rules) and forces a re-write.
+    pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
+        self.params.prompt_cache.enabled = enabled;
+        self
+    }
+
+    /// Use the 1-hour prompt-cache TTL instead of the 5-minute default
+    /// (Claude only).
+    ///
+    /// 1h cache writes cost 2x the base input price (vs 1.25x for 5m), but
+    /// survive turn gaps longer than 5 minutes. Cache reads cost the same
+    /// 10% either way.
+    pub fn with_prompt_cache_ttl_1h(mut self, one_hour: bool) -> Self {
+        self.params.prompt_cache.one_hour = one_hour;
         self
     }
 
@@ -425,6 +464,34 @@ impl Connector {
         }
     }
 
+    /// Extract the full token usage (including prompt-cache accounting) from
+    /// a raw API response.
+    ///
+    /// Works with a complete response body, a streaming `message_start`
+    /// frame (Claude), or the final `message_delta` frame. For Claude the
+    /// [`TokenUsage`] carries the cache fields: `cache_read_input_tokens`
+    /// (tokens served from cache at 10% of input price) and
+    /// `cache_creation_input_tokens` (tokens written to the cache at a 25%
+    /// or 100% premium). Total input tokens =
+    /// `input_tokens + cache_read + cache_creation`.
+    ///
+    /// Streaming note: each call extracts the usage of a SINGLE frame —
+    /// Claude splits input/cache counters into the `message_start` frame and
+    /// the final output count into `message_delta`, so consumers must merge
+    /// per-frame results (take input/cache from `message_start`, take the
+    /// latest non-zero output from `message_delta`) rather than summing.
+    ///
+    /// Returns `None` when no usage object is present or the JSON is invalid.
+    #[must_use]
+    pub fn token_usage(&self, raw: &str) -> Option<TokenUsage> {
+        let provider = self.provider().ok()?;
+        match provider.family {
+            Family::Claude => claude::extract_usage(raw),
+            Family::OpenAICompatible => openai_compatible::extract_usage(raw),
+            Family::Gemini => gemini::extract_usage(raw),
+        }
+    }
+
     /// The provider name (e.g. `"openai"`, `"claude"`, `"gemini"`).
     ///
     /// Returns `None` if the connector was not properly initialised via [`new`](Self::new).
@@ -460,9 +527,18 @@ impl Connector {
         self
     }
 
+    /// Override the maximum number of retries per request (default: 3, i.e.
+    /// up to 4 total attempts). `0` disables retries entirely (same as
+    /// [`with_retry(false)](Self::with_retry)` but per-request-count).
+    pub fn with_max_retries(mut self, n: usize) -> Self {
+        self.params.max_retries = Some(n);
+        self
+    }
+
     /// Override the retry backoff base delay (default 5s → 10s → 20s).
     /// Primarily for tests: a tiny delay makes retry tests run in
-    /// milliseconds instead of sleeping real backoffs.
+    /// milliseconds instead of sleeping real backoffs. The value is used
+    /// VERBATIM — the production equal-jitter spread is not applied.
     pub fn with_retry_delay(mut self, delay: std::time::Duration) -> Self {
         self.params.retry_delay_override = Some(delay);
         self
@@ -483,7 +559,33 @@ impl Connector {
             .as_deref()
             .or_else(|| self.provider.map(|p| p.base_url))
             .unwrap_or_default();
-        base_url.contains("localhost") || base_url.contains("127.0.0.1") || base_url.contains("::1")
+        // Parse the URL and compare the HOST component only: substring
+        // matching misfires on paths/query strings (e.g.
+        // `https://api.example.com/v1?mirror=127.0.0.1`) and on hosts that
+        // merely CONTAIN "localhost" in their name.
+        url::Url::parse(base_url)
+            .ok()
+            .and_then(|u| {
+                // IPv6 hosts come back bracketed from host_str in some
+                // versions; normalize by stripping brackets.
+                u.host_str()
+                    .map(|h| h.trim_matches(['[', ']']).to_ascii_lowercase())
+            })
+            .is_some_and(|host| {
+                host == "localhost"
+                    || host.ends_with(".localhost")
+                    // The whole IPv4 loopback block is 127.0.0.0/8.
+                    || host
+                        .split('.')
+                        .try_fold((0u32, 0usize), |(acc, i), octet| {
+                            octet
+                                .parse::<u8>()
+                                .map(|o| ((acc << 8) | u32::from(o), i + 1))
+                                .map_err(|_| ())
+                        })
+                        .is_ok_and(|(ip, octets)| octets == 4 && (ip >> 24) == 127)
+                    || host == "::1"
+            })
     }
 
     /// The model override, if one was set via [`with_model`](Self::with_model).

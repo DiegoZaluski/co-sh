@@ -1,6 +1,6 @@
 use super::super::common::{
-    SSE_CHUNK_TIMEOUT, SseBuffer, apply_provider_headers, retry_mid_stream, send_get_request,
-    send_request, send_request_stream, send_with_retry, shared_client,
+    SSE_CHUNK_TIMEOUT, SseBuffer, apply_provider_headers, apply_session_headers, retry_mid_stream,
+    send_get_request, send_request, send_request_stream, send_with_retry, shared_client,
 };
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
@@ -273,6 +273,17 @@ struct EmbedContentResponse {
 }
 
 // Helpers
+
+/// Gemini request headers: API key plus cache-affinity session headers when
+/// a session id is configured.
+fn gemini_headers(api_key: &str, session: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut headers = vec![("x-goog-api-key", api_key.to_string())];
+    if let Some(sid) = session {
+        headers.push(("x-session-id", sid.to_string()));
+        headers.push(("x-session-affinity", sid.to_string()));
+    }
+    headers
+}
 
 fn build_contents(prompt: &str, system_prompt: Option<&str>) -> (Vec<Content>, Option<Content>) {
     let system_instruction = system_prompt.map(|sys| Content {
@@ -737,7 +748,7 @@ pub async fn chat(
         config,
         &url,
         &ctx.request,
-        &[("x-goog-api-key", ctx.api_key.as_str())],
+        &gemini_headers(ctx.api_key.as_str(), params.session_id.as_deref()),
     )
     .await?;
     let chat_response: GenerateContentResponse = serde_json::from_str(&response_text)?;
@@ -776,10 +787,12 @@ pub async fn chat_stream(
             config,
         )
         .header("x-goog-api-key", ctx.api_key);
+        let request_builder = apply_session_headers(request_builder, params.session_id.as_deref());
         let response = send_with_retry(
             &request_builder,
             json_body.clone(),
             params.retry_delay_override,
+            params.max_retries,
         )
         .await?;
         retry_mid_stream(
@@ -787,6 +800,7 @@ pub async fn chat_stream(
             request_builder,
             json_body,
             params.retry_delay_override,
+            params.max_retries,
             parse_sse_stream,
         )
     } else {
@@ -794,7 +808,7 @@ pub async fn chat_stream(
             config,
             &url,
             &ctx.request,
-            &[("x-goog-api-key", ctx.api_key.as_str())],
+            &gemini_headers(ctx.api_key.as_str(), params.session_id.as_deref()),
         )
         .await?;
         parse_sse_stream(response)
@@ -1085,10 +1099,12 @@ pub async fn chat_stream_with_messages(
             config,
         )
         .header("x-goog-api-key", api_key);
+        let request_builder = apply_session_headers(request_builder, params.session_id.as_deref());
         let response = send_with_retry(
             &request_builder,
             json_body.clone(),
             params.retry_delay_override,
+            params.max_retries,
         )
         .await?;
         retry_mid_stream(
@@ -1096,6 +1112,7 @@ pub async fn chat_stream_with_messages(
             request_builder,
             json_body,
             params.retry_delay_override,
+            params.max_retries,
             parse_sse_stream_messages,
         )
     } else {
@@ -1103,7 +1120,7 @@ pub async fn chat_stream_with_messages(
             config,
             &url,
             &request,
-            &[("x-goog-api-key", api_key.as_str())],
+            &gemini_headers(api_key.as_str(), params.session_id.as_deref()),
         )
         .await?;
         parse_sse_stream_messages(response)
@@ -1282,7 +1299,7 @@ pub async fn embed(
         config,
         &url,
         &request,
-        &[("x-goog-api-key", api_key.as_str())],
+        &gemini_headers(api_key.as_str(), params.session_id.as_deref()),
     )
     .await?;
     let embed_response: EmbedContentResponse = serde_json::from_str(&response_text)?;
@@ -1318,8 +1335,12 @@ pub async fn list_models(
     let base_url = resolve_base_url(config, params);
     let url = format!("{base_url}/models");
 
-    let response_text =
-        send_get_request(config, &url, &[("x-goog-api-key", api_key.as_str())]).await?;
+    let response_text = send_get_request(
+        config,
+        &url,
+        &gemini_headers(api_key.as_str(), params.session_id.as_deref()),
+    )
+    .await?;
 
     let list: GeminiListModelsResponse = serde_json::from_str(&response_text)?;
     let models: Vec<ModelInfo> = list

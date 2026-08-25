@@ -64,3 +64,66 @@ pub fn retry_delay(e: &ConnectorError, attempt: usize) -> Duration {
     }
     base
 }
+
+/// Apply "equal jitter" to a computed backoff: the result is uniformly in
+/// `[0.5 * delay, delay)`.
+///
+/// Without jitter, every concurrent session that hits the same rate limit
+/// re-sends at exactly the same instant (thundering herd), repeating the
+/// spike that caused the limit. The entropy source is wall-clock nanoseconds
+/// mixed with the delay itself — not cryptographic, plenty for spacing out
+/// retries.
+#[must_use]
+pub fn jittered(delay: Duration) -> Duration {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        // A per-process counter keeps concurrent calls distinct even when
+        // the clock tick did not move between them.
+        .wrapping_add(CALL_COUNTER.fetch_add(1, Ordering::Relaxed) << 20);
+    // SplitMix64 finalizer: cheap avalanche so consecutive calls differ even
+    // when the clock tick did not.
+    let mut z = nanos.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    let half = delay / 2;
+    let extra = delay
+        .saturating_sub(half)
+        .mul_f64((z >> 11) as f64 / (1u64 << 53) as f64);
+    half + extra
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jitter_stays_within_half_to_full_delay() {
+        for delay in [
+            Duration::from_millis(1),
+            RETRY_INITIAL_DELAY,
+            Duration::from_secs(60),
+        ] {
+            for _ in 0..50 {
+                let j = jittered(delay);
+                assert!(j >= delay / 2, "{j:?} below half of {delay:?}");
+                assert!(j < delay, "{j:?} above {delay:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_varies_across_calls() {
+        let delay = Duration::from_secs(5);
+        let seen: std::collections::HashSet<_> = (0..20).map(|_| jittered(delay)).collect();
+        assert!(seen.len() > 3, "jitter produced too few distinct delays");
+    }
+
+    #[test]
+    fn zero_delay_stays_zero() {
+        assert_eq!(jittered(Duration::ZERO), Duration::ZERO);
+    }
+}

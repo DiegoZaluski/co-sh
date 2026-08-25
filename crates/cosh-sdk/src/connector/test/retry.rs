@@ -422,3 +422,65 @@ async fn multiple_mid_stream_retries_succeed() {
 
     let _ = handle.join();
 }
+
+/// `with_max_retries(0)` disables retries entirely: a retryable failure
+/// surfaces immediately after the first attempt.
+#[tokio::test]
+async fn max_retries_zero_disables_retry() {
+    let sse_ok = concat!(
+        r#"data: {"id":"1","choices":[{"delta":{"content":"ok"},"index":0}]}"#,
+        "
+
+"
+    );
+    let _ = &sse_ok;
+    let (port, request_count, handle) = mock_server_sequence(vec![
+        MockResponse::new(500, r#"{"error":"boom"}"#),
+        MockResponse::new(200, sse_ok),
+    ]);
+
+    let c = connector(port).with_max_retries(0);
+    // The eager first request surfaces the 500 directly from stream_chat.
+    let result = c.stream_chat("hi").await;
+    let _ = handle.join();
+    assert!(result.is_err(), "first 500 must surface when retries = 0");
+    assert_eq!(*request_count.lock().unwrap(), 1, "exactly one attempt");
+}
+
+/// `with_max_retries(n)` caps the attempts: with n=1, one retry happens and
+/// the second (successful) response completes the turn.
+#[tokio::test]
+async fn max_retries_one_allows_single_retry() {
+    let sse_ok = concat!(
+        r#"data: {"id":"1","choices":[{"delta":{"content":"ok"},"index":0}]}"#,
+        "
+
+",
+        r#"data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop","index":0}]}"#,
+        "
+
+",
+        "data: [DONE]
+
+",
+    );
+    let (port, request_count, handle) = mock_server_sequence(vec![
+        MockResponse::new(500, r#"{"error":"boom"}"#),
+        MockResponse::new(200, sse_ok),
+    ]);
+
+    let c = connector(port)
+        .with_retry_delay(Duration::from_millis(1))
+        .with_max_retries(1);
+    let mut stream = c.stream_chat("hi").await.unwrap();
+    let mut text = String::new();
+    while let Some(item) = tokio_stream::StreamExt::next(&mut stream).await {
+        match item {
+            Ok(chunk) => text.push_str(chunk.token()),
+            Err(e) => panic!("retry within cap should recover: {e}"),
+        }
+    }
+    let _ = handle.join();
+    assert_eq!(text, "ok");
+    assert_eq!(*request_count.lock().unwrap(), 2, "one retry happened");
+}

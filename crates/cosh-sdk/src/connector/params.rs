@@ -241,6 +241,26 @@ impl ToolDefinition {
     }
 }
 
+/// Cache TTL for the Anthropic prompt cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PromptCacheConfig {
+    /// Whether a top-level `cache_control` is sent on Claude requests.
+    pub enabled: bool,
+    /// Use the 1-hour TTL (`{"type": "ephemeral", "ttl": "1h"}`) instead
+    /// of the 5-minute default. 1h writes cost 2x base input price (vs 1.25x)
+    /// but survive gaps longer than 5 minutes between turns.
+    pub one_hour: bool,
+}
+
+impl Default for PromptCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            one_hour: false,
+        }
+    }
+}
+
 /// Internal request parameters accumulated via the builder API.
 ///
 /// Users configure these through [`Connector`](crate::connector::Connector)
@@ -283,12 +303,29 @@ pub struct Parameters {
     /// `true`; tests disable it to keep single-shot mock-server semantics.
     #[zeroize(skip)]
     pub(crate) retry_enabled: bool,
+    /// Maximum number of RETRIES per request (see
+    /// [`crate::connector::retry::RETRY_MAX_RETRIES`] for the default).
+    /// `None` uses the production default; tests may lower it.
+    #[zeroize(skip)]
+    pub(crate) max_retries: Option<usize>,
     /// Override for the retry backoff base delay (see
     /// [`crate::connector::retry::RETRY_INITIAL_DELAY`]). `None` uses the
     /// production 5s → 10s → 20s schedule; tests set a tiny value so retry
     /// tests run in milliseconds instead of sleeping real backoffs.
     #[zeroize(skip)]
     pub(crate) retry_delay_override: Option<Duration>,
+    /// Anthropic prompt-cache configuration for Claude requests (see
+    /// [`PromptCacheConfig`]). Defaults to enabled with the 5-minute TTL —
+    /// automatic caching keeps the breakpoint on the last cacheable block as
+    /// the conversation grows, which is what agentic multi-turn loops want.
+    #[zeroize(skip)]
+    pub(crate) prompt_cache: PromptCacheConfig,
+    /// Opaque session identifier for cache-affinity routing. When set,
+    /// requests carry `x-session-id` and `x-session-affinity` headers with
+    /// this value so gateways/proxies can pin a session's requests (and
+    /// their prompt-cache entries) to the same backend.
+    #[zeroize(skip)]
+    pub(crate) session_id: Option<String>,
     #[zeroize(skip)]
     pub(crate) user: Option<String>,
     #[zeroize(skip)]
@@ -318,6 +355,9 @@ impl Default for Parameters {
             tool_call_mode: ToolCallMode::Native,
             retry_enabled: true,
             retry_delay_override: None,
+            max_retries: None,
+            prompt_cache: PromptCacheConfig::default(),
+            session_id: None,
             user: None,
             base_url: None,
             // Default to the canonical cosh keyring service so callers only
