@@ -674,10 +674,13 @@ impl RightPanelState {
         }
     }
 
-    /// Alt+← / Alt+→ cycle the focus across agent queues (alphabetical
-    /// order, wrapping). This is how HIDDEN queues — those with no window
-    /// on screen, unreachable by plain ←/→ which only navigate the focused
-    /// queue — are reached. Works from any panel focus.
+    /// Alt+← / Alt+→ (and Shift+B/N) switch the keyboard focus across agent
+    /// queues (alphabetical order, wrapping). Switching also hands the
+    /// DISPLAY to the newly focused queue: its NEWEST entry takes over
+    /// immediately (nav reset → auto-follow), replacing whatever was on
+    /// screen. This is how HIDDEN queues — those with no window on screen,
+    /// unreachable by plain ←/→ which navigate only the focused queue — are
+    /// reached. Works from any panel focus.
     pub fn cycle_agent_queue(&mut self, dir: i32) -> bool {
         let mut agents: Vec<String> = self
             .pty_sessions
@@ -706,7 +709,16 @@ impl RightPanelState {
                 }
             }
         };
-        self.panel_focus = Some(PanelFocus::Agent(agents[next].clone()));
+        let next_agent = agents[next].clone();
+        self.panel_focus = Some(PanelFocus::Agent(next_agent.clone()));
+        // The newest entry of the newly focused queue takes over: drop any
+        // previous manual navigation (live/auto-follow) and force the layout
+        // caches to re-resolve THIS frame so its window swaps in instantly.
+        self.agent_navs.remove(&next_agent);
+        self.bump_gen_for_layout();
+        self.last_subagent_rebuild = Instant::now()
+            .checked_sub(self.subagent_rebuild_interval)
+            .unwrap_or_else(Instant::now);
         true
     }
 
@@ -742,6 +754,9 @@ impl RightPanelState {
     /// them in `visible_subagents` (display order: chronological).
     ///
     /// Candidates ranked best-first:
+    ///   0. The FOCUSED queue's current window (its selected entry while
+    ///      navigating, otherwise its newest) — switching focus must hand
+    ///      the display to that queue even when space is scarce.
     ///   1. PINNED queues (user navigated there deliberately), most recently
     ///      navigated first — that is where the user was last looking. When
     ///      space must be reclaimed among pinned windows, the ones with the
@@ -763,6 +778,18 @@ impl RightPanelState {
                 queues.entry(agent.to_string()).or_default().push(i);
             }
         }
+        // The focused queue's window leads the ranking so a queue switch
+        // always swaps the displayed content, even under tight budgets.
+        let focused_window: Option<usize> = match &self.panel_focus {
+            Some(PanelFocus::Agent(agent)) => {
+                let queue = queues.get(agent.as_str());
+                match self.agent_navs.get(agent.as_str()).and_then(|n| n.index) {
+                    Some(i) => queue.and_then(|q| q.get(i)).copied(),
+                    None => queue.and_then(|q| q.last()).copied(),
+                }
+            }
+            _ => None,
+        };
         let is_pinned = |agent: &str,
                          navs: &HashMap<String, AgentNav>,
                          queues: &HashMap<String, Vec<usize>>| {
@@ -773,12 +800,21 @@ impl RightPanelState {
 
         // (rank class, tiebreak, session idx)
         let mut ranked: Vec<(u8, u64, usize)> = Vec::new();
+        if let Some(idx) = focused_window {
+            ranked.push((0, u64::MAX, idx));
+        }
 
         // 1. Pinned queues — most recent manual navigation first. A pinned
-        //    queue contributes exactly ONE window: its selected entry.
+        //    queue contributes exactly ONE window: its selected entry. The
+        //    focused queue is already represented above.
+        let focused_agent = match &self.panel_focus {
+            Some(PanelFocus::Agent(a)) => Some(a.clone()),
+            _ => None,
+        };
         let mut pinned: Vec<(Instant, usize)> = self
             .pinned_agents()
             .iter()
+            .filter(|agent| Some((*agent).clone()) != focused_agent)
             .filter_map(|agent| {
                 if !is_pinned(agent, &self.agent_navs, &queues) {
                     return None;
@@ -797,6 +833,9 @@ impl RightPanelState {
         for (idx, s) in self.pty_sessions.iter().enumerate().rev() {
             if s.superseded || !s.is_subagent() {
                 continue;
+            }
+            if Some(idx) == focused_window {
+                continue; // already ranked as the focused window
             }
             let agent = s.subagent_agent().unwrap_or("");
             if is_pinned(agent, &self.agent_navs, &queues) {
@@ -817,12 +856,14 @@ impl RightPanelState {
             .collect();
         self.ensure_outputs_loaded(&pinned_idx);
 
-        // Greedy fit against the available budget.
+        // Greedy fit against the available budget. Each displayed window
+        // also carries a 1-row bottom margin (blank separator below it),
+        // so it consumes its content rows plus one.
         let rows = self.subagent_section_rows_for_display(wrap_w);
         let mut chosen: Vec<usize> = Vec::new();
         let mut used: i32 = 0;
         for &(_, _, idx) in &ranked {
-            let need = i32::from(rows.get(idx).copied().unwrap_or(1));
+            let need = i32::from(rows.get(idx).copied().unwrap_or(1)) + 1;
             if used + need <= budget_rows || chosen.is_empty() {
                 chosen.push(idx);
                 used += need;
@@ -2186,6 +2227,82 @@ mod tests {
                 .iter()
                 .all(|&i| !state.pty_sessions[i].superseded)
         );
+    }
+
+    /// REGRESSION: switching queues (Shift+B/N / Alt+arrows) must hand the
+    /// DISPLAY to the newly focused queue — its NEWEST entry takes the
+    /// visible window immediately, replacing the previous queue's window,
+    /// even when only one window fits.
+    #[test]
+    fn queue_switch_displays_newest_of_new_queue() {
+        let mut state = RightPanelState::new();
+        for agent in ["kilo", "opencode"] {
+            state.start_pty(format!("subagent: {agent}"), None);
+            state.complete_last_pty(format!("{agent} v1\n"));
+            state.start_pty(format!("subagent: {agent}"), None);
+            state.complete_last_pty(format!("{agent} v2\n"));
+        }
+        // Sessions: 0=kilo v1 (superseded), 1=kilo v2, 2=open v1, 3=open v2.
+        // Pin kilo at its oldest entry so its window occupies the display.
+        state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+        state.set_queue_index("kilo", 0);
+
+        let wrap_w = 48;
+        let budget = i32::from(state.subagent_section_rows(wrap_w)[1]) + 1;
+        state.resolve_visible_subagents(wrap_w, budget);
+        assert_eq!(
+            state.visible_subagents,
+            vec![0],
+            "precondition: kilo's pinned entry owns the single window"
+        );
+
+        // Switch to opencode → its newest entry takes over the SAME slot.
+        assert!(state.cycle_agent_queue(1));
+        assert_eq!(
+            state.panel_focus,
+            Some(PanelFocus::Agent("opencode".to_string()))
+        );
+        state.resolve_visible_subagents(wrap_w, budget);
+        assert_eq!(
+            state.visible_subagents,
+            vec![3],
+            "the new queue's newest session must replace the old window"
+        );
+
+        // The abandoned queue keeps its own place — a queue switch never
+        // disturbs OTHER queues' navigation state.
+        assert_eq!(state.queue_nav_index("kilo"), Some(0));
+    }
+
+    /// REGRESSION: arrow navigation is 100% confined to the focused queue —
+    /// stepping past either end clamps in place and NEVER touches another
+    /// CLI's nav state or entries.
+    #[test]
+    fn arrows_never_leak_into_other_queues() {
+        let mut state = RightPanelState::new();
+        for agent in ["kilo", "opencode"] {
+            state.start_pty(format!("subagent: {agent}"), None);
+            state.complete_last_pty(format!("{agent} v1\n"));
+            state.start_pty(format!("subagent: {agent}"), None);
+            state.complete_last_pty(format!("{agent} v2\n"));
+        }
+        // Focus opencode via a queue switch (its newest takes the display).
+        assert!(state.cycle_agent_queue(1));
+
+        // Hammer ← past the oldest entry: clamps at index 0…
+        for _ in 0..5 {
+            state.panel_left();
+        }
+        assert_eq!(state.queue_nav_index("opencode"), Some(0));
+        // …and never pins or moves kilo's navigation.
+        assert!(state.queue_nav_index("kilo").is_none());
+
+        // Hammer → back to live and beyond: stays live.
+        for _ in 0..5 {
+            state.panel_right();
+        }
+        assert_eq!(state.queue_nav_index("opencode"), None);
+        assert!(state.queue_nav_index("kilo").is_none());
     }
 
     /// The first "→ cosh:" line of a subagent output is the main agent's

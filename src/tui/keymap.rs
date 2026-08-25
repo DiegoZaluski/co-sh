@@ -43,7 +43,7 @@ pub struct KeyMap {
 
 impl KeyMap {
     pub fn default_vim() -> Self {
-        use KeyCode::{BackTab, Char, Down, Enter, Esc, Left, PageDown, PageUp, Right, Tab, Up};
+        use KeyCode::{Char, Down, Enter, Esc, Left, PageDown, PageUp, Right, Tab, Up};
 
         Self {
             bindings: vec![
@@ -150,13 +150,6 @@ impl KeyMap {
                     KeyBinding {
                         key: Right,
                         modifiers: KeyModifiers::ALT,
-                    },
-                ),
-                (
-                    Action::PrevAgent,
-                    KeyBinding {
-                        key: BackTab,
-                        modifiers: KeyModifiers::NONE,
                     },
                 ),
                 (

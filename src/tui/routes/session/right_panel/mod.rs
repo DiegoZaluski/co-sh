@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
@@ -143,8 +141,9 @@ fn natural_section_height(
 }
 
 /// Natural height of the SUBAGENT section for the resolved window set:
-/// sum of each visible session's content rows plus box overhead. Must be
-/// called AFTER [`RightPanelState::resolve_visible_subagents`].
+/// sum of each visible session's content rows plus a 1-row bottom margin
+/// per window, plus box overhead. Must be called AFTER
+/// [`RightPanelState::resolve_visible_subagents`].
 fn subagent_natural_height(state: &mut RightPanelState, wrap_w: u16) -> i32 {
     let rows = state.subagent_section_rows_for_display(wrap_w);
     let total: i32 = state
@@ -152,7 +151,11 @@ fn subagent_natural_height(state: &mut RightPanelState, wrap_w: u16) -> i32 {
         .iter()
         .map(|&i| i32::from(rows.get(i).copied().unwrap_or(1)))
         .sum();
-    if total == 0 { 0 } else { BOX_OVERHEAD + total }
+    if total == 0 {
+        0
+    } else {
+        BOX_OVERHEAD + total + state.visible_subagents.len() as i32
+    }
 }
 
 /// Render the right panel with section-based layout and dynamic space borrowing.
@@ -463,6 +466,7 @@ fn render_bash_section(
     highlight_section_selection(
         buf,
         state,
+        crate::routes::session::right_panel::types::SectionKind::Bash,
         x + LEFT_PAD,
         x + LEFT_PAD + inner_w,
         inner_y,
@@ -547,7 +551,8 @@ fn render_subagent_section(
     let total_rows: i32 = visible
         .iter()
         .map(|&i| i32::from(rows_all.get(i).copied().unwrap_or(1)))
-        .sum();
+        .sum::<i32>()
+        + visible.len() as i32; // 1-row bottom margin per window
     if total_rows == 0 {
         return;
     }
@@ -576,42 +581,20 @@ fn render_subagent_section(
             }
         }
     }
-    // ONE read-only pass builds every per-window decoration input (queue
-    // counter, nav recency, area tint) — method calls borrow all of
-    // `state`, so nothing of this shape may run inside the render loop.
-    struct WindowDecor {
-        counter: Option<(usize, usize)>,
-        last_nav: Option<Instant>,
-        tint: RGBA,
-    }
-    let mut decor: Vec<WindowDecor> = Vec::with_capacity(sessions.len());
-    for (_, s) in &sessions {
-        let agent = s.subagent_agent().unwrap_or("");
-        let counter = state.queue_nav_index(agent).and_then(|idx| {
-            state
-                .queue_is_pinned(agent)
-                .then(|| (idx + 1, state.queue_len(agent)))
-        });
-        decor.push(WindowDecor {
-            counter,
-            last_nav: state.queue_last_nav(agent),
-            tint: blend(
+    // ONE read-only pass builds each window's area tint — method calls
+    // borrow all of `state`, so nothing of this shape may run inside the
+    // render loop.
+    let tints: Vec<RGBA> = sessions
+        .iter()
+        .map(|(_, s)| {
+            let agent = s.subagent_agent().unwrap_or("");
+            blend(
                 theme.background_element,
                 state.agent_area_color(agent),
                 0.18,
-            ),
-        });
-    }
-    // The chips share ONE top-left slot (the section box's padding row), so
-    // only the MOST RECENTLY navigated pinned window may draw its counter —
-    // otherwise two pinned queues would overwrite each other's chips.
-    let counter_window: Option<usize> = decor
-        .iter()
-        .enumerate()
-        .filter(|(_, d)| d.counter.is_some())
-        .filter_map(|(w, d)| d.last_nav.map(|t| (t, w)))
-        .max_by_key(|(t, _)| *t)
-        .map(|(_, w)| w);
+            )
+        })
+        .collect();
 
     // Screen bands of each rendered window (for click-to-focus mapping).
     state.subagent_window_layouts.clear();
@@ -654,11 +637,12 @@ fn render_subagent_section(
 
         // Area tint of THIS window: fill its visible slice (clipped to the
         // section's inner band) with the blended color before any text or
-        // body cells land on it.
-        let tint = decor[window].tint;
+        // body cells land on it. The window's 1-row bottom margin shares
+        // the tint so each CLI reads as one continuous colored block.
+        let tint = tints[window];
         {
             let vis_top = content_row.max(scroll_y);
-            let vis_bottom = sess_end.min(content_bottom);
+            let vis_bottom = (sess_end + 1).min(content_bottom);
             if vis_bottom > vis_top && wrap_w > 0 {
                 let rect = Rect::new(
                     x,
@@ -682,20 +666,6 @@ fn render_subagent_section(
                     .subagent_window_layouts
                     .push((*sess_idx, band_top, band_bottom));
             }
-        }
-
-        // Queue counter as two glued chips on the box's padding row
-        // (top-left of the section): [index][total], drawn only by the
-        // most recently navigated pinned window (they share one slot).
-        // Hidden at the newest entry — that is live, nothing to show.
-        if Some(window) == counter_window
-            && let Some((k, n)) = decor[window].counter
-            && k < n
-        {
-            draw_chip(buf, x + LEFT_PAD, box_y, &k.to_string(), theme.primary);
-            let idx_w = k.to_string().chars().count() as u16 + 2; // padded
-            let total_x = (x + LEFT_PAD + idx_w).min(x + LEFT_PAD + wrap_w);
-            draw_chip(buf, total_x, box_y, &n.to_string(), theme.text_muted);
         }
 
         // Command header + main-agent input, wrapped; the same visual rows
@@ -837,12 +807,14 @@ fn render_subagent_section(
                 }
             }
         }
-        content_row = sess_end;
+        // Next window starts below THIS window's 1-row bottom margin.
+        content_row = sess_end + 1;
     }
 
     highlight_section_selection(
         buf,
         state,
+        crate::routes::session::right_panel::types::SectionKind::Subagent,
         x + LEFT_PAD,
         x + LEFT_PAD + wrap_w,
         inner_y,
@@ -924,6 +896,7 @@ fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: St
 fn highlight_section_selection(
     buf: &mut Buffer,
     state: &RightPanelState,
+    kind: crate::routes::session::right_panel::types::SectionKind,
     content_min_x: u16,
     content_max_x: u16,
     inner_y: u16,
@@ -933,7 +906,10 @@ fn highlight_section_selection(
     let Some((anchor_x, _anchor_sy, focus_x, _focus_sy)) = state.drag_selection else {
         return;
     };
-    if state.selection_section.is_none() || inner_h == 0 {
+    // Only the OWNING section may paint the highlight: content rows are
+    // per-section coordinates, so re-interpreting them here would paint a
+    // mirrored selection into the other section's box.
+    if state.selection_section != Some(kind) || inner_h == 0 {
         return;
     }
 
@@ -1068,80 +1044,6 @@ mod tests {
         );
     }
 
-    /// The subagent window counter renders as glued [index][total] chips at
-    /// the top-left while navigating, and disappears entirely when the
-    /// selection is back at the newest entry (live view).
-    #[test]
-    fn subagent_counter_chips_show_only_when_navigating() {
-        let theme = test_theme();
-        let mut state = RightPanelState::new();
-        for i in 0..3 {
-            state.start_pty("subagent: kilo".to_string(), None);
-            state.complete_last_pty(format!("report {i}\n"));
-        }
-        state.subagent_rebuild_interval = std::time::Duration::ZERO;
-
-        // Live view: no chips.
-        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 20));
-        render_subagent_section(&mut buf, 0, 0, 50, 20, &mut state, &theme, true);
-        let all: String = (0..20).map(|y| row_text(&buf, y)).collect();
-        assert!(!all.contains("(2/"), "legacy indicator removed");
-        assert!(
-            !row_text(&buf, 1).contains(" 2 "),
-            "no counter at live view"
-        );
-
-        // Navigate to the first entry → [1][3] chips on the padding row.
-        state.panel_focus = Some(types::PanelFocus::Agent("kilo".to_string()));
-        state.panel_left();
-        state.set_queue_index("kilo", 0);
-        buf = Buffer::empty(Rect::new(0, 0, 50, 20));
-        render_subagent_section(&mut buf, 0, 0, 50, 20, &mut state, &theme, true);
-        let pad_row = row_text(&buf, 1);
-        assert!(pad_row.contains('1'), "index chip missing: {pad_row:?}");
-        assert!(pad_row.contains('3'), "total chip missing: {pad_row:?}");
-        assert!(pad_row.find('1').unwrap() < pad_row.find('3').unwrap());
-    }
-
-    /// Two pinned queues visible at once share the single top-left chip
-    /// slot: only the MOST RECENTLY navigated queue draws its counter —
-    /// the chips never overwrite each other.
-    #[test]
-    fn counter_chips_do_not_collide_between_queues() {
-        let theme = test_theme();
-        let mut state = RightPanelState::new();
-        for agent in ["kilo", "opencode"] {
-            state.start_pty(format!("subagent: {agent}"), None);
-            state.complete_last_pty(format!("{agent} report\n"));
-            state.start_pty(format!("subagent: {agent}"), None);
-            state.complete_last_pty(format!("{agent} report v2\n"));
-        }
-        state.subagent_rebuild_interval = std::time::Duration::ZERO;
-
-        // Pin BOTH queues away from live (kilo first, opencode last).
-        state.panel_focus = Some(types::PanelFocus::Agent("kilo".to_string()));
-        state.set_queue_index("kilo", 0);
-        state.panel_focus = Some(types::PanelFocus::Agent("opencode".to_string()));
-        state.set_queue_index("opencode", 0);
-
-        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
-        render_subagent_section(&mut buf, 0, 0, 50, 30, &mut state, &theme, true);
-
-        // Exactly ONE pair of chips: index [1] and total [2] appear once
-        // each on the padding row — not two overlapping pairs.
-        let pad_row = row_text(&buf, 1);
-        assert_eq!(
-            pad_row.matches(" 1 ").count(),
-            1,
-            "single index chip expected: {pad_row:?}"
-        );
-        assert_eq!(
-            pad_row.matches(" 2 ").count(),
-            1,
-            "single total chip expected: {pad_row:?}"
-        );
-    }
-
     /// A long subagent input line wraps onto multiple visual rows inside
     /// its window instead of being cut at the box edge.
     #[test]
@@ -1171,6 +1073,46 @@ mod tests {
         assert_eq!(state.subagent_section_rows(48), &[5]);
     }
 
+    /// REGRESSION: every subagent window has its OWN 1-row bottom margin —
+    /// a blank separator row between consecutive windows (and after the
+    /// last one) instead of stacking them flush.
+    #[test]
+    fn subagent_windows_have_one_row_bottom_margin() {
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::ZERO;
+        for cmd in ["subagent: kilo", "subagent: opencode"] {
+            state.start_pty(cmd.to_string(), None);
+            state.complete_last_pty("report line\n".to_string());
+        }
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
+        render_subagent_section(&mut buf, 0, 0, 50, 30, &mut state, &theme, true);
+
+        let mut bands = state.subagent_window_layouts.clone();
+        bands.sort_by_key(|&(_, top, _)| top);
+        for pair in bands.windows(2) {
+            let gap = pair[1].1 - pair[0].2; // next.top - prev.bottom
+            assert_eq!(
+                gap, 1,
+                "exactly one margin row between windows: bands {bands:?}"
+            );
+            // The margin shares the window's area tint (blank text only).
+            let want = rgba_color(blend(
+                theme.background_element,
+                state.agent_area_color(state.pty_sessions[pair[0].0].subagent_agent().unwrap()),
+                0.18,
+            ));
+            let margin_cell = buf.cell((1u16, pair[0].2 as u16)).map(|c| c.bg);
+            assert_eq!(margin_cell, Some(want), "margin must carry the area tint");
+            let margin = row_text(&buf, pair[0].2 as u16);
+            assert!(
+                margin.trim().is_empty(),
+                "margin row must be blank: {margin:?}"
+            );
+        }
+    }
+
     /// Each rendered subagent window carries its OWN area tint: external
     /// CLIs get distinct blended backgrounds and the INTERNAL subagent
     /// (empty agent name) shares the host color.
@@ -1187,8 +1129,9 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
         render_subagent_section(&mut buf, 0, 0, 50, 30, &mut state, &theme, true);
 
-        // One content row per session (header + 1 body row), stacked in
-        // chronological order from inner_y = TOP_GAP + TOP_PAD = 2.
+        // One content row pair per session (header + 1 body row), stacked
+        // in chronological order from inner_y = TOP_GAP + TOP_PAD = 2,
+        // separated by each window's 1-row bottom margin.
         let expected: Vec<ratatui::style::Color> = ["kilo", "opencode", ""]
             .iter()
             .map(|a| {
@@ -1200,7 +1143,7 @@ mod tests {
             })
             .collect();
         let mut seen: Vec<ratatui::style::Color> = Vec::new();
-        for (row, want) in [3usize, 5, 7].iter().zip(expected.iter()) {
+        for (row, want) in [3usize, 6, 9].iter().zip(expected.iter()) {
             let got = buf.cell((1u16, *row as u16)).map(|c| c.bg);
             assert_eq!(got, Some(*want), "row {row} bg must be the area tint");
             assert!(!seen.contains(&got.unwrap()), "tints must differ per CLI");
@@ -1221,7 +1164,7 @@ mod tests {
         for w in [30u16, 36, 50] {
             let est = usize::from(estimate_height(&body, w));
             let mut buf = Buffer::empty(Rect::new(0, 0, w, est as u16 + 2));
-            let mut md = MarkdownRenderable::new(Some(body.clone()));
+            let md = MarkdownRenderable::new(Some(body.clone()));
             md.render_self(&mut buf, Rect::new(0, 0, w, est as u16));
             let painted = (0..est)
                 .filter(|&y| {
@@ -1447,6 +1390,69 @@ mod tests {
         assert!(state.subagent_scroll_y < i32::MAX);
     }
 
+    /// Regression: a drag anchored in the SUBAGENT box must highlight ONLY
+    /// the subagent rows — the bash renderer used to re-interpret the same
+    /// per-section content rows with its own scroll offset, painting a
+    /// mirrored selection inside the bash box.
+    #[test]
+    fn drag_in_subagent_never_highlights_bash_box() {
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::ZERO;
+
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("report line one\nreport line two\n".to_string());
+        state.start_pty("ls".to_string(), None);
+        state.complete_last_pty("f1\nf2\nf3\n".to_string());
+
+        // Baseline render (no selection) — also populates section_layouts.
+        let mut base = Buffer::empty(Rect::new(0, 0, 50, 40));
+        render_right_panel(&mut base, Rect::new(0, 0, 50, 40), &mut state, &theme, 120);
+
+        let bash_band = state
+            .section_layouts
+            .iter()
+            .find(|l| l.kind == types::SectionKind::Bash)
+            .copied()
+            .expect("bash section on screen");
+        let sub_band = state
+            .section_layouts
+            .iter()
+            .find(|l| l.kind == types::SectionKind::Subagent)
+            .copied()
+            .expect("subagent section on screen");
+
+        // Drag INSIDE the subagent box (anchor → focus both in its band).
+        let y1 = u16::try_from(sub_band.top + 2).unwrap();
+        let y2 = u16::try_from(sub_band.bottom - 2).unwrap();
+        assert!(state.begin_selection(3, y1), "subagent drag must anchor");
+        state.update_drag_selection(30, y2);
+
+        let mut sel = Buffer::empty(Rect::new(0, 0, 50, 40));
+        render_right_panel(&mut sel, Rect::new(0, 0, 50, 40), &mut state, &theme, 120);
+
+        // The bash band must be pixel-identical to the baseline.
+        for y in bash_band.top..bash_band.bottom {
+            for x in 0u16..50 {
+                assert_eq!(
+                    base.cell((x, y as u16))
+                        .map(|c| (c.symbol().to_string(), c.fg, c.bg)),
+                    sel.cell((x, y as u16))
+                        .map(|c| (c.symbol().to_string(), c.fg, c.bg)),
+                    "bash row {y} changed under a subagent-only drag"
+                );
+            }
+        }
+        // Sanity: the subagent band DID get highlighted somewhere.
+        let changed = (sub_band.top..sub_band.bottom).any(|y| {
+            (0u16..50).any(|x| {
+                base.cell((x, y as u16)).map(|c| (c.fg, c.bg))
+                    != sel.cell((x, y as u16)).map(|c| (c.fg, c.bg))
+            })
+        });
+        assert!(changed, "subagent drag must highlight the subagent box");
+    }
+
     /// Regression: a bash PTY appearing while a subagent is present must not
     /// panic. Exercises the full panel render (layout + region rebuild +
     /// highlight) plus the cursor-targeted scroll and drag-selection paths
@@ -1554,12 +1560,13 @@ mod tests {
             .expect("subagent section rendered");
         let band_h = sub.bottom - sub.top;
         assert_eq!(
-            band_h, 13,
-            "section height must equal its natural height (3 overhead + 10 content)"
+            band_h, 14,
+            "section height must equal its natural height (3 overhead + 10 content + 1 margin)"
         );
 
         // Painted check inside the band: only TOP_GAP+TOP_PAD above and the
-        // single BOTTOM_PAD row may be blank.
+        // single BOTTOM_PAD row plus this window's own bottom margin row may
+        // be blank.
         let mut last_paint = sub.top;
         for y in sub.content_top..sub.bottom {
             let t = row_text(&buf, y as u16);
@@ -1568,7 +1575,7 @@ mod tests {
             }
         }
         assert!(
-            last_paint >= sub.bottom - 2,
+            last_paint >= sub.bottom - 3,
             "unpainted void of {} rows inside the subagent box",
             sub.bottom - 1 - last_paint
         );

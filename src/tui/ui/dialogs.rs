@@ -33,6 +33,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
     ("\u{2190}/\u{2192}", "Right panel history (focused slot)"),
     ("Alt+\u{2190}/\u{2192}", "Switch agent queue (right panel)"),
+    ("Shift+B", "Previous agent queue (panel focused)"),
+    ("Shift+N", "Next agent queue (panel focused)"),
 ];
 
 fn rgba_color(rgba: RGBA) -> Color {
