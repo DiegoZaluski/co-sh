@@ -1,0 +1,256 @@
+use super::App;
+use crate::ui::dialogs::DialogType;
+use crossterm::event::KeyCode;
+
+/// Regression: Enter on `/toolcall` in the slash menu must open the
+/// mode picker dialog. It used to fall into the generic branch (fill the
+/// prompt with "/toolcall ") because the dispatch lived only in the
+/// unreachable `None` keymap branch, not in the handler that actually
+/// intercepts Enter.
+#[tokio::test]
+async fn slash_toolcall_command_opens_tool_call_dialog() {
+    let mut app = App::new("/tmp".to_string());
+    let cmd = crate::ui::slash_menu::SlashCommand {
+        name: "toolcall".into(),
+        desc: String::new(),
+    };
+    app.run_slash_command(&cmd);
+    assert!(
+        app.is_tool_call_dialog_visible(),
+        "selecting /toolcall must open the native|inline picker"
+    );
+    assert!(!app.slash_menu.visible, "slash menu closes after Enter");
+}
+
+/// Generic slash commands still fill the prompt instead of opening a
+/// dialog (the fallback branch of `run_slash_command`).
+#[tokio::test]
+async fn slash_unknown_command_fills_prompt() {
+    let mut app = App::new("/tmp".to_string());
+    let cmd = crate::ui::slash_menu::SlashCommand {
+        name: "nonexistent".into(),
+        desc: String::new(),
+    };
+    app.run_slash_command(&cmd);
+    assert_eq!(app.prompt_view.input, "/nonexistent ");
+    assert!(!app.dialog.visible());
+    assert!(!app.slash_menu.visible);
+}
+
+/// `/new` creates and selects a fresh session straight from the prompt —
+/// no detour through Home.
+#[tokio::test]
+async fn slash_new_creates_and_selects_a_fresh_session() {
+    let mut app = App::new("/tmp".to_string());
+    assert!(app.state.current_session_id.is_none());
+    let cmd = crate::ui::slash_menu::SlashCommand {
+        name: "new".into(),
+        desc: String::new(),
+    };
+    app.run_slash_command(&cmd);
+    assert!(
+        app.state.current_session_id.is_some(),
+        "a session was selected"
+    );
+    assert!(
+        matches!(app.mode(), crate::app::AppMode::Session),
+        "the app flips into Session mode"
+    );
+    assert!(!app.slash_menu.visible);
+    assert!(
+        app.state.session_cache.len() == 1,
+        "exactly one new session exists"
+    );
+}
+
+/// `/new` while the agent loop is working is refused with a toast —
+/// selecting a different session mid-run would route the running loop's
+/// events into it.
+#[tokio::test]
+async fn slash_new_refuses_while_agent_is_working() {
+    let mut app = App::new("/tmp".to_string());
+    app.state.status = crate::types::SessionStatus::Working;
+    let cmd = crate::ui::slash_menu::SlashCommand {
+        name: "new".into(),
+        desc: String::new(),
+    };
+    app.run_slash_command(&cmd);
+    assert!(app.state.current_session_id.is_none(), "no session created");
+    assert!(
+        app.toast_state
+            .current
+            .as_ref()
+            .is_some_and(|t| t.message.contains("wait for it")),
+        "the refusal toast tells the user to wait"
+    );
+}
+
+/// `/rename` opens the rename dialog prefilled with the current title;
+/// editing and pressing Enter applies it to the session (in-memory +
+/// sidebar) and closes the dialog.
+#[tokio::test]
+async fn slash_rename_edits_and_applies_the_session_title() {
+    let mut app = App::new("/tmp".to_string());
+    app.start_new_session();
+    let id = app.state.current_session_id.clone().unwrap();
+    if let Some(s) = app.state.session_cache.get_mut(&id) {
+        s.title = "old title".into();
+    }
+    let cmd = crate::ui::slash_menu::SlashCommand {
+        name: "rename".into(),
+        desc: String::new(),
+    };
+    app.run_slash_command(&cmd);
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::RenameSession { input, cursor_pos })
+                if input == "old title" && *cursor_pos == "old title".len()
+        ),
+        "the dialog opens prefilled with the current title, cursor at end"
+    );
+
+    // Clear the field and type a new name, then apply.
+    for _ in 0.."old title".len() {
+        app.handle_text_input_dialog_key(KeyCode::Backspace);
+    }
+    for ch in "manual name".chars() {
+        app.handle_text_input_dialog_key(KeyCode::Char(ch));
+    }
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(!app.dialog.visible(), "Enter closes the dialog");
+    assert_eq!(
+        app.state.session_cache.get(&id).unwrap().title,
+        "manual name",
+        "the in-memory session title is updated"
+    );
+}
+
+/// Esc on the rename dialog cancels without touching the title.
+#[tokio::test]
+async fn slash_rename_esc_cancels_without_changes() {
+    let mut app = App::new("/tmp".to_string());
+    app.start_new_session();
+    let id = app.state.current_session_id.clone().unwrap();
+    if let Some(s) = app.state.session_cache.get_mut(&id) {
+        s.title = "keep me".into();
+    }
+    let cmd = crate::ui::slash_menu::SlashCommand {
+        name: "rename".into(),
+        desc: String::new(),
+    };
+    app.run_slash_command(&cmd);
+    for ch in "edited".chars() {
+        app.handle_text_input_dialog_key(KeyCode::Char(ch));
+    }
+    app.handle_text_input_dialog_key(KeyCode::Esc);
+    assert!(!app.dialog.visible());
+    assert_eq!(app.state.session_cache.get(&id).unwrap().title, "keep me");
+}
+
+/// An empty (whitespace-only) title applies nothing — Enter just closes,
+/// mirroring opencode's prompt behavior.
+#[tokio::test]
+async fn slash_rename_empty_title_applies_nothing() {
+    let mut app = App::new("/tmp".to_string());
+    app.start_new_session();
+    let id = app.state.current_session_id.clone().unwrap();
+    if let Some(s) = app.state.session_cache.get_mut(&id) {
+        s.title = "unchanged".into();
+    }
+    let cmd = crate::ui::slash_menu::SlashCommand {
+        name: "rename".into(),
+        desc: String::new(),
+    };
+    app.run_slash_command(&cmd);
+    // Clear everything, then Enter on an empty field.
+    for _ in 0.."unchanged".len() {
+        app.handle_text_input_dialog_key(KeyCode::Backspace);
+    }
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(!app.dialog.visible(), "Enter still closes the dialog");
+    assert_eq!(
+        app.state.session_cache.get(&id).unwrap().title,
+        "unchanged",
+        "an empty title never clears the session name"
+    );
+}
+
+/// Regression: the slash menu window must SCROLL. With more commands
+/// than the 6 visible rows, navigating down used to move the selection
+/// past the rendered window — the last commands (e.g. /rename) existed
+/// but were invisible and unreachable by arrow keys.
+#[tokio::test]
+async fn slash_menu_scrolls_so_the_selection_stays_visible() {
+    let mut app = App::new("/tmp".to_string());
+    app.prompt_view.input = "/".into();
+    app.slash_menu.update(&app.prompt_view.input);
+    assert!(
+        app.slash_menu.commands.len() > 6,
+        "precondition: more commands than the visible window"
+    );
+
+    // Navigate to the LAST command (past the bottom of the window).
+    for _ in 0..app.slash_menu.commands.len() - 1 {
+        app.slash_menu.select_next();
+    }
+    let selected = app.slash_menu.get_selected_command().unwrap().name.clone();
+
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+    app.slash_menu
+        .render(&mut buf, Rect::new(30, 20, 50, 4), &app.theme);
+
+    // Every row of the menu must be scanned: the selected command's name
+    // must be drawn somewhere in the buffer.
+    let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(
+        rendered.contains(&selected),
+        "the selected command '{selected}' must be on screen after scrolling down"
+    );
+}
+
+/// `/compact` while the agent loop is working must be refused with a toast:
+/// the running loop owns the context manager, and the re-entry guard stays
+/// cleared (no task spawned).
+#[tokio::test]
+async fn slash_compact_refuses_while_agent_is_working() {
+    let mut app = App::new("/tmp".to_string());
+    app.state.status = crate::types::SessionStatus::Working;
+    let cmd = crate::ui::slash_menu::SlashCommand {
+        name: "compact".into(),
+        desc: String::new(),
+    };
+    app.run_slash_command(&cmd);
+    assert!(
+        !app.manual_compaction_active,
+        "no compaction task may start while a loop runs"
+    );
+    assert!(!app.slash_menu.visible);
+    assert!(
+        app.toast_state
+            .current
+            .as_ref()
+            .is_some_and(|t| t.message.contains("between messages")),
+        "the refusal toast explains when /compact can run"
+    );
+}
+
+/// `/compact` in an idle session with no persisted context is refused too —
+/// there is no timeline snapshot to rebuild the summarizer from.
+#[tokio::test]
+async fn slash_compact_refuses_without_a_session_context() {
+    let mut app = App::new("/tmp".to_string());
+    let cmd = crate::ui::slash_menu::SlashCommand {
+        name: "compact".into(),
+        desc: String::new(),
+    };
+    app.run_slash_command(&cmd);
+    assert!(!app.manual_compaction_active);
+    assert!(app.state.current_session_id.is_none());
+    assert!(
+        app.toast_state.current.is_some(),
+        "the refusal surfaces as a toast"
+    );
+}

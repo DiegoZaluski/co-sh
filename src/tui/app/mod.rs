@@ -1,0 +1,627 @@
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use crossterm::event::{self};
+
+use ratatui::layout::Rect;
+use tokio::runtime::Handle;
+use tokio::sync::mpsc;
+
+use cosh::harness::HarnessEvent;
+
+use crate::component::agent_spinner::AgentSpinner;
+use crate::component::prompt::PromptView;
+use crate::config::{LlmConfig, TuiConfig};
+use crate::fallback;
+use crate::keymap::KeyMap;
+use crate::logo::LOGO_CHAT;
+use crate::routes::add_provider::AddProviderView;
+use crate::routes::home::HomeView;
+use crate::routes::router::RouterView;
+use crate::routes::session::SessionView;
+use crate::routes::session::permission::PermissionDialog;
+use crate::routes::session::question::QuestionDialog;
+use crate::routes::session::queue_choice::QueueChoiceDialog;
+use crate::routes::session::right_panel::{RIGHT_PANEL_WIDTH, should_show_right_panel};
+use crate::routes::session::sidebar::SidebarView;
+use crate::routes::settings::SettingsView;
+use crate::routes::tools::InternalToolsView;
+use crate::session_store::SessionStore;
+use crate::state::AppState;
+use crate::theme::{Theme, ThemeRegistry};
+use crate::types::SessionStatus;
+use crate::ui::dialogs::DialogState;
+use crate::ui::toast::ToastState;
+
+mod agent_loop;
+mod commands;
+mod compaction;
+mod dialogs;
+mod events;
+mod keys;
+mod mouse;
+mod providers;
+mod rag;
+mod render;
+mod terminal;
+
+#[cfg(test)]
+mod tests;
+
+use terminal::{init_terminal, restore_terminal};
+
+/// The editable prompt text of a message: its non-synthetic text parts
+/// joined by a space (mirrors opencode's Revert/Copy text reconstruction).
+pub(crate) fn message_prompt_text(msg: &crate::types::Message) -> String {
+    msg.parts
+        .iter()
+        .filter_map(|p| match p {
+            crate::types::Part::Text(t) if !t.synthetic => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const SIDEBAR_WIDTH: u16 = 22;
+
+/// Header link that opens the project's bug-report page.
+/// TODO: replace the URL with the real GitHub issues URL.
+const BUG_REPORT_TEXT: &str = "𓆦 bug";
+const BUG_REPORT_URL: &str = "https://github.com/PLACEHOLDER-OWNER/PLACEHOLDER-REPO/issues";
+const FOOTER_HEIGHT: u16 = 1;
+
+/// When the session is empty (no messages), the prompt is centered horizontally
+/// with a width of `RATIO * main_area` but at least `MIN_WIDTH` characters wide.
+const EMPTY_SESSION_PROMPT_MIN_WIDTH: u16 = 50;
+const EMPTY_SESSION_PROMPT_RATIO: f64 = 0.4;
+/// Rows always reserved for the conversation (or logo) above the prompt, so the
+/// responsive prompt limit never swallows the whole screen even on a very short
+/// terminal.
+const MIN_PROMPT_RESERVE_ROWS: u16 = 4;
+
+enum AppMode {
+    Home,
+    Session,
+    InternalTools,
+    AddProvider,
+    Settings,
+    Router,
+    #[cfg(feature = "embed")]
+    Rag,
+}
+
+/// Result of `App::session_main_area`: the session chat's content area plus
+/// the sidebar/right-panel widths that were subtracted, so `render` and the
+/// mouse dispatch cannot drift apart.
+struct SessionArea {
+    main: Rect,
+    sidebar_w: u16,
+    right_panel_w: u16,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+pub struct App {
+    pub state: AppState,
+    pub theme: Theme,
+    pub theme_registry: ThemeRegistry,
+    pub session_view: SessionView,
+    pub prompt_view: PromptView,
+    pub sidebar: SidebarView,
+    pub dialog: DialogState,
+    pub permission_dialog: PermissionDialog,
+    pub question_dialog: QuestionDialog,
+    pub queue_choice_dialog: QueueChoiceDialog,
+    pub home_view: HomeView,
+    pub internal_tools_view: InternalToolsView,
+    pub show_internal_tools: bool,
+    pub add_provider_view: AddProviderView,
+    pub show_add_provider: bool,
+    pub settings_view: SettingsView,
+    pub show_settings: bool,
+    pub router_view: RouterView,
+    pub show_router: bool,
+    #[cfg(feature = "embed")]
+    pub rag_view: crate::routes::rag::RagView,
+    #[cfg(feature = "embed")]
+    pub show_rag: bool,
+    pub keymap: KeyMap,
+    pub config: TuiConfig,
+    pub toast_state: ToastState,
+    pub slash_menu: crate::ui::slash_menu::SlashMenu,
+    pub should_quit: bool,
+    pub tokio_handle: Handle,
+    pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
+    event_rx: mpsc::UnboundedReceiver<HarnessEvent>,
+    /// Sender for question answers back to the harness.
+    answer_tx: mpsc::UnboundedSender<Result<Vec<cosh_tools::question::types::AnswerItem>, String>>,
+    /// Sender for permission responses back to the harness.
+    perm_tx: mpsc::UnboundedSender<cosh::harness::PermissionAction>,
+    /// Sender for user messages queued for the NEXT REQUEST of the running
+    /// agent loop (the "next request" queue). `None` while no loop runs.
+    queued_input_tx: Option<mpsc::UnboundedSender<String>>,
+    /// Session id that owns the currently running agent loop — guards the
+    /// queue auto-start against mid-run session switches.
+    active_loop_session_id: Option<String>,
+    llm_config: LlmConfig,
+    stop_signal: Arc<AtomicBool>,
+    /// Re-entry guard for the user-triggered `/compact`: true while the
+    /// one-off compaction task runs (there is no loop status to read —
+    /// between loops the app is Idle). Cleared by the CompactOnDemand event.
+    manual_compaction_active: bool,
+    terminal_focused: bool,
+    agent_spinner: Option<AgentSpinner>,
+    /// Latest context manager info for the budget bar (None if no data yet).
+    context_info: Option<cosh::harness::ContextDisplayInfo>,
+    /// Stores the theme name that was active when the theme dialog opened (for cancel/restore)
+    theme_dialog_original: Option<String>,
+    /// Stores the model that was active when the model dialog opened (for cancel/restore)
+    model_dialog_original: Option<String>,
+    /// Stores the reasoning level that was active when the model dialog opened
+    /// (for cancel/restore).
+    reasoning_dialog_original: Option<String>,
+    /// Stale-while-revalidate cache for model listings, keyed by provider.
+    model_cache: crate::util::cache::StaleCache<String, Vec<cosh::ModelEntry>>,
+    /// Structured user preferences (theme, tools, routing) persisted in
+    /// `~/.config/cosh/setup.json`.
+    setup: crate::util::setup::Setup,
+    /// Session persistence store (JSONL files on disk).
+    session_store: SessionStore,
+    /// When set, the current Confirm dialog is asking about deleting a session.
+    pending_delete_session_id: Option<String>,
+    /// Whether a title has already been generated for the current session.
+    /// Set to `false` when a new session is created; set to `true` after
+    /// the async title generation task is spawned.
+    title_generated: bool,
+    /// When set, the current Confirm dialog is asking about deleting a RAG database.
+    #[cfg(feature = "embed")]
+    pending_delete_db_name: Option<String>,
+    /// Handle for the async URL fetch task, aborted on Esc.
+    #[cfg(feature = "embed")]
+    rag_fetch_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Handle for the async embed task, aborted on Esc.
+    #[cfg(feature = "embed")]
+    rag_embed_handle: Option<tokio::task::JoinHandle<()>>,
+
+    // Mouse drag / selection tracking
+    /// Position where the mouse was pressed down (for detecting drag selections).
+    mouse_down_pos: Option<(u16, u16)>,
+    /// Whether a drag-selection is in progress.
+    mouse_drag_active: bool,
+    /// Set when a mouse Up was a drag (even if it selected nothing), so the
+    /// session click dispatch skips opening Message Actions.
+    mouse_up_was_drag: bool,
+    /// Visual highlight: anchor (sx,sy) and focus (x,y) — stored without normalisation
+    /// so the renderer can apply flow-based selection highlighting (top line from `start_x`
+    /// to end, bottom line from start to `end_x`, middle lines fully highlighted).
+    drag_selection: Option<(u16, u16, u16, u16)>,
+
+    // Auto-scroll on selection drag
+    /// When true, the render loop keeps running even without input events.
+    live_requested: bool,
+    /// Timestamp of the previous frame (for delta_time calculation).
+    last_frame_time: std::time::Instant,
+    /// Per-frame counter — rate-limits the PERF debug logs in the render hot
+    /// path (bg_fill etc.) to one sample per ~30 frames (~1/sec) instead of
+    /// one write per frame.
+    perf_frame: u64,
+    /// Last known mouse X position (for keyboard scroll targeting).
+    last_mouse_x: u16,
+    /// Last known mouse Y position (for keyboard scroll targeting).
+    last_mouse_y: u16,
+    /// Timestamp of last scroll wheel event (for debouncing rapid scrolls).
+    last_scroll_time: Instant,
+    /// Whether the sidebar is focused to receive scroll events.
+    /// Set to true when the user clicks inside the sidebar; false on outside clicks.
+    sidebar_focused: bool,
+    /// Clickable area of the "bug report" header link (None when not drawn).
+    bug_link_area: Option<Rect>,
+    /// Whether the terminal bell rings when an agent loop finishes.
+    bell_enabled: bool,
+}
+
+impl App {
+    pub fn new(cwd: String) -> Self {
+        let mut state = AppState::new();
+        state.working_directory = cwd;
+
+        // Load session summaries (header-only, lightweight).
+        // Full sessions are loaded lazily into the LRU cache on demand.
+        let session_store = SessionStore::new();
+        state.session_summaries = session_store.list_sessions();
+
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
+        let (perm_tx, _perm_rx) = mpsc::unbounded_channel();
+
+        let theme_registry = ThemeRegistry::new();
+        let setup = crate::util::setup::Setup::load();
+
+        // Load saved fallback chain from setup config
+        let saved_fallbacks = fallback::load_fallbacks(&setup);
+
+        // Load saved disabled tools from setup config
+        let saved_disabled_tools = crate::routes::tools::load_disabled_tools(&setup);
+        // Persisted tool-call mode overrides the env default for the session.
+        let saved_tool_call_mode = crate::routes::tools::load_tool_call_mode(&setup);
+
+        // Load saved theme from setup config
+        let theme = if setup.appearance.theme.is_empty() {
+            theme_registry.default_theme().clone()
+        } else {
+            theme_registry
+                .get(&setup.appearance.theme)
+                .cloned()
+                .unwrap_or_else(|| theme_registry.default_theme().clone())
+        };
+
+        let saved_bell = setup.appearance.bell_enabled;
+
+        Self {
+            state,
+            theme_registry,
+            theme,
+            session_view: SessionView::new(),
+            home_view: HomeView::new(),
+            internal_tools_view: {
+                let mut v = InternalToolsView::new();
+                v.disabled = saved_disabled_tools;
+                v
+            },
+            show_internal_tools: false,
+            add_provider_view: AddProviderView::new(),
+            show_add_provider: false,
+            settings_view: SettingsView::new(),
+            show_settings: false,
+            router_view: {
+                let mut rv = RouterView::new();
+                rv.set_fallbacks(saved_fallbacks);
+                rv
+            },
+            show_router: false,
+            #[cfg(feature = "embed")]
+            rag_view: crate::routes::rag::RagView::new(),
+            #[cfg(feature = "embed")]
+            show_rag: false,
+            prompt_view: PromptView::new(),
+            sidebar: SidebarView::new(),
+            dialog: DialogState::new(),
+            permission_dialog: PermissionDialog::new(),
+            question_dialog: QuestionDialog::new(),
+            queue_choice_dialog: QueueChoiceDialog::new(),
+            keymap: KeyMap::default_vim(),
+            config: TuiConfig::default(),
+            toast_state: ToastState::new(),
+            slash_menu: crate::ui::slash_menu::SlashMenu::new(),
+            theme_dialog_original: None,
+            model_dialog_original: None,
+            reasoning_dialog_original: None,
+            model_cache: crate::util::cache::StaleCache::new("cache", "model.json"),
+            setup,
+            session_store,
+            pending_delete_session_id: None,
+            title_generated: false,
+            manual_compaction_active: false,
+            #[cfg(feature = "embed")]
+            pending_delete_db_name: None,
+            #[cfg(feature = "embed")]
+            rag_fetch_handle: None,
+            #[cfg(feature = "embed")]
+            rag_embed_handle: None,
+            should_quit: false,
+            tokio_handle: Handle::current(),
+            event_tx,
+            event_rx,
+            answer_tx,
+            perm_tx,
+            queued_input_tx: None,
+            active_loop_session_id: None,
+            llm_config: LlmConfig {
+                tool_call_mode: saved_tool_call_mode,
+                ..LlmConfig::from_env()
+            },
+            stop_signal: Arc::new(AtomicBool::new(false)),
+            terminal_focused: true,
+            agent_spinner: None,
+            context_info: None,
+            mouse_down_pos: None,
+            mouse_drag_active: false,
+            mouse_up_was_drag: false,
+            drag_selection: None,
+            live_requested: false,
+            last_frame_time: std::time::Instant::now(),
+            perf_frame: 0,
+            last_mouse_x: 0,
+            last_mouse_y: 0,
+            last_scroll_time: Instant::now(),
+            sidebar_focused: false,
+            bug_link_area: None,
+            bell_enabled: saved_bell,
+        }
+    }
+
+    pub fn show_welcome_toast(&mut self) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        self.toast_state.show(ToastOptions {
+            title: Some("cosh".to_string()),
+            message: "Welcome! Press Ctrl+P for commands.".to_string(),
+            variant: ToastVariant::Info,
+            duration_ms: 5000,
+        });
+    }
+
+    // RAG helper methods (cfg-gated at method level, always compiles)
+    fn mode(&self) -> AppMode {
+        #[cfg(feature = "embed")]
+        if self.show_rag {
+            return AppMode::Rag;
+        }
+        if self.show_router {
+            AppMode::Router
+        } else if self.show_internal_tools {
+            AppMode::InternalTools
+        } else if self.show_add_provider {
+            AppMode::AddProvider
+        } else if self.show_settings {
+            AppMode::Settings
+        } else if self.state.current_session().is_some() {
+            AppMode::Session
+        } else {
+            AppMode::Home
+        }
+    }
+
+    pub fn run(&mut self) -> io::Result<()> {
+        let mut terminal = init_terminal()?;
+        // Target 30 fps during streaming to give agents time to produce tokens
+        // before we spend cycles re-rendering (reduces jank, lowers CPU usage).
+        let frame_interval = Duration::from_micros(33_333); // ~30 fps
+
+        while !self.should_quit {
+            // ESC sovereign: pre-render event check
+            // During streaming, terminal.draw() can take hundreds of milliseconds.
+            // Do a quick non-blocking poll for pending events BEFORE spending time
+            // on rendering. If events are available, handle them via the full
+            // handle_events() path (which is fast because event::poll() returns
+            // immediately when events are already buffered). This ensures ESC and
+            // other critical keys are processed with minimal latency.
+            if self.live_requested && event::poll(Duration::from_millis(0))? {
+                if self.handle_events()? {
+                    break;
+                }
+                // If stop was requested, skip this render to respond instantly.
+                if self.stop_signal.load(Ordering::Relaxed) {
+                    self.poll_events();
+                    continue;
+                }
+            }
+
+            // Frame-rate limiting during streaming
+            // Skip rendering if not enough time has elapsed. This reduces CPU usage
+            // and prevents jitter from rendering too frequently (which would compete
+            // with the agent's token production). Events are still polled.
+            if self.live_requested {
+                let elapsed = self.last_frame_time.elapsed();
+                if elapsed < frame_interval {
+                    let wait = frame_interval.saturating_sub(elapsed);
+                    // Still poll events while waiting (non-blocking)
+                    if event::poll(Duration::from_millis(0))? && self.handle_events()? {
+                        break;
+                    }
+                    // If stop was requested, drain events and skip render
+                    if self.stop_signal.load(Ordering::Relaxed) {
+                        self.poll_events();
+                        continue;
+                    }
+                    // Sleep for the remaining frame interval
+                    std::thread::sleep(wait);
+                }
+            }
+
+            let now = std::time::Instant::now();
+            let delta = now.duration_since(self.last_frame_time);
+            self.last_frame_time = now;
+            let delta_secs = delta.as_secs_f64();
+
+            terminal.draw(|frame| {
+                self.render(frame, delta_secs);
+            })?;
+
+            if self.live_requested {
+                // When auto-scroll is active, don't block on event::poll.
+                if event::poll(Duration::from_millis(8))? && self.handle_events()? {
+                    break;
+                }
+            } else if self.handle_events()? {
+                break;
+            }
+
+            self.poll_events();
+        }
+
+        restore_terminal()?;
+        Ok(())
+    }
+
+    /// The session view's content area: full terminal minus the open sidebar
+    /// and (in Session mode) the visible right panel. Shared by `render` and
+    /// the mouse dispatch so click hit-testing uses the EXACT width the view
+    /// rendered at — a wider mouse area would re-wrap every message, shifting
+    /// `prefix_y` and making tool-box clicks land on the wrong row.
+    fn session_main_area(&self, area: Rect) -> SessionArea {
+        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+        let right_panel_w = if matches!(self.mode(), AppMode::Session)
+            && (should_show_right_panel(area.width, &self.state.right_panel))
+        {
+            RIGHT_PANEL_WIDTH
+        } else {
+            0
+        };
+        SessionArea {
+            main: Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w + right_panel_w),
+                area.height,
+            ),
+            sidebar_w,
+            right_panel_w,
+        }
+    }
+
+    /// The session transcript viewport (shared by render and the mouse
+    /// dispatch): the main area minus header, prompt, spinner and question
+    /// rows. Used for click hit-testing AND hover tracking so both map
+    /// cursor positions with the exact geometry the view rendered at.
+    fn session_viewport_area(&self) -> Rect {
+        let area = self.terminal_size();
+        let SessionArea {
+            main: main_area, ..
+        } = self.session_main_area(area);
+        let footer_y = main_area.bottom().saturating_sub(1);
+        let prompt_budget = footer_y
+            .saturating_sub(area.y + 1)
+            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+        let prompt_h = self
+            .prompt_view
+            .required_height(main_area.width.saturating_sub(4), prompt_budget);
+        let question_h = if self.question_dialog.visible {
+            self.question_dialog
+                .required_height(main_area.width.saturating_sub(4))
+        } else {
+            0
+        };
+        let spinner_h = u16::from(
+            matches!(self.state.status, SessionStatus::Working)
+                && self.agent_spinner.is_some()
+                && !self.question_dialog.visible,
+        );
+        let prompt_area_y = footer_y.saturating_sub(prompt_h);
+        let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);
+        let question_h = question_h.min(spinner_area_y.saturating_sub(area.y + 1));
+        let question_area_y = spinner_area_y.saturating_sub(question_h);
+        let session_bottom = question_area_y;
+        Rect::new(
+            main_area.x,
+            area.y + 1,
+            main_area.width,
+            session_bottom.saturating_sub(area.y + 1),
+        )
+    }
+    /// Check if a mouse x-coordinate is within the right panel area.
+    fn is_in_right_panel(x: u16, terminal_size: Rect) -> bool {
+        if terminal_size.width < 100 {
+            return false;
+        }
+        let right_panel_x = terminal_size
+            .width
+            .saturating_sub(crate::routes::session::right_panel::RIGHT_PANEL_WIDTH);
+        x >= right_panel_x
+    }
+
+    /// Compute the prompt area rectangle (same calculation as in `render()`).
+    /// Must match the render logic exactly so mouse clicks land on the
+    /// visual prompt position, including the empty-session centered layout.
+    fn compute_prompt_area(&self) -> Option<Rect> {
+        if !matches!(self.mode(), AppMode::Session) {
+            return None;
+        }
+        // When question or permission dialog is visible, prompt is hidden
+        if self.question_dialog.visible || self.permission_dialog.visible {
+            return None;
+        }
+        let area = self.terminal_size();
+        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+
+        let right_panel_w = if matches!(self.mode(), AppMode::Session)
+            && (should_show_right_panel(area.width, &self.state.right_panel))
+        {
+            RIGHT_PANEL_WIDTH
+        } else {
+            0
+        };
+
+        let main_area = Rect::new(
+            area.x + sidebar_w,
+            area.y,
+            area.width.saturating_sub(sidebar_w + right_panel_w),
+            area.height,
+        );
+        let footer_y = main_area.bottom().saturating_sub(1);
+
+        let is_empty_session = self
+            .state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty());
+
+        let full_w = main_area.width.saturating_sub(4);
+        let (prompt_area_x, prompt_area_w) = if is_empty_session {
+            let narrow = std::cmp::max(
+                EMPTY_SESSION_PROMPT_MIN_WIDTH,
+                (main_area.width as f64 * EMPTY_SESSION_PROMPT_RATIO) as u16,
+            )
+            .min(full_w);
+            (main_area.x + (main_area.width - narrow) / 2, narrow)
+        } else {
+            (main_area.x + 2, full_w)
+        };
+
+        // Same responsive budget as `render()` so mouse mapping matches the
+        // actually-rendered prompt height on every screen size.
+        let prompt_budget = footer_y
+            .saturating_sub(area.y + 1)
+            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+        let prompt_h = self
+            .prompt_view
+            .required_height(prompt_area_w, prompt_budget);
+
+        let logo_block_h = if is_empty_session {
+            LOGO_CHAT.len() as u16 + 1
+        } else {
+            0
+        };
+
+        let prompt_area_y = if is_empty_session && prompt_h > 0 {
+            let header_y = area.y + 1;
+            let total_block_h = logo_block_h + prompt_h;
+            let available = footer_y.saturating_sub(header_y);
+            let top_spacer = available.saturating_sub(total_block_h) / 2;
+            header_y + top_spacer + logo_block_h
+        } else {
+            footer_y.saturating_sub(prompt_h)
+        };
+
+        Some(Rect::new(
+            prompt_area_x,
+            prompt_area_y,
+            prompt_area_w,
+            prompt_h,
+        ))
+    }
+
+    #[allow(clippy::unused_self)]
+    fn terminal_size(&self) -> Rect {
+        // We don't store the terminal size, but ratatui's Terminal::size is not accessible here.
+        // Use a reasonable fallback: assume crossterm's terminal size.
+        let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+        Rect::new(0, 0, w, h)
+    }
+
+    fn terminal_height(&self) -> u16 {
+        self.terminal_size().height
+    }
+}
+
+// Embedding helpers (feature-gated)
+
+#[cfg(test)]
+#[path = "../bench/bench_e2e.rs"]
+mod bench_e2e;
+#[cfg(test)]
+#[path = "../bench/probe_drain.rs"]
+mod probe_drain;
+#[cfg(test)]
+#[path = "../bench/probe_real.rs"]
+mod probe_real;
