@@ -8,7 +8,6 @@ use crate::component::prompt::PromptView;
 use crate::fallback;
 use crate::routes::home::HomeAction;
 use crate::routes::router::FocusTarget;
-use crate::routes::session::queue_choice::QueueTarget;
 use crate::routes::session::sidebar::SidebarAction;
 use crate::ui::dialogs::DialogType;
 use crate::util::selection;
@@ -88,6 +87,13 @@ impl App {
                 return Ok(false);
             }
 
+            // Check the per-queued-message actions dialog
+            if self.is_queue_actions_dialog_visible()
+                && self.handle_queue_actions_dialog_key(key.code)
+            {
+                return Ok(false);
+            }
+
             // Check reasoning sub-dialog SECOND (pushed on top of the
             // model list), before the model dialog.
             if self.is_reasoning_dialog_visible() && self.handle_reasoning_dialog_key(key.code) {
@@ -132,21 +138,9 @@ impl App {
                         let text = self.prompt_view.send_message();
                         let target = self.queue_choice_dialog.choice();
                         self.queue_choice_dialog.hide();
-                        if let Some(queues) = self.state.current_pending_queues_mut() {
-                            match target {
-                                QueueTarget::NextRequest => {
-                                    queues.next_request.push_back(text.clone());
-                                    // Hand it to the running loop immediately: it
-                                    // enters the model context before the next request.
-                                    if let Some(tx) = &self.queued_input_tx {
-                                        let _ = tx.send(text);
-                                    }
-                                }
-                                QueueTarget::NextLoop => {
-                                    queues.next_loop.push_back(text);
-                                }
-                            }
-                        }
+                        // Edited message returning to its queue → original
+                        // position; otherwise appended at the end (helper).
+                        self.enqueue_pending_message(target, text);
                         self.prompt_view.focus();
                     } else if !self.queue_choice_dialog.visible {
                         // Dismissed via Esc: re-focus the prompt (the
@@ -780,7 +774,10 @@ impl App {
                     if msg.trim().is_empty() {
                         return Ok(false);
                     }
-                    self.start_agent_loop(msg);
+                    // An edited queued message outstanding? It goes back to
+                    // its queue slot (never a direct provider input) and the
+                    // queue chain resumes FIFO. Otherwise: normal send.
+                    self.submit_prompt_message(msg);
                 }
                 Some(crate::keymap::Action::Interrupt) => {
                     if self.state.status == crate::types::SessionStatus::Working {
@@ -815,6 +812,10 @@ impl App {
                         {
                             queues.clear();
                         }
+                        self.next_request_in_flight = false;
+                        self.queue_actions_deferred_start = false;
+                        self.edit_requeue_hint = None;
+                        self.hovered_queue_row = None;
                         return Ok(false);
                     }
                     if self.queue_choice_dialog.visible {
@@ -914,6 +915,11 @@ impl App {
                     {
                         queues.clear();
                     }
+                    // Nothing left to acknowledge, resume or highlight.
+                    self.next_request_in_flight = false;
+                    self.queue_actions_deferred_start = false;
+                    self.edit_requeue_hint = None;
+                    self.hovered_queue_row = None;
                 }
                 None => {
                     if self.slash_menu.visible {

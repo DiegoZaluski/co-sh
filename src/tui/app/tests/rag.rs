@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use super::App;
 
 /// The full create-db field drag selection flow through the app's real
