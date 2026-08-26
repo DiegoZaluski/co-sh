@@ -159,9 +159,19 @@ enum Line {
     Title,
     Blank,
     Description(&'static str),
-    Category { item: usize },
-    Hook { event: &'static str, hook: usize },
-    AddHook { event: &'static str },
+    /// A non-selectable URL rendered under a description (e.g. the Zen free
+    /// gateway's terms).
+    Link(&'static str),
+    Category {
+        item: usize,
+    },
+    Hook {
+        event: &'static str,
+        hook: usize,
+    },
+    AddHook {
+        event: &'static str,
+    },
 }
 
 impl Line {
@@ -179,6 +189,9 @@ impl Line {
     }
 }
 
+/// Terms shown under the Zen free-gateway description.
+const ZEN_TERMS_LINK: &str = "https://opencode.ai/legal/terms-of-service";
+
 fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
     let mut lines = Vec::new();
     let mut y = 0u16;
@@ -193,6 +206,15 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
             line: Line::Description(settings_items()[item].description),
         });
         y += 1;
+        // The Zen free gateway carries its terms right below the
+        // description, above the toggle.
+        if settings_items()[item].id == "zen_free_gateway" {
+            lines.push(LayoutLine {
+                y,
+                line: Line::Link(ZEN_TERMS_LINK),
+            });
+            y += 1;
+        }
         lines.push(LayoutLine {
             y,
             line: Line::Category { item },
@@ -223,6 +245,13 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
                 line: Line::AddHook {
                     event: settings_items()[item].event,
                 },
+            });
+            y += 1;
+            // Breathing room BELOW the hook list, so "+ Add hook" never sits
+            // glued to the next section's description.
+            lines.push(LayoutLine {
+                y,
+                line: Line::Blank,
             });
             y += 1;
         }
@@ -379,6 +408,10 @@ impl SettingsView {
                 Line::Description(text) => {
                     draw_text(buf, text, row_x, y, area, Style::default().fg(muted));
                 }
+                Line::Link(text) => {
+                    // Same accent color the dialog uses for its terms link.
+                    draw_text(buf, text, row_x, y, area, Style::default().fg(primary));
+                }
                 Line::Category { item } => {
                     let idx = rows
                         .iter()
@@ -462,7 +495,13 @@ fn content_start_y(area: Rect, setup: &Setup) -> u16 {
 fn max_row_width(setup: &Setup) -> usize {
     let mut width = settings_items()
         .iter()
-        .map(|item| item.description.len().max(2 + item.label.len())) // "✔ PreToolUse hooks"
+        .map(|item| {
+            let mut len = item.description.len().max(2 + item.label.len()); // "✔ PreToolUse hooks"
+            if item.id == "zen_free_gateway" {
+                len = len.max(ZEN_TERMS_LINK.len());
+            }
+            len
+        })
         .max()
         .unwrap_or(0);
     for item in settings_items() {
@@ -730,6 +769,9 @@ mod tests {
             .collect();
         assert!(all.contains("✗ PreToolUse hooks"));
         assert!(all.contains("✗ PostToolUse hooks"));
+        // The Zen gateway row carries its terms link under the description.
+        assert!(all.contains("✗ OpenCode Zen free gateway"));
+        assert!(all.contains("https://opencode.ai/legal/terms-of-service"));
         assert!(!all.contains("• hidden"));
         assert!(!all.contains("+ Add hook"));
 
