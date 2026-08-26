@@ -1,6 +1,5 @@
 [workspace]
 members = [
-  "cosh-server",
   "crates/cosh-recall",
   "crates/cosh-sdk",
   "crates/cosh-tools",
@@ -128,7 +127,7 @@ parking_lot = "0.12"
 [patch.crates-io]
 tree-sitter-kotlin = { git = "https://github.com/fwcd/tree-sitter-kotlin", rev = "c8ac3d2627240160b999a2c100de3babbdb8f419" }
 
-# ─── Performance profiles ────────────────────────────────────────────────────
+# Performance profiles
 # The TUI's hot path lives almost entirely in dependencies (tree-sitter,
 # unicode-width, ratatui, pulldown-cmark, regex, taffy). Unoptimized, those
 # make every frame 20-100x slower — a debug `target/debug/cosh` measured
@@ -150,7 +149,7 @@ lto = "thin"
 [workspace.lints.clippy]
 perf = "deny"
 
-# ─── Shared dependency declarations ──────────────────────────────────────────
+# Shared dependency declarations
 # Single source of truth for cross-crate dependencies. Crates opt in with
 # `<dep>.workspace = true`; pre-existing inline versions keep working until
 # they are migrated one crate at a time.
