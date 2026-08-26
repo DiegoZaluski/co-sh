@@ -39,6 +39,9 @@ pub struct Appearance {
     /// terminal's own default color (`Color::Reset`) instead of the theme
     /// color. Panels/elements keep their theme colors.
     pub transparent_background: bool,
+    /// `/anim` toggle: show the animated chat-logo on the empty-session
+    /// landing screen. When off, the static `LOGO_CHAT` is drawn instead.
+    pub anim_enabled: bool,
 }
 
 impl Default for Appearance {
@@ -47,6 +50,7 @@ impl Default for Appearance {
             theme: String::new(),
             bell_enabled: true,
             transparent_background: false,
+            anim_enabled: true,
         }
     }
 }

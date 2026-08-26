@@ -134,6 +134,22 @@ impl App {
             });
             self.setup.appearance.bell_enabled = self.bell_enabled;
             self.setup.save();
+        } else if cmd.name == "anim" {
+            self.anim_enabled = !self.anim_enabled;
+            use crate::ui::toast::{ToastOptions, ToastVariant};
+            let message = if self.anim_enabled {
+                "Animated logo enabled."
+            } else {
+                "Animated logo disabled — using static LOGO_CHAT."
+            };
+            self.toast_state.show(ToastOptions {
+                title: Some("Anim".into()),
+                message: message.into(),
+                variant: ToastVariant::Info,
+                duration_ms: 3000,
+            });
+            self.setup.appearance.anim_enabled = self.anim_enabled;
+            self.setup.save();
         } else {
             let cmd_name = format!("/{} ", cmd.name);
             self.prompt_view.input = cmd_name;

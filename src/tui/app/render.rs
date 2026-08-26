@@ -316,7 +316,7 @@ impl App {
                 0
             };
 
-            let (prompt_area_y, _logo_start_y) = if is_empty_session && prompt_h > 0 {
+            let (prompt_area_y, logo_start_y) = if is_empty_session && prompt_h > 0 {
                 let header_y = area.y + 1;
                 let total_block_h = logo_block_h + prompt_h;
                 let available = footer_y.saturating_sub(header_y);
@@ -538,8 +538,26 @@ impl App {
                             std::time::SystemTime::now(),
                             model_name,
                             delta_time,
-                            is_empty_session,
+                            is_empty_session && self.anim_enabled,
                         );
+
+                        // Static LOGO_CHAT replaces the animation when /anim is off,
+                        // centered above the prompt input.
+                        if is_empty_session && !self.anim_enabled {
+                            for (i, line) in LOGO_CHAT.iter().enumerate() {
+                                let line_w = line.chars().count() as u16;
+                                let logo_x =
+                                    prompt_area.x + prompt_area.width.saturating_sub(line_w) / 2;
+                                buf.set_string(
+                                    logo_x,
+                                    logo_start_y + i as u16,
+                                    line.trim_end(),
+                                    Style::default()
+                                        .fg(rgba_color(self.theme.primary))
+                                        .bg(rgba_color(self.theme.background)),
+                                );
+                            }
+                        }
                     }
                 }
             }

@@ -276,6 +276,9 @@ pub struct App {
     bug_link_area: Option<Rect>,
     /// Whether the terminal bell rings when an agent loop finishes.
     bell_enabled: bool,
+    /// Whether the animated chat-logo plays on the empty-session landing
+    /// screen (`/anim` toggle). When off, the static LOGO_CHAT is drawn.
+    pub(super) anim_enabled: bool,
 }
 
 impl App {
@@ -321,6 +324,7 @@ impl App {
         };
 
         let saved_bell = setup.appearance.bell_enabled;
+        let saved_anim = setup.appearance.anim_enabled;
 
         // Propagate the persisted Zen free-gateway opt-in to every connector
         // built in this process (harness fallback chains, compaction, session
@@ -415,6 +419,7 @@ impl App {
             sidebar_focused: false,
             bug_link_area: None,
             bell_enabled: saved_bell,
+            anim_enabled: saved_anim,
         }
     }
 

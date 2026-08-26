@@ -84,6 +84,10 @@ impl SlashMenu {
                 desc: "Toggle completion bell".into(),
             },
             SlashCommand {
+                name: "anim".into(),
+                desc: "Toggle animated chat logo".into(),
+            },
+            SlashCommand {
                 name: "toolcall".into(),
                 desc: "Tool call mode: native | inline".into(),
             },
