@@ -2379,9 +2379,9 @@ impl DialogState {
                     .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
                 let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
-                // Lighter floating surface (the element color) so the focused
-                // box stands out against the darker prompt panel behind it.
-                let bg_color = rgba_color(theme.background_element);
+                // Same surface as the left sidebar panel so the box reads as
+                // part of the panel family.
+                let bg_color = rgba_color(theme.background_panel);
                 for y in dialog_area.y..dialog_area.bottom() {
                     for x in dialog_area.x..dialog_area.right() {
                         if let Some(cell) = buf.cell_mut((x, y)) {
@@ -2435,14 +2435,12 @@ impl DialogState {
 
                 // Line 2: gap.
 
-                // Lines 3+: the three actions. The selected row swaps to the
-                // darker panel color (inverted vs the lighter surface) with a
-                // bold primary name.
+                // Lines 3+: the three actions. The selected row is marked
+                // with the project's 🞴 indicator instead of a color swap.
                 let list_top = dialog_y + 3;
                 let list_pad = 1;
                 let list_x = dialog_x + list_pad;
                 let list_w = dialog_w.saturating_sub(list_pad * 2);
-                let bg_panel = rgba_color(theme.background_panel);
                 let options = [
                     ("Edit", "Load the message into the prompt"),
                     ("Delete", "Remove it from the queue"),
@@ -2452,26 +2450,36 @@ impl DialogState {
                 for (idx, (name, desc)) in options.iter().enumerate() {
                     let y = list_top + idx as u16;
                     let is_selected = idx == selection;
-                    let row_bg = if is_selected { bg_panel } else { bg_color };
 
                     for cx in list_x..list_x + list_w {
                         if let Some(cell) = buf.cell_mut((cx, y)) {
                             cell.set_char(' ');
-                            cell.set_style(Style::default().bg(row_bg));
+                            cell.set_style(Style::default().bg(bg_color));
                         }
                     }
 
-                    let name_style = if is_selected {
-                        Style::default()
-                            .fg(rgba_color(theme.primary))
-                            .add_modifier(Modifier::BOLD)
-                            .bg(row_bg)
-                    } else {
-                        Style::default().fg(rgba_color(theme.text)).bg(row_bg)
-                    };
-                    draw_text_line(buf, name, list_x + 1, y, list_w - 1, name_style);
+                    // Indicator takes 2 cols, like the sidebar rows.
+                    let ind = if is_selected { "🞴 " } else { "  " };
+                    draw_text_line(
+                        buf,
+                        ind,
+                        list_x + 1,
+                        y,
+                        list_w - 1,
+                        Style::default().fg(rgba_color(theme.text)).bg(bg_color),
+                    );
 
-                    let desc_x = list_x + 12;
+                    let name_x = list_x + 3;
+                    draw_text_line(
+                        buf,
+                        name,
+                        name_x,
+                        y,
+                        list_w - 1,
+                        Style::default().fg(rgba_color(theme.text)).bg(bg_color),
+                    );
+
+                    let desc_x = list_x + 14;
                     if desc_x < list_x + list_w {
                         draw_text_line(
                             buf,
@@ -2479,7 +2487,9 @@ impl DialogState {
                             desc_x,
                             y,
                             list_x + list_w - desc_x,
-                            Style::default().fg(rgba_color(theme.text_muted)).bg(row_bg),
+                            Style::default()
+                                .fg(rgba_color(theme.text_muted))
+                                .bg(bg_color),
                         );
                     }
                 }
