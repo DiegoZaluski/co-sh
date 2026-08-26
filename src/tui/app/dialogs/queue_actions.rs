@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use super::super::agent_loop::QUEUE_ACTIONS_GRACE;
 use crate::routes::session::queue_choice::QueueTarget;
+use crate::types::SessionStatus;
 use crate::ui::dialogs::DialogType;
 use crate::util::selection;
 
@@ -164,6 +165,48 @@ impl App {
             None => {
                 deque.push_back(text);
             }
+        }
+    }
+
+    /// Submit the prompt text as a user message.
+    ///
+    /// Normally this starts a fresh agent loop right away. But when an
+    /// EDITED queued message is outstanding (the hint armed by Queue Actions
+    /// → Edit), the message MUST return to its slot in the queue instead of
+    /// being treated as a direct provider input — otherwise submitting it
+    /// right as the loop ends (status already Idle) would jump ahead of
+    /// everything still queued. The queue chain then resumes in FIFO order:
+    /// leftover "next request" messages are promoted and the head of "next
+    /// agent loop" starts, honoring the queue-actions hold via the deferred
+    /// start flag.
+    pub(in crate::app) fn submit_prompt_message(&mut self, text: String) {
+        let Some(target) = self.edit_requeue_hint.as_ref().map(|(q, _, _)| *q) else {
+            // Plain submission (no edited message in flight).
+            self.start_agent_loop(text);
+            return;
+        };
+        self.enqueue_pending_message(target, text);
+
+        if self.state.status != SessionStatus::Idle {
+            return;
+        }
+        if self.queue_actions_hold_active() {
+            // Deliveries are on hold: let the pump promote and start the
+            // chain once the hold expires.
+            self.queue_actions_deferred_start = true;
+            return;
+        }
+        let Some(id) = self.state.current_session_id.clone() else {
+            return;
+        };
+        self.promote_next_request_to_next_loop(&id);
+        let next = self
+            .state
+            .pending_queues
+            .get_mut(&id)
+            .and_then(|q| q.next_loop.pop_front());
+        if let Some(msg) = next {
+            self.start_agent_loop(msg);
         }
     }
 }

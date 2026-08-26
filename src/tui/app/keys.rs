@@ -759,7 +759,10 @@ impl App {
                     if msg.trim().is_empty() {
                         return Ok(false);
                     }
-                    self.start_agent_loop(msg);
+                    // An edited queued message outstanding? It goes back to
+                    // its queue slot (never a direct provider input) and the
+                    // queue chain resumes FIFO. Otherwise: normal send.
+                    self.submit_prompt_message(msg);
                 }
                 Some(crate::keymap::Action::Interrupt) => {
                     if self.state.status == crate::types::SessionStatus::Working {

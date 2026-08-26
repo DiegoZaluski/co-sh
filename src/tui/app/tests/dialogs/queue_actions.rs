@@ -1,7 +1,23 @@
 use super::super::App;
 use crate::routes::session::queue_choice::QueueTarget;
-use crate::types::SessionStatus;
+use crate::types::{Message, SessionStatus};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+/// Joined non-synthetic text of a message (what the transcript shows).
+fn text_of(msg: &Message) -> String {
+    msg.parts
+        .iter()
+        .filter_map(|p| match p {
+            crate::types::Part::Text(t) if !t.synthetic => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 // ── Queue Actions (Edit/Delete/Copy on pending queued messages) ─────────
 
@@ -406,4 +422,124 @@ async fn hovered_queue_row_background_is_white() {
         buf[(5, 11)].style().bg,
         Some(ratatui::style::Color::Rgb(255, 255, 255))
     );
+}
+
+// ── Edited submit racing the loop end (status already Idle) ─────────────
+
+#[tokio::test]
+async fn edited_submit_after_loop_end_requeues_instead_of_direct_send() {
+    let mut app = app_with_queues();
+    // Edit "request-two" (index 1 of next_request): it leaves the queue and
+    // the edit hint is armed.
+    app.run_queue_action(0, QueueTarget::NextRequest, 1);
+
+    // The agent loop ends right at that moment: status is already Idle when
+    // the user submits.
+    app.state.status = SessionStatus::Idle;
+    app.prompt_view.input = "request-two".into();
+    app.prompt_view.cursor_pos = 11;
+    app.process_key_event(key(KeyCode::Enter)).unwrap();
+
+    let queues = app.state.current_pending_queues().unwrap();
+    assert!(
+        queues.next_request.is_empty(),
+        "leftover next-request messages are promoted like a clean loop end"
+    );
+    // FIFO chain: "loop-one" heads the queue — the edited message waits in
+    // its due slot instead of jumping ahead as a direct input.
+    assert_eq!(
+        queues.next_loop.iter().collect::<Vec<_>>(),
+        ["loop-two", "request-one", "request-two"]
+    );
+    let session = app.state.current_session().unwrap();
+    let last = session.messages.last().map(text_of);
+    assert_eq!(last.as_deref(), Some("loop-one"));
+    assert!(app.edit_requeue_hint.is_none());
+}
+
+#[tokio::test]
+async fn edited_next_loop_submit_after_loop_end_starts_from_queue_head() {
+    let mut app = app_with_queues();
+    // Edit the HEAD of next_loop.
+    app.run_queue_action(0, QueueTarget::NextLoop, 0);
+
+    app.state.status = SessionStatus::Idle;
+    app.prompt_view.input = "loop-one".into();
+    app.prompt_view.cursor_pos = 8;
+    app.process_key_event(key(KeyCode::Enter)).unwrap();
+
+    let queues = app.state.current_pending_queues().unwrap();
+    // Re-inserted at index 0, leftovers promoted behind it, head starts.
+    assert_eq!(
+        queues.next_loop.iter().collect::<Vec<_>>(),
+        ["loop-two", "request-one", "request-two"]
+    );
+    let last = app
+        .state
+        .current_session()
+        .unwrap()
+        .messages
+        .last()
+        .map(text_of);
+    assert_eq!(last.as_deref(), Some("loop-one"));
+}
+
+#[tokio::test]
+async fn edited_submit_during_hold_defers_the_chain_start() {
+    use std::time::{Duration, Instant};
+    let mut app = app_with_queues();
+    app.run_queue_action(0, QueueTarget::NextRequest, 1);
+
+    // Loop ended AND the 5s grace from opening the box is still active.
+    app.state.status = SessionStatus::Idle;
+    app.queue_actions_grace_until = Some(Instant::now() + Duration::from_secs(5));
+    app.prompt_view.input = "request-two".into();
+    app.prompt_view.cursor_pos = 11;
+    app.process_key_event(key(KeyCode::Enter)).unwrap();
+
+    // Nothing starts while held; the message sits in its slot.
+    assert_eq!(app.state.status, SessionStatus::Idle);
+    assert!(app.queue_actions_deferred_start);
+    let queues = app.state.current_pending_queues().unwrap();
+    assert_eq!(
+        queues.next_request.iter().collect::<Vec<_>>(),
+        ["request-one", "request-two"]
+    );
+
+    // Hold expires: the pump promotes and starts the chain from the head.
+    app.queue_actions_grace_until = Some(Instant::now() - Duration::from_millis(1));
+    app.pump_queued_messages();
+    assert_eq!(app.state.status, SessionStatus::Working);
+    let queues = app.state.current_pending_queues().unwrap();
+    assert_eq!(
+        queues.next_loop.iter().collect::<Vec<_>>(),
+        ["loop-two", "request-one", "request-two"]
+    );
+    let last = app
+        .state
+        .current_session()
+        .unwrap()
+        .messages
+        .last()
+        .map(text_of);
+    assert_eq!(last.as_deref(), Some("loop-one"));
+}
+
+#[tokio::test]
+async fn plain_submit_without_outstanding_edit_still_sends_directly() {
+    let mut app = app_with_queues();
+    app.state.status = SessionStatus::Idle;
+
+    app.prompt_view.input = "fresh message".into();
+    app.prompt_view.cursor_pos = 13;
+    app.process_key_event(key(KeyCode::Enter)).unwrap();
+
+    // No edit hint → normal send semantics are untouched.
+    assert_eq!(app.state.status, SessionStatus::Working);
+    let session = app.state.current_session().unwrap();
+    let last = session.messages.last().map(text_of);
+    assert_eq!(last.as_deref(), Some("fresh message"));
+    // Queues untouched (no promotion was triggered by a direct send).
+    let queues = app.state.current_pending_queues().unwrap();
+    assert_eq!(queues.queued_count(), 4);
 }
