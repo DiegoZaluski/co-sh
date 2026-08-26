@@ -162,6 +162,13 @@ impl App {
                 return Ok(false);
             }
 
+            // Zen free-gateway prompt: left/right switches Yes/No (Enter is
+            // handled in the Confirm action arm below, Esc pops unanswered).
+            if self.is_zen_gateway_dialog_visible() && self.handle_zen_gateway_dialog_key(key.code)
+            {
+                return Ok(false);
+            }
+
             // Hook registration box: handled with the full key event
             // so ctrl-combos (word jumps) reach it intact.
             if matches!(
@@ -729,6 +736,14 @@ impl App {
                     self.state.right_panel.cycle_agent_queue(dir);
                 }
                 Some(crate::keymap::Action::SendMessage | crate::keymap::Action::Confirm) => {
+                    // Zen free-gateway prompt: Enter commits the FINAL
+                    // Yes/No answer (write-once; never asked again).
+                    if let Some(dialog) = self.dialog.current()
+                        && matches!(dialog.dialog_type, DialogType::ZenFreeGateway)
+                    {
+                        self.commit_zen_gateway_choice();
+                        return Ok(false);
+                    }
                     if let Some(dialog) = self.dialog.current()
                         && matches!(dialog.dialog_type, DialogType::Confirm { .. })
                     {
@@ -781,6 +796,10 @@ impl App {
                         self.prompt_view.focus();
                     } else if self.dialog.visible() {
                         self.pending_delete_session_id = None;
+                        // Zen prompt closed unanswered: put the parked
+                        // message back into the input (nothing recorded,
+                        // nothing persisted).
+                        self.restore_pending_zen_message();
                         self.clear_rag_pending_state();
                         self.dialog.pop();
                     }
@@ -809,6 +828,10 @@ impl App {
                         self.prompt_view.focus();
                     } else if self.dialog.visible() {
                         self.pending_delete_session_id = None;
+                        // Zen prompt closed unanswered: put the parked
+                        // message back into the input (nothing recorded,
+                        // nothing persisted).
+                        self.restore_pending_zen_message();
                         self.clear_rag_pending_state();
                         self.dialog.pop();
                     } else if matches!(self.mode(), AppMode::Session) {

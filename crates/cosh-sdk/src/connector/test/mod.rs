@@ -7,3 +7,4 @@ pub(crate) mod list_models;
 pub(crate) mod provider;
 pub(crate) mod retry;
 pub(crate) mod streaming;
+pub(crate) mod zen;

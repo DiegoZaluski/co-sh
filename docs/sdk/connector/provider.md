@@ -19,11 +19,11 @@ pub struct ProviderConfig {
 }
 ```
 
-~26 providers are registered: `openai`, `groq`, `mistral`, `together`,
+~28 providers are registered: `openai`, `groq`, `mistral`, `together`,
 `openrouter`, `xai`, `deepseek`, `perplexity`, `fireworks`, `cohere`,
 `huggingface`, `sambanova`, `poe`, `cerebras`, `nvidia`, `anyscale`,
 `vercel`, `cloudflare`, `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`,
-`gemini`, `claude`, `zai`, `charm`. The local model servers (ollama,
+`gemini`, `claude`, `zai`, `charm`, `opencode`. The local model servers (ollama,
 lmstudio, vllm, llamacpp, and the extra ones below) point at
 `http://localhost:*`.
 
@@ -79,6 +79,41 @@ left untouched, and unknown providers are returned verbatim. The raw URL the
 user typed is stored in setup.json — normalization is applied at request time,
 never persisted, and lives in the TUI layer (not in `with_base_url`), so SDK
 tests can keep mocking exact URLs.
+
+## The OpenCode Zen gateway (`opencode`) and its anonymous free tier
+
+`opencode` points at `https://opencode.ai/zen/v1` (default model
+`x-preview-f-free`, key env `OPENCODE_API_KEY`). The gateway deliberately
+serves an ANONYMOUS free tier: requests carrying the sentinel bearer
+[`ZEN_PUBLIC_KEY`] (`"public"`) are answered only for models flagged
+`allowAnonymous` server-side and are rate-limited per IP. cosh's rules for
+using it — enforced in code, not convention:
+
+- **Account keys always win.** A key resolved from keyring/env (or passed via
+  `with_api_key`) means the sentinel is never sent.
+- **Strictly opt-in.** The sentinel is only used when the connector flag
+  `with_zen_public_tier(true)` is set OR the process-wide switch
+  [`set_zen_public_tier_enabled`] was turned on (the TUI flips it from the
+  user's persisted answer in setup.json).
+- **Free models only.** Anonymous requests are checked against
+  [`ZEN_FREE_MODELS`] before any network activity; a paid model fails with
+  `ConnectorError::AnonymousModelBlocked`. Anonymous `list_models` returns
+  only free models. The list deliberately excludes
+  `muse-spark-1.2-contributor-free` (its data policy grants training rights).
+- **Honest identification.** Zen requests carry `User-Agent: cosh/<version>`
+  ([`ZEN_USER_AGENT`]) and no other client's headers — anonymous traffic keeps
+  the stricter public rate-limit bucket instead of imitating the official
+  client.
+
+```rust,ignore
+pub const ZEN_PROVIDER: &str = "opencode";
+pub const ZEN_PUBLIC_KEY: &str = "public";
+pub const ZEN_USER_AGENT: &str = "cosh/<version>";
+pub const ZEN_FREE_MODELS: &[&str];
+pub fn is_zen_free_model(model: &str) -> bool;
+pub fn set_zen_public_tier_enabled(enabled: bool);   // process-wide opt-in
+pub fn zen_public_tier_enabled() -> bool;
+```
 
 ## API key resolution
 

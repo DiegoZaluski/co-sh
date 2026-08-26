@@ -171,6 +171,9 @@ pub struct App {
     session_store: SessionStore,
     /// When set, the current Confirm dialog is asking about deleting a session.
     pending_delete_session_id: Option<String>,
+    /// Message captured while the one-time Zen free-gateway prompt was open;
+    /// replayed through `start_agent_loop` when the user opts in.
+    pending_zen_message: Option<String>,
     /// Whether a title has already been generated for the current session.
     /// Set to `false` when a new session is created; set to `true` after
     /// the async title generation task is spawned.
@@ -259,6 +262,11 @@ impl App {
 
         let saved_bell = setup.appearance.bell_enabled;
 
+        // Propagate the persisted Zen free-gateway opt-in to every connector
+        // built in this process (harness fallback chains, compaction, session
+        // titles) without each construction site needing the setup file.
+        cosh_sdk::connector::set_zen_public_tier_enabled(setup.zen_public_opt_in() == Some(true));
+
         Self {
             state,
             theme_registry,
@@ -302,6 +310,7 @@ impl App {
             setup,
             session_store,
             pending_delete_session_id: None,
+            pending_zen_message: None,
             title_generated: false,
             manual_compaction_active: false,
             #[cfg(feature = "embed")]
@@ -620,14 +629,14 @@ impl App {
 #[path = "../bench/bench_e2e.rs"]
 mod bench_e2e;
 #[cfg(test)]
-#[path = "../bench/stress_rebuild.rs"]
-mod stress_rebuild;
-#[cfg(test)]
-#[path = "../bench/stress_streaming.rs"]
-mod stress_streaming;
-#[cfg(test)]
 #[path = "../bench/probe_drain.rs"]
 mod probe_drain;
 #[cfg(test)]
 #[path = "../bench/probe_real.rs"]
 mod probe_real;
+#[cfg(test)]
+#[path = "../bench/stress_rebuild.rs"]
+mod stress_rebuild;
+#[cfg(test)]
+#[path = "../bench/stress_streaming.rs"]
+mod stress_streaming;

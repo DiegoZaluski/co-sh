@@ -1,6 +1,6 @@
 use super::error::ConnectorError;
 use super::output::StreamChunk;
-use super::provider::ProviderConfig;
+use super::provider::{ProviderConfig, ZEN_PROVIDER, ZEN_USER_AGENT};
 use async_stream::stream;
 use std::pin::Pin;
 use std::sync::OnceLock;
@@ -121,16 +121,13 @@ pub async fn send_get_request(
     url: &str,
     headers: &[(&str, String)],
 ) -> Result<String, ConnectorError> {
-    let mut request_builder = shared_client().get(url).timeout(Duration::from_mins(1));
+    let mut request_builder = apply_provider_headers(
+        shared_client().get(url).timeout(Duration::from_mins(1)),
+        config,
+    );
 
     for (key, value) in headers {
         request_builder = request_builder.header(*key, value.as_str());
-    }
-
-    if config.needs_extra_headers {
-        request_builder = request_builder
-            .header("HTTP-Referer", "https://localhost")
-            .header("X-Title", "provider");
     }
 
     let response = request_builder.send().await?;
@@ -156,18 +153,15 @@ pub(crate) async fn send_request_stream(
     body: &(impl serde::Serialize + Sync),
     headers: &[(&str, String)],
 ) -> Result<reqwest::Response, ConnectorError> {
-    let mut request_builder = shared_client()
-        .post(url)
-        .header("Content-Type", "application/json");
+    let mut request_builder = apply_provider_headers(
+        shared_client()
+            .post(url)
+            .header("Content-Type", "application/json"),
+        config,
+    );
 
     for (key, value) in headers {
         request_builder = request_builder.header(*key, value.as_str());
-    }
-
-    if config.needs_extra_headers {
-        request_builder = request_builder
-            .header("HTTP-Referer", "https://localhost")
-            .header("X-Title", "provider");
     }
 
     let json_body = serde_json::to_string(body)?;
@@ -189,12 +183,22 @@ pub(crate) fn apply_session_headers(
     }
 }
 
-/// Build the provider-extra headers (HTTP-Referer / X-Title) for the given
-/// provider — shared by the plain send path and the retry wrapper.
+/// Build the provider-extra headers for the given provider — shared by the
+/// plain send paths and the retry wrapper. Two concerns live here:
+/// - OpenRouter's required `HTTP-Referer` / `X-Title` identification;
+/// - the OpenCode Zen gateway's honest `User-Agent`: co-sh identifies itself
+///   as the calling client and keeps whatever (stricter) anonymous rate-limit
+///   bucket that earns — imitating the official client to obtain its limits
+///   would circumvent the provider's access rules.
 pub(crate) fn apply_provider_headers(
     request_builder: reqwest::RequestBuilder,
     config: &ProviderConfig,
 ) -> reqwest::RequestBuilder {
+    let request_builder = if config.name == ZEN_PROVIDER {
+        request_builder.header("User-Agent", ZEN_USER_AGENT)
+    } else {
+        request_builder
+    };
     if config.needs_extra_headers {
         request_builder
             .header("HTTP-Referer", "https://localhost")

@@ -38,9 +38,11 @@ pub use params::{
     tool_result_message, user_message,
 };
 pub use provider::{
-    COSH_SERVICE, clear_api_key_cache, detect_provider, get_api_key, get_provider,
-    get_provider_env_var, has_api_key, invalidate_api_key, is_local_provider,
-    known_local_providers, known_providers, known_providers_with_env, normalize_local_base_url,
+    COSH_SERVICE, ZEN_FREE_MODELS, ZEN_PROVIDER, ZEN_PUBLIC_KEY, clear_api_key_cache,
+    detect_provider, get_api_key, get_provider, get_provider_env_var, has_api_key,
+    invalidate_api_key, is_local_provider, is_zen_free_model, known_local_providers,
+    known_providers, known_providers_with_env, normalize_local_base_url,
+    set_zen_public_tier_enabled, zen_public_tier_enabled,
 };
 pub use usage::TokenUsage;
 

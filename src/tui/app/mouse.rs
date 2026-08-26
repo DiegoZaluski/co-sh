@@ -565,6 +565,12 @@ impl App {
                                 }
                                 return Ok(true);
                             }
+                            DialogType::ZenFreeGateway => {
+                                // Clicking Yes/No selects AND confirms — same
+                                // write-once contract as pressing Enter.
+                                self.commit_zen_gateway_choice();
+                                return Ok(true);
+                            }
                             _ => {}
                         }
                     }
@@ -593,6 +599,12 @@ impl App {
                     self.theme_dialog_original = None;
                     self.model_dialog_original = None;
                     self.reasoning_dialog_original = None;
+                    // Zen gateway prompt closed WITHOUT answering: put the
+                    // parked message back into the input — nothing was
+                    // recorded, nothing persisted.
+                    if self.is_zen_gateway_dialog_visible() {
+                        self.restore_pending_zen_message();
+                    }
                     self.dialog.pop();
                     return Ok(true);
                 }

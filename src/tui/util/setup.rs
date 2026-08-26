@@ -104,6 +104,12 @@ pub struct FallbackEntry {
 pub struct Providers {
     /// Map of local provider name → endpoint configuration.
     pub local: std::collections::HashMap<String, LocalEndpoint>,
+    /// One-time answer to the OpenCode Zen free-gateway prompt: `true` = the
+    /// user opted in (anonymous free tier allowed when no API key is set),
+    /// `false` = declined, `None` = never asked. Write-once from the UI: the
+    /// prompt is shown exactly once and NEVER re-asked afterwards — the only
+    /// way back is deleting this field from setup.json by hand.
+    pub zen_public_opt_in: Option<bool>,
 }
 
 /// A single local provider endpoint (`http://host:port`).
@@ -240,6 +246,24 @@ impl Setup {
             self.save();
         }
     }
+
+    /// The persisted answer to the one-time OpenCode Zen free-gateway
+    /// prompt, if the user already answered it (`None` = never asked).
+    #[must_use]
+    pub const fn zen_public_opt_in(&self) -> Option<bool> {
+        self.providers.zen_public_opt_in
+    }
+
+    /// Record the user's FINAL answer to the free-gateway prompt and
+    /// persist. Deliberately write-once: a stored answer is never flipped by
+    /// later calls, so the prompt can only come back by removing the field
+    /// from setup.json manually.
+    pub fn record_zen_public_opt_in(&mut self, opted_in: bool) {
+        if self.providers.zen_public_opt_in.is_none() {
+            self.providers.zen_public_opt_in = Some(opted_in);
+            self.save();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -302,11 +326,38 @@ mod tests {
                 timeout: Some(5),
             }],
         );
-        let json = serde_json::to_string(&setup).unwrap();
-        let loaded: Setup = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&setup);
+        let loaded: Setup = serde_json::from_str(&json.unwrap()).unwrap();
         assert!(loaded.hooks.pre_tool_use_enabled);
         assert!(!loaded.hooks.post_tool_use_enabled);
         assert_eq!(loaded.hooks.events["PreToolUse"].len(), 1);
         assert_eq!(loaded.hooks.events["PreToolUse"][0].command, "exit 2");
+    }
+
+    /// The Zen free-gateway answer is write-once from the UI: the first
+    /// `record_zen_public_opt_in` call persists, later calls are no-ops, and
+    /// the field round-trips through setup.json.
+    #[test]
+    fn zen_opt_in_is_write_once_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("setup.json");
+
+        let mut setup = Setup::default();
+        assert_eq!(setup.zen_public_opt_in(), None);
+
+        setup.record_zen_public_opt_in(true);
+        assert_eq!(setup.zen_public_opt_in(), Some(true));
+        // A second call must NOT flip the recorded answer.
+        setup.record_zen_public_opt_in(false);
+        assert_eq!(setup.zen_public_opt_in(), Some(true));
+
+        let json = serde_json::to_string_pretty(&setup).unwrap();
+        std::fs::write(&path, &json).unwrap();
+        let loaded: Setup = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.zen_public_opt_in(), Some(true));
+
+        // An old config without the field still loads (defaults to None).
+        let legacy: Setup = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.zen_public_opt_in(), None);
     }
 }

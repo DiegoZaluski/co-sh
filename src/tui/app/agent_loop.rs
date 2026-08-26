@@ -17,6 +17,17 @@ impl App {
     /// are handed to the new loop's queued-input channel so they enter its
     /// first request.
     pub(super) fn start_agent_loop(&mut self, msg: String) {
+        // OpenCode Zen anonymous-tier gate: a keyless send that would hit
+        // the Zen gateway (directly or through an `auto` fallback) asks ONCE
+        // whether to use the free gateway. The message is parked and only
+        // replayed on opt-in; Esc closes without recording anything.
+        if self.needs_zen_gateway_prompt() {
+            self.pending_zen_message = Some(msg);
+            self.dialog
+                .show(crate::ui::dialogs::DialogType::ZenFreeGateway);
+            return;
+        }
+
         if self.state.current_session_id.is_none() {
             let id = generate_session_id();
             let title: String = msg.chars().take(40).collect();

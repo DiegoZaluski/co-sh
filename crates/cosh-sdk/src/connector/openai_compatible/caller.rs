@@ -5,7 +5,10 @@ use super::super::common::{
 use super::super::error::ConnectorError;
 use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
 use super::super::params::{Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
-use super::super::provider::{ProviderConfig, get_api_key, is_local_provider};
+use super::super::provider::{
+    ProviderConfig, ZEN_PROVIDER, ZEN_PUBLIC_KEY, get_api_key, is_local_provider,
+    is_zen_free_model, zen_public_tier_enabled,
+};
 use crate::extract_action::NativeToolCall;
 
 use async_stream::stream;
@@ -660,6 +663,11 @@ fn build_chat_request(
 /// servers ignore the `Authorization` header entirely); cloud providers fall
 /// back to the OS keyring / environment and must have a key. Returns an
 /// error when a cloud provider has no key configured.
+///
+/// OpenCode Zen exception: when the user opted in to the anonymous free tier
+/// and no account key resolved, the gateway's `public` sentinel is returned
+/// instead of an error — every caller then enforces the free-model
+/// restriction (see [`zen_anonymous`]).
 fn resolve_api_key(
     config: &ProviderConfig,
     params: &Parameters,
@@ -670,9 +678,36 @@ fn resolve_api_key(
         .clone()
         .or_else(|| get_api_key(config.name, service));
     if !is_local_provider(config.name) && key.is_none() {
+        // A real account key always wins; the sentinel is only sent after an
+        // explicit opt-in (per-connector flag or the process-wide switch)
+        // with nothing resolvable.
+        if config.name == ZEN_PROVIDER && (params.zen_public_tier || zen_public_tier_enabled()) {
+            return Ok(Some(ZEN_PUBLIC_KEY.to_string()));
+        }
         return Err(ConnectorError::MissingApiKey(config.name.to_string()));
     }
     Ok(key)
+}
+
+/// Whether this request rides the Zen ANONYMOUS tier: the resolved
+/// credential is the `public` sentinel (never true for a real account key).
+fn zen_anonymous(config: &ProviderConfig, api_key: Option<&String>) -> bool {
+    config.name == ZEN_PROVIDER && api_key.is_some_and(|k| k == ZEN_PUBLIC_KEY)
+}
+
+/// Enforce the anonymous-tier model restriction for the OpenCode Zen gateway:
+/// with the `public` sentinel only the documented free models may be
+/// requested. Client-side mirror of the gateway's own `allowAnonymous` gate —
+/// failing fast yields a clear message instead of a bare 401 from the server.
+fn ensure_zen_free_model(
+    config: &ProviderConfig,
+    api_key: Option<&String>,
+    model: &str,
+) -> Result<(), ConnectorError> {
+    if zen_anonymous(config, api_key) && !is_zen_free_model(model) {
+        return Err(ConnectorError::AnonymousModelBlocked(model.to_string()));
+    }
+    Ok(())
 }
 
 /// Send a non-streaming chat completion request.
@@ -691,6 +726,7 @@ pub async fn chat(
         .model
         .clone()
         .unwrap_or_else(|| config.default_model.to_string());
+    ensure_zen_free_model(config, api_key.as_ref(), &model)?;
 
     let messages = build_messages(prompt, system_prompt);
     let request = build_chat_request(model, messages, params, false, config.name);
@@ -752,6 +788,7 @@ pub async fn chat_stream(
         .model
         .clone()
         .unwrap_or_else(|| config.default_model.to_string());
+    ensure_zen_free_model(config, api_key.as_ref(), &model)?;
 
     let messages = build_messages(prompt, system_prompt);
     let request = build_chat_request(model, messages, params, true, config.name);
@@ -821,6 +858,7 @@ pub async fn chat_stream_with_messages(
         .model
         .clone()
         .unwrap_or_else(|| config.default_model.to_string());
+    ensure_zen_free_model(config, api_key.as_ref(), &model)?;
 
     // OpenAI's wire format has no `thought_signature` — a Gemini-originated
     // call (carried internally on ToolCallMsg) must be stripped before
@@ -952,9 +990,14 @@ pub async fn list_models(
     let response_text = send_get_request(config, &url, &headers).await?;
 
     let list: ListModelsResponse = serde_json::from_str(&response_text)?;
+    let anonymous = zen_anonymous(config, api_key.as_ref());
     let models: Vec<ModelInfo> = list
         .data
         .into_iter()
+        // Anonymous Zen sessions only see the free tier: filter the
+        // structured list so pickers never offer a model the gateway would
+        // refuse (the raw body is left untouched for debugging).
+        .filter(|item| !anonymous || is_zen_free_model(&item.id))
         .map(|item| ModelInfo { id: item.id })
         .collect();
 
