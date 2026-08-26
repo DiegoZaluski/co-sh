@@ -795,13 +795,14 @@ impl DialogState {
                 DialogAction::Consumed
             }
             DialogType::QueueActions { .. } => {
-                // Identical compact geometry to MessageActions (3 items).
+                // Identical compact geometry to the render arm (3 items plus
+                // 1 line of top padding).
                 let max_w = 64u16.min(area.width.saturating_sub(4));
                 let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
                 let max_visible = 3usize;
-                let dialog_h = (max_visible + 4) as u16;
+                let dialog_h = (max_visible + 5) as u16;
                 let dialog_y = area
                     .y
                     .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
@@ -819,11 +820,11 @@ impl DialogState {
                 let header_w = dialog_w.saturating_sub(header_pad * 2);
                 let esc_label = "esc";
                 let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                if y_click == dialog_y && x >= esc_x && x < esc_x + esc_label.len() as u16 {
+                if y_click == dialog_y + 1 && x >= esc_x && x < esc_x + esc_label.len() as u16 {
                     return DialogAction::Dismissed;
                 }
 
-                let list_top = dialog_y + 3;
+                let list_top = dialog_y + 4;
                 if y_click >= list_top {
                     let row = (y_click - list_top) as usize;
                     if row < max_visible {
@@ -2373,7 +2374,9 @@ impl DialogState {
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
                 let items = 3usize;
-                let dialog_h = (items + 4) as u16;
+                // +1 line of content padding at the top, matching the blank
+                // line already left below the last option.
+                let dialog_h = (items + 5) as u16;
                 let dialog_y = area
                     .y
                     .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
@@ -2408,7 +2411,7 @@ impl DialogState {
                     buf,
                     "Queue Actions",
                     header_x,
-                    dialog_y,
+                    dialog_y + 1,
                     header_w,
                     title_style,
                 );
@@ -2418,26 +2421,26 @@ impl DialogState {
                     buf,
                     esc_label,
                     esc_x,
-                    dialog_y,
-                    header_w,
-                    Style::default().fg(rgba_color(theme.text_muted)),
-                );
-
-                // Line 1: clicked message preview (muted, truncated).
-                draw_text_line(
-                    buf,
-                    preview,
-                    header_x,
                     dialog_y + 1,
                     header_w,
                     Style::default().fg(rgba_color(theme.text_muted)),
                 );
 
-                // Line 2: gap.
+                // Line 2: clicked message preview (muted, truncated).
+                draw_text_line(
+                    buf,
+                    preview,
+                    header_x,
+                    dialog_y + 2,
+                    header_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
 
-                // Lines 3+: the three actions. The selected row is marked
+                // Line 3: gap.
+
+                // Lines 4+: the three actions. The selected row is marked
                 // with the project's 🞴 indicator instead of a color swap.
-                let list_top = dialog_y + 3;
+                let list_top = dialog_y + 4;
                 let list_pad = 1;
                 let list_x = dialog_x + list_pad;
                 let list_w = dialog_w.saturating_sub(list_pad * 2);
