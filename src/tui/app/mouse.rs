@@ -587,12 +587,7 @@ impl App {
                                 }
                                 return Ok(true);
                             }
-                            DialogType::ZenFreeGateway => {
-                                // Clicking Yes/No selects AND confirms — same
-                                // write-once contract as pressing Enter.
-                                self.commit_zen_gateway_choice();
-                                return Ok(true);
-                            }
+
                             _ => {}
                         }
                     }
@@ -621,12 +616,6 @@ impl App {
                     self.theme_dialog_original = None;
                     self.model_dialog_original = None;
                     self.reasoning_dialog_original = None;
-                    // Zen gateway prompt closed WITHOUT answering: put the
-                    // parked message back into the input — nothing was
-                    // recorded, nothing persisted.
-                    if self.is_zen_gateway_dialog_visible() {
-                        self.restore_pending_zen_message();
-                    }
                     self.dialog.pop();
                     return Ok(true);
                 }
@@ -762,6 +751,42 @@ impl App {
                     self.prompt_view.focus();
                 }
                 return Ok(true);
+            }
+        }
+
+        // 5b. Free-gateway recommendation dialog (inline)
+        if self.free_gateway_dialog.visible && matches!(self.mode(), AppMode::Session) {
+            let area = self.terminal_size();
+            let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+            let main_area = Rect::new(
+                area.x + sidebar_w,
+                area.y,
+                area.width.saturating_sub(sidebar_w),
+                area.height,
+            );
+            let footer_y = main_area.bottom().saturating_sub(1);
+            let _prompt_h = 0u16; // prompt is hidden when dialog is visible
+            let rec_h = self
+                .free_gateway_dialog
+                .required_height(main_area.width.saturating_sub(4));
+            let rec_h = rec_h.min(footer_y.saturating_sub(area.y + 1));
+            let rec_area_y = footer_y.saturating_sub(rec_h);
+            let rec_area = Rect::new(
+                main_area.x + 2,
+                rec_area_y,
+                main_area.width.saturating_sub(4),
+                rec_h,
+            );
+            if !self.mouse_drag_active && self.drag_selection.is_none() {
+                let consumed = self.free_gateway_dialog.handle_mouse(&mouse, rec_area, &self.theme);
+                if consumed {
+                    if self.free_gateway_dialog.submitted {
+                        self.commit_gateway_choice();
+                    } else if !self.free_gateway_dialog.visible {
+                        self.restore_pending_gateway_message();
+                    }
+                    return Ok(true);
+                }
             }
         }
 

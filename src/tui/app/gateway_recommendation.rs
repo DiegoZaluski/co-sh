@@ -1,25 +1,16 @@
-use super::super::{App, AppMode};
-use crossterm::event::KeyCode;
+use super::{App, AppMode};
 
-use crate::ui::dialogs::DialogType;
+use crate::routes::session::free_gateway_recommendation::{self, GatewayRecommendationContent};
 use crate::ui::toast::{ToastOptions, ToastVariant};
 
 use cosh_sdk::connector::{ZEN_PROVIDER, get_provider, has_api_key, is_local_provider};
 
 impl App {
-    pub(in crate::app) fn is_zen_gateway_dialog_visible(&self) -> bool {
-        self.dialog.visible()
-            && matches!(
-                self.dialog.current().map(|d| &d.dialog_type),
-                Some(DialogType::ZenFreeGateway)
-            )
-    }
-
-    /// Whether sending now would hit the OpenCode Zen gateway WITHOUT an
-    /// account key and before the user answered the one-time free-gateway
-    /// prompt. Covers both the directly selected provider and any provider
+    /// Whether sending now would hit a provider WITHOUT an account key and
+    /// the user hasn't answered the one-time free-gateway prompt yet.
+    /// Covers both the directly selected provider and any provider
     /// reachable through an `auto` fallback chain.
-    pub(in crate::app) fn needs_zen_gateway_prompt(&self) -> bool {
+    pub(in crate::app) fn needs_gateway_recommendation(&self) -> bool {
         // Answered (Yes or No, persisted in setup.json) → never ask again.
         if self.setup.zen_public_opt_in().is_some() {
             return false;
@@ -48,44 +39,36 @@ impl App {
             })
     }
 
-    /// Arrow navigation inside the Zen free-gateway prompt (Enter is handled
-    /// by the `Confirm` action arm in `keys.rs`, Esc pops without answering).
-    pub(in crate::app) fn handle_zen_gateway_dialog_key(&mut self, key: KeyCode) -> bool {
-        if !self.is_zen_gateway_dialog_visible() {
-            return false;
-        }
-        match key {
-            KeyCode::Left | KeyCode::Right => {
-                if let Some(d) = self.dialog.current_mut() {
-                    d.selected ^= 1;
-                }
-                true
-            }
-            _ => false,
-        }
+    /// Determine which gateway recommendation content to offer.
+    /// Currently only Zen; extensible for future gateways.
+    pub(in crate::app) fn gateway_recommendation_content(
+        &self,
+    ) -> Option<&'static GatewayRecommendationContent> {
+        // Only recommend the Zen free gateway for now.
+        // Future: check for other gateway providers based on config.
+        Some(&free_gateway_recommendation::ZEN)
     }
 
     /// Put a parked message back into the prompt input — used whenever the
-    /// dialog closes WITHOUT an opt-in so the user never loses what they
-    /// typed.
-    pub(in crate::app) fn restore_pending_zen_message(&mut self) {
+    /// dialog closes WITHOUT an opt-in so the user never loses what they typed.
+    pub(in crate::app) fn restore_pending_gateway_message(&mut self) {
         if let Some(msg) = self.pending_zen_message.take() {
             self.prompt_view.input = msg;
             self.prompt_view.cursor_pos = self.prompt_view.input.len();
         }
     }
 
-    /// Enter on the Zen free-gateway prompt: record the user's FINAL answer
-    /// (write-once in setup.json — the prompt never appears again), then
-    /// replay the parked message when opting in.
-    pub(in crate::app) fn commit_zen_gateway_choice(&mut self) {
-        let opted_in = self.dialog.current().is_some_and(|d| d.selected == 0);
+    /// Enter on the free gateway recommendation dialog: record the user's
+    /// FINAL answer (write-once in setup.json — the prompt never appears again),
+    /// then replay the parked message when opting in.
+    pub(in crate::app) fn commit_gateway_choice(&mut self) {
+        let opted_in = self.free_gateway_dialog.selected == 0;
         self.setup.record_zen_public_opt_in(opted_in);
         // Flip the process-wide switch immediately so the replayed message —
-        // and every later connector (fallback chains, /compact, titles) —
-        // inherits the answer without a restart.
+        // and every later connector (fallback chains, compaction, session
+        // titles) — inherits the answer without a restart.
         cosh_sdk::connector::set_zen_public_tier_enabled(opted_in);
-        self.dialog.pop();
+        self.free_gateway_dialog.hide();
 
         let pending = self.pending_zen_message.take();
         if opted_in {
@@ -115,18 +98,18 @@ impl App {
                 }),
             }
         } else {
-            self.restore_pending_zen_message();
+            self.restore_pending_gateway_message();
             self.toast_state.show(ToastOptions {
                 title: Some("Free gateway declined".into()),
-                message:
-                    "Configure an OpenCode API key (ADD Provider) to use its models. Reset providers.zen_public_opt_in in setup.json to be asked again."
-                        .into(),
+                message: "Configure an OpenCode API key (ADD Provider) to use its models. Reset providers.zen_public_opt_in in setup.json to be asked again."
+                    .into(),
                 variant: ToastVariant::Warning,
                 duration_ms: 8000,
             });
         }
     }
-    /// Offer the one-time Zen free-gateway prompt after a FAILED send whose
+
+    /// Offer the one-time free-gateway recommendation after a FAILED send whose
     /// cause the free gateway would actually fix:
     /// - a missing API key (any provider);
     /// - an auth rejection (401/403) on the selected provider;
@@ -140,11 +123,11 @@ impl App {
     ///
     /// Guarded by the write-once opt-in state: once the user answered Yes or
     /// No — even in an earlier session — this never prompts again.
-    pub(in crate::app) fn maybe_offer_zen_gateway_on_error(&mut self, error: &str) {
+    pub(in crate::app) fn maybe_offer_gateway_on_error(&mut self, error: &str) {
         if self.setup.zen_public_opt_in().is_some() || has_api_key(ZEN_PROVIDER) {
             return;
         }
-        if !matches!(self.mode(), AppMode::Session) || self.dialog.visible() {
+        if !matches!(self.mode(), AppMode::Session) || self.free_gateway_dialog.visible {
             return;
         }
         // A running local server needs no credentials and must never be
@@ -156,8 +139,10 @@ impl App {
         let config_failure = ["HTTP 401", "HTTP 403", "HTTP 404"]
             .iter()
             .any(|marker| error.contains(marker));
-        if missing_key || config_failure {
-            self.dialog.show(DialogType::ZenFreeGateway);
+        if (missing_key || config_failure)
+            && let Some(content) = self.gateway_recommendation_content()
+        {
+            self.free_gateway_dialog.show(content);
         }
     }
 }

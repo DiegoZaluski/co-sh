@@ -25,6 +25,7 @@ use crate::routes::session::SessionView;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::queue_choice::QueueChoiceDialog;
+use crate::routes::session::free_gateway_recommendation::FreeGatewayRecommendationDialog;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::routes::session::right_panel::{RIGHT_PANEL_WIDTH, should_show_right_panel};
 use crate::routes::session::sidebar::SidebarView;
@@ -42,6 +43,7 @@ mod commands;
 mod compaction;
 mod dialogs;
 mod events;
+mod gateway_recommendation;
 mod keys;
 mod mouse;
 mod providers;
@@ -141,6 +143,7 @@ pub struct App {
     pub permission_dialog: PermissionDialog,
     pub question_dialog: QuestionDialog,
     pub queue_choice_dialog: QueueChoiceDialog,
+    pub free_gateway_dialog: FreeGatewayRecommendationDialog,
     pub home_view: HomeView,
     pub internal_tools_view: InternalToolsView,
     pub show_internal_tools: bool,
@@ -364,6 +367,7 @@ impl App {
             permission_dialog: PermissionDialog::new(),
             question_dialog: QuestionDialog::new(),
             queue_choice_dialog: QueueChoiceDialog::new(),
+            free_gateway_dialog: FreeGatewayRecommendationDialog::new(),
             keymap: KeyMap::default_vim(),
             config: TuiConfig::default(),
             toast_state: ToastState::new(),

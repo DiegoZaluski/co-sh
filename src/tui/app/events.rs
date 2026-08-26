@@ -710,8 +710,8 @@ impl App {
 
                     // First failure of the keyless OpenCode path (missing key
                     // or auth rejection): offer the one-time free-gateway
-                    // opt-in. Write-once — never offered again once answered.
-                    self.maybe_offer_zen_gateway_on_error(&msg);
+                    // recommendation. Write-once — never offered again once answered.
+                    self.maybe_offer_gateway_on_error(&msg);
                 }
 
                 HarnessEvent::ModelsLoaded { models, current } => {

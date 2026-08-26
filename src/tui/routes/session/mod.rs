@@ -1,4 +1,5 @@
 pub mod footer;
+pub mod free_gateway_recommendation;
 pub mod streaming;
 pub mod tool_render;
 

@@ -5,7 +5,6 @@ mod queue_actions;
 mod text_input;
 mod theme;
 mod tool_call;
-mod zen;
 
 use super::super::App;
 

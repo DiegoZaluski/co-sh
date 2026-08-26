@@ -240,12 +240,13 @@ impl App {
             let footer_y = main_area.bottom().saturating_sub(1);
             let is_session = matches!(self.mode(), AppMode::Session);
 
-            // When question, permission or queue-choice dialog is visible, hide
-            // prompt and spinner (like OpenCode).
+            // When question, permission, queue-choice, or gateway recommendation
+            // dialog is visible, hide prompt and spinner (like OpenCode).
             let hide_prompt_and_spinner = is_session
                 && (self.question_dialog.visible
                     || self.permission_dialog.visible
-                    || self.queue_choice_dialog.visible);
+                    || self.queue_choice_dialog.visible
+                    || self.free_gateway_dialog.visible);
 
             // Detect empty session — no messages yet (like OpenCode initial state)
             let is_empty_session = is_session
@@ -308,6 +309,13 @@ impl App {
             } else {
                 0
             };
+            // Free-gateway recommendation dialog (same position).
+            let recommendation_h = if is_session && self.free_gateway_dialog.visible {
+                self.free_gateway_dialog
+                    .required_height(main_area.width.saturating_sub(4))
+            } else {
+                0
+            };
 
             // Logo block: logo (6 rows) + gap before prompt (1)
             let logo_block_h = if is_empty_session {
@@ -347,9 +355,11 @@ impl App {
             let question_h = question_h.min(max_dialog_h);
             let permission_h = permission_h.min(max_dialog_h);
             let queue_choice_h = queue_choice_h.min(max_dialog_h);
+            let recommendation_h = recommendation_h.min(max_dialog_h);
             let question_area_y = pending_area_y.saturating_sub(question_h);
             let permission_area_y = pending_area_y.saturating_sub(permission_h);
             let queue_choice_area_y = pending_area_y.saturating_sub(queue_choice_h);
+            let recommendation_area_y = pending_area_y.saturating_sub(recommendation_h);
             let pending_area = Rect::new(
                 main_area.x + 2,
                 pending_area_y,
@@ -369,6 +379,7 @@ impl App {
             let session_bottom = question_area_y
                 .min(permission_area_y)
                 .min(queue_choice_area_y)
+                .min(recommendation_area_y)
                 .min(pending_area_y)
                 .min(spinner_area_y)
                 .saturating_sub(prompt_padding);
@@ -391,6 +402,12 @@ impl App {
                 permission_area_y,
                 main_area.width.saturating_sub(4),
                 permission_h,
+            );
+            let recommendation_area = Rect::new(
+                main_area.x + 2,
+                recommendation_area_y,
+                main_area.width.saturating_sub(4),
+                recommendation_h,
             );
             let session_area = Rect::new(
                 main_area.x,
@@ -465,8 +482,14 @@ impl App {
                     if self.question_dialog.visible
                         || self.permission_dialog.visible
                         || self.queue_choice_dialog.visible
+                        || self.free_gateway_dialog.visible
                     {
                         self.prompt_view.blur();
+                    }
+
+                    // Advance the fake streaming text in the recommendation dialog
+                    if self.free_gateway_dialog.visible {
+                        self.free_gateway_dialog.advance_stream();
                     }
 
                     // The animated chat-logo ("O" with a red center and a laser
@@ -495,8 +518,8 @@ impl App {
                         &self.config,
                         delta_time,
                     );
-                    // Question/permission/queue-choice dialogs rendered inline
-                    // between messages and prompt (mutually exclusive).
+                    // Question/permission/queue-choice/recommendation dialogs
+                    // rendered inline between messages and prompt (mutually exclusive).
                     if self.question_dialog.visible {
                         let now = std::time::SystemTime::now();
                         // Sync focus so the answer input's cursor blurs when the
@@ -510,6 +533,9 @@ impl App {
                     } else if self.queue_choice_dialog.visible {
                         self.queue_choice_dialog
                             .render(buf, queue_choice_area, &self.theme);
+                    } else if self.free_gateway_dialog.visible {
+                        self.free_gateway_dialog
+                            .render(buf, recommendation_area, &self.theme);
                     }
                     // Pending queued messages, color-coded per queue, above the
                     // prompt (never rendered while a dialog covers that spot).
@@ -570,7 +596,8 @@ impl App {
                 AppMode::Session => {
                     let hide_text = self.question_dialog.visible
                         || self.permission_dialog.visible
-                        || self.queue_choice_dialog.visible;
+                        || self.queue_choice_dialog.visible
+                        || self.free_gateway_dialog.visible;
                     FooterView::render_with_mode(
                         buf,
                         footer_area,

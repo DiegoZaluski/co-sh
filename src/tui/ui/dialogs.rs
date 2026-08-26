@@ -51,235 +51,7 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
-// ── Zen free-gateway prompt ─────────────────────────────────────────────
 
-/// Width of the borderless Zen free-gateway panel.
-const ZEN_DIALOG_W: u16 = 68;
-/// Height of the borderless Zen free-gateway panel.
-const ZEN_DIALOG_H: u16 = 14;
-/// Horizontal gap between the Yes and No options.
-const ZEN_OPTIONS_GAP: u16 = 6;
-/// Number of explanation lines rendered on the white reading surface. The
-/// white block covers EXACTLY these rows — the options row and the bottom
-/// padding stay on the panel's own color.
-const ZEN_BODY_LINES: usize = 7;
-
-/// Shared geometry for the Zen free-gateway panel — render and mouse
-/// handling must agree on where the options sit, so both derive them from
-/// this one function. Offsets are relative to the centered panel origin.
-struct ZenDialogLayout {
-    x: u16,
-    y: u16,
-    w: u16,
-    h: u16,
-    /// Row holding the WARNING badge (yellow background, label-width only).
-    badge_y: u16,
-    /// Row holding the Yes/No options.
-    options_y: u16,
-    /// Column where "Yes" starts.
-    yes_x: u16,
-    /// Column where "No" starts.
-    no_x: u16,
-}
-
-fn zen_dialog_layout(area: Rect) -> ZenDialogLayout {
-    let w = ZEN_DIALOG_W.min(area.width.saturating_sub(4)).max(30);
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(ZEN_DIALOG_H) / 2;
-    // Options row sits two rows above the bottom padding; the pair is
-    // centered horizontally ("Yes"/"No" widths + gap).
-    let total = 3 + ZEN_OPTIONS_GAP + 2;
-    let options_x = x + w.saturating_sub(total) / 2;
-    ZenDialogLayout {
-        x,
-        y,
-        w,
-        h: ZEN_DIALOG_H,
-        badge_y: y + 3,
-        options_y: y + ZEN_DIALOG_H - 2,
-        yes_x: options_x,
-        no_x: options_x + 3 + ZEN_OPTIONS_GAP,
-    }
-}
-
-/// Borderless solid-panel dialog (the rename-prompt visual language): the
-/// sidebar's `background_panel` color fills the surface, no border
-/// characters. Content top-to-bottom:
-/// - bold title ("Use the OpenCode Zen free gateway?") with a muted "esc";
-/// - a short disclosure: free models without an account, co-sh's
-///   non-affiliation with Anomaly/OpenCode, requests going straight to
-///   opencode.ai under their terms (link), and the free-period training note;
-/// - centered `Yes` / `No` (Yes preselected) with a key hint underneath.
-fn render_zen_gateway_dialog(buf: &mut Buffer, area: Rect, theme: &Theme, selected: usize) {
-    let l = zen_dialog_layout(area);
-
-    // Solid background panel — same color as the history sidebar, a bare
-    // floating surface with no border characters.
-    let bg_color = rgba_color(theme.background_panel);
-    for y in l.y..l.y + l.h {
-        for x in l.x..l.x + l.w {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_char(' ');
-                cell.set_style(
-                    Style::default()
-                        .bg(bg_color)
-                        .remove_modifier(Modifier::all()),
-                );
-                cell.set_diff_option(CellDiffOption::None);
-            }
-        }
-    }
-
-    // White reading surface: EXACTLY the explanation lines, painted edge to
-    // edge (both horizontal limits of the panel). Everything below them —
-    // the blank gap, the Yes/No row and the bottom padding — keeps the
-    // panel's own color.
-    let white_bg = Color::Rgb(255, 255, 255);
-    let body_start = l.badge_y + 1;
-    for y in body_start..body_start + ZEN_BODY_LINES as u16 {
-        for x in l.x..l.x + l.w {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_char(' ');
-                cell.set_style(
-                    Style::default()
-                        .bg(white_bg)
-                        .remove_modifier(Modifier::all()),
-                );
-                cell.set_diff_option(CellDiffOption::None);
-            }
-        }
-    }
-
-    let content_x = l.x + 2;
-    let content_w = l.w.saturating_sub(4);
-
-    // Header row: bold title left, muted "esc" right.
-    let header_y = l.y + 1;
-    draw_text_line(
-        buf,
-        "Use the OpenCode Zen free gateway?",
-        content_x,
-        header_y,
-        content_w,
-        Style::default()
-            .fg(rgba_color(theme.text))
-            .add_modifier(Modifier::BOLD),
-    );
-    let esc_hint = "esc";
-    draw_text_line(
-        buf,
-        esc_hint,
-        l.x + l.w - 2 - esc_hint.len() as u16,
-        header_y,
-        esc_hint.len() as u16,
-        Style::default().fg(rgba_color(theme.text_muted)),
-    );
-
-    // WARNING badge — the theme's warning color as a background confined to
-    // the label's own width; everything else keeps the panel's sidebar
-    // color. The fg follows the swatch's luminance (same contrast rule as
-    // selected rows).
-    let badge = " WARNING ";
-    let (wr, wg, wb, _) = theme.warning.to_ints();
-    let lum = (0.299 * f32::from(wr) + 0.587 * f32::from(wg) + 0.114 * f32::from(wb)) / 255.0;
-    let badge_fg = if lum > 0.5 {
-        Color::Rgb(0, 0, 0)
-    } else {
-        Color::Rgb(255, 255, 255)
-    };
-    draw_text_line(
-        buf,
-        badge,
-        content_x,
-        l.badge_y,
-        content_w,
-        Style::default().fg(badge_fg).bg(rgba_color(theme.warning)),
-    );
-
-    // Disclosure body: what it is, non-affiliation, terms link, data note.
-    // Black-on-white confined to each line's own width for readability —
-    // every other area of the panel keeps its sidebar color.
-    let body: [(&str, bool); 7] = [
-        (
-            "Chat with free models — no account or API key needed.",
-            false,
-        ),
-        (
-            "co-sh is an independent project with NO affiliation to",
-            false,
-        ),
-        (
-            "Anomaly/OpenCode. Requests go from your machine straight",
-            false,
-        ),
-        ("to opencode.ai and follow their terms:", false),
-        ("https://opencode.ai/legal/terms-of-service", true),
-        (
-            "Note some free models may use your data for training",
-            false,
-        ),
-        ("while they are free — see opencode.ai/docs/zen.", false),
-    ];
-    let body_bg = Style::default()
-        .fg(Color::Rgb(0, 0, 0))
-        .bg(Color::Rgb(255, 255, 255));
-    for (i, (text, is_link)) in body.iter().enumerate() {
-        // The URL keeps an underline so it still reads as a link on the
-        // inverted colors.
-        let style = if *is_link {
-            body_bg.add_modifier(Modifier::UNDERLINED)
-        } else {
-            body_bg
-        };
-        draw_text_line(
-            buf,
-            text,
-            content_x,
-            body_start + i as u16,
-            content_w,
-            style,
-        );
-    }
-
-    // Marker-highlight the leading "Note" label of the training note — the
-    // same theme warning swatch as the badge above, over exactly those cells
-    // (highlighter-pen style); the rest of the line keeps its black-on-white
-    // look. Found by prefix so the highlight stays in sync with the body
-    // array.
-    if let Some((idx, _)) = body
-        .iter()
-        .enumerate()
-        .find(|(_, (text, _))| text.starts_with("Note "))
-    {
-        let note_style = Style::default().fg(badge_fg).bg(rgba_color(theme.warning));
-        for (i, ch) in "Note".chars().enumerate() {
-            if let Some(cell) = buf.cell_mut((content_x + i as u16, body_start + idx as u16)) {
-                cell.set_char(ch);
-                cell.set_style(note_style);
-            }
-        }
-    }
-
-    // Options row, back on the PANEL color below the white block —
-    // Confirm-dialog styling: selected option primary+bold, the other muted.
-    let yes_style = if selected == 0 {
-        Style::default()
-            .fg(rgba_color(theme.primary))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(rgba_color(theme.text_muted))
-    };
-    draw_text_line(buf, "Yes", l.yes_x, l.options_y, 3, yes_style);
-
-    let no_style = if selected == 1 {
-        Style::default()
-            .fg(rgba_color(theme.primary))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(rgba_color(theme.text_muted))
-    };
-    draw_text_line(buf, "No", l.no_x, l.options_y, 2, no_style);
-}
 
 /// Borderless text prompt panel: bold title with an "esc" hint on the first
 /// content row, the input line with the blinking cursor, and an "enter
@@ -470,11 +242,7 @@ pub enum DialogType {
         /// Truncated text of the clicked message shown as context.
         preview: String,
     },
-    /// One-time opt-in for the OpenCode Zen anonymous free gateway. Rendered
-    /// as a borderless panel in the sidebar's background color (same visual
-    /// language as the rename prompt) with Yes preselected. The answer is
-    /// recorded ONCE in setup.json and the prompt never appears again.
-    ZenFreeGateway,
+
     /// Action picker for a PENDING queued message (the rows above the
     /// prompt): Edit, Delete, Copy. `queue` + `index` identify the clicked
     /// message inside its `VecDeque`.
@@ -606,28 +374,7 @@ impl DialogState {
 
                 DialogAction::Consumed
             }
-            DialogType::ZenFreeGateway => {
-                let l = zen_dialog_layout(area);
 
-                // Outside the panel → dismiss (same contract as Confirm).
-                if x < l.x || x >= l.x + l.w || y_click < l.y || y_click >= l.y + l.h {
-                    return DialogAction::Dismissed;
-                }
-
-                // Click on an option selects AND confirms it.
-                if y_click == l.options_y {
-                    if x >= l.yes_x && x < l.yes_x + 3 {
-                        instance.selected = 0;
-                        return DialogAction::Confirmed;
-                    }
-                    if x >= l.no_x && x < l.no_x + 2 {
-                        instance.selected = 1;
-                        return DialogAction::Confirmed;
-                    }
-                }
-
-                DialogAction::Consumed
-            }
             DialogType::ThemeList {
                 themes,
                 current: _,
@@ -1264,9 +1011,7 @@ impl DialogState {
                     no_style,
                 );
             }
-            DialogType::ZenFreeGateway => {
-                render_zen_gateway_dialog(buf, area, theme, instance.selected);
-            }
+
             DialogType::ThemeList {
                 themes,
                 current,

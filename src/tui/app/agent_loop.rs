@@ -148,14 +148,15 @@ impl App {
     /// stay queued: [`App::pump_queued_messages`] hands them to the loop's
     /// queued-input channel one at a time (honoring the queue-actions hold).
     pub(super) fn start_agent_loop(&mut self, msg: String) {
-        // OpenCode Zen anonymous-tier gate: a keyless send that would hit
-        // the Zen gateway (directly or through an `auto` fallback) asks ONCE
-        // whether to use the free gateway. The message is parked and only
-        // replayed on opt-in; Esc closes without recording anything.
-        if self.needs_zen_gateway_prompt() {
+        // Free gateway recommendation gate: a keyless send that would hit
+        // a provider without credentials asks ONCE whether to use the free
+        // gateway. The message is parked and only replayed on opt-in;
+        // Esc closes without recording anything.
+        if self.needs_gateway_recommendation() {
             self.pending_zen_message = Some(msg);
-            self.dialog
-                .show(crate::ui::dialogs::DialogType::ZenFreeGateway);
+            if let Some(content) = self.gateway_recommendation_content() {
+                self.free_gateway_dialog.show(content);
+            }
             return;
         }
 
