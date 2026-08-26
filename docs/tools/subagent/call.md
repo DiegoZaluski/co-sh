@@ -21,43 +21,55 @@ exit code. **The function blocks** — the harness runs it inside
 
 ## The agent registry (`AGENTS`)
 
-`AGENTS` is the static table of supported agents: `(api_name, binary,
-[static_args])`. The public name is what the model passes as `agent`; the
-binary and static arguments are what get executed, with the user's `input`
-appended as the final argument.
+`AGENTS` is the static table of supported agents, modeled by the [`Agent`]
+struct:
+
+```rust,ignore
+pub struct Agent {
+    pub name: &'static str,        // public name the model passes as `agent`
+    pub binary: &'static str,      // executable to spawn
+    pub args: &'static [&'static str], // static args placed before the input
+    pub input_flag: Option<&'static str>, // how the user `input` is passed
+}
+```
+
+The `input_flag` field is the single abstraction for how each CLI receives the
+prompt:
+
+- `input_flag: None` — the `input` string is appended as a **final positional
+  argument** (the common case): `binary <args> <input>`.
+- `input_flag: Some(flag)` — the `input` is passed as the **value of `flag`**:
+  `binary <args> <flag> <input>` (for CLIs such as `aider` whose prompt is a
+  named flag, `--message`, rather than a positional argument).
+
+`Agent::args_for(input)` builds the complete argv for either case, and
+`Agent::invocation()` renders the human-readable form used in the tool
+description and docs.
 
 | Name | Binary | Invocation |
 |---|---|---|
 | `opencode` | `opencode` | `opencode run --auto "<input>"` |
-| `kilo` | `kilo` | `kilo run --auto "<input>"` |
-| `claude` | `claude` | `claude -p --permission-mode dontAsk --bare "<input>"` |
-| `devin` | `devin` | `devin -p --permission-mode dangerous "<input>"` |
+| `claude` | `claude` | `claude -p --permission-mode bypassPermissions "<input>"` |
 | `codex` | `codex` | `codex exec --sandbox workspace-write "<input>"` |
-| `cline` | `cline` | `cline -y "<input>"` |
-| `cursor` | `agent` | `agent -p --force --trust "<input>"` |
-| `crush` | `crush` | `crush run --yolo --quiet "<input>"` |
-| `hermes` | `hermes` | `hermes -z "<input>"` |
-| `openhands` | `openhands` | `openhands --headless -t "<input>"` |
-| `pi` | `pi` | `pi -p "<input>"` |
-| `interpreter` | `interpreter` | `interpreter exec --ask-for-approval auto "<input>"` |
-| `letta` | `letta` | `letta -p "<input>"` |
-| `vibe` | `vibe` | `vibe --prompt --agent auto-approve "<input>"` |
-| `aider` | `aider` | `aider --message --yes --no-auto-commits "<input>"` |
-| `omp` | `omp` | `omp -p "<input>"` |
+| `cursor` | `agent` | `agent -p --force "<input>"` |
+| `aider` | `aider` | `aider --yes --no-auto-commits --message "<input>"` |
 | `goose` | `goose` | `goose run -t "<input>"` |
+| `kilo` | `kilo` | `kilo run --auto "<input>"` |
 | `gemini` | `gemini` | `gemini -p "<input>"` |
-| `forge` | `forge` | `forge -p "<input>"` |
+| `interpreter` | `interpreter` | `interpreter exec --ask-for-approval auto "<input>"` |
 
 Two design points behind the table:
 
 - **Only headless-capable agents are listed.** Every entry runs in a
-  non-interactive mode (`-p`, `run`, `exec`, `--message`, …) — purely
+  non-interactive mode (`-p`, `--message`, `run`, `exec`, …) — purely
   interactive TUIs cannot be driven as a sub-process and are excluded.
 - **The static args are tuned for automation**: auto-approval flags prevent
-  blocking on prompts, sandbox/permission modes keep the automation safe,
-  and no-auto-commit flags preserve git control (e.g. `aider`).
+  blocking on prompts (e.g. `--permission-mode bypassPermissions` for claude),
+  sandbox/permission modes keep the automation safe, and no-auto-commit flags
+  preserve git control (e.g. `aider --no-auto-commits`).
 
-To add an agent, add one tuple to `AGENTS` — that is the whole integration.
+To add an agent, add one [`Agent`] entry to `AGENTS` — that is the whole
+integration.
 
 ---
 
@@ -84,7 +96,7 @@ Returns `Ok` when the name is in `AGENTS`, else an error listing every
 supported agent:
 
 ```
-Unsupported agent 'nope'. Supported agents: opencode, kilo, claude, ….
+Unsupported agent 'nope'. Supported agents: opencode, claude, codex, ….
 Use bash_run for shell commands.
 ```
 
@@ -96,33 +108,35 @@ spawned.
 ## The call pipeline
 
 1. **Validate** the agent name (`validate_agent`).
-2. **Resolve** the entry and build the command: `binary <static args> <input>`,
-   with stdout and stderr piped.
+2. **Resolve** the entry and build the command via `entry.args_for(input)`,
+   with stdout and stderr piped. The `input` becomes a positional argument or
+a named flag's value depending on `input_flag`.
 3. **Spawn.** A `NotFound` spawn error is turned into a helpful message with
    the agent-specific install command (e.g. `npm install -g
    @anthropic-ai/claude-code` for claude); other spawn errors surface as
    `"Failed to spawn '<binary>': …"`.
-4. **Stream.** A reader thread reads stdout and stderr line by line. Each
-   stdout line has ANSI escape sequences stripped (so progress bars and
-   colors do not pollute the result), is appended to a shared accumulator,
-   and is sent through `chunk_tx` for live display. stderr lines are
-   forwarded too (without ANSI stripping), keeping the full picture.
+4. **Stream.** A reader thread reads stdout **and** stderr line by line. Each
+   line has ANSI escape sequences stripped (so progress bars and colors do not
+   pollute the result), is appended to a shared accumulator, and is sent
+   through `chunk_tx` for live display.
 5. **Wait.** The main thread polls the reader every 100 ms until it finishes,
-   bounded by a **2-minute timeout**. When the reader is done, `child.wait()`
-   gives the exit code and the call returns `(accumulated_output, code)`.
+   bounded by a timeout (2 minutes by default; override with the
+   `COSH_SUBAGENT_TIMEOUT_SECS` environment variable). When the reader is
+done, `child.wait()` gives the exit code and the call returns
+   `(accumulated_output, code)`.
 6. **On timeout:** the child is killed. If nothing was produced, the call
    fails with a message naming the timeout and, per agent, a hint about what
    may be blocking it (e.g. `" claude may be waiting for permission
-   approval. Use --permission-mode dontAsk."`). If partial output exists, it
-   is returned with exit code `-1` and a warning is logged — the partial
-   result is real data, not an error.
+   approval. Use --permission-mode bypassPermissions."`). If partial output
+exists, it is returned with exit code `-1` and a warning is logged — the
+partial result is real data, not an error.
 
 ---
 
 ## Errors
 
 | Situation | Result |
-|---|---|
+|---|---|---|
 | Unknown agent name | `Err("Unsupported agent …")` — before any spawn |
 | Binary not in `PATH` | `Err` with the install command for that agent |
 | Other spawn failure | `Err("Failed to spawn '<binary>': …")` |

@@ -15,24 +15,14 @@
 //! | Name | Binary | Invocation |
 //! |------|--------|------------|
 //! | `opencode` | `opencode` | `opencode run --auto "<input>"` |
-//! | `kilo` | `kilo` | `kilo run --auto "<input>"` |
-//! | `claude` | `claude` | `claude -p --permission-mode dontAsk --bare "<input>"` |
-//! | `devin` | `devin` | `devin -p --permission-mode dangerous "<input>"` |
+//! | `claude` | `claude` | `claude -p --permission-mode bypassPermissions "<input>"` |
 //! | `codex` | `codex` | `codex exec --sandbox workspace-write "<input>"` |
-//! | `cline` | `cline` | `cline -y "<input>"` |
-//! | `cursor` | `agent` | `agent -p --force --trust "<input>"` |
-//! | `crush` | `crush` | `crush run --yolo --quiet "<input>"` |
-//! | `hermes` | `hermes` | `hermes -z "<input>"` |
-//! | `openhands` | `openhands` | `openhands --headless -t "<input>"` |
-//! | `pi` | `pi` | `pi -p "<input>"` |
-//! | `interpreter` | `interpreter` | `interpreter exec --ask-for-approval auto "<input>"` |
-//! | `letta` | `letta` | `letta -p "<input>"` |
-//! | `vibe` | `vibe` | `vibe --prompt --agent auto-approve "<input>"` |
-//! | `aider` | `aider` | `aider --message --yes --no-auto-commits "<input>"` |
-//! | `omp` | `omp` | `omp -p "<input>"` |
+//! | `cursor` | `agent` | `agent -p --force "<input>"` |
+//! | `aider` | `aider` | `aider --yes --no-auto-commits --message "<input>"` |
 //! | `goose` | `goose` | `goose run -t "<input>"` |
+//! | `kilo` | `kilo` | `kilo run --auto "<input>"` |
 //! | `gemini` | `gemini` | `gemini -p "<input>"` |
-//! | `forge` | `forge` | `forge -p "<input>"` |
+//! | `interpreter` | `interpreter` | `interpreter exec --ask-for-approval auto "<input>"` |
 //!
 //! See [`AGENTS`](call::AGENTS) for the full list.
 
@@ -160,11 +150,10 @@ impl SubAgent {
                     // returns entries present in AGENTS.
                     let entry = call::AGENTS
                         .iter()
-                        .find(|(n, _, _)| *n == *name)
+                        .find(|a| a.name == *name)
                         .expect("installed agent must be in AGENTS");
-                    let (_, binary, static_args) = entry;
-                    let args = static_args.join(" ");
-                    format!("- `{name}` → `{binary} {args} \"<input>\"`\n")
+                    let invocation = entry.invocation();
+                    format!("- `{name}` → `{invocation}`\n")
                 })
                 .collect::<String>();
 
@@ -181,7 +170,7 @@ impl SubAgent {
             // LLM can still attempt the tool if we missed one.
             call::AGENTS
                 .iter()
-                .map(|(n, _, _)| serde_json::Value::String(n.to_string()))
+                .map(|a| serde_json::Value::String(a.name.to_string()))
                 .collect()
         } else {
             installed
