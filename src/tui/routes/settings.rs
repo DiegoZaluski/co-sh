@@ -26,7 +26,7 @@ pub const POST_TOOL_USE_EVENT: &str = "PostToolUse";
 /// Maximum characters of a hook command shown in list rows.
 const COMMAND_PREVIEW_LEN: usize = 34;
 
-// ── Catalog ─────────────────────────────────────────────────────────────────
+// Catalog
 
 /// One top-level entry of the Settings list. `id` keys the activation
 /// behaviour; `label` is the option name; `description` explains what the
@@ -52,12 +52,23 @@ fn settings_items() -> &'static [SettingsItem] {
             description: "Run custom shell commands after every successful tool call",
             event: POST_TOOL_USE_EVENT,
         },
+        SettingsItem {
+            id: "zen_free_gateway",
+            label: "OpenCode Zen free gateway",
+            description: "Use OpenCode's free models without login when no API key is set",
+            event: "",
+        },
     ]
 }
 
 /// Each category owns its own switch, so toggling one never leaks into the
-/// other event.
+/// other event. Items WITHOUT an event (empty string) are standalone
+/// switches — currently only the OpenCode Zen free gateway, which reads its
+/// state from the persisted one-time prompt answer.
 fn is_enabled(item: &SettingsItem, setup: &Setup) -> bool {
+    if item.event.is_empty() {
+        return item.id == "zen_free_gateway" && setup.zen_public_opt_in() == Some(true);
+    }
     setup.hooks.is_event_enabled(item.event)
 }
 
@@ -123,7 +134,7 @@ pub fn validate_hook(
     })
 }
 
-// ── Screen model ────────────────────────────────────────────────────────────
+// Screen model
 
 /// A selectable row of the Settings screen. Sub-rows exist only while their
 /// category is enabled.
@@ -187,7 +198,10 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
             line: Line::Category { item },
         });
         y += 1;
-        if is_enabled(&settings_items()[item], setup) {
+        // Only hook categories own sub-lists; standalone switches (empty
+        // event) are a single toggle row.
+        let manages_hooks = !settings_items()[item].event.is_empty();
+        if manages_hooks && is_enabled(&settings_items()[item], setup) {
             lines.push(LayoutLine {
                 y,
                 line: Line::Blank,
@@ -232,6 +246,11 @@ fn content_height(setup: &Setup) -> u16 {
 pub enum SettingsAction {
     /// Persisted state changed; caller must `setup.save()`.
     ToggleSaved,
+    /// The Zen free-gateway switch flipped; caller must `setup.save()` AND
+    /// resync the SDK's process-wide tier flag
+    /// ([`cosh_sdk::connector::set_zen_public_tier_enabled`]) so connectors
+    /// built from now on honor the new state.
+    ZenGatewayToggled,
     /// Open the registration box: blank when `index` is `None`.
     OpenHookForm {
         event: &'static str,
@@ -239,7 +258,7 @@ pub enum SettingsAction {
     },
 }
 
-// ── View ────────────────────────────────────────────────────────────────────
+// View
 
 pub struct SettingsView {
     pub selection: ListSelection,
@@ -272,6 +291,14 @@ impl SettingsView {
         match rows.get(idx)? {
             SettingsRow::Category(i) => {
                 let item = &settings_items()[*i];
+                // Standalone switches (no hook sub-list) flip their own
+                // persisted field.
+                if item.event.is_empty() && item.id == "zen_free_gateway" {
+                    let enabled = setup.zen_public_opt_in() == Some(true);
+                    setup.providers.zen_public_opt_in = Some(!enabled);
+                    self.selection.clamp(selectable_rows(setup).len());
+                    return Some(SettingsAction::ZenGatewayToggled);
+                }
                 // Each category flips only its own event's switch.
                 match item.event {
                     PRE_TOOL_USE_EVENT => {
@@ -439,7 +466,7 @@ fn max_row_width(setup: &Setup) -> usize {
         .max()
         .unwrap_or(0);
     for item in settings_items() {
-        if !setup.hooks.is_event_enabled(item.event) {
+        if item.event.is_empty() || !setup.hooks.is_event_enabled(item.event) {
             continue;
         }
         for entry in hook_entries(setup, item.event) {
@@ -549,7 +576,11 @@ mod tests {
         let disabled = setup_with_hooks(false, &[("a", "cmd a")]);
         assert_eq!(
             selectable_rows(&disabled),
-            vec![SettingsRow::Category(0), SettingsRow::Category(1)]
+            vec![
+                SettingsRow::Category(0),
+                SettingsRow::Category(1),
+                SettingsRow::Category(2),
+            ]
         );
 
         let enabled = setup_with_hooks(true, &[("a", "cmd a"), ("b", "cmd b")]);
@@ -572,8 +603,44 @@ mod tests {
                 SettingsRow::AddHook {
                     event: POST_TOOL_USE_EVENT
                 },
+                SettingsRow::Category(2),
             ]
         );
+    }
+
+    /// The Zen free-gateway row flips the persisted answer BOTH ways from
+    /// the settings screen — unlike the one-time prompt, this is the manual
+    /// control — and reports the dedicated action so callers resync the SDK.
+    #[test]
+    fn zen_free_gateway_toggle_round_trip() {
+        let mut setup = Setup::default();
+        assert_eq!(setup.zen_public_opt_in(), None);
+        let mut view = SettingsView::new();
+
+        // Find the row wherever it sits in the selectable order.
+        let zen_row = |setup: &Setup| {
+            selectable_rows(setup)
+                .iter()
+                .position(|r| matches!(r, SettingsRow::Category(2)))
+                .expect("zen gateway category row exists")
+        };
+
+        view.selection.selected_index = zen_row(&setup);
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::ZenGatewayToggled)
+        );
+        assert_eq!(setup.zen_public_opt_in(), Some(true));
+        assert!(is_enabled(&settings_items()[2], &setup));
+
+        // Second activation turns it OFF (manual override of any answer).
+        view.selection.selected_index = zen_row(&setup);
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::ZenGatewayToggled)
+        );
+        assert_eq!(setup.zen_public_opt_in(), Some(false));
+        assert!(!is_enabled(&settings_items()[2], &setup));
     }
 
     #[test]
