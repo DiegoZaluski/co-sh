@@ -103,7 +103,16 @@ struct SessionArea {
     right_panel_w: u16,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+/// Where an edited queued message came from, so it can return to its exact
+/// slot ([`App::enqueue_pending_message`]). Bound to the owning session —
+/// the hint is meaningless (and dropped) anywhere else.
+#[derive(Debug)]
+pub(super) struct EditRequeueHint {
+    pub(super) session_id: String,
+    pub(super) queue: QueueTarget,
+    pub(super) index: usize,
+}
+
 pub struct App {
     pub state: AppState,
     pub theme: Theme,
@@ -164,11 +173,14 @@ pub struct App {
     /// The deque entry is only retired on acknowledgment so the message can
     /// never be lost if the loop ends before injecting it.
     next_request_in_flight: bool,
-    /// Origin of an edited queued message: `(queue, original index, text)`.
-    /// Re-queueing the exact same text into the SAME queue restores its
-    /// original position; queueing into the other queue (or a different
-    /// text) appends at the end and drops the hint.
-    pub(super) edit_requeue_hint: Option<(QueueTarget, usize, String)>,
+    /// Origin of an edited queued message: the owning session, its queue and
+    /// the original position. Re-submitting into the SAME queue re-inserts at
+    /// that (tracked) position; choosing the other queue appends at the end
+    /// and drops the hint. Invalid outside the owning session.
+    pub(super) edit_requeue_hint: Option<EditRequeueHint>,
+    /// Session that owned the queue when the Queue Actions box was opened —
+    /// actions from a box left open across a session switch are rejected.
+    active_queue_actions_session: Option<String>,
     llm_config: LlmConfig,
     stop_signal: Arc<AtomicBool>,
     /// Re-entry guard for the user-triggered `/compact`: true while the
@@ -347,6 +359,7 @@ impl App {
             queue_actions_deferred_start: false,
             next_request_in_flight: false,
             edit_requeue_hint: None,
+            active_queue_actions_session: None,
             llm_config: LlmConfig {
                 tool_call_mode: saved_tool_call_mode,
                 ..LlmConfig::from_env()

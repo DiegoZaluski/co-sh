@@ -32,6 +32,8 @@ fn app_with_queues() -> App {
     };
     app.state.add_session(session);
     app.state.current_session_id = Some("t".into());
+    // Actions always run against the session that opened the box.
+    app.active_queue_actions_session = Some("t".into());
     {
         let queues = app.state.current_pending_queues_mut().unwrap();
         queues.next_loop.push_back("loop-one".into());
@@ -199,6 +201,11 @@ async fn full_edit_resend_flow_restores_position_via_keys() {
 async fn requeue_position_tracks_delivered_heads() {
     use std::time::{Duration, Instant};
     let mut app = app_with_queues();
+    // A third survivor makes insert-at-0 distinguishable from append.
+    {
+        let queues = app.state.current_pending_queues_mut().unwrap();
+        queues.next_request.push_back("request-three".into());
+    }
     app.state.status = SessionStatus::Working;
     app.active_loop_session_id = Some("t".into());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -215,7 +222,76 @@ async fn requeue_position_tracks_delivered_heads() {
         .unwrap();
     app.poll_events();
 
-    // The hint slid from index 1 to 0: only "request-two" remains.
+    // The hint slid from index 1 to 0: the edited message returns to the
+    // FRONT, ahead of the untouched "request-three" — not appended.
+    app.enqueue_pending_message(QueueTarget::NextRequest, "request-two".into());
+    assert_eq!(
+        app.state
+            .current_pending_queues()
+            .unwrap()
+            .next_request
+            .iter()
+            .collect::<Vec<_>>(),
+        ["request-two", "request-three"]
+    );
+}
+
+#[tokio::test]
+async fn injection_ack_without_in_flight_marker_pops_nothing() {
+    let mut app = app_with_queues();
+    app.state.status = SessionStatus::Working;
+    app.active_loop_session_id = Some("t".into());
+
+    // No pump call → nothing in flight; a stray ack event must not retire
+    // any queued entry.
+    app.event_tx
+        .send(cosh::harness::HarnessEvent::UserMessageInjected {
+            text: "request-one".into(),
+        })
+        .unwrap();
+    app.poll_events();
+
+    let queues = app.state.current_pending_queues().unwrap();
+    assert_eq!(
+        queues.next_request.iter().collect::<Vec<_>>(),
+        ["request-one", "request-two"],
+        "the ack guard keeps the queue intact"
+    );
+}
+
+#[tokio::test]
+async fn promotion_remaps_the_edit_hint_to_next_loop() {
+    let mut app = app_with_queues();
+    app.run_queue_action(0, QueueTarget::NextRequest, 1);
+    match &app.edit_requeue_hint {
+        Some(h) => assert_eq!(
+            (h.session_id.as_str(), h.queue, h.index),
+            ("t", QueueTarget::NextRequest, 1)
+        ),
+        other => panic!("unexpected hint {other:?}"),
+    }
+    // Loop end promotes leftovers; the hint must keep pointing at the same
+    // message, now behind the two existing next-loop entries.
+    app.promote_next_request_to_next_loop("t");
+    match &app.edit_requeue_hint {
+        Some(h) => assert_eq!(
+            (h.session_id.as_str(), h.queue, h.index),
+            ("t", QueueTarget::NextLoop, 3)
+        ),
+        other => panic!("unexpected hint {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_row_before_the_hint_shifts_its_home_slot() {
+    let mut app = app_with_queues();
+    // Edit "request-two" (index 1): queue becomes ["request-one"].
+    app.run_queue_action(0, QueueTarget::NextRequest, 1);
+    // Delete the row that sat BEFORE the edited message's home slot.
+    app.run_queue_action(1, QueueTarget::NextRequest, 0);
+    // Re-submit: with "request-one" gone, index 1 clamps to the end — but
+    // the hint slid to 0, so the message must land at the FRONT, not after
+    // unrelated survivors.
     app.enqueue_pending_message(QueueTarget::NextRequest, "request-two".into());
     assert_eq!(
         app.state
@@ -229,24 +305,35 @@ async fn requeue_position_tracks_delivered_heads() {
 }
 
 #[tokio::test]
-async fn promotion_remaps_the_edit_hint_to_next_loop() {
+async fn edit_hint_is_dropped_when_submitting_from_another_session() {
     let mut app = app_with_queues();
-    app.run_queue_action(0, QueueTarget::NextRequest, 1);
-    match &app.edit_requeue_hint {
-        Some((QueueTarget::NextRequest, idx, text)) => {
-            assert_eq!((*idx, text.as_str()), (1, "request-two"));
-        }
-        other => panic!("unexpected hint {other:?}"),
-    }
-    // Loop end promotes leftovers; the hint must keep pointing at the same
-    // message, now behind the two existing next-loop entries.
-    app.promote_next_request_to_next_loop("t");
-    match &app.edit_requeue_hint {
-        Some((QueueTarget::NextLoop, idx, text)) => {
-            assert_eq!((*idx, text.as_str()), (3, "request-two"));
-        }
-        other => panic!("unexpected hint {other:?}"),
-    }
+    app.run_queue_action(0, QueueTarget::NextRequest, 0);
+    assert!(app.edit_requeue_hint.is_some());
+    // Switch to a different session and submit a fresh message there: it
+    // must be sent directly, never requeued into B's queues at A's slot.
+    let session_b = crate::types::Session {
+        id: "b".into(),
+        title: "b".into(),
+        created_at: 2_000,
+        title_generated: false,
+        messages: vec![],
+    };
+    app.state.add_session(session_b);
+    app.state.current_session_id = Some("b".into());
+    app.submit_prompt_message("fresh for b".into());
+
+    assert_eq!(app.state.status, SessionStatus::Working);
+    let last = app
+        .state
+        .current_session()
+        .unwrap()
+        .messages
+        .last()
+        .map(text_of);
+    assert_eq!(last.as_deref(), Some("fresh for b"));
+    // Session A's queues were not touched by B's submission.
+    let a = app.state.pending_queues.get("t").unwrap();
+    assert_eq!(a.next_request.len(), 1, "A kept its remaining message");
 }
 
 #[tokio::test]

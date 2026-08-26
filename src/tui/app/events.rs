@@ -530,18 +530,29 @@ impl App {
                     // (FIFO — the harness drains the channel in order).
                     // Popping only on acknowledgment guarantees a message
                     // already handed to the loop can never be lost.
+                    //
+                    // The ack always belongs to the OWNING session's queue —
+                    // pop from there, never from whichever session is being
+                    // viewed after a mid-run switch.
                     if self.next_request_in_flight {
                         self.next_request_in_flight = false;
-                        if let Some(queues) = self.state.current_pending_queues_mut() {
+                        let owner = self.active_loop_session_id.clone();
+                        let queues = match &owner {
+                            Some(id) => self.state.pending_queues.get_mut(id),
+                            None => self.state.current_pending_queues_mut(),
+                        };
+                        if let Some(queues) = queues {
                             queues.next_request.pop_front();
                         }
                         // A delivered head shifts the edited message's home
                         // position one slot closer to the front.
-                        if let Some((QueueTarget::NextRequest, idx, _)) =
-                            &mut self.edit_requeue_hint
-                            && *idx > 0
+                        if let Some(hint) = &mut self.edit_requeue_hint
+                            && hint.queue == QueueTarget::NextRequest
+                            && self.active_loop_session_id.as_deref()
+                                == Some(hint.session_id.as_str())
+                            && hint.index > 0
                         {
-                            *idx -= 1;
+                            hint.index -= 1;
                         }
                     }
                     // Mirror the message into the owning session's history —

@@ -138,8 +138,8 @@ impl App {
                         let text = self.prompt_view.send_message();
                         let target = self.queue_choice_dialog.choice();
                         self.queue_choice_dialog.hide();
-                        // Same queue + unchanged text → original position;
-                        // otherwise appended at the end (see helper).
+                        // Edited message returning to its queue → original
+                        // position; otherwise appended at the end (helper).
                         self.enqueue_pending_message(target, text);
                         self.prompt_view.focus();
                     } else if !self.queue_choice_dialog.visible {
@@ -892,8 +892,9 @@ impl App {
                     {
                         queues.clear();
                     }
-                    // Nothing left to acknowledge or highlight.
+                    // Nothing left to acknowledge, resume or highlight.
                     self.next_request_in_flight = false;
+                    self.queue_actions_deferred_start = false;
                     self.edit_requeue_hint = None;
                     self.hovered_queue_row = None;
                 }

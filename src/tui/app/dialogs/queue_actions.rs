@@ -2,6 +2,7 @@ use super::super::App;
 use crossterm::event::KeyCode;
 use std::time::Instant;
 
+use super::super::EditRequeueHint;
 use super::super::agent_loop::QUEUE_ACTIONS_GRACE;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::types::SessionStatus;
@@ -11,7 +12,8 @@ use crate::util::selection;
 impl App {
     /// Open the Queue Actions box for one queued message. Grants the
     /// [`QUEUE_ACTIONS_GRACE`] window (the agent loop may not consume the
-    /// next effective message for 5 seconds) and clears the row highlight.
+    /// next effective message for 5 seconds), remembers the owning session
+    /// and clears the row highlight.
     pub(in crate::app) fn open_queue_actions_for(
         &mut self,
         queue: QueueTarget,
@@ -19,6 +21,7 @@ impl App {
         text: &str,
     ) {
         self.queue_actions_grace_until = Some(Instant::now() + QUEUE_ACTIONS_GRACE);
+        self.active_queue_actions_session = self.state.current_session_id.clone();
         self.hovered_queue_row = None;
         let preview: String = text.chars().take(36).collect();
         self.dialog.replace(DialogType::QueueActions {
@@ -84,6 +87,15 @@ impl App {
         queue: QueueTarget,
         index: usize,
     ) {
+        // A box left open across a session switch must never mutate another
+        // session's queue.
+        let Some(owner) = self.active_queue_actions_session.clone() else {
+            return;
+        };
+        if self.state.current_session_id.as_deref() != Some(owner.as_str()) {
+            self.dialog.clear();
+            return;
+        }
         let text = {
             let Some(queues) = self.state.current_pending_queues_mut() else {
                 return;
@@ -98,14 +110,32 @@ impl App {
             match action {
                 0 => {
                     // Edit: remember the origin BEFORE removing, so
-                    // re-queueing the same text into the SAME queue can
-                    // restore its exact position.
-                    let text = deque[index].clone();
-                    self.edit_requeue_hint = Some((queue, index, text.clone()));
-                    deque.remove(index)
+                    // re-submitting into the SAME queue restores its exact
+                    // position.
+                    let text = deque.remove(index);
+                    if text.is_some() {
+                        self.edit_requeue_hint = Some(EditRequeueHint {
+                            session_id: owner,
+                            queue,
+                            index,
+                        });
+                    }
+                    text
                 }
                 // Delete: remove in-place, shifting followers left.
-                1 => deque.remove(index),
+                1 => {
+                    let removed = deque.remove(index);
+                    // A row before the edited message's home slot just
+                    // shifted it one slot closer to the front.
+                    if removed.is_some()
+                        && let Some(hint) = &mut self.edit_requeue_hint
+                        && hint.queue == queue
+                        && hint.index > index
+                    {
+                        hint.index -= 1;
+                    }
+                    removed
+                }
                 _ => deque.get(index).cloned(),
             }
         };
@@ -117,10 +147,7 @@ impl App {
             0 => {
                 // Edit: take the message out of the queue and load it into
                 // the prompt for editing/resending.
-                self.prompt_view.input = text;
-                self.prompt_view.cursor_pos = self.prompt_view.input.len();
-                self.prompt_view.focus();
-                self.hovered_queue_row = None;
+                self.load_into_prompt(text);
             }
             1 => {
                 // Delete: the message was already removed above.
@@ -134,18 +161,32 @@ impl App {
         }
     }
 
+    /// Load `text` into the prompt input for editing/resending.
+    fn load_into_prompt(&mut self, text: String) {
+        self.prompt_view.input = text;
+        self.prompt_view.cursor_pos = self.prompt_view.input.len();
+        self.prompt_view.focus();
+        self.hovered_queue_row = None;
+    }
+
     /// Enqueue a message into the chosen pending queue (the queue-choice
     /// dialog submit path).
     ///
-    /// The message being submitted IS the edited queued message (the prompt
-    /// flow guarantees it): while an edit hint is outstanding, submitting to
-    /// the ORIGINAL queue re-inserts at the tracked original position — even
-    /// if the text was changed, since editing is the whole point. Choosing
-    /// the OTHER queue appends at the end and drops the hint.
+    /// While an edit hint for the CURRENT session is outstanding, submitting
+    /// to the hint's queue re-inserts at the tracked position — even if the
+    /// text was changed, since editing is the whole point. Choosing the
+    /// other queue (or a stale cross-session hint) appends at the end.
     pub(in crate::app) fn enqueue_pending_message(&mut self, target: QueueTarget, text: String) {
+        let current = self.state.current_session_id.clone();
         let hint = self.edit_requeue_hint.take();
+        // A hint from another session is meaningless here: drop it and send
+        // like a plain queued message.
+        let hint = match (&hint, &current) {
+            (Some(h), Some(id)) if h.session_id == *id => Some(h),
+            _ => None,
+        };
         let restore = match &hint {
-            Some((queue, index, _)) if *queue == target => Some(*index),
+            Some(h) if h.queue == target => Some(h.index),
             _ => None,
         };
         let Some(queues) = self.state.current_pending_queues_mut() else {
@@ -180,10 +221,16 @@ impl App {
     /// agent loop" starts, honoring the queue-actions hold via the deferred
     /// start flag.
     pub(in crate::app) fn submit_prompt_message(&mut self, text: String) {
-        let Some(target) = self.edit_requeue_hint.as_ref().map(|(q, _, _)| *q) else {
-            // Plain submission (no edited message in flight).
-            self.start_agent_loop(text);
-            return;
+        let target = match &self.edit_requeue_hint {
+            // Only a hint belonging to the CURRENT session rewrites the
+            // submit path; stale cross-session hints are dropped below.
+            Some(h) if Some(&h.session_id) == self.state.current_session_id.as_ref() => h.queue,
+            _ => {
+                // Plain submission (no edited message in flight here).
+                self.edit_requeue_hint = None;
+                self.start_agent_loop(text);
+                return;
+            }
         };
         self.enqueue_pending_message(target, text);
 

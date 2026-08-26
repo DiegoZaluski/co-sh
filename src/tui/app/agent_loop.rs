@@ -13,8 +13,8 @@ use crate::types::SessionStatus;
 use cosh::harness::HarnessEvent;
 
 /// Grace window granted to the user when a Queue Actions box is opened:
-/// during the next 5 seconds the agent loop may not start a new request
-/// (and may not consume the next queued message), giving the user time to
+/// during the next 5 seconds the TUI may not hand the next queued message
+/// to the running loop nor auto-start a new one, giving the user time to
 /// edit or delete a message that sits ahead of the effective send order.
 pub(super) const QUEUE_ACTIONS_GRACE: Duration = Duration::from_secs(5);
 
@@ -33,8 +33,9 @@ impl App {
 
     /// Promote leftover "next request" messages into the "next agent loop"
     /// queue (FIFO, appended behind its existing items). An outstanding
-    /// edit-requeue hint pointing at `next_request` is remapped so it keeps
-    /// identifying the same message after the promotion.
+    /// edit-requeue hint pointing at `next_request` — and an open Queue
+    /// Actions box targeting it — are remapped so they keep identifying the
+    /// same message after the promotion.
     pub(super) fn promote_next_request_to_next_loop(&mut self, id: &str) {
         let old_loop_len;
         {
@@ -44,9 +45,39 @@ impl App {
                 queues.next_loop.push_back(text);
             }
         }
-        if let Some((queue @ QueueTarget::NextRequest, idx, _)) = &mut self.edit_requeue_hint {
-            *idx += old_loop_len;
+        if let Some(hint) = &mut self.edit_requeue_hint
+            && hint.session_id == id
+            && hint.queue == QueueTarget::NextRequest
+        {
+            hint.index += old_loop_len;
+            hint.queue = QueueTarget::NextLoop;
+        }
+        if let Some(d) = self.dialog.current_mut()
+            && let crate::ui::dialogs::DialogType::QueueActions { queue, index, .. } =
+                &mut d.dialog_type
+            && *queue == QueueTarget::NextRequest
+        {
+            *index += old_loop_len;
             *queue = QueueTarget::NextLoop;
+        }
+    }
+
+    /// Resume the pending queue chain: promote leftover "next request"
+    /// messages and start a fresh loop with the head of "next agent loop".
+    /// Returns true when a loop was started.
+    fn resume_pending_chain(&mut self, id: &str) -> bool {
+        self.promote_next_request_to_next_loop(id);
+        let next = self
+            .state
+            .pending_queues
+            .get_mut(id)
+            .and_then(|q| q.next_loop.pop_front());
+        match next {
+            Some(msg) => {
+                self.start_agent_loop(msg);
+                true
+            }
+            None => false,
         }
     }
 
@@ -75,7 +106,7 @@ impl App {
             if self
                 .active_loop_session_id
                 .as_ref()
-                .is_some_and(|owner| self.state.current_session_id.as_ref() != Some(owner))
+                .is_some_and(|owner| current.as_ref() != Some(owner))
             {
                 // The user switched sessions — keep the flag armed so the
                 // owning session's auto-start still fires when it (or any
@@ -86,15 +117,7 @@ impl App {
             let Some(id) = current else {
                 return;
             };
-            self.promote_next_request_to_next_loop(&id);
-            let next = self
-                .state
-                .pending_queues
-                .get_mut(&id)
-                .and_then(|q| q.next_loop.pop_front());
-            if let Some(msg) = next {
-                self.start_agent_loop(msg);
-            }
+            self.resume_pending_chain(&id);
             return;
         }
 
@@ -440,11 +463,6 @@ impl App {
     /// model) — a later manual message rolls them in.
     pub(super) fn handle_loop_end(&mut self, start_next: bool) -> bool {
         self.queued_input_tx = None;
-        self.queue_actions_deferred_start = false;
-        // Any in-flight message was never confirmed injected: its deque
-        // entry is still the head, so it simply takes part in whatever
-        // happens to the queue below.
-        self.next_request_in_flight = false;
         let Some(id) = self.state.current_session_id.clone() else {
             return false;
         };
@@ -452,9 +470,14 @@ impl App {
             && self.active_loop_session_id.as_deref() != Some(id.as_str())
         {
             // The user switched sessions while the loop ran — leave the queues
-            // untouched for the session that owns them.
+            // untouched for the session that owns them (and do NOT touch the
+            // viewed session's deferred-start flag).
             return false;
         }
+        // Any in-flight message was never confirmed injected: its deque
+        // entry is still the head, so it simply takes part in whatever
+        // happens to the queue below.
+        self.next_request_in_flight = false;
         if start_next && self.queue_actions_hold_active() {
             // The user is operating on queued messages: neither the
             // promotion nor the auto-start may touch the queues (stored
@@ -468,21 +491,27 @@ impl App {
             self.queue_actions_deferred_start = pending;
             return pending;
         }
+        self.queue_actions_deferred_start = false;
+        // Promotion also remaps an open Queue Actions box / edit hint, so
+        // stored indexes stay valid on both paths.
         self.promote_next_request_to_next_loop(&id);
-        let next = self.state.pending_queues.get_mut(&id).and_then(|q| {
-            if start_next {
-                q.next_loop.pop_front()
-            } else {
-                None
-            }
-        });
+        let next = if start_next {
+            self.state
+                .pending_queues
+                .get_mut(&id)
+                .and_then(|q| q.next_loop.pop_front())
+        } else {
+            // Error path: park the queues — no auto-start.
+            None
+        };
         // Row indexes shifted after the promotion — drop the highlight.
         self.hovered_queue_row = None;
-        if let Some(msg) = next {
-            self.start_agent_loop(msg);
-            true
-        } else {
-            false
+        match next {
+            Some(msg) => {
+                self.start_agent_loop(msg);
+                true
+            }
+            None => false,
         }
     }
 
