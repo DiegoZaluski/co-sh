@@ -1,8 +1,8 @@
 /target
 .fastembed_cache
-.opencode/*
-.devin
-.crush
+/.opencode/
+/.devin/
+/.crush/
 # /linetime
 TODO.md
 .env

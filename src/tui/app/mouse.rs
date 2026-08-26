@@ -778,7 +778,9 @@ impl App {
                 rec_h,
             );
             if !self.mouse_drag_active && self.drag_selection.is_none() {
-                let consumed = self.free_gateway_dialog.handle_mouse(&mouse, rec_area, &self.theme);
+                let consumed = self
+                    .free_gateway_dialog
+                    .handle_mouse(&mouse, rec_area, &self.theme);
                 if consumed {
                     if self.free_gateway_dialog.submitted {
                         self.commit_gateway_choice();

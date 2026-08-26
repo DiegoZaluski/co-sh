@@ -5,6 +5,11 @@ use crate::ui::toast::{ToastOptions, ToastVariant};
 
 use cosh_sdk::connector::{ZEN_PROVIDER, get_provider, has_api_key, is_local_provider};
 
+/// Default model selected when the user opts into the Zen free gateway.
+/// Change this single constant to switch the initial model — it must
+/// exist in `ZEN_FREE_MODELS` (the anonymous tier's allowed catalog).
+const ZEN_DEFAULT_FREE_MODEL: &str = "hy3-free";
+
 impl App {
     /// Whether sending now would hit a provider WITHOUT an account key and
     /// the user hasn't answered the one-time free-gateway prompt yet.
@@ -82,8 +87,7 @@ impl App {
                 && !is_local_provider(&self.llm_config.provider)
             {
                 self.llm_config.provider = ZEN_PROVIDER.to_string();
-                self.llm_config.model =
-                    get_provider(ZEN_PROVIDER).map(|cfg| cfg.default_model.to_string());
+                self.llm_config.model = Some(ZEN_DEFAULT_FREE_MODEL.to_string());
                 self.llm_config.reasoning = None;
             }
             match pending {

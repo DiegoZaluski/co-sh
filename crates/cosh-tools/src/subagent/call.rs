@@ -409,9 +409,7 @@ pub fn call(
             "codex" => {
                 " codex may be waiting for permission approval. Use --sandbox workspace-write."
             }
-            "cursor" => {
-                " cursor may be waiting for permission approval. Use agent -p --force."
-            }
+            "cursor" => " cursor may be waiting for permission approval. Use agent -p --force.",
             "interpreter" => {
                 " interpreter may be waiting for permission approval. Use --ask-for-approval auto."
             }
@@ -484,10 +482,16 @@ mod tests {
     fn invocation_matches_documented_commands() {
         let expected: &[(&str, &str)] = &[
             ("opencode", "opencode run --auto \"<input>\""),
-            ("claude", "claude -p --permission-mode bypassPermissions \"<input>\""),
+            (
+                "claude",
+                "claude -p --permission-mode bypassPermissions \"<input>\"",
+            ),
             ("codex", "codex exec --sandbox workspace-write \"<input>\""),
             ("cursor", "agent -p --force \"<input>\""),
-            ("aider", "aider --yes --no-auto-commits --message \"<input>\""),
+            (
+                "aider",
+                "aider --yes --no-auto-commits --message \"<input>\"",
+            ),
             ("goose", "goose run -t \"<input>\""),
             ("kilo", "kilo run --auto \"<input>\""),
             ("gemini", "gemini -p \"<input>\""),

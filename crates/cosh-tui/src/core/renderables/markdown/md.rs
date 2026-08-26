@@ -2589,10 +2589,7 @@ pub(crate) fn estimate_height_ext(text: &str, max_w: u16, keep_last_feed: bool) 
                     block_content_height(h, canvas.rows())
                 };
                 #[allow(clippy::unwrap_used)]
-                BLOCK_HEIGHT_CACHE
-                    .lock()
-                    .unwrap()
-                    .put(block_key, measured);
+                BLOCK_HEIGHT_CACHE.lock().unwrap().put(block_key, measured);
                 measured
             }
         };

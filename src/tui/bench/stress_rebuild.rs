@@ -145,10 +145,11 @@ async fn stress_full_rebuild() {
     for (w, h) in [(120u16, 40u16), (200, 60), (160, 48)] {
         terminal.backend_mut().resize(w, h);
         let t = std::time::Instant::now();
-        terminal.draw(|f| {
-            app.render(f, 0.016);
-        })
-        .unwrap();
+        terminal
+            .draw(|f| {
+                app.render(f, 0.016);
+            })
+            .unwrap();
         println!(
             "[STRESS] resize to {w}x{h}: {:.1}ms",
             t.elapsed().as_secs_f64() * 1000.0

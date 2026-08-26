@@ -60,8 +60,7 @@ fn drive(name: &str, doc_builder: impl Fn(usize) -> String, units: usize) {
 fn stress_streaming_paragraph() {
     drive(
         "paragraph",
-        |_| "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod\n"
-            .repeat(2000),
+        |_| "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod\n".repeat(2000),
         2000,
     );
 }
@@ -120,7 +119,9 @@ fn stress_streaming_mixed_doc() {
         |n| {
             (0..n)
                 .map(|i| match i % 4 {
-                    0 => format!("## Section {i}\n\nParagraph with `inline code` and **bold**.\n\n"),
+                    0 => {
+                        format!("## Section {i}\n\nParagraph with `inline code` and **bold**.\n\n")
+                    }
                     1 => format!("- bullet {i}\n- bullet {i}b\n"),
                     2 => format!("```rust\ndef f{i}(x):\n    return x * {i}\n```\n\n"),
                     _ => format!("> quoted wisdom {i}\n\n"),

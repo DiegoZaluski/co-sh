@@ -32,7 +32,7 @@ pub const ZEN: GatewayRecommendationContent = GatewayRecommendationContent {
     title: "Use the OpenCode Zen free gateway?",
     stream_text: "You don't have an API key set up yet.\n\n\
         I can connect you to the **OpenCode Zen** free gateway — \
-        chat with models like `MiMo V2.5` and `Big Pickle` \
+        chat with models like `Hy3` and `Big Pickle` \
         without an account or API key.\n\n\
         *Note: co-sh is an independent project with no affiliation to \
         Anomaly/OpenCode. Requests go from your machine straight to \

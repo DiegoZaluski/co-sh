@@ -51,8 +51,6 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
-
-
 /// Borderless text prompt panel: bold title with an "esc" hint on the first
 /// content row, the input line with the blinking cursor, and an "enter
 /// submit" hint at the bottom — one blank padding row above and below.

@@ -3242,6 +3242,7 @@ impl Harness {
                             .to_string();
                     continue;
                 }
+
                 // No tools and no extraction failures — conversation is complete.
                 // The final text response becomes the loop's LoopClosure.
                 // log::debug!("run_agent_loop DONE (no tools)");
