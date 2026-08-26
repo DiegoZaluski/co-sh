@@ -1,21 +1,129 @@
 use std::io;
 use std::io::Write as _;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
 use super::App;
 use crate::component::agent_spinner::AgentSpinner;
+use crate::routes::session::queue_choice::QueueTarget;
 use crate::session_store::generate_session_id;
+use crate::types::SessionStatus;
 use cosh::harness::HarnessEvent;
 
+/// Grace window granted to the user when a Queue Actions box is opened:
+/// during the next 5 seconds the agent loop may not start a new request
+/// (and may not consume the next queued message), giving the user time to
+/// edit or delete a message that sits ahead of the effective send order.
+pub(super) const QUEUE_ACTIONS_GRACE: Duration = Duration::from_secs(5);
+
 impl App {
+    /// True while the loop must not consume the next queued message: either
+    /// a Queue Actions box is open (the queued indexes it carries must stay
+    /// stable until its action runs) or the user is still inside the
+    /// [`QUEUE_ACTIONS_GRACE`] window granted when the box was opened.
+    pub(super) fn queue_actions_hold_active(&self) -> bool {
+        if self.is_queue_actions_dialog_visible() {
+            return true;
+        }
+        self.queue_actions_grace_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Promote leftover "next request" messages into the "next agent loop"
+    /// queue (FIFO, appended behind its existing items). An outstanding
+    /// edit-requeue hint pointing at `next_request` is remapped so it keeps
+    /// identifying the same message after the promotion.
+    pub(super) fn promote_next_request_to_next_loop(&mut self, id: &str) {
+        let old_loop_len;
+        {
+            let queues = self.state.pending_queues.entry(id.to_string()).or_default();
+            old_loop_len = queues.next_loop.len();
+            while let Some(text) = queues.next_request.pop_front() {
+                queues.next_loop.push_back(text);
+            }
+        }
+        if let Some((queue @ QueueTarget::NextRequest, idx, _)) = &mut self.edit_requeue_hint {
+            *idx += old_loop_len;
+            *queue = QueueTarget::NextLoop;
+        }
+    }
+
+    /// Deliver queued messages to the running agent loop and start deferred
+    /// loops — but only while the queue-actions hold
+    /// ([`App::queue_actions_hold_active`]) is not active.
+    ///
+    /// "Next request" messages are forwarded ONE PER CALL so the next
+    /// effective message is always the head of the queue and can be held,
+    /// edited or deleted before it ever reaches the running loop. The deque
+    /// entry is only retired when the harness acknowledges the injection
+    /// (`UserMessageInjected`), so a message already sitting in the loop's
+    /// channel can never be lost if the loop ends before injecting it.
+    /// Called once per main-loop iteration from `run()`.
+    pub(super) fn pump_queued_messages(&mut self) {
+        if self.queue_actions_hold_active() {
+            return;
+        }
+
+        // A clean loop end wanted to auto-start the first "next loop"
+        // message but was held; run it now that the hold expired. The
+        // promotion of leftover "next request" messages happens here too —
+        // never while a Queue Actions box holds indexes into the deque.
+        if self.queue_actions_deferred_start && self.state.status == SessionStatus::Idle {
+            let current = self.state.current_session_id.clone();
+            if self
+                .active_loop_session_id
+                .as_ref()
+                .is_some_and(|owner| self.state.current_session_id.as_ref() != Some(owner))
+            {
+                // The user switched sessions — keep the flag armed so the
+                // owning session's auto-start still fires when it (or any
+                // session without a live owner) is back in front.
+                return;
+            }
+            self.queue_actions_deferred_start = false;
+            let Some(id) = current else {
+                return;
+            };
+            self.promote_next_request_to_next_loop(&id);
+            let next = self
+                .state
+                .pending_queues
+                .get_mut(&id)
+                .and_then(|q| q.next_loop.pop_front());
+            if let Some(msg) = next {
+                self.start_agent_loop(msg);
+            }
+            return;
+        }
+
+        // Forward the head of the "next request" queue into the live loop's
+        // channel; the harness injects it into the context before its next
+        // request. FIFO is preserved: one in-flight message at a time, both
+        // sides are queues, and the deque entry retires on acknowledgment.
+        if self.state.status == SessionStatus::Working
+            && !self.next_request_in_flight
+            && let Some(owner) = self.active_loop_session_id.clone()
+            && self.state.current_session_id.as_deref() == Some(owner.as_str())
+            && let Some(text) = self
+                .state
+                .pending_queues
+                .get(&owner)
+                .and_then(|q| q.next_request.front().cloned())
+            && let Some(tx) = &self.queued_input_tx
+        {
+            let _ = tx.send(text);
+            self.next_request_in_flight = true;
+        }
+    }
+
     /// Start a full agent loop for `msg` (a user message that was just sent
     /// or dequeued from the pending "next agent loop" queue). Creates the
     /// session + history entry, spins the working state, and spawns the
     /// harness thread. Messages still pending in the "next request" queue
-    /// are handed to the new loop's queued-input channel so they enter its
-    /// first request.
+    /// stay queued: [`App::pump_queued_messages`] hands them to the loop's
+    /// queued-input channel one at a time (honoring the queue-actions hold).
     pub(super) fn start_agent_loop(&mut self, msg: String) {
         if self.state.current_session_id.is_none() {
             let id = generate_session_id();
@@ -94,21 +202,12 @@ impl App {
         self.perm_tx = perm_tx;
 
         // Create a fresh queued-input channel for the "next request" queue.
-        // The harness drains it before every request of THIS loop.
+        // The harness drains it before every request of THIS loop. Queued
+        // messages are forwarded by `pump_queued_messages`, one at a time,
+        // so an open Queue Actions box can always hold them back.
         let (queued_tx, queued_rx) = mpsc::unbounded_channel();
         self.queued_input_tx = Some(queued_tx.clone());
         self.active_loop_session_id = self.state.current_session_id.clone();
-
-        // Carry over messages that were queued for the next request while no
-        // loop was running (e.g. the previous run ended in an error and the
-        // user typed a fresh message): they enter this loop's first request.
-        if let Some(id) = self.state.current_session_id.clone()
-            && let Some(queues) = self.state.pending_queues.get(&id)
-        {
-            for text in &queues.next_request {
-                let _ = queued_tx.send(text.clone());
-            }
-        }
 
         let mut disabled_tools = self.internal_tools_view.disabled.clone();
 
@@ -333,11 +432,19 @@ impl App {
     /// messages that were never injected are promoted to the "next agent
     /// loop" queue (they behave like it: they wait for the next run). When
     /// `start_next` is true (the run ended cleanly — Done or Stopped) the
-    /// first queued next-loop message starts a fresh loop. On Error the queues
+    /// first queued next-loop message starts a fresh loop (FIFO). If the
+    /// queue-actions hold is active, that start is deferred instead:
+    /// [`App::pump_queued_messages`] starts it once the user closes the
+    /// actions box and the grace window expires. On Error the queues
     /// stay parked: the user decides when to resend (e.g. after switching the
     /// model) — a later manual message rolls them in.
     pub(super) fn handle_loop_end(&mut self, start_next: bool) -> bool {
         self.queued_input_tx = None;
+        self.queue_actions_deferred_start = false;
+        // Any in-flight message was never confirmed injected: its deque
+        // entry is still the head, so it simply takes part in whatever
+        // happens to the queue below.
+        self.next_request_in_flight = false;
         let Some(id) = self.state.current_session_id.clone() else {
             return false;
         };
@@ -348,17 +455,29 @@ impl App {
             // untouched for the session that owns them.
             return false;
         }
-        let next: Option<String> = {
-            let queues = self.state.pending_queues.entry(id).or_default();
-            while let Some(text) = queues.next_request.pop_front() {
-                queues.next_loop.push_back(text);
-            }
+        if start_next && self.queue_actions_hold_active() {
+            // The user is operating on queued messages: neither the
+            // promotion nor the auto-start may touch the queues (stored
+            // indexes must stay valid until the action runs). The pump
+            // performs both once the hold expires.
+            let pending = self
+                .state
+                .pending_queues
+                .get(&id)
+                .is_some_and(|q| q.queued_count() > 0);
+            self.queue_actions_deferred_start = pending;
+            return pending;
+        }
+        self.promote_next_request_to_next_loop(&id);
+        let next = self.state.pending_queues.get_mut(&id).and_then(|q| {
             if start_next {
-                queues.next_loop.pop_front()
+                q.next_loop.pop_front()
             } else {
                 None
             }
-        };
+        });
+        // Row indexes shifted after the promotion — drop the highlight.
+        self.hovered_queue_row = None;
         if let Some(msg) = next {
             self.start_agent_loop(msg);
             true

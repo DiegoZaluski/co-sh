@@ -24,6 +24,7 @@ use crate::routes::session::SessionView;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::queue_choice::QueueChoiceDialog;
+use crate::routes::session::queue_choice::QueueTarget;
 use crate::routes::session::right_panel::{RIGHT_PANEL_WIDTH, should_show_right_panel};
 use crate::routes::session::sidebar::SidebarView;
 use crate::routes::settings::SettingsView;
@@ -145,6 +146,29 @@ pub struct App {
     /// Session id that owns the currently running agent loop — guards the
     /// queue auto-start against mid-run session switches.
     active_loop_session_id: Option<String>,
+    /// Pending-queue row (render order: next-loop rows first, then
+    /// next-request rows) currently under the mouse cursor — drives the
+    /// opencode-style hover highlight above the prompt.
+    pub(super) hovered_queue_row: Option<usize>,
+    /// Until when the agent loop may not consume the next queued message.
+    /// Set to `now + QUEUE_ACTIONS_GRACE` whenever a Queue Actions box is
+    /// opened; while a Queue Actions box is open the hold applies regardless
+    /// (queued indexes must stay stable until the action runs).
+    pub(super) queue_actions_grace_until: Option<Instant>,
+    /// Set when a loop ended cleanly with a next-loop message waiting but its
+    /// start was deferred by the queue-actions hold. Consumed by
+    /// [`App::pump_queued_messages`] once the hold expires.
+    queue_actions_deferred_start: bool,
+    /// True while the head of `next_request` has been handed to the running
+    /// loop's channel but not yet acknowledged via `UserMessageInjected`.
+    /// The deque entry is only retired on acknowledgment so the message can
+    /// never be lost if the loop ends before injecting it.
+    next_request_in_flight: bool,
+    /// Origin of an edited queued message: `(queue, original index, text)`.
+    /// Re-queueing the exact same text into the SAME queue restores its
+    /// original position; queueing into the other queue (or a different
+    /// text) appends at the end and drops the hint.
+    pub(super) edit_requeue_hint: Option<(QueueTarget, usize, String)>,
     llm_config: LlmConfig,
     stop_signal: Arc<AtomicBool>,
     /// Re-entry guard for the user-triggered `/compact`: true while the
@@ -318,6 +342,11 @@ impl App {
             perm_tx,
             queued_input_tx: None,
             active_loop_session_id: None,
+            hovered_queue_row: None,
+            queue_actions_grace_until: None,
+            queue_actions_deferred_start: false,
+            next_request_in_flight: false,
+            edit_requeue_hint: None,
             llm_config: LlmConfig {
                 tool_call_mode: saved_tool_call_mode,
                 ..LlmConfig::from_env()
@@ -439,6 +468,7 @@ impl App {
             }
 
             self.poll_events();
+            self.pump_queued_messages();
         }
 
         restore_terminal()?;
@@ -601,6 +631,84 @@ impl App {
         ))
     }
 
+    /// Compute the pending-queued-messages strip rectangle (same calculation
+    /// as in `render()`): the rows above the prompt, growing upward from it.
+    /// Shared by hover tracking and click hit-testing so both map cursor
+    /// positions onto the exact rows that were drawn.
+    pub(super) fn compute_pending_queues_area(&self) -> Option<Rect> {
+        if !matches!(self.mode(), AppMode::Session) {
+            return None;
+        }
+        // When an inline dialog covers the prompt region, the pending rows
+        // are not rendered.
+        if self.question_dialog.visible
+            || self.permission_dialog.visible
+            || self.queue_choice_dialog.visible
+        {
+            return None;
+        }
+        let pending_h = self
+            .state
+            .current_pending_queues()
+            .map_or(0, |q| q.queued_count() as u16);
+        if pending_h == 0 {
+            return None;
+        }
+        let area = self.terminal_size();
+        let SessionArea {
+            main: main_area, ..
+        } = self.session_main_area(area);
+        let footer_y = main_area.bottom().saturating_sub(1);
+
+        let is_empty_session = self
+            .state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty());
+        let full_w = main_area.width.saturating_sub(4);
+        let prompt_area_w = if is_empty_session {
+            std::cmp::max(
+                EMPTY_SESSION_PROMPT_MIN_WIDTH,
+                (main_area.width as f64 * EMPTY_SESSION_PROMPT_RATIO) as u16,
+            )
+            .min(full_w)
+        } else {
+            full_w
+        };
+
+        // Same responsive budget as `render()` so mouse mapping matches the
+        // actually-rendered prompt height on every screen size.
+        let prompt_budget = footer_y
+            .saturating_sub(area.y + 1)
+            .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+        let prompt_h = self
+            .prompt_view
+            .required_height(prompt_area_w, prompt_budget);
+
+        let logo_block_h = if is_empty_session {
+            LOGO_CHAT.len() as u16 + 1
+        } else {
+            0
+        };
+
+        let prompt_area_y = if is_empty_session && prompt_h > 0 {
+            let header_y = area.y + 1;
+            let total_block_h = logo_block_h + prompt_h;
+            let available = footer_y.saturating_sub(header_y);
+            let top_spacer = available.saturating_sub(total_block_h) / 2;
+            header_y + top_spacer + logo_block_h
+        } else {
+            footer_y.saturating_sub(prompt_h)
+        };
+
+        let pending_area_y = prompt_area_y.saturating_sub(pending_h);
+        Some(Rect::new(
+            main_area.x + 2,
+            pending_area_y,
+            main_area.width.saturating_sub(4),
+            pending_h,
+        ))
+    }
+
     #[allow(clippy::unused_self)]
     fn terminal_size(&self) -> Rect {
         // We don't store the terminal size, but ratatui's Terminal::size is not accessible here.
@@ -620,14 +728,14 @@ impl App {
 #[path = "../bench/bench_e2e.rs"]
 mod bench_e2e;
 #[cfg(test)]
-#[path = "../bench/stress_rebuild.rs"]
-mod stress_rebuild;
-#[cfg(test)]
-#[path = "../bench/stress_streaming.rs"]
-mod stress_streaming;
-#[cfg(test)]
 #[path = "../bench/probe_drain.rs"]
 mod probe_drain;
 #[cfg(test)]
 #[path = "../bench/probe_real.rs"]
 mod probe_real;
+#[cfg(test)]
+#[path = "../bench/stress_rebuild.rs"]
+mod stress_rebuild;
+#[cfg(test)]
+#[path = "../bench/stress_streaming.rs"]
+mod stress_streaming;

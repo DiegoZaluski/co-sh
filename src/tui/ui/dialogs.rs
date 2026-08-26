@@ -245,6 +245,15 @@ pub enum DialogType {
         /// Truncated text of the clicked message shown as context.
         preview: String,
     },
+    /// Action picker for a PENDING queued message (the rows above the
+    /// prompt): Edit, Delete, Copy. `queue` + `index` identify the clicked
+    /// message inside its `VecDeque`.
+    QueueActions {
+        queue: crate::routes::session::queue_choice::QueueTarget,
+        index: usize,
+        /// Truncated text of the clicked message shown as context.
+        preview: String,
+    },
     Shortcuts {
         scroll: usize,
     },
@@ -490,6 +499,46 @@ impl DialogState {
             }
             DialogType::MessageActions { .. } => {
                 // Same compact geometry as the ReasoningList (3 items).
+                let max_w = 64u16.min(area.width.saturating_sub(4));
+                let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+
+                let max_visible = 3usize;
+                let dialog_h = (max_visible + 4) as u16;
+                let dialog_y = area
+                    .y
+                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
+
+                if x < dialog_x
+                    || x >= dialog_x + dialog_w
+                    || y_click < dialog_y
+                    || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+
+                let header_pad = 4;
+                let header_x = dialog_x + header_pad;
+                let header_w = dialog_w.saturating_sub(header_pad * 2);
+                let esc_label = "esc";
+                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
+                if y_click == dialog_y && x >= esc_x && x < esc_x + esc_label.len() as u16 {
+                    return DialogAction::Dismissed;
+                }
+
+                let list_top = dialog_y + 3;
+                if y_click >= list_top {
+                    let row = (y_click - list_top) as usize;
+                    if row < max_visible {
+                        instance.selected = row;
+                        return DialogAction::Confirmed;
+                    }
+                }
+
+                DialogAction::Consumed
+            }
+            DialogType::QueueActions { .. } => {
+                // Identical compact geometry to MessageActions (3 items).
                 let max_w = 64u16.min(area.width.saturating_sub(4));
                 let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
@@ -2026,6 +2075,124 @@ impl DialogState {
                     let y = list_top + idx as u16;
                     let is_selected = idx == selection;
                     let row_bg = if is_selected { bg_element } else { bg_color };
+
+                    for cx in list_x..list_x + list_w {
+                        if let Some(cell) = buf.cell_mut((cx, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(row_bg));
+                        }
+                    }
+
+                    let name_style = if is_selected {
+                        Style::default()
+                            .fg(rgba_color(theme.primary))
+                            .add_modifier(Modifier::BOLD)
+                            .bg(row_bg)
+                    } else {
+                        Style::default().fg(rgba_color(theme.text)).bg(row_bg)
+                    };
+                    draw_text_line(buf, name, list_x + 1, y, list_w - 1, name_style);
+
+                    let desc_x = list_x + 12;
+                    if desc_x < list_x + list_w {
+                        draw_text_line(
+                            buf,
+                            desc,
+                            desc_x,
+                            y,
+                            list_x + list_w - desc_x,
+                            Style::default().fg(rgba_color(theme.text_muted)).bg(row_bg),
+                        );
+                    }
+                }
+            }
+            DialogType::QueueActions { preview, .. } => {
+                let selection = instance.selected.min(2);
+                let max_w = 64u16.min(area.width.saturating_sub(4));
+                let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+
+                let items = 3usize;
+                let dialog_h = (items + 4) as u16;
+                let dialog_y = area
+                    .y
+                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
+                let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+                // Lighter floating surface (the element color) so the focused
+                // box stands out against the darker prompt panel behind it.
+                let bg_color = rgba_color(theme.background_element);
+                for y in dialog_area.y..dialog_area.bottom() {
+                    for x in dialog_area.x..dialog_area.right() {
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(
+                                Style::default()
+                                    .bg(bg_color)
+                                    .remove_modifier(Modifier::all()),
+                            );
+                            cell.set_diff_option(CellDiffOption::None);
+                        }
+                    }
+                }
+
+                let header_pad = 4;
+                let header_x = dialog_x + header_pad;
+                let header_w = dialog_w.saturating_sub(header_pad * 2);
+
+                // Line 0: bold title + "esc" hint (right-aligned, muted).
+                let title_style = Style::default()
+                    .fg(rgba_color(theme.text))
+                    .add_modifier(Modifier::BOLD);
+                draw_text_line(
+                    buf,
+                    "Queue Actions",
+                    header_x,
+                    dialog_y,
+                    header_w,
+                    title_style,
+                );
+                let esc_label = "esc";
+                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
+                draw_text_line(
+                    buf,
+                    esc_label,
+                    esc_x,
+                    dialog_y,
+                    header_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                // Line 1: clicked message preview (muted, truncated).
+                draw_text_line(
+                    buf,
+                    preview,
+                    header_x,
+                    dialog_y + 1,
+                    header_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                // Line 2: gap.
+
+                // Lines 3+: the three actions. The selected row swaps to the
+                // darker panel color (inverted vs the lighter surface) with a
+                // bold primary name.
+                let list_top = dialog_y + 3;
+                let list_pad = 1;
+                let list_x = dialog_x + list_pad;
+                let list_w = dialog_w.saturating_sub(list_pad * 2);
+                let bg_panel = rgba_color(theme.background_panel);
+                let options = [
+                    ("Edit", "Load the message into the prompt"),
+                    ("Delete", "Remove it from the queue"),
+                    ("Copy", "Copy message text to clipboard"),
+                ];
+
+                for (idx, (name, desc)) in options.iter().enumerate() {
+                    let y = list_top + idx as u16;
+                    let is_selected = idx == selection;
+                    let row_bg = if is_selected { bg_panel } else { bg_color };
 
                     for cx in list_x..list_x + list_w {
                         if let Some(cell) = buf.cell_mut((cx, y)) {

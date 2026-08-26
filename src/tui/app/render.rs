@@ -585,41 +585,42 @@ impl App {
     /// request" rows below (cool cyan/blue background), each preserving FIFO
     /// order. The two dedicated theme colors switch with the active theme. No
     /// explicit labels — the background color IS the identity of the queue.
-    fn render_pending_queues(&self, buf: &mut ratatui::buffer::Buffer, area: Rect) {
+    pub(super) fn render_pending_queues(&self, buf: &mut ratatui::buffer::Buffer, area: Rect) {
         let Some(queues) = self.state.current_pending_queues() else {
             return;
         };
         if queues.next_loop.is_empty() && queues.next_request.is_empty() {
             return;
         }
+        // The hovered row swaps its queue color for pure WHITE so the focus
+        // clearly stands out against every theme surface (and against the
+        // prompt box, which shares the element/panel colors). `contrast_on`
+        // flips the row text to black for readability.
+        let hover_bg = RGBA::from_hex("#FFFFFF");
+        let hover = self.hovered_queue_row;
         let mut y = area.y;
+        let mut row = 0usize;
         let panel = self.theme.background_panel;
         let border = self.theme.accent;
         for text in &queues.next_loop {
-            Self::draw_pending_row(
-                buf,
-                text,
-                area.x,
-                y,
-                area.width,
-                self.theme.queue_next_loop,
-                panel,
-                border,
-            );
+            let bg = if hover == Some(row) {
+                hover_bg
+            } else {
+                self.theme.queue_next_loop
+            };
+            Self::draw_pending_row(buf, text, area.x, y, area.width, bg, panel, border);
             y += 1;
+            row += 1;
         }
         for text in &queues.next_request {
-            Self::draw_pending_row(
-                buf,
-                text,
-                area.x,
-                y,
-                area.width,
-                self.theme.queue_next_request,
-                panel,
-                border,
-            );
+            let bg = if hover == Some(row) {
+                hover_bg
+            } else {
+                self.theme.queue_next_request
+            };
+            Self::draw_pending_row(buf, text, area.x, y, area.width, bg, panel, border);
             y += 1;
+            row += 1;
         }
     }
 

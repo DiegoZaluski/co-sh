@@ -1,6 +1,7 @@
 mod confirm;
 mod message_actions;
 mod model;
+mod queue_actions;
 mod text_input;
 mod theme;
 mod tool_call;

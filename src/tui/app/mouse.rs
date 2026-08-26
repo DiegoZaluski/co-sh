@@ -365,6 +365,9 @@ impl App {
                             DialogType::MessageActions { .. } => {
                                 self.handle_message_actions_dialog_key(KeyCode::Up);
                             }
+                            DialogType::QueueActions { .. } => {
+                                self.handle_queue_actions_dialog_key(KeyCode::Up);
+                            }
                             _ => {}
                         }
                     } else if self.sidebar_focused && self.sidebar.open && x < SIDEBAR_WIDTH {
@@ -418,6 +421,9 @@ impl App {
                             DialogType::MessageActions { .. } => {
                                 self.handle_message_actions_dialog_key(KeyCode::Down);
                             }
+                            DialogType::QueueActions { .. } => {
+                                self.handle_queue_actions_dialog_key(KeyCode::Down);
+                            }
                             _ => {}
                         }
                     } else if self.sidebar_focused && self.sidebar.open && x < SIDEBAR_WIDTH {
@@ -468,6 +474,15 @@ impl App {
                 let session_area = self.session_viewport_area();
                 self.session_view
                     .update_hover(y, session_area, &self.state, &self.config);
+                // Hover tracking for the pending queued rows above the prompt.
+                self.hovered_queue_row = match self.compute_pending_queues_area() {
+                    Some(area)
+                        if x >= area.x && x < area.right() && y >= area.y && y < area.bottom() =>
+                    {
+                        Some((y - area.y) as usize)
+                    }
+                    _ => None,
+                };
             }
             return Ok(true);
         }
@@ -554,6 +569,13 @@ impl App {
                                 let message_id = message_id.clone();
                                 self.dialog.pop();
                                 self.run_message_action(action, &message_id);
+                                return Ok(true);
+                            }
+                            DialogType::QueueActions { queue, index, .. } => {
+                                let action = d.selected.min(2);
+                                let (queue, index) = (*queue, *index);
+                                self.dialog.pop();
+                                self.run_queue_action(action, queue, index);
                                 return Ok(true);
                             }
                             DialogType::ApiKeyInput { .. } | DialogType::LocalUrlInput { .. } => {
@@ -722,19 +744,9 @@ impl App {
                     let text = self.prompt_view.send_message();
                     let target = self.queue_choice_dialog.choice();
                     self.queue_choice_dialog.hide();
-                    if let Some(queues) = self.state.current_pending_queues_mut() {
-                        match target {
-                            QueueTarget::NextRequest => {
-                                queues.next_request.push_back(text.clone());
-                                if let Some(tx) = &self.queued_input_tx {
-                                    let _ = tx.send(text);
-                                }
-                            }
-                            QueueTarget::NextLoop => {
-                                queues.next_loop.push_back(text);
-                            }
-                        }
-                    }
+                    // Same queue + unchanged text → original position;
+                    // otherwise appended at the end (see helper).
+                    self.enqueue_pending_message(target, text);
                     self.prompt_view.focus();
                 }
                 return Ok(true);
@@ -786,6 +798,33 @@ impl App {
                 }
                 SidebarAction::None => {}
             }
+        }
+
+        // 6b. Pending queued-message rows (Queue Actions): clicking a row
+        // opens the Edit/Delete/Copy box for that specific queued message
+        // and grants the 5-second hold on the next effective message.
+        if matches!(self.mode(), AppMode::Session)
+            && !self.mouse_drag_active
+            && self.drag_selection.is_none()
+            && let Some(pending_area) = self.compute_pending_queues_area()
+            && y >= pending_area.y
+            && y < pending_area.bottom()
+        {
+            if let Some(queues) = self.state.current_pending_queues() {
+                let row = (y - pending_area.y) as usize;
+                let loop_len = queues.next_loop.len();
+                let (queue, index, text) = if row < loop_len {
+                    (QueueTarget::NextLoop, row, queues.next_loop[row].clone())
+                } else {
+                    let idx = row - loop_len;
+                    match queues.next_request.get(idx) {
+                        Some(text) => (QueueTarget::NextRequest, idx, text.clone()),
+                        None => return Ok(true),
+                    }
+                };
+                self.open_queue_actions_for(queue, index, &text);
+            }
+            return Ok(true);
         }
 
         // 7. Session view (tool expand/collapse)

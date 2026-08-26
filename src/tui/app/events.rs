@@ -7,6 +7,7 @@ use ratatui::style::Color;
 
 use super::{App, AppMode};
 use crate::component::spinner_highlight::HighlightSpinner;
+use crate::routes::session::queue_choice::QueueTarget;
 use crate::session_store::is_valid_session;
 use crate::types::SessionStatus;
 use crate::ui::dialogs::DialogType;
@@ -525,12 +526,32 @@ impl App {
 
                 HarnessEvent::UserMessageInjected { text } => {
                     // The running loop consumed a "next request" message:
-                    // move it out of the pending area (FIFO — the harness
-                    // drains in order) into the normal history.
-                    if let Some(queues) = self.state.current_pending_queues_mut() {
-                        queues.next_request.pop_front();
+                    // retire the in-flight marker and pop the deque head
+                    // (FIFO — the harness drains the channel in order).
+                    // Popping only on acknowledgment guarantees a message
+                    // already handed to the loop can never be lost.
+                    if self.next_request_in_flight {
+                        self.next_request_in_flight = false;
+                        if let Some(queues) = self.state.current_pending_queues_mut() {
+                            queues.next_request.pop_front();
+                        }
+                        // A delivered head shifts the edited message's home
+                        // position one slot closer to the front.
+                        if let Some((QueueTarget::NextRequest, idx, _)) =
+                            &mut self.edit_requeue_hint
+                            && *idx > 0
+                        {
+                            *idx -= 1;
+                        }
                     }
-                    if let Some(session) = self.state.current_session_mut() {
+                    // Mirror the message into the owning session's history —
+                    // never into whichever session happens to be selected
+                    // after a mid-run switch.
+                    let owner_matches = self
+                        .active_loop_session_id
+                        .as_ref()
+                        .is_none_or(|owner| self.state.current_session_id.as_ref() == Some(owner));
+                    if owner_matches && let Some(session) = self.state.current_session_mut() {
                         session.messages.push(Message {
                             id: format!("msg-{}", session.messages.len()),
                             role: MessageRole::User,
