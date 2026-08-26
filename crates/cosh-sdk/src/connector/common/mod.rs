@@ -54,7 +54,7 @@ impl SseBuffer {
         while let Some(sep_end) = next_sse_separator(&self.buf) {
             let raw: Vec<u8> = self.buf.drain(..sep_end).collect();
             let text = String::from_utf8_lossy(&raw);
-            if let Some(data) = text.lines().find_map(|l| l.strip_prefix("data: ")) {
+            if let Some(data) = text.lines().find_map(|l| strip_data_prefix(l)) {
                 frames.push(data.to_owned());
             }
         }
@@ -80,10 +80,22 @@ impl SseBuffer {
         let raw: Vec<u8> = std::mem::take(&mut self.buf);
         let text = String::from_utf8_lossy(&raw);
         text.lines()
-            .filter_map(|l| l.strip_prefix("data: "))
-            .map(String::from)
+            .filter_map(|l| strip_data_prefix(l).map(String::from))
             .collect()
     }
+}
+
+/// Strip the SSE `data:` field prefix from a line, returning the field value
+/// (trimmed of surrounding whitespace) or `None` for non-data lines.
+///
+/// Per the WHATWG SSE spec, the field value starts after `data:` followed by
+/// an optional single U+0020. Both `data: payload` (with space) and
+/// `data:payload` (without space) are valid — the space is stripped when
+/// present. This mirrors Goose's `strip_data_prefix` implementation.
+fn strip_data_prefix(line: &str) -> Option<&str> {
+    line.strip_prefix("data: ")
+        .or_else(|| line.strip_prefix("data:"))
+        .map(|s| s.trim())
 }
 
 /// Byte offset just past the first SSE event separator in `buf` — the blank
@@ -511,5 +523,62 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(buf.flush(), vec![r#"{"a":1}"#, r#"{"b":2}"#]);
+    }
+
+    // ── strip_data_prefix tests (SSE spec compliance) ─────────────────
+
+    #[test]
+    fn strip_data_prefix_with_space() {
+        assert_eq!(
+            super::strip_data_prefix("data: {\"a\":1}"),
+            Some(r#"{"a":1}"#)
+        );
+    }
+
+    #[test]
+    fn strip_data_prefix_without_space() {
+        // SSE spec: space after colon is optional.
+        assert_eq!(
+            super::strip_data_prefix("data:{\"a\":1}"),
+            Some(r#"{"a":1}"#)
+        );
+    }
+
+    #[test]
+    fn strip_data_prefix_non_data_line() {
+        assert_eq!(super::strip_data_prefix("event: message"), None);
+        assert_eq!(super::strip_data_prefix("id: 123"), None);
+        assert_eq!(super::strip_data_prefix(""), None);
+    }
+
+    #[test]
+    fn strip_data_prefix_trims_whitespace() {
+        assert_eq!(
+            super::strip_data_prefix("data:  {\"a\":1}  "),
+            Some(r#"{"a":1}"#)
+        );
+    }
+
+    #[test]
+    fn strip_data_prefix_empty_value() {
+        // SSE spec: empty data field is valid (event dispatch without data).
+        assert_eq!(super::strip_data_prefix("data:"), Some(""));
+        assert_eq!(super::strip_data_prefix("data: "), Some(""));
+    }
+
+    // ── SseBuffer with no-space data prefix ────────────────────────────
+
+    #[test]
+    fn pushes_no_space_data_prefix() {
+        let mut buf = SseBuffer::new();
+        let frames = buf.push_and_drain(b"data:{\"a\":1}\n\ndata:{\"b\":2}\n\n");
+        assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
+    }
+
+    #[test]
+    fn mixed_space_and_no_space_prefix() {
+        let mut buf = SseBuffer::new();
+        let frames = buf.push_and_drain(b"data: {\"a\":1}\n\ndata:{\"b\":2}\n\n");
+        assert_eq!(frames, vec![r#"{"a":1}"#, r#"{"b":2}"#]);
     }
 }
