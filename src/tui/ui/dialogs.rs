@@ -220,7 +220,7 @@ fn render_zen_gateway_dialog(buf: &mut Buffer, area: Rect, theme: &Theme, select
         ("to opencode.ai and follow their terms:", false),
         ("https://opencode.ai/legal/terms-of-service", true),
         (
-            "Note: some free models may use your data for training",
+            "Note some free models may use your data for training",
             false,
         ),
         ("while they are free — see opencode.ai/docs/zen.", false),
@@ -244,6 +244,25 @@ fn render_zen_gateway_dialog(buf: &mut Buffer, area: Rect, theme: &Theme, select
             content_w,
             style,
         );
+    }
+
+    // Marker-highlight the leading "Note" label of the training note — the
+    // same theme warning swatch as the badge above, over exactly those cells
+    // (highlighter-pen style); the rest of the line keeps its black-on-white
+    // look. Found by prefix so the highlight stays in sync with the body
+    // array.
+    if let Some((idx, _)) = body
+        .iter()
+        .enumerate()
+        .find(|(_, (text, _))| text.starts_with("Note "))
+    {
+        let note_style = Style::default().fg(badge_fg).bg(rgba_color(theme.warning));
+        for (i, ch) in "Note".chars().enumerate() {
+            if let Some(cell) = buf.cell_mut((content_x + i as u16, body_start + idx as u16)) {
+                cell.set_char(ch);
+                cell.set_style(note_style);
+            }
+        }
     }
 
     // Options row, back on the PANEL color below the white block —
