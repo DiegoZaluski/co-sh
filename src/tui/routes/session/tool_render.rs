@@ -16,7 +16,7 @@ use cosh_tui::core::renderables::diff::{DiffRenderable, DiffViewMode};
 use cosh_tui::core::renderables::markdown::{MarkdownRenderable, estimate_height};
 
 use crate::component::spinner_highlight::HighlightSpinner;
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 use crate::types::{ToolPart, ToolStatus};
 
 /// Pick the foreground color for an inline tool label based on its status.
@@ -27,11 +27,6 @@ fn tool_label_fg(status: &ToolStatus, theme: &Theme) -> RGBA {
         ToolStatus::Completed => theme.text_muted,
         ToolStatus::Running => theme.text,
     }
-}
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
 }
 
 /// Return the highlight colour for a tool display name.

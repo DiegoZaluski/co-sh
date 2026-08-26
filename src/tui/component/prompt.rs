@@ -2,17 +2,16 @@ use std::cell::Cell;
 use std::time::SystemTime;
 
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
-use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
 use crate::component::cursor::{Cursor, CursorState};
 use crate::logo::ChatLogo;
 use crate::state::AppState;
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 use crate::types::{AgentColors, MessageRole, Part, Session};
 
 const BASE_H: u16 = 2;
@@ -38,11 +37,6 @@ pub struct PastedPart {
     pub virtual_text: String,
     /// The original pasted text that will be expanded on submit/copy.
     pub actual_text: String,
-}
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
 }
 
 const fn prompt_border_chars() -> BorderCharacters {

@@ -5,10 +5,9 @@ use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 use ratatui::style::Style;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 use crate::util::text_region::TextRegion;
 
 pub mod todo;
@@ -19,11 +18,6 @@ use types::{
     PtySession, RightPanelState, SubagentBodyCache, sanitize_subagent_text, split_subagent_output,
     wrap_chars,
 };
-
-pub fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 /// Black-or-white text color with readable contrast on `bg`.
 fn contrast_fg(bg: RGBA) -> RGBA {

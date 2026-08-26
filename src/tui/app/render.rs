@@ -13,11 +13,7 @@ use crate::logo::LOGO_CHAT;
 use crate::routes::home::footer::HomeFooterView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::right_panel::render_right_panel;
-
-pub(super) fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
+use crate::theme::rgba_color;
 
 /// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
 pub(super) fn render_budget_bar(pct: u8) -> String {

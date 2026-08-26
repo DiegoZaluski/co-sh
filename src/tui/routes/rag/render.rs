@@ -11,7 +11,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 use crate::util::markdown::render_markdown;
 
 use super::models::{CreateDbFocus, RagMode};
@@ -82,10 +82,6 @@ pub(crate) const DESC_POPUP_MIN_W: u16 = 30;
 pub(crate) const DESC_POPUP_MIN_H: u16 = 5;
 
 // Helpers
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;

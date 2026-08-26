@@ -1,15 +1,15 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
-use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::types::MouseEvent;
 
 use super::super::super::theme::Theme;
+use crate::theme::rgba_color;
 
 /// Which pending queue a message typed during a running agent loop joins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,11 +18,6 @@ pub enum QueueTarget {
     NextRequest,
     /// The message waits for the current loop to end and starts a new one.
     NextLoop,
-}
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
 }
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {

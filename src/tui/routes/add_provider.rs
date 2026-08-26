@@ -8,7 +8,7 @@ use cosh_sdk::connector::{
 use cosh_tui::core::types::MouseEvent;
 
 use crate::component::search_bar::SearchBar;
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 use crate::util::list_selection::ListSelection;
 use crate::util::setup::Setup;
 
@@ -259,11 +259,6 @@ impl AddProviderView {
             }
         }
     }
-}
-
-fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
 }
 
 fn max_row_width() -> usize {

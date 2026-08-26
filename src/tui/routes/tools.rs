@@ -6,7 +6,7 @@ use ratatui::style::{Color, Style};
 
 use cosh_tui::core::types::MouseEvent;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 use crate::util::list_selection::ListSelection;
 
 pub fn load_disabled_tools(setup: &crate::util::setup::Setup) -> HashSet<String> {
@@ -213,11 +213,6 @@ impl InternalToolsView {
             }
         }
     }
-}
-
-fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
 }
 
 /// Compute the Y position where title and list start (vertically centered).

@@ -3,12 +3,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use cosh::ModelEntry;
-use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::types::MouseEvent;
 
 use crate::component::search_bar::SearchBar;
 use crate::fallback::{FallbackEntry, default_fallbacks};
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 use crate::util::list_selection::ListSelection;
 
 const FOOTER_MARGIN: u16 = 3;
@@ -16,11 +15,6 @@ const SIDE_PADDING: u16 = 4;
 const MODEL_LIST_TOP_OFFSET: u16 = 3;
 const FALLBACK_LIST_TOP_OFFSET: u16 = 2;
 const VISIBLE_COUNT: usize = 20;
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;

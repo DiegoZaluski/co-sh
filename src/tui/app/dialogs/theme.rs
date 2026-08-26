@@ -13,13 +13,20 @@ impl App {
             .collect();
         themes.sort_by_key(|a| a.to_lowercase());
 
+        // Resolve the current theme by comparing against each registry entry
+        // WITH the /background preference applied — self.theme carries the
+        // transparent-background override, so a plain equality check would
+        // miss while the toggle is on.
         let current = self
             .theme_registry
             .names()
-            .iter()
-            .find(|&&name| self.theme_registry.get(name) == Some(&self.theme))
-            .map_or_else(|| "opencode".to_string(), |&s| s.to_string());
-
+            .into_iter()
+            .find(|&name| {
+                self.theme_registry
+                    .get(name)
+                    .is_some_and(|t| self.themed(t) == self.theme)
+            })
+            .map_or_else(|| "opencode".to_string(), str::to_string);
         // Store the theme name so we can restore on cancel
         self.theme_dialog_original = Some(current.clone());
 
@@ -71,9 +78,8 @@ impl App {
                         .current()
                         .map_or(0, |d| d.selected.min(filtered.len().saturating_sub(1)))]
                     .clone();
-                    if let Some(t) = self.theme_registry.get(&name) {
-                        self.theme = t.clone();
-                        self.config.theme_gen += 1;
+                    if let Some(t) = self.theme_registry.get(&name).cloned() {
+                        self.set_theme(&t);
                     }
                     // Persist theme choice so it survives restarts
                     self.setup.appearance.theme = name;
@@ -86,10 +92,9 @@ impl App {
             KeyCode::Esc => {
                 // Restore original theme
                 if let Some(ref orig) = self.theme_dialog_original
-                    && let Some(t) = self.theme_registry.get(orig)
+                    && let Some(t) = self.theme_registry.get(orig).cloned()
                 {
-                    self.theme = t.clone();
-                    self.config.theme_gen += 1;
+                    self.set_theme(&t);
                 }
                 self.theme_dialog_original = None;
                 self.dialog.pop();
@@ -111,10 +116,9 @@ impl App {
                 if is_empty {
                     // Restore original theme when filter becomes empty (matches opencode)
                     if let Some(ref orig) = self.theme_dialog_original
-                        && let Some(t) = self.theme_registry.get(orig)
+                        && let Some(t) = self.theme_registry.get(orig).cloned()
                     {
-                        self.theme = t.clone();
-                        self.config.theme_gen += 1;
+                        self.set_theme(&t);
                     }
                 } else {
                     self.apply_filtered_theme_preview();
@@ -157,10 +161,9 @@ impl App {
             .current()
             .map_or(0, |d| d.selected.min(filtered.len().saturating_sub(1)));
         if sel < filtered.len()
-            && let Some(t) = self.theme_registry.get(&filtered[sel])
+            && let Some(t) = self.theme_registry.get(&filtered[sel]).cloned()
         {
-            self.theme = t.clone();
-            self.config.theme_gen += 1;
+            self.set_theme(&t);
         }
     }
 

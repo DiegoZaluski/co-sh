@@ -1,4 +1,20 @@
 use cosh_tui::core::lib::rgba::RGBA;
+use ratatui::style::Color;
+
+/// Map a theme [`RGBA`] onto a ratatui [`Color`], honoring the crate-wide
+/// transparency convention (see the renderables in `cosh-tui`, e.g.
+/// `diff.rs`): alpha 0 means "no fill" and maps to [`Color::Reset`] so the
+/// terminal's own default background shows through instead of an opaque
+/// RGB(0,0,0) block. The `/background` toggle relies on this by zeroing the
+/// active theme's background alpha.
+pub fn rgba_color(rgba: RGBA) -> Color {
+    let (r, g, b, a) = rgba.to_ints();
+    if a == 0 {
+        Color::Reset
+    } else {
+        Color::Rgb(r, g, b)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
@@ -674,4 +690,18 @@ fn material() -> Theme {
     t.queue_next_loop = RGBA::from_hex("#3A331C");
     t.queue_next_request = RGBA::from_hex("#1A2E3A");
     t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgba_color_maps_alpha_zero_to_reset() {
+        assert_eq!(rgba_color(RGBA::from_ints(7, 7, 10, 0)), Color::Reset);
+        assert_eq!(
+            rgba_color(RGBA::from_ints(0x07, 0x07, 0x0a, 255)),
+            Color::Rgb(0x07, 0x07, 0x0a)
+        );
+    }
 }

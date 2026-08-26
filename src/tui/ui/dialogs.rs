@@ -12,7 +12,7 @@ use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::types::MouseEvent;
 
 use crate::component::cursor::{Cursor, CursorState};
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 
 /// Visual item in the model list - either a provider header or a model
 #[derive(Debug, Clone)]
@@ -36,11 +36,6 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Shift+B", "Previous agent queue (panel focused)"),
     ("Shift+N", "Next agent queue (panel focused)"),
 ];
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;

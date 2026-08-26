@@ -4,9 +4,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::rgba_color;
 use super::types::{TodoItem, wrap_chars};
 use crate::theme::Theme;
+use crate::theme::rgba_color;
 
 /// Gap above the box (1 blank line).
 const TOP_GAP: u16 = 1;

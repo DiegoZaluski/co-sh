@@ -10,6 +10,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 use cosh::harness::HarnessEvent;
+use cosh_tui::core::lib::rgba::RGBA;
 
 use crate::component::agent_spinner::AgentSpinner;
 use crate::component::prompt::PromptView;
@@ -66,6 +67,18 @@ pub(crate) fn message_prompt_text(msg: &crate::types::Message) -> String {
         .join("\n")
 }
 
+/// Zero the alpha of a theme's base background when transparent mode is on
+/// (the `/background` toggle). RGB channels are preserved so luminance
+/// derivations keep working and toggling off restores the exact registry
+/// color.
+fn apply_background_preference(mut t: Theme, transparent_background: bool) -> Theme {
+    if transparent_background {
+        let (r, g, b, _) = t.background.to_ints();
+        t.background = RGBA::from_ints(r, g, b, 0);
+    }
+    t
+}
+
 const SIDEBAR_WIDTH: u16 = 22;
 
 /// Header link that opens the project's bug-report page.
@@ -117,6 +130,10 @@ pub struct App {
     pub state: AppState,
     pub theme: Theme,
     pub theme_registry: ThemeRegistry,
+    /// `/background` toggle: when on, the active theme's base background is
+    /// painted with the terminal default ([`ratatui::style::Color::Reset`])
+    /// instead of the theme color. Persisted in `setup.json`.
+    pub transparent_background: bool,
     pub session_view: SessionView,
     pub prompt_view: PromptView,
     pub sidebar: SidebarView,
@@ -286,14 +303,21 @@ impl App {
         // Persisted tool-call mode overrides the env default for the session.
         let saved_tool_call_mode = crate::routes::tools::load_tool_call_mode(&setup);
 
-        // Load saved theme from setup config
-        let theme = if setup.appearance.theme.is_empty() {
-            theme_registry.default_theme().clone()
-        } else {
-            theme_registry
-                .get(&setup.appearance.theme)
-                .cloned()
-                .unwrap_or_else(|| theme_registry.default_theme().clone())
+        // Load saved theme from setup config, honoring the /background toggle:
+        // when enabled the base background is swapped for a fully transparent
+        // RGBA (alpha 0 → Color::Reset at draw time) so the terminal's own
+        // background shows through.
+        let transparent_background = setup.appearance.transparent_background;
+        let theme = {
+            let base = if setup.appearance.theme.is_empty() {
+                theme_registry.default_theme().clone()
+            } else {
+                theme_registry
+                    .get(&setup.appearance.theme)
+                    .cloned()
+                    .unwrap_or_else(|| theme_registry.default_theme().clone())
+            };
+            apply_background_preference(base, transparent_background)
         };
 
         let saved_bell = setup.appearance.bell_enabled;
@@ -307,6 +331,7 @@ impl App {
             state,
             theme_registry,
             theme,
+            transparent_background,
             session_view: SessionView::new(),
             home_view: HomeView::new(),
             internal_tools_view: {
@@ -401,6 +426,23 @@ impl App {
             variant: ToastVariant::Info,
             duration_ms: 5000,
         });
+    }
+
+    /// Apply the `/background` preference to a theme: when the toggle is on,
+    /// zero the alpha of the base background (keeping its RGB channels so
+    /// luminance-based derivations keep working). At draw time the shared
+    /// [`crate::theme::rgba_color`] maps alpha 0 to the terminal default.
+    pub(in crate::app) fn themed(&self, t: &Theme) -> Theme {
+        apply_background_preference(t.clone(), self.transparent_background)
+    }
+
+    /// Install a new active theme (honoring the background preference) and
+    /// bump the render-cache generation so cached cells repaint. Every
+    /// `self.theme` mutation must go through here — including previews and
+    /// cancels in the theme dialog — or the toggle would silently drop.
+    pub(in crate::app) fn set_theme(&mut self, t: &Theme) {
+        self.theme = self.themed(t);
+        self.config.theme_gen += 1;
     }
 
     // RAG helper methods (cfg-gated at method level, always compiles)

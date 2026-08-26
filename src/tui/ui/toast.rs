@@ -1,6 +1,5 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 
 use cosh_tui::core::lib::border::BorderSidesConfig;
 use cosh_tui::core::lib::rgba::RGBA;
@@ -11,11 +10,6 @@ use cosh_tui::core::renderables::text::TextRenderable;
 use cosh_tui::core::types::TextAttributes;
 
 use crate::theme::Theme;
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 #[derive(Debug, Clone)]
 pub enum ToastVariant {

@@ -35,6 +35,10 @@ pub struct Appearance {
     pub theme: String,
     /// Ring the terminal bell when the agent loop finishes.
     pub bell_enabled: bool,
+    /// `/background` toggle: paint the TUI's base background with the
+    /// terminal's own default color (`Color::Reset`) instead of the theme
+    /// color. Panels/elements keep their theme colors.
+    pub transparent_background: bool,
 }
 
 impl Default for Appearance {
@@ -42,6 +46,7 @@ impl Default for Appearance {
         Self {
             theme: String::new(),
             bell_enabled: true,
+            transparent_background: false,
         }
     }
 }
@@ -276,6 +281,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&setup).unwrap();
         let parsed: Setup = serde_json::from_str(&json).unwrap();
         assert!(parsed.appearance.bell_enabled);
+        assert!(!parsed.appearance.transparent_background);
         assert_eq!(parsed.tools.tool_call_mode, "native");
         assert!(parsed.providers.local.is_empty());
     }
@@ -287,6 +293,7 @@ mod tests {
 
         let mut setup = Setup::default();
         setup.appearance.theme = "dracula".to_string();
+        setup.appearance.transparent_background = true;
         setup.tools.disabled = vec!["bash".to_string()];
         setup.providers.local.insert(
             "llamacpp".to_string(),
@@ -300,6 +307,7 @@ mod tests {
 
         let loaded: Setup = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.appearance.theme, "dracula");
+        assert!(loaded.appearance.transparent_background);
         assert_eq!(loaded.tools.disabled, vec!["bash".to_string()]);
         assert_eq!(
             loaded.local_base_url("llamacpp"),

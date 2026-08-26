@@ -1,21 +1,15 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
-use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::types::MouseEvent;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 
 const OPTIONS: [&str; 3] = ["Allow", "Allow Once", "Deny"];
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 const fn left_border_chars() -> BorderCharacters {
     BorderCharacters {

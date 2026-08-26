@@ -15,6 +15,7 @@
 //! - A slow, wide atmospheric glow
 
 #![allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+#![allow(dead_code)]
 
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
@@ -33,6 +34,12 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 // Include the spinner module from the TUI component directory.
 #[path = "../tui/component/spinner_highlight.rs"]
 mod spinner_highlight;
+
+// `spinner_highlight` resolves its shared color helper through
+// `crate::theme` — include the real module so there is a single source of
+// truth for it.
+#[path = "../tui/theme.rs"]
+mod theme;
 
 use cosh_tui::core::lib::rgba::RGBA;
 use spinner_highlight::HighlightSpinner;

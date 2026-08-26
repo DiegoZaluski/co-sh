@@ -1,6 +1,13 @@
-use super::App;
+use super::{App, HOME_LOCK, isolate_home};
 use crate::ui::dialogs::DialogType;
 use crossterm::event::KeyCode;
+
+fn slash_cmd(name: &str) -> crate::ui::slash_menu::SlashCommand {
+    crate::ui::slash_menu::SlashCommand {
+        name: name.into(),
+        desc: String::new(),
+    }
+}
 
 /// Regression: Enter on `/toolcall` in the slash menu must open the
 /// mode picker dialog. It used to fall into the generic branch (fill the
@@ -253,4 +260,99 @@ async fn slash_compact_refuses_without_a_session_context() {
         app.toast_state.current.is_some(),
         "the refusal surfaces as a toast"
     );
+}
+
+/// `/background` toggles the base background between the theme color and the
+/// terminal default: ON zeroes the alpha (RGB preserved, so luminance
+/// derivations keep working), OFF restores the exact registry color. Each
+/// toggle bumps the render generation and surfaces a toast.
+#[tokio::test]
+async fn slash_background_toggles_and_restores() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let (r, g, b, _) = app.theme_registry.default_theme().background.to_ints();
+    assert_eq!(app.config.theme_gen, 0);
+
+    app.run_slash_command(&slash_cmd("background"));
+    assert!(app.transparent_background);
+    assert_eq!(app.theme.background.to_ints(), (r, g, b, 0));
+    assert_eq!(app.config.theme_gen, 1);
+    assert!(
+        app.toast_state
+            .current
+            .as_ref()
+            .is_some_and(|t| t.message.contains("terminal")),
+        "the toast announces the terminal-default background"
+    );
+
+    app.run_slash_command(&slash_cmd("background"));
+    assert!(!app.transparent_background);
+    assert_eq!(app.theme.background.to_ints(), (r, g, b, 255));
+    assert_eq!(app.config.theme_gen, 2);
+}
+
+/// The transparent-background preference survives a theme switch while it is
+/// active — the new theme also gets its base background cleared — and
+/// toggling off restores that theme's pristine color.
+#[tokio::test]
+async fn slash_background_survives_theme_switch() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.setup.appearance.theme = "dracula".to_string();
+
+    app.run_slash_command(&slash_cmd("background"));
+    assert!(app.transparent_background);
+    let (_, _, _, dracula_a) = app.theme.background.to_ints();
+    assert_eq!(dracula_a, 0);
+
+    // A later theme switch (through set_theme, like the dialog does) keeps
+    // the preference applied.
+    let nord = app.theme_registry.get("nord").cloned().unwrap();
+    app.set_theme(&nord);
+    let (nr, ng, nb, na) = app.theme.background.to_ints();
+    assert_eq!(na, 0, "the new theme inherits the transparent background");
+
+    // Toggling off restores the CURRENT theme's exact registry color.
+    app.run_slash_command(&slash_cmd("background"));
+    assert_eq!(app.theme.background.to_ints(), (nr, ng, nb, 255));
+}
+
+/// The persisted preference loads at startup: a setup.json with
+/// `transparent_background: true` starts the app with an alpha-0 background.
+#[tokio::test]
+async fn background_preference_loads_from_setup_on_startup() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    // isolate_home wipes <scratch>/.config first, so write AFTER it runs.
+    let cfg = std::env::temp_dir()
+        .join("cosh-hook-test-home")
+        .join(".config/cosh");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("setup.json"),
+        r#"{"appearance": {"theme": "dracula", "bell_enabled": true, "transparent_background": true}}"#,
+    )
+    .unwrap();
+
+    let app = App::new("/tmp".to_string());
+    assert!(app.transparent_background);
+    let (_, _, _, a) = app.theme.background.to_ints();
+    assert_eq!(a, 0, "startup applies the persisted /background state");
+}
+
+/// The slash menu offers `/background` and filters down to it.
+#[tokio::test]
+async fn slash_menu_lists_background_command() {
+    let mut app = App::new("/tmp".to_string());
+    app.prompt_view.input = "/back".into();
+    app.slash_menu.update(&app.prompt_view.input);
+    let names: Vec<String> = app
+        .slash_menu
+        .filtered_indices()
+        .into_iter()
+        .map(|i| app.slash_menu.commands[i].name.clone())
+        .collect();
+    assert_eq!(names, vec!["background".to_string()]);
 }

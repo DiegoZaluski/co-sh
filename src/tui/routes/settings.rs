@@ -15,7 +15,7 @@ use ratatui::style::{Color, Style};
 
 use cosh_tui::core::types::MouseEvent;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 use crate::util::list_selection::ListSelection;
 use crate::util::setup::{HookEntry, Setup};
 
@@ -539,11 +539,6 @@ fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, area: Rect, style: St
             cell.set_style(style);
         }
     }
-}
-
-fn rgba_color(rgba: cosh_tui::core::lib::rgba::RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
 }
 
 #[cfg(test)]

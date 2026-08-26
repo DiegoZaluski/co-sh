@@ -2,18 +2,12 @@ use std::time::SystemTime;
 
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
 use crate::component::cursor::{Cursor, CursorState};
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 
-use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::lib::unicode_util;
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 const PLACEHOLDER: &str = "Enter URL or file path, then press Enter";
 

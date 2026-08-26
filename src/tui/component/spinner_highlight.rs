@@ -30,16 +30,12 @@
 //! spinner.render(buf, x, y);
 //! ```
 
+use crate::theme::rgba_color;
 use cosh_tui::core::lib::rgba::RGBA;
 use ratatui::buffer::Buffer;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
 // Colour helpers
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 /// Linear interpolation between two RGBA colours in RGB space.
 fn lerp_color(a: RGBA, b: RGBA, t: f32) -> RGBA {

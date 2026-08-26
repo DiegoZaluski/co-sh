@@ -1,4 +1,5 @@
 use cosh::harness::HarnessEvent;
+use cosh_tui::core::lib::rgba::RGBA;
 
 use super::App;
 use super::BUG_REPORT_URL;
@@ -51,6 +52,42 @@ impl App {
         self.prompt_view.focus();
     }
 
+    /// `/background` toggle: repaint the TUI's base background with the
+    /// terminal default (`Color::Reset`) instead of the theme color. Panels,
+    /// elements and menus keep their theme colors.
+    ///
+    /// Flips the alpha of the current background IN PLACE: every theme
+    /// mutation path (`App::set_theme`, the startup loader) preserves the RGB
+    /// channels and only zeroes alpha while the toggle is on, so the pristine
+    /// color is always recoverable locally — no registry/name lookup that
+    /// could drift from what is actually on screen.
+    pub(super) fn toggle_transparent_background(&mut self) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        self.transparent_background = !self.transparent_background;
+        let mut theme = self.theme.clone();
+        let (r, g, b, _) = theme.background.to_ints();
+        theme.background = if self.transparent_background {
+            RGBA::from_ints(r, g, b, 0)
+        } else {
+            RGBA::from_ints(r, g, b, 255)
+        };
+        self.theme = theme;
+        self.config.theme_gen += 1;
+        self.setup.appearance.transparent_background = self.transparent_background;
+        self.setup.save();
+        let message = if self.transparent_background {
+            "Now using the terminal's default background."
+        } else {
+            "Theme background restored."
+        };
+        self.toast_state.show(ToastOptions {
+            title: Some("Background".into()),
+            message: message.into(),
+            variant: ToastVariant::Info,
+            duration_ms: 3000,
+        });
+    }
+
     /// Execute a slash-menu command (Enter or click). Shared by the keyboard
     /// and mouse handlers so both dispatch identically — a command missed here
     /// silently degrades to filling the prompt with "/name ".
@@ -79,6 +116,8 @@ impl App {
             }
         } else if cmd.name == "rename" {
             self.open_rename_dialog();
+        } else if cmd.name == "background" {
+            self.toggle_transparent_background();
         } else if cmd.name == "bell" {
             self.bell_enabled = !self.bell_enabled;
             use crate::ui::toast::{ToastOptions, ToastVariant};

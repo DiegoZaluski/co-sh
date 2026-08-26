@@ -31,8 +31,9 @@ use cosh_tui::core::renderables::markdown::{
 };
 
 use crate::theme::Theme;
+use crate::theme::rgba_color;
 
-use super::{conceal_text, rgba_color, sanitize_text};
+use super::{conceal_text, sanitize_text};
 
 /// Kind of the trailing open block the split point re-renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

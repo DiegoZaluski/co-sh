@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
 use cosh_tools::question::types::{AnswerItem, QuestionItem, QuestionType};
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
@@ -14,11 +14,7 @@ use cosh_tui::core::types::MouseEvent;
 
 use super::super::super::component::cursor::{Cursor, CursorState};
 use super::super::super::theme::Theme;
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
+use crate::theme::rgba_color;
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;

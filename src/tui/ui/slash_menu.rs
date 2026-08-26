@@ -4,16 +4,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 
 /// Maximum number of command rows the menu shows at once. More commands than
 /// this scroll inside the window ([`SlashMenu::visible_window`]).
 const MAX_ROWS: usize = 6;
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;
@@ -79,6 +74,10 @@ impl SlashMenu {
             SlashCommand {
                 name: "themes".into(),
                 desc: "Change color theme".into(),
+            },
+            SlashCommand {
+                name: "background".into(),
+                desc: "Toggle terminal-default background".into(),
             },
             SlashCommand {
                 name: "bell".into(),

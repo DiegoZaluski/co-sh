@@ -6,9 +6,9 @@
 
 use cosh_tui::core::lib::rgba::RGBA;
 use ratatui::buffer::Buffer;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -42,11 +42,6 @@ const ELLIPSIS_FRAMES: &[&str] = &[".", "..", "...", ""];
 const BIRTH_CHAR: char = '.';
 
 // ── Colour helpers ─────────────────────────────────────────────────────────
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
-}
 
 /// Linear interpolation between two RGBA colours in RGB space.
 #[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]

@@ -29,7 +29,7 @@ use std::hash::Hasher;
 use self::tool_render::ToolRenderState;
 use crate::config::TuiConfig;
 use crate::state::AppState;
-use crate::theme::Theme;
+use crate::theme::{Theme, rgba_color};
 use crate::types::{
     AgentColors, CompactionPart, CompactionPhase, FilePart, Message, MessageRole, Part,
     ReasoningPart, SessionStatus, ToolPart, ToolStatus,
@@ -50,11 +50,6 @@ const fn left_border_chars() -> BorderCharacters {
         right_t: ' ',
         cross: ' ',
     }
-}
-
-fn rgba_color(rgba: RGBA) -> Color {
-    let (r, g, b, _) = rgba.to_ints();
-    Color::Rgb(r, g, b)
 }
 
 /// Draws the expand/collapse hint styled as a button: highlighted with the
@@ -2266,8 +2261,7 @@ impl SessionView {
                 config_tok,
                 theme,
             );
-            let (_, text_h) =
-                text_cache.update(&text_part.text, max_w, config_tok, config.conceal);
+            let (_, text_h) = text_cache.update(&text_part.text, max_w, config_tok, config.conceal);
             part_hs[text_pi] = text_h;
             let msg_h: u16 = part_hs.iter().sum::<u16>().max(1);
             let full_area = Rect::new(0, 0, width, msg_h);
