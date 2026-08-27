@@ -11,6 +11,7 @@ pub(crate) mod claude;
 pub(crate) mod common;
 pub(crate) mod discovery;
 pub(crate) mod gemini;
+pub(crate) mod openai;
 pub(crate) mod openai_compatible;
 
 mod client;

@@ -23,7 +23,7 @@ async fn missing_api_key() {
 }
 
 #[tokio::test]
-async fn openai_success() {
+async fn success() {
     let raw_body = r#"{"object":"list","data":[{"id":"gpt-4o","object":"model"},{"id":"gpt-4","object":"model"}]}"#;
     let (port, _body, _raw, handle) = mock_server(raw_body, 200);
     let result = connector(port).list_models().await;
@@ -37,7 +37,7 @@ async fn openai_success() {
 }
 
 #[tokio::test]
-async fn openai_http_401() {
+async fn http_401() {
     let (port, _body, _raw, handle) =
         mock_server(r#"{"error":{"message":"Incorrect API key"}}"#, 401);
     let err = connector(port).list_models().await.unwrap_err();
@@ -51,7 +51,7 @@ async fn openai_http_401() {
 }
 
 #[tokio::test]
-async fn openai_malformed_json() {
+async fn malformed_json() {
     let (port, _body, _raw, handle) = mock_server("not-json-at-all", 200);
     let err = connector(port).list_models().await.unwrap_err();
     handle.join().unwrap();

@@ -234,7 +234,21 @@ pub fn mock_server_sequence(
 }
 
 /// Build a Connector pointed at a mock server on the given port.
+///
+/// Uses `groq` — a generic OpenAI-compatible cloud provider — so these tests
+/// exercise the shared `/v1/chat/completions` path. The `openai` provider now
+/// routes to the Responses API and is covered separately via
+/// [`openai_connector`].
 pub fn connector(port: u16) -> Connector {
+    Connector::new("groq")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}/v1"))
+        .with_api_key("sk-test")
+}
+
+/// Build an OpenAI (Responses API) Connector pointed at a mock server on the
+/// given port. Used by the `test::openai` module to exercise `/v1/responses`.
+pub fn openai_connector(port: u16) -> Connector {
     Connector::new("openai")
         .unwrap()
         .with_base_url(format!("http://127.0.0.1:{port}/v1"))
@@ -251,7 +265,7 @@ pub fn claude_connector(port: u16) -> Connector {
 
 /// Like `connector()` but without an API key — for testing env var fallback.
 pub fn connector_no_key(port: u16) -> Connector {
-    Connector::new("openai")
+    Connector::new("groq")
         .unwrap()
         .with_base_url(format!("http://127.0.0.1:{port}/v1"))
 }

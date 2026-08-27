@@ -243,7 +243,7 @@ async fn model_fallback() {
 
     let body = captured.lock().unwrap().take().unwrap();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(json["model"], "gpt-4o-mini");
+    assert_eq!(json["model"], "llama-3.3-70b-versatile");
 }
 
 /// Ensures the OpenRouter provider sends the expected extra headers.
@@ -263,12 +263,12 @@ async fn openrouter_extra_headers() {
     assert!(req.contains("x-title:"), "missing x-title header");
 }
 
-/// Ensures `Connector::chat()` falls back to `OPENAI_API_KEY` env var when no
+/// Ensures `Connector::chat()` falls back to the provider's env var when no
 /// key is stored (keyring isolation via a non-existent service).
 #[tokio::test]
 async fn api_key_env_fallback() {
     let _lock = ENV_LOCK.lock().await;
-    let _guard = EnvGuard::set("OPENAI_API_KEY", "sk-from-env");
+    let _guard = EnvGuard::set("GROQ_API_KEY", "sk-from-env");
     let (port, _body, _raw, handle) =
         mock_server(r#"{"choices":[{"message":{"content":"ok"}}]}"#, 200);
     let result = connector_no_key(port)

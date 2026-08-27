@@ -8,6 +8,7 @@ use super::provider::{
 
 use super::claude;
 use super::gemini;
+use super::openai;
 use super::openai_compatible;
 
 /// A unified client for any LLM provider.
@@ -271,6 +272,7 @@ impl Connector {
             Family::OpenAICompatible => {
                 openai_compatible::chat(provider, &self.params, prompt, None, service).await
             }
+            Family::OpenAi => openai::chat(provider, &self.params, prompt, None, service).await,
             Family::Gemini => gemini::chat(provider, &self.params, prompt, None, service).await,
             Family::Claude => claude::chat(provider, &self.params, prompt, None, service).await,
         }
@@ -293,6 +295,9 @@ impl Connector {
             Family::OpenAICompatible => {
                 openai_compatible::chat(provider, &self.params, prompt, Some(system), service).await
             }
+            Family::OpenAi => {
+                openai::chat(provider, &self.params, prompt, Some(system), service).await
+            }
             Family::Gemini => {
                 gemini::chat(provider, &self.params, prompt, Some(system), service).await
             }
@@ -314,6 +319,11 @@ impl Connector {
 
         match provider.family {
             Family::OpenAICompatible => {
+                openai_compatible::embed(provider, &self.params, input, service).await
+            }
+            // Embeddings are not part of the Responses API — the `openai`
+            // provider keeps using the shared `/v1/embeddings` endpoint.
+            Family::OpenAi => {
                 openai_compatible::embed(provider, &self.params, input, service).await
             }
             Family::Gemini => gemini::embed(provider, &self.params, input, service).await,
@@ -339,6 +349,9 @@ impl Connector {
         match provider.family {
             Family::OpenAICompatible => {
                 openai_compatible::chat_stream(provider, &self.params, prompt, None, service).await
+            }
+            Family::OpenAi => {
+                openai::chat_stream(provider, &self.params, prompt, None, service).await
             }
             Family::Gemini => {
                 gemini::chat_stream(provider, &self.params, prompt, None, service).await
@@ -377,6 +390,9 @@ impl Connector {
                 )
                 .await
             }
+            Family::OpenAi => {
+                openai::chat_stream(provider, &self.params, prompt, Some(system), service).await
+            }
             Family::Gemini => {
                 gemini::chat_stream(provider, &self.params, prompt, Some(system), service).await
             }
@@ -413,6 +429,9 @@ impl Connector {
                 openai_compatible::chat_stream(provider, &params, prompt, Some(system), service)
                     .await
             }
+            Family::OpenAi => {
+                openai::chat_stream(provider, &params, prompt, Some(system), service).await
+            }
             Family::Gemini => {
                 gemini::chat_stream(provider, &params, prompt, Some(system), service).await
             }
@@ -446,6 +465,16 @@ impl Connector {
         match provider.family {
             Family::OpenAICompatible => {
                 openai_compatible::chat_stream_with_messages(
+                    provider,
+                    params,
+                    system,
+                    messages,
+                    self.params.service_keyring.as_deref(),
+                )
+                .await
+            }
+            Family::OpenAi => {
+                openai::chat_stream_with_messages(
                     provider,
                     params,
                     system,
@@ -491,6 +520,7 @@ impl Connector {
         let provider = self.provider().ok()?;
         match provider.family {
             Family::OpenAICompatible => openai_compatible::extract_tokens(raw),
+            Family::OpenAi => openai::extract_tokens(raw),
             Family::Claude => claude::extract_tokens(raw),
             Family::Gemini => gemini::extract_tokens(raw),
         }
@@ -520,6 +550,7 @@ impl Connector {
         match provider.family {
             Family::Claude => claude::extract_usage(raw),
             Family::OpenAICompatible => openai_compatible::extract_usage(raw),
+            Family::OpenAi => openai::extract_usage(raw),
             Family::Gemini => gemini::extract_usage(raw),
         }
     }
@@ -658,6 +689,16 @@ impl Connector {
         let provider = self.provider()?;
         match provider.family {
             Family::OpenAICompatible => {
+                openai_compatible::list_models(
+                    provider,
+                    &self.params,
+                    self.params.service_keyring.as_deref(),
+                )
+                .await
+            }
+            // Model listing is not part of the Responses API — the `openai`
+            // provider keeps using the shared `/v1/models` endpoint.
+            Family::OpenAi => {
                 openai_compatible::list_models(
                     provider,
                     &self.params,

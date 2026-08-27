@@ -147,6 +147,11 @@ pub fn clear_api_key_cache() {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     OpenAICompatible,
+    /// The OpenAI-native Responses API (`/v1/responses`). Only the `openai`
+    /// provider uses this family; it is what exposes reasoning for OpenAI's
+    /// reasoning models. `embed` and `list_models` still route through the
+    /// shared `/v1/embeddings` and `/v1/models` endpoints.
+    OpenAi,
     Gemini,
     Claude,
 }
@@ -217,7 +222,7 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
         "openai",
         ProviderConfig::cloud(
             "openai",
-            Family::OpenAICompatible,
+            Family::OpenAi,
             "https://api.openai.com/v1",
             "gpt-4o-mini",
         ),

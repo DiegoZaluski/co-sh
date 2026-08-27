@@ -4,6 +4,7 @@ pub(crate) mod common;
 pub(crate) mod embeddings;
 pub(crate) mod gemini;
 pub(crate) mod list_models;
+pub(crate) mod openai;
 pub(crate) mod provider;
 pub(crate) mod retry;
 pub(crate) mod streaming;
