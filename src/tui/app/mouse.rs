@@ -567,12 +567,7 @@ impl App {
                             DialogType::MessageActions { message_id, is_last_user_message, .. } => {
                                 let max_options = if *is_last_user_message { 3 } else { 1 };
                                 let selected = d.selected.min(max_options - 1);
-                                let action = if *is_last_user_message {
-                                    selected
-                                } else {
-                                    // Single option (Copy) maps to action 1
-                                    1
-                                };
+                                let action = App::message_action_index(selected, *is_last_user_message);
                                 let message_id = message_id.clone();
                                 self.dialog.pop();
                                 self.run_message_action(action, &message_id);

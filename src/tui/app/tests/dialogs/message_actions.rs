@@ -106,13 +106,9 @@ async fn message_actions_revert_truncates_and_restores_prompt() {
     let mut app = app_with_user_message();
     app.run_message_action(0, "u2"); // Use last user message for revert
     let session = app.state.current_session().unwrap();
-    assert!(
-        session
-            .messages
-            .iter()
-            .all(|m| m.id != "u2"),
-        "the reverted message is dropped"
-    );
+    let ids: Vec<&str> = session.messages.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, vec!["u1", "a1"], "u2 and everything after it are dropped");
+    assert!(!session.messages.iter().any(|m| m.id == "u2"));
     assert_eq!(app.prompt_view.input, "second");
     assert_eq!(app.prompt_view.cursor_pos, app.prompt_view.input.len());
 }
@@ -130,6 +126,11 @@ async fn message_actions_fork_branches_new_session_up_to_message() {
     assert!(old.messages.iter().any(|m| m.id == "u2"));
     assert!(old.title.contains("(fork)"));
     assert_ne!(old.id, "t", "the fork is a brand-new session id");
+    // Regression: the fork must be persisted to disk so it survives restarts.
+    assert!(
+        app.session_store.load_session(&old.id).is_some(),
+        "fork session must be saved to disk"
+    );
 }
 
 #[tokio::test]
@@ -248,4 +249,32 @@ async fn message_actions_single_user_message_shows_all_options() {
     assert!(all.contains("Message Actions"), "title rendered");
     assert!(all.contains("Revert") && all.contains("Copy") && all.contains("Fork"),
         "Single user message should show all options since it's also the last");
+}
+
+#[test]
+fn message_action_index_maps_correctly() {
+    use super::super::App;
+    assert_eq!(App::message_action_index(0, true), 0, "last user: 0=Revert");
+    assert_eq!(App::message_action_index(1, true), 1, "last user: 1=Copy");
+    assert_eq!(App::message_action_index(2, true), 2, "last user: 2=Fork");
+    assert_eq!(App::message_action_index(0, false), 1, "non-last: visual 0 maps to Copy (1)");
+}
+
+#[tokio::test]
+async fn message_actions_non_last_keyboard_only_cycles_one_option() {
+    let mut app = app_with_user_message();
+    app.dialog.replace(DialogType::MessageActions {
+        message_id: "u1".into(),
+        preview: "hello world".into(),
+        is_last_user_message: false,
+    });
+    // Down stays at 0 (only 1 option)
+    assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
+    assert_eq!(app.dialog.current().unwrap().selected, 0);
+    // Up also stays at 0
+    assert!(app.handle_message_actions_dialog_key(KeyCode::Up));
+    assert_eq!(app.dialog.current().unwrap().selected, 0);
+    // Enter executes Copy (action index 1)
+    assert!(app.handle_message_actions_dialog_key(KeyCode::Enter));
+    assert!(!app.dialog.visible(), "dialog closed after Enter");
 }
