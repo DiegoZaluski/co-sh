@@ -19,30 +19,51 @@ impl App {
         if !self.is_message_actions_dialog_visible() {
             return false;
         }
+
+        let is_last_user_message = self.dialog.current().and_then(|d| {
+            if let DialogType::MessageActions { is_last_user_message, .. } = &d.dialog_type {
+                Some(*is_last_user_message)
+            } else {
+                None
+            }
+        }).unwrap_or(false);
+
+        let max_options = if is_last_user_message { 3 } else { 1 };
+
         match key {
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(d) = self.dialog.current_mut() {
-                    d.selected = if d.selected == 0 { 2 } else { d.selected - 1 };
+                    d.selected = if d.selected == 0 { max_options - 1 } else { d.selected - 1 };
                 }
                 true
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(d) = self.dialog.current_mut() {
-                    d.selected = (d.selected + 1) % 3;
+                    d.selected = (d.selected + 1) % max_options;
                 }
                 true
             }
             KeyCode::Enter => {
-                let selected = self.dialog.current().map_or(0, |d| d.selected.min(2));
-                let message_id = match self.dialog.current() {
+                let selected = self.dialog.current().map_or(0, |d| d.selected.min(max_options - 1));
+                let (message_id, is_last_user_message) = match self.dialog.current() {
                     Some(d) => match &d.dialog_type {
-                        DialogType::MessageActions { message_id, .. } => message_id.clone(),
+                        DialogType::MessageActions { message_id, is_last_user_message, .. } => {
+                            (message_id.clone(), *is_last_user_message)
+                        }
                         _ => return true,
                     },
                     None => return true,
                 };
                 self.dialog.pop();
-                self.run_message_action(selected, &message_id);
+                // Map the action index: if not last user message, only Copy (index 0)
+                // exists, so we need to map it to action 1 (Copy) in the original enum
+                let action = if is_last_user_message {
+                    selected
+                } else {
+                    // Single option (Copy) maps to action 1
+                    1
+                };
+                self.run_message_action(action, &message_id);
                 true
             }
             KeyCode::Esc => {

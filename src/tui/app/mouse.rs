@@ -564,8 +564,15 @@ impl App {
                                 self.handle_tool_call_dialog_key(KeyCode::Enter);
                                 return Ok(true);
                             }
-                            DialogType::MessageActions { message_id, .. } => {
-                                let action = d.selected.min(2);
+                            DialogType::MessageActions { message_id, is_last_user_message, .. } => {
+                                let max_options = if *is_last_user_message { 3 } else { 1 };
+                                let selected = d.selected.min(max_options - 1);
+                                let action = if *is_last_user_message {
+                                    selected
+                                } else {
+                                    // Single option (Copy) maps to action 1
+                                    1
+                                };
                                 let message_id = message_id.clone();
                                 self.dialog.pop();
                                 self.run_message_action(action, &message_id);
@@ -876,9 +883,18 @@ impl App {
                     .handle_mouse(&mouse, session_area, &self.state, &self.config)
             {
                 if let Some(message_id) = self.session_view.pending_message_action.take() {
-                    let preview = self
-                        .state
-                        .current_session()
+                    let session = self.state.current_session();
+                    let is_last_user_message = session
+                        .and_then(|s| {
+                            s.messages
+                                .iter()
+                                .rposition(|m| m.role == crate::types::MessageRole::User)
+                        })
+                        .zip(session.and_then(|s| s.messages.iter().position(|m| m.id == message_id)))
+                        .map(|(last_user_idx, clicked_idx)| last_user_idx == clicked_idx)
+                        .unwrap_or(false);
+
+                    let preview = session
                         .and_then(|s| s.messages.iter().find(|m| m.id == message_id))
                         .map(message_prompt_text)
                         .unwrap_or_default()
@@ -888,6 +904,7 @@ impl App {
                     self.dialog.replace(DialogType::MessageActions {
                         message_id,
                         preview,
+                        is_last_user_message,
                     });
                     self.session_view.hovered_msg_idx = None;
                 }

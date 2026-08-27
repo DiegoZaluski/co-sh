@@ -233,12 +233,17 @@ pub enum DialogType {
         cursor_pos: usize,
     },
     /// Per-message action picker shown when clicking a user message in the
-    /// transcript (port of opencode's "Message Actions" dialog): Revert,
-    /// Copy, Fork. `message_id` identifies the clicked message.
+    /// transcript (port of opencode's "Message Actions" dialog): Copy always
+    /// available, Revert/Fork only for the last user message. `message_id`
+    /// identifies the clicked message.
     MessageActions {
         message_id: String,
         /// Truncated text of the clicked message shown as context.
         preview: String,
+        /// Whether this is the last user message in the session (only the
+        /// last user message can be reverted/forked due to context state
+        /// bincode serialization issues).
+        is_last_user_message: bool,
     },
 
     /// Action picker for a PENDING queued message (the rows above the
@@ -494,13 +499,17 @@ impl DialogState {
 
                 DialogAction::Consumed
             }
-            DialogType::MessageActions { .. } => {
-                // Same compact geometry as the ReasoningList (3 items).
+            DialogType::MessageActions {
+                is_last_user_message,
+                ..
+            } => {
+                // Same compact geometry as the ReasoningList (3 items for last
+                // user message, 1 item for older messages).
                 let max_w = 64u16.min(area.width.saturating_sub(4));
                 let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
-                let max_visible = 3usize;
+                let max_visible = if *is_last_user_message { 3usize } else { 1usize };
                 let dialog_h = (max_visible + 5) as u16;
                 let dialog_y = area
                     .y
@@ -1986,13 +1995,18 @@ impl DialogState {
             DialogType::MessageActions {
                 message_id: _,
                 preview,
+                is_last_user_message,
             } => {
-                let selection = instance.selected.min(2);
+                let selection = if *is_last_user_message {
+                    instance.selected.min(2)
+                } else {
+                    instance.selected.min(0)
+                };
                 let max_w = 64u16.min(area.width.saturating_sub(4));
                 let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
-                let items = 3usize;
+                let items = if *is_last_user_message { 3usize } else { 1usize };
                 let dialog_h = (items + 5) as u16;
                 let dialog_y = area
                     .y
@@ -2058,18 +2072,23 @@ impl DialogState {
 
                 // Line 3: gap.
 
-                // Lines 4+: the three actions. The selected row is marked
+                // Lines 4+: the actions. The selected row is marked
                 // with the project's 🞴 indicator and primary color instead
-                // of a background swap.
+                // of a background swap. Only the last user message can be
+                // reverted/forked due to context state bincode serialization.
                 let list_top = dialog_y + 4;
                 let list_pad = 1;
                 let list_x = dialog_x + list_pad;
                 let list_w = dialog_w.saturating_sub(list_pad * 2);
-                let options = [
-                    ("Revert", "Restore prompt, drop later messages"),
-                    ("Copy", "Copy message text to clipboard"),
-                    ("Fork", "Branch a new session from here"),
-                ];
+                let options = if *is_last_user_message {
+                    vec![
+                        ("Revert", "Restore prompt, drop later messages"),
+                        ("Copy", "Copy message text to clipboard"),
+                        ("Fork", "Branch a new session from here"),
+                    ]
+                } else {
+                    vec![("Copy", "Copy message text to clipboard")]
+                };
 
                 for (idx, (name, desc)) in options.iter().enumerate() {
                     let y = list_top + idx as u16;
