@@ -156,7 +156,7 @@ impl App {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                forked.title_generated = false;
+                forked.title_generated = session.title_generated;
                 let new_id = forked.id.clone();
                 self.state.add_session(forked);
                 // Retrieve the forked session from cache and persist it to disk.
