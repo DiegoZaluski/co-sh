@@ -501,7 +501,7 @@ impl DialogState {
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
                 let max_visible = 3usize;
-                let dialog_h = (max_visible + 4) as u16;
+                let dialog_h = (max_visible + 5) as u16;
                 let dialog_y = area
                     .y
                     .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
@@ -519,11 +519,11 @@ impl DialogState {
                 let header_w = dialog_w.saturating_sub(header_pad * 2);
                 let esc_label = "esc";
                 let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                if y_click == dialog_y && x >= esc_x && x < esc_x + esc_label.len() as u16 {
+                if y_click == dialog_y + 1 && x >= esc_x && x < esc_x + esc_label.len() as u16 {
                     return DialogAction::Dismissed;
                 }
 
-                let list_top = dialog_y + 3;
+                let list_top = dialog_y + 4;
                 if y_click >= list_top {
                     let row = (y_click - list_top) as usize;
                     if row < max_visible {
@@ -1993,7 +1993,7 @@ impl DialogState {
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
                 let items = 3usize;
-                let dialog_h = (items + 4) as u16;
+                let dialog_h = (items + 5) as u16;
                 let dialog_y = area
                     .y
                     .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
@@ -2021,7 +2021,9 @@ impl DialogState {
                 let header_x = dialog_x + header_pad;
                 let header_w = dialog_w.saturating_sub(header_pad * 2);
 
-                // Line 0: bold title + "esc" hint (right-aligned, muted).
+                // Line 0: padding top.
+
+                // Line 1: bold title + "esc" hint (right-aligned, muted).
                 let title_style = Style::default()
                     .fg(rgba_color(theme.text))
                     .add_modifier(Modifier::BOLD);
@@ -2029,7 +2031,7 @@ impl DialogState {
                     buf,
                     "Message Actions",
                     header_x,
-                    dialog_y,
+                    dialog_y + 1,
                     header_w,
                     title_style,
                 );
@@ -2039,31 +2041,30 @@ impl DialogState {
                     buf,
                     esc_label,
                     esc_x,
-                    dialog_y,
-                    header_w,
-                    Style::default().fg(rgba_color(theme.text_muted)),
-                );
-
-                // Line 1: clicked message preview (muted, truncated).
-                draw_text_line(
-                    buf,
-                    preview,
-                    header_x,
                     dialog_y + 1,
                     header_w,
                     Style::default().fg(rgba_color(theme.text_muted)),
                 );
 
-                // Line 2: gap.
+                // Line 2: clicked message preview (muted, truncated).
+                draw_text_line(
+                    buf,
+                    preview,
+                    header_x,
+                    dialog_y + 2,
+                    header_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
 
-                // Lines 3+: the three actions. Selected row swaps to the
-                // element background (opencode highlights via background
-                // color, not borders).
-                let list_top = dialog_y + 3;
+                // Line 3: gap.
+
+                // Lines 4+: the three actions. The selected row is marked
+                // with the project's 🞴 indicator and primary color instead
+                // of a background swap.
+                let list_top = dialog_y + 4;
                 let list_pad = 1;
                 let list_x = dialog_x + list_pad;
                 let list_w = dialog_w.saturating_sub(list_pad * 2);
-                let bg_element = rgba_color(theme.background_element);
                 let options = [
                     ("Revert", "Restore prompt, drop later messages"),
                     ("Copy", "Copy message text to clipboard"),
@@ -2073,12 +2074,11 @@ impl DialogState {
                 for (idx, (name, desc)) in options.iter().enumerate() {
                     let y = list_top + idx as u16;
                     let is_selected = idx == selection;
-                    let row_bg = if is_selected { bg_element } else { bg_color };
 
                     for cx in list_x..list_x + list_w {
                         if let Some(cell) = buf.cell_mut((cx, y)) {
                             cell.set_char(' ');
-                            cell.set_style(Style::default().bg(row_bg));
+                            cell.set_style(Style::default().bg(bg_color));
                         }
                     }
 
@@ -2086,13 +2086,19 @@ impl DialogState {
                         Style::default()
                             .fg(rgba_color(theme.primary))
                             .add_modifier(Modifier::BOLD)
-                            .bg(row_bg)
+                            .bg(bg_color)
                     } else {
-                        Style::default().fg(rgba_color(theme.text)).bg(row_bg)
+                        Style::default().fg(rgba_color(theme.text)).bg(bg_color)
                     };
-                    draw_text_line(buf, name, list_x + 1, y, list_w - 1, name_style);
 
-                    let desc_x = list_x + 12;
+                    let indicator = if is_selected { "🞴 " } else { "   " };
+                    let indicator_x = list_x;
+                    draw_text_line(buf, indicator, indicator_x, y, 3, name_style);
+
+                    let name_x = list_x + 3;
+                    draw_text_line(buf, name, name_x, y, list_w - 3, name_style);
+
+                    let desc_x = list_x + 15;
                     if desc_x < list_x + list_w {
                         draw_text_line(
                             buf,
@@ -2100,7 +2106,7 @@ impl DialogState {
                             desc_x,
                             y,
                             list_x + list_w - desc_x,
-                            Style::default().fg(rgba_color(theme.text_muted)).bg(row_bg),
+                            Style::default().fg(rgba_color(theme.text_muted)).bg(bg_color),
                         );
                     }
                 }
@@ -2199,15 +2205,24 @@ impl DialogState {
                         }
                     }
 
+                    let name_style = if is_selected {
+                        Style::default()
+                            .fg(rgba_color(theme.primary))
+                            .add_modifier(Modifier::BOLD)
+                            .bg(bg_color)
+                    } else {
+                        Style::default().fg(rgba_color(theme.text)).bg(bg_color)
+                    };
+
                     // Indicator takes 2 cols, like the sidebar rows.
-                    let ind = if is_selected { "🞴 " } else { "  " };
+                    let ind = if is_selected { "🞴 " } else { "   " };
                     draw_text_line(
                         buf,
                         ind,
-                        list_x + 1,
+                        list_x,
                         y,
-                        list_w - 1,
-                        Style::default().fg(rgba_color(theme.text)).bg(bg_color),
+                        3,
+                        name_style,
                     );
 
                     let name_x = list_x + 3;
@@ -2216,11 +2231,11 @@ impl DialogState {
                         name,
                         name_x,
                         y,
-                        list_w - 1,
-                        Style::default().fg(rgba_color(theme.text)).bg(bg_color),
+                        list_w - 3,
+                        name_style,
                     );
 
-                    let desc_x = list_x + 14;
+                    let desc_x = list_x + 15;
                     if desc_x < list_x + list_w {
                         draw_text_line(
                             buf,
