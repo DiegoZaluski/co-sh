@@ -822,6 +822,8 @@ impl App {
                     self.finalize_stale_compaction_lines();
                     self.state
                         .switch_to_session(session_id, &self.session_store);
+                    // Returning to a session restores the last model used there.
+                    self.restore_current_session_model();
                     self.session_view.hovered_msg_idx = None;
                     self.title_generated = true;
                     self.finalize_stale_compaction_lines();

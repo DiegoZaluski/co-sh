@@ -47,6 +47,9 @@ struct SessionHeader {
     cwd: String,
     provider: Option<String>,
     model: Option<String>,
+    /// Reasoning effort (`None` = model default) for the last model used.
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 /// Manages reading and writing session files to disk, isolated by CWD.
@@ -286,6 +289,9 @@ impl SessionStore {
             messages,
             created_at: header.created_at,
             title_generated: header.title_generated,
+            provider: header.provider,
+            model: header.model,
+            reasoning: header.reasoning,
         })
     }
 
@@ -338,24 +344,35 @@ impl SessionStore {
 
     /// Build a `SessionHeader` from a `Session`, populating `cwd` with the
     /// canonicalized current working directory.
+    ///
+    /// The session's own recorded model selection (provider + model +
+    /// reasoning) wins. Sessions without one — e.g. saved before this
+    /// feature — fall back to deriving provider/model from the last valid
+    /// assistant message, which preserves the old behavior.
     fn build_header(&self, session: &Session) -> SessionHeader {
-        // Grab provider/model from the last valid assistant message
-        let (provider, model) = session
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == MessageRole::Assistant && !m.id.starts_with("msg-err-"))
-            .map(|m| {
-                let prov = m.model.as_deref().and_then(|model_name| {
-                    if model_name.contains('/') {
-                        model_name.split('/').next().map(String::from)
-                    } else {
-                        None
-                    }
-                });
-                (prov, m.model.clone())
-            })
-            .unwrap_or((None, None));
+        let (provider, model) = match (&session.provider, &session.model.as_deref()) {
+            // A recorded selection (provider + model written together) wins.
+            (Some(_), Some(_)) => (session.provider.clone(), session.model.clone()),
+            // A recorded `auto` selection wins too — it has no provider to
+            // pin, so the fallback chain stays the source of truth.
+            (None, Some("auto")) => (None, session.model.clone()),
+            _ => session
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == MessageRole::Assistant && !m.id.starts_with("msg-err-"))
+                .map(|m| {
+                    let prov = m.model.as_deref().and_then(|model_name| {
+                        if model_name.contains('/') {
+                            model_name.split('/').next().map(String::from)
+                        } else {
+                            None
+                        }
+                    });
+                    (prov, m.model.clone())
+                })
+                .unwrap_or((None, None)),
+        };
 
         let cwd = std::env::current_dir()
             .ok()
@@ -370,6 +387,7 @@ impl SessionStore {
             cwd,
             provider,
             model,
+            reasoning: session.reasoning.clone(),
         }
     }
 
@@ -610,6 +628,9 @@ mod tests {
             created_at: 0,
             messages,
             title_generated: false,
+            provider: None,
+            model: None,
+            reasoning: None,
         }
     }
 
@@ -761,6 +782,75 @@ mod tests {
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0].role, MessageRole::User);
         assert_eq!(loaded.messages[1].role, MessageRole::Assistant);
+    }
+
+    #[test]
+    fn test_session_model_persistence_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let mut session = make_test_session(
+            "12345",
+            "Model Session",
+            vec![
+                make_user_msg("msg-0", "Hello!"),
+                make_assistant_msg("msg-1", "Hi there!"),
+            ],
+        );
+        session.provider = Some("nvidia".to_string());
+        session.model = Some("deepseek-ai/deepseek-v4-pro".to_string());
+        session.reasoning = Some("high".to_string());
+
+        store.save_session(&session);
+
+        let loaded = store.load_session("12345").unwrap();
+        // The recorded selection round-trips through the JSONL header.
+        assert_eq!(loaded.model.as_deref(), Some("deepseek-ai/deepseek-v4-pro"));
+        assert_eq!(loaded.provider.as_deref(), Some("nvidia"));
+        assert_eq!(loaded.reasoning.as_deref(), Some("high"));
+
+        // A legacy header without the reasoning field still loads.
+        let file = store.file_path("12345");
+        let contents = std::fs::read_to_string(&file).unwrap();
+        let mut lines: Vec<&str> = contents.lines().collect();
+        let mut header: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        header.as_object_mut().unwrap().remove("reasoning");
+        let header_line = header.to_string();
+        lines[0] = &header_line;
+        std::fs::write(&file, lines.join("\n")).unwrap();
+        let loaded = store.load_session("12345").unwrap();
+        assert_eq!(loaded.reasoning, None);
+        assert_eq!(loaded.model.as_deref(), Some("deepseek-ai/deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn test_build_header_keeps_recorded_auto_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let mut session = make_test_session(
+            "12346",
+            "Auto Session",
+            vec![
+                make_user_msg("msg-0", "Hello!"),
+                make_assistant_msg("msg-1", "Hi there!"),
+            ],
+        );
+        // The user explicitly picked `auto`; the last assistant message
+        // carries a concrete model id the fallback chain actually used.
+        session.provider = None;
+        session.model = Some("auto".to_string());
+        session.reasoning = Some("low".to_string());
+        session.messages[1].model = Some("openai/gpt-oss-120b".to_string());
+
+        store.save_session(&session);
+
+        let loaded = store.load_session("12346").unwrap();
+        // The recorded `auto` selection wins over deriving the concrete model
+        // from the last assistant message — no provider is pinned.
+        assert_eq!(loaded.model.as_deref(), Some("auto"));
+        assert_eq!(loaded.provider, None);
+        assert_eq!(loaded.reasoning.as_deref(), Some("low"));
     }
 
     #[test]

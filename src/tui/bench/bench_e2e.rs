@@ -241,6 +241,9 @@ async fn bench_e2e_agent_loop() {
             title: "E2E".into(),
             created_at: 0,
             title_generated: true,
+            provider: None,
+            model: None,
+            reasoning: None,
             messages,
         });
         app.state.current_session_id = Some(id);

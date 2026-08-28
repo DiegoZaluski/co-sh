@@ -131,7 +131,7 @@ impl AppState {
             created_at: session.created_at,
             message_count: session.messages.len(),
             cwd: self.working_directory.clone(),
-            model: None,
+            model: session.model.clone(),
             title_generated: session.title_generated,
         };
         self.session_summaries.push(summary);
@@ -152,6 +152,9 @@ impl AppState {
                 created_at,
                 messages: vec![],
                 title_generated: false,
+                provider: None,
+                model: None,
+                reasoning: None,
             },
         );
     }
@@ -173,7 +176,7 @@ impl AppState {
                 created_at: session.created_at,
                 message_count: session.messages.len(),
                 cwd: self.working_directory.clone(),
-                model: None,
+                model: session.model.clone(),
                 title_generated: session.title_generated,
             };
             self.session_summaries.push(summary);
@@ -283,6 +286,9 @@ impl AppState {
             title: "Demo Session".to_string(),
             created_at: 1000,
             title_generated: false,
+            provider: None,
+            model: None,
+            reasoning: None,
             messages: vec![
                 Message {
                     id: "msg-1".to_string(),

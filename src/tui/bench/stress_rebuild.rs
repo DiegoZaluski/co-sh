@@ -96,6 +96,9 @@ fn setup(n_msgs: usize) -> (App, Terminal<TestBackend>) {
         title: "STRESS".into(),
         created_at: 0,
         title_generated: true,
+        provider: None,
+        model: None,
+        reasoning: None,
         messages,
     });
     app.state.current_session_id = Some(id);

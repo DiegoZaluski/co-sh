@@ -86,9 +86,17 @@ impl App {
             if self.llm_config.provider != ZEN_PROVIDER
                 && !is_local_provider(&self.llm_config.provider)
             {
-                self.llm_config.provider = ZEN_PROVIDER.to_string();
-                self.llm_config.model = Some(ZEN_DEFAULT_FREE_MODEL.to_string());
-                self.llm_config.reasoning = None;
+                self.set_llm_model(
+                    ZEN_DEFAULT_FREE_MODEL.to_string(),
+                    ZEN_PROVIDER.to_string(),
+                    None,
+                );
+                // Associate the rerouted free-gateway model with the current
+                // session so switching back to it (or reopening it) restores
+                // a config that works instead of the failing model. The
+                // free-gateway prompt is write-once, so without this the
+                // session would be stuck on a model that cannot connect.
+                self.record_model_on_current_session();
             }
             match pending {
                 Some(msg) => self.start_agent_loop(msg),

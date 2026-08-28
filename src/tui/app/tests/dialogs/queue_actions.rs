@@ -28,6 +28,9 @@ fn app_with_queues() -> App {
         title: "t".into(),
         created_at: 1_000,
         title_generated: false,
+        provider: None,
+        model: None,
+        reasoning: None,
         messages: vec![],
     };
     app.state.add_session(session);
@@ -316,6 +319,9 @@ async fn edit_hint_is_dropped_when_submitting_from_another_session() {
         title: "b".into(),
         created_at: 2_000,
         title_generated: false,
+        provider: None,
+        model: None,
+        reasoning: None,
         messages: vec![],
     };
     app.state.add_session(session_b);

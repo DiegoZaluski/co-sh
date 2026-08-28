@@ -329,6 +329,19 @@ impl App {
         let saved_bell = setup.appearance.bell_enabled;
         let saved_anim = setup.appearance.anim_enabled;
 
+        // Restore the globally persisted model selection (the last one the
+        // user picked) so new sessions start with it — a stored selection
+        // wins over the env-var defaults.
+        let mut llm_config = LlmConfig {
+            tool_call_mode: saved_tool_call_mode,
+            ..LlmConfig::from_env()
+        };
+        if let Some(model) = setup.persisted_model() {
+            llm_config.model = Some(model.to_string());
+            llm_config.provider = setup.model.provider.clone();
+            llm_config.reasoning = setup.model.reasoning.clone();
+        }
+
         // Propagate the persisted Zen free-gateway opt-in to every connector
         // built in this process (harness fallback chains, compaction, session
         // titles) without each construction site needing the setup file.
@@ -402,10 +415,7 @@ impl App {
             next_request_in_flight: false,
             edit_requeue_hint: None,
             active_queue_actions_session: None,
-            llm_config: LlmConfig {
-                tool_call_mode: saved_tool_call_mode,
-                ..LlmConfig::from_env()
-            },
+            llm_config,
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
             agent_spinner: None,

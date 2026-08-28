@@ -172,6 +172,12 @@ impl App {
                     .as_millis() as u64,
             );
             self.state.current_session_id = Some(id);
+            // The session inherits the ACTIVE model config. Forcing the global
+            // slot here would clobber a selection from the just-fired gateway
+            // reroute (the replayed first message must go out on the free
+            // model) or from the current UI state. At startup the active
+            // config already IS the global selection (`App::new`), and
+            // `/new` restores it explicitly.
             self.title_generated = false;
         }
 

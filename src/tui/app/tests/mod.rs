@@ -32,6 +32,7 @@ mod agent_loop;
 mod commands;
 mod dialogs;
 mod keys;
+mod model_persistence;
 mod providers;
 mod rag;
 mod render;

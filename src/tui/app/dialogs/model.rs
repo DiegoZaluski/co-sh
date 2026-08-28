@@ -320,10 +320,10 @@ impl App {
                 inst.selected = start;
             }
         } else {
-            self.llm_config.model = Some(model.to_string());
-            self.llm_config.provider = provider.to_string();
             // Keep the previous reasoning level — the new model either
             // ignores it or uses it; user can change it from the dialog.
+            let reasoning = self.llm_config.reasoning.clone();
+            self.commit_model_selection(model, provider, reasoning.as_deref());
             self.model_dialog_original = None;
             self.reasoning_dialog_original = None;
             self.dialog.pop();
@@ -349,6 +349,107 @@ impl App {
         self.model_dialog_original = None;
         self.reasoning_dialog_original = None;
         self.dialog.pop();
+    }
+
+    /// Apply a (model, provider, reasoning) selection: update the live LLM
+    /// config, persist the selection globally in `setup.json`, and record it
+    /// on the current session so its JSONL header carries it. This is the
+    /// single write path shared by every model selection in the UI.
+    pub(in crate::app) fn commit_model_selection(
+        &mut self,
+        model: &str,
+        provider: &str,
+        reasoning: Option<&str>,
+    ) {
+        self.set_llm_model(model.to_owned(), provider.to_owned(), reasoning.map(String::from));
+        self.setup.set_model_selection(provider, model, reasoning);
+        self.record_model_on_current_session();
+        // Flush the session header right away so the selection survives the
+        // window before the next ContextSnapshot (~10 s) or Done/Stopped save.
+        if let Some(session) = self.state.current_session() {
+            self.session_store.save_session_async(session);
+        }
+    }
+
+    /// Point the active LLM config at a model selection. Owned values: the
+    /// callers have already copied them out of `self` to release the borrow,
+    /// so the copies are moved in rather than cloned a second time.
+    pub(in crate::app) fn set_llm_model(
+        &mut self,
+        model: String,
+        provider: String,
+        reasoning: Option<String>,
+    ) {
+        self.llm_config.model = if model.is_empty() {
+            None
+        } else {
+            Some(model)
+        };
+        self.llm_config.provider = provider;
+        self.llm_config.reasoning = reasoning;
+    }
+
+    /// Record the active model selection on the current session so it is
+    /// persisted in the session's JSONL header on the next save.
+    pub(in crate::app) fn record_model_on_current_session(&mut self) {
+        if let Some(session) = self.state.current_session_mut() {
+            session.provider = if self.llm_config.provider.is_empty() {
+                None
+            } else {
+                Some(self.llm_config.provider.clone())
+            };
+            session.model = self.llm_config.model.clone();
+            session.reasoning = self.llm_config.reasoning.clone();
+        }
+    }
+
+    /// Restore the globally persisted model (the last one the user selected)
+    /// into the active LLM config. Used when entering a brand-new session; a
+    /// stored selection wins over the env-var defaults.
+    pub(in crate::app) fn apply_global_model(&mut self) {
+        let Some(model) = self.setup.persisted_model().map(String::from) else {
+            return;
+        };
+        let provider = self.setup.model.provider.clone();
+        let reasoning = self.setup.model.reasoning.clone();
+        self.set_llm_model(model, provider, reasoning);
+        self.record_model_on_current_session();
+    }
+
+    /// Restore the model recorded on the current session into the active LLM
+    /// config. Used when switching back to a session so the last model used
+    /// there comes back. A session without a recorded selection leaves the
+    /// active config untouched — before this feature, switching sessions
+    /// never mutated the config, so that legacy behavior is preserved.
+    pub(in crate::app) fn restore_current_session_model(&mut self) {
+        let Some(session) = self.state.current_session() else {
+            return;
+        };
+        let (provider, model, reasoning) = (
+            session.provider.clone(),
+            session.model.clone(),
+            session.reasoning.clone(),
+        );
+        match (provider, model) {
+            // A recorded explicit selection fully replaces the active config —
+            // model, provider AND reasoning (the reasoning could legitimately
+            // be `None`, which must clear a leftover effort from elsewhere).
+            (Some(provider), Some(model)) => {
+                self.set_llm_model(model, provider, reasoning);
+            }
+            // A recorded `auto` selection has no provider to pin — the
+            // fallback chain stays the source of truth, so clear any leftover
+            // provider from the previously active config.
+            (None, Some(model)) if model == "auto" => {
+                self.set_llm_model(model, String::new(), reasoning);
+            }
+            // No usable recorded selection: either the session never had one,
+            // or the header only derived a bare model id without a provider
+            // (no `/`). Best-effort fallback for slash'd legacy headers in
+            // the `(Some, Some)` arm above; here we cannot pin a provider
+            // confidently, so the active config stays as-is.
+            _ => {}
+        }
     }
 
     pub(in crate::app) fn is_reasoning_dialog_visible(&self) -> bool {
@@ -404,13 +505,12 @@ impl App {
                     let idx = d.selected.min(levels.len().saturating_sub(1));
                     (model.clone(), provider.clone(), levels[idx].clone())
                 };
-                self.llm_config.model = Some(model);
-                self.llm_config.provider = provider;
-                self.llm_config.reasoning = if level == "default" {
+                let reasoning = if level == "default" {
                     None
                 } else {
-                    Some(level)
+                    Some(level.as_str())
                 };
+                self.commit_model_selection(&model, &provider, reasoning);
                 self.model_dialog_original = None;
                 self.reasoning_dialog_original = None;
                 // Pop both the reasoning sub-dialog and the model list.

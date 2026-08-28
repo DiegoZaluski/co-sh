@@ -13,6 +13,9 @@ fn app_with_user_message() -> App {
         title: "t".into(),
         created_at: now,
         title_generated: false,
+        provider: None,
+        model: None,
+        reasoning: None,
         messages: vec![
             Message {
                 id: "u1".into(),
@@ -209,6 +212,9 @@ async fn message_actions_single_user_message_shows_all_options() {
         title: "single".into(),
         created_at: now,
         title_generated: false,
+        provider: None,
+        model: None,
+        reasoning: None,
         messages: vec![
             Message {
                 id: "u1".into(),

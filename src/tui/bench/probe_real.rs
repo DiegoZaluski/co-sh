@@ -109,6 +109,9 @@ async fn probe_real_session() {
         title: header.title.clone(),
         created_at: header.created_at,
         title_generated: true,
+        provider: None,
+        model: None,
+        reasoning: None,
         messages,
     });
     app.state.current_session_id = Some(id);

@@ -23,6 +23,7 @@ pub struct Setup {
     pub routing: Routing,
     pub hooks: Hooks,
     pub providers: Providers,
+    pub model: Model,
 }
 
 // Categories
@@ -101,6 +102,24 @@ impl Default for Routing {
 pub struct FallbackEntry {
     pub provider: String,
     pub model: String,
+}
+
+/// The last model the user selected, restored for NEW sessions
+/// (global model persistence).
+///
+/// The whole struct represents a single selection slot: every time the user
+/// picks a model, `model` is overwritten with the new choice, `provider` with
+/// the provider that serves it, and `reasoning` with its reasoning effort.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Model {
+    /// Provider name of the last selected model (empty when the selection is
+    /// `auto` — the fallback chain routes there).
+    pub provider: String,
+    /// Model id of the last selected model. Empty → no global selection yet.
+    pub model: String,
+    /// Reasoning effort for the last selected model (`None` = model default).
+    pub reasoning: Option<String>,
 }
 
 // Providers
@@ -256,6 +275,27 @@ impl Setup {
         }
     }
 
+    /// The globally persisted model id, if the user ever selected one.
+    #[must_use]
+    pub fn persisted_model(&self) -> Option<&str> {
+        if self.model.model.is_empty() {
+            None
+        } else {
+            Some(&self.model.model)
+        }
+    }
+
+    /// Record the last model selected by the user and persist it globally.
+    ///
+    /// The selection is a single overwritten slot (provider + model +
+    /// reasoning) — the same shape the per-session header stores.
+    pub fn set_model_selection(&mut self, provider: &str, model: &str, reasoning: Option<&str>) {
+        self.model.provider = provider.to_string();
+        self.model.model = model.to_string();
+        self.model.reasoning = reasoning.map(String::from);
+        self.save();
+    }
+
     /// The persisted answer to the one-time OpenCode Zen free-gateway
     /// prompt, if the user already answered it (`None` = never asked).
     #[must_use]
@@ -371,5 +411,40 @@ mod tests {
         // An old config without the field still loads (defaults to None).
         let legacy: Setup = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy.zen_public_opt_in(), None);
+    }
+
+    /// The global model selection is a single overwritten slot that
+    /// round-trips through setup.json, and an absent `model` category in an
+    /// old config loads as "no selection yet".
+    #[test]
+    fn model_selection_is_overwritten_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("setup.json");
+
+        let mut setup = Setup::default();
+        assert_eq!(setup.persisted_model(), None);
+
+        // Selecting a model persists provider + model + reasoning.
+        setup.set_model_selection("nvidia", "deepseek-ai/deepseek-v4-pro", Some("high"));
+        assert_eq!(setup.persisted_model(), Some("deepseek-ai/deepseek-v4-pro"));
+        assert_eq!(setup.model.provider, "nvidia");
+        assert_eq!(setup.model.reasoning.as_deref(), Some("high"));
+
+        // A later selection OVERWRITES the slot — no history is kept.
+        setup.set_model_selection("groq", "openai/gpt-oss-120b", None);
+        assert_eq!(setup.persisted_model(), Some("openai/gpt-oss-120b"));
+        assert_eq!(setup.model.provider, "groq");
+        assert_eq!(setup.model.reasoning, None);
+
+        let json = serde_json::to_string_pretty(&setup).unwrap();
+        std::fs::write(&path, &json).unwrap();
+        let loaded: Setup = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.persisted_model(), Some("openai/gpt-oss-120b"));
+        assert_eq!(loaded.model.provider, "groq");
+        assert_eq!(loaded.model.reasoning, None);
+
+        // An old config without the `model` category loads with no selection.
+        let legacy: Setup = serde_json::from_str(r#"{"appearance": {}}"#).unwrap();
+        assert_eq!(legacy.persisted_model(), None);
     }
 }
