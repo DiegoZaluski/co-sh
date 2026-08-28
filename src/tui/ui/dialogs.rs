@@ -1324,10 +1324,9 @@ impl DialogState {
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
                 let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
 
-                // Fill background with a subtly lighter shade than theme background
-                let (r, g, b, _) = theme.background_element.to_ints();
-                let lighten = |c: u8| c.saturating_add(5);
-                let bg_color = Color::Rgb(lighten(r), lighten(g), lighten(b));
+                // Fill background with the same panel color as the left
+                // sidebar, so the dialog matches the app's left panel.
+                let bg_color = rgba_color(theme.background_panel);
                 for y in dialog_y..dialog_y + dialog_h {
                     for x in dialog_x..dialog_x + dialog_w {
                         if let Some(cell) = buf.cell_mut((x, y)) {
