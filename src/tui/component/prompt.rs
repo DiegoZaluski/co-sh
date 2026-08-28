@@ -44,7 +44,9 @@ const fn prompt_border_chars() -> BorderCharacters {
         top_left: ' ',
         top_right: ' ',
         bottom_left: '\u{2579}',
-        bottom_right: ' ',
+        // Mirrors `bottom_left`: the right `┃` terminates with the same
+        // up-stub on the cap row, keeping the box symmetric left/right.
+        bottom_right: '\u{2579}',
         horizontal: ' ',
         vertical: '\u{2503}',
         top_t: ' ',
@@ -503,7 +505,8 @@ impl PromptView {
     /// short screen caps the box low right away, while a tall screen lets it
     /// stretch up to the generous [`MAX_PROMPT_LINES`] hard cap.
     pub fn required_height(&self, area_width: u16, max_height: u16) -> u16 {
-        let text_w = area_width.saturating_sub(5) as usize;
+        // 6 columns of horizontal chrome: border + 2 padding on each side.
+        let text_w = area_width.saturating_sub(6) as usize;
         let content_lines = if self.input.is_empty() || text_w == 0 {
             1
         } else {
@@ -576,7 +579,7 @@ impl PromptView {
         if self.input.is_empty() {
             return None;
         }
-        let text_w = area.width.saturating_sub(5) as usize;
+        let text_w = area.width.saturating_sub(6) as usize;
         if text_w == 0 {
             return None;
         }
@@ -640,7 +643,8 @@ impl PromptView {
         delta_time: f64,
         show_logo: bool,
     ) {
-        let text_w = area.width.saturating_sub(5) as usize;
+        // 6 columns of horizontal chrome: border + 2 padding on each side.
+        let text_w = area.width.saturating_sub(6) as usize;
         self.input_text_width.set(text_w);
         let display_placeholder = self.input.is_empty();
         let display_text = if display_placeholder {
@@ -723,7 +727,7 @@ impl PromptView {
         border_box.set_border_sides(BorderSidesConfig {
             left: true,
             top: false,
-            right: false,
+            right: true,
             bottom: false,
         });
         border_box.set_custom_border_chars(prompt_border_chars());
@@ -731,17 +735,23 @@ impl PromptView {
 
         let mut bg_box = BoxRenderable::new();
         bg_box.set_background_color(Some(theme.background_element.into()));
+        // The band stops one column short of the right edge so the right `┃`
+        // sits on the terminal background, mirroring the left border (this
+        // also matches the slash menu's content band exactly).
         let bg_area = Rect::new(
             input_area.x + 1,
             input_area.y,
-            input_area.width.saturating_sub(1),
+            input_area.width.saturating_sub(2),
             input_area.height,
         );
         bg_box.render_self(buf, bg_area);
 
         let x_off = input_area.x + 3;
         let text_start = input_area.y + 1;
-        let max_line_w = input_area.width.saturating_sub(5) as u16;
+        // Text width: left chrome (border + 2 padding = 3) and right chrome
+        // (2 padding + border = 3) — symmetric now that the box has a right
+        // `┃` like the slash menu.
+        let max_line_w = input_area.width.saturating_sub(6) as u16;
 
         // Pre-compute which visual lines overlap with pasted virtual-text placeholders.
         // Uses cumulative byte-offset tracking (same approach as `char_pos_at_mouse`)
@@ -852,14 +862,16 @@ impl PromptView {
         cap_border_box.set_border_sides(BorderSidesConfig {
             left: true,
             top: false,
-            right: false,
+            right: true,
             bottom: true,
         });
         cap_border_box.set_custom_border_chars(prompt_border_chars());
         cap_border_box.render_self(buf, cap_area);
 
         let cap_fill_x = cap_area.x + 1;
-        let cap_fill_right = cap_area.right();
+        // Stop one column early so the `▀` band never covers the right `╹`
+        // termination of the right border (mirrors the left `╹`).
+        let cap_fill_right = cap_area.right().saturating_sub(1);
         let cap_style = Style::default()
             .fg(rgba_color(theme.background_element))
             .bg(rgba_color(theme.background));
