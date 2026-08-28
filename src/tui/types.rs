@@ -25,6 +25,44 @@ pub struct Message {
     pub model: Option<String>,
 }
 
+impl Message {
+    /// Append a reasoning delta while keeping all reasoning contiguous and
+    /// ordered before the visible answer. If the answer (a `Text` part) has
+    /// already started streaming, the delta is folded back into the last
+    /// `Reasoning` part that precedes it instead of spawning a new Thought
+    /// block after the answer.
+    pub fn push_reasoning(&mut self, text: &str) {
+        if let Some(text_idx) = self.parts.iter().position(|p| matches!(p, Part::Text(_))) {
+            match (0..text_idx)
+                .rev()
+                .find(|&i| matches!(self.parts[i], Part::Reasoning(_)))
+            {
+                Some(i) => {
+                    if let Part::Reasoning(rp) = &mut self.parts[i] {
+                        rp.text.push_str(text);
+                    }
+                }
+                None => self.parts.insert(
+                    text_idx,
+                    Part::Reasoning(ReasoningPart {
+                        text: text.to_string(),
+                        collapsed: true,
+                    }),
+                ),
+            }
+        } else if matches!(self.parts.last(), Some(Part::Reasoning(_))) {
+            if let Some(Part::Reasoning(rp)) = self.parts.last_mut() {
+                rp.text.push_str(text);
+            }
+        } else {
+            self.parts.push(Part::Reasoning(ReasoningPart {
+                text: text.to_string(),
+                collapsed: true,
+            }));
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
     User,
@@ -182,5 +220,115 @@ impl AgentColors {
     pub fn get(&self, name: &str, unique_agents: &[String]) -> RGBA {
         let index = unique_agents.iter().position(|a| a == name).unwrap_or(0);
         self.palette[index % self.palette.len()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg() -> Message {
+        Message {
+            id: "m".into(),
+            role: MessageRole::Assistant,
+            parts: vec![],
+            created_at: 0,
+            agent: None,
+            model: None,
+        }
+    }
+
+    fn reasoning(text: &str) -> Part {
+        Part::Reasoning(ReasoningPart {
+            text: text.to_string(),
+            collapsed: true,
+        })
+    }
+
+    fn text(text: &str) -> Part {
+        Part::Text(TextPart {
+            text: text.to_string(),
+            synthetic: false,
+        })
+    }
+
+    fn tool() -> Part {
+        Part::Tool(ToolPart {
+            tool: "read".into(),
+            input: serde_json::json!({}),
+            output: None,
+            status: ToolStatus::Running,
+            tool_call_id: None,
+            is_start: true,
+            is_streaming: false,
+            cached_line_count: None,
+        })
+    }
+
+    #[test]
+    fn reasoning_after_answer_folds_back_into_prior_thought() {
+        let mut m = msg();
+        m.push_reasoning("R1");
+        m.parts.push(text("T1"));
+        m.push_reasoning("R2");
+        // Mirror the Token handler: append to the trailing text part.
+        if let Some(Part::Text(t)) = m.parts.last_mut() {
+            t.text.push_str("T2");
+        } else {
+            m.parts.push(text("T2"));
+        }
+
+        assert_eq!(m.parts.len(), 2);
+        match (&m.parts[0], &m.parts[1]) {
+            (Part::Reasoning(r), Part::Text(t)) => {
+                assert_eq!(r.text, "R1R2");
+                assert_eq!(t.text, "T1T2");
+            }
+            other => panic!("expected [Reasoning, Text], got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_between_tool_calls_stays_separate() {
+        let mut m = msg();
+        m.push_reasoning("R1");
+        m.parts.push(tool());
+        m.push_reasoning("R2");
+
+        assert_eq!(m.parts.len(), 3);
+        assert!(matches!(m.parts[0], Part::Reasoning(_)));
+        assert!(matches!(m.parts[1], Part::Tool(_)));
+        match &m.parts[2] {
+            Part::Reasoning(r) => assert_eq!(r.text, "R2"),
+            other => panic!("expected trailing Reasoning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_after_answer_without_prior_thought_inserts_before_text() {
+        let mut m = msg();
+        m.parts.push(text("T1"));
+        m.push_reasoning("R1");
+
+        assert_eq!(m.parts.len(), 2);
+        assert!(matches!(m.parts[0], Part::Reasoning(_)));
+        assert!(matches!(m.parts[1], Part::Text(_)));
+        match &m.parts[0] {
+            Part::Reasoning(r) => assert_eq!(r.text, "R1"),
+            other => panic!("expected Reasoning before text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn consecutive_reasoning_appends_to_trailing_thought() {
+        let mut m = msg();
+        m.push_reasoning("R1");
+        m.push_reasoning("R2");
+
+        assert_eq!(m.parts.len(), 1);
+        match &m.parts[0] {
+            Part::Reasoning(r) => assert_eq!(r.text, "R1R2"),
+            other => panic!("expected single Reasoning, got {other:?}"),
+        }
     }
 }

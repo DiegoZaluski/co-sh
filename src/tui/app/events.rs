@@ -406,13 +406,7 @@ impl App {
                     };
                     match session.messages.last_mut() {
                         Some(msg) if msg.role == MessageRole::Assistant => {
-                            match msg.parts.last_mut() {
-                                Some(Part::Reasoning(rp)) => rp.text.push_str(&text),
-                                _ => msg.parts.push(Part::Reasoning(ReasoningPart {
-                                    text: text.clone(),
-                                    collapsed: true,
-                                })),
-                            }
+                            msg.push_reasoning(&text);
                         }
                         _ => session.messages.push(Message {
                             id: format!("msg-{}", session.messages.len()),
