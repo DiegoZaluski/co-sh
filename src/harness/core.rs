@@ -1482,6 +1482,7 @@ impl Harness {
                     // Simulate the SDK's mid-stream retry marker: the consumer
                     // must discard any partial content and restart.
                     if self.mock_stream_resets.pop_front() == Some(true) {
+                        self.handle_mid_stream_reset(&mut extractor);
                         on_event(StreamEvent::Reset);
                     }
                     for token in &tokens {
@@ -1611,9 +1612,7 @@ impl Harness {
             // rendered, so the retried response restarts clean.
             if chunk.is_reset() {
                 log::debug!("stream_chat_with_messages RESET after retry");
-                extractor.reset_stream_state();
-                self.pending_thinking_blocks.clear();
-                self.last_finish_reason = None;
+                self.handle_mid_stream_reset(&mut extractor);
                 on_event(StreamEvent::Reset);
                 continue;
             }
@@ -1706,6 +1705,19 @@ impl Harness {
             }
             _ => {}
         }
+    }
+
+    /// Drop every trace of a failed stream attempt when the SDK emits a
+    /// mid-stream retry marker: the extractor's half-parsed buffer, stashed
+    /// thinking blocks, any tool calls already queued from the failed
+    /// attempt, and the finish reason it carried. The retried response
+    /// restarts from the beginning, so the failed attempt's tool calls must
+    /// not be dispatched (or duplicated) alongside it.
+    fn handle_mid_stream_reset(&mut self, extractor: &mut ExtractAction) {
+        extractor.reset_stream_state();
+        self.pending_thinking_blocks.clear();
+        self.tool_issuer.clear();
+        self.last_finish_reason = None;
     }
 
     /// Route a tool call the provider delivered NATIVELY (structured
@@ -1854,8 +1866,7 @@ impl Harness {
             // the retried response restarts clean (see
             // [`Self::stream_chat_with_messages`]).
             if chunk.is_reset() {
-                extractor.reset_stream_state();
-                self.last_finish_reason = None;
+                self.handle_mid_stream_reset(&mut extractor);
                 on_event(StreamEvent::Reset);
                 continue;
             }

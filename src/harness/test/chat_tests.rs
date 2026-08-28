@@ -329,3 +329,28 @@ async fn stream_reset_marker_discards_partial_then_restarts() {
         "the reset marker arrives first, then the retried response"
     );
 }
+
+#[tokio::test]
+async fn stream_reset_clears_queued_tool_calls() {
+    // A mid-stream retry must also discard tool calls already queued from the
+    // failed attempt — otherwise they'd be dispatched (or duplicated) alongside
+    // the retried response.
+    let mut h = make_harness()
+        .with_mock_stream_reset()
+        .with_mock_stream(Ok(vec!["retried"]));
+
+    // Simulate a tool call the failed attempt queued before the reset.
+    h.push_tool_call(cosh_sdk::extract_action::ToolCallData {
+        id: "call_1".to_string(),
+        name: "fetch".to_string(),
+        arguments: json!({"url": "https://example.com"}),
+        thought_signature: String::new(),
+    });
+
+    let _ = h.stream_chat_with_messages("sys", &[], &mut |_| {}).await;
+
+    assert!(
+        !h.has_pending_tools(),
+        "a mid-stream reset must clear tool calls queued by the failed attempt"
+    );
+}
