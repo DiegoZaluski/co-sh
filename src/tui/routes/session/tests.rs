@@ -281,6 +281,40 @@ fn test_reasoning_body_is_dimmed() {
     );
 }
 
+/// An expanded Think block must render in full, not clamped to 10 lines.
+#[test]
+fn test_reasoning_renders_more_than_ten_lines() {
+    let theme = test_theme();
+    let config = test_config();
+
+    // 25 reasoning lines — comfortably past the old 10-line clamp.
+    let text: String = (0..25).map(|i| format!("reasoning line {i}\n")).collect();
+    let part = ReasoningPart {
+        text: text.clone(),
+        collapsed: false,
+    };
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 80));
+    let mut line_h = 0u16;
+    super::SessionView::render_reasoning(&mut buf, 0, 0, &mut line_h, 80, &part, true, &theme);
+
+    let expected = text.lines().count() as u16 + 2;
+    assert_eq!(
+        line_h, expected,
+        "expanded reasoning must render all lines, not clamp to 10"
+    );
+
+    // The height estimate must agree so scrolling stays consistent.
+    let est = SessionView::estimate_part_height(
+        &Part::Reasoning(part),
+        80,
+        &config,
+        &MessageRole::Assistant,
+        &super::tool_render::ToolRenderState::new(),
+    );
+    assert_eq!(est, line_h, "estimate_part_height must match render height");
+}
+
 /// Test rendering with progressively larger messages to check for
 /// performance degradation patterns. This simulates what happens during
 /// a long streaming session where the message grows over time.

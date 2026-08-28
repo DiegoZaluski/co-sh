@@ -885,7 +885,7 @@ impl SessionView {
         *line_h = 1;
 
         if expanded && !part.text.is_empty() {
-            let md_h = part.text.lines().count().min(10) as u16 + 1;
+            let md_h = part.text.lines().count() as u16 + 1;
             let md_area = Rect::new(x + 2, y + 1, max_w.saturating_sub(2), md_h);
             // Sanitize before the markdown renderer so control chars can't
             // reach buffer cells (ratatui cell_width panic). `\n` is kept —
@@ -1625,7 +1625,7 @@ impl SessionView {
                         config.thinking_mode,
                     );
                     if expanded {
-                        (r.text.lines().count().min(10) as u16) + 2
+                        (r.text.lines().count() as u16) + 2
                     } else {
                         // Collapsed: just the "+ Thought" header row.
                         1
