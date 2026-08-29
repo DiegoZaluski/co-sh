@@ -1,40 +1,16 @@
-//! Single-owner LLM-free synchronous context manager.
+//! Single-owner, synchronous conversation timeline that feeds the LLM.
 //!
-//! The [`ContextManager`] is the **single owner** of the whole conversation —
-//! user prompts, assistant outputs, tool calls and tool results — before it
-//! reaches the LLM. Fresh content is always rendered verbatim: there is no
-//! deterministic compression. The only compaction is the **LLM summarizer**
-//! (`resumir > apagar`): when the held context reaches 80% of the budget,
-//! [`Self::run`] returns [`RunOutcome::NeedsLlmCompaction`] and the harness
-//! drives the LLM compaction (see below).
+//! The [`ContextManager`] owns every conversation item — user prompts,
+//! assistant outputs, tool calls and tool results — in display order. Content
+//! is rendered verbatim; the only compaction is the LLM summarizer: when the
+//! held context reaches 80% of the budget, [`Self::run`] returns
+//! [`RunOutcome::NeedsLlmCompaction`] and the harness drives the compaction.
 //!
-//! The final text of a finished agent loop is promoted verbatim into a
-//! [`Closure`] by [`close_loop`](Self::close_loop), so the final answer is
-//! always delivered in its original form.
-//!
-//! [`build_messages`](Self::build_messages) renders the conversation as a
-//! provider-ready `Vec<ChatMessage>` with a **1:1 mapping** between items and
-//! messages, so every message keeps its original position by construction.
-//!
-//! # Compaction
-//!
-//! The only automatic cleanup runs at the start of every [`run`](Self::run):
-//! the **useless tool-chain sweep** (results marked `useless` — e.g. a
-//! zero-match `find_grep`) drops dead weight as soon as the model has had one
-//! read of it, keeping the newest chain alive. When the total is still over
-//! the 80% trigger, [`Self::run`] returns [`RunOutcome::NeedsLlmCompaction`].
-//!
-//! The **LLM compaction** (the last-resort fallback, driven by the harness)
-//! serializes the entire remaining context — protected items included — into
-//! an opencode-style transcript and asks the model for a continuation summary
-//! that replaces the whole timeline in place. When the serialized context
-//! exceeds the provider's own window (a `ContextWindowExceeded` error), the
-//! harness drives the **split-and-concatenate contingency**: the timeline is
-//! summarized in sequential chunks and the concatenated summaries are
-//! committed atomically as the new single anchor. If the summary still cannot
-//! fit the model window, the overflow is recorded as stuck for that provider
-//! ([`Self::mark_overflow`]) and the user is notified until they switch the
-//! model or start a new session.
+//! [`build_messages`](Self::build_messages) renders the timeline as a
+//! provider-ready `Vec<ChatMessage>` with a 1:1 item→message mapping. The
+//! final text of a finished loop is promoted verbatim into a [`Closure`] by
+//! [`close_loop`](Self::close_loop), so the final answer is delivered
+//! unchanged.
 
 #[cfg(test)]
 mod test;
@@ -59,18 +35,6 @@ pub const MAX_CONTEXT_TOKENS: usize = 100_000;
 const COMPACT_PCT: usize = 80;
 
 // ── Split-and-concatenate (the context-window contingency) ──────────────
-//
-// When the held context exceeds the model's window — the
-// model-switch-to-a-smaller-window scenario, or a provider error that
-// reports the window — the harness drives the split-and-concatenate
-// contingency: the timeline is summarized in sequential chunks (whole items,
-// historical order), each chunk's summary is appended to a staging buffer,
-// and — only when EVERYTHING has been summarized — the buffer is committed
-// atomically as the new single anchor (exactly the end state of a normal LLM
-// compaction). The timeline is never touched until that final commit; a
-// failure at any point aborts and everything stays. When the window is
-// UNKNOWN the split is still driven — sized against the current token budget
-// ([`ContextManager::max_tokens`]) as the best available estimate.
 
 /// The final anchor buffer must stay at or below this fraction of the model's
 /// window (the "ceiling" — the max capacity of the concatenation buffer).
@@ -96,21 +60,10 @@ const SPLIT_CONTINUITY_CHARS: usize = 1200;
 /// of degrading to one item per chunk.
 const SPLIT_CALL_OVERHEAD: usize = 8000;
 
-// Tool results are NOT truncated in the LLM-compaction transcript: the tools
-// themselves bound their output (hashline-numbered reads, capped search
-// results), and cutting a payload the model may still need forces it to
-// re-read the source afterwards — spending more tokens on re-reading than
-// the truncation ever saved. The summary prompt is bounded by the model's
-// own window, and the split-and-concatenate contingency summarizes the whole
-// timeline in chunks when the transcript ever exceeds it.
-
 /// The summarization template the LLM compaction asks the model to fill
 /// (opencode's `SUMMARY_TEMPLATE`, kept as inspiration): a structured anchor
 /// that preserves the objective, the work state and the next move so the
-/// session can continue seamlessly from the summary. The `Code & Anchors`
-/// section exists so the agent resumes editing where it stopped WITHOUT
-/// re-reading whole files: hashline anchors (`¶path#TAG`) and the exact code
-/// blocks the next step touches are carried forward verbatim.
+/// session can continue seamlessly from the summary.
 const SUMMARY_TEMPLATE: &str = "\
 Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
@@ -267,25 +220,12 @@ impl ContextItem {
         }
     }
 
-    fn is_tool(&self) -> bool {
-        matches!(
-            self,
-            ContextItem::ToolCall { .. } | ContextItem::ToolResult { .. }
-        )
-    }
-
-    /// True when this is a closable assistant text output — the only kind that
-    /// may be promoted to a [`ContextItem::Closure`] by
-    /// [`ContextManager::close_loop`]. An assistant output that carried a tool
-    /// call is structural and can never be a summary of what was done.
-    fn is_assistant(&self) -> bool {
-        matches!(
-            self,
-            ContextItem::Assistant {
-                closable: true,
-                ..
-            }
-        )
+    fn call_id(&self) -> Option<&str> {
+        match self {
+            ContextItem::ToolCall { call_id, .. }
+            | ContextItem::ToolResult { call_id, .. } => Some(call_id),
+            _ => None,
+        }
     }
 }
 
@@ -300,10 +240,9 @@ fn serialize_item(item: &ContextItem) -> String {
         ContextItem::ToolCall {
             name, arguments, ..
         } => format!("[Assistant tool call]: {name}({arguments})"),
-        // Tool results are passed VERBATIM — no truncation (see the note
-        // above `SUMMARY_TEMPLATE`): the tools bound their own output, and
-        // truncating a payload the model still needs forces it to re-read the
-        // source.
+        // Tool results are passed VERBATIM — the tools bound their own output,
+        // and truncating a payload the model still needs only forces a
+        // costlier re-read of the source.
         ContextItem::ToolResult { content, .. } => format!("[Tool result]: {content}"),
         ContextItem::Closure { content, .. } => format!("[Assistant]: {content}"),
         // The previous summary stays in the timeline (index 0 after
@@ -441,7 +380,6 @@ fn build_split_prompt(
     first_chunk: bool,
     continuity: &str,
     chunk: &str,
-    should_warn: bool,
     target_tokens: Option<usize>,
     remaining_tokens: usize,
     buffer_tokens: usize,
@@ -461,7 +399,7 @@ fn build_split_prompt(
         out.push_str(continuity);
         out.push('\n');
     }
-    if should_warn && let Some(target) = target_tokens {
+    if let Some(target) = target_tokens {
         out.push_str(&format!(
             "\nTOKEN LIMIT: {buffer_tokens} tokens are already summarized and the final \
              summary must stay within budget. Compress the chunk below to AT MOST ~{target} \
@@ -514,8 +452,6 @@ pub struct SplitProjection {
     pub warn_at: usize,
     /// Whether the limit message should be sent on the next chunk.
     pub should_warn: bool,
-    /// Estimated tokens of the items not yet summarized.
-    pub remaining_tokens: usize,
 }
 
 /// One chunk request of the split-and-concatenate contingency: the prompt the
@@ -698,13 +634,7 @@ impl ContextManager {
 
     /// Add an assistant text output. When `closable` is true the text is a
     /// pure-text turn (no tool call) and may be promoted to a [`Closure`] by
-    /// [`Self::close_loop`]. When false (the output carried a tool call) it
-    /// stays structural.
-    ///
-    /// The FINAL output of a loop needs no special casing here: the harness
-    /// calls [`Self::close_loop`] the moment the loop ends, promoting the
-    /// ORIGINAL text verbatim into a `Closure`, so the delivered final answer
-    /// is always the original text.
+    /// [`Self::close_loop`].
     pub fn add_assistant(&mut self, text: &str, closable: bool) {
         let id = self.next_id();
         self.push_item(ContextItem::Assistant {
@@ -837,27 +767,23 @@ impl ContextManager {
     /// ORIGINAL text is promoted verbatim, so the final answer is never
     /// summarized away.
     pub fn close_loop(&mut self) {
-        let Some(last) = self.items.back() else {
+        let Some(ContextItem::Assistant { id, original, closable }) = self.items.back() else {
             return;
         };
-        if !last.is_assistant() {
+        if !*closable {
             return;
         }
-        // Capture the draft's current token cost before the pop, so the cache
-        // moves from the draft cost to the closure cost. Read from the cache —
-        // never re-tokenize the draft.
-        let draft_id = self.items.back().unwrap().id();
+        let draft_id = *id;
+        let content = original.clone();
         let draft_tokens = self
             .item_tokens
             .remove(&draft_id)
-            .unwrap_or_else(|| self.items.back().unwrap().tokens(self.encoding));
-        let ContextItem::Assistant { id, original, .. } = self.items.pop_back().unwrap() else {
-            return;
-        };
+            .unwrap_or_else(|| self.encoding.estimate(&content));
+        self.items.pop_back();
         self.cached_items_tokens = self.cached_items_tokens.saturating_sub(draft_tokens);
         self.push_item(ContextItem::Closure {
-            id,
-            content: original,
+            id: draft_id,
+            content,
         });
     }
 
@@ -875,15 +801,12 @@ impl ContextManager {
 
     // Compaction
 
-    /// Per-iteration tick: drop useless tool chains, then check the 80%
-    /// budget trigger.
+    /// Per-iteration tick: run the useless tool-chain sweep, then check the
+    /// 80% budget trigger.
     ///
-    /// The **useless tool-chain sweep** runs first (regardless of the budget):
-    /// chains whose result is marked `useless` are dropped automatically,
-    /// keeping the newest chain alive. Then, when the total is still at or
-    /// over the trigger, the manager returns [`RunOutcome::NeedsLlmCompaction`]
-    /// — the harness runs the LLM compaction and applies the summary via
-    /// [`Self::apply_llm_summary`].
+    /// When the total is at or over the trigger, returns
+    /// [`RunOutcome::NeedsLlmCompaction`] so the harness runs the LLM
+    /// compaction and applies the summary via [`Self::apply_llm_summary`].
     pub fn run(&mut self) -> RunOutcome {
         self.sweep_useless_chains();
         if self.total_tokens() < self.trigger() {
@@ -893,30 +816,17 @@ impl ContextManager {
         }
     }
 
-    /// Automatic dead-weight cleanup, OUTSIDE the toggle: remove every tool
-    /// chain whose result is marked `useless` (e.g. a zero-match
-    /// `find_grep`/`find_glob`), **except the newest chain** — the one the
-    /// model has not seen yet. Runs at the start of every [`Self::run`]
-    /// regardless of the budget, so useless chains are cleaned as soon as the
-    /// model has had one read of them instead of waiting for a budget
-    /// overflow.
+    /// Remove every tool chain whose result is marked `useless`, except the
+    /// newest chain (the one the model has not reacted to yet). Runs at the
+    /// start of every [`Self::run`], regardless of the budget.
     fn sweep_useless_chains(&mut self) {
         // The newest chain (the one the model has not seen yet) is preserved:
         // its CALL id is the chain identity, so BOTH halves are excluded.
-        let newest_call_id: Option<String> =
-            self.items
-                .iter()
-                .rev()
-                .find(|it| it.is_tool())
-                .and_then(|it| match it {
-                    ContextItem::ToolCall { call_id, .. }
-                    | ContextItem::ToolResult { call_id, .. } => Some(call_id.clone()),
-                    _ => None,
-                });
-        // Precompute the set of `useless` call ids in ONE pass. The previous
-        // per-item `chain_is_useless` scan (position + any, both O(n)) ran for
-        // EVERY tool item — O(n²) over a long tool timeline, paid at the
-        // start of every `run()`.
+        let newest_call_id: Option<String> = self
+            .items
+            .iter()
+            .rev()
+            .find_map(|it| it.call_id().map(str::to_string));
         let useless_call_ids: HashSet<String> = self
             .items
             .iter()
@@ -929,21 +839,21 @@ impl ContextManager {
                 _ => None,
             })
             .collect();
-        let ids: Vec<u64> = self
-            .items
-            .iter()
-            .filter(|it| it.is_tool())
-            .filter(|it| match it {
-                ContextItem::ToolCall { call_id, .. } | ContextItem::ToolResult { call_id, .. } => {
+        // Back-to-front so removing a chain never invalidates a pending index;
+        // remove_item also drops the partner half, so its index is skipped
+        // naturally by the next iteration.
+        let mut idx = self.items.len();
+        while idx > 0 {
+            idx -= 1;
+            let doomed = match &self.items[idx] {
+                ContextItem::ToolCall { call_id, .. }
+                | ContextItem::ToolResult { call_id, .. } => {
                     newest_call_id.as_deref() != Some(call_id.as_str())
                         && useless_call_ids.contains(call_id)
                 }
-                _ => true,
-            })
-            .map(ContextItem::id)
-            .collect();
-        for id in ids {
-            if let Some(idx) = self.items.iter().position(|it| it.id() == id) {
+                _ => false,
+            };
+            if doomed {
                 self.remove_item(idx);
             }
         }
@@ -1001,21 +911,11 @@ impl ContextManager {
         // A successful compaction is proof the provider accepts the context
         // again — any recorded stuck overflow is no longer relevant.
         self.clear_overflow();
-        let normal_trigger = self.max_tokens.saturating_mul(COMPACT_PCT) / 100;
-        self.total_tokens() < normal_trigger
+        self.total_tokens() < self.normal_trigger()
     }
 
     // Split-and-concatenate (the context-window contingency, driven by the
-    // harness)
-    //
-    // When the held context exceeds the model's window (a model switch to a
-    // smaller window, or a provider error that reports the window), the
-    // timeline is summarized in sequential chunks and the summaries are
-    // concatenated into ONE staging buffer. The timeline is NEVER touched
-    // during the process — the final commit replaces it with the buffer
-    // atomically, exactly like a normal LLM compaction. When the window is
-    // UNKNOWN the split is sized against the current token budget as the best
-    // available estimate.
+    // harness). The timeline is untouched until commit_split.
 
     /// The current token budget — the discovered window or the default. The
     /// harness uses it (with the error-reported window) to detect the
@@ -1051,7 +951,7 @@ impl ContextManager {
     }
 
     /// Live budget projection of the in-progress split: buffer accumulation
-    /// vs the ceiling, plus the tokens still to summarize.
+    /// vs the ceiling.
     #[must_use]
     pub fn split_projection(&self) -> SplitProjection {
         let split = self.split.as_ref();
@@ -1059,18 +959,11 @@ impl ContextManager {
         let buffer_tokens = split.map_or(0, |s| s.buffer_tokens);
         let ceiling = (window as f64 * SPLIT_BUFFER_MAX_PCT) as usize;
         let warn_at = (ceiling as f64 * SPLIT_WARN_PCT) as usize;
-        let remaining_tokens = self
-            .items
-            .iter()
-            .skip(self.split_cursor_idx())
-            .map(|it| it.tokens(self.encoding))
-            .sum();
         SplitProjection {
             buffer_tokens,
             ceiling,
             warn_at,
             should_warn: buffer_tokens >= warn_at,
-            remaining_tokens,
         }
     }
 
@@ -1134,10 +1027,10 @@ impl ContextManager {
             .map(|it| it.tokens(self.encoding))
             .sum();
 
-        // Contenção antecipada: only when the buffer accumulation is
-        // concerning do we ask the summarizer to be terse, targeting a
-        // proportional share of the remaining ceiling so the final buffer
-        // stays under it (with the folga built into the ceiling itself).
+        // Early containment: only when the buffer accumulation is concerning
+        // do we ask the summarizer to be terse, targeting a proportional share
+        // of the remaining ceiling so the final buffer stays under it (the
+        // slack is built into the ceiling itself).
         let target_tokens = if projection.should_warn {
             let available = projection.ceiling.saturating_sub(projection.buffer_tokens);
             let target = if remaining_tokens > 0 {
@@ -1157,7 +1050,6 @@ impl ContextManager {
             first_chunk,
             continuity,
             &chunk_text,
-            projection.should_warn,
             target_tokens,
             remaining_tokens,
             projection.buffer_tokens,
@@ -1176,13 +1068,18 @@ impl ContextManager {
         let Some(split) = self.split.as_mut() else {
             return;
         };
-        if !summary.trim().is_empty() {
-            if !split.buffer.is_empty() {
-                split.buffer.push('\n');
-            }
-            split.buffer.push_str(summary.trim());
-            split.buffer_tokens = self.encoding.estimate(&split.buffer);
+        let summary = summary.trim();
+        // An empty summary means the chunk was never summarized: advancing the
+        // cursor would silently drop those items from the final anchor.
+        if summary.is_empty() {
+            return;
         }
+        if !split.buffer.is_empty() {
+            split.buffer.push('\n');
+        }
+        split.buffer.push_str(summary);
+        split.buffer_tokens = self.encoding.estimate(&split.buffer);
+
         // The tail snippet that glues the next chunk onto this one.
         split.continuity = if summary.len() <= SPLIT_CONTINUITY_CHARS {
             summary.to_string()
@@ -1456,8 +1353,13 @@ impl ContextManager {
     /// [`Self::apply_llm_summary`]) keep their normal semantics (see those).
     fn trigger(&self) -> usize {
         if self.manual_compaction {
-            return 0;
+            0
+        } else {
+            self.normal_trigger()
         }
+    }
+
+    fn normal_trigger(&self) -> usize {
         self.max_tokens.saturating_mul(COMPACT_PCT) / 100
     }
 
@@ -1523,72 +1425,43 @@ impl ContextManager {
             .saturating_add(self.todo.tokens(self.encoding))
     }
 
-    /// Remove the item at `idx`, returning its token cost. For tool items the
-    /// matching call/result partner is removed too, so the native
-    /// `tool_call → tool` chain can never break (a lone `tool` message or an
-    /// orphaned tool call is rejected by providers).
-    fn remove_item(&mut self, idx: usize) -> usize {
-        let item = &self.items[idx];
-        let call_id = match item {
-            ContextItem::ToolCall { call_id, .. } | ContextItem::ToolResult { call_id, .. } => {
-                Some(call_id.clone())
-            }
-            _ => None,
+    /// Remove the item at `idx`. For tool items the matching call/result
+    /// partner is removed too, so the native `tool_call → tool` chain can
+    /// never break (a lone `tool` message or an orphaned tool call is
+    /// rejected by providers).
+    fn remove_item(&mut self, idx: usize) {
+        let is_call = matches!(self.items[idx], ContextItem::ToolCall { .. });
+        let Some(cid) = self.items[idx].call_id().map(str::to_string) else {
+            self.remove_at(idx);
+            return;
         };
-
-        let Some(cid) = call_id else {
-            // Read the cost from the per-item cache instead of re-tokenizing
-            // (removed content can be large — e.g. a whole tool result).
-            let id = self.items[idx].id();
-            let tokens = self
-                .item_tokens
-                .remove(&id)
-                .unwrap_or_else(|| self.items[idx].tokens(self.encoding));
-            self.items.remove(idx);
-            self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
-            return tokens;
-        };
-
-        let is_call = matches!(item, ContextItem::ToolCall { .. });
         let partner = self.items.iter().position(|it| match it {
             ContextItem::ToolCall { call_id: c, .. } if !is_call => *c == cid,
             ContextItem::ToolResult { call_id: c, .. } if is_call => *c == cid,
             _ => false,
         });
-
         match partner {
-            // Remove both halves of the chain so the native pairing never
-            // breaks. The higher index is removed first so the lower one stays
-            // valid; both token costs are summed.
+            // Remove both halves so the native pairing never breaks; the
+            // higher index first so the lower one stays valid.
             Some(p) => {
-                let (lo, hi) = (idx.min(p), idx.max(p));
-                // Both halves' costs come from the cache (a tool result can
-                // be large — re-tokenizing it here would re-pay it).
-                let lo_tokens = self
-                    .item_tokens
-                    .remove(&self.items[lo].id())
-                    .unwrap_or_else(|| self.items[lo].tokens(self.encoding));
-                let hi_tokens = self
-                    .item_tokens
-                    .remove(&self.items[hi].id())
-                    .unwrap_or_else(|| self.items[hi].tokens(self.encoding));
-                let total = lo_tokens.saturating_add(hi_tokens);
-                self.items.remove(hi);
-                self.items.remove(lo);
-                self.cached_items_tokens = self.cached_items_tokens.saturating_sub(total);
-                total
+                self.remove_at(idx.max(p));
+                self.remove_at(idx.min(p));
             }
             // No partner (orphan) — remove just this item.
-            None => {
-                let id = self.items[idx].id();
-                let tokens = self
-                    .item_tokens
-                    .remove(&id)
-                    .unwrap_or_else(|| self.items[idx].tokens(self.encoding));
-                self.items.remove(idx);
-                self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
-                tokens
-            }
+            None => self.remove_at(idx),
         }
+    }
+
+    /// Remove the item at `idx` and adjust the cached token total, reading the
+    /// cost from the per-item cache instead of re-tokenizing (removed content
+    /// can be large — e.g. a whole tool result).
+    fn remove_at(&mut self, idx: usize) {
+        let id = self.items[idx].id();
+        let tokens = self
+            .item_tokens
+            .remove(&id)
+            .unwrap_or_else(|| self.items[idx].tokens(self.encoding));
+        self.items.remove(idx);
+        self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
     }
 }
