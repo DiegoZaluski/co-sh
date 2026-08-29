@@ -84,7 +84,8 @@ pub enum Part {
     Tool(ToolPart),
     Reasoning(ReasoningPart),
     File(FilePart),
-    /// A context-compaction status line (pipeline stopwatch / phase notice).
+    /// A context-compaction status line: the "Summarizing" box for the LLM
+    /// compaction, carrying a live stopwatch while it runs.
     Compaction(CompactionPart),
 }
 

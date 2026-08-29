@@ -22,7 +22,7 @@
 //!
 //! Its tokens still count toward the context budget ([`ContextManager`]'s
 //! `total_tokens`), so the 80% compaction trigger stays honest — but nothing
-//! can ever compact, evict or summarize the block away.
+//! can ever compact or summarize the block away.
 //!
 //! # Removal rules
 //!
@@ -347,10 +347,9 @@ mod tests {
         assert_eq!(msgs[1].content.as_deref(), Some("hello"));
     }
 
-    // The whole point of the dedicated block: EVERY compaction phase must
-    // leave it untouched — the pipeline / draft eviction (`run`), the LLM
-    // compaction (`apply_llm_summary`, which replaces the entire timeline)
-    // and the tool-chain overflow drain.
+    // The whole point of the dedicated block: every compaction phase must
+    // leave it untouched — the useless-chain sweep (`run`) and the LLM
+    // compaction (`apply_llm_summary`, which replaces the entire timeline).
     #[test]
     fn todo_block_survives_every_compaction_phase() {
         let mut m = cm(1000); // trigger = 800

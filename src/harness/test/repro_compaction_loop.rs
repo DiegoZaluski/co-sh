@@ -15,11 +15,11 @@ use std::sync::atomic::AtomicBool;
 // never approaches the budget.
 //
 // Mechanism this test pins down: a single `run_agent_loop` can fire the LLM
-// compaction MULTIPLE times. Tool chains are PROTECTED content (never
-// prose-compressed, never evicted), so once the model adds a big tool call the
-// deterministic phases resolve nothing and `run()` returns
-// `NeedsLlmCompaction` again after EVERY dispatch that pushes the total back
-// over the 80% trigger. Each compaction serializes the ENTIRE accumulated
+// compaction MULTIPLE times. A live tool chain (its call + results) stays in
+// the timeline — the useless-chain sweep only removes chains with no output —
+// so once the model adds a big tool call the sweep resolves nothing and
+// `run()` returns `NeedsLlmCompaction` again after EVERY dispatch that pushes
+// the total back over the 80% trigger. Each compaction serializes the ENTIRE accumulated
 // timeline (the previous summary + everything since — the "old context") into
 // the summarizer prompt. With a hardcoded budget far below the model window,
 // the trigger re-fires constantly and the summarizer is called once per
@@ -28,8 +28,8 @@ use std::sync::atomic::AtomicBool;
 async fn repro_llm_compaction_repeats_mid_loop_when_protected_content_regrows() {
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // Protected-only history over the trigger: no drafts for the pipeline or
-    // the eviction pass → NeedsLlmCompaction at loop start.
+    // History over the trigger with nothing for the useless-chain sweep to
+    // remove → NeedsLlmCompaction at loop start.
     // The loaded turn is a COMPLETED one (user + answer): the loop input
     // lands after an output, never directly on a user turn (that pattern is
     // the abandoned-input case, which the harness now drops).
@@ -48,9 +48,10 @@ async fn repro_llm_compaction_repeats_mid_loop_when_protected_content_regrows() 
     );
     // The summarizer always succeeds with a small summary.
     h = h.with_mock_chat(Ok("## Objective\n- compacted"));
-    // Each work iteration adds a HUGE PROTECTED tool chain (the call
-    // arguments are never evictable / compressible), pushing the total back
-    // over the trigger → the LLM compaction re-fires after EVERY dispatch.
+    // Each work iteration adds a HUGE live tool chain (nothing for the
+    // useless-chain sweep to remove — it is still in flight, or its results
+    // are fresh), pushing the total back over the trigger → the LLM compaction
+    // re-fires after EVERY dispatch.
     let huge = "a".repeat(20_000);
     h.mock_stream_queue.push_back(Ok(vec![
         "Let me inspect ".to_string(),

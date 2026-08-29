@@ -1730,7 +1730,7 @@ fn compaction_part_serde_roundtrip() {
     ));
 }
 
-// The "Summarizing" box (LLM compaction, phase 3): collapsed it shows ONLY the
+// The "Summarizing" box (LLM compaction): collapsed it shows ONLY the
 // LAST lines of the streamed text (the LRU-like scroll-up preview — the top
 // lines leave the box as the stream grows, nothing is removed), and clicking
 // expands it to the full text with a taller height. Long lines WORD-WRAP

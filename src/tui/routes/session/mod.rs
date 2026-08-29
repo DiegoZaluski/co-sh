@@ -728,7 +728,8 @@ impl SessionView {
         draw_text_line(buf, &label, x, y, max_w, style);
     }
 
-    /// Render the "Summarizing" box of the LLM compaction (phase 3): a
+    /// Render the "Summarizing" box of the LLM compaction (the last-resort
+    /// fallback): a
     /// bordered title row with a live/elapsed stopwatch, and the streamed
     /// summary body. Collapsed, the body is a fixed-height preview that shows
     /// only the LAST lines (the top lines visually leave the box as the stream
@@ -1363,11 +1364,10 @@ impl SessionView {
                         line_h = line_h.min(available);
                         y += line_h;
                     } else {
-                        // One-line status: the pipeline line ticks live
+                        // One-line status: the "Summarizing" line ticks live
                         // (computed from `started_at` vs now) until it
-                        // finalizes; the other phase lines are static notices.
-                        // Height is always 1, so the line never reflows while
-                        // the stopwatch runs.
+                        // finalizes. Height is always 1, so the line never
+                        // reflows while the stopwatch runs.
                         let text = compaction_line(c, crate::types::now_ms());
                         let style = Style::default().fg(rgba_color(compaction_color(theme)));
                         draw_text_line(buf, &text, x, y, max_w, style);

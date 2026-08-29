@@ -304,26 +304,26 @@ async fn full_tool_loop_builds_correct_item_sequence_and_messages() {
     assert_eq!(user_count, 1, "the user input must be sent exactly once");
 }
 
-// ── Proof: the LLM compaction (phase 3) runs in the harness ──────────────
+// ── Proof: the LLM compaction runs in the harness ─────────────────────────
 //
-// When the deterministic phases exhaust every draft and the total is still
-// over the 80% trigger, `run_agent_loop` performs the LLM compaction: it
-// builds the summary prompt from the context manager, calls the model (the
-// mock chat response here), applies the summary, and re-adds the in-flight
-// input so the model sees the task verbatim. The TUI gets the lifecycle
-// events and the timeline ends as [Compaction, user, LoopClosure].
+// When the useless-chain sweep leaves the total over the 80% trigger,
+// `run_agent_loop` performs the LLM compaction: it builds the summary prompt
+// from the context manager, calls the model (the mock chat response here),
+// applies the summary, and re-adds the in-flight input so the model sees the
+// task verbatim. The TUI gets the lifecycle events and the timeline ends as
+// [Compaction, user, LoopClosure].
 #[tokio::test]
-async fn run_agent_loop_runs_the_llm_compaction_when_drafts_are_exhausted() {
+async fn run_agent_loop_runs_the_llm_compaction_when_over_the_trigger() {
     use crate::harness::context_manager::ContextManager;
     use crate::harness::events::LlmCompactionEvent;
 
     let mut h = Harness::new_test();
-    // Small budget so the preloaded protected-only history overflows the 80%
-    // trigger with NOTHING for the deterministic phases to compress or evict
-    // (user prompts are protected by construction).
+    // Small budget so the preloaded history overflows the 80% trigger with
+    // nothing for the useless-chain sweep to remove, forcing the LLM
+    // compaction.
     h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
-    // below): protected-only over the trigger, and the loop input lands after
+    // A loaded user turn WITH an answer (promoted to a LoopClosure
+    // below): history over the trigger, and the loop input lands after
     // an output — never directly on a user turn (that pattern is the
     // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
@@ -420,8 +420,8 @@ async fn run_agent_loop_survives_a_failed_llm_compaction() {
 
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
-    // below): protected-only over the trigger, and the loop input lands after
+    // A loaded user turn WITH an answer (promoted to a LoopClosure
+    // below): history over the trigger, and the loop input lands after
     // an output — never directly on a user turn (that pattern is the
     // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
@@ -585,8 +585,8 @@ async fn run_agent_loop_marks_provider_stuck_when_split_cannot_fit() {
 
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // A loaded user turn WITH an answer (promoted to a protected Closure
-    // below): protected-only over the trigger, and the loop input lands after
+    // A loaded user turn WITH an answer (promoted to a Closure
+    // below): history over the trigger, and the loop input lands after
     // an output — never directly on a user turn (that pattern is the
     // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
@@ -702,8 +702,8 @@ async fn run_agent_loop_retries_generic_compaction_failures_then_notifies() {
 
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
-    // below): protected-only over the trigger, and the loop input lands after
+    // A loaded user turn WITH an answer (promoted to a LoopClosure
+    // below): history over the trigger, and the loop input lands after
     // an output — never directly on a user turn (that pattern is the
     // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
@@ -775,9 +775,10 @@ async fn run_agent_loop_retries_generic_compaction_failures_then_notifies() {
     );
 }
 
-// Once the provider is recorded as stuck (every chain drained, still over),
-// the doomed summarizer call is SKIPPED — no LlmCompaction lifecycle events —
-// and the throttled warning toast is re-surfaced instead.
+// Once the provider is recorded as stuck (the split can no longer shrink the
+// context into the window), the doomed summarizer call is SKIPPED — no
+// LlmCompaction lifecycle events — and the throttled warning toast is
+// re-surfaced instead.
 #[tokio::test]
 async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
     use crate::harness::context_manager::ContextManager;
@@ -785,8 +786,8 @@ async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
 
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
-    // below): protected-only over the trigger, and the loop input lands after
+    // A loaded user turn WITH an answer (promoted to a LoopClosure
+    // below): history over the trigger, and the loop input lands after
     // an output — never directly on a user turn (that pattern is the
     // abandoned-input case, which the harness now drops).
     h = h.with_history(&[
@@ -794,7 +795,7 @@ async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
         ("assistant".into(), "a ".repeat(1100)),
     ]);
     h.context_manager.close_loop();
-    // The provider is already known to overflow with every chain drained.
+    // The provider is already recorded as overflowing (marked stuck).
     h.context_manager.mark_overflow("openai");
     h = h.with_mock_stream(Ok(vec!["final answer"]));
 
@@ -863,9 +864,8 @@ async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
 // error that reported it) and the held context exceeds it — the
 // model-switch-to-a-smaller-window scenario — the harness drives the split
 // instead of the single-shot compaction: the timeline is summarized in
-// sequential chunks and committed ATOMICALLY as the new anchor. The legacy
-// drain would only remove tool chains and keep the protected items over
-// budget; the split shrinks the WHOLE timeline to fit the known window.
+// sequential chunks and committed ATOMICALLY as the new anchor. The split
+// shrinks the WHOLE timeline to fit the known window.
 #[tokio::test]
 async fn known_window_overflow_drives_split_and_commits_the_anchor() {
     use crate::harness::context_manager::ContextManager;
@@ -877,8 +877,8 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
     // the provider, so the split path must fire instead.
     h = h.with_discovered_window(600);
     h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
-    // below): protected-only over the trigger (~2200 ≥ 1600) and > 600 — the
+    // A loaded user turn WITH an answer (promoted to a LoopClosure
+    // below): history over the trigger (~2200 ≥ 1600) and > 600 — the
     // known window.
     h = h.with_history(&[
         ("user".into(), "u ".repeat(1100)),
@@ -976,8 +976,7 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
     );
 
     // The split committed ATOMICALLY: the whole timeline became a single
-    // Compaction anchor (the legacy drain would have kept the protected items
-    // over budget and marked the provider stuck instead).
+    // Compaction anchor.
     assert!(
         matches!(
             &items[0],
@@ -1017,9 +1016,9 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
 }
 
 // The REACTIVE fork: when the single-shot compaction transcript itself
-// overflows with a REPORTED window, `llm_compact` drives the split instead of
-// the chain drain — the split shrinks the whole timeline (protected items
-// included) into a fitting anchor and the compaction resolves successfully
+// overflows with a REPORTED window, `llm_compact` drives the split — the
+// split shrinks the whole timeline (every item included) into a fitting
+// anchor and the compaction resolves successfully
 // (Finished, never Failed; the provider is never marked stuck).
 #[tokio::test]
 async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() {
@@ -1032,7 +1031,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
     // `llm_compact` runs the single-shot compaction — whose transcript then
     // overflows WITH a reported window, triggering the reactive split.
     h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // Protected-only history over the trigger (~2200 ≥ 1600) and > 600 (the
+    // History over the trigger (~2200 ≥ 1600) and > 600 (the
     // window the error will report).
     h = h.with_history(&[
         ("user".into(), "u ".repeat(1100)),
@@ -1119,7 +1118,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         )),
         "the compaction must NOT be reported as failed; events={events:?}"
     );
-    // The legacy drain was NOT taken: no persistent overflow warning toast.
+    // The split resolved without a persistent overflow warning toast.
     assert!(
         !events.iter().any(|e| matches!(
             e,
@@ -1167,8 +1166,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         )),
         "the giant history was folded into the anchor"
     );
-    // Unlike the legacy drain, the reactive split resolves WITHOUT marking
-    // the provider stuck.
+    // The reactive split resolves without marking the provider stuck.
     assert!(
         !stuck,
         "the reactive split must not mark the provider stuck"
@@ -1186,7 +1184,7 @@ async fn split_aborts_on_an_empty_chunk_summary_and_keeps_the_context() {
     let mut h = Harness::new_test();
     h = h.with_discovered_window(600);
     h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // Protected-only history over the trigger AND over the known window.
+    // History over the trigger AND over the known window.
     h = h.with_history(&[
         ("user".into(), "u ".repeat(1100)),
         ("assistant".into(), "a ".repeat(1100)),
@@ -1260,7 +1258,7 @@ async fn split_aborts_on_an_empty_chunk_summary_and_keeps_the_context() {
             it,
             ContextItem::User { original, .. } if original.starts_with("u ")
         )),
-        "the timeline keeps the original protected history; items={items:?}"
+        "the timeline keeps the original history; items={items:?}"
     );
     assert!(
         !items

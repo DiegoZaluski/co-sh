@@ -134,8 +134,8 @@ Two harness behaviors shape how the plan is actually used:
 - **The plan is always visible.** The harness renders the current list as a
   dedicated, protected `## Tool TODOs` context block injected right after the
   system prompt — before the conversation history — and re-renders it after
-  every `plan_*` call. The block survives every compaction phase (draft
-  eviction, LLM summarization, overflow drain) and disappears only when all
+  every `plan_*` call. The block survives every compaction phase (the
+  useless-chain sweep and the LLM summarization) and disappears only when all
   tasks are terminal or the list is empty. The model therefore sees the plan
   without calling `plan_todo_read` first, and cannot forget it.
 - **Ask mode is read-only.** In Ask mode only `plan_todo_read` and

@@ -277,7 +277,7 @@ async fn discovered_context_window(model: Option<&str>) -> Option<usize> {
 }
 
 /// The classified result of a single summarizer attempt, so [`Harness::llm_compact`]
-/// can decide between retrying (generic errors), draining tool chains
+/// can decide between retrying (generic errors), driving the split
 /// (context-window overflow) or giving up.
 #[derive(Debug)]
 enum CompactionErr {
@@ -293,8 +293,8 @@ enum CompactionErr {
 enum CompactionOutcome {
     /// A summary was produced and is ready to be applied.
     Applied,
-    /// A contingency (chain draining or the split-and-concatenate path)
-    /// brought the total down — the compaction is no longer needed.
+    /// A contingency (the split-and-concatenate path) brought the total down —
+    /// the compaction is no longer needed.
     ResolvedByContingency,
     /// The summarizer call failed or produced nothing.
     Failed,
@@ -473,9 +473,9 @@ pub struct Harness {
     local_base_urls: std::collections::HashMap<String, String>,
 
     /// Window size (tokens) parsed from the LAST context-window overflow
-    /// error, stashed by [`Self::stream_chat_with_messages`] so the retry
-    /// loop can drain tool chains locally (without an HTTP round trip per
-    /// chain) until the estimate fits. Reset at the start of every stream.
+    /// error, stashed by [`Self::stream_chat_with_messages`] so the caller can
+    /// size the split-and-concatenate contingency against a known window.
+    /// Reset at the start of every stream.
     last_context_window: Option<usize>,
 
     /// Window size (tokens) of the ACTIVE model from the last successful
@@ -483,7 +483,7 @@ pub struct Harness {
     /// it forms the KNOWN window that drives the split-and-concatenate
     /// contingency (see [`Self::known_split_window`]). Set at loop start and
     /// on fallback switches; `None` when discovery failed (unknown window →
-    /// legacy drain path).
+    /// the split is sized against the token budget).
     discovered_window: Option<usize>,
 
     /// When the persistent context-overflow toast was last shown, for the
@@ -990,7 +990,7 @@ impl Harness {
         }
     }
 
-    /// Run the LLM compaction (phase 3, the last-resort fallback): build the
+    /// Run the LLM compaction (the last-resort fallback): build the
     /// prompt from the context manager's serialized context, ask the model
     /// for the continuation summary, and apply it. The summarizer is a
     /// SEPARATE agent: it streams with its OWN system prompt from the context
@@ -1060,7 +1060,7 @@ impl Harness {
                     // the provider reported its window, remember it; then drive
                     // the split-and-concatenate contingency (sized against the
                     // known window or the current budget as a fallback) — it
-                    // shrinks the WHOLE timeline (protected items included).
+                    // shrinks the WHOLE timeline (every item included).
                     if let Some(w) = window_tokens {
                         self.last_context_window = Some(w);
                     }
@@ -1308,8 +1308,9 @@ impl Harness {
     /// like [`Self::chat`].
     ///
     /// Errors are CLASSIFIED (not flattened to strings) so the caller can
-    /// distinguish a context-window overflow — the one error that draining
-    /// tool chains can fix — from generic failures and user interruptions.
+    /// distinguish a context-window overflow — the one error the split
+    /// contingency is meant to fix — from generic failures and user
+    /// interruptions.
     async fn stream_summarize_for_compaction(
         &mut self,
         system: &str,
@@ -2193,13 +2194,12 @@ impl Harness {
         // an input the user gave up on — only the newest input stays.
         self.context_manager.remove_abandoned_inputs();
 
-        // Apply the 80% compaction (the synchronous pipeline + eviction
-        // phases) before the first LLM request, so the initial context is
-        // already within budget. When the deterministic phases exhaust every
-        // draft and the total is still over the trigger, the LLM compaction
-        // (phase 3, the last-resort fallback) runs; the in-flight input was
-        // folded into the summary, so it is re-added for the model to see the
-        // task verbatim.
+        // Apply the 80% compaction before the first LLM request, so the
+        // initial context is already within budget. When the useless-chain
+        // sweep still leaves the total over the trigger, the LLM compaction
+        // (or the split-and-concatenate contingency) runs; the in-flight input
+        // was folded into the summary, so it is re-added for the model to see
+        // the task verbatim.
         if matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction) {
             // Known-window contingency: when the ACTIVE model's window is
             // known and the remaining context still exceeds it, the
@@ -2305,8 +2305,8 @@ impl Harness {
                     && e == CONTEXT_WINDOW_MARKER
                 {
                     // Context-window contingency: drive the split — it shrinks
-                    // the WHOLE timeline (protected items included) into a
-                    // fitting anchor. On success retry immediately; on failure
+                    // the WHOLE timeline (every item included) into a fitting
+                    // anchor. On success retry immediately; on failure
                     // the overflow is stuck — surface the (throttled) warning
                     // and fall through to the normal error handling with a
                     // HUMAN-readable message.

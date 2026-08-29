@@ -9,8 +9,8 @@
 //! [`build_messages`](Self::build_messages) renders the timeline as a
 //! provider-ready `Vec<ChatMessage>` with a 1:1 item→message mapping. The
 //! final text of a finished loop is promoted verbatim into a [`Closure`] by
-//! [`close_loop`](Self::close_loop), so the final answer is delivered
-//! unchanged.
+//! [`close_loop`](Self::close_loop), so it is delivered word-for-word for as
+//! long as it remains in the timeline.
 
 #[cfg(test)]
 mod test;
@@ -507,9 +507,9 @@ pub struct ContextManager {
     /// wholesale on restore and on encoding change.
     cached_items_tokens: usize,
     /// Per-item estimated token cost (`id -> tokens`), kept in sync with
-    /// `cached_items_tokens`. Lets an in-place edit read the OLD cost of the
-    /// edited item without re-tokenizing the whole timeline. Rebuilt wholesale
-    /// on restore and on encoding change.
+    /// `cached_items_tokens`. Lets a mutation read the OLD cost of an item it
+    /// is about to remove or replace without re-tokenizing the whole timeline.
+    /// Rebuilt wholesale on restore and on encoding change.
     item_tokens: HashMap<u64, usize>,
     /// Manual-compaction mode (`/compact`): while set, [`Self::trigger`]
     /// returns zero so [`Self::run`] hands off to the LLM summary regardless
@@ -764,8 +764,9 @@ impl ContextManager {
     /// cannot be a summary of what was done, so no `Closure` is created.
     ///
     /// The harness has now told us this turn was the loop's FINAL output: the
-    /// ORIGINAL text is promoted verbatim, so the final answer is never
-    /// summarized away.
+    /// ORIGINAL text is promoted verbatim, so it is rendered verbatim for as
+    /// long as it stays in the timeline. (A later compaction still folds it
+    /// into the summary along with everything else.)
     pub fn close_loop(&mut self) {
         let Some(ContextItem::Assistant { id, original, closable }) = self.items.back() else {
             return;
@@ -859,8 +860,8 @@ impl ContextManager {
         }
     }
 
-    /// Build the LLM-compaction request: the entire remaining context —
-    /// protected items included — serialized into an opencode-style
+    /// Build the LLM-compaction request: the entire remaining timeline —
+    /// every item, the `Closure` included — serialized into an opencode-style
     /// transcript, wrapped in the summarization prompt.
     ///
     /// A [`ContextItem::Compaction`] item (the previous summary) switches the
@@ -1103,10 +1104,11 @@ impl ContextManager {
     /// made the anchor bigger than the window.
     ///
     /// The success criterion is the WINDOW, not the 80% trigger that
-    /// [`Self::apply_llm_summary`] reports: that trigger is a normal-compaction
-    /// concern (80% of the budget) and must not fail a split whose anchor is
-    /// well under the model's window — otherwise the caller would fall back to
-    /// the chain drain on an already-committed timeline.
+    /// [`Self::apply_llm_summary`] reports: the split is driven by a
+    /// model-window overflow, so its anchor only needs to fit that window — an
+    /// anchor well under 80% of the budget is still a valid commit. On failure
+    /// (the anchor is still too big) the timeline is left untouched and the
+    /// caller records the provider as stuck and notifies.
     pub fn commit_split(&mut self) -> bool {
         let Some(split) = self.split.take() else {
             return false;
@@ -1193,7 +1195,7 @@ impl ContextManager {
         {
             match item {
                 ContextItem::User { original, .. } => {
-                    // User prompts are protected: always delivered verbatim.
+                    // User prompts are rendered verbatim.
                     messages.push(user_message(original));
                 }
                 ContextItem::Assistant { original, .. } => {
@@ -1325,7 +1327,7 @@ impl ContextManager {
     /// truth for `total_tokens()`; every mutation of `items` must update it.
     fn push_item(&mut self, item: ContextItem) {
         // The item is tokenized HERE for the running total — keep the per-item
-        // cost so a later in-place edit can read the old cost without
+        // cost so a later removal or replacement can read the old cost without
         // re-tokenizing it.
         let tokens = item.tokens(self.encoding);
         self.item_tokens.insert(item.id(), tokens);
@@ -1403,7 +1405,7 @@ impl ContextManager {
                 self.cached_items_tokens, brute
             );
             // The per-item map must mirror every item 1:1 — a stale entry
-            // would silently feed wrong deltas into pipeline/trim/eviction.
+            // would silently feed wrong token deltas into the caches.
             debug_assert_eq!(
                 self.item_tokens.len(),
                 self.items.len(),
