@@ -640,6 +640,7 @@ impl PromptView {
         unique_agents: &[String],
         now: SystemTime,
         model_name: &str,
+        reasoning: Option<&str>,
         delta_time: f64,
         show_logo: bool,
     ) {
@@ -900,9 +901,16 @@ impl PromptView {
             muted_style,
         );
 
-        // Model name on the right side of the footer line
+        // Model name on the right side of the footer line. When a concrete
+        // reasoning level was chosen (low/medium/high/etc., i.e. not the
+        // model default), show it first so the user can recall both the level
+        // and the model, e.g. ` high . deepseek-ai/deepseek-v4-flash`.
         if !model_name.is_empty() {
-            let model_text = format!(" {model_name}");
+            let reason_prefix = match reasoning {
+                Some(r) if !r.is_empty() && r != "default" => format!("{r} . "),
+                _ => String::new(),
+            };
+            let model_text = format!(" {reason_prefix}{model_name}");
             let model_x = area.right().saturating_sub(model_text.len() as u16);
             draw_text_line(
                 buf,

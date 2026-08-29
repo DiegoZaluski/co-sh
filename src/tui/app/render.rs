@@ -554,6 +554,7 @@ impl App {
                             spinner.render(buf, spinner_area.x + 1, spinner_area.y);
                         }
                         let model_name = self.llm_config.model.as_deref().unwrap_or("");
+                        let reasoning = self.llm_config.reasoning.as_deref();
                         self.prompt_view.render(
                             buf,
                             prompt_area,
@@ -563,6 +564,7 @@ impl App {
                             &unique_agents,
                             std::time::SystemTime::now(),
                             model_name,
+                            reasoning,
                             delta_time,
                             is_empty_session && self.anim_enabled,
                         );
