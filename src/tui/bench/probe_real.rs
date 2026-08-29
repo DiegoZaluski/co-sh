@@ -249,7 +249,7 @@ async fn probe_real_session() {
     // ── Done: transition out ──
     app.event_tx
         .send(HarnessEvent::Done {
-            context: Default::default(),
+            context: super::bench_e2e::realistic_context(100),
         })
         .unwrap();
     let t = std::time::Instant::now();

@@ -439,7 +439,7 @@ impl App {
                         && is_valid_session(session)
                     {
                         self.session_store
-                            .save_session_async_with_context(session, &context);
+                            .save_session_async_with_context(session, context);
 
                         // Trigger async title generation for the first response.
                         // The session title starts as a timestamp; the LLM produces
@@ -593,7 +593,7 @@ impl App {
                         && is_valid_session(session)
                     {
                         self.session_store
-                            .save_session_async_with_context(session, &context);
+                            .save_session_async_with_context(session, context);
                         self.state.ensure_session_summary(&id);
                     }
 
@@ -608,7 +608,7 @@ impl App {
                     // context snapshot mid-run so a crash/restart does not lose
                     // the in-flight run. Persist the session log here, mirroring
                     // the Done/Stopped handlers.
-                    self.persist_incrementally(&context);
+                    self.persist_incrementally(context);
                 }
 
                 HarnessEvent::LlmCompaction { event } => {
@@ -784,7 +784,7 @@ impl App {
     /// event so a crash/restart mid-run resumes from the latest context
     /// instead of the session-start state. Mirrors the Done/Stopped save
     /// logic and skips sessions with no valid dialog yet.
-    pub(super) fn persist_incrementally(&mut self, context: &ContextManagerState) {
+    pub(super) fn persist_incrementally(&mut self, context: ContextManagerState) {
         if self.state.status != SessionStatus::Working {
             return;
         }

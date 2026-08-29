@@ -98,6 +98,54 @@ fn shell_out(lines: usize) -> String {
         .join("\n")
 }
 
+/// Build a realistic context-manager snapshot sized like a long agent session
+/// (one user/assistant/tool-call/tool-result round per iteration), so
+/// `ContextSnapshot`/`Done` events measure the real cost of moving the context
+/// through the UI thread and serializing it — not an empty `Default::default()`.
+pub(crate) fn realistic_context(
+    rounds: usize,
+) -> cosh::harness::context_manager::ContextManagerState {
+    use cosh::harness::context_manager::{ContextItem, ContextManagerState};
+    let mut items = Vec::with_capacity(rounds * 4);
+    let mut next_id = 1u64;
+    for r in 0..rounds {
+        items.push(ContextItem::User {
+            id: next_id,
+            original: format!("question number {r} about module {r}"),
+        });
+        next_id += 1;
+        items.push(ContextItem::Assistant {
+            id: next_id,
+            original: format!("### Answer {r}\n\nDetailed analysis with code spans.\n"),
+            closable: true,
+        });
+        next_id += 1;
+        items.push(ContextItem::ToolCall {
+            id: next_id,
+            call_id: format!("call_{r}"),
+            name: "read".to_string(),
+            arguments: format!("{{\"file\":\"src/m{r}.rs\"}}"),
+            thought_signature: String::new(),
+            thinking_blocks: Vec::new(),
+        });
+        next_id += 1;
+        items.push(ContextItem::ToolResult {
+            id: next_id,
+            call_id: format!("call_{r}"),
+            content: big_rust_file(600),
+            useless: false,
+        });
+        next_id += 1;
+    }
+    ContextManagerState {
+        items: items.into_iter().collect(),
+        next_id,
+        max_tokens: 100_000,
+        overflow_provider: None,
+        split: None,
+    }
+}
+
 /// One agent round-trip pushed through the real event channel.
 fn push_agent_round(app: &mut App, seed: usize) {
     use crate::types::{Message, MessageRole, Part, TextPart};
@@ -302,11 +350,13 @@ async fn bench_e2e_agent_loop() {
             }
             // ContextSnapshot every 2 rounds (~10s throttle upstream).
             if round % 2 == 1 {
+                // Construct the snapshot OUTSIDE the timed region: in a real
+                // run the harness builds it on the agent thread; the UI thread
+                // only drains an already-built snapshot.
+                let context = super::bench_e2e::realistic_context(100);
                 let t = std::time::Instant::now();
                 app.event_tx
-                    .send(HarnessEvent::ContextSnapshot {
-                        context: Default::default(),
-                    })
+                    .send(HarnessEvent::ContextSnapshot { context })
                     .unwrap();
                 app.poll_events();
                 ft.drain_ms.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -343,12 +393,9 @@ async fn bench_e2e_agent_loop() {
     // ── Scenario D: Done — final save + transition out of live mode ──
     {
         let mut ft = FrameStats::new("done_save_transition");
+        let context = super::bench_e2e::realistic_context(100);
         let t = std::time::Instant::now();
-        app.event_tx
-            .send(HarnessEvent::Done {
-                context: Default::default(),
-            })
-            .unwrap();
+        app.event_tx.send(HarnessEvent::Done { context }).unwrap();
         app.poll_events();
         ft.drain_ms.push(t.elapsed().as_secs_f64() * 1000.0);
         let t2 = std::time::Instant::now();

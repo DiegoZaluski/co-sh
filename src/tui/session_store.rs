@@ -184,14 +184,18 @@ impl SessionStore {
     /// Persist a session with an explicit context snapshot on the background
     /// writer thread. A single writer keeps FIFO ordering, so a newer snapshot
     /// can never be clobbered by an older in-flight one.
+    ///
+    /// The context is taken BY VALUE and moved onto the writer thread — no deep
+    /// clone of the context items happens on the caller (UI) thread, only a
+    /// cheap `VecDeque` pointer move.
     pub fn save_session_async_with_context(
         &self,
         session: &crate::types::Session,
-        context: &ContextManagerState,
+        context: ContextManagerState,
     ) {
         self.enqueue_save(SaveJob {
             session: Box::new(session.clone()),
-            context: Some(context.clone()),
+            context: Some(context),
         });
     }
 

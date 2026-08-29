@@ -234,7 +234,7 @@ impl AppState {
             if should_save {
                 // Reborrow to avoid borrow conflict with ensure_session_summary
                 if let Some(session) = self.session_cache.get(oid) {
-                    store.save_session(session);
+                    store.save_session_async(session);
                 }
                 self.ensure_session_summary(oid);
             }

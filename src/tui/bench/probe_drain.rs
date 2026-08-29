@@ -163,7 +163,7 @@ async fn probe_drain_costs() {
         &mut app,
         "ContextSnapshot(full save)",
         HarnessEvent::ContextSnapshot {
-            context: Default::default(),
+            context: super::bench_e2e::realistic_context(100),
         },
     );
     terminal.draw(|f| app.render(f, 0.033)).unwrap();
@@ -173,7 +173,7 @@ async fn probe_drain_costs() {
         &mut app,
         "Done(full save)",
         HarnessEvent::Done {
-            context: Default::default(),
+            context: super::bench_e2e::realistic_context(100),
         },
     );
     terminal.draw(|f| app.render(f, 0.033)).unwrap();
