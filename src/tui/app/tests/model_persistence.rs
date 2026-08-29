@@ -42,7 +42,10 @@ async fn global_model_loads_applies_and_overwrites() {
     app.run_slash_command(&new_cmd());
     let session = app.state.current_session().unwrap();
     assert_eq!(session.provider.as_deref(), Some("nvidia"));
-    assert_eq!(session.model.as_deref(), Some("deepseek-ai/deepseek-v4-pro"));
+    assert_eq!(
+        session.model.as_deref(),
+        Some("deepseek-ai/deepseek-v4-pro")
+    );
     assert_eq!(session.reasoning.as_deref(), Some("high"));
 
     // Returning to a session restores ITS recorded model, replacing whatever
@@ -71,7 +74,10 @@ async fn global_model_loads_applies_and_overwrites() {
 
     let on_disk: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(cfg.join("setup.json")).unwrap()).unwrap();
-    assert_eq!(on_disk["model"]["model"], "grok-4", "disk keeps the newest selection");
+    assert_eq!(
+        on_disk["model"]["model"], "grok-4",
+        "disk keeps the newest selection"
+    );
     assert_eq!(on_disk["model"]["provider"], "xai");
     assert_eq!(on_disk["model"]["reasoning"], "medium");
 }
@@ -122,7 +128,10 @@ async fn auto_session_restore_clears_leftover_provider() {
     app.restore_current_session_model();
 
     assert_eq!(app.llm_config.model.as_deref(), Some("auto"));
-    assert!(app.llm_config.provider.is_empty(), "auto must not pin a provider");
+    assert!(
+        app.llm_config.provider.is_empty(),
+        "auto must not pin a provider"
+    );
     assert_eq!(app.llm_config.reasoning.as_deref(), Some("high"));
 }
 
@@ -181,7 +190,11 @@ async fn model_dialog_cancel_and_reasoning_esc_do_not_persist() {
     assert_eq!(app.llm_config.model.as_deref(), Some("gpt-oss-120b"));
     assert_eq!(app.llm_config.reasoning.as_deref(), Some("low"));
     assert!(!app.is_model_dialog_visible());
-    assert_eq!(app.setup.persisted_model(), None, "cancel persists nothing globally");
+    assert_eq!(
+        app.setup.persisted_model(),
+        None,
+        "cancel persists nothing globally"
+    );
     let session = app.state.current_session().unwrap();
     assert_eq!(session.model, None);
     assert_eq!(session.provider, None);
@@ -203,7 +216,10 @@ async fn model_dialog_cancel_and_reasoning_esc_do_not_persist() {
     assert!(app.handle_reasoning_dialog_key(KeyCode::Esc));
     assert!(!app.is_reasoning_dialog_visible());
     let session = app.state.current_session().unwrap();
-    assert_eq!(session.model, None, "reasoning-dialog cancel persists nothing");
+    assert_eq!(
+        session.model, None,
+        "reasoning-dialog cancel persists nothing"
+    );
     assert_eq!(app.setup.persisted_model(), None);
 }
 
@@ -231,14 +247,23 @@ async fn reasoning_dialog_enter_commits_selection() {
     app.dialog.current_mut().unwrap().selected = 3; // "high"
     assert!(app.handle_reasoning_dialog_key(KeyCode::Enter));
 
-    assert_eq!(app.llm_config.model.as_deref(), Some("deepseek-ai/deepseek-v4-pro"));
+    assert_eq!(
+        app.llm_config.model.as_deref(),
+        Some("deepseek-ai/deepseek-v4-pro")
+    );
     assert_eq!(app.llm_config.provider, "nvidia");
     assert_eq!(app.llm_config.reasoning.as_deref(), Some("high"));
     let session = app.state.current_session().unwrap();
-    assert_eq!(session.model.as_deref(), Some("deepseek-ai/deepseek-v4-pro"));
+    assert_eq!(
+        session.model.as_deref(),
+        Some("deepseek-ai/deepseek-v4-pro")
+    );
     assert_eq!(session.provider.as_deref(), Some("nvidia"));
     assert_eq!(session.reasoning.as_deref(), Some("high"));
-    assert_eq!(app.setup.persisted_model(), Some("deepseek-ai/deepseek-v4-pro"));
+    assert_eq!(
+        app.setup.persisted_model(),
+        Some("deepseek-ai/deepseek-v4-pro")
+    );
     assert_eq!(app.setup.model.reasoning.as_deref(), Some("high"));
 }
 
@@ -265,7 +290,10 @@ async fn gateway_reroute_records_free_model_on_session_only() {
     assert_eq!(app.llm_config.reasoning, None);
     let session = app.state.current_session().unwrap();
     assert_eq!(session.id, session_id);
-    assert_eq!(session.provider.as_deref(), Some(cosh_sdk::connector::ZEN_PROVIDER));
+    assert_eq!(
+        session.provider.as_deref(),
+        Some(cosh_sdk::connector::ZEN_PROVIDER)
+    );
     assert_eq!(session.model.as_deref(), Some("hy3-free"));
     assert_eq!(session.reasoning, None);
 

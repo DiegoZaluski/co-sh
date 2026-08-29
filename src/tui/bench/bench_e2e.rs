@@ -305,7 +305,7 @@ async fn bench_e2e_agent_loop() {
                 let t = std::time::Instant::now();
                 app.event_tx
                     .send(HarnessEvent::ContextSnapshot {
-                        context_state: vec![0u8; 1024],
+                        context: Default::default(),
                     })
                     .unwrap();
                 app.poll_events();
@@ -346,7 +346,7 @@ async fn bench_e2e_agent_loop() {
         let t = std::time::Instant::now();
         app.event_tx
             .send(HarnessEvent::Done {
-                context_state: vec![0u8; 64 * 1024],
+                context: Default::default(),
             })
             .unwrap();
         app.poll_events();

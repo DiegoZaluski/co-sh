@@ -32,7 +32,7 @@ use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
 use crate::types::{
-    AgentColors, CompactionPart, CompactionPhase, FilePart, Message, MessageRole, Part,
+    AgentColors, CompactionPart, FilePart, Message, MessageRole, Part,
     ReasoningPart, SessionStatus, ToolPart, ToolStatus,
 };
 use std::time::Instant;
@@ -171,7 +171,7 @@ fn hash_parts(msg: &Message) -> u64 {
                 // cache as tokens arrive. While the stopwatch alone ticks, the
                 // hash stays stable — the ticking bypasses the cell cache via
                 // `msg_has_running_compaction`.
-                hasher.write(&[phase_to_u8(c.phase)]);
+                hasher.write(&[0u8]);
                 hasher.write(&c.started_at.to_le_bytes());
                 hasher.write(c.text.as_bytes());
                 match c.elapsed_ms {
@@ -187,41 +187,22 @@ fn hash_parts(msg: &Message) -> u64 {
     hasher.finish()
 }
 
-fn phase_to_u8(phase: CompactionPhase) -> u8 {
-    match phase {
-        CompactionPhase::Pipeline => 0,
-        CompactionPhase::Drafts => 1,
-        CompactionPhase::Llm => 2,
-    }
-}
-
 /// All compaction phases use muted gray to indicate system messages.
-/// The `phase` parameter is kept for future per-phase color customization.
-fn compaction_color(_phase: CompactionPhase, theme: &Theme) -> RGBA {
+fn compaction_color(theme: &Theme) -> RGBA {
     theme.text_muted
 }
 
-/// The chat line text for a compaction part. `now` is the current wall-clock
-/// millis: while a stopwatch line is running the elapsed number ticks every
-/// frame (the moving number IS the activity signal — no spinner needed); when
-/// it finalizes the same line freezes. The draft eviction is a plain colored
-/// label with no stopwatch and no completion marker.
+/// The chat line text for the LLM "Summarizing" box. `now` is the current
+/// wall-clock millis: while the stopwatch line is running the elapsed number
+/// ticks every frame (the moving number IS the activity signal — no spinner
+/// needed); when it finalizes the same line freezes.
 fn compaction_line(part: &CompactionPart, now: u64) -> String {
     let elapsed = part
         .elapsed_ms
         .unwrap_or_else(|| now.saturating_sub(part.started_at));
-    match part.phase {
-        CompactionPhase::Pipeline => {
-            // Millisecond precision — the second counter flips visibly.
-            let secs = elapsed as f64 / 1000.0;
-            format!("context compression · {secs:.3}s")
-        }
-        CompactionPhase::Drafts => "draft eviction".to_string(),
-        CompactionPhase::Llm => {
-            let secs = elapsed as f64 / 1000.0;
-            format!("llm compaction · {secs:.3}s")
-        }
-    }
+    // Millisecond precision — the second counter flips visibly.
+    let secs = elapsed as f64 / 1000.0;
+    format!("llm compaction · {secs:.3}s")
 }
 
 /// Max body lines of the COLLAPSED "Summarizing" box. When the streamed
@@ -1372,7 +1353,7 @@ impl SessionView {
                     y += 1;
                 }
                 Part::Compaction(c) => {
-                    if c.phase == CompactionPhase::Llm && !c.text.is_empty() {
+                if !c.text.is_empty() {
                         let expanded = tool_state.is_expanded(&summarizing_id(c));
                         let mut line_h =
                             Self::render_summarizing_box(buf, x, y, max_w, c, expanded, theme);
@@ -1388,8 +1369,7 @@ impl SessionView {
                         // Height is always 1, so the line never reflows while
                         // the stopwatch runs.
                         let text = compaction_line(c, crate::types::now_ms());
-                        let style =
-                            Style::default().fg(rgba_color(compaction_color(c.phase, theme)));
+                        let style = Style::default().fg(rgba_color(compaction_color(theme)));
                         draw_text_line(buf, &text, x, y, max_w, style);
                         y += 1;
                     }
@@ -1634,7 +1614,7 @@ impl SessionView {
             }
             Part::File(_) => 1,
             Part::Compaction(c) => {
-                if c.phase == CompactionPhase::Llm && !c.text.is_empty() {
+                                if !c.text.is_empty() {
                     // The "Summarizing" box: title row + wrapped body. Collapsed
                     // keeps a fixed preview height (scroll-up); expanded grows
                     // with the full streamed text. The width is the box's inner
@@ -2090,7 +2070,6 @@ impl SessionView {
                         }
 
                         if let crate::types::Part::Compaction(c) = part
-                            && c.phase == CompactionPhase::Llm
                             && !c.text.is_empty()
                         {
                             // Toggle the "Summarizing" box on any click
@@ -3126,7 +3105,7 @@ impl SessionView {
                                 }
                             }
                             crate::types::Part::Compaction(c) => {
-                                if c.phase == CompactionPhase::Llm && !c.text.is_empty() {
+                    if !c.text.is_empty() {
                                     // The "Summarizing" box: title row + the
                                     // visible body rows (tail when collapsed,
                                     // full text when expanded). The rows come

@@ -127,38 +127,29 @@ pub struct FilePart {
     pub mime: String,
 }
 
-/// A context-compaction status line in the chat. The pipeline line carries a
-/// live stopwatch while it runs; the other phase lines are one-shot notices.
+/// A context-compaction status line in the chat: the LLM "Summarizing" box.
 /// Persisted with the session like any other part.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionPart {
-    /// Which compaction phase this line reports.
+    /// Which compaction phase this line reports (always [`CompactionPhase::Llm`]).
     pub phase: CompactionPhase,
     /// Wall-clock unix millis when the phase started (persisted so a restored
     /// session can still show a coherent elapsed time).
     pub started_at: u64,
     /// Final elapsed millis when the phase finished; `None` while running.
     pub elapsed_ms: Option<u64>,
-    /// The streamed text of the phase. Only the LLM phase (phase 3) fills it:
-    /// the summarizer's tokens accumulate here and the "Summarizing" box
-    /// renders them (collapsed = bounded preview that visually scrolls up,
-    /// expanded = full growing body). The other phases leave it empty.
+    /// The streamed text of the summarizer: the tokens accumulate here and the
+    /// "Summarizing" box renders them (collapsed = bounded preview that
+    /// visually scrolls up, expanded = full growing body).
     #[serde(default)]
     pub text: String,
 }
 
-/// Which context-compaction phase a [`CompactionPart`] reports.
+/// The only context-compaction phase a [`CompactionPart`] reports: the LLM
+/// compaction (the last-resort fallback, driven by the harness). The model call
+/// can take seconds, so its line carries a live stopwatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompactionPhase {
-    /// Phase 1 — the TF-IDF → LSA → MMR pipeline. It runs synchronously on
-    /// the agent loop's thread and can block it for seconds, so its line
-    /// carries a live stopwatch.
-    Pipeline,
-    /// Phase 2 — gradual draft eviction.
-    Drafts,
-    /// Phase 3 — the LLM compaction (the last-resort fallback, driven by the
-    /// harness). The model call can take seconds, so its line carries a live
-    /// stopwatch like the pipeline's.
     Llm,
 }
 
@@ -169,16 +160,6 @@ impl CompactionPart {
             phase,
             started_at: now_ms(),
             elapsed_ms: None,
-            text: String::new(),
-        }
-    }
-
-    /// A finished one-shot phase line (no stopwatch — the fast phases).
-    pub fn done(phase: CompactionPhase) -> Self {
-        Self {
-            phase,
-            started_at: now_ms(),
-            elapsed_ms: Some(0),
             text: String::new(),
         }
     }

@@ -1,6 +1,8 @@
 use cosh_tools::question::types::QuestionItem;
 use serde_json::Value;
 
+use super::context_manager::ContextManagerState;
+
 /// Represents a model entry with its provider
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelEntry {
@@ -31,13 +33,13 @@ pub enum HarnessEvent {
     Reasoning { text: String },
     /// The agent loop finished normally (no more tool calls).
     Done {
-        /// Bincode-serialized ContextManagerState for persistence.
-        context_state: Vec<u8>,
+        /// Context manager state for persistence (the JSONL session log).
+        context: ContextManagerState,
     },
     /// The agent loop was interrupted by a stop request.
     Stopped {
-        /// Bincode-serialized ContextManagerState for persistence.
-        context_state: Vec<u8>,
+        /// Context manager state for persistence (the JSONL session log).
+        context: ContextManagerState,
     },
     /// Intermediate output from a running tool (e.g. bash streaming).
     ToolOutput {
@@ -72,27 +74,18 @@ pub enum HarnessEvent {
         /// Current context budget usage info.
         info: super::context_manager::ContextDisplayInfo,
     },
-    /// Periodic serialized context snapshot during a long agent run, so the
-    /// TUI can persist the `.ctx` companion file incrementally. A crash or
-    /// restart mid-run then resumes from the latest snapshot instead of the
-    /// session-start state. Emitted from the agent loop at a throttled cadence.
+    /// Periodic context snapshot during a long agent run, so the TUI can
+    /// persist the session log incrementally. A crash or restart mid-run then
+    /// resumes from the latest snapshot instead of the session-start state.
+    /// Emitted from the agent loop at a throttled cadence.
     ContextSnapshot {
-        /// Bincode-serialized [`ContextManagerState`](super::context_manager::ContextManagerState).
-        context_state: Vec<u8>,
+        /// The context manager state (the JSONL session log).
+        context: ContextManagerState,
     },
-    /// A compaction phase ran inside the context manager, emitted WHILE
-    /// [`ContextManager::run`] executes so the TUI can show live feedback in
-    /// the chat: the pipeline (phase 1) gets a running stopwatch (Started
-    /// before the compression work, Finished after it) and the other phases
-    /// are one-shot lines.
-    Compaction {
-        /// Which phase ran and how it should be displayed.
-        event: super::context_manager::CompactionEvent,
-    },
-    /// The LLM compaction (phase 3, the last-resort fallback) lifecycle. The
-    /// harness drives the model call (the context manager is synchronous and
-    /// LLM-free), so these events are emitted by the harness around the
-    /// summarization call — `Started` before it, `Finished`/`Failed` after.
+    /// The LLM compaction (the last-resort fallback) lifecycle. The harness
+    /// drives the model call (the context manager is synchronous and LLM-free),
+    /// so these events are emitted by the harness around the summarization
+    /// call — `Started` before it, `Finished`/`Failed` after.
     LlmCompaction {
         /// Which stage of the LLM compaction this event reports.
         event: LlmCompactionEvent,
@@ -124,9 +117,9 @@ pub enum HarnessEvent {
     },
     /// A user-visible notification, rendered by the TUI through its existing
     /// toast system. Emitted when the context-window overflow could not be
-    /// relieved (every tool chain drained) or a provider error survived its
-    /// retries — the session keeps working, but the user must act (switch
-    /// the model, start a new session).
+    /// relieved (the split could not fit the context) or a provider error
+    /// survived its retries — the session keeps working, but the user must act
+    /// (switch the model, start a new session).
     Toast {
         /// The message to display.
         message: String,
@@ -157,9 +150,9 @@ pub enum ToastVariant {
     Error,
 }
 
-/// A stage of the LLM compaction (phase 3, the last-resort fallback), emitted
-/// by the harness while it runs the summarization model call so the TUI can
-/// show a live line in the chat.
+/// A stage of the LLM compaction (the last-resort fallback), emitted by the
+/// harness while it runs the summarization model call so the TUI can show a
+/// live line in the chat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmCompactionEvent {
     /// The harness is about to call the model for the continuation summary.

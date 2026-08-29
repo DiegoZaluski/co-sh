@@ -616,7 +616,7 @@ impl Harness {
             if role == "user" {
                 self.context_manager.add_user(text);
             } else {
-                // Loaded assistant turns are prose and compressible.
+                // Loaded assistant turns are prose and closable.
                 self.context_manager.add_assistant(text, true);
             }
         }
@@ -1015,16 +1015,17 @@ impl Harness {
     ) -> bool {
         use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
         let provider = self.connector.provider_name().unwrap_or("?");
-        // The provider's window already overflowed with every tool chain
-        // drained: the summarizer call is doomed — skip it and re-surface the
-        // notification (throttled) instead of burning a paid call per dispatch.
+        // The provider's window already overflowed and the split could not fit
+        // the context: the summarizer call is doomed — skip it and re-surface
+        // the notification (throttled) instead of burning a paid call per
+        // dispatch.
         if self.context_manager.overflow_stuck(provider) {
             self.notify_context_overflow(tx);
             return false;
         }
         // Defensive — the harness only calls this after `NeedsLlmCompaction`,
         // so there is normally something to compact.
-        let mut request = match self.context_manager.llm_compaction_request() {
+        let request = match self.context_manager.llm_compaction_request() {
             Some(request) => request,
             None => return false,
         };
@@ -1055,40 +1056,20 @@ impl Harness {
                     break CompactionOutcome::Failed;
                 }
                 Err(CompactionErr::ContextWindow { window_tokens }) => {
-                    // Known-window contingency: the single-shot transcript
-                    // overflowed the provider. When the provider reported its
-                    // window, drive the split instead of draining — it
-                    // shrinks the whole timeline (protected items included).
+                    // The single-shot transcript overflowed the provider. When
+                    // the provider reported its window, remember it; then drive
+                    // the split-and-concatenate contingency (sized against the
+                    // known window or the current budget as a fallback) — it
+                    // shrinks the WHOLE timeline (protected items included).
                     if let Some(w) = window_tokens {
                         self.last_context_window = Some(w);
                     }
-                    if window_tokens.is_some() && self.split_context(tx).await {
+                    if self.split_context(tx).await {
                         self.compaction_generic_retries = 0;
                         break CompactionOutcome::ResolvedByContingency;
                     }
-                    if self.context_manager.evict_tool_chain_for_overflow() {
-                        // One chain per attempt. When the provider reported
-                        // its window, drain LOCALLY (no HTTP round trip per
-                        // chain) until the estimate fits, then retry once.
-                        if let Some(window) = window_tokens {
-                            while self.context_manager.display_info().total_tokens > window
-                                && self.context_manager.evict_tool_chain_for_overflow()
-                            {
-                            }
-                        }
-                        // REBUILD the request from the SHRUNK timeline: a
-                        // stale prompt (serialized before the drain) still
-                        // contains the removed chains, so retrying it is
-                        // doomed to overflow again. When the drain already
-                        // brought the total below the trigger, the overflow
-                        // is resolved and there is nothing left to summarize.
-                        match self.context_manager.llm_compaction_request() {
-                            Some(rebuilt) => request = rebuilt,
-                            None => break CompactionOutcome::ResolvedByContingency,
-                        }
-                        continue;
-                    }
-                    // No tool chain left to relieve the overflow — stuck.
+                    // The split could not fit the context into the window —
+                    // stuck.
                     self.context_manager.mark_overflow(provider);
                     self.notify_context_overflow(tx);
                     self.compaction_generic_retries = 0;
@@ -1114,8 +1095,7 @@ impl Harness {
             CompactionOutcome::Applied if !summary.trim().is_empty() => self
                 .context_manager
                 .apply_llm_summary(summary.trim().to_string()),
-            // A contingency (drain or split) resolved the overflow — a
-            // successful pass.
+            // The split resolved the overflow — a successful pass.
             CompactionOutcome::ResolvedByContingency => true,
             CompactionOutcome::Applied | CompactionOutcome::Failed => false,
         };
@@ -1132,7 +1112,7 @@ impl Harness {
     /// The ACTIVE model's known context window for the split-and-concatenate
     /// contingency: the window reported by the LAST context-window error (the
     /// most precise) or the last successful discovery. `None` = unknown — the
-    /// legacy drain path applies instead.
+    /// split is sized against the current token budget instead.
     fn known_split_window(&self) -> Option<usize> {
         self.last_context_window.or(self.discovered_window)
     }
@@ -1156,17 +1136,8 @@ impl Harness {
             return ManualCompactionOutcome::NothingToCompact;
         }
         // Same wiring as a loop start: the shared stop flag reaches the
-        // summarizer's stream loop and the TUI sees the phase lines live.
-        // (The keymap only sets the flag while a loop is Working, so today
-        // nothing sets it during a manual pass — the wiring keeps that door
-        // open without extra code.)
+        // summarizer's stream loop and the TUI sees the summary streamed live.
         self.stop_signal = Some(stop_signal);
-        self.context_manager.set_compaction_observer({
-            let tx = tx.clone();
-            move |event| {
-                let _ = tx.send(HarnessEvent::Compaction { event });
-            }
-        });
         self.context_manager
             .set_model(self.connector.effective_model());
 
@@ -1180,14 +1151,14 @@ impl Harness {
         self.context_manager.end_manual_compaction();
 
         // Refresh the budget display and persist the compacted context via
-        // the TUI's normal paths (the ContextSnapshot handler writes both the
-        // session JSONL and the `.ctx` companion file).
+        // the TUI's normal paths (the ContextSnapshot handler writes the
+        // session JSONL log).
         let _ = tx.send(HarnessEvent::ContextInfo {
             info: self.context_manager.display_info(),
         });
-        if ok && let Ok(state) = bincode::serialize(&self.context_manager.save_state()) {
+        if ok {
             let _ = tx.send(HarnessEvent::ContextSnapshot {
-                context_state: state,
+                context: self.context_manager.save_state(),
             });
         }
         if ok {
@@ -1207,20 +1178,21 @@ impl Harness {
     /// stays). Persisted staging is resumed exactly where it stopped.
     ///
     /// Returns whether the split was committed. `false` means the context is
-    /// unchanged — the caller falls back to the legacy behavior (chain drain,
-    /// stuck overflow).
+    /// unchanged — the caller marks the overflow stuck and notifies the user.
     async fn split_context(
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
         use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
+        let provider = self.connector.provider_name().unwrap_or("?");
         // Resume an in-progress split without needing a fresh window (the
-        // window is persisted in the staging). A fresh split needs a KNOWN
-        // window and a context that actually exceeds it.
+        // window is persisted in the staging). A fresh split sizes against the
+        // known window, falling back to the current token budget when the
+        // window is unknown.
         if !self.context_manager.split_active() {
-            let Some(window) = self.known_split_window() else {
-                return false;
-            };
+            let window = self
+                .known_split_window()
+                .unwrap_or_else(|| self.context_manager.max_tokens());
             if self.context_manager.display_info().total_tokens <= window {
                 return false;
             }
@@ -1266,10 +1238,12 @@ impl Harness {
                     break false;
                 }
                 Err(CompactionErr::ContextWindow { .. }) => {
-                    // A chunk sized to a KNOWN window should never overflow;
-                    // the window guess was wrong — abort and let the caller
-                    // fall back to the legacy drain.
+                    // A chunk sized to the window should never overflow; the
+                    // window guess was wrong — abort and mark the overflow
+                    // stuck so the caller notifies the user.
                     self.context_manager.abort_split();
+                    self.context_manager.mark_overflow(provider);
+                    self.notify_context_overflow(tx);
                     break false;
                 }
                 Err(CompactionErr::Other(e)) => {
@@ -1996,7 +1970,7 @@ impl Harness {
     }
 
     /// Add a tool call + its result to the context manager (structural
-    /// layer — never prose-compressed). The native `tool_call → tool` chain is
+    /// layer — structural). The native `tool_call → tool` chain is
     /// preserved 1:1: the call item renders as an `assistant` message with
     /// `tool_calls`, the result as a `tool` message with the matching id.
     fn push_tool_history(
@@ -2134,10 +2108,9 @@ impl Harness {
         let mut loop_window: VecDeque<String> = VecDeque::with_capacity(LOOP_DETECTION_WINDOW_SIZE);
 
         // Throttle the periodic context snapshots so the TUI can persist the
-        // `.ctx` companion file incrementally without serializing the whole
-        // context on every tool dispatch. The snapshot itself is emitted on
-        // the agent thread (the expensive clone + bincode pass never touches
-        // the UI thread).
+        // session log incrementally without serializing the whole context on
+        // every tool dispatch. The snapshot itself is emitted on the agent
+        // thread (the expensive clone never touches the UI thread).
         let mut last_snapshot = std::time::Instant::now();
 
         // Store the stop signal so stream_chat can check it mid-stream.
@@ -2145,18 +2118,6 @@ impl Harness {
 
         // Route reasoning/thinking tokens to the TUI as they stream in.
         self.reasoning_tx = Some(tx.clone());
-
-        // Route compaction-phase notifications to the TUI so it can show the
-        // pipeline stopwatch and the per-phase lines live in the chat. The
-        // pipeline runs synchronously on THIS thread, so the TUI (a separate
-        // thread) receives `PipelineStarted` before the compression work and
-        // `PipelineFinished` after it — exactly what the stopwatch needs.
-        self.context_manager.set_compaction_observer({
-            let tx = tx.clone();
-            move |event| {
-                let _ = tx.send(HarnessEvent::Compaction { event });
-            }
-        });
 
         // Pass the event tx to CoshTools for streaming tool output (e.g. bash)
         if let Some(ref mut cosh) = self.cosh_tools {
@@ -2189,7 +2150,8 @@ impl Harness {
             // Remember the discovery outcome: it is the KNOWN window that
             // drives the split-and-concatenate contingency when the held
             // context exceeds it (see `known_split_window`). A failed
-            // discovery leaves it `None` — unknown window → legacy path.
+            // discovery leaves it `None` — unknown window → the split is sized
+            // against the current budget.
             self.discovered_window = None;
             if let Some(window) = discovered_context_window(self.connector.effective_model()).await
             {
@@ -2269,9 +2231,8 @@ impl Harness {
                 if self.stop || stop_signal.load(Ordering::Relaxed) {
                     log::debug!("run_agent_loop STOPPED");
                     self.context_manager.close_loop();
-                    let cs =
-                        bincode::serialize(&self.context_manager.save_state()).unwrap_or_default();
-                    let _ = tx.send(HarnessEvent::Stopped { context_state: cs });
+                    let context = self.context_manager.save_state();
+                    let _ = tx.send(HarnessEvent::Stopped { context });
                     true
                 } else {
                     false
@@ -2343,38 +2304,15 @@ impl Harness {
                 if let Err(ref e) = attempt
                     && e == CONTEXT_WINDOW_MARKER
                 {
-                    // Known-window contingency: prefer the split path — it
-                    // shrinks the WHOLE timeline (protected items included)
-                    // into a fitting anchor, while draining only removes tool
-                    // chains. On success retry immediately; on failure fall
-                    // through to the legacy drain.
+                    // Context-window contingency: drive the split — it shrinks
+                    // the WHOLE timeline (protected items included) into a
+                    // fitting anchor. On success retry immediately; on failure
+                    // the overflow is stuck — surface the (throttled) warning
+                    // and fall through to the normal error handling with a
+                    // HUMAN-readable message.
                     if self.split_context(&tx).await {
                         continue;
                     }
-                    let window = self.last_context_window.take();
-                    if self.context_manager.evict_tool_chain_for_overflow() {
-                        // One chain per attempt; when the provider
-                        // reported its window, drain locally (no HTTP
-                        // round trip per chain) until the estimate fits.
-                        // NOTE: the local estimate counts COMPRESSED drafts
-                        // while the request sends originals (and the
-                        // compaction transcript passes tool results verbatim,
-                        // untruncated), so it is
-                        // approximate in both directions — only a hint to
-                        // skip round trips, never a hard guarantee.
-                        if let Some(window) = window {
-                            while self.context_manager.display_info().total_tokens > window
-                                && self.context_manager.evict_tool_chain_for_overflow()
-                            {
-                            }
-                        }
-                        // Recoverable: still draining — no toast yet (the
-                        // retry may succeed).
-                        continue;
-                    }
-                    // No chain left: the overflow is stuck. Surface the
-                    // (throttled) warning and fall through to the normal
-                    // error handling with a HUMAN-readable message.
                     self.context_manager
                         .mark_overflow(self.connector.provider_name().unwrap_or("?"));
                     self.notify_context_overflow(&tx);
@@ -2397,8 +2335,7 @@ impl Harness {
                 if e == INTERRUPTED_MARKER {
                     self.context_manager.close_loop();
                     let _ = tx.send(HarnessEvent::Stopped {
-                        context_state: bincode::serialize(&self.context_manager.save_state())
-                            .unwrap_or_default(),
+                        context: self.context_manager.save_state(),
                     });
                     break;
                 }
@@ -2515,9 +2452,9 @@ impl Harness {
 
             // Record the assistant's text response in the context manager so it
             // is delivered via the messages array on the next iteration. Tool
-            // calls are recorded separately as structural items during dispatch
-            // (never prose-compressed); an output that carried a tool call stays
-            // structural too — only pure text is compressible.
+            // calls are recorded separately as structural items during dispatch;
+            // an output that carried a tool call stays structural too — only
+            // pure text is closable.
             let had_tools = self.has_pending_tools();
             if !assistant_response.is_empty() {
                 self.context_manager
@@ -2566,8 +2503,7 @@ impl Harness {
                     // log::debug!("run_agent_loop MAX_ITERATIONS={MAX_ITERATIONS} reached");
                     self.context_manager.close_loop();
                     let _ = tx.send(HarnessEvent::Done {
-                        context_state: bincode::serialize(&self.context_manager.save_state())
-                            .unwrap_or_default(),
+                        context: self.context_manager.save_state(),
                     });
                     terminal_sent = true;
                     break;
@@ -3159,10 +3095,7 @@ impl Harness {
                             self.stop = true;
                             self.context_manager.close_loop();
                             let _ = tx.send(HarnessEvent::Stopped {
-                                context_state: bincode::serialize(
-                                    &self.context_manager.save_state(),
-                                )
-                                .unwrap_or_default(),
+                                context: self.context_manager.save_state(),
                             });
                             return; // Exit run_agent_loop entirely
                         }
@@ -3205,8 +3138,7 @@ impl Harness {
                         variant: ToastVariant::Info,
                     });
                     let _ = tx.send(HarnessEvent::Done {
-                        context_state: bincode::serialize(&self.context_manager.save_state())
-                            .unwrap_or_default(),
+                        context: self.context_manager.save_state(),
                     });
                     break;
                 }
@@ -3221,8 +3153,7 @@ impl Harness {
                         // not stay in a "running" state.
                         self.context_manager.close_loop();
                         let _ = tx.send(HarnessEvent::Done {
-                            context_state: bincode::serialize(&self.context_manager.save_state())
-                                .unwrap_or_default(),
+                            context: self.context_manager.save_state(),
                         });
                         break;
                     }
@@ -3241,8 +3172,7 @@ impl Harness {
                         // not stay in a "running" state.
                         self.context_manager.close_loop();
                         let _ = tx.send(HarnessEvent::Done {
-                            context_state: bincode::serialize(&self.context_manager.save_state())
-                                .unwrap_or_default(),
+                            context: self.context_manager.save_state(),
                         });
                         break;
                     }
@@ -3255,12 +3185,11 @@ impl Harness {
                 }
 
                 // No tools and no extraction failures — conversation is complete.
-                // The final text response becomes the loop's LoopClosure.
+                // The final text response becomes the loop's Closure.
                 // log::debug!("run_agent_loop DONE (no tools)");
                 self.context_manager.close_loop();
                 let _ = tx.send(HarnessEvent::Done {
-                    context_state: bincode::serialize(&self.context_manager.save_state())
-                        .unwrap_or_default(),
+                    context: self.context_manager.save_state(),
                 });
                 break;
             }
@@ -3272,10 +3201,9 @@ impl Harness {
             current_input =
                 "Please continue with your response based on the information above.".to_string();
 
-            // Compact before the next request. The LLM compaction (phase 3,
-            // the last-resort fallback) runs when the deterministic phases
-            // have nothing left to compress or evict and the total is still
-            // over the trigger — the harness performs the model call.
+            // Compact before the next request. The LLM compaction runs when
+            // the total is still over the trigger — the harness performs the
+            // model call.
             if matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction) {
                 self.llm_compact(&tx).await;
             }
@@ -3283,14 +3211,13 @@ impl Harness {
                 info: self.context_manager.display_info(),
             });
 
-            // Incremental persistence: hand the TUI a serialized snapshot of
-            // the running context at a throttled cadence so a crash/restart
-            // mid-run does not lose the in-flight run's context.
+            // Incremental persistence: hand the TUI a snapshot of the running
+            // context at a throttled cadence so a crash/restart mid-run does
+            // not lose the in-flight run's context.
             if last_snapshot.elapsed() >= self.snapshot_interval {
                 last_snapshot = std::time::Instant::now();
                 let _ = tx.send(HarnessEvent::ContextSnapshot {
-                    context_state: bincode::serialize(&self.context_manager.save_state())
-                        .unwrap_or_default(),
+                    context: self.context_manager.save_state(),
                 });
             }
         }
@@ -3486,7 +3413,7 @@ impl Harness {
 
     /// Run the INTERNAL sub-agent path of the merged `subagent_call` tool:
     /// a nested [`Harness`] that reuses this connector (same provider/model),
-    /// starts with an EMPTY context (no history, no `.ctx`), runs in
+    /// starts with an EMPTY context (no history), runs in
     /// [`Mode::Yolo`] (approval was already asked at the parent tool gate),
     /// and persists nothing. It runs on its OWN THREAD with a dedicated
     /// current-thread runtime (the same pattern the TUI uses): a nested
@@ -3496,7 +3423,7 @@ impl Harness {
     /// events are bridged to the TUI as a plain `ToolOutput` stream — the
     /// tools it calls and any snapshot/summary events are dropped, so the
     /// main agent never sees its intermediate work and nothing is written
-    /// to disk. Only the final report (the nested loop's `LoopClosure`) is
+    /// to disk. Only the final report (the nested loop's `Closure`) is
     /// returned as the tool result.
     ///
     /// # Errors
@@ -3599,7 +3526,7 @@ impl Harness {
                     // The nested loop already closes its own context on every
                     // normal exit; the defensive call is idempotent (a no-op
                     // when the last item is not an assistant draft). The
-                    // report is the LoopClosure content.
+                    // report is the Closure content.
                     nested.context_manager.close_loop();
                     let final_answer = nested.context_manager.final_answer();
                     // Release the nested harness (and its event-tx clones) so

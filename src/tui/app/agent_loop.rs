@@ -300,12 +300,13 @@ impl App {
             })
             .unwrap_or_default();
 
-        // Load companion context state (.ctx file) for session resumption
-        let ctx_bytes: Option<Vec<u8>> = self
+        // Load companion context state (the JSONL item log) for session
+        // resumption.
+        let ctx_state: Option<cosh::harness::ContextManagerState> = self
             .state
             .current_session_id
             .as_ref()
-            .and_then(|id| self.session_store.load_ctx(id));
+            .and_then(|id| self.session_store.load_context(id));
 
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
@@ -431,12 +432,9 @@ impl App {
                         .with_fallbacks(remaining)
                         .with_local_base_urls(local_base_urls);
 
-                    // Restore compressed context state from .ctx companion file
-                    if let Some(ref ctx_bytes) = ctx_bytes {
-                        use cosh::harness::ContextManagerState;
-                        if let Ok(state) = bincode::deserialize::<ContextManagerState>(ctx_bytes) {
-                            harness.context_manager.restore_state(&state);
-                        }
+                    // Restore the authoritative context from the JSONL item log.
+                    if let Some(ref state) = ctx_state {
+                        harness.context_manager.restore_state(state);
                     }
                     #[cfg(feature = "embed")]
                     harness.set_recall_context(recall_suffix);

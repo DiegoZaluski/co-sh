@@ -110,7 +110,11 @@ async fn message_actions_revert_truncates_and_restores_prompt() {
     app.run_message_action(0, "u2"); // Use last user message for revert
     let session = app.state.current_session().unwrap();
     let ids: Vec<&str> = session.messages.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, vec!["u1", "a1"], "u2 and everything after it are dropped");
+    assert_eq!(
+        ids,
+        vec!["u1", "a1"],
+        "u2 and everything after it are dropped"
+    );
     assert!(!session.messages.iter().any(|m| m.id == "u2"));
     assert_eq!(app.prompt_view.input, "second");
     assert_eq!(app.prompt_view.cursor_pos, app.prompt_view.input.len());
@@ -198,8 +202,14 @@ async fn message_actions_non_last_user_message_only_shows_copy() {
     let all: String = (0..24).map(line).collect();
     assert!(all.contains("Message Actions"), "title rendered");
     assert!(all.contains("Copy"), "Copy is always available");
-    assert!(!all.contains("Revert"), "Revert should not be shown for non-last user message");
-    assert!(!all.contains("Fork"), "Fork should not be shown for non-last user message");
+    assert!(
+        !all.contains("Revert"),
+        "Revert should not be shown for non-last user message"
+    );
+    assert!(
+        !all.contains("Fork"),
+        "Fork should not be shown for non-last user message"
+    );
 }
 
 #[tokio::test]
@@ -215,19 +225,17 @@ async fn message_actions_single_user_message_shows_all_options() {
         provider: None,
         model: None,
         reasoning: None,
-        messages: vec![
-            Message {
-                id: "u1".into(),
-                role: MessageRole::User,
-                parts: vec![Part::Text(TextPart {
-                    text: "only message".into(),
-                    synthetic: false,
-                })],
-                created_at: now,
-                agent: None,
-                model: None,
-            },
-        ],
+        messages: vec![Message {
+            id: "u1".into(),
+            role: MessageRole::User,
+            parts: vec![Part::Text(TextPart {
+                text: "only message".into(),
+                synthetic: false,
+            })],
+            created_at: now,
+            agent: None,
+            model: None,
+        }],
     };
     app.state.add_session(session);
     app.state.current_session_id = Some("single".into());
@@ -253,8 +261,10 @@ async fn message_actions_single_user_message_shows_all_options() {
     };
     let all: String = (0..24).map(line).collect();
     assert!(all.contains("Message Actions"), "title rendered");
-    assert!(all.contains("Revert") && all.contains("Copy") && all.contains("Fork"),
-        "Single user message should show all options since it's also the last");
+    assert!(
+        all.contains("Revert") && all.contains("Copy") && all.contains("Fork"),
+        "Single user message should show all options since it's also the last"
+    );
 }
 
 #[test]
@@ -263,7 +273,11 @@ fn message_action_index_maps_correctly() {
     assert_eq!(App::message_action_index(0, true), 0, "last user: 0=Revert");
     assert_eq!(App::message_action_index(1, true), 1, "last user: 1=Copy");
     assert_eq!(App::message_action_index(2, true), 2, "last user: 2=Fork");
-    assert_eq!(App::message_action_index(0, false), 1, "non-last: visual 0 maps to Copy (1)");
+    assert_eq!(
+        App::message_action_index(0, false),
+        1,
+        "non-last: visual 0 maps to Copy (1)"
+    );
 }
 
 #[tokio::test]

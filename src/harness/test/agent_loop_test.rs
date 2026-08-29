@@ -60,80 +60,6 @@ async fn test_agent_loop_simple_conversation() {
 }
 
 #[tokio::test]
-async fn test_agent_loop_forwards_compaction_phases_to_the_tui() {
-    use crate::harness::context_manager::{CompactionEvent, ContextManager};
-
-    // ~5.8 chars/token with the default encoding, so 200 paragraphs of ~63
-    // chars ≈ 2100 tokens — comfortably over the 1600-token (80%) trigger.
-    let big_answer = (0..200)
-        .map(|i| format!("Answer paragraph {i} discusses rivers, mountains and weather. "))
-        .collect::<String>();
-
-    let mut h = Harness::new_test();
-    // Small budget so the preloaded history overflows the 80% trigger on the
-    // very first `run()` inside the loop — the pipeline then compresses the
-    // assistant history and the observer forwards the phases.
-    h.context_manager = ContextManager::new(2000);
-    h = h.with_history(&[
-        ("user".to_string(), "initial question".to_string()),
-        ("assistant".to_string(), big_answer),
-    ]);
-    h = h.with_mock_stream(Ok(vec!["final answer"]));
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
-    let stop_signal = Arc::new(AtomicBool::new(false));
-
-    let handle = tokio::spawn(async move {
-        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
-            .await;
-    });
-
-    let mut events = Vec::new();
-    let timeout = tokio::time::Duration::from_secs(5);
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
-            Ok(Some(event)) => {
-                let is_done = matches!(
-                    event,
-                    HarnessEvent::Done { .. }
-                        | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
-                );
-                events.push(event);
-                if is_done {
-                    break;
-                }
-            }
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
-    handle.abort();
-
-    assert!(
-        events.iter().any(|e| matches!(
-            e,
-            HarnessEvent::Compaction {
-                event: CompactionEvent::PipelineStarted
-            }
-        )),
-        "the harness must forward PipelineStarted to the TUI; events={events:?}"
-    );
-    assert!(
-        events.iter().any(|e| matches!(
-            e,
-            HarnessEvent::Compaction {
-                event: CompactionEvent::PipelineFinished
-            }
-        )),
-        "the harness must forward PipelineFinished to the TUI; events={events:?}"
-    );
-}
-
-#[tokio::test]
 async fn test_agent_loop_with_tool_call() {
     let mut h = Harness::new_test()
         .with_test_tool(
@@ -343,7 +269,7 @@ async fn full_tool_loop_builds_correct_item_sequence_and_messages() {
     assert!(matches!(
         &items[1],
         ContextItem::Assistant {
-            compressible: false,
+            closable: false,
             ..
         }
     ));
@@ -351,7 +277,7 @@ async fn full_tool_loop_builds_correct_item_sequence_and_messages() {
     assert!(matches!(&items[3], ContextItem::ToolResult { .. }));
     assert!(matches!(
         &items[4],
-        ContextItem::LoopClosure { content, .. } if content == "Done!"
+        ContextItem::Closure { content, .. } if content == "Done!"
     ));
 
     // The rendered payload: native roles in order, input exactly once.
@@ -646,18 +572,20 @@ async fn input_with_output_before_cancel_is_kept() {
 // ── Context-window overflow recovery (provider rejects the prompt size) ──
 
 // When the summarizer call fails with a context-window overflow, the harness
-// drains ONE tool chain per attempt ("1 por vez") and retries; once every
-// chain is gone it marks the provider stuck and notifies the user through a
-// Toast — the loop still completes normally on the next main request.
+// drives the split-and-concatenate contingency. When the split itself cannot
+// fit the context into the window (the summarizer keeps overflowing), the
+// provider is marked stuck and the user is notified through a Toast — the
+// loop still completes normally. The split never drains items: the tool chains
+// stay in the timeline.
 #[tokio::test]
-async fn run_agent_loop_drains_tool_chains_on_context_window_overflow() {
+async fn run_agent_loop_marks_provider_stuck_when_split_cannot_fit() {
     use crate::harness::context_manager::ContextManager;
     use crate::harness::core::CONTEXT_WINDOW_MARKER;
     use crate::harness::events::{LlmCompactionEvent, ToastVariant};
 
     let mut h = Harness::new_test();
     h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
+    // A loaded user turn WITH an answer (promoted to a protected Closure
     // below): protected-only over the trigger, and the loop input lands after
     // an output — never directly on a user turn (that pattern is the
     // abandoned-input case, which the harness now drops).
@@ -666,8 +594,7 @@ async fn run_agent_loop_drains_tool_chains_on_context_window_overflow() {
         ("assistant".into(), "a ".repeat(1100)),
     ]);
     h.context_manager.close_loop();
-    // Two tool chains the harness can drain (the mock CHAT response is the
-    // summarizer call).
+    // Two tool chains in the timeline (the split summarizes, never drains).
     h.context_manager.add_tool_call("t0", "fs_read", "{}");
     h.context_manager.add_tool_result("t0", "contents A");
     h.context_manager.add_tool_call("t1", "fs_read", "{}");
@@ -748,20 +675,20 @@ async fn run_agent_loop_drains_tool_chains_on_context_window_overflow() {
             .any(|e| matches!(e, HarnessEvent::Done { .. })),
         "the loop completes after the overflow is handled"
     );
-    // Every tool chain was drained from the timeline (call + result).
+    // The split never drains items — the tool chains stay in the timeline.
     assert!(
-        !items.iter().any(|it| {
+        items.iter().any(|it| {
             matches!(
                 it,
                 ContextItem::ToolCall { .. } | ContextItem::ToolResult { .. }
             )
         }),
-        "all tool chains were drained"
+        "the split summarizes, never drains — the tool chains remain"
     );
     // The provider is recorded as stuck (the notification persists).
     assert!(
         stuck,
-        "the provider must be marked stuck after the chains are exhausted"
+        "the provider must be marked stuck when the split cannot fit the context"
     );
 }
 
@@ -930,96 +857,6 @@ async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
     );
 }
 
-// The MAIN request path also recovers: when the provider rejects the agent
-// request (not just the summarizer), the harness drains one chain and retries
-// with REBUILT messages (the removed call/result pair must not be re-sent).
-#[tokio::test]
-async fn run_agent_loop_drains_chains_on_main_request_overflow() {
-    use crate::harness::context_manager::ContextManager;
-    use crate::harness::core::CONTEXT_WINDOW_MARKER;
-
-    let mut h = Harness::new_test();
-    h.context_manager = ContextManager::new(2000); // trigger = 1600
-    // A loaded user turn WITH an answer (promoted to a protected LoopClosure
-    // below): protected-only over the trigger, and the loop input lands after
-    // an output — never directly on a user turn (that pattern is the
-    // abandoned-input case, which the harness now drops).
-    h = h.with_history(&[
-        ("user".into(), "u ".repeat(1100)),
-        ("assistant".into(), "a ".repeat(1100)),
-    ]);
-    h.context_manager.close_loop();
-    // The provider is already stuck (the summarizer is skipped) — the
-    // overflow now hits the MAIN request instead.
-    h.context_manager.mark_overflow("openai");
-    h.context_manager.add_tool_call("t0", "fs_read", "{}");
-    h.context_manager.add_tool_result("t0", "contents");
-    h = h.with_mock_streams(vec![
-        Err(CONTEXT_WINDOW_MARKER), // main request: overflow → drain one chain
-        Ok(vec!["final answer"]),   // retry with rebuilt messages: succeeds
-    ]);
-
-    let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<ContextItem>>();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
-    let stop_signal = Arc::new(AtomicBool::new(false));
-
-    let handle = tokio::spawn(async move {
-        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
-            .await;
-        let _ = state_tx.send(h.context_manager.items_snapshot());
-    });
-
-    let mut events = Vec::new();
-    let timeout = tokio::time::Duration::from_secs(5);
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
-            Ok(Some(event)) => {
-                let is_done = matches!(
-                    event,
-                    HarnessEvent::Done { .. }
-                        | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
-                );
-                events.push(event);
-                if is_done {
-                    break;
-                }
-            }
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
-    let items = tokio::time::timeout(tokio::time::Duration::from_secs(2), state_rx.recv())
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    handle.abort();
-
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, HarnessEvent::Done { .. })),
-        "the retry succeeds and the loop completes; events={events:?}"
-    );
-    assert!(
-        !events.iter().any(|e| matches!(e, HarnessEvent::Error(_))),
-        "no terminal error after the drain retry"
-    );
-    assert!(
-        !items.iter().any(|it| {
-            matches!(
-                it,
-                ContextItem::ToolCall { .. } | ContextItem::ToolResult { .. }
-            )
-        }),
-        "the drained chain is not re-sent"
-    );
-}
-
 // ── Split-and-concatenate (the known-window contingency) ────────────────
 //
 // When the ACTIVE model's window is KNOWN (discovery or a context-window
@@ -1168,7 +1005,7 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
     assert!(
         matches!(
             &items[2],
-            ContextItem::LoopClosure { content, .. } if content == "final answer"
+            ContextItem::Closure { content, .. } if content == "final answer"
         ),
         "the loop's final answer follows the anchor; items={items:?}"
     );
@@ -1476,13 +1313,12 @@ fn result_is_useless_reads_find_grep_json_contract() {
 
 // ── Incremental persistence: ContextSnapshot events ───────────────────────
 //
-// The harness emits a serialized context snapshot per tool dispatch (with a
-// test-zeroed cadence) so the TUI can write the `.ctx` companion file mid-run.
-// This test proves the snapshots (1) arrive during the run, (2) deserialize
-// into a valid [`ContextManagerState`], (3) reflect progress — each later
-// snapshot owns the tool call/result accumulated since — and (4) restore into
-// a fresh manager that keeps answering: exactly the round trip a crash/restart
-// resume performs through the `.ctx` file.
+// The harness emits a context snapshot per tool dispatch (with a test-zeroed
+// cadence) so the TUI can persist the session log mid-run. This test proves the
+// snapshots (1) arrive during the run, (2) are valid [`ContextManagerState`]s,
+// (3) reflect progress — each later snapshot owns the tool call/result
+// accumulated since — and (4) restore into a fresh manager that keeps
+// answering: exactly the round trip a crash/restart resume performs.
 #[tokio::test]
 async fn run_agent_loop_emits_resumable_incremental_context_snapshots() {
     use crate::harness::context_manager::{ContextManager, ContextManagerState};
@@ -1542,24 +1378,18 @@ async fn run_agent_loop_emits_resumable_incremental_context_snapshots() {
     }
     handle.abort();
 
-    let raw_snapshots: Vec<&Vec<u8>> = events
+    let states: Vec<ContextManagerState> = events
         .iter()
         .filter_map(|e| match e {
-            HarnessEvent::ContextSnapshot { context_state } => Some(context_state),
+            HarnessEvent::ContextSnapshot { context } => Some(context.clone()),
             _ => None,
         })
         .collect();
     assert!(
-        raw_snapshots.len() >= 2,
+        states.len() >= 2,
         "a multi-dispatch run must snapshot per dispatch; got {}",
-        raw_snapshots.len()
+        states.len()
     );
-
-    // Every snapshot is a valid bincode round trip of the persisted state.
-    let states: Vec<ContextManagerState> = raw_snapshots
-        .iter()
-        .map(|raw| bincode::deserialize(raw).expect("a snapshot must deserialize"))
-        .collect();
 
     // Progress: the snapshots accumulate the tool call/result pairs.
     let sizes: Vec<usize> = states.iter().map(|s| s.items.len()).collect();
@@ -1569,7 +1399,7 @@ async fn run_agent_loop_emits_resumable_incremental_context_snapshots() {
     );
 
     // Resumability: restore the LAST snapshot into a fresh manager and keep
-    // answering — the exact `.ctx` round trip on restart.
+    // answering — the exact session-log round trip on restart.
     let last = states.last().expect("non-empty snapshots");
     let mut restored = ContextManager::new(last.max_tokens);
     restored.restore_state(last);
@@ -1715,6 +1545,6 @@ async fn queued_next_request_message_enters_the_next_request_with_tool_work() {
     );
     assert!(matches!(
         items.last(),
-        Some(ContextItem::LoopClosure { content, .. }) if content == "all done"
+        Some(ContextItem::Closure { content, .. }) if content == "all done"
     ));
 }

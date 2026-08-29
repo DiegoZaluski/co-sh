@@ -7,8 +7,15 @@
 //!
 //! Each JSONL file represents one complete chat session:
 //!
-//! - Line 1: Session metadata (JSON object with title, created_at, cwd, etc.)
-//! - Lines 2+: Each message serialized as a JSON object, one per line.
+//! - Line 1: Session metadata (JSON object with title, created_at, cwd, model,
+//!   and the context-manager session state — `max_tokens`, `overflow_provider`,
+//!   `next_id`).
+//! - Lines 2+: One [`ContextItem`](cosh::harness::context_manager::ContextItem)
+//!   per line — the single source of truth for the conversation context. The
+//!   display `Session`/`Message`/`Part` model is DERIVED from these items on
+//!   load, so the transcript and the context can never drift apart.
+//! - Optional final line: the staging of an in-progress split-and-concatenate
+//!   (`{"split": …}`), so an interrupted split resumes exactly where it stopped.
 //!
 //! Sessions are grouped by CWD (current working directory). The CWD path is
 //! hashed with xxHash32 to produce a deterministic subdirectory name, so
@@ -19,6 +26,7 @@
 //! at least one user message AND at least one valid assistant response
 //! (error-only responses don't count as dialog).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,14 +35,22 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh32::xxh32;
 
-use crate::types::{Message, MessageRole, Part, Session};
+use cosh::harness::context_manager::{ContextItem, ContextManagerState, SplitState};
+
+use crate::types::{
+    Message, MessageRole, Part, ReasoningPart, Session, TextPart, ToolPart, ToolStatus,
+};
 
 /// Number of session files to keep on disk per CWD. Oldest files are evicted first.
 const MAX_SESSIONS_ON_DISK: usize = 50;
 
-/// A queued session snapshot for the background save-writer thread.
+/// A queued session snapshot for the background save-writer thread. When
+/// `context` is `None` the writer preserves the context already on disk (a
+/// display-only save — title rename, message edit, session switch — must never
+/// clobber the authoritative context).
 struct SaveJob {
     session: Box<crate::types::Session>,
+    context: Option<ContextManagerState>,
 }
 
 /// Metadata stored as the first JSONL line in each session file.
@@ -50,6 +66,41 @@ struct SessionHeader {
     /// Reasoning effort (`None` = model default) for the last model used.
     #[serde(default)]
     reasoning: Option<String>,
+    /// Token budget persisted from the context manager.
+    #[serde(default)]
+    max_tokens: usize,
+    /// Stuck context-window overflow provider (see `ContextManagerState`).
+    #[serde(default)]
+    overflow_provider: Option<String>,
+    /// Monotonic item id counter persisted from the context manager.
+    #[serde(default)]
+    next_id: u64,
+}
+
+/// The split-staging line appended after the item lines when a split is in
+/// progress. A dedicated marker object so it can never collide with a
+/// [`ContextItem`] line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SplitLine {
+    split: SplitState,
+}
+
+/// The display-only reasoning line appended after the item lines: a list of
+/// item-id → reasoning-text pairs so the TUI can re-render the "+ Thought"
+/// blocks after a reload. Reasoning is display-only — it is deliberately NOT
+/// stored on a [`ContextItem`] and NOT parsed by [`SessionStore::load_context`],
+/// so it can never leak back into the context the context manager sends to the
+/// model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReasoningLine {
+    reasoning: Vec<ReasoningEntry>,
+}
+
+/// One item-id → reasoning-text association in a [`ReasoningLine`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReasoningEntry {
+    id: u64,
+    text: String,
 }
 
 /// Manages reading and writing session files to disk, isolated by CWD.
@@ -60,6 +111,15 @@ pub struct SessionStore {
     sessions_dir: PathBuf,
     /// The hash of the current working directory.
     cwd_hash: String,
+}
+
+/// The parsed contents of a session file: header + context items + split stage
+/// + the display-only reasoning map (item id → reasoning text).
+struct ParsedSession {
+    header: SessionHeader,
+    items: Vec<ContextItem>,
+    split: Option<SplitState>,
+    reasoning: HashMap<u64, String>,
 }
 
 impl SessionStore {
@@ -82,50 +142,63 @@ impl SessionStore {
 
     // ── Public API ────────────────────────────────────────────────────────
 
-    /// Persist a session to disk as a JSONL file in the current CWD's subdirectory.
+    /// Persist a session to disk as a JSONL file in the current CWD's
+    /// subdirectory, PRESERVING any context already on disk.
     ///
-    /// The session is saved as `session-{id}.jsonl`. If a file with the same
-    /// name already exists, it is overwritten so the disk always reflects the
-    /// latest state. After saving, the store evicts the oldest files beyond
-    /// `MAX_SESSIONS_ON_DISK`.
+    /// This is the display-only save path (title rename, message edit, session
+    /// switch, fork, revert): the context items are the authoritative
+    /// transcript, and a display edit must never clobber them. If no context
+    /// exists yet (a brand-new session that has not produced a terminal
+    /// snapshot, or a forked session), the display messages are converted back
+    /// into context items best-effort so the transcript is not lost.
     pub fn save_session(&self, session: &Session) {
-        let file_path = self.file_path(&session.id);
-        let header = self.build_header(session);
-
-        let mut lines = Vec::new();
-
-        // Line 1: session header
-        if let Ok(json) = serde_json::to_string(&header) {
-            lines.push(json);
-        }
-
-        // Lines 2+: messages
-        for msg in &session.messages {
-            if let Ok(json) = serde_json::to_string(&StoredMessage::from(msg)) {
-                lines.push(json);
-            }
-        }
-
-        if let Err(e) = std::fs::write(&file_path, lines.join("\n")) {
-            log::warn!("failed to save session {}: {e}", session.id);
-        }
-
-        self.evict_old_sessions();
+        let context = self
+            .load_context(&session.id)
+            .unwrap_or_else(|| context_from_messages(&session.messages));
+        self.write_session(session, &context);
     }
 
-    /// Persist a session WITHOUT blocking the caller (the UI thread).
+    /// Persist a session together with an explicit context-manager snapshot.
+    /// This is the harness path (Done / Stopped / ContextSnapshot): the
+    /// context items are authoritative.
+    pub fn save_session_with_context(&self, session: &Session, context: &ContextManagerState) {
+        self.write_session(session, context);
+    }
+
+    /// Persist a session WITHOUT blocking the caller (the UI thread),
+    /// preserving any context already on disk. See [`Self::save_session`].
     ///
-    /// `save_session` re-serializes the whole transcript and rewrites the
-    /// file; for a growing agent session that cost grows without bound and
-    /// ran inline in the event loop — the periodic hitch on every throttled
-    /// `ContextSnapshot` (~every 10 s) and the stall on Done/Stopped, which
-    /// is exactly when the user is staring at the TUI.
-    ///
-    /// This variant clones the session (a memcpy — an order of magnitude
-    /// cheaper than serialization) and hands it to a single background
-    /// writer thread. A single writer keeps FIFO ordering, so a newer
-    /// snapshot can never be clobbered by an older in-flight one.
+    /// Unlike [`Self::save_session`], the context is NOT read here: the job is
+    /// enqueued with `context: None` so the writer thread runs
+    /// [`Self::save_session`] at write time. That read is ordered after any
+    /// earlier snapshot job in the FIFO queue, so a display-only save that
+    /// coincides with an in-flight `ContextSnapshot` can never capture the
+    /// stale pre-snapshot context and clobber the fresher one.
     pub fn save_session_async(&self, session: &crate::types::Session) {
+        self.enqueue_save(SaveJob {
+            session: Box::new(session.clone()),
+            context: None,
+        });
+    }
+
+    /// Persist a session with an explicit context snapshot on the background
+    /// writer thread. A single writer keeps FIFO ordering, so a newer snapshot
+    /// can never be clobbered by an older in-flight one.
+    pub fn save_session_async_with_context(
+        &self,
+        session: &crate::types::Session,
+        context: &ContextManagerState,
+    ) {
+        self.enqueue_save(SaveJob {
+            session: Box::new(session.clone()),
+            context: Some(context.clone()),
+        });
+    }
+
+    /// Hand a save job to the single background writer thread. FIFO ordering is
+    /// preserved, so a newer snapshot always lands after (and wins over) an
+    /// older in-flight job.
+    fn enqueue_save(&self, job: SaveJob) {
         static WRITER: std::sync::OnceLock<std::sync::mpsc::Sender<SaveJob>> =
             std::sync::OnceLock::new();
         let tx = WRITER.get_or_init(|| {
@@ -135,7 +208,10 @@ impl SessionStore {
                 .name("session-save".into())
                 .spawn(move || {
                     while let Ok(job) = rx.recv() {
-                        store.save_session(&job.session);
+                        match job.context {
+                            Some(context) => store.write_session(&job.session, &context),
+                            None => store.save_session(&job.session),
+                        }
                     }
                 });
             if spawned.is_err() {
@@ -145,21 +221,20 @@ impl SessionStore {
         });
         // If the thread failed to spawn there is no receiver; fall back to a
         // synchronous save rather than dropping the snapshot.
-        if tx
-            .send(SaveJob {
-                session: Box::new(session.clone()),
-            })
-            .is_err()
-        {
-            self.save_session(session);
+        if let Err(send_err) = tx.send(job) {
+            let job = send_err.0;
+            match job.context {
+                Some(context) => self.write_session(&job.session, &context),
+                None => self.save_session(&job.session),
+            }
         }
     }
 
     /// Update only the title in an existing session file on disk.
     ///
     /// Reads the file, replaces the title in the first-line JSON header,
-    /// and writes it back.  This is much cheaper than a full `save_session`
-    /// rewrite and is used by the async title generation path.
+    /// and writes it back. This is much cheaper than a full rewrite and is
+    /// used by the async title generation path.
     pub fn update_title(&self, session_id: &str, new_title: &str) {
         let file_path = self.file_path(session_id);
         let Ok(contents) = std::fs::read_to_string(&file_path) else {
@@ -255,10 +330,123 @@ impl SessionStore {
         summaries
     }
 
-    /// Load a full session from its JSONL file.
+    /// Load the display `Session` for a session, reconstructed from the
+    /// persisted [`ContextItem`] log. The display model is DERIVED from the
+    /// context items, so the transcript always matches the authoritative
+    /// context.
     ///
     /// Returns `None` if the file does not exist or cannot be parsed.
     pub fn load_session(&self, session_id: &str) -> Option<Session> {
+        let parsed = self.parse_file(session_id)?;
+        Some(Session {
+            id: session_id.to_string(),
+            title: parsed.header.title,
+            messages: items_to_messages(&parsed.items, &parsed.reasoning),
+            created_at: parsed.header.created_at,
+            title_generated: parsed.header.title_generated,
+            provider: parsed.header.provider,
+            model: parsed.header.model,
+            reasoning: parsed.header.reasoning,
+        })
+    }
+
+    /// Load the context-manager state for a session — the authoritative
+    /// transcript, restored verbatim into the harness on resume.
+    ///
+    /// Returns `None` if the file does not exist or cannot be parsed.
+    pub fn load_context(&self, session_id: &str) -> Option<ContextManagerState> {
+        let parsed = self.parse_file(session_id)?;
+        Some(ContextManagerState {
+            items: parsed.items.into_iter().collect(),
+            next_id: parsed.header.next_id,
+            max_tokens: parsed.header.max_tokens,
+            overflow_provider: parsed.header.overflow_provider,
+            split: parsed.split,
+        })
+    }
+
+    /// Delete a session file from disk.
+    pub fn delete_session(&self, session_id: &str) {
+        let file_path = self.file_path(session_id);
+        std::fs::remove_file(&file_path).ok();
+    }
+
+    /// Check whether a session with the given ID exists on disk.
+    pub fn has_session(&self, session_id: &str) -> bool {
+        self.file_path(session_id).exists()
+    }
+
+    // ── Private helpers ───────────────────────────────────────────────────
+
+    /// Build the absolute path for a session file within the current CWD subdirectory.
+    fn file_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir
+            .join(format!("session-{session_id}.jsonl"))
+    }
+
+    /// Write the header, item lines and (optional) split line for a session.
+    ///
+    /// The write is atomic: the JSONL is now the single source of truth (there
+    /// is no redundant bincode sidecar), so a crash mid-write must never leave
+    /// a half-written session that can't be resumed. The content is written to
+    /// a `.tmp` sibling and `fs::rename`d over the final path (atomic on the
+    /// same filesystem); a reader only ever sees the complete old or new file.
+    fn write_session(&self, session: &Session, context: &ContextManagerState) {
+        let file_path = self.file_path(&session.id);
+        let header = self.build_header(session, context);
+
+        let mut lines = Vec::new();
+
+        // Line 1: session header.
+        match serde_json::to_string(&header) {
+            Ok(json) => lines.push(json),
+            Err(e) => log::warn!("failed to serialize header for session {}: {e}", session.id),
+        }
+
+        // Lines 2+: one ContextItem per line.
+        for (i, item) in context.items.iter().enumerate() {
+            match serde_json::to_string(item) {
+                Ok(json) => lines.push(json),
+                Err(e) => log::warn!("failed to serialize item {i} for session {}: {e}", session.id),
+            }
+        }
+
+        // Optional final line: the split staging.
+        if let Some(split) = &context.split {
+            match serde_json::to_string(&SplitLine { split: split.clone() }) {
+                Ok(json) => lines.push(json),
+                Err(e) => log::warn!("failed to serialize split for session {}: {e}", session.id),
+            }
+        }
+
+        // Optional final line: the display-only reasoning map.
+        let reasoning = collect_reasoning(session, context);
+        if !reasoning.is_empty() {
+            match serde_json::to_string(&ReasoningLine { reasoning }) {
+                Ok(json) => lines.push(json),
+                Err(e) => {
+                    log::warn!("failed to serialize reasoning for session {}: {e}", session.id)
+                }
+            }
+        }
+
+        let tmp_path = file_path.with_extension("jsonl.tmp");
+        if let Err(e) = std::fs::write(&tmp_path, lines.join("\n")) {
+            log::warn!("failed to save session {}: {e}", session.id);
+            let _ = std::fs::remove_file(&tmp_path);
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
+            log::warn!("failed to finalize session {}: {e}", session.id);
+            let _ = std::fs::remove_file(&tmp_path);
+            return;
+        }
+
+        self.evict_old_sessions();
+    }
+
+    /// Parse a session file into header + items + split stage.
+    fn parse_file(&self, session_id: &str) -> Option<ParsedSession> {
         let file_path = self.file_path(session_id);
         let content = std::fs::read_to_string(&file_path).ok()?;
 
@@ -271,85 +459,51 @@ impl SessionStore {
         let header: SessionHeader = serde_json::from_str(lines[0]).ok()?;
         lines.remove(0);
 
-        // Remaining lines: messages
-        let mut messages: Vec<Message> = Vec::new();
-        for line in &lines {
+        // Remaining lines: items, plus an optional split/reasoning line.
+        let mut items: Vec<ContextItem> = Vec::new();
+        let mut split: Option<SplitState> = None;
+        let mut reasoning: HashMap<u64, String> = HashMap::new();
+        for (idx, line) in lines.iter().enumerate() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
-            if let Ok(stored) = serde_json::from_str::<StoredMessage>(line) {
-                messages.push(stored.into_message());
+            match serde_json::from_str::<ContextItem>(line) {
+                Ok(item) => items.push(item),
+                Err(item_err) => match serde_json::from_str::<SplitLine>(line) {
+                    Ok(split_line) => split = Some(split_line.split),
+                    Err(_) => match serde_json::from_str::<ReasoningLine>(line) {
+                        Ok(reasoning_line) => {
+                            for entry in reasoning_line.reasoning {
+                                reasoning.insert(entry.id, entry.text);
+                            }
+                        }
+                        Err(_) => {
+                            // A corrupted line loses exactly one item — log it
+                            // (session id, 1-based line number, parse error)
+                            // rather than silently dropping a chunk of the
+                            // restored context.
+                            log::warn!(
+                                "skipping unparseable line {} in session {session_id}: {item_err}",
+                                idx + 2
+                            );
+                        }
+                    },
+                },
             }
         }
 
-        Some(Session {
-            id: session_id.to_string(),
-            title: header.title,
-            messages,
-            created_at: header.created_at,
-            title_generated: header.title_generated,
-            provider: header.provider,
-            model: header.model,
-            reasoning: header.reasoning,
+        Some(ParsedSession {
+            header,
+            items,
+            split,
+            reasoning,
         })
     }
 
-    /// Delete a session file and its companion `.ctx` file from disk.
-    pub fn delete_session(&self, session_id: &str) {
-        let file_path = self.file_path(session_id);
-        std::fs::remove_file(&file_path).ok();
-        self.delete_ctx(session_id);
-    }
-
-    /// Check whether a session with the given ID exists on disk.
-    pub fn has_session(&self, session_id: &str) -> bool {
-        self.file_path(session_id).exists()
-    }
-
-    // ── Companion .ctx file (bincode-encoded ContextManagerState) ──────────
-
-    /// Build path for the companion `.ctx` file.
-    fn ctx_file_path(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir.join(format!("session-{session_id}.ctx"))
-    }
-
-    /// Save bincode-encoded context manager state alongside the JSONL session.
-    pub fn save_ctx(&self, session_id: &str, state: &[u8]) {
-        let path = self.ctx_file_path(session_id);
-        if let Err(e) = std::fs::write(&path, state) {
-            log::warn!("failed to save context state for session {session_id}: {e}");
-        }
-    }
-
-    /// Load bincode-encoded context manager state for a session.
-    /// Returns `None` if no companion file exists or it cannot be read.
-    pub fn load_ctx(&self, session_id: &str) -> Option<Vec<u8>> {
-        let path = self.ctx_file_path(session_id);
-        std::fs::read(&path).ok()
-    }
-
-    /// Delete the companion `.ctx` file for a session.
-    pub fn delete_ctx(&self, session_id: &str) {
-        std::fs::remove_file(self.ctx_file_path(session_id)).ok();
-    }
-
-    // ── Private helpers ───────────────────────────────────────────────────
-
-    /// Build the absolute path for a session file within the current CWD subdirectory.
-    fn file_path(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir
-            .join(format!("session-{session_id}.jsonl"))
-    }
-
-    /// Build a `SessionHeader` from a `Session`, populating `cwd` with the
-    /// canonicalized current working directory.
-    ///
-    /// The session's own recorded model selection (provider + model +
-    /// reasoning) wins. Sessions without one — e.g. saved before this
-    /// feature — fall back to deriving provider/model from the last valid
-    /// assistant message, which preserves the old behavior.
-    fn build_header(&self, session: &Session) -> SessionHeader {
+    /// Build a `SessionHeader` from a `Session` + the context state, populating
+    /// `cwd` with the canonicalized current working directory.
+    fn build_header(&self, session: &Session, context: &ContextManagerState) -> SessionHeader {
         let (provider, model) = match (&session.provider, &session.model.as_deref()) {
             // A recorded selection (provider + model written together) wins.
             (Some(_), Some(_)) => (session.provider.clone(), session.model.clone()),
@@ -388,6 +542,9 @@ impl SessionStore {
             provider,
             model,
             reasoning: session.reasoning.clone(),
+            max_tokens: context.max_tokens,
+            overflow_provider: context.overflow_provider.clone(),
+            next_id: context.next_id,
         }
     }
 
@@ -405,12 +562,16 @@ impl SessionStore {
 
         let header: SessionHeader = serde_json::from_str(first_line).ok()?;
 
-        // Count remaining non-empty lines (messages)
+        // Count remaining non-empty item lines (skip the split/reasoning
+        // staging lines — they are not messages).
         let mut message_count: usize = 0;
         for line in reader.lines().map_while(Result::ok) {
-            if !line.trim().is_empty() {
-                message_count += 1;
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("{\"split\":") || line.starts_with("{\"reasoning\":")
+            {
+                continue;
             }
+            message_count += 1;
         }
 
         // Extract session ID from filename: session-{id}.jsonl
@@ -455,11 +616,266 @@ impl SessionStore {
         let to_remove = files.len() - MAX_SESSIONS_ON_DISK;
         for (path, _) in files.iter().take(to_remove) {
             std::fs::remove_file(path).ok();
-            // Remove companion .ctx file too
-            let ctx_path = path.with_extension("ctx");
-            std::fs::remove_file(&ctx_path).ok();
         }
     }
+}
+
+/// Build a fresh context snapshot from the display `Message` list. Used only
+/// for the display-only save path when no authoritative context exists yet
+/// (a brand-new session, or a forked/reverted transcript). It is a best-effort
+/// reverse mapping — tool calls lose their thought signatures/thinking blocks —
+/// because it only ever runs for transcripts the harness has not yet persisted.
+fn context_from_messages(messages: &[Message]) -> ContextManagerState {
+    let mut items: Vec<ContextItem> = Vec::new();
+    let mut next_id = 1u64;
+    macro_rules! push {
+        ($item:expr) => {{
+            items.push($item);
+            next_id += 1;
+        }};
+    }
+
+    for m in messages {
+        match m.role {
+            MessageRole::User => {
+                if let Some(text) = m
+                    .parts
+                    .iter()
+                    .find_map(|p| match p {
+                        Part::Text(t) if !t.text.is_empty() => Some(t.text.clone()),
+                        _ => None,
+                    })
+                {
+                    push!(ContextItem::User {
+                        id: next_id,
+                        original: text,
+                    });
+                }
+            }
+            MessageRole::Assistant => {
+                for part in &m.parts {
+                    match part {
+                        Part::Text(t) if !t.synthetic && !t.text.is_empty() => {
+                            push!(ContextItem::Assistant {
+                                id: next_id,
+                                original: t.text.clone(),
+                                closable: true,
+                            });
+                        }
+                        Part::Tool(tp) => {
+                            // Live tool parts carry no provider id (the display
+                            // is id-less); the harness would synthesize one (see
+                            // `Harness::push_tool_history`). Mirror that here so
+                            // a restored ToolCall never reaches the provider
+                            // with an empty `call_id` (OpenAI-compatible APIs
+                            // reject it).
+                            let call_id = match &tp.tool_call_id {
+                                Some(id) if !id.is_empty() => id.clone(),
+                                _ => {
+                                    log::warn!(
+                                        "tool part without call_id in context_from_messages; \
+                                         synthesizing call_{next_id:016x}"
+                                    );
+                                    format!("call_{next_id:016x}")
+                                }
+                            };
+                            if tp.is_start {
+                                push!(ContextItem::ToolCall {
+                                    id: next_id,
+                                    call_id,
+                                    name: tp.tool.clone(),
+                                    arguments: tp.input.to_string(),
+                                    thought_signature: String::new(),
+                                    thinking_blocks: Vec::new(),
+                                });
+                            } else if let Some(output) = &tp.output {
+                                push!(ContextItem::ToolResult {
+                                    id: next_id,
+                                    call_id,
+                                    content: output.clone(),
+                                    useless: false,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    ContextManagerState {
+        items: items.into_iter().collect(),
+        next_id,
+        max_tokens: cosh::harness::context_manager::MAX_CONTEXT_TOKENS,
+        overflow_provider: None,
+        split: None,
+    }
+}
+
+/// Reconstruct the display `Message` list from the authoritative
+/// [`ContextItem`] log plus the display-only reasoning map. This is a
+/// display-only mapping: the context items are the source of truth for the
+/// model, and the display model is derived so the transcript always matches.
+/// Reasoning is rendered as a leading [`Part::Reasoning`] ("+ Thought") and is
+/// never part of the model-facing context.
+fn items_to_messages(items: &[ContextItem], reasoning: &HashMap<u64, String>) -> Vec<Message> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let id = format!("msg-{idx}");
+            let thought = reasoning.get(&context_item_id(item)).map(|text| {
+                Part::Reasoning(ReasoningPart {
+                    text: text.clone(),
+                    collapsed: true,
+                })
+            });
+            match item {
+                ContextItem::User { original, .. } => Message {
+                    id,
+                    role: MessageRole::User,
+                    parts: vec![Part::Text(TextPart {
+                        text: original.clone(),
+                        synthetic: false,
+                    })],
+                    created_at: 0,
+                    agent: None,
+                    model: None,
+                },
+                ContextItem::Assistant { original, .. }
+                | ContextItem::Closure { content: original, .. }
+                | ContextItem::Compaction {
+                    summary: original, ..
+                } => {
+                    let mut parts = Vec::with_capacity(2);
+                    if let Some(thought) = thought {
+                        parts.push(thought);
+                    }
+                    parts.push(Part::Text(TextPart {
+                        text: original.clone(),
+                        synthetic: false,
+                    }));
+                    Message {
+                        id,
+                        role: MessageRole::Assistant,
+                        parts,
+                        created_at: 0,
+                        agent: None,
+                        model: None,
+                    }
+                }
+                ContextItem::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                    ..
+                } => {
+                    let mut parts = Vec::with_capacity(2);
+                    if let Some(thought) = thought {
+                        parts.push(thought);
+                    }
+                    parts.push(Part::Tool(ToolPart {
+                        tool: name.clone(),
+                        input: serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null),
+                        output: None,
+                        status: ToolStatus::Completed,
+                        tool_call_id: Some(call_id.clone()),
+                        is_start: true,
+                        is_streaming: false,
+                        cached_line_count: None,
+                    }));
+                    Message {
+                        id,
+                        role: MessageRole::Assistant,
+                        parts,
+                        created_at: 0,
+                        agent: None,
+                        model: None,
+                    }
+                }
+                ContextItem::ToolResult {
+                    call_id, content, ..
+                } => Message {
+                    id,
+                    role: MessageRole::Assistant,
+                    parts: vec![Part::Tool(ToolPart {
+                        tool: String::new(),
+                        input: serde_json::Value::Null,
+                        output: Some(content.clone()),
+                        status: ToolStatus::Completed,
+                        tool_call_id: Some(call_id.clone()),
+                        is_start: false,
+                        is_streaming: false,
+                        cached_line_count: None,
+                    })],
+                    created_at: 0,
+                    agent: None,
+                    model: None,
+                },
+            }
+        })
+        .collect()
+}
+
+/// The stable id of a context item, used to key the display-only reasoning map.
+fn context_item_id(item: &ContextItem) -> u64 {
+    match item {
+        ContextItem::User { id, .. }
+        | ContextItem::Assistant { id, .. }
+        | ContextItem::ToolCall { id, .. }
+        | ContextItem::ToolResult { id, .. }
+        | ContextItem::Closure { id, .. }
+        | ContextItem::Compaction { id, .. } => *id,
+    }
+}
+
+/// Map the display `Session`'s reasoning blocks onto the context items they
+/// precede, producing item-id → reasoning-text pairs for the display-only
+/// reasoning line. The context items are NOT modified: reasoning is
+/// display-only and must never enter the model-facing context.
+///
+/// The mapping is positional — the k-th assistant "output" in the display
+/// (a tool start or a text part) corresponds to the k-th output item in the
+/// context (a `ToolCall`/`Assistant`/`Closure`). Reasoning blocks that sit
+/// immediately before an output attach to that output.
+fn collect_reasoning(session: &Session, context: &ContextManagerState) -> Vec<ReasoningEntry> {
+    // One reasoning slot per display output, in order.
+    let mut slots: Vec<Option<String>> = Vec::new();
+    let mut pending: Option<String> = None;
+    for msg in &session.messages {
+        if msg.role != MessageRole::Assistant {
+            // A user turn resets any dangling reasoning (it has nowhere to go).
+            pending = None;
+            continue;
+        }
+        for part in &msg.parts {
+            match part {
+                Part::Reasoning(r) => {
+                    pending.get_or_insert_with(String::new).push_str(&r.text);
+                }
+                Part::Tool(tp) if tp.is_start => slots.push(pending.take()),
+                Part::Text(t) if !t.synthetic && !t.text.is_empty() => slots.push(pending.take()),
+                _ => {}
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut slots = slots.into_iter();
+    for item in &context.items {
+        match item {
+            ContextItem::ToolCall { id, .. }
+            | ContextItem::Assistant { id, .. }
+            | ContextItem::Closure { id, .. } => {
+                if let Some(Some(text)) = slots.next() {
+                    result.push(ReasoningEntry { id: *id, text });
+                }
+            }
+            _ => {}
+        }
+    }
+    result
 }
 
 impl Default for SessionStore {
@@ -488,51 +904,6 @@ pub struct SessionSummary {
     /// Whether the title was generated by the LLM (true) or is a
     /// fallback timestamp (false).
     pub title_generated: bool,
-}
-
-// ── Stored message format ────────────────────────────────────────────────
-
-/// Serializable representation of a message for JSONL storage.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredMessage {
-    id: String,
-    role: String,
-    parts: Vec<Part>,
-    created_at: u64,
-    agent: Option<String>,
-    model: Option<String>,
-}
-
-impl From<&Message> for StoredMessage {
-    fn from(msg: &Message) -> Self {
-        Self {
-            id: msg.id.clone(),
-            role: match msg.role {
-                MessageRole::User => "user".to_string(),
-                MessageRole::Assistant => "assistant".to_string(),
-            },
-            parts: msg.parts.clone(),
-            created_at: msg.created_at,
-            agent: msg.agent.clone(),
-            model: msg.model.clone(),
-        }
-    }
-}
-
-impl StoredMessage {
-    fn into_message(self) -> Message {
-        Message {
-            id: self.id,
-            role: match self.role.as_str() {
-                "assistant" => MessageRole::Assistant,
-                _ => MessageRole::User,
-            },
-            parts: self.parts,
-            created_at: self.created_at,
-            agent: self.agent,
-            model: self.model,
-        }
-    }
 }
 
 // ── Public helpers ───────────────────────────────────────────────────────
@@ -687,6 +1058,32 @@ mod tests {
         }
     }
 
+    /// Build a context snapshot with the given items.
+    fn make_context(items: Vec<ContextItem>) -> ContextManagerState {
+        ContextManagerState {
+            items: items.into_iter().collect(),
+            next_id: 42,
+            max_tokens: 100_000,
+            overflow_provider: None,
+            split: None,
+        }
+    }
+
+    fn user_item(id: u64, text: &str) -> ContextItem {
+        ContextItem::User {
+            id,
+            original: text.to_string(),
+        }
+    }
+
+    fn assistant_item(id: u64, text: &str) -> ContextItem {
+        ContextItem::Assistant {
+            id,
+            original: text.to_string(),
+            closable: true,
+        }
+    }
+
     #[test]
     fn test_is_valid_session_empty() {
         let session = make_test_session("1", "Empty", vec![]);
@@ -746,7 +1143,7 @@ mod tests {
         // User msg + valid assistant + multiple errors after = dialog happened
         let session = make_test_session(
             "1",
-            "Multiple Errors After Dialog",
+            "Multiple Errors After",
             vec![
                 make_user_msg("msg-0", "Hello"),
                 make_assistant_msg("msg-1", "Let me help"),
@@ -763,17 +1160,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
-        let session = make_test_session(
-            "12345",
-            "Test Session",
-            vec![
-                make_user_msg("msg-0", "Hello!"),
-                make_assistant_msg("msg-1", "Hi there!"),
-            ],
-        );
+        let session = make_test_session("12345", "Test Session", vec![]);
+        let context = make_context(vec![
+            user_item(1, "Hello!"),
+            assistant_item(2, "Hi there!"),
+        ]);
 
-        store.save_session(&session);
+        store.save_session_with_context(&session, &context);
 
+        // Context round-trips verbatim.
+        let loaded = store.load_context("12345");
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().items.len(), 2);
+
+        // Display session is reconstructed from the items.
         let loaded = store.load_session("12345");
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
@@ -789,19 +1189,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
-        let mut session = make_test_session(
-            "12345",
-            "Model Session",
-            vec![
-                make_user_msg("msg-0", "Hello!"),
-                make_assistant_msg("msg-1", "Hi there!"),
-            ],
-        );
+        let mut session = make_test_session("12345", "Model Session", vec![]);
         session.provider = Some("nvidia".to_string());
         session.model = Some("deepseek-ai/deepseek-v4-pro".to_string());
         session.reasoning = Some("high".to_string());
 
-        store.save_session(&session);
+        store.save_session_with_context(&session, &make_context(vec![]));
 
         let loaded = store.load_session("12345").unwrap();
         // The recorded selection round-trips through the JSONL header.
@@ -828,29 +1221,210 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
-        let mut session = make_test_session(
-            "12346",
-            "Auto Session",
-            vec![
-                make_user_msg("msg-0", "Hello!"),
-                make_assistant_msg("msg-1", "Hi there!"),
-            ],
-        );
-        // The user explicitly picked `auto`; the last assistant message
-        // carries a concrete model id the fallback chain actually used.
+        let mut session = make_test_session("12346", "Auto Session", vec![]);
+        // The user explicitly picked `auto`.
         session.provider = None;
         session.model = Some("auto".to_string());
         session.reasoning = Some("low".to_string());
-        session.messages[1].model = Some("openai/gpt-oss-120b".to_string());
 
-        store.save_session(&session);
+        store.save_session_with_context(&session, &make_context(vec![]));
 
         let loaded = store.load_session("12346").unwrap();
-        // The recorded `auto` selection wins over deriving the concrete model
-        // from the last assistant message — no provider is pinned.
         assert_eq!(loaded.model.as_deref(), Some("auto"));
         assert_eq!(loaded.provider, None);
         assert_eq!(loaded.reasoning.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn test_save_session_preserves_existing_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let session = make_test_session("1000", "First", vec![]);
+        let context = make_context(vec![user_item(1, "Hello"), assistant_item(2, "Hi")]);
+        store.save_session_with_context(&session, &context);
+
+        // A display-only save (e.g. title rename) must not clobber the context.
+        let mut renamed = session.clone();
+        renamed.title = "Renamed".to_string();
+        store.save_session(&renamed);
+
+        let context = store.load_context("1000").unwrap();
+        assert_eq!(context.items.len(), 2);
+        let session = store.load_session("1000").unwrap();
+        assert_eq!(session.title, "Renamed");
+    }
+
+    #[test]
+    fn test_split_staging_persists_and_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let session = make_test_session("5000", "Split Session", vec![]);
+        let mut context = make_context(vec![
+            user_item(1, "Hello!"),
+            assistant_item(2, "Hi there!"),
+        ]);
+        // An in-progress split-and-concatenate must survive the JSONL round-trip
+        // verbatim, so an interrupted split resumes where it stopped.
+        context.split = Some(SplitState {
+            buffer: "## Objective\n- summarized so far".to_string(),
+            cursor: Some(2),
+            continuity: "tail of the last chunk".to_string(),
+            window: 100_000,
+            buffer_tokens: 1234,
+        });
+
+        store.save_session_with_context(&session, &context);
+
+        let loaded = store.load_context("5000").unwrap();
+        let split = loaded.split.expect("split staging was persisted");
+        assert_eq!(split.buffer, "## Objective\n- summarized so far");
+        assert_eq!(split.cursor, Some(2));
+        assert_eq!(split.continuity, "tail of the last chunk");
+        assert_eq!(split.window, 100_000);
+        assert_eq!(split.buffer_tokens, 1234);
+
+        // The staging is a distinct final line, so it never collides with an item.
+        let file = store.file_path("5000");
+        let contents = std::fs::read_to_string(&file).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert!(lines.last().unwrap().starts_with("{\"split\":"));
+    }
+
+    #[test]
+    fn test_reasoning_persists_for_display_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        // A live display session: the assistant turn streams a "+ Thought"
+        // block before its answer.
+        let mut session = make_test_session(
+            "6000",
+            "Reasoning Session",
+            vec![make_user_msg("msg-0", "Why is the sky blue?")],
+        );
+        session.messages.push(Message {
+            id: "msg-1".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                Part::Reasoning(ReasoningPart {
+                    text: "Rayleigh scattering...".to_string(),
+                    collapsed: true,
+                }),
+                Part::Text(TextPart {
+                    text: "Because of Rayleigh scattering.".to_string(),
+                    synthetic: false,
+                }),
+            ],
+            created_at: 2000,
+            agent: None,
+            model: None,
+        });
+
+        // The harness context carries NO reasoning — it is display-only.
+        let context = make_context(vec![
+            user_item(1, "Why is the sky blue?"),
+            assistant_item(2, "Because of Rayleigh scattering."),
+        ]);
+
+        store.save_session_with_context(&session, &context);
+
+        // The reasoning survives for display, attached to its answer.
+        let loaded = store.load_session("6000").unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        let parts = &loaded.messages[1].parts;
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], Part::Reasoning(r) if r.text == "Rayleigh scattering..."));
+        assert!(matches!(&parts[1], Part::Text(t) if t.text == "Because of Rayleigh scattering."));
+
+        // The reasoning line is written as a distinct final line, so it never
+        // enters the context the context manager loads.
+        let file = store.file_path("6000");
+        let contents = std::fs::read_to_string(&file).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert!(lines.last().unwrap().starts_with("{\"reasoning\":"));
+        assert!(lines.last().unwrap().contains("Rayleigh scattering"));
+    }
+
+    #[test]
+    fn test_reasoning_between_tool_calls_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        // Reasoning blocks interleaved with tool calls: R1 precedes the read
+        // call, R2 precedes the final answer.
+        let mut session = make_test_session(
+            "7000",
+            "Reasoning Tools",
+            vec![make_user_msg("msg-0", "Read the file")],
+        );
+        session.messages.push(Message {
+            id: "msg-1".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                Part::Reasoning(ReasoningPart {
+                    text: "I'll read the file first.".to_string(),
+                    collapsed: true,
+                }),
+                Part::Tool(ToolPart {
+                    tool: "read".to_string(),
+                    input: serde_json::json!({"path": "x"}),
+                    output: Some("contents".to_string()),
+                    status: ToolStatus::Completed,
+                    tool_call_id: None,
+                    is_start: true,
+                    is_streaming: false,
+                    cached_line_count: None,
+                }),
+                Part::Reasoning(ReasoningPart {
+                    text: "Now I can answer.".to_string(),
+                    collapsed: true,
+                }),
+                Part::Text(TextPart {
+                    text: "The file says contents.".to_string(),
+                    synthetic: false,
+                }),
+            ],
+            created_at: 2000,
+            agent: None,
+            model: None,
+        });
+
+        // Harness context: user, tool call, tool result, closure (no reasoning).
+        let context = make_context(vec![
+            user_item(1, "Read the file"),
+            ContextItem::ToolCall {
+                id: 2,
+                call_id: "call_1".to_string(),
+                name: "read".to_string(),
+                arguments: "{\"path\":\"x\"}".to_string(),
+                thought_signature: String::new(),
+                thinking_blocks: Vec::new(),
+            },
+            ContextItem::ToolResult {
+                id: 3,
+                call_id: "call_1".to_string(),
+                content: "contents".to_string(),
+                useless: false,
+            },
+            ContextItem::Closure {
+                id: 4,
+                content: "The file says contents.".to_string(),
+            },
+        ]);
+
+        store.save_session_with_context(&session, &context);
+
+        let loaded = store.load_session("7000").unwrap();
+        // Messages: user, tool-call (with R1), tool-result, closure (with R2).
+        assert_eq!(loaded.messages.len(), 4);
+        let call_parts = &loaded.messages[1].parts;
+        assert_eq!(call_parts.len(), 2);
+        assert!(matches!(&call_parts[0], Part::Reasoning(r) if r.text == "I'll read the file first."));
+        let answer_parts = &loaded.messages[3].parts;
+        assert_eq!(answer_parts.len(), 2);
+        assert!(matches!(&answer_parts[0], Part::Reasoning(r) if r.text == "Now I can answer."));
     }
 
     #[test]
@@ -858,25 +1432,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
-        let session1 = make_test_session(
-            "1000",
-            "First",
-            vec![
-                make_user_msg("msg-0", "Hi"),
-                make_assistant_msg("msg-1", "Hello"),
-            ],
-        );
-        let session2 = make_test_session(
-            "2000",
-            "Second",
-            vec![
-                make_user_msg("msg-0", "Hey"),
-                make_assistant_msg("msg-1", "Yo"),
-            ],
-        );
+        let session1 = make_test_session("1000", "First", vec![]);
+        let session2 = make_test_session("2000", "Second", vec![]);
 
-        store.save_session(&session1);
-        store.save_session(&session2);
+        store.save_session_with_context(&session1, &make_context(vec![user_item(1, "Hi")]));
+        store.save_session_with_context(&session2, &make_context(vec![user_item(1, "Hey")]));
 
         let list = store.list_sessions();
         assert_eq!(list.len(), 2);
@@ -885,47 +1445,17 @@ mod tests {
     }
 
     #[test]
-    fn test_ctx_roundtrip_and_delete() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(&dir);
-
-        // No companion file yet → load returns None.
-        assert!(store.load_ctx("12345").is_none());
-
-        // Save → load returns the exact bytes written.
-        let payload: &[u8] = b"bincode-encoded-context-state";
-        store.save_ctx("12345", payload);
-        assert_eq!(store.load_ctx("12345").as_deref(), Some(payload));
-
-        // Delete removes the companion file.
-        store.delete_ctx("12345");
-        assert!(store.load_ctx("12345").is_none());
-    }
-
-    #[test]
     fn test_delete_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
-        let session = make_test_session(
-            "12345",
-            "To Delete",
-            vec![
-                make_user_msg("msg-0", "Hello"),
-                make_assistant_msg("msg-1", "Hi"),
-            ],
-        );
-
-        store.save_session(&session);
-        store.save_ctx("12345", b"context-state");
+        let session = make_test_session("12345", "To Delete", vec![]);
+        store.save_session_with_context(&session, &make_context(vec![user_item(1, "Hello")]));
         assert!(store.has_session("12345"));
-        assert!(store.load_ctx("12345").is_some());
 
-        // Deleting the session must also remove its companion .ctx file — a
-        // stale .ctx would resurrect deleted context state on a future resume.
         store.delete_session("12345");
         assert!(!store.has_session("12345"));
-        assert!(store.load_ctx("12345").is_none());
+        assert!(store.load_context("12345").is_none());
     }
 
     #[test]
@@ -934,40 +1464,15 @@ mod tests {
         let store = test_store(&dir);
 
         for i in 0..(MAX_SESSIONS_ON_DISK + 5) {
-            let session = make_test_session(
-                &format!("{i:05}"),
-                &format!("Session {i}"),
-                vec![
-                    make_user_msg("msg-0", "Hello"),
-                    make_assistant_msg("msg-1", "Hi"),
-                ],
+            let session = make_test_session(&format!("{i:05}"), &format!("Session {i}"), vec![]);
+            store.save_session_with_context(
+                &session,
+                &make_context(vec![user_item(1, "Hello")]),
             );
-            store.save_session(&session);
-            store.save_ctx(&format!("{i:05}"), b"context-state");
         }
 
         let list = store.list_sessions();
         assert!(list.len() <= MAX_SESSIONS_ON_DISK);
-
-        // Every surviving session still has its companion .ctx, and the
-        // evicted ones lost both files — no orphaned .ctx can resurrect a
-        // session that was evicted from disk.
-        let survivor_ids: std::collections::HashSet<String> =
-            list.iter().map(|s| s.session_id.clone()).collect();
-        for i in 0..(MAX_SESSIONS_ON_DISK + 5) {
-            let id = format!("{i:05}");
-            if survivor_ids.contains(&id) {
-                assert!(
-                    store.load_ctx(&id).is_some(),
-                    "surviving session {id} keeps its .ctx"
-                );
-            } else {
-                assert!(
-                    store.load_ctx(&id).is_none(),
-                    "evicted session {id} lost its .ctx too"
-                );
-            }
-        }
     }
 
     #[test]
@@ -999,25 +1504,11 @@ mod tests {
         };
         std::fs::create_dir_all(base.join("projb")).ok();
 
-        let session_a = make_test_session(
-            "1000",
-            "Project A",
-            vec![
-                make_user_msg("msg-0", "Hi"),
-                make_assistant_msg("msg-1", "Hello"),
-            ],
-        );
-        store_a.save_session(&session_a);
+        let session_a = make_test_session("1000", "Project A", vec![]);
+        store_a.save_session_with_context(&session_a, &make_context(vec![user_item(1, "Hi")]));
 
-        let session_b = make_test_session(
-            "2000",
-            "Project B",
-            vec![
-                make_user_msg("msg-0", "Hey"),
-                make_assistant_msg("msg-1", "Yo"),
-            ],
-        );
-        store_b.save_session(&session_b);
+        let session_b = make_test_session("2000", "Project B", vec![]);
+        store_b.save_session_with_context(&session_b, &make_context(vec![user_item(1, "Yo")]));
 
         // Each store only sees its own sessions
         assert_eq!(store_a.list_sessions().len(), 1);
@@ -1036,16 +1527,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
-        let session = make_test_session(
-            "100",
-            "CWD Test",
-            vec![
-                make_user_msg("msg-0", "Hello"),
-                make_assistant_msg("msg-1", "Hi"),
-            ],
-        );
-
-        store.save_session(&session);
+        let session = make_test_session("100", "CWD Test", vec![]);
+        store.save_session_with_context(&session, &make_context(vec![]));
 
         // Load and check cwd was populated in the summary
         let list = store.list_sessions();

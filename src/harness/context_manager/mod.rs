@@ -2,18 +2,15 @@
 //!
 //! The [`ContextManager`] is the **single owner** of the whole conversation —
 //! user prompts, assistant outputs, tool calls and tool results — before it
-//! reaches the LLM. Fresh content is rendered verbatim; the TF-IDF → LSA →
-//! MMR compression pipeline runs **synchronously on the agent loop's thread**
-//! as the first phase of the 80% compaction ([`compression::init`]). There is
-//! no worker thread: no CPU is spent compressing anything unless the budget
-//! actually overflows, and the compressed copy is swapped in at the **same
-//! position** — a field update, so the message order is never reorganized.
+//! reaches the LLM. Fresh content is always rendered verbatim: there is no
+//! deterministic compression. The only compaction is the **LLM summarizer**
+//! (`resumir > apagar`): when the held context reaches 80% of the budget,
+//! [`Self::run`] returns [`RunOutcome::NeedsLlmCompaction`] and the harness
+//! drives the LLM compaction (see below).
 //!
-//! The most recent compressible assistant turn may be the agent loop's FINAL
-//! output, which must keep its original text: [`close_loop`](Self::close_loop)
-//! promotes the ORIGINAL text verbatim into a `LoopClosure` the moment the
-//! loop ends, so the final answer is always delivered in its original form
-//! even if a pipeline pass had already summarized the raw draft.
+//! The final text of a finished agent loop is promoted verbatim into a
+//! [`Closure`] by [`close_loop`](Self::close_loop), so the final answer is
+//! always delivered in its original form.
 //!
 //! [`build_messages`](Self::build_messages) renders the conversation as a
 //! provider-ready `Vec<ChatMessage>` with a **1:1 mapping** between items and
@@ -21,87 +18,24 @@
 //!
 //! # Compaction
 //!
-//! When the held context reaches 80% of the budget, the compaction runs. The
-//! funnel is **pipeline-first by construction**: phase 1 (the pipeline) always
-//! leads, and phase 2 (gradual draft eviction) only runs when the pipeline
-//! could not bring the total below the trigger. The [`LoopClosure`] is the
-//! shared progress checkpoint:
+//! The only automatic cleanup runs at the start of every [`run`](Self::run):
+//! the **useless tool-chain sweep** (results marked `useless` — e.g. a
+//! zero-match `find_grep`) drops dead weight as soon as the model has had one
+//! read of it, keeping the newest chain alive. When the total is still over
+//! the 80% trigger, [`Self::run`] returns [`RunOutcome::NeedsLlmCompaction`].
 //!
-//!   1. **The pipeline** (`pipeline_pass`) — the compression runs here,
-//!      synchronously, on the agent loop's thread. It compresses every
-//!      compressible assistant draft of the CURRENT segment (the drafts up to
-//!      the next [`LoopClosure`]): below the trigger at the segment boundary
-//!      → the pass is done; still over → the pass STOPS here (the parada por
-//!      segmento) and phase 2 takes over the same segment — the next
-//!      segment's drafts wait until the current one is exhausted;
-//!   2. **Gradual draft eviction** (`evict_drafts`) — removes one whole
-//!      assistant draft at a time, oldest-first, from a persistent cursor;
-//!      after each removal the budget is checked and the pass stops the
-//!      moment the total drops below 80%. The cursor resumes across
-//!      consecutive overflows and the pass yields at a [`LoopClosure`] — the
-//!      oldest segment's drafts are exhausted, and the funnel repeats into
-//!      the next segment (see below). The [`LoopClosure`] is the shared
-//!      CHECKPOINT of phases 1 and 2: both stop at it and continue after it.
-//!
-//! **User prompts, `LoopClosure`s, tool chains and previous compaction
-//! summaries are protected** from both deterministic phases — they are never
-//! prose-compressed, never evicted and never trimmed. The old anchor system
-//! (a verbatim "first prompt of the segment") is gone: every user input keeps
-//! its original text until the LLM compaction folds it into the general
-//! summary.
-//!
-//! Because the pipeline always leads and phase 2 is bounded by the segment
-//! frontier, eviction structurally never touches prose the pipeline could
-//! still summarize. The guarantee comes from this ORDER, not from an
-//! eligibility rule: if the pipeline breaks or times out on a draft, that
-//! draft stays raw but remains evictable, so the system degrades gracefully
-//! instead of deadlocking.
-//!
-//! The 1 → 2 alternation grinds through the drafts segment by segment INSIDE
-//! a single [`run`](Self::run) — "tudo se repete": when phase 2 exhausts a
-//! segment (reaching its closing [`LoopClosure`]) still over the trigger, the
-//! pipeline immediately takes the next segment, then phase 2 drains it, and
-//! so on until the total drops below 80% or every draft is gone. A **segment
-//! frontier** tracks the start of the current segment: phase 1 compresses it,
-//! phase 2 evicts it, and when phase 2 exhausts the segment's drafts the
-//! frontier advances past the closure. Phase 2 can never cross the frontier
-//! into a segment the pipeline has not processed. Across overflows, the
-//! persistent cursor keeps the drain granular — one chunk per stop when the
-//! budget allows — so the decoupling is spread over many dispatches.
-//! When **no draft remains** (nothing for the pipeline to compress, nothing
-//! for the draft pass to evict) and the total is still over the 80% trigger,
-//! the manager returns [`RunOutcome::NeedsLlmCompaction`]: the harness then
-//! runs the **LLM compaction** — the third level, OUTSIDE the toggle, a
-//! last-resort fallback (opencode-style). The entire remaining context
-//! (protected items included) is serialized and sent to the model, which
-//! produces a continuation summary that replaces the whole timeline in place.
-//! That is the only compaction that ever touches the protected items.
-//!
-//! A separate automatic cleanup, also outside the toggle, removes **useless
-//! tool chains** (results marked `useless` — e.g. a zero-match `find_grep`)
-//! at the start of every [`run`](Self::run): dead weight is dropped as soon
-//! as the model has had one read of it, keeping the newest chain alive.
-//!
-//! Two deliberate floors keep the total above the trigger in rare cases, by
-//! design: (1) the protected items (user prompts, closures, tool chains,
-//! compaction summaries) are never removed by the deterministic phases, so if
-//! they alone exceed the model window the total stays over budget until the
-//! LLM compaction runs — and if that call fails, the context simply stays
-//! over until it succeeds (the accepted fallback); (2) a segment whose drafts
-//! are exhausted still over the trigger hands the pipeline the next segment
-//! inside the same `run()` (the 1 → 2 grind repeats), so the alternation
-//! converges to the 80% trigger or to `NeedsLlmCompaction` within a single
-//! overflow.
-//!
-//! When the provider itself rejects the compaction because the serialized
-//! context exceeds ITS window (a `ContextWindowExceeded` error), the harness
-//! drains tool chains one at a time via [`Self::evict_tool_chain_for_overflow`]
-//! (never inputs, closures or summaries) and retries; once every chain is gone
-//! the overflow is recorded as stuck for that provider
-//! ([`Self::mark_overflow`]) and the user is notified through the TUI until
-//! they switch the model.
+//! The **LLM compaction** (the last-resort fallback, driven by the harness)
+//! serializes the entire remaining context — protected items included — into
+//! an opencode-style transcript and asks the model for a continuation summary
+//! that replaces the whole timeline in place. When the serialized context
+//! exceeds the provider's own window (a `ContextWindowExceeded` error), the
+//! harness drives the **split-and-concatenate contingency**: the timeline is
+//! summarized in sequential chunks and the concatenated summaries are
+//! committed atomically as the new single anchor. If the summary still cannot
+//! fit the model window, the overflow is recorded as stuck for that provider
+//! ([`Self::mark_overflow`]) and the user is notified until they switch the
+//! model or start a new session.
 
-pub mod compression;
 #[cfg(test)]
 mod test;
 pub mod todo_ctxt;
@@ -115,10 +49,7 @@ use cosh_sdk::connector::{
 use cosh_tools::plan::types::TodoList;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use text_splitter::TextSplitter;
 use todo_ctxt::TodoContext;
-
-use compression::init::{CHUNK_CAPACITY, init as deterministic_compress};
 
 /// Default token budget for the total conversation context. Overridable via
 /// [`ContextManager::new`].
@@ -127,44 +58,19 @@ pub const MAX_CONTEXT_TOKENS: usize = 100_000;
 /// Percentage of the budget at which the compaction runs.
 const COMPACT_PCT: usize = 80;
 
-/// Retention preview: when the context is under budget pressure and the
-/// drafts are exhausted, OLD tool results are trimmed to this many leading
-/// characters instead of holding every full output for the rest of the
-/// session (the growth that drives long-session OOMs). The item stays a valid
-/// `tool` message — only the content is shortened.
-const TOOL_RESULT_PREVIEW_CHARS: usize = 300;
-
-/// Prefix that marks an already-trimmed tool result, so a later overflow
-/// never re-trims it: the trimmed text stays bounded and stable across the
-/// repeated `run()` calls of a busy tool loop.
-const TOOL_RESULT_TRIM_MARKER: &str = "[trimmed, was ";
-
-/// TF-IDF maximum document frequency filter for deterministic compression.
-const TFIDF_MAX_DF: f64 = 0.8;
-
-/// MMR lambda balancing relevance and diversity for deterministic compression.
-const MMR_LAMBDA: f64 = 0.7;
-
-/// MMR compression ratio: keep roughly this fraction of the input chunks.
-const MMR_RATIO: f64 = 0.4;
-
-/// Maximum number of sentence-chunks per deterministic compression pass.
-/// Larger inputs are split into batches to bound the O(n²) SVD/MMR cost.
-const DETERMINISTIC_MAX_CHUNKS: usize = 200;
-
-// ── Split-and-concatenate (the known-window contingency) ────────────────
+// ── Split-and-concatenate (the context-window contingency) ──────────────
 //
-// When the ACTIVE model's window is KNOWN (discovery or a context-window
-// error that reports it) and the held context exceeds that window — the
-// model-switch-to-a-smaller-window scenario — the legacy chain drain cannot
-// help (protected items are never evicted). Instead the harness drives the
-// split-and-concatenate contingency: the timeline is summarized in
-// sequential chunks (whole items, historical order), each chunk's summary is
-// appended to a staging buffer, and — only when EVERYTHING has been
-// summarized — the buffer is committed atomically as the new single anchor
-// (exactly the end state of a normal LLM compaction). The timeline is never
-// touched until that final commit; a failure at any point aborts and
-// everything stays.
+// When the held context exceeds the model's window — the
+// model-switch-to-a-smaller-window scenario, or a provider error that
+// reports the window — the harness drives the split-and-concatenate
+// contingency: the timeline is summarized in sequential chunks (whole items,
+// historical order), each chunk's summary is appended to a staging buffer,
+// and — only when EVERYTHING has been summarized — the buffer is committed
+// atomically as the new single anchor (exactly the end state of a normal LLM
+// compaction). The timeline is never touched until that final commit; a
+// failure at any point aborts and everything stays. When the window is
+// UNKNOWN the split is still driven — sized against the current token budget
+// ([`ContextManager::max_tokens`]) as the best available estimate.
 
 /// The final anchor buffer must stay at or below this fraction of the model's
 /// window (the "ceiling" — the max capacity of the concatenation buffer).
@@ -195,8 +101,8 @@ const SPLIT_CALL_OVERHEAD: usize = 8000;
 // results), and cutting a payload the model may still need forces it to
 // re-read the source afterwards — spending more tokens on re-reading than
 // the truncation ever saved. The summary prompt is bounded by the model's
-// own window, and the existing overflow recovery drains tool chains if the
-// transcript ever exceeds it.
+// own window, and the split-and-concatenate contingency summarizes the whole
+// timeline in chunks when the transcript ever exceeds it.
 
 /// The summarization template the LLM compaction asks the model to fill
 /// (opencode's `SUMMARY_TEMPLATE`, kept as inspiration): a structured anchor
@@ -263,22 +169,22 @@ Rules:
 
 /// A single conversation item in display order. **One item = one message** in
 /// [`ContextManager::build_messages`], so message positions are preserved by
-/// construction and a compression swap is an in-place field update.
+/// construction. This is also the persisted representation: the JSONL session
+/// log holds one [`ContextItem`] per line (see `session_store`), so the
+/// timeline is restored verbatim from disk.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ContextItem {
-    /// A user prompt. **Protected**: it is never submitted to the compression
-    /// pipeline and never evicted by the draft pass — its original text stays
-    /// verbatim until the LLM compaction folds it into the general summary.
+    /// A user prompt. **Protected**: its original text stays verbatim until
+    /// the LLM compaction folds it into the general summary.
     User { id: u64, original: String },
     /// An assistant text output.
     Assistant {
         id: u64,
         original: String,
-        /// Filled in place when the pipeline returns the compressed copy.
-        compressed: Option<String>,
-        /// False when the output carried a tool call — the spec keeps such
-        /// outputs in the structural layer (never prose-compressed).
-        compressible: bool,
+        /// True when the output carried no tool call, so it may be promoted to
+        /// a [`ContextItem::Closure`] by [`ContextManager::close_loop`]. An
+        /// output that carried a tool call is structural (never closable).
+        closable: bool,
     },
     /// A tool CALL — structural, never prose-compressed. Renders as an
     /// `assistant` message with native `tool_calls`.
@@ -312,14 +218,12 @@ pub enum ContextItem {
         useless: bool,
     },
     /// The final text response of a completed agent loop. Replaces the raw
-    /// assistant text in place; protected from the deterministic phases. Also
-    /// marks the segment boundary for the pipeline and for the gradual draft
-    /// eviction (phase 2 yields here).
-    LoopClosure { id: u64, content: String },
-    /// The continuation summary produced by the LLM compaction (phase 3, the
+    /// assistant text in place.
+    Closure { id: u64, content: String },
+    /// The continuation summary produced by the LLM compaction (the
     /// last-resort fallback). Replaces the WHOLE timeline in place; renders as
-    /// an assistant message. Protected from the deterministic phases — the
-    /// next LLM compaction folds it into the new summary (update mode).
+    /// an assistant message. The next LLM compaction folds it into the new
+    /// summary (update mode).
     Compaction { id: u64, summary: String },
 }
 
@@ -330,7 +234,7 @@ impl ContextItem {
             | ContextItem::Assistant { id, .. }
             | ContextItem::ToolCall { id, .. }
             | ContextItem::ToolResult { id, .. }
-            | ContextItem::LoopClosure { id, .. }
+            | ContextItem::Closure { id, .. }
             | ContextItem::Compaction { id, .. } => *id,
         }
     }
@@ -341,11 +245,7 @@ impl ContextItem {
     fn tokens(&self, enc: TokenEncoding) -> usize {
         match self {
             ContextItem::User { original, .. } => enc.estimate(original),
-            ContextItem::Assistant {
-                original,
-                compressed,
-                ..
-            } => enc.estimate(compressed.as_deref().unwrap_or(original)),
+            ContextItem::Assistant { original, .. } => enc.estimate(original),
             ContextItem::ToolCall {
                 name,
                 arguments,
@@ -362,13 +262,9 @@ impl ContextItem {
                         .sum::<usize>()
             }
             ContextItem::ToolResult { content, .. } => enc.estimate(content),
-            ContextItem::LoopClosure { content, .. } => enc.estimate(content),
+            ContextItem::Closure { content, .. } => enc.estimate(content),
             ContextItem::Compaction { summary, .. } => enc.estimate(summary),
         }
-    }
-
-    fn is_loop(&self) -> bool {
-        matches!(self, ContextItem::LoopClosure { .. })
     }
 
     fn is_tool(&self) -> bool {
@@ -378,64 +274,22 @@ impl ContextItem {
         )
     }
 
-    /// True when this is a compressible assistant text output — the only kind
-    /// that may be promoted to a [`ContextItem::LoopClosure`] by
+    /// True when this is a closable assistant text output — the only kind that
+    /// may be promoted to a [`ContextItem::Closure`] by
     /// [`ContextManager::close_loop`]. An assistant output that carried a tool
     /// call is structural and can never be a summary of what was done.
     fn is_assistant(&self) -> bool {
         matches!(
             self,
             ContextItem::Assistant {
-                compressible: true,
+                closable: true,
                 ..
             }
         )
     }
 }
 
-// Deterministic compression (synchronous, same thread as the agent loop)
-
-/// Deterministic compression with batching, so a single pass can never stall
-/// the agent loop with an unbounded SVD/MMR pass.
-///
-/// The pipeline splits the input into sentence-level chunks and runs
-/// TF-IDF → LSA (full SVD) → MMR (O(n³)) over them. Without batching, a
-/// medium/large turn (a few thousand sentence-chunks) would run ONE pass over
-/// the whole text — seconds of work. Splitting into batches of at most
-/// [`DETERMINISTIC_MAX_CHUNKS`] sentences bounds every pass to the
-/// millisecond range. (Previously batching only kicked in above
-/// [`MAX_CONTEXT_TOKENS`] estimated tokens, leaving the medium range — the
-/// common case for a single chat turn — unbatched.)
-fn compress_text(text: &str) -> String {
-    let splitter = TextSplitter::new(CHUNK_CAPACITY);
-    let chunks: Vec<&str> = splitter.chunks(text).collect();
-    if chunks.len() <= DETERMINISTIC_MAX_CHUNKS {
-        // Small text: a single pass over the whole text — identical to the
-        // historical single-pass behavior.
-        return deterministic_compress(text, false, TFIDF_MAX_DF, MMR_LAMBDA, MMR_RATIO);
-    }
-    chunks
-        .chunks(DETERMINISTIC_MAX_CHUNKS)
-        .map(|batch| {
-            // TextSplitter strips boundary whitespace, so rejoin with a single
-            // space to avoid gluing the last word of one chunk to the first of
-            // the next.
-            let batch_text = batch.join(" ");
-            deterministic_compress(&batch_text, false, TFIDF_MAX_DF, MMR_LAMBDA, MMR_RATIO)
-        })
-        .collect::<Vec<String>>()
-        .join(" ")
-}
-
-/// Deterministic compression that can never panic. A panic in the
-/// TF-IDF → LSA → MMR pipeline (e.g. a degenerate SVD or a text-splitter edge
-/// case) must not crash the agent loop — the draft simply stays raw and the
-/// eviction phase remains the fallback.
-fn try_compress(text: &str) -> Option<String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compress_text(text))).ok()
-}
-
-// LLM compaction (phase 3 — the last-resort fallback, driven by the harness)
+// LLM compaction (the last-resort fallback, driven by the harness)
 
 /// Serialize one conversation item into the opencode-style transcript the
 /// LLM compaction sends to the model.
@@ -451,7 +305,7 @@ fn serialize_item(item: &ContextItem) -> String {
         // truncating a payload the model still needs forces it to re-read the
         // source.
         ContextItem::ToolResult { content, .. } => format!("[Tool result]: {content}"),
-        ContextItem::LoopClosure { content, .. } => format!("[Assistant]: {content}"),
+        ContextItem::Closure { content, .. } => format!("[Assistant]: {content}"),
         // The previous summary stays in the timeline (index 0 after
         // `apply_llm_summary`) — the update-mode instruction references it by
         // this exact label instead of embedding a second copy in the prompt.
@@ -479,28 +333,36 @@ fn build_llm_prompt(has_previous_summary: bool, context: &str) -> String {
     format!("{instruction}\n\n{SUMMARY_TEMPLATE}\n\n{context}")
 }
 
-/// Snapshot of context manager state for bincode persistence. The compression
-/// pipeline runs synchronously at the next 80% overflow, so nothing is
-/// in-flight between save and restore — the snapshot is a plain clone.
-///
-/// NOTE: bincode 1.x is positional — ADDING a field is a format break (an
-/// old snapshot fails the whole deserialization and the TUI falls back to the
-/// JSONL history; the accepted dev-stage tradeoff). `overflow_provider` was
-/// added with the context-window overflow recovery, and `split` with the
-/// split-and-concatenate contingency.
-#[derive(Serialize, Deserialize)]
+/// Snapshot of context manager state for JSON persistence (the session JSONL
+/// log). Nothing is in-flight between save and restore — the snapshot is a
+/// plain clone. `overflow_provider` records the stuck context-window overflow,
+/// and `split` the staging of an in-progress split-and-concatenate.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextManagerState {
     pub items: VecDeque<ContextItem>,
     pub next_id: u64,
     pub max_tokens: usize,
-    /// The provider whose context window overflowed the LLM compaction with
-    /// every tool chain drained. While set (same provider), the harness skips
-    /// the doomed summarizer call and only re-notifies — until the user
-    /// switches the model. `None` = no known stuck overflow.
+    /// The provider whose context window overflowed the LLM compaction and
+    /// could not be relieved by the split. While set (same provider), the
+    /// harness skips the doomed summarizer call and only re-notifies — until
+    /// the user switches the model or starts a new session. `None` = no known
+    /// stuck overflow.
     pub overflow_provider: Option<String>,
     /// Staging of an in-progress split-and-concatenate, so an interrupted
     /// split resumes exactly where it stopped.
     pub split: Option<SplitState>,
+}
+
+impl Default for ContextManagerState {
+    fn default() -> Self {
+        Self {
+            items: VecDeque::new(),
+            next_id: 1,
+            max_tokens: MAX_CONTEXT_TOKENS,
+            overflow_provider: None,
+            split: None,
+        }
+    }
 }
 
 /// Snapshot of context manager state for TUI display: the budget percentage
@@ -515,33 +377,14 @@ pub struct ContextDisplayInfo {
     pub max_tokens: usize,
 }
 
-/// A compaction-phase notification emitted while [`ContextManager::run`]
-/// executes, so the caller (the TUI) can show live feedback in the chat: a
-/// stopwatch for the pipeline (phase 1 — the only deterministic phase slow
-/// enough to block the agent loop) and one line per draft pass that actually
-/// did work. The LLM compaction (phase 3) is driven by the harness, not by
-/// `run`, so its start/finish are delivered as a separate
-/// [`HarnessEvent::LlmCompaction`](crate::harness::HarnessEvent).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompactionEvent {
-    /// Phase 1 (the pipeline) is about to compress drafts — the TUI starts
-    /// the stopwatch. Only emitted when there is real work.
-    PipelineStarted,
-    /// Phase 1 finished compressing — the TUI stops the stopwatch.
-    PipelineFinished,
-    /// Phase 2 (gradual draft eviction) removed at least one chunk.
-    DraftsEvicted,
-}
-
-/// Outcome of [`ContextManager::run`]: whether the deterministic phases
-/// resolved the overflow, or the harness must run the LLM compaction.
+/// Outcome of [`ContextManager::run`]: whether the context is within budget,
+/// or the harness must run the LLM compaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunOutcome {
-    /// The total dropped below the 80% trigger — nothing else to do.
+    /// The total is below the 80% trigger — nothing else to do.
     Resolved,
-    /// Phases 1-2 exhausted every draft and the total is still over the
-    /// trigger: the harness must run the LLM compaction (phase 3, the
-    /// last-resort fallback, outside the toggle).
+    /// The total is over the trigger: the harness must run the LLM
+    /// compaction (the last-resort fallback).
     NeedsLlmCompaction,
 }
 
@@ -690,41 +533,15 @@ pub struct SplitChunkRequest {
     pub chunk_end: Option<u64>,
 }
 
-/// Orchestrates the synchronous TF-IDF → LSA → MMR compression of the whole
-/// conversation, the in-place swaps, the 80% pipeline-first funnel (pipeline
-/// → gradual draft eviction), the useless tool-chain sweep, and the
-/// `LoopClosure` promotion of each finished agent loop. The LLM compaction
-/// (phase 3) is requested via [`RunOutcome::NeedsLlmCompaction`] and applied
-/// by the harness through [`Self::apply_llm_summary`].
+/// Orchestrates the single-owner conversation timeline: the useless tool-chain
+/// sweep, the `Closure` promotion of each finished agent loop, and the 80%
+/// budget trigger. The LLM compaction is requested via
+/// [`RunOutcome::NeedsLlmCompaction`] and applied by the harness through
+/// [`Self::apply_llm_summary`].
 pub struct ContextManager {
     /// Conversation items in display order (oldest first). One item = one
     /// message; positions are stable.
     items: VecDeque<ContextItem>,
-    /// Persistent position of the gradual draft eviction (phase 2): the id of
-    /// the NEXT item to consider. `None` means the walk starts at the
-    /// beginning of the timeline. The eviction removes one whole chunk per
-    /// stop and parks this cursor, so the next budget overflow resumes exactly
-    /// where this one stopped. Scheduling bias only — not persisted; a
-    /// restored manager simply starts over.
-    draft_cursor: Option<u64>,
-    /// Segment frontier: the id of the FIRST item of the current segment —
-    /// the segment phases 1 and 2 are working on. `None` means the frontier
-    /// is at the start of the timeline. Phase 1 compresses the segment, phase
-    /// 2 evicts it, and when phase 2 exhausts the segment's drafts (reaching
-    /// its closing [`LoopClosure`]) the frontier advances past the closure —
-    /// the funnel then repeats (tudo se repete) so the pipeline takes the
-    /// next segment in the same `run()`. Phase 2 can never cross the frontier
-    /// into a segment the pipeline has not processed, so
-    /// eviction structurally never touches unsummarized prose. Scheduling
-    /// bias only — not persisted; a restored manager starts over.
-    segment_start: Option<u64>,
-    /// Live compaction notifications for the TUI: called synchronously while
-    /// [`Self::run`] executes so the caller can show the pipeline stopwatch
-    /// and one line per phase that actually did work. Scheduling-only — not
-    /// part of the snapshot; the harness wires it per agent loop via
-    /// [`Self::set_compaction_observer`]. `Send` so a [`Harness`] holding the
-    /// manager stays movable into a tokio task.
-    compaction_observer: Option<Box<dyn FnMut(CompactionEvent) + Send>>,
     /// Monotonic id counter for items/jobs.
     next_id: u64,
     /// Token budget before the 80% compaction trigger.
@@ -733,41 +550,37 @@ pub struct ContextManager {
     /// [`Self::set_model`]). Defaults to [`TokenEncoding::Cl100k`] — the
     /// generic cross-provider estimate.
     encoding: TokenEncoding,
-    /// The provider whose context window overflowed the LLM compaction with
-    /// every tool chain drained (see [`Self::overflow_stuck`]). Persisted with
-    /// the snapshot so a stuck session stays notified across turns until the
-    /// user switches the model.
+    /// The provider whose context window overflowed the LLM compaction and
+    /// could not be relieved by the split (see [`Self::overflow_stuck`]).
+    /// Persisted with the snapshot so a stuck session stays notified across
+    /// turns until the user switches the model or starts a new session.
     overflow_provider: Option<String>,
-    /// Persistent staging of the split-and-concatenate contingency (the
-    /// known-window model-switch path). The timeline is untouched while it is
-    /// `Some`; the buffer is committed atomically by [`Self::commit_split`].
-    /// Persisted with the snapshot so an interrupted split resumes exactly
-    /// where it stopped.
+    /// Persistent staging of the split-and-concatenate contingency. The
+    /// timeline is untouched while it is `Some`; the buffer is committed
+    /// atomically by [`Self::commit_split`]. Persisted with the snapshot so an
+    /// interrupted split resumes exactly where it stopped.
     split: Option<SplitState>,
     /// The dedicated protected TODO block: mirrors the tools' `Plan` list and
     /// renders it as a protected `user` message at the FRONT of the messages.
-    /// Never compressed, evicted, drained or summarized — see [`todo_ctxt`]
-    /// for the protection and removal rules.
+    /// Never summarized — see [`todo_ctxt`] for the protection and removal
+    /// rules.
     todo: TodoContext,
     /// Running token total of `items` (excluding the TODO block), kept in sync
     /// incrementally by every mutation so `total_tokens()` is O(1) instead of
-    /// re-tokenizing every item through tiktoken on each call (~33ms at 1300+
-    /// items). Rebuilt wholesale on restore and on encoding change.
+    /// re-tokenizing every item through tiktoken on each call. Rebuilt
+    /// wholesale on restore and on encoding change.
     cached_items_tokens: usize,
     /// Per-item estimated token cost (`id -> tokens`), kept in sync with
-    /// `cached_items_tokens`. Lets an in-place edit (compression, tool-result
-    /// trim) read the OLD cost of the edited item without re-tokenizing the
-    /// whole timeline — the cost of the removed half of a big tool result was
-    /// proportional to the FULL content (~1ms for a ~2k-token result), the
-    /// dominant term of the `run()` compaction pass. Rebuilt wholesale on
-    /// restore and on encoding change.
+    /// `cached_items_tokens`. Lets an in-place edit read the OLD cost of the
+    /// edited item without re-tokenizing the whole timeline. Rebuilt wholesale
+    /// on restore and on encoding change.
     item_tokens: HashMap<u64, usize>,
     /// Manual-compaction mode (`/compact`): while set, [`Self::trigger`]
-    /// returns zero so the deterministic funnel in [`Self::run`] grinds
-    /// EVERY segment (not just up to the 80% trigger) before handing off to
-    /// phase 3. Scheduling-only — never persisted; a restored manager is
-    /// never left mid-manual because the harness brackets the whole manual
-    /// pass with `begin_manual_compaction`/`end_manual_compaction`.
+    /// returns zero so [`Self::run`] hands off to the LLM summary regardless
+    /// of how much budget is free. Scheduling-only — never persisted; a
+    /// restored manager is never left mid-manual because the harness brackets
+    /// the whole manual pass with
+    /// `begin_manual_compaction`/`end_manual_compaction`.
     manual_compaction: bool,
 }
 
@@ -786,9 +599,6 @@ impl ContextManager {
     pub fn new(max_tokens: usize) -> Self {
         Self {
             items: VecDeque::new(),
-            draft_cursor: None,
-            segment_start: None,
-            compaction_observer: None,
             next_id: 1,
             max_tokens,
             encoding: TokenEncoding::Cl100k,
@@ -829,20 +639,6 @@ impl ContextManager {
             .unwrap_or(MAX_CONTEXT_TOKENS);
 
         Self::new(max_tokens)
-    }
-
-    /// Route compaction-phase notifications to `f`, called synchronously
-    /// while [`Self::run`] executes (the TUI uses this to show the pipeline
-    /// stopwatch and the per-phase lines live in the chat). Replaces any
-    /// previous observer.
-    pub fn set_compaction_observer(&mut self, f: impl FnMut(CompactionEvent) + Send + 'static) {
-        self.compaction_observer = Some(Box::new(f));
-    }
-
-    fn emit(&mut self, event: CompactionEvent) {
-        if let Some(f) = self.compaction_observer.as_mut() {
-            f(event);
-        }
     }
 
     /// Set the active model so token counts are estimated with the closest
@@ -890,9 +686,8 @@ impl ContextManager {
 
     // Ingestion
 
-    /// Add a user prompt. Protected by construction: it is never compressed
-    /// and never evicted — its original text stays verbatim until the LLM
-    /// compaction (phase 3) folds it into the general summary.
+    /// Add a user prompt. Protected by construction: its original text stays
+    /// verbatim until the LLM compaction folds it into the general summary.
     pub fn add_user(&mut self, text: &str) {
         let id = self.next_id();
         self.push_item(ContextItem::User {
@@ -901,26 +696,21 @@ impl ContextManager {
         });
     }
 
-    /// Add an assistant text output. When `compressible` is true the raw text
-    /// is rendered in place until the pipeline (phase 1 of the compaction)
-    /// summarizes it — synchronously, at the next 80% overflow. When false
-    /// (the output carried a tool call) it stays structural and is never
-    /// submitted to the compressor; either kind is a removable draft for the
-    /// eviction pass.
+    /// Add an assistant text output. When `closable` is true the text is a
+    /// pure-text turn (no tool call) and may be promoted to a [`Closure`] by
+    /// [`Self::close_loop`]. When false (the output carried a tool call) it
+    /// stays structural.
     ///
     /// The FINAL output of a loop needs no special casing here: the harness
     /// calls [`Self::close_loop`] the moment the loop ends, promoting the
-    /// ORIGINAL text verbatim into a `LoopClosure` — even if a pipeline pass
-    /// had already summarized the raw draft, the delivered final answer is
-    /// always the original text. A turn the loop provably advances past is
-    /// fair game for the pipeline.
-    pub fn add_assistant(&mut self, text: &str, compressible: bool) {
+    /// ORIGINAL text verbatim into a `Closure`, so the delivered final answer
+    /// is always the original text.
+    pub fn add_assistant(&mut self, text: &str, closable: bool) {
         let id = self.next_id();
         self.push_item(ContextItem::Assistant {
             id,
             original: text.to_string(),
-            compressed: None,
-            compressible,
+            closable,
         });
     }
 
@@ -998,12 +788,11 @@ impl ContextManager {
 
     /// Drop ABANDONED input turns: when the timeline ends with two or more
     /// consecutive `User` turns with NO output between them (assistant text,
-    /// tool work, LoopClosure or summary), every turn but the newest is an
-    /// input the user gave up on — the run ended without the LLM producing
-    /// anything (typically cancelled with Esc), and a new input followed.
-    /// Each older turn of the run is removed, so the model only ever sees the
-    /// newest input. A turn that produced ANY output after it is never
-    /// touched.
+    /// tool work, Closure or summary), every turn but the newest is an input
+    /// the user gave up on — the run ended without the LLM producing anything
+    /// (typically cancelled with Esc), and a new input followed. Each older
+    /// turn of the run is removed, so the model only ever sees the newest
+    /// input. A turn that produced ANY output after it is never touched.
     ///
     /// Called by the harness at loop start right after the fresh input is
     /// added, so an abandoned prompt never survives into the request.
@@ -1036,22 +825,17 @@ impl ContextManager {
             self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
         }
         self.items.drain(start..end);
-        // Scheduling bias only — the removed tail may hold the draft cursor
-        // and the segment frontier; reset them so the next overflow starts
-        // fresh.
-        self.draft_cursor = None;
-        self.segment_start = None;
         true
     }
 
     /// Promote the last assistant text output of the finished agent loop into a
-    /// [`ContextItem::LoopClosure`], replacing the raw text in place. Guard: if
+    /// [`ContextItem::Closure`], replacing the raw text in place. Guard: if
     /// the last item is not an assistant text (e.g. it was a tool call), it
-    /// cannot be a summary of what was done, so no `LoopClosure` is created.
+    /// cannot be a summary of what was done, so no `Closure` is created.
     ///
     /// The harness has now told us this turn was the loop's FINAL output: the
     /// ORIGINAL text is promoted verbatim, so the final answer is never
-    /// compressed.
+    /// summarized away.
     pub fn close_loop(&mut self) {
         let Some(last) = self.items.back() else {
             return;
@@ -1059,11 +843,9 @@ impl ContextManager {
         if !last.is_assistant() {
             return;
         }
-        // Capture the draft's CURRENT token cost before the pop — if the
-        // pipeline already compressed it, that is the compressed cost (which
-        // the per-item cache holds); the LoopClosure then renders the
-        // original text, so the cache must move from draft-cost to
-        // closure-cost. Read from the cache — never re-tokenize the draft.
+        // Capture the draft's current token cost before the pop, so the cache
+        // moves from the draft cost to the closure cost. Read from the cache —
+        // never re-tokenize the draft.
         let draft_id = self.items.back().unwrap().id();
         let draft_tokens = self
             .item_tokens
@@ -1073,239 +855,42 @@ impl ContextManager {
             return;
         };
         self.cached_items_tokens = self.cached_items_tokens.saturating_sub(draft_tokens);
-        self.push_item(ContextItem::LoopClosure {
+        self.push_item(ContextItem::Closure {
             id,
             content: original,
         });
     }
 
-    /// The final text of a completed agent loop: the `LoopClosure` content
-    /// of the last item, set by [`Self::close_loop`]. `None` when the loop
-    /// was not closed or the last item is not the loop closure (e.g. the
-    /// last turn ended in a tool call).
+    /// The final text of a completed agent loop: the `Closure` content of the
+    /// last item, set by [`Self::close_loop`]. `None` when the loop was not
+    /// closed or the last item is not the closure (e.g. the last turn ended in
+    /// a tool call).
     #[must_use]
     pub fn final_answer(&self) -> Option<String> {
         match self.items.back() {
-            Some(ContextItem::LoopClosure { content, .. }) => Some(content.clone()),
+            Some(ContextItem::Closure { content, .. }) => Some(content.clone()),
             _ => None,
         }
     }
 
     // Compaction
 
-    /// Per-iteration tick: run the 80% compaction when the held context
-    /// reaches the trigger.
+    /// Per-iteration tick: drop useless tool chains, then check the 80%
+    /// budget trigger.
     ///
-    /// The funnel is **pipeline-first by construction** — phase 1 (the
-    /// pipeline) ALWAYS leads, and phase 2 (gradual draft eviction) only runs
-    /// when the pipeline could not bring the total below the 80% trigger:
-    ///
-    ///   1. **The pipeline** — compresses the CURRENT segment's compressible
-    ///      assistant drafts synchronously on the agent loop's thread; at the
-    ///      segment's closing [`LoopClosure`], below the trigger → done, still
-    ///      over → the pass STOPS here (parada por segmento) and phase 2
-    ///      takes over the same segment;
-    ///   2. **Draft eviction** — one whole assistant draft at a time from a
-    ///      persistent cursor, stopping the moment the total drops below 80%.
-    ///      When the segment's drafts are exhausted (the pass reaches the
-    ///      closing [`LoopClosure`]), the **segment frontier** advances past
-    ///      the closure and the funnel repeats inside the same call — the
-    ///      pipeline takes the next segment (tudo se repete).
-    ///
-    /// Because the pipeline always runs FIRST and phase 2 is bounded by the
-    /// segment frontier, eviction structurally never touches prose the
-    /// pipeline could still summarize. This invariant comes from the ORDER,
-    /// not from an eligibility rule: if the pipeline breaks or times out on a
-    /// draft, that draft stays raw but remains evictable, so the system
-    /// degrades instead of deadlocking.
-    ///
-    /// User prompts, `LoopClosure`s, tool chains and compaction summaries are
-    /// protected from both phases. When the alternation exhausts every draft
-    /// and the total is still over the trigger, the manager returns
-    /// [`RunOutcome::NeedsLlmCompaction`] — the harness then runs the LLM
-    /// compaction (phase 3, the last-resort fallback, outside the toggle) and
-    /// applies the summary via [`Self::apply_llm_summary`].
-    ///
-    /// Before anything else, the **useless tool-chain sweep** runs (outside
-    /// the toggle, regardless of the budget): chains whose result is marked
-    /// `useless` are dropped automatically, keeping the newest chain alive.
-    ///
-    /// Phases 1-2 aim for the 80% trigger (minimum decompaction): a pass ends
-    /// just under the ceiling, so in a busy tool loop the next `run()` — called
-    /// after every dispatch — re-triggers with a minimal removal each time.
-    /// That is the intended rolling eviction, not a bug.
+    /// The **useless tool-chain sweep** runs first (regardless of the budget):
+    /// chains whose result is marked `useless` are dropped automatically,
+    /// keeping the newest chain alive. Then, when the total is still at or
+    /// over the trigger, the manager returns [`RunOutcome::NeedsLlmCompaction`]
+    /// — the harness runs the LLM compaction and applies the summary via
+    /// [`Self::apply_llm_summary`].
     pub fn run(&mut self) -> RunOutcome {
-        // Pre-phase (outside the toggle): drop useless tool chains — dead
-        // weight cleaned automatically, even under the budget.
         self.sweep_useless_chains();
         if self.total_tokens() < self.trigger() {
-            return RunOutcome::Resolved;
+            RunOutcome::Resolved
+        } else {
+            RunOutcome::NeedsLlmCompaction
         }
-        // Segment-by-segment grind ("tudo se repete"): phase 1 ALWAYS leads
-        // for the current segment; phase 2 drains it when the pipeline could
-        // not resolve. When phase 2 exhausts the segment (the frontier
-        // advances past its closing LoopClosure) and the total is still over
-        // the trigger, the cycle REPEATS inside this same call — the
-        // pipeline takes the next segment immediately — until the total
-        // drops below the trigger or every draft is gone. Each iteration
-        // advances the frontier past at least one segment (or reaches the
-        // end of the timeline, where removing every draft implies
-        // `drafts_exhausted`), so the loop terminates.
-        loop {
-            // Phase 1 ALWAYS leads. It compresses the CURRENT segment's
-            // drafts and stops at the segment's closing LoopClosure (parada
-            // por segmento); resolving here is the minimum decompaction.
-            if self.pipeline_pass() {
-                return RunOutcome::Resolved;
-            }
-            // Only when the pipeline could not bring the total below the
-            // trigger does phase 2 run — bounded by the segment frontier, so
-            // everything it can remove has already been through the pipeline
-            // (or is structural / failed to compress). Eviction never removes
-            // prose the pipeline could still summarize: the invariant is
-            // guaranteed by this ORDER, not by an eligibility rule, so a
-            // broken or timed-out pipeline degrades gracefully (the raw
-            // draft remains evictable) instead of deadlocking the context.
-            if self.evict_drafts() {
-                return RunOutcome::Resolved;
-            }
-            // Retention (context-window-aware): before the LLM compaction,
-            // trim the CONTENT of old tool results in place — the tool-chain
-            // contract stays intact and the long-session memory growth is
-            // bounded even when no draft can be compressed or evicted.
-            if self.trim_stale_tool_results() {
-                return RunOutcome::Resolved;
-            }
-            // Both phases ran and the total is still over the trigger. The
-            // deterministic grind is only exhausted when no draft remains —
-            // then the LLM compaction is the only way down (phase 3, last
-            // resort, outside the toggle). Otherwise phase 2 exhausted the
-            // current segment (the frontier advanced) — loop and let the
-            // pipeline take the next segment.
-            if self.drafts_exhausted() {
-                return RunOutcome::NeedsLlmCompaction;
-            }
-        }
-    }
-
-    /// Phase 1 of the compaction: the compression pipeline, now synchronous.
-    ///
-    /// Compresses every compressible assistant draft of the CURRENT segment —
-    /// the drafts from the segment frontier up to the next
-    /// [`ContextItem::LoopClosure`]. At the segment boundary the budget is
-    /// checked: below the 80% trigger → the pass is done; still over → the
-    /// pass STOPS here (parada por segmento) and phase 2 takes over the same
-    /// segment — the next segment's drafts wait until the current one is
-    /// exhausted. A segment's drafts are compressed as a coherent block, so
-    /// the model sees a consistent (compressed) view of each completed loop
-    /// instead of a mixed raw/summary mix.
-    ///
-    /// User prompts are never candidates (they are protected) — only
-    /// compressible assistant texts.
-    ///
-    /// Returns `true` when the total dropped below the trigger (the funnel
-    /// stops here); `false` when the segment is fully compressed and the
-    /// total is still over the trigger — the funnel falls through to the
-    /// draft pass for the same segment.
-    ///
-    /// Runs on the agent loop's thread — there is no worker thread anymore.
-    fn pipeline_pass(&mut self) -> bool {
-        let trigger = self.trigger();
-        let mut total = self.total_tokens();
-        if total < trigger {
-            return true;
-        }
-        // Walk from the segment frontier (the current segment's start).
-        let mut idx = self.segment_start_idx();
-        // Only report the pass when the CURRENT segment holds at least one
-        // compressible draft — an empty pass is instant and invisible to the
-        // user, so it must not surface a stopwatch line.
-        let has_work = self
-            .items
-            .iter()
-            .skip(idx)
-            .take_while(|it| !it.is_loop())
-            .any(|it| {
-                matches!(
-                    it,
-                    ContextItem::Assistant {
-                        compressible: true,
-                        compressed: None,
-                        ..
-                    }
-                )
-            });
-        if has_work {
-            self.emit(CompactionEvent::PipelineStarted);
-        }
-        // No compressible draft in the current segment: the walk below could
-        // not change the total, and `run` only calls this over the trigger —
-        // skip the O(n) walk entirely (pipeline-first runs this phase on every
-        // overflow).
-        if !has_work {
-            return false;
-        }
-        while idx < self.items.len() {
-            if self.items[idx].is_loop() {
-                // Segment boundary (parada por segmento): the segment's drafts
-                // are fully compressed. Below the trigger → done; still over →
-                // STOP here and hand the SAME segment to phase 2 — the next
-                // segment's drafts wait until the current one is exhausted.
-                if has_work {
-                    self.emit(CompactionEvent::PipelineFinished);
-                }
-                return total < trigger;
-            }
-            let eligible = matches!(
-                &self.items[idx],
-                ContextItem::Assistant {
-                    compressible: true,
-                    compressed: None,
-                    ..
-                }
-            );
-            if !eligible {
-                idx += 1;
-                continue;
-            }
-            // Snapshot the job first (releases the borrow before mutating).
-            let original = match &self.items[idx] {
-                ContextItem::Assistant { original, .. } => original.clone(),
-                _ => unreachable!(),
-            };
-            let Some(compressed) = try_compress(&original) else {
-                // Degrade: keep the draft raw — the eviction pass still
-                // applies.
-                idx += 1;
-                continue;
-            };
-            // Read the draft's OLD cost from the per-item cache (its original
-            // text may be large — re-tokenizing it here would re-pay the
-            // whole draft); only the compressed copy is tokenized.
-            let draft_id = self.items[idx].id();
-            let old_tokens = self
-                .item_tokens
-                .get(&draft_id)
-                .copied()
-                .unwrap_or_else(|| self.items[idx].tokens(self.encoding));
-            match &mut self.items[idx] {
-                ContextItem::Assistant { compressed: c, .. } => *c = Some(compressed),
-                _ => unreachable!(),
-            }
-            let new_tokens = self.items[idx].tokens(self.encoding);
-            self.item_tokens.insert(draft_id, new_tokens);
-            total = total.saturating_sub(old_tokens).saturating_add(new_tokens);
-            self.cached_items_tokens = self
-                .cached_items_tokens
-                .saturating_sub(old_tokens)
-                .saturating_add(new_tokens);
-            idx += 1;
-        }
-        // End of the timeline — still over the trigger → not resolved.
-        if has_work {
-            self.emit(CompactionEvent::PipelineFinished);
-        }
-        total < trigger
     }
 
     /// Automatic dead-weight cleanup, OUTSIDE the toggle: remove every tool
@@ -1364,209 +949,9 @@ impl ContextManager {
         }
     }
 
-    /// Retention under budget pressure: trim the CONTENT of old tool results
-    /// to a short preview instead of holding every full tool output for the
-    /// rest of the session (the growth that drives long-session OOMs).
-    ///
-    /// Contract-safe by construction: the item stays a `tool` message with its
-    /// `call_id` — only the content is shortened, so the native
-    /// `tool_call → tool` pairing the providers require never breaks. The
-    /// NEWEST chain is left intact (the model has not read that result yet);
-    /// older results are trimmed in one pass.
-    ///
-    /// Idempotent: an already-trimmed result is skipped, so a later overflow
-    /// costs one cheap scan and never re-mangles the text.
-    ///
-    /// Returns `true` when the trim brought the total below the 80% trigger.
-    fn trim_stale_tool_results(&mut self) -> bool {
-        if self.total_tokens() < self.trigger() {
-            return true;
-        }
-        // The newest chain (the one the model has not seen yet) is preserved:
-        // its CALL id is the chain identity, so its result stays full.
-        let newest_call_id: Option<String> =
-            self.items
-                .iter()
-                .rev()
-                .find(|it| it.is_tool())
-                .and_then(|it| match it {
-                    ContextItem::ToolCall { call_id, .. }
-                    | ContextItem::ToolResult { call_id, .. } => Some(call_id.clone()),
-                    _ => None,
-                });
-        let mut trimmed = false;
-        for it in self.items.iter_mut() {
-            let item_id = it.id();
-            if let ContextItem::ToolResult {
-                call_id, content, ..
-            } = it
-            {
-                if newest_call_id.as_deref() == Some(call_id.as_str()) {
-                    continue;
-                }
-                if content.starts_with(TOOL_RESULT_TRIM_MARKER) {
-                    continue;
-                }
-                if content.len() <= TOOL_RESULT_PREVIEW_CHARS {
-                    continue;
-                }
-                // Read the OLD cost from the per-item cache instead of
-                // re-tokenizing the FULL content (a ~2k-token result costs
-                // ~1ms per estimate — the dominant term of the whole pass
-                // when the timeline holds many large results). Only the
-                // small preview is tokenized.
-                let old_tokens = self
-                    .item_tokens
-                    .get(&item_id)
-                    .copied()
-                    .unwrap_or_else(|| self.encoding.estimate(content));
-                let prefix: String = content.chars().take(TOOL_RESULT_PREVIEW_CHARS).collect();
-                let saved = content.len() - prefix.len();
-                *content = format!("{TOOL_RESULT_TRIM_MARKER}{saved} chars] {prefix}");
-                let new_tokens = self.encoding.estimate(content);
-                self.item_tokens.insert(item_id, new_tokens);
-                self.cached_items_tokens = self
-                    .cached_items_tokens
-                    .saturating_sub(old_tokens)
-                    .saturating_add(new_tokens);
-                trimmed = true;
-            }
-        }
-        trimmed && self.total_tokens() < self.trigger()
-    }
-
-    /// Phase 2 of the compaction: gradual draft eviction.
-    ///
-    /// Removes ONE whole chunk — an assistant draft — at a time, walking the
-    /// CURRENT segment oldest-first from a persistent cursor. After each
-    /// removal the budget is checked: below the 80% trigger → stop (the
-    /// cursor parks on the next item, so the NEXT overflow resumes exactly
-    /// here — the decoupling is spread over many overflows and the context
-    /// lives much longer).
-    ///
-    /// `run` only calls this AFTER the pipeline finished the current segment,
-    /// so every draft seen here has already been through it (or is structural
-    /// — `compressible: false` — or failed to compress): eviction never
-    /// removes prose the pipeline could still summarize. That is guaranteed by
-    /// the calling ORDER and the segment frontier, not by an eligibility rule
-    /// — a broken pipeline degrades gracefully (the raw draft remains
-    /// evictable) instead of deadlocking.
-    ///
-    /// User prompts, `LoopClosure`s, tool chains and compaction summaries are
-    /// never removed here — user prompts are protected and the other three are
-    /// structural segments, not drafts.
-    ///
-    /// Returns `true` when the total dropped below the trigger (the cursor is
-    /// parked for the next overflow). Returns `false` when the segment's
-    /// drafts are exhausted — the pass reached the segment's closing
-    /// [`ContextItem::LoopClosure`] and the segment frontier advanced past it
-    /// (the funnel then repeats, so the pipeline takes the next segment in
-    /// the same `run()` — tudo se repete) — or the end of the timeline still
-    /// over the trigger (nothing left to evict anywhere). Ending the timeline
-    /// below the trigger resets the cursor and the frontier so the next
-    /// overflow starts fresh.
-    ///
-    /// Cursor parking: the walk-yield at a closure parks PAST it (`idx + 1`,
-    /// the next segment starts there), while a below-the-trigger stop with a
-    /// closure as the next item parks ON the closure — both are safe because
-    /// the resume looks for the first item with `id >= cursor`.
-    fn evict_drafts(&mut self) -> bool {
-        let trigger = self.trigger();
-        let mut total = self.total_tokens();
-        if total < trigger {
-            // Defensive — `run` only calls this over the trigger.
-            return true;
-        }
-        // Resume from the persistent cursor (the id of the next item to
-        // consider), floored at the segment frontier so the pass can never
-        // cross into a segment the pipeline has not processed. Ids are
-        // monotonic, so the first item with `id >= cursor` is the resume
-        // point even if the cursor item itself was removed by another phase.
-        let seg_idx = self.segment_start_idx();
-        let mut idx = match self.draft_cursor {
-            Some(cid) => self
-                .items
-                .iter()
-                .position(|it| it.id() >= cid)
-                .unwrap_or(self.items.len())
-                .max(seg_idx),
-            None => seg_idx,
-        };
-        let mut removed_any = false;
-        loop {
-            // Advance past the non-removable items. A LoopClosure is the
-            // segment boundary: the segment's drafts are exhausted — the
-            // frontier advances past it and the next overflow's pipeline
-            // takes the next segment.
-            while idx < self.items.len() {
-                if self.items[idx].is_loop() {
-                    self.draft_cursor = self.items.get(idx + 1).map(|it| it.id());
-                    self.segment_start = self.items.get(idx + 1).map(|it| it.id());
-                    if removed_any {
-                        self.emit(CompactionEvent::DraftsEvicted);
-                    }
-                    return total < trigger;
-                }
-                if !self.is_removable_draft(idx) {
-                    idx += 1;
-                    continue;
-                }
-                break;
-            }
-            if idx >= self.items.len() {
-                // End of the timeline — the LAST segment is exhausted (or
-                // never had drafts). Below the trigger → resolved, and both
-                // the cursor and the frontier reset so the next overflow
-                // starts fresh. Still over → nothing left to evict anywhere:
-                // the deterministic grind is exhausted.
-                self.draft_cursor = None;
-                self.segment_start = None;
-                if removed_any {
-                    self.emit(CompactionEvent::DraftsEvicted);
-                }
-                return total < trigger;
-            }
-            // Remove ONE chunk and check the budget immediately.
-            let removed = self.remove_item(idx);
-            total = total.saturating_sub(removed);
-            removed_any = true;
-            // The next item shifted into `idx`; park the cursor there.
-            self.draft_cursor = self.items.get(idx).map(|it| it.id());
-            if total < trigger {
-                // Below the trigger — resolved (whether or not the very next
-                // item is a LoopClosure; either way the cursor is parked on
-                // it, so the next overflow resumes from there).
-                if removed_any {
-                    self.emit(CompactionEvent::DraftsEvicted);
-                }
-                return true;
-            }
-        }
-    }
-
-    /// True when the item at `idx` is a removable draft chunk: an assistant
-    /// output. User prompts are protected (never removed), `LoopClosure`s,
-    /// tool chains and compaction summaries are structural segments, not
-    /// drafts.
-    fn is_removable_draft(&self, idx: usize) -> bool {
-        matches!(self.items[idx], ContextItem::Assistant { .. })
-    }
-
-    /// True when neither deterministic phase has any work left: no
-    /// compressible draft for the pipeline and no removable draft for the
-    /// eviction pass. Since user prompts, `LoopClosure`s, tool chains and
-    /// compaction summaries are protected from both phases, "no `Assistant`
-    /// items" is exactly "the grind is exhausted".
-    fn drafts_exhausted(&self) -> bool {
-        !self
-            .items
-            .iter()
-            .any(|it| matches!(it, ContextItem::Assistant { .. }))
-    }
-
-    /// Build the LLM-compaction request (phase 3, the last-resort fallback):
-    /// the entire remaining context — protected items included — serialized
-    /// into an opencode-style transcript, wrapped in the summarization prompt.
+    /// Build the LLM-compaction request: the entire remaining context —
+    /// protected items included — serialized into an opencode-style
+    /// transcript, wrapped in the summarization prompt.
     ///
     /// A [`ContextItem::Compaction`] item (the previous summary) switches the
     /// prompt to update mode: the summary is NOT embedded in the instruction —
@@ -1599,13 +984,12 @@ impl ContextManager {
     }
 
     /// Apply the LLM-compaction summary: replace the ENTIRE timeline with a
-    /// single [`ContextItem::Compaction`] (the continuation summary) and reset
-    /// the scheduling state (cursor + toggle). Returns whether the total is
-    /// now below the 80% trigger — the summary should be small enough, but a
-    /// degenerate huge summary is surfaced so the harness can report failure.
-    /// The verdict always uses the NORMAL trigger (manual `/compact` mode
-    /// zeroes [`Self::trigger`] only for the deterministic funnel; a manual
-    /// pass legitimately lands far below it).
+    /// single [`ContextItem::Compaction`] (the continuation summary). Returns
+    /// whether the total is now below the 80% trigger — the summary should be
+    /// small enough, but a degenerate huge summary is surfaced so the harness
+    /// can report failure. The verdict always uses the NORMAL trigger (manual
+    /// `/compact` mode zeroes [`Self::trigger`] only for the run; a manual pass
+    /// legitimately lands far below it).
     pub fn apply_llm_summary(&mut self, summary: String) -> bool {
         let id = self.next_id();
         self.items.clear();
@@ -1614,8 +998,6 @@ impl ContextManager {
         self.cached_items_tokens = 0;
         self.item_tokens.clear();
         self.push_item(ContextItem::Compaction { id, summary });
-        self.draft_cursor = None;
-        self.segment_start = None;
         // A successful compaction is proof the provider accepts the context
         // again — any recorded stuck overflow is no longer relevant.
         self.clear_overflow();
@@ -1623,21 +1005,21 @@ impl ContextManager {
         self.total_tokens() < normal_trigger
     }
 
-    // Split-and-concatenate (the known-window contingency, driven by the
+    // Split-and-concatenate (the context-window contingency, driven by the
     // harness)
     //
-    // When the ACTIVE model's window is KNOWN and the held context exceeds it
-    // (a model switch to a smaller window, or a provider error that reports
-    // the window), the timeline is summarized in sequential chunks and the
-    // summaries are concatenated into ONE staging buffer. The timeline is
-    // NEVER touched during the process — the final commit replaces it with
-    // the buffer atomically, exactly like a normal LLM compaction. This is a
-    // contingency path only: the normal 80% funnel and the single-shot LLM
-    // compaction are untouched.
+    // When the held context exceeds the model's window (a model switch to a
+    // smaller window, or a provider error that reports the window), the
+    // timeline is summarized in sequential chunks and the summaries are
+    // concatenated into ONE staging buffer. The timeline is NEVER touched
+    // during the process — the final commit replaces it with the buffer
+    // atomically, exactly like a normal LLM compaction. When the window is
+    // UNKNOWN the split is sized against the current token budget as the best
+    // available estimate.
 
     /// The current token budget — the discovered window or the default. The
     /// harness uses it (with the error-reported window) to detect the
-    /// known-window, context-exceeds-window split trigger.
+    /// context-exceeds-window split trigger.
     #[must_use]
     pub const fn max_tokens(&self) -> usize {
         self.max_tokens
@@ -1860,97 +1242,17 @@ impl ContextManager {
         }
     }
 
-    // Context-window overflow recovery (driven by the harness)
-
-    /// Remove ONE tool chain (call + result TOGETHER — the native tool-call
-    /// format rejects an unpaired half, so `remove_item` always drops the
-    /// pair) to relieve a provider-side context-window overflow. The harness
-    /// drains one chain per attempt ("1 por vez") and re-requests after each;
-    /// when the provider reported its window, the harness also drains locally
-    /// with the token estimate to skip the pointless HTTP round trips.
-    ///
-    /// Removal order (the accepted design): useless chains first, then the
-    /// largest (most tokens freed per item), then middle-out as the tiebreak
-    /// — the intent at both ends (oldest task start, newest in-flight work)
-    /// survives the longest. Unlike the automatic sweep, NO chain is exempt:
-    /// when the context still does not fit, everything goes.
-    ///
-    /// Returns whether a chain was removed; `false` means no tool chain
-    /// remains anywhere — the overflow cannot be relieved this way.
-    pub fn evict_tool_chain_for_overflow(&mut self) -> bool {
-        // Collect the distinct chains (call/result halves share a call_id).
-        let mut chains: Vec<(String, usize, bool, usize)> = Vec::new();
-        for item in &self.items {
-            let (ContextItem::ToolCall { call_id, .. } | ContextItem::ToolResult { call_id, .. }) =
-                item
-            else {
-                continue;
-            };
-            if chains.iter().any(|(cid, ..)| cid == call_id) {
-                continue;
-            }
-            let tokens: usize = self
-                .items
-                .iter()
-                .filter(|it| {
-                    matches!(
-                        it,
-                        ContextItem::ToolCall { call_id: c, .. }
-                        | ContextItem::ToolResult { call_id: c, .. } if c == call_id
-                    )
-                })
-                .map(|it| it.tokens(self.encoding))
-                .sum();
-            let useless = self.items.iter().any(|it| {
-                matches!(
-                    it,
-                    ContextItem::ToolResult {
-                        call_id: c,
-                        useless: true,
-                        ..
-                    } if c == call_id
-                )
-            });
-            chains.push((call_id.clone(), tokens, useless, 0));
-        }
-        if chains.is_empty() {
-            return false;
-        }
-        // Middle-out distance from the chain list's middle (the tiebreak).
-        let mid = chains.len() / 2;
-        for (i, chain) in chains.iter_mut().enumerate() {
-            chain.3 = i.abs_diff(mid);
-        }
-        chains.sort_by(|a, b| {
-            b.2.cmp(&a.2) // useless chains first
-                .then(b.1.cmp(&a.1)) // then by size, descending
-                .then(a.3.cmp(&b.3)) // middle-out tiebreak
-        });
-        let (call_id, ..) = &chains[0];
-        let Some(idx) = self.items.iter().position(|it| {
-            matches!(
-                it,
-                ContextItem::ToolCall { call_id: c, .. }
-                | ContextItem::ToolResult { call_id: c, .. } if c == call_id
-            )
-        }) else {
-            return false;
-        };
-        self.remove_item(idx);
-        true
-    }
-
     /// True when the LLM compaction is KNOWN to be stuck for `provider`: a
-    /// previous overflow drained every tool chain and the total still exceeds
-    /// the window. The harness then skips the doomed summarizer call (it would
-    /// only burn a paid request per dispatch) and re-surfaces the notification
-    /// until the user switches the model.
+    /// previous overflow could not be relieved by the split and the total
+    /// still exceeds the window. The harness then skips the doomed summarizer
+    /// call (it would only burn a paid request per dispatch) and re-surfaces
+    /// the notification until the user switches the model.
     pub fn overflow_stuck(&self, provider: &str) -> bool {
         self.overflow_provider.as_deref() == Some(provider)
     }
 
-    /// Record that the LLM compaction is stuck for `provider` (every tool
-    /// chain was drained and the context still exceeds the provider window).
+    /// Record that the LLM compaction is stuck for `provider` (the split could
+    /// not fit the context into the provider window).
     pub fn mark_overflow(&mut self, provider: &str) {
         self.overflow_provider = Some(provider.to_string());
     }
@@ -1997,12 +1299,8 @@ impl ContextManager {
                     // User prompts are protected: always delivered verbatim.
                     messages.push(user_message(original));
                 }
-                ContextItem::Assistant {
-                    original,
-                    compressed,
-                    ..
-                } => {
-                    messages.push(assistant_message(compressed.as_deref().unwrap_or(original)));
+                ContextItem::Assistant { original, .. } => {
+                    messages.push(assistant_message(original));
                 }
                 ContextItem::ToolCall {
                     call_id,
@@ -2035,7 +1333,7 @@ impl ContextManager {
                 } => {
                     messages.push(tool_result_message(call_id, content));
                 }
-                ContextItem::LoopClosure { content, .. } => {
+                ContextItem::Closure { content, .. } => {
                     messages.push(assistant_message(content));
                 }
                 ContextItem::Compaction { summary, .. } => {
@@ -2055,8 +1353,7 @@ impl ContextManager {
         // The protected TODO block is injected at the FRONT — right after the
         // system prompt (passed separately by the harness), before the
         // conversation history. It is re-rendered live from the tools' Plan
-        // state on every call, so it is structurally immune to the pipeline,
-        // the draft eviction, the tool-chain drain and even the LLM
+        // state on every call, so it is structurally immune to even the LLM
         // compaction (see `todo_ctxt`).
         if let Some(msg) = self.todo.message() {
             messages.insert(0, msg);
@@ -2085,9 +1382,9 @@ impl ContextManager {
         self.items.iter().cloned().collect()
     }
 
-    /// Serializable snapshot for bincode persistence. The compression
-    /// pipeline runs synchronously at the next overflow, so there is no
-    /// in-flight work to exclude.
+    /// Serializable snapshot for JSON persistence (the session JSONL log).
+    /// Nothing is in-flight between save and restore — the snapshot is a plain
+    /// clone.
     pub fn save_state(&self) -> ContextManagerState {
         ContextManagerState {
             items: self.items.clone(),
@@ -2098,11 +1395,9 @@ impl ContextManager {
         }
     }
 
-    /// Restore a previously saved snapshot. The compression pipeline runs
-    /// synchronously at the next 80% overflow, so no re-submission is needed —
-    /// the items are restored verbatim and the pipeline summarizes them (or
-    /// the eviction phases remove them, or the LLM compaction folds them)
-    /// exactly as in a fresh session.
+    /// Restore a previously saved snapshot. The items are restored verbatim;
+    /// the next 80% overflow triggers the LLM compaction exactly as in a fresh
+    /// session.
     pub fn restore_state(&mut self, state: &ContextManagerState) {
         self.items = state.items.clone();
         self.next_id = state.next_id;
@@ -2111,11 +1406,6 @@ impl ContextManager {
         // Split progress is REAL progress (the buffer + cursor) — a restored
         // session resumes the split exactly where it stopped.
         self.split = state.split.clone();
-        // Scheduling bias only — a restored session restarts the gradual
-        // draft eviction and the segment frontier from the beginning of the
-        // timeline.
-        self.draft_cursor = None;
-        self.segment_start = None;
         // The TODO block mirror is not persisted (the tools' Plan state is
         // not part of the snapshot): clear it so a restored session never
         // surfaces a stale block — the harness re-syncs it at the next loop
@@ -2137,30 +1427,13 @@ impl ContextManager {
     /// re-tokenizing the whole timeline). The cache is the single source of
     /// truth for `total_tokens()`; every mutation of `items` must update it.
     fn push_item(&mut self, item: ContextItem) {
-        // The item is tokenized HERE for the running total — keep the
-        // per-item cost so a later in-place edit (compression, trim) can read
-        // the old cost without re-tokenizing it.
+        // The item is tokenized HERE for the running total — keep the per-item
+        // cost so a later in-place edit can read the old cost without
+        // re-tokenizing it.
         let tokens = item.tokens(self.encoding);
         self.item_tokens.insert(item.id(), tokens);
         self.cached_items_tokens = self.cached_items_tokens.saturating_add(tokens);
         self.items.push_back(item);
-    }
-
-    /// Test-only insertion path: the test module builds scenarios by pushing
-    /// raw items directly (LoopClosures, Compactions, flagged drafts); those
-    /// must go through the cache-updating path so `total_tokens()` stays
-    /// correct in the tests.
-    ///
-    /// A manually-assigned id must never collide with a generated one: a
-    /// later `add_*` draws from the internal counter, so if a test pushed
-    /// `id: 1` while the counter still sat at 1, the next add would produce a
-    /// SECOND item with id 1 (invisible before the per-item token cache made
-    /// duplicate ids a correctness issue). Advance the counter past the
-    /// manual id so generated ids stay unique.
-    #[cfg(test)]
-    fn push_raw(&mut self, item: ContextItem) {
-        self.next_id = self.next_id.max(item.id().saturating_add(1));
-        self.push_item(item);
     }
 
     /// Rebuild the cached token total (and the per-item cache) from scratch.
@@ -2176,13 +1449,11 @@ impl ContextManager {
         }
     }
 
-    /// Token count at which the 80% compaction trigger fires.
-    /// Token threshold at which the compaction funnel stops: 80% of the
-    /// budget normally, ZERO while the manual `/compact` mode is active —
-    /// so [`Self::run`] grinds the deterministic phases through every
-    /// segment and hands off to the LLM summary (phase 3) regardless of how
-    /// much budget is free. The LLM-side guards ([`Self::llm_compaction_request`],
-    /// [`Self::apply_llm_summary`) keep their normal semantics (see those).
+    /// Token count at which the 80% compaction trigger fires: 80% of the
+    /// budget normally, ZERO while the manual `/compact` mode is active — so
+    /// [`Self::run`] hands off to the LLM summary regardless of how much
+    /// budget is free. The LLM-side guards ([`Self::llm_compaction_request`],
+    /// [`Self::apply_llm_summary`]) keep their normal semantics (see those).
     fn trigger(&self) -> usize {
         if self.manual_compaction {
             return 0;
@@ -2191,9 +1462,8 @@ impl ContextManager {
     }
 
     /// Enter manual-compaction mode (`/compact`): the next [`Self::run`]
-    /// grinds every segment deterministically and ends in
-    /// [`RunOutcome::NeedsLlmCompaction`] whenever anything is left, instead
-    /// of stopping at the 80% trigger. Always paired with
+    /// returns [`RunOutcome::NeedsLlmCompaction`] whenever anything is left,
+    /// instead of stopping at the 80% trigger. Always paired with
     /// [`Self::end_manual_compaction`] after the LLM pass.
     pub fn begin_manual_compaction(&mut self) {
         self.manual_compaction = true;
@@ -2251,21 +1521,6 @@ impl ContextManager {
         }
         self.cached_items_tokens
             .saturating_add(self.todo.tokens(self.encoding))
-    }
-
-    /// Index of the segment frontier's item — where the current segment
-    /// starts. `None` (or a removed id) falls back to the beginning of the
-    /// timeline; ids are monotonic, so the first item with `id >= frontier`
-    /// is the resume point.
-    fn segment_start_idx(&self) -> usize {
-        self.segment_start
-            .map(|sid| {
-                self.items
-                    .iter()
-                    .position(|it| it.id() >= sid)
-                    .unwrap_or(self.items.len())
-            })
-            .unwrap_or(0)
     }
 
     /// Remove the item at `idx`, returning its token cost. For tool items the

@@ -241,8 +241,8 @@ pub enum DialogType {
         /// Truncated text of the clicked message shown as context.
         preview: String,
         /// Whether this is the last user message in the session (only the
-        /// last user message can be reverted/forked due to context state
-        /// bincode serialization issues).
+        /// last user message can be reverted/forked — the context item log is
+        /// truncated at the message boundary).
         is_last_user_message: bool,
     },
 
@@ -509,7 +509,11 @@ impl DialogState {
                 let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
-                let max_visible = if *is_last_user_message { 3usize } else { 1usize };
+                let max_visible = if *is_last_user_message {
+                    3usize
+                } else {
+                    1usize
+                };
                 let dialog_h = (max_visible + 5) as u16;
                 let dialog_y = area
                     .y
@@ -2005,7 +2009,11 @@ impl DialogState {
                 let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
-                let items = if *is_last_user_message { 3usize } else { 1usize };
+                let items = if *is_last_user_message {
+                    3usize
+                } else {
+                    1usize
+                };
                 let dialog_h = (items + 5) as u16;
                 let dialog_y = area
                     .y
@@ -2074,7 +2082,7 @@ impl DialogState {
                 // Lines 4+: the actions. The selected row is marked
                 // with the project's 🞴 indicator and primary color instead
                 // of a background swap. Only the last user message can be
-                // reverted/forked due to context state bincode serialization.
+                // reverted/forked (the transcript is truncated at that point).
                 let list_top = dialog_y + 4;
                 let list_pad = 1;
                 let list_x = dialog_x + list_pad;
@@ -2124,7 +2132,9 @@ impl DialogState {
                             desc_x,
                             y,
                             list_x + list_w - desc_x,
-                            Style::default().fg(rgba_color(theme.text_muted)).bg(bg_color),
+                            Style::default()
+                                .fg(rgba_color(theme.text_muted))
+                                .bg(bg_color),
                         );
                     }
                 }
@@ -2234,24 +2244,10 @@ impl DialogState {
 
                     // Indicator takes 2 cols, like the sidebar rows.
                     let ind = if is_selected { "🞴 " } else { "   " };
-                    draw_text_line(
-                        buf,
-                        ind,
-                        list_x,
-                        y,
-                        3,
-                        name_style,
-                    );
+                    draw_text_line(buf, ind, list_x, y, 3, name_style);
 
                     let name_x = list_x + 3;
-                    draw_text_line(
-                        buf,
-                        name,
-                        name_x,
-                        y,
-                        list_w - 3,
-                        name_style,
-                    );
+                    draw_text_line(buf, name, name_x, y, list_w - 3, name_style);
 
                     let desc_x = list_x + 15;
                     if desc_x < list_x + list_w {

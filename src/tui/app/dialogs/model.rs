@@ -361,7 +361,11 @@ impl App {
         provider: &str,
         reasoning: Option<&str>,
     ) {
-        self.set_llm_model(model.to_owned(), provider.to_owned(), reasoning.map(String::from));
+        self.set_llm_model(
+            model.to_owned(),
+            provider.to_owned(),
+            reasoning.map(String::from),
+        );
         self.setup.set_model_selection(provider, model, reasoning);
         self.record_model_on_current_session();
         // Flush the session header right away so the selection survives the
@@ -380,11 +384,7 @@ impl App {
         provider: String,
         reasoning: Option<String>,
     ) {
-        self.llm_config.model = if model.is_empty() {
-            None
-        } else {
-            Some(model)
-        };
+        self.llm_config.model = if model.is_empty() { None } else { Some(model) };
         self.llm_config.provider = provider;
         self.llm_config.reasoning = reasoning;
     }

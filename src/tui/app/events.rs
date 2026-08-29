@@ -11,6 +11,7 @@ use crate::routes::session::queue_choice::QueueTarget;
 use crate::session_store::is_valid_session;
 use crate::types::SessionStatus;
 use crate::ui::dialogs::DialogType;
+use cosh::harness::context_manager::ContextManagerState;
 use cosh::harness::HarnessEvent;
 
 impl App {
@@ -425,11 +426,11 @@ impl App {
                     }
                 }
 
-                HarnessEvent::Done { context_state } => {
+                HarnessEvent::Done { context } => {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
-                    // Safety net: a pipeline line interrupted at its start must
-                    // not stay running (the stopwatch would tick forever).
+                    // Safety net: a "Summarizing" line interrupted at its start
+                    // must not stay running (the stopwatch would tick forever).
                     self.finalize_stale_compaction_lines();
 
                     // Persist session to disk if it has valid dialog
@@ -437,8 +438,8 @@ impl App {
                         && let Some(session) = self.state.session_cache.get(&id)
                         && is_valid_session(session)
                     {
-                        self.session_store.save_session_async(session);
-                        self.session_store.save_ctx(&id, &context_state);
+                        self.session_store
+                            .save_session_async_with_context(session, &context);
 
                         // Trigger async title generation for the first response.
                         // The session title starts as a timestamp; the LLM produces
@@ -575,7 +576,7 @@ impl App {
                     }
                 }
 
-                HarnessEvent::Stopped { context_state } => {
+                HarnessEvent::Stopped { context } => {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
                     self.finalize_stale_compaction_lines();
@@ -591,8 +592,8 @@ impl App {
                         && let Some(session) = self.state.session_cache.get(&id)
                         && is_valid_session(session)
                     {
-                        self.session_store.save_session_async(session);
-                        self.session_store.save_ctx(&id, &context_state);
+                        self.session_store
+                            .save_session_async_with_context(session, &context);
                         self.state.ensure_session_summary(&id);
                     }
 
@@ -602,17 +603,12 @@ impl App {
                     self.context_info = Some(info);
                 }
 
-                HarnessEvent::ContextSnapshot { context_state } => {
+                HarnessEvent::ContextSnapshot { context } => {
                     // Incremental persistence: the harness emits a throttled
-                    // serialized context snapshot mid-run so a crash/restart
-                    // does not lose the in-flight run. Persist the session
-                    // JSONL and the `.ctx` companion file here, mirroring the
-                    // Done/Stopped handlers.
-                    self.persist_incrementally(&context_state);
-                }
-
-                HarnessEvent::Compaction { event } => {
-                    self.handle_compaction_event(event);
+                    // context snapshot mid-run so a crash/restart does not lose
+                    // the in-flight run. Persist the session log here, mirroring
+                    // the Done/Stopped handlers.
+                    self.persist_incrementally(&context);
                 }
 
                 HarnessEvent::LlmCompaction { event } => {
@@ -788,7 +784,7 @@ impl App {
     /// event so a crash/restart mid-run resumes from the latest context
     /// instead of the session-start state. Mirrors the Done/Stopped save
     /// logic and skips sessions with no valid dialog yet.
-    pub(super) fn persist_incrementally(&mut self, context_state: &[u8]) {
+    pub(super) fn persist_incrementally(&mut self, context: &ContextManagerState) {
         if self.state.status != SessionStatus::Working {
             return;
         }
@@ -796,8 +792,8 @@ impl App {
             && let Some(session) = self.state.session_cache.get(&id)
             && is_valid_session(session)
         {
-            self.session_store.save_session_async(session);
-            self.session_store.save_ctx(&id, context_state);
+            self.session_store
+                .save_session_async_with_context(session, context);
             self.state.ensure_session_summary(&id);
         }
     }

@@ -564,10 +564,15 @@ impl App {
                                 self.handle_tool_call_dialog_key(KeyCode::Enter);
                                 return Ok(true);
                             }
-                            DialogType::MessageActions { message_id, is_last_user_message, .. } => {
+                            DialogType::MessageActions {
+                                message_id,
+                                is_last_user_message,
+                                ..
+                            } => {
                                 let max_options = if *is_last_user_message { 3 } else { 1 };
                                 let selected = d.selected.min(max_options - 1);
-                                let action = App::message_action_index(selected, *is_last_user_message);
+                                let action =
+                                    App::message_action_index(selected, *is_last_user_message);
                                 let message_id = message_id.clone();
                                 self.dialog.pop();
                                 self.run_message_action(action, &message_id);
@@ -887,7 +892,10 @@ impl App {
                                 .iter()
                                 .rposition(|m| m.role == crate::types::MessageRole::User)
                         })
-                        .zip(session.and_then(|s| s.messages.iter().position(|m| m.id == message_id)))
+                        .zip(
+                            session
+                                .and_then(|s| s.messages.iter().position(|m| m.id == message_id)),
+                        )
                         .map(|(last_user_idx, clicked_idx)| last_user_idx == clicked_idx)
                         .unwrap_or(false);
 

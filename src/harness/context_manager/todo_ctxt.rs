@@ -15,11 +15,7 @@
 //! [`ContextManager::build_messages`](super::ContextManager::build_messages)
 //! call, so it is structurally immune to every compaction phase:
 //!
-//! - the TF-IDF → LSA → MMR pipeline never sees it (it is not an `Assistant`
-//!   draft);
-//! - the draft eviction and the useless-chain sweep never touch it (it is not
-//!   an item at all);
-//! - the tool-chain overflow drain ignores it;
+//! - the useless-chain sweep never touches it (it is not an item at all);
 //! - even the LLM compaction — which replaces the WHOLE timeline with a
 //!   summary — leaves it intact, because the block is re-rendered from the
 //!   mirror afterwards.
@@ -376,7 +372,7 @@ mod tests {
         m.add_tool_result_flagged("t0", "no matches", true);
         assert!(m.total_tokens() >= 800, "precondition: over the trigger");
 
-        // Phases 1-2 (pipeline + draft eviction): the block survives.
+        // The useless-chain sweep: the block survives.
         m.run();
         assert!(
             m.build_messages("")[0]
@@ -398,10 +394,10 @@ mod tests {
             "even the LLM compaction cannot remove the TODO block"
         );
 
-        // The tool-chain overflow drain ignores the block too.
+        // The useless-chain sweep ignores the block too.
         m.add_tool_call("t1", "fs_read", "{}");
-        m.add_tool_result("t1", "contents");
-        m.evict_tool_chain_for_overflow();
+        m.add_tool_result_flagged("t1", "no matches", true);
+        m.sweep_useless_chains();
         assert!(
             m.build_messages("")[0]
                 .content

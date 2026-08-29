@@ -168,11 +168,10 @@ async fn default_budget_holds_entire_conversation_until_80_percent() {
         before.total_tokens
     );
 
-    // (b) A small budget compacts at 80% → back just under the 80% trigger
-    // (the minimum decompaction): the pipeline summarizes the compressible
-    // assistant drafts in place (user prompts are protected and never
-    // touched). The phases work, they just trigger very late at the default
-    // 100k budget.
+    // (b) A small budget over the trigger asks for the LLM compaction (the
+    // only compaction — there is no deterministic compression anymore), and
+    // never silently trims content: `run()` returns NeedsLlmCompaction and the
+    // total stays exactly as it was, so the harness drives the LLM summary.
     let mut small = ContextManager::new(4_000);
     for i in 0..20 {
         small.add_user("Continue.");
@@ -190,16 +189,20 @@ async fn default_budget_holds_entire_conversation_until_80_percent() {
         small_before.total_tokens >= 3_200,
         "precondition: small budget is over the 80% trigger"
     );
-    small.run();
+    let outcome = small.run();
     let small_after = small.display_info();
     eprintln!(
-        "[perf] small budget: {}/4000 before run() → {} after (trigger at 3200)",
+        "[perf] small budget: {}/4000 before run() → {} after (trigger at 3200); outcome={outcome:?}",
         small_before.total_tokens, small_after.total_tokens
     );
-    assert!(
-        small_after.total_tokens < 3_200,
-        "expected compaction back under the 80% trigger, got {}",
-        small_after.total_tokens
+    assert_eq!(
+        outcome,
+        crate::harness::context_manager::RunOutcome::NeedsLlmCompaction,
+        "an over-budget context requests the LLM compaction"
+    );
+    assert_eq!(
+        small_before.total_tokens, small_after.total_tokens,
+        "no silent deletion: the deterministic phases are gone, so the total stays unchanged"
     );
 }
 

@@ -73,7 +73,10 @@ impl App {
     ///
     /// - If `is_last_user_message`: selection 0=Revert, 1=Copy, 2=Fork
     /// - Otherwise: only Copy is shown (visual index 0) → action index 1
-    pub(in crate::app) fn message_action_index(selected: usize, is_last_user_message: bool) -> usize {
+    pub(in crate::app) fn message_action_index(
+        selected: usize,
+        is_last_user_message: bool,
+    ) -> usize {
         if is_last_user_message {
             debug_assert!(selected < 3, "selected must be 0..2 for last user message");
             selected

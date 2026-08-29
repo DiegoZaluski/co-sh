@@ -1663,43 +1663,9 @@ fn compaction_line_formatting() {
 
     use super::compaction_line;
 
-    // Running pipeline: the stopwatch ticks from `started_at` (no spinner —
-    // the moving number is the activity signal). `now` is passed explicitly so
-    // the assertion is deterministic (no wall-clock race).
-    let running = CompactionPart {
-        phase: CompactionPhase::Pipeline,
-        started_at: 10_000,
-        elapsed_ms: None,
-        text: String::new(),
-    };
-    assert_eq!(
-        compaction_line(&running, 11_500),
-        "context compression · 1.500s"
-    );
-    // Millisecond precision: one tick later the same line shows 1.501s.
-    assert_eq!(
-        compaction_line(&running, 11_501),
-        "context compression · 1.501s"
-    );
-
-    // Finished pipeline: the same line, frozen — no checkmark, the stopped
-    // stopwatch is the completion signal.
-    let done = CompactionPart {
-        phase: CompactionPhase::Pipeline,
-        started_at: 0,
-        elapsed_ms: Some(2_340),
-        text: String::new(),
-    };
-    assert_eq!(compaction_line(&done, 0), "context compression · 2.340s");
-
-    // One-shot phase notices: plain colored labels — no stopwatch, no
-    // completion marker.
-    assert_eq!(
-        compaction_line(&CompactionPart::done(CompactionPhase::Drafts), 0),
-        "draft eviction"
-    );
-
-    // The LLM compaction (phase 3) carries a stopwatch like the pipeline's.
+    // The LLM "Summarizing" box carries a live stopwatch: while running, the
+    // elapsed number ticks from `started_at` (`now` is passed explicitly so
+    // the assertion is deterministic — no wall-clock race).
     let llm = CompactionPart {
         phase: CompactionPhase::Llm,
         started_at: 0,
@@ -1717,6 +1683,11 @@ fn compaction_line_formatting() {
         compaction_line(&llm_running, 11_500),
         "llm compaction · 1.500s"
     );
+    // Millisecond precision: one tick later the same line shows 1.501s.
+    assert_eq!(
+        compaction_line(&llm_running, 11_501),
+        "llm compaction · 1.501s"
+    );
 }
 
 #[test]
@@ -1726,7 +1697,7 @@ fn compaction_part_serde_roundtrip() {
     // The Compaction part must survive JSONL serialization (running + done),
     // including the streamed `text` field of the "Summarizing" box.
     let running = Part::Compaction(CompactionPart {
-        phase: CompactionPhase::Pipeline,
+        phase: CompactionPhase::Llm,
         started_at: 1234,
         elapsed_ms: None,
         text: String::new(),
@@ -1734,7 +1705,7 @@ fn compaction_part_serde_roundtrip() {
     let json = serde_json::to_string(&running).unwrap();
     assert_eq!(
         json,
-        "{\"type\":\"Compaction\",\"phase\":\"Pipeline\",\"started_at\":1234,\"elapsed_ms\":null,\"text\":\"\"}"
+        "{\"type\":\"Compaction\",\"phase\":\"Llm\",\"started_at\":1234,\"elapsed_ms\":null,\"text\":\"\"}"
     );
     let back: Part = serde_json::from_str(&json).unwrap();
     assert_eq!(json, serde_json::to_string(&back).unwrap());
@@ -1755,7 +1726,7 @@ fn compaction_part_serde_roundtrip() {
     let back: Part = serde_json::from_str(legacy).unwrap();
     assert!(matches!(
         back,
-        Part::Compaction(c) if c.text.is_empty() && c.phase == CompactionPhase::Llm
+        Part::Compaction(c) if c.text.is_empty()
     ));
 }
 

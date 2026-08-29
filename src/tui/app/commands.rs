@@ -162,13 +162,11 @@ impl App {
         self.slash_menu.visible = false;
     }
 
-    /// User-triggered `/compact`: run the compaction funnel NOW (the
-    /// deterministic phases across every segment, then the LLM summary)
-    /// instead of waiting for the 80% trigger. Refusals are surfaced as
-    /// toasts; the work runs on a one-off tokio task that rebuilds a Harness
-    /// from the persisted `.ctx` snapshot — between loops no harness exists,
-    /// and while a loop runs its context manager is untouchable, so both
-    /// cases refuse.
+    /// User-triggered `/compact`: run the LLM summary NOW instead of waiting
+    /// for the 80% trigger. Refusals are surfaced as toasts; the work runs on
+    /// a one-off tokio task that rebuilds a Harness from the persisted JSONL
+    /// item log — between loops no harness exists, and while a loop runs its
+    /// context manager is untouchable, so both cases refuse.
     pub(super) fn start_manual_compaction(&mut self) {
         use crate::ui::toast::{ToastOptions, ToastVariant};
         fn refuse(app: &mut App, message: String) {
@@ -199,7 +197,7 @@ impl App {
             });
             return;
         };
-        let Some(ctx_bytes) = self.session_store.load_ctx(&id) else {
+        let Some(ctx_state) = self.session_store.load_context(&id) else {
             self.toast_state.show(ToastOptions {
                 title: Some("Compact".into()),
                 message: "Nothing to compact yet.".into(),
@@ -228,11 +226,7 @@ impl App {
                     }
                     let mut harness =
                         Harness::new(connector, &cwd, std::collections::HashSet::new());
-                    if let Ok(state) =
-                        bincode::deserialize::<cosh::harness::ContextManagerState>(&ctx_bytes)
-                    {
-                        harness.context_manager.restore_state(&state);
-                    }
+                    harness.context_manager.restore_state(&ctx_state);
                     harness.compact_on_demand(&event_tx, stop_signal).await
                 }
                 Err(e) => {
