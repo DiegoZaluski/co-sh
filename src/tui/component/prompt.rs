@@ -6,7 +6,7 @@ use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
 use crate::logo::ChatLogo;
@@ -873,13 +873,23 @@ impl PromptView {
         // Stop one column early so the `▀` band never covers the right `╹`
         // termination of the right border (mirrors the left `╹`).
         let cap_fill_right = cap_area.right().saturating_sub(1);
-        let cap_style = Style::default()
-            .fg(rgba_color(theme.background_element))
-            .bg(rgba_color(theme.background));
-        for cx in cap_fill_x..cap_fill_right {
-            if let Some(cell) = buf.cell_mut((cx, cap_area.y)) {
-                cell.set_char('\u{2580}');
-                cell.set_style(cap_style);
+        // Only paint the blend band when the fill is a real color. On
+        // transparent themes (`orng`; anywhere `background_element` has
+        // alpha 0) `rgba_color` maps the fill to `Color::Reset`, and a `▀`
+        // painted with a Reset foreground renders its upper half in the
+        // terminal's *default* fg (usually white) — a bright band the input
+        // box never shows (`BoxRenderable` skips alpha-0 fills entirely).
+        // Mirror that "alpha 0 = no fill" rule here: skip the glyph so the
+        // cap row stays as transparent as the box fill itself.
+        if rgba_color(theme.background_element) != Color::Reset {
+            let cap_style = Style::default()
+                .fg(rgba_color(theme.background_element))
+                .bg(rgba_color(theme.background));
+            for cx in cap_fill_x..cap_fill_right {
+                if let Some(cell) = buf.cell_mut((cx, cap_area.y)) {
+                    cell.set_char('\u{2580}');
+                    cell.set_style(cap_style);
+                }
             }
         }
 
@@ -1116,5 +1126,73 @@ mod tests {
         let total = 10;
         assert_eq!(prompt_scroll_top(total - 1, total, window), total - window);
         assert_eq!(prompt_scroll_top(0, total, window), 0);
+    }
+
+    #[test]
+    fn cap_fill_skips_transparent_element_but_keeps_opaque_blend() {
+        use crate::theme::ThemeRegistry;
+
+        let registry = ThemeRegistry::new();
+        // Transparent theme (`orng`): background_element has alpha 0, so the
+        // cap `▀` band must NOT be painted — mirroring BoxRenderable's
+        // "alpha 0 = no fill" rule. Painting it would render the glyph's
+        // upper half in `Color::Reset` (terminal default, typically white).
+        let orng = registry.get("orng").expect("orng theme registered");
+        let state = AppState::new();
+
+        let area = Rect::new(0, 0, 80, 10);
+        // input_area.y + input_h (one content line) = cap row.
+        let cap_y = BASE_H + 1 + AGENT_H;
+
+        let mut transparent_view = PromptView::new();
+        let mut buf = Buffer::empty(area);
+        transparent_view.render(
+            &mut buf,
+            area,
+            &state,
+            orng,
+            &AgentColors::from_theme(orng),
+            &[],
+            SystemTime::now(),
+            "",
+            None,
+            0.0,
+            false,
+        );
+        for x in 1..area.right() - 1 {
+            let cell = &buf[(x, cap_y)];
+            assert_ne!(
+                cell.symbol(),
+                "\u{2580}",
+                "cap row on a transparent theme must stay glyph-free (x={x})"
+            );
+        }
+
+        // Opaque themes keep the visual intent: the `▀` blend band is still
+        // painted as the smooth gradient between box fill and background.
+        let cosh = registry.default_theme();
+        let mut opaque_view = PromptView::new();
+        let mut buf = Buffer::empty(area);
+        opaque_view.render(
+            &mut buf,
+            area,
+            &state,
+            cosh,
+            &AgentColors::from_theme(cosh),
+            &[],
+            SystemTime::now(),
+            "",
+            None,
+            0.0,
+            false,
+        );
+        for x in 1..area.right() - 1 {
+            let cell = &buf[(x, cap_y)];
+            assert_eq!(
+                cell.symbol(),
+                "\u{2580}",
+                "opaque themes must keep painting the blend band (x={x})"
+            );
+        }
     }
 }
