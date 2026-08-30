@@ -557,7 +557,7 @@ impl App {
         use std::collections::BTreeMap;
         let mut grouped: BTreeMap<String, Vec<&'a cosh::ModelEntry>> = BTreeMap::new();
         for entry in models {
-            if filter.is_empty() || entry.model.to_lowercase().contains(&filter.to_lowercase()) {
+            if crate::ui::dialogs::model_entry_matches_filter(entry, filter) {
                 grouped
                     .entry(entry.provider.clone())
                     .or_default()

@@ -17,6 +17,17 @@ impl App {
     /// `handle_events`). Extracted so tests can dispatch synthetic keys.
     pub(super) fn process_key_event(&mut self, key: KeyEvent) -> io::Result<bool> {
         if key.kind == KeyEventKind::Press {
+            // Modal sovereignty: while a Confirm dialog is on screen it owns
+            // the ENTIRE keyboard — the slash menu, the prompt, the sidebar
+            // and every panel must not react to any key until the user
+            // decides. Left/Right/Enter/Esc drive the dialog; any other key
+            // is swallowed. (Without this gate a "/"-open slash menu used to
+            // steal Enter from the "Quit cosh?" confirm and run a command.)
+            if self.is_confirm_dialog_visible() {
+                self.handle_confirm_dialog_key(key.code);
+                return Ok(false);
+            }
+
             // Escape clears selection if there is one.
             if key.code == KeyCode::Esc && self.prompt_view.has_selection() {
                 self.prompt_view.clear_selection();
@@ -151,10 +162,8 @@ impl App {
                 }
             }
 
-            // Check Confirm dialog for arrow navigation
-            if self.is_confirm_dialog_visible() && self.handle_confirm_dialog_key(key.code) {
-                return Ok(false);
-            }
+            // (Confirm dialog keys are handled by the sovereignty gate at the
+            // top of this function — nothing here can run while it decides.)
 
             // Free-gateway recommendation dialog (inline, shown after HTTP
             // errors or when no API key is configured).

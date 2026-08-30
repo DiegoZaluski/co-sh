@@ -27,10 +27,29 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
 fn draw_bg_line(buf: &mut Buffer, x: u16, y: u16, width: u16, color: Color) {
     for cx in x..(x + width) {
         if let Some(cell) = buf.cell_mut((cx, y)) {
+            // Clear the cell too: the menu band overlays whatever the chat
+            // rendered in those rows, so stale glyphs must not bleed through.
+            cell.set_char(' ');
             cell.set_style(Style::default().bg(color));
         }
     }
 }
+
+/// Linear blend of two colors: `t = 0` returns `base`, `t = 1` returns
+/// `overlay` (same semantics as the right panel's `blend`). ratatui has no
+/// real alpha, so translucency is simulated by pre-blending the fill over
+/// the background it sits on.
+fn blend(base: RGBA, overlay: RGBA, t: f32) -> RGBA {
+    let mix = |a: u8, b: u8| -> u8 { (f32::from(a) * (1.0 - t) + f32::from(b) * t).round() as u8 };
+    let (ar, ag, ab, _) = base.to_ints();
+    let (br, bg_, bb, _) = overlay.to_ints();
+    RGBA::from_ints(mix(ar, br), mix(ag, bg_), mix(ab, bb), 255)
+}
+
+/// How much of the menu panel color shows through the row fill. Kept below
+/// 1.0 so the band reads as a translucent layer over the background instead
+/// of an opaque "text highlight" stroke.
+const MENU_FILL_OPACITY: f32 = 0.5;
 
 fn selected_foreground_color(bg: RGBA, fallback: RGBA) -> Color {
     let (r, g, b, a) = bg.to_ints();
@@ -242,7 +261,17 @@ impl SlashMenu {
         // Render just above the prompt input area
         let menu_y_start = prompt_area.y.saturating_sub(max_rows as u16);
         let menu_width = prompt_area.width;
-        let menu_bg = rgba_color(theme.background_menu);
+        // Row fill: the menu panel color blended over the theme's base
+        // background. Simulates the panel's translucency so the band reads
+        // as a soft layered surface instead of an opaque "text highlight"
+        // (which broke the semi-transparent look under the `/background`
+        // toggle). The blend uses the base background's RGB, which the
+        // `/background` toggle preserves exactly for this kind of derivation.
+        let row_fill = rgba_color(blend(
+            theme.background,
+            theme.background_menu,
+            MENU_FILL_OPACITY,
+        ));
         let border_fg = rgba_color(theme.secondary);
 
         // Draw each command option or no-results placeholder
@@ -251,7 +280,7 @@ impl SlashMenu {
             let is_no_results = idxs.is_empty();
             let (row_bg, cmd_text, desc_text, cmd_style, desc_style) = if is_no_results {
                 (
-                    menu_bg,
+                    row_fill,
                     String::new(),
                     "No matching items".to_string(),
                     Style::default(),
@@ -264,7 +293,7 @@ impl SlashMenu {
                 let row_bg = if is_selected {
                     rgba_color(theme.primary)
                 } else {
-                    menu_bg
+                    row_fill
                 };
                 let cmd_text = format!("/{}", cmd.name);
                 let desc_text = format!(" {}", cmd.desc);

@@ -619,9 +619,12 @@ impl App {
             if let Some(d) = self.dialog.current_mut() {
                 d.cursor.terminal_focused = self.terminal_focused;
             }
-            self.dialog.render(buf, area, &self.theme, now);
-
+            // The slash menu renders first so modal dialogs (e.g. the Ctrl+C
+            // "Quit cosh?" confirm) always paint on top of it — the menu is
+            // inline chrome, the dialog is a modal overlay that owns the
+            // whole input surface while visible (sovereign keys + mouse).
             self.slash_menu.render(buf, prompt_area, &self.theme);
+            self.dialog.render(buf, area, &self.theme, now);
         }
     }
 
