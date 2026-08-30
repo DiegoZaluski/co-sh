@@ -19,7 +19,7 @@
 //! one response are dispatched sequentially (preserves the agent's intent).
 //! Neither is a defect; both are measured only to characterise the wall clock.
 
-use crate::harness::context_manager::{ContextManager, MAX_CONTEXT_TOKENS};
+use crate::harness::context::{ContextManager, MAX_CONTEXT_TOKENS};
 use crate::harness::core::{Harness, Mode, StreamEvent};
 use crate::harness::guardrails::{PermissionCheck, check_tool_permission};
 use crate::util::estimate_tokens;
@@ -197,7 +197,7 @@ async fn default_budget_holds_entire_conversation_until_80_percent() {
     );
     assert_eq!(
         outcome,
-        crate::harness::context_manager::RunOutcome::NeedsLlmCompaction,
+        crate::harness::context::RunOutcome::NeedsLlmCompaction,
         "an over-budget context requests the LLM compaction"
     );
     assert_eq!(

@@ -35,7 +35,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh32::xxh32;
 
-use cosh::harness::context_manager::{ContextItem, ContextManagerState, SplitState};
+use cosh::harness::context::{ContextItem, ContextManagerState, SplitState};
 
 use crate::types::{
     Message, MessageRole, Part, ReasoningPart, Session, TextPart, ToolPart, ToolStatus,
@@ -411,13 +411,18 @@ impl SessionStore {
         for (i, item) in context.items.iter().enumerate() {
             match serde_json::to_string(item) {
                 Ok(json) => lines.push(json),
-                Err(e) => log::warn!("failed to serialize item {i} for session {}: {e}", session.id),
+                Err(e) => log::warn!(
+                    "failed to serialize item {i} for session {}: {e}",
+                    session.id
+                ),
             }
         }
 
         // Optional final line: the split staging.
         if let Some(split) = &context.split {
-            match serde_json::to_string(&SplitLine { split: split.clone() }) {
+            match serde_json::to_string(&SplitLine {
+                split: split.clone(),
+            }) {
                 Ok(json) => lines.push(json),
                 Err(e) => log::warn!("failed to serialize split for session {}: {e}", session.id),
             }
@@ -429,7 +434,10 @@ impl SessionStore {
             match serde_json::to_string(&ReasoningLine { reasoning }) {
                 Ok(json) => lines.push(json),
                 Err(e) => {
-                    log::warn!("failed to serialize reasoning for session {}: {e}", session.id)
+                    log::warn!(
+                        "failed to serialize reasoning for session {}: {e}",
+                        session.id
+                    )
                 }
             }
         }
@@ -571,7 +579,9 @@ impl SessionStore {
         let mut message_count: usize = 0;
         for line in reader.lines().map_while(Result::ok) {
             let line = line.trim();
-            if line.is_empty() || line.starts_with("{\"split\":") || line.starts_with("{\"reasoning\":")
+            if line.is_empty()
+                || line.starts_with("{\"split\":")
+                || line.starts_with("{\"reasoning\":")
             {
                 continue;
             }
@@ -642,14 +652,10 @@ fn context_from_messages(messages: &[Message]) -> ContextManagerState {
     for m in messages {
         match m.role {
             MessageRole::User => {
-                if let Some(text) = m
-                    .parts
-                    .iter()
-                    .find_map(|p| match p {
-                        Part::Text(t) if !t.text.is_empty() => Some(t.text.clone()),
-                        _ => None,
-                    })
-                {
+                if let Some(text) = m.parts.iter().find_map(|p| match p {
+                    Part::Text(t) if !t.text.is_empty() => Some(t.text.clone()),
+                    _ => None,
+                }) {
                     push!(ContextItem::User {
                         id: next_id,
                         original: text,
@@ -711,7 +717,7 @@ fn context_from_messages(messages: &[Message]) -> ContextManagerState {
     ContextManagerState {
         items: items.into_iter().collect(),
         next_id,
-        max_tokens: cosh::harness::context_manager::MAX_CONTEXT_TOKENS,
+        max_tokens: cosh::harness::context::MAX_CONTEXT_TOKENS,
         overflow_provider: None,
         split: None,
     }
@@ -748,7 +754,9 @@ fn items_to_messages(items: &[ContextItem], reasoning: &HashMap<u64, String>) ->
                     model: None,
                 },
                 ContextItem::Assistant { original, .. }
-                | ContextItem::Closure { content: original, .. }
+                | ContextItem::Closure {
+                    content: original, ..
+                }
                 | ContextItem::Compaction {
                     summary: original, ..
                 } => {
@@ -1165,10 +1173,7 @@ mod tests {
         let store = test_store(&dir);
 
         let session = make_test_session("12345", "Test Session", vec![]);
-        let context = make_context(vec![
-            user_item(1, "Hello!"),
-            assistant_item(2, "Hi there!"),
-        ]);
+        let context = make_context(vec![user_item(1, "Hello!"), assistant_item(2, "Hi there!")]);
 
         store.save_session_with_context(&session, &context);
 
@@ -1265,10 +1270,8 @@ mod tests {
         let store = test_store(&dir);
 
         let session = make_test_session("5000", "Split Session", vec![]);
-        let mut context = make_context(vec![
-            user_item(1, "Hello!"),
-            assistant_item(2, "Hi there!"),
-        ]);
+        let mut context =
+            make_context(vec![user_item(1, "Hello!"), assistant_item(2, "Hi there!")]);
         // An in-progress split-and-concatenate must survive the JSONL round-trip
         // verbatim, so an interrupted split resumes where it stopped.
         context.split = Some(SplitState {
@@ -1425,7 +1428,9 @@ mod tests {
         assert_eq!(loaded.messages.len(), 4);
         let call_parts = &loaded.messages[1].parts;
         assert_eq!(call_parts.len(), 2);
-        assert!(matches!(&call_parts[0], Part::Reasoning(r) if r.text == "I'll read the file first."));
+        assert!(
+            matches!(&call_parts[0], Part::Reasoning(r) if r.text == "I'll read the file first.")
+        );
         let answer_parts = &loaded.messages[3].parts;
         assert_eq!(answer_parts.len(), 2);
         assert!(matches!(&answer_parts[0], Part::Reasoning(r) if r.text == "Now I can answer."));
@@ -1469,10 +1474,7 @@ mod tests {
 
         for i in 0..(MAX_SESSIONS_ON_DISK + 5) {
             let session = make_test_session(&format!("{i:05}"), &format!("Session {i}"), vec![]);
-            store.save_session_with_context(
-                &session,
-                &make_context(vec![user_item(1, "Hello")]),
-            );
+            store.save_session_with_context(&session, &make_context(vec![user_item(1, "Hello")]));
         }
 
         let list = store.list_sessions();

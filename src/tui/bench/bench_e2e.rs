@@ -104,8 +104,8 @@ fn shell_out(lines: usize) -> String {
 /// through the UI thread and serializing it — not an empty `Default::default()`.
 pub(crate) fn realistic_context(
     rounds: usize,
-) -> cosh::harness::context_manager::ContextManagerState {
-    use cosh::harness::context_manager::{ContextItem, ContextManagerState};
+) -> cosh::harness::context::ContextManagerState {
+    use cosh::harness::context::{ContextItem, ContextManagerState};
     let mut items = Vec::with_capacity(rounds * 4);
     let mut next_id = 1u64;
     for r in 0..rounds {

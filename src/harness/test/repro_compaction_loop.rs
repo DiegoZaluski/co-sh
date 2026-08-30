@@ -1,6 +1,6 @@
 use super::super::core::Harness;
 use super::super::events::HarnessEvent;
-use crate::harness::context_manager::ContextManager;
+use crate::harness::context::ContextManager;
 use crate::harness::events::LlmCompactionEvent;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

@@ -1,7 +1,7 @@
 use cosh_tools::question::types::QuestionItem;
 use serde_json::Value;
 
-use super::context_manager::ContextManagerState;
+use super::context::ContextManagerState;
 
 /// Represents a model entry with its provider
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -72,7 +72,7 @@ pub enum HarnessEvent {
     /// Sent after each [`ContextManager::run`] cycle during the agent loop.
     ContextInfo {
         /// Current context budget usage info.
-        info: super::context_manager::ContextDisplayInfo,
+        info: super::context::ContextDisplayInfo,
     },
     /// Periodic context snapshot during a long agent run, so the TUI can
     /// persist the session log incrementally. A crash or restart mid-run then

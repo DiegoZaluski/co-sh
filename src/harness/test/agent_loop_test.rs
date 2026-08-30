@@ -1,7 +1,7 @@
 use super::super::core::Harness;
 use super::super::core::result_is_useless;
 use super::super::events::HarnessEvent;
-use crate::harness::context_manager::ContextItem;
+use crate::harness::context::ContextItem;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -314,7 +314,7 @@ async fn full_tool_loop_builds_correct_item_sequence_and_messages() {
 // [Compaction, user, LoopClosure].
 #[tokio::test]
 async fn run_agent_loop_runs_the_llm_compaction_when_over_the_trigger() {
-    use crate::harness::context_manager::ContextManager;
+    use crate::harness::context::ContextManager;
     use crate::harness::events::LlmCompactionEvent;
 
     let mut h = Harness::new_test();
@@ -415,7 +415,7 @@ async fn run_agent_loop_runs_the_llm_compaction_when_over_the_trigger() {
 // context as it was (over budget but alive) — never panic or drop the turn.
 #[tokio::test]
 async fn run_agent_loop_survives_a_failed_llm_compaction() {
-    use crate::harness::context_manager::ContextManager;
+    use crate::harness::context::ContextManager;
     use crate::harness::events::LlmCompactionEvent;
 
     let mut h = Harness::new_test();
@@ -579,7 +579,7 @@ async fn input_with_output_before_cancel_is_kept() {
 // stay in the timeline.
 #[tokio::test]
 async fn run_agent_loop_marks_provider_stuck_when_split_cannot_fit() {
-    use crate::harness::context_manager::ContextManager;
+    use crate::harness::context::ContextManager;
     use crate::harness::core::CONTEXT_WINDOW_MARKER;
     use crate::harness::events::{LlmCompactionEvent, ToastVariant};
 
@@ -697,7 +697,7 @@ async fn run_agent_loop_marks_provider_stuck_when_split_cannot_fit() {
 // the loop still completes.
 #[tokio::test]
 async fn run_agent_loop_retries_generic_compaction_failures_then_notifies() {
-    use crate::harness::context_manager::ContextManager;
+    use crate::harness::context::ContextManager;
     use crate::harness::events::{LlmCompactionEvent, ToastVariant};
 
     let mut h = Harness::new_test();
@@ -781,7 +781,7 @@ async fn run_agent_loop_retries_generic_compaction_failures_then_notifies() {
 // re-surfaced instead.
 #[tokio::test]
 async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
-    use crate::harness::context_manager::ContextManager;
+    use crate::harness::context::ContextManager;
     use crate::harness::events::ToastVariant;
 
     let mut h = Harness::new_test();
@@ -868,7 +868,7 @@ async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
 // shrinks the WHOLE timeline to fit the known window.
 #[tokio::test]
 async fn known_window_overflow_drives_split_and_commits_the_anchor() {
-    use crate::harness::context_manager::ContextManager;
+    use crate::harness::context::ContextManager;
     use crate::harness::events::LlmCompactionEvent;
 
     let mut h = Harness::new_test();
@@ -1022,7 +1022,7 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
 // (Finished, never Failed; the provider is never marked stuck).
 #[tokio::test]
 async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() {
-    use crate::harness::context_manager::ContextManager;
+    use crate::harness::context::ContextManager;
     use crate::harness::core::CONTEXT_WINDOW_MARKER;
     use crate::harness::events::{LlmCompactionEvent, ToastVariant};
 
@@ -1178,7 +1178,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
 // stays exactly as it was. Nothing is silently dropped from the anchor.
 #[tokio::test]
 async fn split_aborts_on_an_empty_chunk_summary_and_keeps_the_context() {
-    use crate::harness::context_manager::ContextManager;
+    use crate::harness::context::ContextManager;
     use crate::harness::events::LlmCompactionEvent;
 
     let mut h = Harness::new_test();
@@ -1319,7 +1319,7 @@ fn result_is_useless_reads_find_grep_json_contract() {
 // answering: exactly the round trip a crash/restart resume performs.
 #[tokio::test]
 async fn run_agent_loop_emits_resumable_incremental_context_snapshots() {
-    use crate::harness::context_manager::{ContextManager, ContextManagerState};
+    use crate::harness::context::{ContextManager, ContextManagerState};
 
     let mut h = Harness::new_test()
         .with_snapshot_interval(std::time::Duration::ZERO)

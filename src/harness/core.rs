@@ -1,4 +1,6 @@
-use super::context_manager::{ContextManager, MAX_CONTEXT_TOKENS, RunOutcome};
+#[cfg(not(test))]
+use super::context::error_catalog_window;
+use super::context::{ContextManager, MAX_CONTEXT_TOKENS, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
 use cosh_sdk::connector::{
@@ -250,6 +252,12 @@ static DISCOVERED_WINDOW_CACHE: OnceLock<Mutex<HashMap<String, Option<usize>>>> 
 #[cfg(not(test))]
 async fn discovered_context_window(model: Option<&str>) -> Option<usize> {
     let model = model?;
+    // A window the user's own provider reported in a previous overflow is the
+    // authoritative maximum — a local read that beats a public-catalog guess
+    // and costs no network call.
+    if let Some(window) = error_catalog_window(model) {
+        return Some(window);
+    }
     let cache = DISCOVERED_WINDOW_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(window) = cache
         .lock()
@@ -1062,7 +1070,7 @@ impl Harness {
                     // known window or the current budget as a fallback) — it
                     // shrinks the WHOLE timeline (every item included).
                     if let Some(w) = window_tokens {
-                        self.last_context_window = Some(w);
+                        self.remember_error_window(w);
                     }
                     if self.split_context(tx).await {
                         self.compaction_generic_retries = 0;
@@ -1117,6 +1125,18 @@ impl Harness {
         self.last_context_window.or(self.discovered_window)
     }
 
+    /// Record a context window reported by a context-window overflow error.
+    ///
+    /// The RAW window is stashed for the split-and-concatenate contingency; the
+    /// budget re-sizing (to the effective value) and the persistence to the
+    /// provider-error catalog are delegated to the context manager, which owns
+    /// that business logic.
+    fn remember_error_window(&mut self, window: usize) {
+        self.last_context_window = Some(window);
+        let model = self.connector.effective_model();
+        self.context_manager.record_provider_window(model, window);
+    }
+
     /// The user-triggered `/compact`: run the deterministic funnel across
     /// EVERY segment (the trigger floored at zero for this pass) and then the
     /// LLM summary of whatever remains — the same phases as the automatic 80%
@@ -1129,7 +1149,7 @@ impl Harness {
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
         stop_signal: Arc<AtomicBool>,
     ) -> ManualCompactionOutcome {
-        use super::context_manager::RunOutcome;
+        use super::context::RunOutcome;
         use super::events::HarnessEvent;
 
         if !self.context_manager.has_compactable_content() {
@@ -1504,7 +1524,9 @@ impl Harness {
                             ConnectorError::ContextWindowExceeded {
                                 window_tokens, ..
                             } => {
-                                self.last_context_window = window_tokens;
+                                if let Some(window) = window_tokens {
+                                    self.remember_error_window(window);
+                                }
                                 CONTEXT_WINDOW_MARKER.to_string()
                             }
                             other => other.to_string(),

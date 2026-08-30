@@ -418,6 +418,41 @@ async fn with_discovered_context_creates_valid_context_manager() {
     assert!(cm.total_tokens() > 0, "Should track tokens after adding content");
 }
 
+// ── Provider-error catalog (windows observed from API errors) ─────────────
+
+#[test]
+fn error_catalog_matches_case_and_vendor_tolerant() {
+    let mut catalog = HashMap::new();
+    catalog.insert("openai/gpt-4o".to_string(), 128_000);
+    catalog.insert("claude-sonnet-4-5".to_string(), 200_000);
+    // Exact, bare, capitalized and vendor-prefixed spellings all resolve.
+    assert_eq!(
+        find_window_in_error_catalog("gpt-4o", &catalog),
+        Some(128_000)
+    );
+    assert_eq!(
+        find_window_in_error_catalog("GPT-4O", &catalog),
+        Some(128_000)
+    );
+    assert_eq!(
+        find_window_in_error_catalog("anthropic/claude-sonnet-4-5", &catalog),
+        Some(200_000)
+    );
+    // Unknown models fall through.
+    assert_eq!(find_window_in_error_catalog("unknown-model", &catalog), None);
+}
+
+#[test]
+fn error_catalog_round_trips_through_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(API_ERROR_CATALOG_FILE);
+    let mut catalog = HashMap::new();
+    catalog.insert("gpt-4o".to_string(), 128_000);
+    save_error_catalog(&path, &catalog);
+    let loaded = load_error_catalog(&path).unwrap();
+    assert_eq!(loaded.get("gpt-4o"), Some(&128_000));
+}
+
 // ── Split-and-concatenate (the context-window contingency) ─────────────────
 
 #[test]

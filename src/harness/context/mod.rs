@@ -25,6 +25,7 @@ use cosh_sdk::connector::{
 use cosh_tools::plan::types::TodoList;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use todo_ctxt::TodoContext;
 
 /// Default token budget for the total conversation context. Overridable via
@@ -531,6 +532,102 @@ fn assistant_message(text: &str) -> ChatMessage {
     }
 }
 
+// ── Provider-error catalog (windows observed from provider API errors) ─────
+//
+// A context-window overflow is the provider's OWN report of its maximum input
+// size ("maximum context length is 128000") — more authoritative than a guess
+// from a public catalog, and worth persisting across launches. This lives HERE,
+// in the harness, deliberately isolated from `cosh-sdk`'s discovery: it records
+// the user's own observed maxima (private, per-machine state), not a public
+// model listing. It is stored at the TOP level of the data dir
+// (`~/.local/share/cosh`), not under the `cache/` subdir the public catalogs
+// use — a record, not a cache.
+
+/// File name of the provider-error catalog (a JSON map of `model → window`).
+const API_ERROR_CATALOG_FILE: &str = "api_errors.json";
+
+/// Resolve the directory holding the provider-error catalog:
+/// `{data_local_dir}/cosh`.
+fn resolve_error_catalog_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|b| b.data_local_dir().join("cosh"))
+}
+
+/// Read the provider-error catalog map from `path`. `None` when the file is
+/// missing or unparseable — a corrupted catalog is ignored, never fatal.
+fn load_error_catalog(path: &Path) -> Option<HashMap<String, usize>> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Write `catalog` to `path`, creating the directory if needed. Never fatal —
+/// a failing cache write must not block the agent loop.
+fn save_error_catalog(path: &Path, catalog: &HashMap<String, usize>) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::warn!(
+            "failed to create provider-error catalog dir {}: {e}",
+            dir.display()
+        );
+        return;
+    }
+    match serde_json::to_string(catalog) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(path, json) {
+                log::warn!(
+                    "failed to write provider-error catalog {}: {e}",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => log::warn!("failed to serialize provider-error catalog: {e}"),
+    }
+}
+
+/// Flexible match against the provider-error catalog map, mirroring the SDK's
+/// discovery: the needle matches a key when they are equal or share a bare
+/// (vendor-less) suffix, case-insensitive.
+fn find_window_in_error_catalog(
+    model_name: &str,
+    catalog: &HashMap<String, usize>,
+) -> Option<usize> {
+    let needle_lower = model_name.to_lowercase();
+    let needle_bare = needle_lower.rsplit('/').next().unwrap_or(&needle_lower);
+    catalog.iter().find_map(|(id, window)| {
+        let id_lower = id.to_lowercase();
+        let id_bare = id_lower.rsplit('/').next().unwrap_or(&id_lower);
+        let matches = id_lower == needle_lower
+            || id_bare == needle_lower
+            || id_lower == needle_bare
+            || id_bare == needle_bare;
+        matches.then_some(*window)
+    })
+}
+
+/// The model's context window recorded in the provider-error catalog, if any —
+/// a window the user's own provider reported in a previous overflow (more
+/// authoritative than a public-catalog guess, and a local read).
+pub fn error_catalog_window(model_name: &str) -> Option<usize> {
+    let dir = resolve_error_catalog_dir()?;
+    let catalog = load_error_catalog(&dir.join(API_ERROR_CATALOG_FILE))?;
+    find_window_in_error_catalog(model_name, &catalog)
+}
+
+/// Persist a model's context window — reported by a provider's context-window
+/// overflow — for future launches. Never fatal: the caller has already applied
+/// the window to its in-memory budget, and a failed write must not break the
+/// agent loop.
+pub fn save_error_catalog_window(model_name: &str, window: usize) {
+    let Some(dir) = resolve_error_catalog_dir() else {
+        return;
+    };
+    let path = dir.join(API_ERROR_CATALOG_FILE);
+    let mut catalog = load_error_catalog(&path).unwrap_or_default();
+    catalog.insert(model_name.to_string(), window);
+    save_error_catalog(&path, &catalog);
+}
+
 impl ContextManager {
     pub fn new(max_tokens: usize) -> Self {
         Self {
@@ -608,6 +705,27 @@ impl ContextManager {
     /// value it persisted.
     pub fn set_max_tokens(&mut self, max_tokens: usize) {
         self.max_tokens = max_tokens;
+    }
+
+    /// Record a context window reported by a provider context-window overflow.
+    ///
+    /// A provider's overflow is its OWN report of the maximum input size, so it
+    /// is treated exactly like a successful discovery: the budget is re-sized
+    /// to the EFFECTIVE value ([`effective_context_window`]), replacing the 100k
+    /// fallback, and the RAW window is persisted to the provider-error catalog
+    /// so future launches discover it before ever paying another overflow.
+    ///
+    /// Persistence is skipped under `cfg(test)`: tests run against the real
+    /// `~/.local/share/cosh` data dir and must never write to it.
+    pub fn record_provider_window(&mut self, model: Option<&str>, window: usize) {
+        self.set_max_tokens(effective_context_window(window));
+        let Some(model) = model else {
+            return;
+        };
+        if cfg!(test) {
+            return;
+        }
+        save_error_catalog_window(model, window);
     }
 
     /// Replace the mirrored tool TODO list. The harness syncs it from the

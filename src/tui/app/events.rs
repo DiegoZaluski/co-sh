@@ -11,8 +11,8 @@ use crate::routes::session::queue_choice::QueueTarget;
 use crate::session_store::is_valid_session;
 use crate::types::SessionStatus;
 use crate::ui::dialogs::DialogType;
-use cosh::harness::context_manager::ContextManagerState;
 use cosh::harness::HarnessEvent;
+use cosh::harness::context::ContextManagerState;
 
 impl App {
     pub(super) fn handle_events(&mut self) -> io::Result<bool> {

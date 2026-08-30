@@ -4,7 +4,7 @@
 //! the remainder — reusing the automatic compaction's events end to end.
 
 use super::super::core::Harness;
-use crate::harness::context_manager::{ContextManager, RunOutcome};
+use crate::harness::context::{ContextManager, RunOutcome};
 use crate::harness::core::ManualCompactionOutcome;
 use crate::harness::events::{HarnessEvent, LlmCompactionEvent};
 use std::sync::Arc;
