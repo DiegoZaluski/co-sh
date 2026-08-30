@@ -1947,7 +1947,7 @@ mod tests {
 
         let spilled = state.pty_sessions.iter().filter(|p| p.spilled).count();
         assert!(
-            spilled >= 1 && spilled <= 5,
+            (1..=5).contains(&spilled),
             "oldest finished outputs moved to disk (got {spilled})"
         );
         assert!(

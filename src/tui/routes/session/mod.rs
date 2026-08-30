@@ -32,8 +32,8 @@ use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
 use crate::types::{
-    AgentColors, CompactionPart, FilePart, Message, MessageRole, Part,
-    ReasoningPart, SessionStatus, ToolPart, ToolStatus,
+    AgentColors, CompactionPart, FilePart, Message, MessageRole, Part, ReasoningPart,
+    SessionStatus, ToolPart, ToolStatus,
 };
 use std::time::Instant;
 
@@ -1354,7 +1354,7 @@ impl SessionView {
                     y += 1;
                 }
                 Part::Compaction(c) => {
-                if !c.text.is_empty() {
+                    if !c.text.is_empty() {
                         let expanded = tool_state.is_expanded(&summarizing_id(c));
                         let mut line_h =
                             Self::render_summarizing_box(buf, x, y, max_w, c, expanded, theme);
@@ -1614,7 +1614,7 @@ impl SessionView {
             }
             Part::File(_) => 1,
             Part::Compaction(c) => {
-                                if !c.text.is_empty() {
+                if !c.text.is_empty() {
                     // The "Summarizing" box: title row + wrapped body. Collapsed
                     // keeps a fixed preview height (scroll-up); expanded grows
                     // with the full streamed text. The width is the box's inner
@@ -3105,7 +3105,7 @@ impl SessionView {
                                 }
                             }
                             crate::types::Part::Compaction(c) => {
-                    if !c.text.is_empty() {
+                                if !c.text.is_empty() {
                                     // The "Summarizing" box: title row + the
                                     // visible body rows (tail when collapsed,
                                     // full text when expanded). The rows come

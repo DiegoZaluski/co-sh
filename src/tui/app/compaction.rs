@@ -7,9 +7,11 @@ impl App {
     pub(super) fn finalize_compaction_line(session: &mut crate::types::Session) {
         use crate::types::Part;
         let now = crate::types::now_ms();
-        let running = session.messages.iter_mut().rev().find(|m| {
-            matches!(&m.parts[..], [Part::Compaction(c)] if c.is_running())
-        });
+        let running = session
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(&m.parts[..], [Part::Compaction(c)] if c.is_running()));
         if let Some(msg) = running
             && let Some(Part::Compaction(c)) = msg.parts.last_mut()
         {
@@ -64,9 +66,11 @@ impl App {
         let Some(session) = self.state.current_session_mut() else {
             return;
         };
-        let target = session.messages.iter_mut().rev().find(|m| {
-            matches!(&m.parts[..], [Part::Compaction(c)] if c.is_running())
-        });
+        let target = session
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(&m.parts[..], [Part::Compaction(c)] if c.is_running()));
         if let Some(msg) = target
             && let Some(Part::Compaction(c)) = msg.parts.last_mut()
         {

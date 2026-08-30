@@ -531,7 +531,7 @@ mod tests {
         d.stream_chars = d.content.stream_text.chars().count();
         let h = d.required_height(80);
         // text + gap + question + options + padding
-        assert!(h >= MIN_HEIGHT + 1 + 1 + 1);
+        assert!(h > MIN_HEIGHT + 1 + 1);
     }
 
     #[test]

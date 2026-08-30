@@ -2003,7 +2003,8 @@ impl DialogState {
                 let selection = if *is_last_user_message {
                     instance.selected.min(2)
                 } else {
-                    instance.selected.min(0)
+                    // Only "Copy" is offered: the selection stays on row 0.
+                    0
                 };
                 let max_w = 64u16.min(area.width.saturating_sub(4));
                 let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));

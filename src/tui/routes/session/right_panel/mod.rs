@@ -464,11 +464,13 @@ fn render_bash_section(
         buf,
         state,
         crate::routes::session::right_panel::types::SectionKind::Bash,
-        x + LEFT_PAD,
-        x + LEFT_PAD + inner_w,
-        inner_y,
-        inner_h,
-        scroll_y,
+        SelectionBand {
+            min_x: x + LEFT_PAD,
+            max_x: x + LEFT_PAD + inner_w,
+            inner_y,
+            inner_h,
+            scroll_y,
+        },
     );
 }
 
@@ -821,11 +823,13 @@ fn render_subagent_section(
         buf,
         state,
         crate::routes::session::right_panel::types::SectionKind::Subagent,
-        x + LEFT_PAD,
-        x + LEFT_PAD + wrap_w,
-        inner_y,
-        inner_h,
-        scroll_y,
+        SelectionBand {
+            min_x: x + LEFT_PAD,
+            max_x: x + LEFT_PAD + wrap_w,
+            inner_y,
+            inner_h,
+            scroll_y,
+        },
     );
 }
 
@@ -892,6 +896,17 @@ fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: St
     }
 }
 
+/// The on-screen band a section's drag-selection may paint into: the
+/// section's content x-range, its visible y-band, and the panel scroll
+/// offset used to map content rows back to screen rows.
+struct SelectionBand {
+    min_x: u16,
+    max_x: u16,
+    inner_y: u16,
+    inner_h: u16,
+    scroll_y: i32,
+}
+
 /// Invert fg/bg of the cells inside a section's drag-selection rectangle.
 ///
 /// Mirrors the chat's flow-based highlight: the anchor/focus are stored in
@@ -905,11 +920,7 @@ fn highlight_section_selection(
     buf: &mut Buffer,
     state: &RightPanelState,
     kind: crate::routes::session::right_panel::types::SectionKind,
-    content_min_x: u16,
-    content_max_x: u16,
-    inner_y: u16,
-    inner_h: u16,
-    scroll_y: i32,
+    band: SelectionBand,
 ) {
     let Some((anchor_x, _anchor_sy, focus_x, _focus_sy)) = state.drag_selection else {
         return;
@@ -917,23 +928,25 @@ fn highlight_section_selection(
     // Only the OWNING section may paint the highlight: content rows are
     // per-section coordinates, so re-interpreting them here would paint a
     // mirrored selection into the other section's box.
-    if state.selection_section != Some(kind) || inner_h == 0 {
+    if state.selection_section != Some(kind) || band.inner_h == 0 {
         return;
     }
 
-    let content_top = i32::from(inner_y);
-    let band_bottom = content_top + i32::from(inner_h) - 1;
+    let content_min_x = band.min_x;
+    let content_max_x = band.max_x;
+    let content_top = i32::from(band.inner_y);
+    let band_bottom = content_top + i32::from(band.inner_h) - 1;
     // Saturating: content rows can transiently carry the `i32::MAX`
     // scroll-to-bottom sentinel (e.g. a click racing a render that clamps
     // it), which would overflow a plain `- scroll_y + content_top`.
     let anchor_screen_y = state
         .selection_anchor_content_y
-        .saturating_sub(scroll_y)
+        .saturating_sub(band.scroll_y)
         .saturating_add(content_top)
         .clamp(content_top, band_bottom) as u16;
     let focus_screen_y = state
         .selection_focus_content_y
-        .saturating_sub(scroll_y)
+        .saturating_sub(band.scroll_y)
         .saturating_add(content_top)
         .clamp(content_top, band_bottom) as u16;
 
