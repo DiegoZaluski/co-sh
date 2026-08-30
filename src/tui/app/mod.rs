@@ -524,6 +524,10 @@ impl App {
     pub(in crate::app) fn set_theme(&mut self, t: &Theme) {
         self.theme = self.themed(t);
         self.config.theme_gen += 1;
+        // Update the active spinner's colours to reflect the new theme
+        if let Some(spinner) = &mut self.agent_spinner {
+            spinner.update_theme(&self.theme);
+        }
     }
 
     // RAG helper methods (cfg-gated at method level, always compiles)

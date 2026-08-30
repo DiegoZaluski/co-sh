@@ -216,6 +216,16 @@ impl AgentSpinner {
         self.label_width = label.chars().count();
     }
 
+    /// Update the theme colours (gradient and label colour) without
+    /// resetting the animation state. This allows the spinner to
+    /// immediately reflect theme changes while a loop is active.
+    pub fn update_theme(&mut self, theme: &Theme) {
+        let gradient_a = theme.primary;
+        let gradient_b = theme.accent;
+        self.label_color = theme.text_muted;
+        self.gradient_colors = make_gradient_ramp(gradient_a, gradient_b, self.cycling_char_width);
+    }
+
     /// Total width in terminal cells (cycling + gap + label + ellipsis).
     pub fn width(&self) -> usize {
         let mut w = self.cycling_char_width;
@@ -302,5 +312,39 @@ impl AgentSpinner {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_theme_changes_gradient_and_label_color() {
+        let registry = crate::theme::ThemeRegistry::new();
+        let mut theme1 = registry.get("opencode").cloned().unwrap();
+        theme1.primary = RGBA::from_hex("#FF0000");
+        theme1.accent = RGBA::from_hex("#0000FF");
+        theme1.text_muted = RGBA::from_hex("#00FF00");
+
+        let mut theme2 = registry.get("opencode").cloned().unwrap();
+        theme2.primary = RGBA::from_hex("#00FF00");
+        theme2.accent = RGBA::from_hex("#FF00FF");
+        theme2.text_muted = RGBA::from_hex("#FFFF00");
+
+        let mut spinner = AgentSpinner::new("Test", &theme1);
+
+        // Verify initial colors are from theme1
+        assert_eq!(spinner.gradient_colors[0], theme1.primary);
+        assert_eq!(spinner.gradient_colors[NUM_CYCLING_CHARS - 1], theme1.accent);
+        assert_eq!(spinner.label_color, theme1.text_muted);
+
+        // Update to theme2
+        spinner.update_theme(&theme2);
+
+        // Verify colors are now from theme2
+        assert_eq!(spinner.gradient_colors[0], theme2.primary);
+        assert_eq!(spinner.gradient_colors[NUM_CYCLING_CHARS - 1], theme2.accent);
+        assert_eq!(spinner.label_color, theme2.text_muted);
     }
 }
