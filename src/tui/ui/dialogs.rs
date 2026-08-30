@@ -39,7 +39,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
+    for (i, ch) in text.chars().filter(|c| !c.is_control()).enumerate() {
         let cx = x + i as u16;
         if cx >= right {
             break;

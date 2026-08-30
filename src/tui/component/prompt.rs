@@ -994,26 +994,26 @@ impl PromptView {
             // (ellipsis) — the reasoning level always stays fully visible.
             // When even the level alone would not fit, show only the level.
             let reason_text = reason.unwrap_or_default().to_string();
-            let (prov_out, model_out, reason_out) =
-                if prov_w + model_w + sep_w + reason_w <= avail {
-                    (prov_seg, model_name.to_string(), reason_text)
-                } else if model_w + sep_w + reason_w <= avail {
-                    (String::new(), model_name.to_string(), reason_text)
-                } else if avail > sep_w + reason_w {
-                    (
-                        String::new(),
-                        truncate_with_ellipsis(model_name, avail - sep_w - reason_w),
-                        reason_text,
-                    )
-                } else {
-                    (
-                        String::new(),
-                        String::new(),
-                        reason
-                            .map(|r| truncate_with_ellipsis(r, avail))
-                            .unwrap_or_default(),
-                    )
-                };
+            let (prov_out, model_out, reason_out) = if prov_w + model_w + sep_w + reason_w <= avail
+            {
+                (prov_seg, model_name.to_string(), reason_text)
+            } else if model_w + sep_w + reason_w <= avail {
+                (String::new(), model_name.to_string(), reason_text)
+            } else if avail > sep_w + reason_w {
+                (
+                    String::new(),
+                    truncate_with_ellipsis(model_name, avail - sep_w - reason_w),
+                    reason_text,
+                )
+            } else {
+                (
+                    String::new(),
+                    String::new(),
+                    reason
+                        .map(|r| truncate_with_ellipsis(r, avail))
+                        .unwrap_or_default(),
+                )
+            };
 
             let mut segments: Vec<(String, Style)> = Vec::new();
             if !prov_out.is_empty() {

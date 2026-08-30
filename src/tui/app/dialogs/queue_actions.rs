@@ -23,7 +23,7 @@ impl App {
         self.queue_actions_grace_until = Some(Instant::now() + QUEUE_ACTIONS_GRACE);
         self.active_queue_actions_session = self.state.current_session_id.clone();
         self.hovered_queue_row = None;
-        let preview: String = text.chars().take(36).collect();
+        let preview = super::super::dialog_preview_text(text);
         self.dialog.replace(DialogType::QueueActions {
             queue,
             index,

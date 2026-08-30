@@ -298,3 +298,135 @@ async fn message_actions_non_last_keyboard_only_cycles_one_option() {
     assert!(app.handle_message_actions_dialog_key(KeyCode::Enter));
     assert!(!app.dialog.visible(), "dialog closed after Enter");
 }
+
+/// The real crash flow: a click on a user message in the transcript opens the
+/// Message Actions box. Sweep every viewport row through the app's real mouse
+/// dispatch (Down+Up + a re-render after each hit) so the panic — wherever it
+/// hides on this path — reproduces in CI.
+#[tokio::test]
+async fn clicking_a_user_message_opens_message_actions_without_panicking() {
+    use crossterm::event::{
+        KeyCode, KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut app = app_with_user_message();
+    let (w, h) = (80u16, 24u16);
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+    terminal.draw(|f| app.render(f, 0.016)).unwrap();
+
+    let mouse = |kind: CKind, x: u16, y: u16| CMouse {
+        kind,
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    let mut opened = 0;
+    for y in 0..h {
+        for x in [6u16, 20, 40] {
+            eprintln!("EVENT down x={x} y={y}");
+            app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), x, y))
+                .expect("down handled");
+            app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), x, y))
+                .expect("up handled");
+            let hit = app.is_message_actions_dialog_visible();
+            if hit {
+                opened += 1;
+                // Render the frame that follows the open, then act on the box.
+                terminal.draw(|f| app.render(f, 0.016)).unwrap();
+                app.handle_message_actions_dialog_key(KeyCode::Esc);
+            }
+            eprintln!("RENDER after x={x} y={y}");
+            terminal.draw(|f| app.render(f, 0.016)).unwrap();
+        }
+    }
+    assert!(opened >= 1, "at least one click must open Message Actions");
+}
+
+/// Regression for the real crash: clicking a MULTILINE user prompt opened
+/// the Message Actions box whose preview carried a raw `\n` into
+/// `draw_text_line`, panicking ratatui's `cell_width` ("control character
+/// passed to cell_width without filtering") on the frame after the open —
+/// the TUI died with a garbled screen. Uses the exact session that crashed
+/// (multiline prompt + HTTP-401 error assistant line), restored through the
+/// real disk load path.
+#[tokio::test]
+async fn clicking_multiline_user_message_opens_message_actions_without_panicking() {
+    use crossterm::event::{
+        KeyCode, KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let dir = tempfile::tempdir().unwrap();
+    let sessions_dir = dir.path().join("crashhash");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::write(
+        sessions_dir.join("session-1788063765396.jsonl"),
+        concat!(
+            r#"{"title":"Aug 30 01:22","title_generated":false,"created_at":1788063765396,"#,
+            r#""cwd":"/home/inky/co-sh","provider":"opencode","model":"big-pickle","#,
+            r#""reasoning":"high","max_tokens":100000,"overflow_model":null,"next_id":3}"#,
+            "\n",
+            r#"{"User":{"id":1,"original":"Crie um AGENT.md para o projeto,\n1. pesquise como cria um AGENT.md eficiente \n2. estude o projeto e implemente"}}"#,
+            "\n",
+            r#"{"Assistant":{"id":2,"original":"Error: HTTP 401 - ModelError","closable":true}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let store = crate::session_store::SessionStore::with_dir(sessions_dir, "crashhash".into());
+
+    let mut app = App::new("/tmp".to_string());
+    app.state.session_summaries = store.list_sessions();
+    let id = "1788063765396".to_string();
+    assert!(app.state.ensure_session_cached(&id, &store));
+    app.state.current_session_id = Some(id);
+
+    let (w, h) = (100u16, 30u16);
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+    terminal.draw(|f| app.render(f, 0.016)).unwrap();
+
+    let mouse = |kind: CKind, x: u16, y: u16| CMouse {
+        kind,
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // Sweep every viewport row through the app's real mouse dispatch so any
+    // panic on the click-to-open-to-render path reproduces in CI.
+    let mut opened = 0;
+    for y in 0..h {
+        for x in [4u16, 15, 30, 60] {
+            app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), x, y))
+                .expect("down handled");
+            app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), x, y))
+                .expect("up handled");
+            if app.is_message_actions_dialog_visible() {
+                opened += 1;
+                // The frame right after the open used to panic here.
+                terminal.draw(|f| app.render(f, 0.016)).unwrap();
+                let d = app.dialog.current().unwrap();
+                if let crate::ui::dialogs::DialogType::MessageActions { preview, .. } =
+                    &d.dialog_type
+                {
+                    assert!(
+                        !preview.chars().any(char::is_control),
+                        "preview must be sanitized: {preview:?}"
+                    );
+                }
+                // Drive the actions (Revert included) with a render after each.
+                app.handle_message_actions_dialog_key(KeyCode::Down);
+                app.handle_message_actions_dialog_key(KeyCode::Down);
+                app.handle_message_actions_dialog_key(KeyCode::Enter);
+                terminal.draw(|f| app.render(f, 0.016)).unwrap();
+            }
+            terminal.draw(|f| app.render(f, 0.016)).unwrap();
+        }
+    }
+    assert!(
+        opened >= 1,
+        "Message Actions must open for the user message"
+    );
+}

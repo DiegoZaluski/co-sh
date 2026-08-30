@@ -141,6 +141,17 @@ impl SessionStore {
         }
     }
 
+    /// Test-only store rooted at an explicit directory (lets integration
+    /// tests drive the real load path against fixture session files).
+    #[cfg(test)]
+    pub(crate) fn with_dir(sessions_dir: std::path::PathBuf, cwd_hash: String) -> Self {
+        std::fs::create_dir_all(&sessions_dir).ok();
+        Self {
+            sessions_dir,
+            cwd_hash,
+        }
+    }
+
     // ── Public API ────────────────────────────────────────────────────────
 
     /// Persist a session to disk as a JSONL file in the current CWD's

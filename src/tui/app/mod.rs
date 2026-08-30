@@ -69,6 +69,21 @@ pub(crate) fn message_prompt_text(msg: &crate::types::Message) -> String {
         .join("\n")
 }
 
+/// One-line, control-character-free preview of a text for the Message
+/// Actions / Queue Actions boxes. The box renders the preview with
+/// `draw_text_line`, which writes characters into the ratatui buffer
+/// directly — a raw `\n` (multiline prompt) or any other control char in
+/// the source text panics ratatui's `cell_width`, so they never reach it.
+pub(crate) fn dialog_preview_text(text: &str) -> String {
+    text.lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(36)
+        .collect()
+}
+
 /// Zero the alpha of a theme's base background when transparent mode is on
 /// (the `/background` toggle). RGB channels are preserved so luminance
 /// derivations keep working and toggling off restores the exact registry

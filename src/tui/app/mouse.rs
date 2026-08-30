@@ -9,7 +9,7 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use super::{App, AppMode, MIN_PROMPT_RESERVE_ROWS, SIDEBAR_WIDTH, message_prompt_text};
+use super::{App, AppMode, MIN_PROMPT_RESERVE_ROWS, SIDEBAR_WIDTH};
 use crate::fallback;
 use crate::routes::router::FocusTarget;
 use crate::routes::session::queue_choice::QueueTarget;
@@ -901,11 +901,9 @@ impl App {
 
                     let preview = session
                         .and_then(|s| s.messages.iter().find(|m| m.id == message_id))
-                        .map(message_prompt_text)
-                        .unwrap_or_default()
-                        .chars()
-                        .take(36)
-                        .collect::<String>();
+                        .map(super::message_prompt_text)
+                        .unwrap_or_default();
+                    let preview = super::dialog_preview_text(&preview);
                     self.dialog.replace(DialogType::MessageActions {
                         message_id,
                         preview,
