@@ -6,7 +6,7 @@ use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
 use crate::logo::ChatLogo;
@@ -69,6 +69,44 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
             cell.set_style(style);
         }
     }
+}
+
+/// Display name for a model: drop any lab/org prefix — e.g.
+/// `deepseek.ai/deepseek-v4-pro` becomes `deepseek-v4-pro`. Display-only:
+/// the configured model id keeps its full form for the model picker and API
+/// calls. Note the lab prefix is unrelated to the gateway provider actually
+/// being accessed (see `LlmConfig.provider`).
+fn short_model_name(model: &str) -> &str {
+    match model.rsplit_once('/') {
+        Some((_, name)) if !name.is_empty() => name,
+        _ => model,
+    }
+}
+
+/// Truncate `text` to at most `max` characters, ending with an ellipsis when
+/// clipping occurs.
+fn truncate_with_ellipsis(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut clipped: String = text.chars().take(max.saturating_sub(1)).collect();
+    clipped.push('\u{2026}');
+    clipped
+}
+
+/// Style for the reasoning-level badge: bold and color-coded by effort
+/// intensity — green for low, amber for medium, red for high. Anything
+/// unknown falls back to the theme's info color.
+fn reason_level_style(level: &str, theme: &Theme) -> Style {
+    let color = match level {
+        "low" | "minimal" => theme.success,
+        "medium" => theme.warning,
+        "high" | "xhigh" => theme.error,
+        _ => theme.info,
+    };
+    Style::default()
+        .fg(rgba_color(color))
+        .add_modifier(Modifier::BOLD)
 }
 
 pub struct PromptView {
@@ -639,6 +677,7 @@ impl PromptView {
         agent_colors: &AgentColors,
         unique_agents: &[String],
         now: SystemTime,
+        provider: &str,
         model_name: &str,
         reasoning: Option<&str>,
         delta_time: f64,
@@ -911,25 +950,93 @@ impl PromptView {
             muted_style,
         );
 
-        // Model name on the right side of the footer line. When a concrete
-        // reasoning level was chosen (low/medium/high/etc., i.e. not the
-        // model default), show it first so the user can recall both the level
-        // and the model, e.g. ` high . deepseek-ai/deepseek-v4-flash`.
+        // Provider + model + reasoning level on the agent-label row — the
+        // same line as Build/Ask/Yolo, inside the input box, right-aligned.
+        // Layout is `provider model . level`, e.g.
+        // ` openrouter deepseek-v4-flash . high`. The provider is the
+        // gateway/API actually being accessed (from `LlmConfig.provider`,
+        // unrelated to the model id's lab prefix) and stays muted so it reads
+        // as a qualifier next to the bright model name, which uses the
+        // theme's adaptive text color (a white tone on dark themes,
+        // near-black on light ones such as sakura). The reasoning level is
+        // bold and color-coded by effort intensity; the ` . ` separator is
+        // muted too. Segments are truncated so the row always respects the
+        // box interior and never overlaps the agent label on the left.
         if !model_name.is_empty() {
-            let reason_prefix = match reasoning {
-                Some(r) if !r.is_empty() && r != "default" => format!("{r} . "),
-                _ => String::new(),
+            // Bare model name, without the lab/org prefix (display only).
+            let model_name = short_model_name(model_name);
+            let reason = reasoning.filter(|r| !r.is_empty() && *r != "default");
+            let sep = if reason.is_some() { " . " } else { "" };
+            let model_style = Style::default().fg(rgba_color(theme.text));
+            let reason_style = reason
+                .map(|r| reason_level_style(r, theme))
+                .unwrap_or(muted_style);
+
+            // Gateway provider prefix, muted, followed by one spacer column.
+            let prov_seg = if provider.is_empty() {
+                String::new()
+            } else {
+                format!("{provider} ")
             };
-            let model_text = format!(" {reason_prefix}{model_name}");
-            let model_x = area.right().saturating_sub(model_text.len() as u16);
-            draw_text_line(
-                buf,
-                &model_text,
-                model_x,
-                footer_y,
-                model_text.len() as u16,
-                muted_style,
-            );
+            let prov_w = prov_seg.chars().count();
+            let sep_w = sep.chars().count();
+            let reason_w = reason.map(|r| r.chars().count()).unwrap_or(0);
+            let model_w = model_name.chars().count();
+
+            // Interior width mirrors `max_line_w`: 3 columns of chrome on
+            // each side (border + 2 padding). Reserve room for the agent
+            // label plus one spacer column.
+            let interior_w = input_area.width.saturating_sub(6) as usize;
+            let label_w = agent_label.chars().count() + 1;
+            let avail = interior_w.saturating_sub(label_w);
+
+            // Fit order: drop the provider first, then shrink the model name
+            // (ellipsis) — the reasoning level always stays fully visible.
+            // When even the level alone would not fit, show only the level.
+            let reason_text = reason.unwrap_or_default().to_string();
+            let (prov_out, model_out, reason_out) =
+                if prov_w + model_w + sep_w + reason_w <= avail {
+                    (prov_seg, model_name.to_string(), reason_text)
+                } else if model_w + sep_w + reason_w <= avail {
+                    (String::new(), model_name.to_string(), reason_text)
+                } else if avail > sep_w + reason_w {
+                    (
+                        String::new(),
+                        truncate_with_ellipsis(model_name, avail - sep_w - reason_w),
+                        reason_text,
+                    )
+                } else {
+                    (
+                        String::new(),
+                        String::new(),
+                        reason
+                            .map(|r| truncate_with_ellipsis(r, avail))
+                            .unwrap_or_default(),
+                    )
+                };
+
+            let mut segments: Vec<(String, Style)> = Vec::new();
+            if !prov_out.is_empty() {
+                segments.push((prov_out, muted_style));
+            }
+            if !model_out.is_empty() {
+                segments.push((model_out, model_style));
+            }
+            if !reason_out.is_empty() {
+                segments.push((sep.to_string(), muted_style));
+                segments.push((reason_out, reason_style));
+            }
+            let total_w: usize = segments.iter().map(|(t, _)| t.chars().count()).sum();
+            if total_w > 0 {
+                let mut x = input_area.right().saturating_sub(3 + total_w as u16);
+                for (text, style) in segments {
+                    let w = text.chars().count() as u16;
+                    if w > 0 {
+                        draw_text_line(buf, &text, x, label_y, w, style);
+                        x += w;
+                    }
+                }
+            }
         }
 
         // ── Chat logo animation ───────────────────────────────────────────
@@ -1155,6 +1262,7 @@ mod tests {
             &[],
             SystemTime::now(),
             "",
+            "",
             None,
             0.0,
             false,
@@ -1181,6 +1289,7 @@ mod tests {
             &AgentColors::from_theme(cosh),
             &[],
             SystemTime::now(),
+            "",
             "",
             None,
             0.0,

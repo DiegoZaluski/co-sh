@@ -553,6 +553,7 @@ impl App {
                         {
                             spinner.render(buf, spinner_area.x + 1, spinner_area.y);
                         }
+                        let provider = self.llm_config.provider.as_str();
                         let model_name = self.llm_config.model.as_deref().unwrap_or("");
                         let reasoning = self.llm_config.reasoning.as_deref();
                         self.prompt_view.render(
@@ -563,6 +564,7 @@ impl App {
                             &agent_colors,
                             &unique_agents,
                             std::time::SystemTime::now(),
+                            provider,
                             model_name,
                             reasoning,
                             delta_time,
