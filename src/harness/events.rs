@@ -16,6 +16,12 @@ pub struct ModelEntry {
 pub enum HarnessEvent {
     /// A text token streamed from the LLM.
     Token { text: String },
+    /// A NEW streaming attempt is about to start. The SDK's retry middleware
+    /// re-streams failed attempts from the beginning; this event scopes what
+    /// the TUI may later discard on [`HarnessEvent::ClearAssistant`]: only
+    /// the message(s) opened AFTER this boundary belong to the current
+    /// attempt — the previous iteration's transcript must never be popped.
+    BeginAssistant,
     /// The SDK retried a mid-stream failure and is about to re-stream the
     /// response from the beginning: the TUI must drop any partial assistant
     /// message it rendered from the failed attempt (it would otherwise

@@ -731,85 +731,123 @@ fn context_from_messages(messages: &[Message]) -> ContextManagerState {
 /// Reasoning is rendered as a leading [`Part::Reasoning`] ("+ Thought") and is
 /// never part of the model-facing context.
 fn items_to_messages(items: &[ContextItem], reasoning: &HashMap<u64, String>) -> Vec<Message> {
-    items
+    // Tool chains are MERGED back into the display shape the live loop
+    // produces: one ToolPart carrying name + input + output (the call's
+    // result). Restoring them unmerged would lose the tool's identity on the
+    // result half (nameless parts render as generic) and the output on the
+    // call half (diffs/edits/reads/bash blocks render from `output`) — the
+    // transcript would visually collapse after a restart.
+    // Pending result indices per call_id, built in one pass — the merge
+    // below is O(n) total (each result is consumed at most once).
+    let mut pending_results: HashMap<&str, std::collections::VecDeque<usize>> = items
         .iter()
         .enumerate()
-        .map(|(idx, item)| {
-            let id = format!("msg-{idx}");
-            let thought = reasoning.get(&context_item_id(item)).map(|text| {
+        .fold(HashMap::new(), |mut acc, (j, it)| {
+            if let ContextItem::ToolResult { call_id, .. } = it {
+                acc.entry(call_id.as_str()).or_default().push_back(j);
+            }
+            acc
+        });
+    let mut consumed_result = vec![false; items.len()];
+    let mut messages: Vec<Message> = Vec::new();
+    for (idx, item) in items.iter().enumerate() {
+        let id = format!("msg-{idx}");
+        let thought = |item_id: u64| {
+            reasoning.get(&item_id).map(|text| {
                 Part::Reasoning(ReasoningPart {
                     text: text.clone(),
                     collapsed: true,
                 })
-            });
-            match item {
-                ContextItem::User { original, .. } => Message {
+            })
+        };
+        match item {
+            ContextItem::User { original, .. } => messages.push(Message {
+                id,
+                role: MessageRole::User,
+                parts: vec![Part::Text(TextPart {
+                    text: original.clone(),
+                    synthetic: false,
+                })],
+                created_at: 0,
+                agent: None,
+                model: None,
+            }),
+            ContextItem::Assistant { original, .. }
+            | ContextItem::Closure {
+                content: original, ..
+            }
+            | ContextItem::Compaction {
+                summary: original, ..
+            } => {
+                let mut parts = Vec::with_capacity(2);
+                if let Some(thought) = thought(context_item_id(item)) {
+                    parts.push(thought);
+                }
+                parts.push(Part::Text(TextPart {
+                    text: original.clone(),
+                    synthetic: false,
+                }));
+                messages.push(Message {
                     id,
-                    role: MessageRole::User,
-                    parts: vec![Part::Text(TextPart {
-                        text: original.clone(),
-                        synthetic: false,
-                    })],
+                    role: MessageRole::Assistant,
+                    parts,
                     created_at: 0,
                     agent: None,
                     model: None,
-                },
-                ContextItem::Assistant { original, .. }
-                | ContextItem::Closure {
-                    content: original, ..
+                });
+            }
+            ContextItem::ToolCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            } => {
+                // This call's result: the next unconsumed ToolResult with the
+                // same call_id — order-independent, so interleaved parallel
+                // chains merge correctly too.
+                let result = pending_results
+                    .get_mut(call_id.as_str())
+                    .and_then(|queue| queue.pop_front())
+                    .and_then(|j| {
+                        consumed_result[j] = true;
+                        match &items[j] {
+                            ContextItem::ToolResult { content, .. } => Some(content.clone()),
+                            _ => None,
+                        }
+                    });
+                let mut parts = Vec::with_capacity(2);
+                if let Some(thought) = thought(context_item_id(item)) {
+                    parts.push(thought);
                 }
-                | ContextItem::Compaction {
-                    summary: original, ..
-                } => {
-                    let mut parts = Vec::with_capacity(2);
-                    if let Some(thought) = thought {
-                        parts.push(thought);
-                    }
-                    parts.push(Part::Text(TextPart {
-                        text: original.clone(),
-                        synthetic: false,
-                    }));
-                    Message {
-                        id,
-                        role: MessageRole::Assistant,
-                        parts,
-                        created_at: 0,
-                        agent: None,
-                        model: None,
-                    }
+                parts.push(Part::Tool(ToolPart {
+                    tool: name.clone(),
+                    input: serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null),
+                    output: result,
+                    status: ToolStatus::Completed,
+                    tool_call_id: Some(call_id.clone()),
+                    is_start: true,
+                    is_streaming: false,
+                    cached_line_count: None,
+                }));
+                messages.push(Message {
+                    id,
+                    role: MessageRole::Assistant,
+                    parts,
+                    created_at: 0,
+                    agent: None,
+                    model: None,
+                });
+            }
+            ContextItem::ToolResult {
+                call_id, content, ..
+            } => {
+                // Consumed by its call above. An orphan result (its call is
+                // not in the log) still renders as a result-only part so the
+                // output is never dropped.
+                if consumed_result[idx] {
+                    continue;
                 }
-                ContextItem::ToolCall {
-                    call_id,
-                    name,
-                    arguments,
-                    ..
-                } => {
-                    let mut parts = Vec::with_capacity(2);
-                    if let Some(thought) = thought {
-                        parts.push(thought);
-                    }
-                    parts.push(Part::Tool(ToolPart {
-                        tool: name.clone(),
-                        input: serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null),
-                        output: None,
-                        status: ToolStatus::Completed,
-                        tool_call_id: Some(call_id.clone()),
-                        is_start: true,
-                        is_streaming: false,
-                        cached_line_count: None,
-                    }));
-                    Message {
-                        id,
-                        role: MessageRole::Assistant,
-                        parts,
-                        created_at: 0,
-                        agent: None,
-                        model: None,
-                    }
-                }
-                ContextItem::ToolResult {
-                    call_id, content, ..
-                } => Message {
+                messages.push(Message {
                     id,
                     role: MessageRole::Assistant,
                     parts: vec![Part::Tool(ToolPart {
@@ -825,10 +863,11 @@ fn items_to_messages(items: &[ContextItem], reasoning: &HashMap<u64, String>) ->
                     created_at: 0,
                     agent: None,
                     model: None,
-                },
+                });
             }
-        })
-        .collect()
+        }
+    }
+    messages
 }
 
 /// The stable id of a context item, used to key the display-only reasoning map.
@@ -1270,6 +1309,97 @@ mod tests {
         assert_eq!(loaded.reasoning.as_deref(), Some("low"));
     }
 
+    /// Restoring a session must rebuild the tool chains in the SAME shape the
+    /// live loop renders: one ToolPart with the tool's name, its input AND its
+    /// output. Unmerged parts would lose the diff/edit/read/bash blocks after
+    /// a restart (the call half has no output, the result half has no name).
+    #[test]
+    fn restored_tool_chains_render_like_the_live_display() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session(
+            "9000",
+            "Tool Session",
+            vec![make_user_msg("u1", "edit the file")],
+        );
+
+        let context = make_context(vec![
+            user_item(1, "edit the file"),
+            ContextItem::Assistant {
+                id: 2,
+                original: "editing".into(),
+                closable: false,
+            },
+            ContextItem::ToolCall {
+                id: 3,
+                call_id: "call-a".into(),
+                name: "fs_edit".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+                thought_signature: String::new(),
+                thinking_blocks: Vec::new(),
+            },
+            // Interleaved parallel chain: the result of call-a comes AFTER
+            // the call of chain b — the merge must be order-independent.
+            ContextItem::ToolCall {
+                id: 4,
+                call_id: "call-b".into(),
+                name: "fs_read".into(),
+                arguments: r#"{"path":"b.rs"}"#.into(),
+                thought_signature: String::new(),
+                thinking_blocks: Vec::new(),
+            },
+            ContextItem::ToolResult {
+                id: 5,
+                call_id: "call-a".into(),
+                content: "--- a.rs\n+++ b.rs\n@@ -1 +1 @@\n-old\n+new".into(),
+                useless: false,
+            },
+            ContextItem::ToolResult {
+                id: 6,
+                call_id: "call-b".into(),
+                content: "contents of b".into(),
+                useless: false,
+            },
+        ]);
+        store.save_session_with_context(&session, &context);
+
+        let loaded = store.load_session("9000").unwrap();
+        // user + assistant + 2 merged tool parts (NOT 2 raw pairs = 4 parts).
+        let tool_msgs: Vec<&Message> = loaded
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+            .filter(|m| m.parts.iter().any(|p| matches!(p, Part::Tool(_))))
+            .collect();
+        assert_eq!(
+            tool_msgs.len(),
+            2,
+            "each tool chain restores as ONE message"
+        );
+        for msg in &tool_msgs {
+            let Part::Tool(tp) = &msg.parts[0] else {
+                panic!("expected a tool part");
+            };
+            assert!(!tp.tool.is_empty(), "the tool name survives the restore");
+            assert!(
+                tp.output.is_some(),
+                "the tool OUTPUT survives the restore (diffs/edits/render blocks)"
+            );
+            assert!(!tp.input.is_null(), "the tool input survives the restore");
+        }
+        let edit = tool_msgs
+            .iter()
+            .find(|m| matches!(&m.parts[0], Part::Tool(tp) if tp.tool == "fs_edit"))
+            .unwrap();
+        let Part::Tool(tp) = &edit.parts[0] else {
+            panic!();
+        };
+        assert!(
+            tp.output.as_deref().unwrap().starts_with("--- a.rs"),
+            "fs_edit keeps its diff content"
+        );
+    }
+
     #[test]
     fn test_save_session_preserves_existing_context() {
         let dir = tempfile::tempdir().unwrap();
@@ -1450,14 +1580,20 @@ mod tests {
         store.save_session_with_context(&session, &context);
 
         let loaded = store.load_session("7000").unwrap();
-        // Messages: user, tool-call (with R1), tool-result, closure (with R2).
-        assert_eq!(loaded.messages.len(), 4);
+        // Messages: user, MERGED tool chain (call + result in one part, with
+        // R1), closure (with R2). The reasoning blocks keep their positions.
+        assert_eq!(loaded.messages.len(), 3);
         let call_parts = &loaded.messages[1].parts;
         assert_eq!(call_parts.len(), 2);
         assert!(
             matches!(&call_parts[0], Part::Reasoning(r) if r.text == "I'll read the file first.")
         );
-        let answer_parts = &loaded.messages[3].parts;
+        assert!(
+            matches!(&call_parts[1], Part::Tool(t)
+                if t.tool == "read" && t.output.as_deref() == Some("contents")),
+            "the tool chain restores merged, with name and output"
+        );
+        let answer_parts = &loaded.messages[2].parts;
         assert_eq!(answer_parts.len(), 2);
         assert!(matches!(&answer_parts[0], Part::Reasoning(r) if r.text == "Now I can answer."));
     }

@@ -2308,6 +2308,10 @@ impl Harness {
             let system_context = self.build_chat_context();
             let mut assistant_response = String::new();
             let result = loop {
+                // Attempt boundary: the TUI scopes its discard-on-reset to the
+                // message(s) opened after this point — a reset can then never
+                // eat the PREVIOUS iteration's transcript.
+                let _ = tx.send(HarnessEvent::BeginAssistant);
                 let messages = self.context_manager.build_messages(&current_input);
                 let attempt = self
                     .stream_chat_with_messages(&system_context, &messages, |event| {

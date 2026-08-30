@@ -245,6 +245,25 @@ fn remove_abandoned_inputs_never_touches_a_pending_live_call() {
     assert_eq!(cm.items_snapshot().len(), 2);
 }
 
+#[test]
+fn a_fresh_input_after_a_compaction_with_nothing_produced_between_is_abandoned() {
+    // [Compaction, User(a), User(b)]: a Compaction anchor holds the answer to
+    // the work that came BEFORE it. A user turn AFTER the anchor with NO
+    // output between it and the next input produced nothing (the run was
+    // cancelled before the LLM answered) — the abandoned-input rule applies
+    // and only the newest input survives.
+    let mut cm = cm(10_000);
+    cm.add_user("real task");
+    let _ = cm.apply_llm_summary("## Objective\n- do the task".into());
+    cm.add_user("abandoned retry");
+    cm.add_user("next input");
+    assert!(cm.remove_abandoned_inputs());
+    let items = cm.items_snapshot();
+    assert_eq!(items.len(), 2);
+    assert!(matches!(items[0], ContextItem::Compaction { .. }));
+    assert!(matches!(&items[1], ContextItem::User { original, .. } if original == "next input"));
+}
+
 // ── Useless tool-chain sweep ──────────────────────────────────────────────
 
 #[test]

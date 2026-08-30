@@ -207,6 +207,13 @@ pub struct App {
     /// one-off compaction task runs (there is no loop status to read —
     /// between loops the app is Idle). Cleared by the CompactOnDemand event.
     manual_compaction_active: bool,
+    /// The (session id, message id) opened by the CURRENT streaming attempt
+    /// (the `BeginAssistant` → `ClearAssistant` window). A mid-stream reset
+    /// may discard ONLY this message, and ONLY while its session is still on
+    /// screen: the previous iteration's transcript (with its tool parts) must
+    /// survive a provider retry, and a session switch must never make a
+    /// late reset reach another session's messages.
+    stream_msg_id: Option<(String, String)>,
     terminal_focused: bool,
     agent_spinner: Option<AgentSpinner>,
     /// Latest context manager info for the budget bar (None if no data yet).
@@ -395,6 +402,7 @@ impl App {
             pending_zen_message: None,
             title_generated: false,
             manual_compaction_active: false,
+            stream_msg_id: None,
             #[cfg(feature = "embed")]
             pending_delete_db_name: None,
             #[cfg(feature = "embed")]

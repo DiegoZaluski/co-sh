@@ -80,28 +80,47 @@ impl App {
 
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
+                HarnessEvent::BeginAssistant => {
+                    // A new streaming attempt starts: what follows belongs to
+                    // THIS attempt. ClearAssistant may later discard only the
+                    // message opened here — never older transcript content.
+                    self.stream_msg_id = None;
+                }
                 HarnessEvent::ClearAssistant => {
-                    // The SDK retried a mid-stream failure and is about to
-                    // re-stream the response from the beginning: drop the
-                    // partial assistant message rendered from the failed
-                    // attempt (it would otherwise concatenate with the
-                    // retried response).
-                    if let Some(session) = self.state.current_session_mut()
-                        && let Some(msg) = session.messages.last_mut()
-                        && msg.role == MessageRole::Assistant
+                    // The SDK retried a mid-stream failure: drop the partial
+                    // assistant message rendered from the failed attempt (it
+                    // would otherwise concatenate with the retried response).
+                    // Scoped to the message the attempt opened (BeginAssistant)
+                    // AND to the session the attempt belongs to — a session
+                    // switch during a background loop must never let a late
+                    // reset reach another session's transcript.
+                    if let Some((sid, mid)) = self.stream_msg_id.take()
+                        && self.state.current_session_id.as_deref() == Some(&sid)
+                        && let Some(session) = self.state.current_session_mut()
+                        && let Some(pos) = session.messages.iter().position(|m| m.id == mid)
                     {
-                        session.messages.pop();
+                        session.messages.remove(pos);
                     }
                 }
                 HarnessEvent::Token { text } => {
                     if text.trim().is_empty() {
                         continue;
                     }
+                    let cur_session = self.state.current_session_id.clone();
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
-                    match session.messages.last_mut() {
-                        Some(msg) if msg.role == MessageRole::Assistant => {
+                    // Append to the CURRENT attempt's message only — a fresh
+                    // attempt never bleeds into the previous iteration's
+                    // message (its tool parts would be at risk on a reset).
+                    let target = self
+                        .stream_msg_id
+                        .take()
+                        .filter(|(sid, _)| cur_session.as_deref() == Some(sid.as_str()))
+                        .and_then(|(_, mid)| session.messages.iter_mut().find(|m| m.id == mid));
+                    match target {
+                        Some(msg) => {
+                            self.stream_msg_id = cur_session.map(|sid| (sid, msg.id.clone()));
                             match msg.parts.last_mut() {
                                 Some(Part::Text(tp)) => tp.text.push_str(&text),
                                 _ => msg.parts.push(Part::Text(TextPart {
@@ -110,24 +129,32 @@ impl App {
                                 })),
                             }
                         }
-                        _ => session.messages.push(Message {
-                            id: format!("msg-{}", session.messages.len()),
-                            role: MessageRole::Assistant,
-                            parts: vec![Part::Text(TextPart {
-                                text: text.clone(),
-                                synthetic: false,
-                            })],
-                            created_at: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
-                            agent: None,
-                            model: None,
-                        }),
+                        None => {
+                            let id = format!("msg-{}", session.messages.len());
+                            self.stream_msg_id = cur_session.map(|sid| (sid, id.clone()));
+                            session.messages.push(Message {
+                                id,
+                                role: MessageRole::Assistant,
+                                parts: vec![Part::Text(TextPart {
+                                    text: text.clone(),
+                                    synthetic: false,
+                                })],
+                                created_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                                agent: None,
+                                model: None,
+                            });
+                        }
                     }
                 }
 
                 HarnessEvent::ToolCall { tool, input } => {
+                    // The attempt ended — its message is now transcript
+                    // history (tool parts attach below); a future reset must
+                    // never reach it.
+                    self.stream_msg_id = None;
                     // Track plan_todo_write calls for right panel TODO list
                     if tool == "plan_todo_write" {
                         self.state.right_panel.pending_todo_update_count += 1;
@@ -402,33 +429,47 @@ impl App {
                     if text.trim().is_empty() {
                         continue;
                     }
+                    let cur_session = self.state.current_session_id.clone();
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
-                    match session.messages.last_mut() {
-                        Some(msg) if msg.role == MessageRole::Assistant => {
+                    // Same attempt-scoping as the Token handler: reasoning
+                    // belongs to the CURRENT attempt's message.
+                    let target = self
+                        .stream_msg_id
+                        .take()
+                        .filter(|(sid, _)| cur_session.as_deref() == Some(sid.as_str()))
+                        .and_then(|(_, mid)| session.messages.iter_mut().find(|m| m.id == mid));
+                    match target {
+                        Some(msg) => {
+                            self.stream_msg_id = cur_session.map(|sid| (sid, msg.id.clone()));
                             msg.push_reasoning(&text);
                         }
-                        _ => session.messages.push(Message {
-                            id: format!("msg-{}", session.messages.len()),
-                            role: MessageRole::Assistant,
-                            parts: vec![Part::Reasoning(ReasoningPart {
-                                text: text.clone(),
-                                collapsed: true,
-                            })],
-                            created_at: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
-                            agent: None,
-                            model: None,
-                        }),
+                        None => {
+                            let id = format!("msg-{}", session.messages.len());
+                            self.stream_msg_id = cur_session.map(|sid| (sid, id.clone()));
+                            session.messages.push(Message {
+                                id,
+                                role: MessageRole::Assistant,
+                                parts: vec![Part::Reasoning(ReasoningPart {
+                                    text: text.clone(),
+                                    collapsed: true,
+                                })],
+                                created_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                                agent: None,
+                                model: None,
+                            });
+                        }
                     }
                 }
 
                 HarnessEvent::Done { context } => {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
+                    self.stream_msg_id = None;
                     // Safety net: a "Summarizing" line interrupted at its start
                     // must not stay running (the stopwatch would tick forever).
                     self.finalize_stale_compaction_lines();
@@ -579,6 +620,7 @@ impl App {
                 HarnessEvent::Stopped { context } => {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
+                    self.stream_msg_id = None;
                     self.finalize_stale_compaction_lines();
                     self.toast_state.show(ToastOptions {
                         title: Some("Interrupted".into()),
@@ -673,6 +715,7 @@ impl App {
                         action: None,
                     };
                     self.agent_spinner = None;
+                    self.stream_msg_id = None;
 
                     // Push error as an assistant message so it appears inline in the chat
                     let error_text = format!("Error: {msg}");
