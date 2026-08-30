@@ -347,7 +347,7 @@ fn cosh() -> Theme {
 
 fn sakura() -> Theme {
     let mut t = full_theme(
-        "#E8F0FF", "#DCE4F0", "#D0D8E4", "#C94C6E", "#D45D79", "#C8D0DC", "#343434", "#8B8B8B",
+        "#E8F0FF", "#DCE4F0", "#D0D8E4", "#C94C6E", "#D45D79", "#C8D0DC", "#000000", "#8B8B8B",
         "#D45D79", "#C94C6E", "#343434", "#7CB342", "#F4C2C2", "#E57373", "#D45D79", "#7CB342",
         "#E57373", "#9E9E9E", "#D45D79", "#66BB6A", "#EF9A9A", "#E8F5E9", "#FFF0F3", "#E8F0FF",
         "#9E9E9E", "#E8F5E9", "#FFF0F3", "#343434", "#D45D79", "#C94C6E", "#343434", "#D45D79",

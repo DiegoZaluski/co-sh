@@ -404,7 +404,18 @@ impl MarkdownPalette {
                 | MarkdownElement::ListItem { .. }
                 | MarkdownElement::Paragraph,
             )
-            | None => {}
+            | None => {
+                // Plain text (paragraphs, bare runs, list item bodies) must
+                // keep the palette's base text color. Without this the cells
+                // keep the default `Reset` fg, so the terminal's own default
+                // foreground leaks through — invisible on light themes (e.g.
+                // sakura) where the default is white on a light background.
+                // Headings/inline accents already set a fg above, so only the
+                // untouched style gets the base color.
+                if style.fg.is_none() {
+                    style = style.fg(rgba_to_ratatui(self.text));
+                }
+            }
         }
 
         style
@@ -449,4 +460,46 @@ impl MarkdownPalette {
 pub const fn rgba_to_ratatui(c: RGBA) -> Color {
     let (r, g, b, _) = c.to_ints();
     Color::Rgb(r, g, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REGRESSION: plain paragraph/bare text must keep the palette's base
+    /// `text` foreground. Before the fix, `style_for` returned `Style::default()`
+    /// (no fg) for paragraphs, so the terminal's own default foreground leaked
+    /// through — white on light themes like sakura made the output unreadable.
+    #[test]
+    fn paragraph_text_uses_base_text_fg() {
+        let text = RGBA::from_ints(0, 0, 0, 255);
+        let palette = MarkdownPalette::new(text, RGBA::from_ints(232, 240, 255, 255));
+
+        for element in [
+            None,
+            Some(MarkdownElement::Paragraph),
+            Some(MarkdownElement::ListItem { ordered: true }),
+        ] {
+            let style = palette.style_for(element, None);
+            assert_eq!(
+                style.fg,
+                Some(rgba_to_ratatui(text)),
+                "plain text must carry the base fg for element {element:?}"
+            );
+        }
+    }
+
+    /// Inline accents still win over the new base-text fallback.
+    #[test]
+    fn inline_accents_override_base_fg() {
+        let text = RGBA::from_ints(0, 0, 0, 255);
+        let mut palette = MarkdownPalette::new(text, RGBA::from_ints(232, 240, 255, 255));
+        let strong = RGBA::from_ints(200, 100, 50, 255);
+        palette.set_accent_colors(MarkdownAccentColors {
+            strong: Some(strong),
+            ..MarkdownAccentColors::default()
+        });
+        let style = palette.style_for(Some(MarkdownElement::Strong), None);
+        assert_eq!(style.fg, Some(rgba_to_ratatui(strong)));
+    }
 }

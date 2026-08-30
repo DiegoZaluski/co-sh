@@ -125,12 +125,12 @@ fn test_blockquote_muted_text() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
     md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
 
-    // Blockquote content starts at row 0, column 2 (indent)
-    // with no explicit fg (inherits from container), no bold, no bg.
+    // Blockquote content starts at row 0, column 2 (indent) and carries the
+    // base text foreground (never the terminal default), no bold, no bg.
     assert_eq!(
         buf.cell((2, 0)).unwrap().style().fg,
-        Some(Color::Reset),
-        "Blockquote text should have no explicit fg (inherits from container)"
+        Some(Color::Rgb(220, 220, 220)),
+        "Blockquote text should keep the base text foreground"
     );
     assert!(
         !buf.cell((2, 0))
@@ -590,11 +590,11 @@ fn test_blockquote_multiple_paragraphs() {
     md.render_self(&mut buf, Rect::new(0, 0, 40, 10));
 
     // First paragraph text starts at row 0, column 2 (indent).
-    // No explicit fg (inherits from container), no bold, no bg.
+    // Carries the base text foreground (never the terminal default), no bold.
     assert_eq!(
         buf.cell((2, 0)).unwrap().style().fg,
-        Some(Color::Reset),
-        "Blockquote first paragraph should have no explicit fg"
+        Some(Color::Rgb(220, 220, 220)),
+        "Blockquote first paragraph should keep the base text foreground"
     );
 }
 
