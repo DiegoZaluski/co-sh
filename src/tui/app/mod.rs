@@ -97,6 +97,9 @@ fn apply_background_preference(mut t: Theme, transparent_background: bool) -> Th
 }
 
 const SIDEBAR_WIDTH: u16 = 22;
+/// Minimum terminal width to show the left panel. Below this width, the sidebar
+/// is auto-hidden to prevent layout conflicts with home/session content.
+const MIN_WIDTH_FOR_LEFT_PANEL: u16 = 80;
 
 /// What the left panel currently shows. Ctrl+U jumps straight to the usage
 /// dashboard; Ctrl+B jumps straight back to the session history — the two
@@ -630,7 +633,7 @@ impl App {
     /// rendered at — a wider mouse area would re-wrap every message, shifting
     /// `prefix_y` and making tool-box clicks land on the wrong row.
     fn session_main_area(&self, area: Rect) -> SessionArea {
-        let sidebar_w = if self.sidebar.open {
+        let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
             self.left_panel_width()
         } else {
             0
@@ -874,7 +877,7 @@ impl App {
             return None;
         }
         let area = self.terminal_size();
-        let sidebar_w = if self.sidebar.open {
+        let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
             self.left_panel_width()
         } else {
             0

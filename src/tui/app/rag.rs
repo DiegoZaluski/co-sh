@@ -352,7 +352,7 @@ impl App {
     #[cfg(feature = "embed")]
     pub(super) fn handle_rag_mouse_click(&mut self, mouse: &MouseEvent) -> bool {
         let area = self.terminal_size();
-        let sidebar_w = if self.sidebar.open {
+        let sidebar_w = if self.sidebar.open && area.width >= super::MIN_WIDTH_FOR_LEFT_PANEL {
             self.left_panel_width()
         } else {
             0

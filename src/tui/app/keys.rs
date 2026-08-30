@@ -298,7 +298,10 @@ impl App {
             // Sidebar-focused arrow key scrolling (runs for ALL modes)
             // Must come before mode-specific handlers (Home, InternalTools,
             // Session) which also consume Up/Down before the action dispatch.
-            if self.sidebar_focused && self.sidebar.open {
+            if self.sidebar_focused
+                && self.sidebar.open
+                && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+            {
                 match key.code {
                     KeyCode::Up => {
                         self.sidebar.select_prev(self.state.session_summaries.len());
@@ -676,6 +679,7 @@ impl App {
             // arrives as BackTab, which the keymap doesn't bind.)
             if self.sidebar.open
                 && matches!(self.left_panel, super::LeftPanelMode::Dashboard)
+                && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
                 && self.state.right_panel.panel_focus.is_none()
             {
                 match key.code {
@@ -693,7 +697,10 @@ impl App {
 
             match action {
                 Some(crate::keymap::Action::ScrollUp) => {
-                    if self.sidebar_focused && self.sidebar.open {
+                    if self.sidebar_focused
+                        && self.sidebar.open
+                        && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+                    {
                         self.sidebar.select_prev(self.state.session_summaries.len());
                     } else if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
                         self.state.right_panel.scroll_up_at(self.last_mouse_y, 3);
@@ -705,7 +712,10 @@ impl App {
                     }
                 }
                 Some(crate::keymap::Action::ScrollDown) => {
-                    if self.sidebar_focused && self.sidebar.open {
+                    if self.sidebar_focused
+                        && self.sidebar.open
+                        && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+                    {
                         self.sidebar.select_next(self.state.session_summaries.len());
                     } else if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
                         self.state.right_panel.scroll_down_at(self.last_mouse_y, 3);
@@ -717,7 +727,10 @@ impl App {
                     }
                 }
                 Some(crate::keymap::Action::ScrollUpPage) => {
-                    if self.sidebar_focused && self.sidebar.open {
+                    if self.sidebar_focused
+                        && self.sidebar.open
+                        && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+                    {
                         self.sidebar
                             .select_first(self.state.session_summaries.len());
                     } else if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
@@ -733,7 +746,10 @@ impl App {
                     }
                 }
                 Some(crate::keymap::Action::ScrollDownPage) => {
-                    if self.sidebar_focused && self.sidebar.open {
+                    if self.sidebar_focused
+                        && self.sidebar.open
+                        && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+                    {
                         self.sidebar.select_last(self.state.session_summaries.len());
                     } else if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
                         let vh = self.state.right_panel.visible_height.max(1);

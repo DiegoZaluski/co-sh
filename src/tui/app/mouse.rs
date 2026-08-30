@@ -9,7 +9,7 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use super::{App, AppMode, MIN_PROMPT_RESERVE_ROWS, SIDEBAR_WIDTH};
+use super::{App, AppMode, MIN_PROMPT_RESERVE_ROWS, MIN_WIDTH_FOR_LEFT_PANEL, SIDEBAR_WIDTH};
 use crate::fallback;
 use crate::routes::router::FocusTarget;
 use crate::routes::session::queue_choice::QueueTarget;
@@ -120,7 +120,7 @@ impl App {
                 #[cfg(feature = "embed")]
                 if matches!(self.mode(), AppMode::Rag) {
                     let area = self.terminal_size();
-                    let sidebar_w = if self.sidebar.open {
+                    let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                         self.left_panel_width()
                     } else {
                         0
@@ -173,7 +173,7 @@ impl App {
                 #[cfg(feature = "embed")]
                 if matches!(self.mode(), AppMode::Rag) && self.rag_view.field_selection.is_some() {
                     let area = self.terminal_size();
-                    let sidebar_w = if self.sidebar.open {
+                    let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                         self.left_panel_width()
                     } else {
                         0
@@ -381,6 +381,7 @@ impl App {
                     } else if self.sidebar_focused
                         && matches!(self.left_panel, super::LeftPanelMode::History)
                         && self.sidebar.open
+                        && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                         && x < SIDEBAR_WIDTH
                     {
                         self.sidebar.select_prev(self.state.session_summaries.len());
@@ -441,6 +442,7 @@ impl App {
                     } else if self.sidebar_focused
                         && matches!(self.left_panel, super::LeftPanelMode::History)
                         && self.sidebar.open
+                        && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                         && x < SIDEBAR_WIDTH
                     {
                         self.sidebar.select_next(self.state.session_summaries.len());
@@ -663,7 +665,7 @@ impl App {
         {
             let is_session = matches!(self.mode(), AppMode::Session);
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open {
+            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                 self.left_panel_width()
             } else {
                 0
@@ -705,7 +707,7 @@ impl App {
         // 4. Question dialog (inline, between session and prompt)
         if self.question_dialog.visible && matches!(self.mode(), AppMode::Session) {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open {
+            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                 self.left_panel_width()
             } else {
                 0
@@ -755,7 +757,7 @@ impl App {
         // 4b. Queue-choice dialog (inline, shown while the agent loop runs)
         if self.queue_choice_dialog.visible && matches!(self.mode(), AppMode::Session) {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open {
+            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                 self.left_panel_width()
             } else {
                 0
@@ -798,7 +800,7 @@ impl App {
         // 5b. Free-gateway recommendation dialog (inline)
         if self.free_gateway_dialog.visible && matches!(self.mode(), AppMode::Session) {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open {
+            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                 self.left_panel_width()
             } else {
                 0
@@ -855,10 +857,14 @@ impl App {
         if matches!(event_type, MouseEventType::Down) || matches!(event_type, MouseEventType::Up) {
             self.sidebar_focused = self.sidebar.open
                 && matches!(self.left_panel, super::LeftPanelMode::History)
+                && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                 && x < SIDEBAR_WIDTH;
         }
 
-        if self.sidebar.open && matches!(self.left_panel, super::LeftPanelMode::History) {
+        if self.sidebar.open
+            && matches!(self.left_panel, super::LeftPanelMode::History)
+            && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
+        {
             let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
             match self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
                 SidebarAction::SwitchTo(session_id) => {
@@ -958,7 +964,7 @@ impl App {
         // 8. Home view (same area computation as render: skip header row + footer)
         if matches!(self.mode(), AppMode::Home) && !self.dialog.visible() {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open {
+            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                 self.left_panel_width()
             } else {
                 0
@@ -1013,7 +1019,7 @@ impl App {
         // 8c. Router view — mouse click on a model row adds it to fallback chain
         if matches!(self.mode(), AppMode::Router) && !self.dialog.visible() {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open {
+            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                 self.left_panel_width()
             } else {
                 0
@@ -1054,7 +1060,7 @@ impl App {
         // 8a. Settings view — mouse click on a setting row toggles it
         if matches!(self.mode(), AppMode::Settings) && !self.dialog.visible() {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open {
+            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                 self.left_panel_width()
             } else {
                 0
@@ -1108,7 +1114,7 @@ impl App {
         // 8b. Internal Tools view — mouse click on a tool row toggles it
         if matches!(self.mode(), AppMode::InternalTools) && !self.dialog.visible() {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open {
+            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                 self.left_panel_width()
             } else {
                 0
@@ -1142,7 +1148,7 @@ impl App {
         // 8c. AddProvider view — mouse click on a provider row opens API key input
         if matches!(self.mode(), AppMode::AddProvider) && !self.dialog.visible() {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open {
+            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
                 self.left_panel_width()
             } else {
                 0

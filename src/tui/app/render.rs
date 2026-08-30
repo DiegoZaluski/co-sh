@@ -228,7 +228,7 @@ impl App {
                 self.state.right_panel.handle_auto_scroll(delta_time);
             }
 
-            if self.sidebar.open {
+            if self.sidebar.open && area.width >= super::MIN_WIDTH_FOR_LEFT_PANEL {
                 if matches!(self.left_panel, super::LeftPanelMode::Dashboard) {
                     // Usage dashboard: a self-contained panel (session usage
                     // + spend per provider/total for the selected period).
