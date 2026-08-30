@@ -276,6 +276,12 @@ impl App {
             .map(|s| {
                 s.messages
                     .iter()
+                    // Terminal API/runtime errors are display-only: a provider
+                    // failure must never enter the model-facing conversation
+                    // as if it were assistant output (the authoritative item
+                    // log path keeps them out too — `build_messages` skips
+                    // `ContextItem::Error`).
+                    .filter(|m| !m.id.starts_with("msg-err-"))
                     .filter_map(|m| {
                         let role = match m.role {
                             crate::types::MessageRole::User => "user",
@@ -315,7 +321,10 @@ impl App {
             let rt = match Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {
-                    let _ = event_tx.send(HarnessEvent::Error(format!("runtime: {e}")));
+                    let _ = event_tx.send(HarnessEvent::Error {
+                        message: format!("runtime: {e}"),
+                        context: None,
+                    });
                     return;
                 }
             };
@@ -373,9 +382,10 @@ impl App {
                                 connector = c;
                             }
                             None => {
-                                let _ = event_tx.send(HarnessEvent::Error(format!(
-                                    "auto: no fallback available ({last_err})"
-                                )));
+                                let _ = event_tx.send(HarnessEvent::Error {
+                                    message: format!("auto: no fallback available ({last_err})"),
+                                    context: None,
+                                });
                                 return;
                             }
                         }
@@ -419,8 +429,10 @@ impl App {
                                 };
                             }
                             Err(e) => {
-                                let _ =
-                                    event_tx.send(HarnessEvent::Error(format!("connector: {e}")));
+                                let _ = event_tx.send(HarnessEvent::Error {
+                                    message: format!("connector: {e}"),
+                                    context: None,
+                                });
                                 return;
                             }
                         }
@@ -462,7 +474,10 @@ impl App {
                 } else {
                     "unknown panic".to_string()
                 };
-                let _ = event_tx_panic.send(HarnessEvent::Error(format!("panic: {msg}")));
+                let _ = event_tx_panic.send(HarnessEvent::Error {
+                    message: format!("panic: {msg}"),
+                    context: None,
+                });
             }
         });
     }

@@ -768,6 +768,23 @@ impl Harness {
         !self.tool_issuer.is_empty()
     }
 
+    /// Emit the terminal `Error` event of an agent loop. The failure is first
+    /// recorded as a DISPLAY-ONLY context item (`ContextManager::add_error`)
+    /// and its snapshot travels with the event: the transcript restores the
+    /// styled error line after a restart, while the model never sees a
+    /// provider failure as assistant output.
+    fn emit_terminal_error(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+        msg: String,
+    ) {
+        self.context_manager.add_error(&format!("Error: {msg}"));
+        let _ = tx.send(super::events::HarnessEvent::Error {
+            message: msg,
+            context: Some(self.context_manager.save_state()),
+        });
+    }
+
     /// Builds the system header for the LLM.
     ///
     /// Concatenates mode-specific instructions, system prompts, harness tools, system tools,
@@ -2469,7 +2486,7 @@ impl Harness {
                 } else {
                     e.clone()
                 };
-                let _ = tx.send(HarnessEvent::Error(user_msg));
+                self.emit_terminal_error(&tx, user_msg);
                 if e != CONTEXT_WINDOW_MARKER {
                     use super::events::ToastVariant;
                     let _ = tx.send(HarnessEvent::Toast {
@@ -2711,7 +2728,7 @@ impl Harness {
                         // Halt stops the entire turn
                         if hr.halt {
                             let msg = "Turn halted by hook".to_string();
-                            let _ = tx.send(HarnessEvent::Error(msg));
+                            self.emit_terminal_error(&tx, msg);
                             terminal_sent = true;
                             break;
                         }
@@ -2719,7 +2736,7 @@ impl Harness {
                             let msg = format!(
                                 "{MAX_TOOL_RETRIES} consecutive tool call failures. Agent loop interrupted."
                             );
-                            let _ = tx.send(HarnessEvent::Error(msg));
+                            self.emit_terminal_error(&tx, msg);
                             terminal_sent = true;
                             break;
                         }
@@ -2762,7 +2779,7 @@ impl Harness {
                                 let msg = format!(
                                     "{MAX_TOOL_RETRIES} consecutive tool call failures. Agent loop interrupted."
                                 );
-                                let _ = tx.send(HarnessEvent::Error(msg));
+                                self.emit_terminal_error(&tx, msg);
                                 terminal_sent = true;
                                 break;
                             }
@@ -3033,7 +3050,7 @@ impl Harness {
                                     log::debug!(
                                         "run_agent_loop POST_HOOK_HALT tool={tool_name_str}"
                                     );
-                                    let _ = tx.send(HarnessEvent::Error(reason));
+                                    self.emit_terminal_error(&tx, reason);
                                     terminal_sent = true;
                                     break;
                                 }
@@ -3115,7 +3132,7 @@ impl Harness {
                                     "{MAX_TOOL_RETRIES} consecutive tool call \
                                      failures. Agent loop interrupted."
                                 );
-                                let _ = tx.send(HarnessEvent::Error(msg));
+                                self.emit_terminal_error(&tx, msg);
                                 terminal_sent = true;
                                 break;
                             }
@@ -3541,8 +3558,8 @@ impl Harness {
                                         });
                                     }
                                 }
-                                super::events::HarnessEvent::Error(e) => {
-                                    *err_capture.lock().unwrap() = Some(e);
+                                super::events::HarnessEvent::Error { message, .. } => {
+                                    *err_capture.lock().unwrap() = Some(message);
                                 }
                                 _ => {}
                             }

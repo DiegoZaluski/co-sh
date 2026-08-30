@@ -709,16 +709,16 @@ impl App {
                     });
                 }
 
-                HarnessEvent::Error(msg) => {
+                HarnessEvent::Error { message, context } => {
                     self.state.status = SessionStatus::Retry {
-                        message: msg.clone(),
+                        message: message.clone(),
                         action: None,
                     };
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
 
                     // Push error as an assistant message so it appears inline in the chat
-                    let error_text = format!("Error: {msg}");
+                    let error_text = format!("Error: {message}");
                     if let Some(session) = self.state.current_session_mut() {
                         session.messages.push(Message {
                             id: format!("msg-err-{}", session.messages.len()),
@@ -736,6 +736,63 @@ impl App {
                         });
                     }
 
+                    // Persist the styled error line NOW: the loop is over, no
+                    // `Done` snapshot follows, so without this save the error
+                    // would vanish (or collapse into plain assistant prose via
+                    // the best-effort fallback) after a restart. Harness paths
+                    // carry the snapshot with the display-only Error item
+                    // already recorded; TUI-side failures (thread runtime,
+                    // connector construction, panic) record the item here —
+                    // appending it to the persisted context so the
+                    // model-facing timeline stays clean either way. Gated on
+                    // `is_valid_session` exactly like Done/Stopped/snapshot:
+                    // a prompt that never got a real answer is NOT dialog and
+                    // must not pollute the sidebar with empty sessions.
+                    if let Some(id) = self.state.current_session_id.clone() {
+                        let should_save = self
+                            .state
+                            .session_cache
+                            .get(&id)
+                            .is_some_and(crate::session_store::is_valid_session);
+                        if should_save {
+                            let persisted = match context {
+                                Some(ctx) => ctx,
+                                None => {
+                                    // NOTE: the disk log may be one turn behind
+                                    // (a prompt that failed before the harness
+                                    // registered it) — the restored transcript
+                                    // then shows the error without that prompt.
+                                    // Accepted: the failure never reached the
+                                    // model either, so nothing was "lost".
+                                    let mut ctx =
+                                        self.session_store.load_context(&id).unwrap_or_else(|| {
+                                            self.state
+                                                .session_cache
+                                                .get(&id)
+                                                .map(|s| {
+                                                    crate::session_store::context_from_messages(
+                                                        &s.messages,
+                                                    )
+                                                })
+                                                .unwrap_or_default()
+                                        });
+                                    ctx.items.push_back(
+                                        cosh::harness::context::ContextItem::Error {
+                                            id: ctx.next_id,
+                                            content: format!("Error: {message}"),
+                                        },
+                                    );
+                                    ctx.next_id += 1;
+                                    ctx
+                                }
+                            };
+                            if let Some(session) = self.state.session_cache.get(&id) {
+                                self.session_store
+                                    .save_session_async_with_context(session, persisted);
+                            }
+                        }
+                    }
+
                     // The run failed: leave the queues parked (promote leftover
                     // next-request messages to next-loop semantics but never
                     // auto-start — the user decides when to resend).
@@ -744,7 +801,7 @@ impl App {
                     // First failure of the keyless OpenCode path (missing key
                     // or auth rejection): offer the one-time free-gateway
                     // recommendation. Write-once — never offered again once answered.
-                    self.maybe_offer_gateway_on_error(&msg);
+                    self.maybe_offer_gateway_on_error(&message);
                 }
 
                 HarnessEvent::ModelsLoaded { models, current } => {

@@ -203,6 +203,7 @@ impl ContextManager {
             .skip(start_idx)
             .take(end_idx - start_idx)
             .map(serialize_item)
+            .filter(|line| !line.is_empty())
             .collect::<Vec<String>>()
             .join("\n\n");
         let chunk_end = self.items.get(end_idx - 1).map(ContextItem::id);

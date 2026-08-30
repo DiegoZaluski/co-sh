@@ -71,6 +71,10 @@ Rules:
 /// Serialize one conversation item into the opencode-style transcript the
 /// LLM compaction sends to the model.
 pub(super) fn serialize_item(item: &ContextItem) -> String {
+    // Display-only error lines never reach a summarizer prompt.
+    if matches!(item, ContextItem::Error { .. }) {
+        return String::new();
+    }
     match item {
         ContextItem::User { original, .. } => format!("[User]: {original}"),
         ContextItem::Assistant { original, .. } => format!("[Assistant]: {original}"),
@@ -86,6 +90,8 @@ pub(super) fn serialize_item(item: &ContextItem) -> String {
         // `apply_llm_summary`) — the update-mode instruction references it by
         // this exact label instead of embedding a second copy in the prompt.
         ContextItem::Compaction { summary, .. } => format!("[Previous summary]: {summary}"),
+        // Unreachable (filtered above) but exhaustive for the compiler.
+        ContextItem::Error { .. } => String::new(),
     }
 }
 

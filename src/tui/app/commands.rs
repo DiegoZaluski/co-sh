@@ -230,7 +230,10 @@ impl App {
                     harness.compact_on_demand(&event_tx, stop_signal).await
                 }
                 Err(e) => {
-                    let _ = event_tx.send(HarnessEvent::Error(format!("connector: {e}")));
+                    let _ = event_tx.send(HarnessEvent::Error {
+                        message: format!("connector: {e}"),
+                        context: None,
+                    });
                     ManualCompactionOutcome::Failed
                 }
             };

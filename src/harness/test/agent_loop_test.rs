@@ -32,7 +32,7 @@ async fn test_agent_loop_simple_conversation() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -93,7 +93,7 @@ async fn test_agent_loop_with_tool_call() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -128,7 +128,7 @@ async fn test_agent_loop_with_tool_call() {
     assert!(
         matches!(
             last,
-            HarnessEvent::Done { .. } | HarnessEvent::Stopped { .. } | HarnessEvent::Error(_)
+            HarnessEvent::Done { .. } | HarnessEvent::Stopped { .. } | HarnessEvent::Error { .. }
         ),
         "expected terminal event, got {last:?}"
     );
@@ -180,7 +180,7 @@ async fn loop_detection_stops_repeated_identical_tool_calls() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -357,7 +357,7 @@ async fn run_agent_loop_runs_the_llm_compaction_when_over_the_trigger() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -455,7 +455,7 @@ async fn run_agent_loop_survives_a_failed_llm_compaction() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -631,7 +631,7 @@ async fn run_agent_loop_marks_provider_stuck_when_split_cannot_fit() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -735,7 +735,7 @@ async fn run_agent_loop_retries_generic_compaction_failures_then_notifies() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -819,7 +819,7 @@ async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -918,7 +918,7 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -1081,7 +1081,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -1218,7 +1218,7 @@ async fn split_aborts_on_an_empty_chunk_summary_and_keeps_the_context() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {
@@ -1363,7 +1363,7 @@ async fn run_agent_loop_emits_resumable_incremental_context_snapshots() {
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {

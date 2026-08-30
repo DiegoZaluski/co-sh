@@ -83,7 +83,7 @@ async fn repro_llm_compaction_repeats_mid_loop_when_protected_content_regrows() 
                     event,
                     HarnessEvent::Done { .. }
                         | HarnessEvent::Stopped { .. }
-                        | HarnessEvent::Error(_)
+                        | HarnessEvent::Error { .. }
                 );
                 events.push(event);
                 if is_done {

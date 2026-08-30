@@ -835,3 +835,68 @@ fn has_compactable_content_rejects_a_lone_previous_summary() {
         "a lone previous summary is not compactable content"
     );
 }
+
+#[test]
+fn an_api_error_is_display_only_and_never_reaches_the_model() {
+    let mut ctx = cm(10_000);
+    ctx.add_user("fix the build");
+    ctx.add_error("Error: HTTP 401 - unauthorized");
+
+    // The item is in the timeline (so the transcript persists it) …
+    let items = ctx.items_snapshot();
+    assert!(matches!(
+        items.last(),
+        Some(ContextItem::Error { content, .. }) if content == "Error: HTTP 401 - unauthorized"
+    ));
+    // … but it is invisible to the model and costs no budget.
+    let msgs = ctx.build_messages("");
+    assert_eq!(msgs.len(), 1, "the error never becomes a model message");
+    assert_eq!(msgs[0].role, "user");
+    let mut bare = cm(10_000);
+    bare.add_user("fix the build");
+    assert_eq!(
+        ctx.display_info().total_tokens,
+        bare.display_info().total_tokens,
+        "errors add zero tokens to the budget"
+    );
+
+    // A summarizer prompt never sees the failure either. The budget is tiny
+    // on purpose so the compaction guard (`total >= trigger`) actually fires
+    // and the request is really built — a larger budget would return `None`
+    // and the assertion below would never run.
+    let long_task = "please ".repeat(60) + "fix the build";
+    let mut ctx = cm(50);
+    ctx.add_user(&long_task);
+    ctx.add_error("Error: HTTP 401 - unauthorized");
+    let req = ctx
+        .llm_compaction_request()
+        .expect("the tiny budget must fire the compaction request");
+    assert!(
+        !req.prompt.contains("HTTP 401"),
+        "the compaction prompt must not embed API errors"
+    );
+
+    // A trailing error does not turn the user prompt into "abandoned input":
+    // the run failed before producing anything, but the prompt stays so the
+    // user can see what they asked (and resend).
+    let mut ctx = cm(10_000);
+    ctx.add_user("fix the build");
+    ctx.add_error("Error: HTTP 401 - unauthorized");
+    assert!(!ctx.remove_abandoned_inputs());
+    assert_eq!(ctx.build_messages("").len(), 1);
+}
+
+#[test]
+fn an_error_survives_a_state_roundtrip() {
+    let mut ctx = cm(10_000);
+    ctx.add_user("task");
+    ctx.add_error("Error: provider down");
+    let state = ctx.save_state();
+
+    let mut restored = cm(10_000);
+    restored.restore_state(&state);
+    let msgs = restored.build_messages("");
+    assert_eq!(msgs.len(), 1, "the restored error stays out of the context");
+    let items = restored.items_snapshot();
+    assert!(matches!(items.last(), Some(ContextItem::Error { .. })));
+}

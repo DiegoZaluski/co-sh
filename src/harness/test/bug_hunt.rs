@@ -346,7 +346,7 @@ async fn bug09_dispatch_guard_emits_single_terminal_event() {
 
     let errors = events
         .iter()
-        .filter(|e| matches!(e, HarnessEvent::Error(_)))
+        .filter(|e| matches!(e, HarnessEvent::Error { .. }))
         .count();
     let stopped = events
         .iter()

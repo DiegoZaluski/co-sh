@@ -99,6 +99,14 @@ pub enum ContextItem {
     /// an assistant message. The next LLM compaction folds it into the new
     /// summary (update mode).
     Compaction { id: u64, summary: String },
+    /// A terminal API/runtime error surfaced to the user. DISPLAY-ONLY:
+    /// [`ContextManager::build_messages`] skips it (an API failure must never
+    /// reach the LLM as if it were assistant output — the live loop keeps the
+    /// same contract), it costs zero tokens, and the summarizers never see it.
+    /// It exists in the timeline solely so the persisted transcript restores
+    /// the error line with its own display semantics (the TUI's styled error
+    /// box) instead of collapsing it into plain assistant prose.
+    Error { id: u64, content: String },
 }
 
 impl ContextItem {
@@ -109,7 +117,8 @@ impl ContextItem {
             | ContextItem::ToolCall { id, .. }
             | ContextItem::ToolResult { id, .. }
             | ContextItem::Closure { id, .. }
-            | ContextItem::Compaction { id, .. } => *id,
+            | ContextItem::Compaction { id, .. }
+            | ContextItem::Error { id, .. } => *id,
         }
     }
 
@@ -138,6 +147,8 @@ impl ContextItem {
             ContextItem::ToolResult { content, .. } => enc.estimate(content),
             ContextItem::Closure { content, .. } => enc.estimate(content),
             ContextItem::Compaction { summary, .. } => enc.estimate(summary),
+            // Display-only: never delivered to the model, never budgeted.
+            ContextItem::Error { .. } => 0,
         }
     }
 
@@ -422,6 +433,18 @@ impl ContextManager {
             id,
             original: text.to_string(),
             closable,
+        });
+    }
+
+    /// Record a terminal API/runtime error as a DISPLAY-ONLY timeline item:
+    /// skipped by [`Self::build_messages`] (the model never sees a provider
+    /// failure as assistant output) and by the summarizers, and worth zero
+    /// tokens. Persisted so the transcript restores the styled error line.
+    pub fn add_error(&mut self, text: &str) {
+        let id = self.next_id();
+        self.push_item(ContextItem::Error {
+            id,
+            content: text.to_string(),
         });
     }
 
@@ -740,6 +763,7 @@ impl ContextManager {
             .items
             .iter()
             .map(serialize_item)
+            .filter(|line| !line.is_empty())
             .collect::<Vec<String>>()
             .join("\n\n");
         Some(LlmCompactionRequest {
@@ -872,6 +896,9 @@ impl ContextManager {
                 ContextItem::Compaction { summary, .. } => {
                     messages.push(assistant_message(summary));
                 }
+                // Display-only error line: never part of the model-facing
+                // conversation.
+                ContextItem::Error { .. } => {}
             }
         }
         // Append the harness steering input unless it duplicates the trailing

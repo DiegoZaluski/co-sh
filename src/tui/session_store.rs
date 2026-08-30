@@ -651,7 +651,7 @@ impl SessionStore {
 /// (a brand-new session, or a forked/reverted transcript). It is a best-effort
 /// reverse mapping — tool calls lose their thought signatures/thinking blocks —
 /// because it only ever runs for transcripts the harness has not yet persisted.
-fn context_from_messages(messages: &[Message]) -> ContextManagerState {
+pub(crate) fn context_from_messages(messages: &[Message]) -> ContextManagerState {
     let mut items: Vec<ContextItem> = Vec::new();
     let mut next_id = 1u64;
     macro_rules! push {
@@ -675,6 +675,23 @@ fn context_from_messages(messages: &[Message]) -> ContextManagerState {
                 }
             }
             MessageRole::Assistant => {
+                // Terminal API/runtime errors are DISPLAY-ONLY: the live loop
+                // never records them as assistant output, so the best-effort
+                // fallback must not either — they become Error items (skipped
+                // by `build_messages`) instead of model-facing prose.
+                if m.id.starts_with("msg-err-") {
+                    for part in &m.parts {
+                        if let Part::Text(t) = part
+                            && !t.text.is_empty()
+                        {
+                            push!(ContextItem::Error {
+                                id: next_id,
+                                content: t.text.clone(),
+                            });
+                        }
+                    }
+                    continue;
+                }
                 for part in &m.parts {
                     match part {
                         Part::Text(t) if !t.synthetic && !t.text.is_empty() => {
@@ -807,6 +824,23 @@ fn items_to_messages(items: &[ContextItem], reasoning: &HashMap<u64, String>) ->
                     model: None,
                 });
             }
+            ContextItem::Error { content, .. } => {
+                // Terminal API/runtime errors keep their display semantics:
+                // the `msg-err-` id prefix is what the renderer styles as the
+                // red error box, so a restored error never collapses into
+                // plain assistant prose.
+                messages.push(Message {
+                    id: format!("msg-err-{idx}"),
+                    role: MessageRole::Assistant,
+                    parts: vec![Part::Text(TextPart {
+                        text: content.clone(),
+                        synthetic: false,
+                    })],
+                    created_at: 0,
+                    agent: None,
+                    model: None,
+                });
+            }
             ContextItem::ToolCall {
                 call_id,
                 name,
@@ -889,7 +923,8 @@ fn context_item_id(item: &ContextItem) -> u64 {
         | ContextItem::ToolCall { id, .. }
         | ContextItem::ToolResult { id, .. }
         | ContextItem::Closure { id, .. }
-        | ContextItem::Compaction { id, .. } => *id,
+        | ContextItem::Compaction { id, .. }
+        | ContextItem::Error { id, .. } => *id,
     }
 }
 
@@ -1726,5 +1761,64 @@ mod tests {
             .as_millis() as u64;
         let formatted = format_session_timestamp(ts);
         assert!(!formatted.is_empty());
+    }
+
+    /// The full error-display contract across a save/restore: an API error
+    /// lives in the item log as a display-only `Error` item, and the restored
+    /// transcript brings it back with the `msg-err-` id the renderer styles as
+    /// the red error box — never as plain assistant prose. The fallback
+    /// conversion (no authoritative log on disk) maps the display message to
+    /// the same item shape, so the model never inherits a provider failure.
+    #[test]
+    fn api_errors_keep_their_display_semantics_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let session = make_test_session(
+            "8100",
+            "Error Semantics",
+            vec![
+                make_user_msg("msg-0", "fix the build"),
+                make_error_msg("msg-err-1", "Error: HTTP 401 - unauthorized"),
+            ],
+        );
+        let context = make_context(vec![
+            user_item(1, "fix the build"),
+            ContextItem::Error {
+                id: 2,
+                content: "Error: HTTP 401 - unauthorized".to_string(),
+            },
+        ]);
+        store.save_session_with_context(&session, &context);
+
+        let loaded = store.load_session("8100").unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        let err = &loaded.messages[1];
+        assert!(
+            err.id.starts_with("msg-err-"),
+            "the restored error keeps its styled id, got {}",
+            err.id
+        );
+        assert_eq!(err.role, MessageRole::Assistant);
+        assert!(
+            matches!(&err.parts[0], Part::Text(t) if t.text == "Error: HTTP 401 - unauthorized")
+        );
+
+        // The restored item log keeps the error OUT of the model context.
+        let state = store.load_context("8100").unwrap();
+        let mut cm = cosh::harness::context::ContextManager::new(100_000);
+        cm.restore_state(&state);
+        let msgs = cm.build_messages("");
+        assert_eq!(msgs.len(), 1, "only the user prompt reaches the model");
+        assert_eq!(msgs[0].role, "user");
+
+        // Fallback conversion (no authoritative log): the display error
+        // message becomes an Error item, not assistant prose.
+        let fallback = context_from_messages(&loaded.messages);
+        assert!(matches!(
+            fallback.items[1],
+            ContextItem::Error { ref content, .. } if content == "Error: HTTP 401 - unauthorized"
+        ));
+        assert_eq!(fallback.items.len(), 2);
     }
 }

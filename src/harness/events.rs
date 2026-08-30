@@ -56,8 +56,17 @@ pub enum HarnessEvent {
         /// Whether this is the final chunk for this tool call.
         finished: bool,
     },
-    /// A fatal error occurred.
-    Error(String),
+    /// A fatal error occurred. The harness paths carry the context snapshot
+    /// WITH the display-only error item already recorded
+    /// ([`ContextManager::add_error`]) so the TUI can persist the styled
+    /// error line right away — the loop is over, no `Done` snapshot follows.
+    /// `None` when the failure happened outside the harness context (thread
+    /// runtime, connector construction, panic): the TUI then records the
+    /// error item itself.
+    Error {
+        message: String,
+        context: Option<ContextManagerState>,
+    },
     /// Models list loaded from the provider.
     ModelsLoaded {
         models: Vec<ModelEntry>,
