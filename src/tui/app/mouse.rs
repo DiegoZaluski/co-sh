@@ -637,8 +637,14 @@ impl App {
             }
         }
 
-        // Slash menu
-        if self.slash_menu.visible && matches!(self.mode(), AppMode::Session) {
+        // Slash menu. Modal dialogs own every click while visible (the dialog
+        // block above handles and returns on every hit), so the menu only
+        // handles clicks when no dialog is open — it can never steal a click
+        // from a modal (e.g. "Yes" on the quit confirm).
+        if self.slash_menu.visible
+            && !self.dialog.visible()
+            && matches!(self.mode(), AppMode::Session)
+        {
             let is_session = matches!(self.mode(), AppMode::Session);
             let area = self.terminal_size();
             let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
