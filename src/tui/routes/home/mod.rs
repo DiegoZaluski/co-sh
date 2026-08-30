@@ -275,14 +275,21 @@ impl HomeView {
         }
 
         let key_hints = "show session history ctrl+B | show keyboard shortcuts ctrl+K";
-        let hint_x = cx.saturating_sub(key_hints.len() as u16 / 2);
-        draw_text_line(
-            buf,
-            key_hints,
-            hint_x,
-            area.bottom().saturating_sub(2),
-            area.width,
-            Style::default().fg(muted),
-        );
+        // Hide the hints once the terminal is too narrow to also fit the left
+        // panel: expanding the sidebar narrows the usable width by
+        // SIDEBAR_WIDTH (22), so only show them while they'd still fit in that
+        // worst case.
+        const SIDEBAR_RESERVE: u16 = 22;
+        if (key_hints.len() as u16) + SIDEBAR_RESERVE <= area.width {
+            let hint_x = cx.saturating_sub(key_hints.len() as u16 / 2);
+            draw_text_line(
+                buf,
+                key_hints,
+                hint_x,
+                area.bottom().saturating_sub(2),
+                area.width,
+                Style::default().fg(muted),
+            );
+        }
     }
 }
