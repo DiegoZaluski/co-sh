@@ -141,20 +141,42 @@ impl App {
                 let budget_str = format!("{}{:>3}%", render_budget_bar(pct), pct);
                 let gap: u16 = 2;
 
-                let display_w =
-                    (token_str.chars().count() + gap as usize + budget_str.chars().count()) as u16;
+                // Session total cost — the bare "$" makes its meaning obvious,
+                // so only the amount is painted (green). Hidden while the
+                // model's price is still unknown (no guessed $0).
+                let cost_str = self.session_cost().map(|c| format!("${c:.2}"));
+                let cost_w = cost_str.as_ref().map_or(0, |s| s.chars().count()) as u16;
+                let cost_gap = if cost_str.is_some() { gap } else { 0 };
+
+                let display_w = (cost_w as usize
+                    + cost_gap as usize
+                    + (token_str.chars().count() + gap as usize + budget_str.chars().count()))
+                    as u16;
                 let right_x = main_area.right().saturating_sub(display_w + 1);
 
-                // Token counter — to the left of the budget bar.
+                // Session cost — the leftmost element of the header line.
+                if let Some(cost) = &cost_str {
+                    let cost_style = Style::default().fg(rgba_color(self.theme.success));
+                    for (i, ch) in cost.chars().enumerate() {
+                        if let Some(cell) = buf.cell_mut((right_x + i as u16, area.y)) {
+                            cell.set_char(ch);
+                            cell.set_style(cost_style);
+                        }
+                    }
+                }
+
+                // Token counter — to the right of the cost (or left of the
+                // budget bar when no price is known yet).
+                let token_x = right_x + cost_w + cost_gap;
                 for (i, ch) in token_str.chars().enumerate() {
-                    if let Some(cell) = buf.cell_mut((right_x + i as u16, area.y)) {
+                    if let Some(cell) = buf.cell_mut((token_x + i as u16, area.y)) {
                         cell.set_char(ch);
                         cell.set_style(Style::default().fg(rgba_color(self.theme.text_muted)));
                     }
                 }
 
                 // Budget bar (with conditional color)
-                let offset = token_str.chars().count() as u16 + gap;
+                let offset = cost_w + cost_gap + token_str.chars().count() as u16 + gap;
                 let budget_style = if pct >= 90 {
                     Style::default().fg(rgba_color(self.theme.error))
                 } else if pct >= 70 {

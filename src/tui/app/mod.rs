@@ -670,20 +670,13 @@ impl App {
             .as_millis() as u64;
 
         let session_tokens = crate::usage::total_tokens(&self.session_records());
-        let mut session_cost: f64 = 0.0;
-        let mut has_cost = false;
-        for r in self.session_records() {
-            if let Some(c) = r.cost_usd {
-                session_cost += c;
-                has_cost = true;
-            }
-        }
+        let session_cost = self.session_cost();
 
         let period = summarize(&self.usage_records, self.usage_period, now_ms);
 
         crate::routes::session::dashboard::DashboardData {
             session_tokens,
-            session_cost: has_cost.then_some(session_cost),
+            session_cost,
             period,
             period_enum: self.usage_period,
         }
@@ -699,6 +692,22 @@ impl App {
             .filter(|r| r.session_id == sid)
             .cloned()
             .collect()
+    }
+
+    /// Total real cost (USD) of the current session's recorded API usage.
+    ///
+    /// `None` when no record resolved a price yet (the model's rate isn't in
+    /// the offline catalog) — a guessed `$0` is never reported.
+    fn session_cost(&self) -> Option<f64> {
+        let mut total = 0.0;
+        let mut has = false;
+        for r in self.session_records() {
+            if let Some(c) = r.cost_usd {
+                total += c;
+                has = true;
+            }
+        }
+        has.then_some(total)
     }
 
     /// Persist one real API request's usage for the current session.
