@@ -725,7 +725,7 @@ pub async fn chat_stream_with_messages(
         let response = send_request_stream(config, &url, &request, &headers).await?;
         parse_sse_stream_with_tools(response)
     };
-    Ok(ChatStream::new(stream))
+    Ok(ChatStream::new(stream, config.family))
 }
 
 /// Parse a Claude SSE response into stream chunks, accumulating `tool_use`
@@ -1033,7 +1033,7 @@ pub async fn chat_stream(
         let response = send_request_stream(config, &url, &ctx.request, &headers).await?;
         parse_sse_stream(response)
     };
-    Ok(ChatStream::new(stream))
+    Ok(ChatStream::new(stream, config.family))
 }
 
 /// Parse a Claude SSE response into stream chunks (text, reasoning,

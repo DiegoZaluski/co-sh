@@ -721,7 +721,7 @@ async fn stream_responses(
         let response = send_request_stream(config, &url, &request, &headers).await?;
         process_sse_response(response)
     };
-    Ok(ChatStream::new(stream))
+    Ok(ChatStream::new(stream, config.family))
 }
 
 /// Send a streaming Responses request with a user prompt.

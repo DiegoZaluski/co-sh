@@ -1,5 +1,7 @@
 use super::error::ConnectorError;
 use super::params::ClaudeThinkingBlock;
+use super::provider::Family;
+use super::usage::TokenUsage;
 use crate::extract_action::NativeToolCall;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -154,18 +156,44 @@ impl StreamChunk {
 pub struct ChatStream {
     inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>>,
     last_raw: Option<String>,
+    /// Token usage accumulated across the stream's frames (per-field max
+    /// merge — see [`TokenUsage::merge_stream`]). Cleared on the retry
+    /// middleware's reset marker so a re-streamed attempt starts fresh.
+    usage: Option<TokenUsage>,
+    family: Family,
     finished: bool,
 }
 
 impl ChatStream {
     pub(crate) fn new(
         inner: Pin<Box<dyn Stream<Item = Result<StreamChunk, ConnectorError>> + Send>>,
+        family: Family,
     ) -> Self {
         Self {
             inner,
             last_raw: None,
+            usage: None,
+            family,
             finished: false,
         }
+    }
+
+    /// Returns the token usage accumulated from the stream's usage frames.
+    ///
+    /// If the stream hasn't been fully consumed yet, this drains any
+    /// remaining items first. The counters are normalized onto
+    /// [`TokenUsage`] (including prompt-cache accounting) and reflect the
+    /// provider's OWN usage object — the same numbers the API bills, never
+    /// a local estimate.
+    ///
+    /// Returns `None` when the provider never reported usage (e.g. the
+    /// stream failed before a usage frame arrived).
+    pub async fn usage(&mut self) -> Option<TokenUsage> {
+        if !self.finished {
+            use tokio_stream::StreamExt;
+            while self.next().await.is_some() {}
+        }
+        self.usage
     }
 
     /// Returns the last raw SSE frame received from the stream.
@@ -197,12 +225,34 @@ impl Stream for ChatStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let poll = self.inner.as_mut().poll_next(cx);
         if let Poll::Ready(Some(Ok(ref chunk))) = poll {
+            if chunk.is_reset() {
+                // The retry middleware is re-streaming a failed attempt from
+                // the beginning: drop the failed attempt's partial usage.
+                self.usage = None;
+            } else if let Some(u) = extract_family_usage(self.family, &chunk.raw) {
+                self.usage = Some(match self.usage {
+                    Some(prev) => prev.merge_stream(u),
+                    None => u,
+                });
+            }
             self.last_raw = Some(chunk.raw.clone());
         }
         if matches!(poll, Poll::Ready(None)) {
             self.finished = true;
         }
         poll
+    }
+}
+
+/// Extract the normalized [`TokenUsage`] from a raw SSE frame using the
+/// family-specific field shapes (`usage` vs `usageMetadata`, cache detail
+/// paths, …).
+fn extract_family_usage(family: Family, raw: &str) -> Option<TokenUsage> {
+    match family {
+        Family::OpenAICompatible => super::openai_compatible::extract_usage(raw),
+        Family::OpenAi => super::openai::extract_usage(raw),
+        Family::Claude => super::claude::extract_usage(raw),
+        Family::Gemini => super::gemini::extract_usage(raw),
     }
 }
 

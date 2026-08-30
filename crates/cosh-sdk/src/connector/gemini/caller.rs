@@ -813,7 +813,7 @@ pub async fn chat_stream(
         .await?;
         parse_sse_stream(response)
     };
-    Ok(ChatStream::new(stream))
+    Ok(ChatStream::new(stream, config.family))
 }
 
 /// Parse a Gemini `?alt=sse` response body into stream chunks (text,
@@ -1125,7 +1125,7 @@ pub async fn chat_stream_with_messages(
         .await?;
         parse_sse_stream_messages(response)
     };
-    Ok(ChatStream::new(stream))
+    Ok(ChatStream::new(stream, config.family))
 }
 
 /// Parse a Gemini `?alt=sse` response into stream chunks with native

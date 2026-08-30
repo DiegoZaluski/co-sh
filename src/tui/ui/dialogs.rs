@@ -30,15 +30,17 @@ pub(crate) fn model_entry_matches_filter(entry: &ModelEntry, filter: &str) -> bo
         return true;
     }
     let needle = filter.to_lowercase();
-    entry.model.to_lowercase().contains(&needle)
-        || entry.provider.to_lowercase().contains(&needle)
+    entry.model.to_lowercase().contains(&needle) || entry.provider.to_lowercase().contains(&needle)
 }
 
 /// List of (`key_combo`, description) for the Shortcuts dialog
 /// Only non-obvious compound shortcuts — basic nav/enter/esc are excluded
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Tab", "Toggle mode (Build/Ask)"),
-    ("Ctrl+B", "Toggle sidebar (session history)"),
+    ("Ctrl+B", "Toggle left panel (open/close)"),
+    ("Ctrl+U", "Left panel: usage dashboard"),
+    ("Ctrl+S", "Left panel: session history"),
+    ("Tab", "Dashboard open: cycle period (Shift+Tab back)"),
     ("Ctrl+C", "Toggle conceal (hide assistant text)"),
     ("Ctrl+T", "Toggle thinking (show/hide reasoning)"),
     ("Ctrl+D", "Toggle tool details (show/hide completed)"),
@@ -3059,7 +3061,10 @@ mod hook_panel_tests {
 
     #[test]
     fn model_filter_empty_matches_everything() {
-        assert!(model_entry_matches_filter(&entry("openrouter", "deepseek-v4-pro"), ""));
+        assert!(model_entry_matches_filter(
+            &entry("openrouter", "deepseek-v4-pro"),
+            ""
+        ));
     }
 
     #[test]
@@ -3068,15 +3073,27 @@ mod hook_panel_tests {
             &entry("openrouter", "deepseek-v4-pro"),
             "DEEPSEEK"
         ));
-        assert!(!model_entry_matches_filter(&entry("openrouter", "deepseek-v4-pro"), "gpt"));
+        assert!(!model_entry_matches_filter(
+            &entry("openrouter", "deepseek-v4-pro"),
+            "gpt"
+        ));
     }
 
     #[test]
     fn model_filter_matches_provider_isolating_its_group() {
         // Searching by provider keeps every model of that provider, not just
         // models whose name contains the provider string.
-        assert!(model_entry_matches_filter(&entry("openrouter", "deepseek-v4-pro"), "openrouter"));
-        assert!(model_entry_matches_filter(&entry("OpenRouter", "gpt-5"), "openrouter"));
-        assert!(!model_entry_matches_filter(&entry("nvidia", "deepseek-v4-pro"), "openrouter"));
+        assert!(model_entry_matches_filter(
+            &entry("openrouter", "deepseek-v4-pro"),
+            "openrouter"
+        ));
+        assert!(model_entry_matches_filter(
+            &entry("OpenRouter", "gpt-5"),
+            "openrouter"
+        ));
+        assert!(!model_entry_matches_filter(
+            &entry("nvidia", "deepseek-v4-pro"),
+            "openrouter"
+        ));
     }
 }

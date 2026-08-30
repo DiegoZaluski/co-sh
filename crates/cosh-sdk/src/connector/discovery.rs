@@ -15,6 +15,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use super::usage::Pricing;
+
 /// File name of the cached models.dev catalog (raw JSON, rewritten whole).
 const MODELS_DEV_CATALOG_FILE: &str = "models.dev.json";
 /// File name of the cached OpenRouter catalog (raw JSON, rewritten whole).
@@ -85,6 +87,10 @@ struct ModelsDevModel {
     /// plain toggle). Effort-style options carry the accepted values.
     #[serde(default)]
     reasoning_options: Vec<ModelsDevReasoningOption>,
+    /// Official per-model token prices (USD per Mtok), used to turn the
+    /// API-reported token usage into a real cost.
+    #[serde(default)]
+    cost: Option<ModelsDevCost>,
 }
 
 /// One entry of a model's `reasoning_options`. The catalog occasionally
@@ -101,6 +107,21 @@ struct ModelsDevReasoningOption {
 #[derive(Debug, Default, Deserialize)]
 struct ModelsDevLimit {
     context: Option<usize>,
+}
+
+/// A model's `cost` entry from the models.dev catalog: official token
+/// prices in USD per million tokens. Fields the catalog doesn't publish
+/// (e.g. `cache_read` for models without prompt caching) deserialize as 0.
+#[derive(Debug, Default, Deserialize)]
+struct ModelsDevCost {
+    #[serde(default)]
+    input: f64,
+    #[serde(default)]
+    output: f64,
+    #[serde(default)]
+    cache_read: f64,
+    #[serde(default)]
+    cache_write: f64,
 }
 
 /// Reasoning metadata for a model, resolved from the cached models.dev catalog.
@@ -1118,6 +1139,83 @@ fn find_window_in_models_dev(
                 || id_bare == needle_bare;
             if matches { m.limit.context } else { None }
         })
+}
+
+/// Flexible pricing match against the models.dev catalog (same matching
+/// rules as [`find_window_in_models_dev`]).
+fn find_pricing_in_models_dev(
+    needle: &str,
+    providers: &HashMap<String, ModelsDevProvider>,
+) -> Option<Pricing> {
+    let needle_lower = needle.to_lowercase();
+    let needle_bare = needle_lower.rsplit('/').next().unwrap_or(&needle_lower);
+    providers
+        .values()
+        .flat_map(|p| p.models.iter())
+        .find_map(|(id, m)| {
+            let id_lower = id.to_lowercase();
+            let id_bare = id_lower.rsplit('/').next().unwrap_or(&id_lower);
+            let matches = id_lower == needle_lower
+                || id_bare == needle_lower
+                || id_lower == needle_bare
+                || id_bare == needle_bare;
+            if !matches {
+                return None;
+            }
+            m.cost.as_ref().map(|c| Pricing {
+                input: c.input,
+                output: c.output,
+                cache_read: c.cache_read,
+                cache_write: c.cache_write,
+            })
+        })
+}
+
+/// Resolve a model's official token pricing from the cached models.dev
+/// catalog (offline, synchronous).
+///
+/// Prices are the catalog's `cost` entry in USD per million tokens — the
+/// same numbers the providers bill. `None` means the model is absent from
+/// the cached catalog (or the cache is missing): callers must NOT guess a
+/// price — exclude the model from dollar totals instead.
+#[must_use]
+pub fn model_pricing(model_name: &str, cache_dir: Option<&str>) -> Option<Pricing> {
+    let dir = resolve_cache_dir(cache_dir?)?;
+    let cache = CatalogCache::new(dir);
+    let raw = cache.load_raw(MODELS_DEV_CATALOG_FILE)?;
+    let catalog: ModelsDevCatalog = serde_json::from_str(&raw).ok()?;
+    find_pricing_in_models_dev(model_name, &catalog.providers)
+}
+
+/// Like [`model_pricing`], but falls back to fetching the models.dev
+/// catalog from the network when the model is absent from the cache —
+/// back-filling the catalog exactly like [`discover_context_window`] does.
+///
+/// This is the entry point for cost accounting: the first request for an
+/// unknown model pays one catalog download, then everything is offline.
+pub async fn lookup_pricing(model_name: &str, cache_dir: Option<&str>) -> Option<Pricing> {
+    let cache = cache_dir.and_then(resolve_cache_dir).map(CatalogCache::new);
+    if let Some(cache) = &cache
+        && let Some(raw) = cache.load_raw(MODELS_DEV_CATALOG_FILE)
+        && let Ok(catalog) = serde_json::from_str::<ModelsDevCatalog>(&raw)
+        && let Some(pricing) = find_pricing_in_models_dev(model_name, &catalog.providers)
+    {
+        return Some(pricing);
+    }
+
+    let response = reqwest::get("https://models.dev/api.json").await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let raw = response.text().await.ok()?;
+    let catalog: ModelsDevCatalog = serde_json::from_str(&raw).ok()?;
+    let pricing = find_pricing_in_models_dev(model_name, &catalog.providers);
+    if pricing.is_some()
+        && let Some(cache) = &cache
+    {
+        cache.save_raw(MODELS_DEV_CATALOG_FILE, &raw);
+    }
+    pricing
 }
 
 /// Attempts to discover the context window size for a given model.

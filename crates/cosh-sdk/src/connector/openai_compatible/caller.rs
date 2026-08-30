@@ -836,7 +836,7 @@ pub async fn chat_stream(
         let response = send_request_stream(config, &url, &request, &headers).await?;
         process_sse_response(response)
     };
-    Ok(ChatStream::new(stream))
+    Ok(ChatStream::new(stream, config.family))
 }
 
 /// Send a streaming chat completion with a full messages array including
@@ -910,7 +910,7 @@ pub async fn chat_stream_with_messages(
         let response = send_request_stream(config, &url, &request, &headers).await?;
         process_sse_response(response)
     };
-    Ok(ChatStream::new(stream))
+    Ok(ChatStream::new(stream, config.family))
 }
 
 /// Send an embedding request and return the embedding vector.

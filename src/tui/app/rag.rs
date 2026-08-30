@@ -4,7 +4,7 @@ use ratatui::layout::Rect;
 
 use super::App;
 #[cfg(feature = "embed")]
-use super::{AppMode, SIDEBAR_WIDTH};
+use super::AppMode;
 #[cfg(feature = "embed")]
 use crate::ui::dialogs::DialogType;
 
@@ -352,7 +352,11 @@ impl App {
     #[cfg(feature = "embed")]
     pub(super) fn handle_rag_mouse_click(&mut self, mouse: &MouseEvent) -> bool {
         let area = self.terminal_size();
-        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+        let sidebar_w = if self.sidebar.open {
+            self.left_panel_width()
+        } else {
+            0
+        };
         let main_area = Rect::new(
             area.x + sidebar_w,
             area.y,

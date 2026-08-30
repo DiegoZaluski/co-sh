@@ -3,6 +3,7 @@ pub mod free_gateway_recommendation;
 pub mod streaming;
 pub mod tool_render;
 
+pub mod dashboard;
 pub mod permission;
 pub mod question;
 pub mod queue_choice;

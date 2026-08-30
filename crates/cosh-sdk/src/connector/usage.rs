@@ -51,4 +51,151 @@ impl TokenUsage {
             + u64::from(self.cache_creation_input_tokens)
             + u64::from(self.cache_read_input_tokens)
     }
+
+    /// Merge per-frame usage extracts from a SINGLE streaming response.
+    ///
+    /// Providers split usage across SSE frames: Claude reports input/cache
+    /// counters in the `message_start` frame and the final output count in
+    /// `message_delta`; Gemini streams cumulative `usageMetadata` in every
+    /// frame. Within one request every counter only grows, so the merge is
+    /// a per-field max — never a sum (summing would double-count the
+    /// `message_start` input tokens).
+    #[must_use]
+    pub fn merge_stream(self, next: TokenUsage) -> TokenUsage {
+        TokenUsage {
+            input_tokens: self.input_tokens.max(next.input_tokens),
+            output_tokens: self.output_tokens.max(next.output_tokens),
+            cache_creation_input_tokens: self
+                .cache_creation_input_tokens
+                .max(next.cache_creation_input_tokens),
+            cache_read_input_tokens: self
+                .cache_read_input_tokens
+                .max(next.cache_read_input_tokens),
+            reasoning_tokens: self.reasoning_tokens.max(next.reasoning_tokens),
+        }
+    }
+
+    /// Cost in US dollars for this usage at the given per-model pricing
+    /// (USD per million tokens, as published in the models.dev catalog).
+    ///
+    /// Every token counter is billed at its own rate: plain input, cache
+    /// writes (Anthropic premium), cache reads (the ~10% discount) and
+    /// output. Reasoning tokens are NOT priced separately — providers bill
+    /// them as part of the completion (`output_tokens` includes them).
+    #[must_use]
+    pub fn cost(&self, pricing: &Pricing) -> f64 {
+        const MTOK: f64 = 1_000_000.0;
+        (f64::from(self.input_tokens) * pricing.input
+            + f64::from(self.output_tokens) * pricing.output
+            + f64::from(self.cache_read_input_tokens) * pricing.cache_read
+            + f64::from(self.cache_creation_input_tokens) * pricing.cache_write)
+            / MTOK
+    }
+}
+
+/// Per-model token pricing in USD per million tokens, used to turn the
+/// API-reported [`TokenUsage`] into a real cost.
+///
+/// Rates come from the models.dev catalog (field `cost`), which publishes
+/// the official per-model prices — this is a price TABLE, not an estimate:
+/// the token counts themselves always come from the provider's own usage
+/// object.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pricing {
+    /// Plain (uncached) input tokens. USD / Mtok.
+    pub input: f64,
+    /// Completion tokens. USD / Mtok.
+    pub output: f64,
+    /// Cache-read tokens (Anthropic, OpenAI prompt caching). USD / Mtok.
+    pub cache_read: f64,
+    /// Cache-write tokens (Anthropic cache_creation). USD / Mtok.
+    pub cache_write: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_stream_takes_per_field_max() {
+        // Claude: message_start carries input + cache counters (output=1),
+        // message_delta carries the final output count.
+        let start = TokenUsage {
+            input_tokens: 1200,
+            output_tokens: 1,
+            cache_creation_input_tokens: 400,
+            cache_read_input_tokens: 8000,
+            reasoning_tokens: 0,
+        };
+        let delta = TokenUsage {
+            input_tokens: 0,
+            output_tokens: 350,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let merged = start.merge_stream(delta);
+        assert_eq!(merged.input_tokens, 1200);
+        assert_eq!(merged.output_tokens, 350);
+        assert_eq!(merged.cache_creation_input_tokens, 400);
+        assert_eq!(merged.cache_read_input_tokens, 8000);
+    }
+
+    #[test]
+    fn merge_stream_accumulates_growing_gemini_counters() {
+        let a = TokenUsage {
+            input_tokens: 50,
+            output_tokens: 20,
+            ..TokenUsage::default()
+        };
+        let b = TokenUsage {
+            input_tokens: 200,
+            output_tokens: 60,
+            cache_read_input_tokens: 150,
+            reasoning_tokens: 40,
+            ..TokenUsage::default()
+        };
+        let merged = a.merge_stream(b);
+        assert_eq!(merged.total_input_tokens(), 350);
+        assert_eq!(merged.output_tokens, 60);
+        assert_eq!(merged.reasoning_tokens, 40);
+    }
+
+    #[test]
+    fn cost_prices_each_bucket_at_its_own_rate() {
+        // gpt-4o-like: $2.50/M in, $10/M out, $1.25/M cache read.
+        let pricing = Pricing {
+            input: 2.50,
+            output: 10.0,
+            cache_read: 1.25,
+            cache_write: 0.0,
+        };
+        let usage = TokenUsage {
+            input_tokens: 2_000_000,
+            output_tokens: 1_000_000,
+            cache_read_input_tokens: 4_000_000,
+            ..TokenUsage::default()
+        };
+        // 2M*2.5 + 1M*10 + 4M*1.25 = 5 + 10 + 5 = 20
+        assert!((usage.cost(&pricing) - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_applies_anthropic_cache_write_premium() {
+        let pricing = Pricing {
+            input: 3.0,
+            output: 15.0,
+            cache_read: 0.3,
+            cache_write: 3.75,
+        };
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 200_000,
+            cache_creation_input_tokens: 100_000,
+            cache_read_input_tokens: 2_000_000,
+            ..TokenUsage::default()
+        };
+        // 1M*3 + 0.2M*15 + 0.1M*3.75 + 2M*0.3 = 3 + 3 + 0.375 + 0.6 = 6.975
+        assert!((usage.cost(&pricing) - 6.975).abs() < 1e-9);
+    }
 }

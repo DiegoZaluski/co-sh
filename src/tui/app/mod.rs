@@ -98,6 +98,19 @@ fn apply_background_preference(mut t: Theme, transparent_background: bool) -> Th
 
 const SIDEBAR_WIDTH: u16 = 22;
 
+/// What the left panel currently shows. Ctrl+U jumps straight to the usage
+/// dashboard; Ctrl+B jumps straight back to the session history — the two
+/// keys are NOT a toggle, so a user only ever needs to know the one that
+/// shows what they want.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum LeftPanelMode {
+    /// The session history list (Ctrl+B).
+    #[default]
+    History,
+    /// The usage dashboard (Ctrl+U).
+    Dashboard,
+}
+
 /// Header link that opens the project's bug-report page.
 /// TODO: replace the URL with the real GitHub issues URL.
 const BUG_REPORT_TEXT: &str = "𓆦 bug";
@@ -233,6 +246,22 @@ pub struct App {
     agent_spinner: Option<AgentSpinner>,
     /// Latest context manager info for the budget bar (None if no data yet).
     context_info: Option<cosh::harness::ContextDisplayInfo>,
+    /// What the left panel shows (history vs dashboard) and its dashboard
+    /// period selection.
+    left_panel: LeftPanelMode,
+    usage_period: crate::usage::UsagePeriod,
+    /// Every usage record loaded from disk (for period/provider aggregation).
+    /// Kept in RAM and refreshed on new events so the dashboard never re-reads
+    /// the JSONL per frame.
+    usage_records: Vec<crate::usage::UsageRecord>,
+    /// Global usage log persistence (append per request, read for aggregates).
+    usage_store: crate::usage::UsageStore,
+    /// Monotonic id for correlating an in-flight cost lookup with its record.
+    usage_next_id: u64,
+    /// Receiver for the async price-backfill task: (record id, cost USD).
+    usage_cost_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, f64)>,
+    /// Sender half of [`Self::usage_cost_rx`], cloned into backfill tasks.
+    usage_cost_tx: tokio::sync::mpsc::UnboundedSender<(u64, f64)>,
     /// Stores the theme name that was active when the theme dialog opened (for cancel/restore)
     theme_dialog_original: Option<String>,
     /// Stores the model that was active when the model dialog opened (for cancel/restore)
@@ -319,6 +348,7 @@ impl App {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
         let (perm_tx, _perm_rx) = mpsc::unbounded_channel();
+        let (usage_cost_tx, usage_cost_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let theme_registry = ThemeRegistry::new();
         let setup = crate::util::setup::Setup::load();
@@ -368,6 +398,8 @@ impl App {
         // built in this process (harness fallback chains, compaction, session
         // titles) without each construction site needing the setup file.
         cosh_sdk::connector::set_zen_public_tier_enabled(setup.zen_public_opt_in() == Some(true));
+
+        let usage_store = crate::usage::UsageStore::new();
 
         Self {
             state,
@@ -443,6 +475,13 @@ impl App {
             terminal_focused: true,
             agent_spinner: None,
             context_info: None,
+            left_panel: LeftPanelMode::default(),
+            usage_period: crate::usage::UsagePeriod::default(),
+            usage_records: usage_store.load(),
+            usage_store,
+            usage_next_id: 0,
+            usage_cost_rx,
+            usage_cost_tx,
             mouse_down_pos: None,
             mouse_drag_active: false,
             mouse_up_was_drag: false,
@@ -587,7 +626,11 @@ impl App {
     /// rendered at — a wider mouse area would re-wrap every message, shifting
     /// `prefix_y` and making tool-box clicks land on the wrong row.
     fn session_main_area(&self, area: Rect) -> SessionArea {
-        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+        let sidebar_w = if self.sidebar.open {
+            self.left_panel_width()
+        } else {
+            0
+        };
         let right_panel_w = if matches!(self.mode(), AppMode::Session)
             && (should_show_right_panel(area.width, &self.state.right_panel))
         {
@@ -605,6 +648,155 @@ impl App {
             sidebar_w,
             right_panel_w,
         }
+    }
+
+    /// Width of the left panel. The usage dashboard shares the session
+    /// sidebar's width, so geometry is consistent regardless of view. Shared
+    /// by render and mouse dispatch for exact click hit-testing.
+    fn left_panel_width(&self) -> u16 {
+        SIDEBAR_WIDTH
+    }
+
+    /// Assemble the snapshot the usage dashboard renders. The session block
+    /// comes from the live per-session records (which gain costs as backfills
+    /// land); the spend-by-period block aggregates the full on-disk log.
+    fn dashboard_data(&self) -> crate::routes::session::dashboard::DashboardData {
+        use crate::usage::summarize;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let session_tokens = crate::usage::total_tokens(&self.session_records());
+        let mut session_cost: f64 = 0.0;
+        let mut has_cost = false;
+        for r in self.session_records() {
+            if let Some(c) = r.cost_usd {
+                session_cost += c;
+                has_cost = true;
+            }
+        }
+
+        let period = summarize(&self.usage_records, self.usage_period, now_ms);
+
+        crate::routes::session::dashboard::DashboardData {
+            session_tokens,
+            session_cost: has_cost.then_some(session_cost),
+            period,
+            period_enum: self.usage_period,
+        }
+    }
+
+    /// The usage records belonging to the current session.
+    fn session_records(&self) -> Vec<crate::usage::UsageRecord> {
+        let Some(sid) = self.state.current_session_id.as_deref() else {
+            return Vec::new();
+        };
+        self.usage_records
+            .iter()
+            .filter(|r| r.session_id == sid)
+            .cloned()
+            .collect()
+    }
+
+    /// Persist one real API request's usage for the current session.
+    ///
+    /// Cost is derived from the real tokens × the model's official price via
+    /// the OFFLINE models.dev cache when available. If the model's price is
+    /// not cached yet, a background task fetches the catalog and reports the
+    /// cost back on `usage_cost_rx` — a guessed `$0` is never recorded.
+    fn record_usage(
+        &mut self,
+        usage: cosh_sdk::connector::TokenUsage,
+        provider: &str,
+        model: &str,
+    ) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let session_id = self.state.current_session_id.clone().unwrap_or_default();
+        let id = self.usage_next_id;
+        self.usage_next_id = self.usage_next_id.wrapping_add(1);
+
+        let cost = cosh_sdk::connector::model_pricing(model, crate::usage::MODELS_DEV_CACHE_DIR)
+            .map(|p| usage.cost(&p));
+
+        let record = crate::usage::UsageRecord {
+            id,
+            ts,
+            session_id,
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            usage,
+            cost_usd: cost,
+        };
+
+        self.usage_records.push(record.clone());
+        self.usage_store.append(&record);
+
+        // Price unknown → fetch the catalog in the background and report the
+        // resolved cost back (keeps the UI thread off the network).
+        if cost.is_none() && !model.is_empty() {
+            let tx = self.usage_cost_tx.clone();
+            let model = model.to_owned();
+            self.tokio_handle.spawn(async move {
+                if let Some(pricing) =
+                    cosh_sdk::connector::lookup_pricing(&model, crate::usage::MODELS_DEV_CACHE_DIR)
+                        .await
+                {
+                    let _ = tx.send((id, usage.cost(&pricing)));
+                }
+            });
+        }
+    }
+
+    /// Drain resolved cost backfills from the background pricing task and
+    /// enrich the matching records (memory + disk) so dollar totals settle.
+    fn pump_usage_costs(&mut self) {
+        let mut changed = false;
+        while let Ok((id, cost)) = self.usage_cost_rx.try_recv() {
+            if let Some(r) = self.usage_records.iter_mut().find(|r| r.id == id)
+                && r.cost_usd.replace(cost) != Some(cost)
+            {
+                changed = true;
+            }
+        }
+        if changed {
+            // Rewrite the on-disk log with the enriched costs. Backfills are
+            // rare, so this never happens on the hot path.
+            let records = self.usage_records.clone();
+            self.usage_store.rewrite(&records);
+        }
+    }
+
+    /// Ctrl+U: always open the left panel showing the usage dashboard. Not a
+    /// toggle — pressing it again keeps showing the dashboard, so the user
+    /// never has to know a matching "other" shortcut.
+    fn show_dashboard(&mut self) {
+        self.left_panel = LeftPanelMode::Dashboard;
+        self.sidebar.open = true;
+    }
+
+    /// Ctrl+S: always open the left panel showing the session history. Also
+    /// not a toggle — it just points the panel at the session list.
+    fn show_session_history(&mut self) {
+        self.left_panel = LeftPanelMode::History;
+        self.sidebar.open = true;
+    }
+
+    /// Tab/Shift+Tab on the dashboard: advance (or go back) through the
+    /// period selector — day → week → month → year → total.
+    fn cycle_usage_period(&mut self, forward: bool) {
+        self.usage_period = if forward {
+            self.usage_period.next()
+        } else {
+            self.usage_period.prev()
+        };
     }
 
     /// The session transcript viewport (shared by render and the mouse
@@ -669,7 +861,11 @@ impl App {
             return None;
         }
         let area = self.terminal_size();
-        let sidebar_w = if self.sidebar.open { SIDEBAR_WIDTH } else { 0 };
+        let sidebar_w = if self.sidebar.open {
+            self.left_panel_width()
+        } else {
+            0
+        };
 
         let right_panel_w = if matches!(self.mode(), AppMode::Session)
             && (should_show_right_panel(area.width, &self.state.right_panel))

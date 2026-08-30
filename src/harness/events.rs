@@ -1,3 +1,4 @@
+use cosh_sdk::connector::TokenUsage;
 use cosh_tools::question::types::QuestionItem;
 use serde_json::Value;
 
@@ -148,6 +149,20 @@ pub enum HarnessEvent {
         session_id: String,
         /// The new human-readable title.
         title: String,
+    },
+    /// Real token usage reported by the provider for a completed LLM request.
+    ///
+    /// Emitted once per API call (each agent-loop request, LLM compaction,
+    /// etc.) after its stream finishes. Counters come straight from the
+    /// provider's own usage object — never a local estimate. The TUI stamps
+    /// the current session id + timestamp and persists it for cost tracking.
+    Usage {
+        /// The normalized per-request token usage (including cache accounting).
+        usage: TokenUsage,
+        /// The provider that served the request (e.g. `"opencode"`, `"claude"`).
+        provider: String,
+        /// The model that served the request.
+        model: String,
     },
 }
 

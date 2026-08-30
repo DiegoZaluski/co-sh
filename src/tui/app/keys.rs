@@ -671,6 +671,26 @@ impl App {
                 return Ok(false);
             }
 
+            // When the usage dashboard is open, Tab / Shift+Tab cycle the
+            // period selector instead of toggling mode focus. (Shift+Tab
+            // arrives as BackTab, which the keymap doesn't bind.)
+            if self.sidebar.open
+                && matches!(self.left_panel, super::LeftPanelMode::Dashboard)
+                && self.state.right_panel.panel_focus.is_none()
+            {
+                match key.code {
+                    KeyCode::Tab => {
+                        self.cycle_usage_period(true);
+                        return Ok(false);
+                    }
+                    KeyCode::BackTab => {
+                        self.cycle_usage_period(false);
+                        return Ok(false);
+                    }
+                    _ => {}
+                }
+            }
+
             match action {
                 Some(crate::keymap::Action::ScrollUp) => {
                     if self.sidebar_focused && self.sidebar.open {
@@ -728,7 +748,16 @@ impl App {
                     }
                 }
                 Some(crate::keymap::Action::ToggleSidebar) => {
+                    // Ctrl+B: toggle the left panel open/closed.
                     self.sidebar.open = !self.sidebar.open;
+                }
+                Some(crate::keymap::Action::ToggleUsage) => {
+                    // Ctrl+U: always open the left panel showing the dashboard.
+                    self.show_dashboard();
+                }
+                Some(crate::keymap::Action::ShowSessionHistory) => {
+                    // Ctrl+S: always open the left panel showing session history.
+                    self.show_session_history();
                 }
                 Some(crate::keymap::Action::ToggleHelp) => {
                     if self.dialog.visible()

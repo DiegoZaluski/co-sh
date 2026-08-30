@@ -4,8 +4,8 @@ use super::context::{ContextManager, MAX_CONTEXT_TOKENS, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
 use cosh_sdk::connector::{
-    ChatMessage, ClaudeThinkingBlock, Connector, ConnectorError, ToolCallMode, ToolDefinition,
-    resolve_reasoning_effort,
+    ChatMessage, ChatStream, ClaudeThinkingBlock, Connector, ConnectorError, ToolCallMode,
+    ToolDefinition, resolve_reasoning_effort,
 };
 #[cfg(not(test))]
 use cosh_sdk::connector::{discover_context_window, effective_context_window};
@@ -1339,6 +1339,27 @@ impl Harness {
         });
     }
 
+    /// Emit a [`HarnessEvent::Usage`] for a just-completed stream, if the
+    /// provider reported usage and the TUI is listening. Drains the stream
+    /// (its accumulated usage) first. Used by every LLM request so session
+    /// token/cost tracking reflects real API usage.
+    async fn emit_usage(&self, stream: &mut ChatStream) {
+        let Some(usage) = stream.usage().await else {
+            return;
+        };
+        if let Some(ref tx) = self.reasoning_tx {
+            let _ = tx.send(super::events::HarnessEvent::Usage {
+                usage,
+                provider: self
+                    .connector
+                    .provider_name()
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                model: self.connector.model().unwrap_or("").to_owned(),
+            });
+        }
+    }
+
     /// Ask the summarizer model for the compaction summary, STREAMING the
     /// tokens through `on_token` (which forwards them to the TUI as
     /// [`HarnessEvent::LlmCompactionToken`]). The summarizer is a dedicated
@@ -1463,6 +1484,7 @@ impl Harness {
                 on_token(token);
             }
         }
+        self.emit_usage(&mut stream).await;
         Ok(())
     }
 
@@ -1655,6 +1677,7 @@ impl Harness {
         self.last_failed_raw = extractor.take_last_failed_raw();
 
         // log::debug!("stream_chat_with_messages DONE total_tokens={token_count}");
+        self.emit_usage(&mut stream).await;
         Ok("done".into())
     }
 
@@ -1904,6 +1927,7 @@ impl Harness {
         self.last_failed_raw = extractor.take_last_failed_raw();
 
         // log::debug!("stream_chat DONE total_tokens={token_count}");
+        self.emit_usage(&mut stream).await;
         Ok("done".into())
     }
 

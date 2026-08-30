@@ -24,8 +24,8 @@ pub mod retry;
 
 pub use client::Connector;
 pub use discovery::{
-    ModelReasoning, discover_context_window, effective_context_window, model_reasoning,
-    model_reasoning_from_catalog, resolve_reasoning_effort,
+    ModelReasoning, discover_context_window, effective_context_window, lookup_pricing,
+    model_pricing, model_reasoning, model_reasoning_from_catalog, resolve_reasoning_effort,
 };
 pub use error::ConnectorError;
 pub use output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
@@ -45,7 +45,7 @@ pub use provider::{
     known_providers, known_providers_with_env, normalize_local_base_url,
     set_zen_public_tier_enabled, zen_public_tier_enabled,
 };
-pub use usage::TokenUsage;
+pub use usage::{Pricing, TokenUsage};
 
 #[cfg(test)]
 mod test;

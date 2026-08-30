@@ -12,6 +12,7 @@ mod state;
 mod theme;
 mod types;
 mod ui;
+mod usage;
 mod util;
 
 #[cfg(test)]
