@@ -6,7 +6,7 @@ use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
 use crate::logo::ChatLogo;
@@ -69,6 +69,32 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
             cell.set_style(style);
         }
     }
+}
+
+/// Truncate `text` to at most `max` characters, ending with an ellipsis when
+/// clipping occurs.
+fn truncate_with_ellipsis(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut clipped: String = text.chars().take(max.saturating_sub(1)).collect();
+    clipped.push('\u{2026}');
+    clipped
+}
+
+/// Style for the reasoning-level badge: bold and color-coded by effort
+/// intensity — green for low, amber for medium, red for high. Anything
+/// unknown falls back to the theme's info color.
+fn reason_level_style(level: &str, theme: &Theme) -> Style {
+    let color = match level {
+        "low" | "minimal" => theme.success,
+        "medium" => theme.warning,
+        "high" | "xhigh" => theme.error,
+        _ => theme.info,
+    };
+    Style::default()
+        .fg(rgba_color(color))
+        .add_modifier(Modifier::BOLD)
 }
 
 pub struct PromptView {
@@ -914,34 +940,71 @@ impl PromptView {
         // Model + reasoning level on the agent-label row — the same line as
         // Build/Ask/Yolo, inside the input box, right-aligned. Order is model
         // first, then the reasoning level, e.g.
-        // ` deepseek-ai/deepseek-v4-flash . high`. When the level is the model
-        // default (or unset) only the model name is shown. The text is
-        // truncated with an ellipsis so it always respects the box interior
-        // and never overlaps the agent label on the left.
+        // ` deepseek-ai/deepseek-v4-flash . high`. The model name uses the
+        // theme's adaptive text color (a white tone on dark themes,
+        // near-black on light ones such as sakura). The reasoning level is
+        // bold and color-coded by effort intensity; the ` . ` separator stays
+        // muted. Segments are truncated so the row always respects the box
+        // interior and never overlaps the agent label on the left.
         if !model_name.is_empty() {
-            let reason_suffix = match reasoning {
-                Some(r) if !r.is_empty() && r != "default" => format!(" . {r}"),
-                _ => String::new(),
-            };
-            let full_text = format!("{model_name}{reason_suffix}");
-            // Interior width mirrors `max_line_w`: 3 columns of chrome on each
-            // side (border + 2 padding).
+            let reason = reasoning.filter(|r| !r.is_empty() && *r != "default");
+            let sep = if reason.is_some() { " . " } else { "" };
+            let model_style = Style::default().fg(rgba_color(theme.text));
+            let reason_style = reason
+                .map(|r| reason_level_style(r, theme))
+                .unwrap_or(muted_style);
+
+            let reason_w = reason.map(|r| r.chars().count()).unwrap_or(0);
+            let sep_w = sep.chars().count();
+            let model_w = model_name.chars().count();
+
+            // Interior width mirrors `max_line_w`: 3 columns of chrome on
+            // each side (border + 2 padding). Reserve room for the agent
+            // label plus one spacer column.
             let interior_w = input_area.width.saturating_sub(6) as usize;
-            // Reserve room for the agent label plus one spacer column.
             let label_w = agent_label.chars().count() + 1;
             let avail = interior_w.saturating_sub(label_w);
-            let (text, text_w) = if full_text.chars().count() > avail {
-                let clipped: String = full_text.chars().take(avail.saturating_sub(1)).collect();
-                (format!("{clipped}\u{2026}"), avail)
+
+            // Shrink the model name first — it is the longest part — so the
+            // reasoning level always stays fully visible. When even the level
+            // alone would not fit, drop the model entirely.
+            let (model_seg, sep_seg, reason_seg) = if model_w + sep_w + reason_w <= avail {
+                (
+                    model_name.to_string(),
+                    sep.to_string(),
+                    reason.unwrap_or_default().to_string(),
+                )
+            } else if avail > sep_w + reason_w {
+                (
+                    truncate_with_ellipsis(model_name, avail - sep_w - reason_w),
+                    sep.to_string(),
+                    reason.unwrap_or_default().to_string(),
+                )
             } else {
-                let w = full_text.chars().count();
-                (full_text, w)
+                (
+                    String::new(),
+                    String::new(),
+                    reason
+                        .map(|r| truncate_with_ellipsis(r, avail))
+                        .unwrap_or_default(),
+                )
             };
-            if text_w > 0 {
-                let text_w = text_w as u16;
-                // End at the right interior edge, mirroring the left `x_off`.
-                let text_x = input_area.right().saturating_sub(3 + text_w);
-                draw_text_line(buf, &text, text_x, label_y, text_w, muted_style);
+
+            let segments = [
+                (model_seg.as_str(), model_style),
+                (sep_seg.as_str(), muted_style),
+                (reason_seg.as_str(), reason_style),
+            ];
+            let total_w: usize = segments.iter().map(|(t, _)| t.chars().count()).sum();
+            if total_w > 0 {
+                let mut x = input_area.right().saturating_sub(3 + total_w as u16);
+                for (text, style) in segments {
+                    let w = text.chars().count() as u16;
+                    if w > 0 {
+                        draw_text_line(buf, text, x, label_y, w, style);
+                        x += w;
+                    }
+                }
             }
         }
 
