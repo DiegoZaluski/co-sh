@@ -21,6 +21,19 @@ enum VisualItem {
     Model(ModelEntry),
 }
 
+/// Whether a model entry matches the `/models` search filter: the filter
+/// matches either the model name or its provider, so searching e.g.
+/// `openrouter` isolates the whole OpenRouter group instead of only models
+/// literally containing "openrouter" in their name.
+pub(crate) fn model_entry_matches_filter(entry: &ModelEntry, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let needle = filter.to_lowercase();
+    entry.model.to_lowercase().contains(&needle)
+        || entry.provider.to_lowercase().contains(&needle)
+}
+
 /// List of (`key_combo`, description) for the Shortcuts dialog
 /// Only non-obvious compound shortcuts — basic nav/enter/esc are excluded
 const SHORTCUTS: &[(&str, &str)] = &[
@@ -746,9 +759,7 @@ impl DialogState {
                 // Group models by provider (same as render)
                 let mut grouped: BTreeMap<String, Vec<&ModelEntry>> = BTreeMap::new();
                 for entry in models {
-                    if filter.is_empty()
-                        || entry.model.to_lowercase().contains(&filter.to_lowercase())
-                    {
+                    if model_entry_matches_filter(entry, filter) {
                         grouped
                             .entry(entry.provider.clone())
                             .or_default()
@@ -1473,9 +1484,7 @@ impl DialogState {
 
                 let mut grouped: BTreeMap<String, Vec<&ModelEntry>> = BTreeMap::new();
                 for entry in models {
-                    if filter.is_empty()
-                        || entry.model.to_lowercase().contains(&filter.to_lowercase())
-                    {
+                    if model_entry_matches_filter(entry, filter) {
                         grouped
                             .entry(entry.provider.clone())
                             .or_default()
@@ -3038,5 +3047,35 @@ mod hook_panel_tests {
         let wrapped = ["", "", long.as_str(), ""];
         let (_, _, _, h_wrapped, _, _) = hook_input_metrics(area, wrapped);
         assert_eq!(h_wrapped, h_single + 1);
+    }
+
+    fn entry(provider: &str, model: &str) -> ModelEntry {
+        ModelEntry {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        }
+    }
+
+    #[test]
+    fn model_filter_empty_matches_everything() {
+        assert!(model_entry_matches_filter(&entry("openrouter", "deepseek-v4-pro"), ""));
+    }
+
+    #[test]
+    fn model_filter_matches_model_name_case_insensitive() {
+        assert!(model_entry_matches_filter(
+            &entry("openrouter", "deepseek-v4-pro"),
+            "DEEPSEEK"
+        ));
+        assert!(!model_entry_matches_filter(&entry("openrouter", "deepseek-v4-pro"), "gpt"));
+    }
+
+    #[test]
+    fn model_filter_matches_provider_isolating_its_group() {
+        // Searching by provider keeps every model of that provider, not just
+        // models whose name contains the provider string.
+        assert!(model_entry_matches_filter(&entry("openrouter", "deepseek-v4-pro"), "openrouter"));
+        assert!(model_entry_matches_filter(&entry("OpenRouter", "gpt-5"), "openrouter"));
+        assert!(!model_entry_matches_filter(&entry("nvidia", "deepseek-v4-pro"), "openrouter"));
     }
 }
