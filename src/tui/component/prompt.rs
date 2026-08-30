@@ -71,6 +71,17 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
+/// Display name for a model: drop any lab/org prefix — e.g.
+/// `deepseek.ai/deepseek-v4-pro` becomes `deepseek-v4-pro`. Display-only:
+/// the configured model id keeps its full form for the model picker and API
+/// calls.
+fn short_model_name(model: &str) -> &str {
+    match model.rsplit_once('/') {
+        Some((_, name)) if !name.is_empty() => name,
+        _ => model,
+    }
+}
+
 /// Truncate `text` to at most `max` characters, ending with an ellipsis when
 /// clipping occurs.
 fn truncate_with_ellipsis(text: &str, max: usize) -> String {
@@ -947,6 +958,9 @@ impl PromptView {
         // muted. Segments are truncated so the row always respects the box
         // interior and never overlaps the agent label on the left.
         if !model_name.is_empty() {
+            // Show only the model name, without the lab/org prefix (e.g.
+            // `deepseek.ai/deepseek-v4-pro` renders as `deepseek-v4-pro`).
+            let model_name = short_model_name(model_name);
             let reason = reasoning.filter(|r| !r.is_empty() && *r != "default");
             let sep = if reason.is_some() { " . " } else { "" };
             let model_style = Style::default().fg(rgba_color(theme.text));
