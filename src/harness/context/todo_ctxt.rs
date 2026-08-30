@@ -3,9 +3,12 @@
 //! The [`ContextManager`](super::ContextManager) is the single owner of the
 //! conversation timeline. This separate mini-manager owns ONLY the tool TODO
 //! list — the plan the agent is executing — and renders it as a single
-//! protected `user` message injected at the FRONT of the message list: right
-//! after the system prompt (which the harness passes separately), before the
-//! conversation history. The model therefore always sees the current plan
+//! protected block placed at the FRONT of the message list: right after the
+//! system prompt (which the harness passes separately), before the
+//! conversation history. When the first history message is itself a `user`
+//! turn, the block is merged into it (avoiding two consecutive `user`
+//! messages, which some providers reject); otherwise it is injected as its
+//! own `user` message. The model therefore always sees the current plan
 //! without needing to call `plan_todo_read` first, and cannot forget it.
 //!
 //! # Protection
@@ -45,13 +48,19 @@ use cosh_tools::plan::types::{TodoList, TodoStatus};
 
 /// The dedicated, fully-protected TODO context block.
 ///
-/// Holds the mirror of the tools' `Plan` list and renders the block message
-/// on demand. See the module docs for the protection and removal rules.
+/// Holds the mirror of the tools' `Plan` list and the memoized rendering of
+/// the block. See the module docs for the protection and removal rules.
 #[derive(Debug, Clone, Default)]
 pub struct TodoContext {
     /// The latest mirrored TODO list from the tools' `Plan` state. `None`
     /// means the block is not rendered (nothing to show / plan over).
     list: Option<TodoList>,
+    /// Memoized rendering of `list`: `Some(text)` = the block text, `None` =
+    /// no block (fresh context, cleared mirror, or the plan is over). Kept
+    /// because `tokens()` is read on EVERY budget check (`total_tokens`) —
+    /// re-rendering + re-estimating per call would be pure waste; the text
+    /// only changes when the list changes (`sync`/`clear`).
+    rendered: Option<String>,
 }
 
 impl TodoContext {
@@ -63,8 +72,10 @@ impl TodoContext {
 
     /// Replace the mirrored TODO list with the tools' authoritative state.
     /// Visibility follows the two removal rules automatically: the block
-    /// appears for a live plan and disappears when the plan is over.
+    /// appears for a live plan and disappears when the plan is over. The
+    /// rendering is computed here, once per change.
     pub fn sync(&mut self, list: TodoList) {
+        self.rendered = render(&list);
         self.list = Some(list);
     }
 
@@ -73,6 +84,7 @@ impl TodoContext {
     /// restored session never surfaces a stale block.
     pub fn clear(&mut self) {
         self.list = None;
+        self.rendered = None;
     }
 
     /// True when the block must be rendered: a non-empty list with at least
@@ -80,14 +92,20 @@ impl TodoContext {
     /// means the plan is over — the block is gone (removal rules 1 and 2).
     #[must_use]
     pub fn visible(&self) -> bool {
-        self.render().is_some()
+        self.rendered.is_some()
+    }
+
+    /// The block text, or `None` when not visible.
+    #[must_use]
+    pub(crate) fn text(&self) -> Option<String> {
+        self.rendered.clone()
     }
 
     /// Render the block as a provider-ready `user` message, or `None` when
     /// the block is not visible (the plan is over).
     #[must_use]
     pub fn message(&self) -> Option<ChatMessage> {
-        self.render().map(|text| user_message(&text))
+        self.text().map(|text| user_message(&text))
     }
 
     /// Estimated token cost of the rendered block (`0` when not visible).
@@ -95,36 +113,36 @@ impl TodoContext {
     /// stays honest while the block itself stays protected.
     #[must_use]
     pub fn tokens(&self, enc: TokenEncoding) -> usize {
-        self.render().map_or(0, |text| enc.estimate(&text))
+        self.rendered.as_ref().map_or(0, |text| enc.estimate(text))
     }
+}
 
-    /// The Markdown block, or `None` when not visible.
-    fn render(&self) -> Option<String> {
-        let list = self.list.as_ref()?;
-        if list.groups.is_empty() || all_terminal(list) {
-            return None;
-        }
-        let mut out = String::from(
-            "## Tool TODOs\n\
-             This protected block always shows the current plan. Update it with \
-             plan_todo_write / plan_todo_cross_off / plan_todo_edit.\n",
-        );
-        for group in &list.groups {
-            if group.items.is_empty() {
-                continue;
-            }
-            out.push_str(&format!("\n### {}\n", group.title));
-            for item in &group.items {
-                let mut line = format!("- [{}] {}", status_marker(item.status), item.description);
-                if !item.depends_on.is_empty() {
-                    line.push_str(&format!("  (depends: {})", item.depends_on.join(", ")));
-                }
-                out.push_str(&line);
-                out.push('\n');
-            }
-        }
-        Some(out)
+/// The Markdown block for `list`, or `None` when the plan is over (empty or
+/// all-terminal — removal rules 1 and 2).
+fn render(list: &TodoList) -> Option<String> {
+    if list.groups.is_empty() || all_terminal(list) {
+        return None;
     }
+    let mut out = String::from(
+        "## Tool TODOs\n\
+         This protected block always shows the current plan. Update it with \
+         plan_todo_write / plan_todo_cross_off / plan_todo_edit.\n",
+    );
+    for group in &list.groups {
+        if group.items.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n### {}\n", group.title));
+        for item in &group.items {
+            let mut line = format!("- [{}] {}", status_marker(item.status), item.description);
+            if !item.depends_on.is_empty() {
+                line.push_str(&format!("  (depends: {})", item.depends_on.join(", ")));
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    Some(out)
 }
 
 /// Checkbox marker for a task status: `[ ]` pending, `[*]` in progress,
@@ -326,13 +344,38 @@ mod tests {
     }
 
     #[test]
-    fn build_messages_injects_the_block_at_the_front() {
+    fn build_messages_merges_the_block_into_the_leading_user_turn() {
         let mut m = cm(10_000);
         m.add_user("hello");
         m.set_todo_list(list(vec![group(
             "Database",
             vec![item("task-1", TodoStatus::Pending)],
         )]));
+        let msgs = m.build_messages("");
+        // Merged: a single user message carrying the block AND the prompt —
+        // never two consecutive `user` messages.
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
+        let text = msgs[0].content.as_deref().unwrap();
+        assert!(
+            text.contains("## Tool TODOs"),
+            "the block leads the merged message"
+        );
+        assert!(text.ends_with("hello"), "the prompt follows the block");
+    }
+
+    #[test]
+    fn build_messages_injects_the_block_when_the_first_turn_is_not_user() {
+        let mut m = cm(10_000);
+        // A restored/compacted timeline whose first message is the anchor
+        // (assistant role): the block cannot be merged — it is injected.
+        m.set_todo_list(list(vec![group(
+            "Database",
+            vec![item("task-1", TodoStatus::Pending)],
+        )]));
+        m.add_user("hello");
+        m.add_assistant("doing it", true);
+        m.apply_llm_summary("## Objective\n- keep going".into());
         let msgs = m.build_messages("");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
@@ -342,9 +385,9 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("## Tool TODOs"),
-            "the block is the FIRST message — right after the system prompt"
+            "the block is its own leading message here"
         );
-        assert_eq!(msgs[1].content.as_deref(), Some("hello"));
+        assert_eq!(msgs[1].role, "assistant");
     }
 
     // The whole point of the dedicated block: every compaction phase must

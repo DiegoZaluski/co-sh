@@ -159,6 +159,92 @@ fn remove_abandoned_inputs_keeps_a_turn_that_produced_output() {
     assert_eq!(cm.items_snapshot().len(), 3);
 }
 
+#[test]
+fn remove_abandoned_inputs_drops_a_partial_runs_orphan_tool_call() {
+    // A run cancelled mid-execution: the tool result never arrived. The new
+    // input follows the dangling call, so the orphan is removed and the older
+    // prompt is then recognized as abandoned too.
+    let mut cm = cm(10_000);
+    cm.add_user("abandoned");
+    cm.add_tool_call("orphan", "fs_read", "{}");
+    cm.add_user("current");
+    assert!(cm.remove_abandoned_inputs());
+    let items = cm.items_snapshot();
+    assert_eq!(items.len(), 1);
+    assert!(
+        matches!(&items[0], ContextItem::User { original, .. } if original == "current"),
+        "only the newest input survives"
+    );
+}
+
+#[test]
+fn remove_abandoned_inputs_drops_parallel_orphan_calls() {
+    let mut cm = cm(10_000);
+    cm.add_user("abandoned");
+    cm.add_tool_call("orphan-a", "fs_read", "{}");
+    cm.add_tool_call("orphan-b", "find_grep", "{}");
+    cm.add_user("current");
+    assert!(cm.remove_abandoned_inputs());
+    assert_eq!(cm.items_snapshot().len(), 1);
+}
+
+#[test]
+fn remove_abandoned_inputs_drops_the_orphan_in_a_mixed_parallel_run() {
+    // Cancellation with SOME results already arrived: TC(y) completed, TC(x)
+    // never got its result. The orphan must go while the completed chain
+    // (and the output it represents) stays whole.
+    let mut cm = cm(10_000);
+    cm.add_user("abandoned");
+    cm.add_tool_call("orphan", "fs_read", "{}");
+    cm.add_tool_call("done", "find_grep", "{}");
+    cm.add_tool_result("done", "3 matches");
+    cm.add_user("current");
+    assert!(cm.remove_abandoned_inputs());
+    let items = cm.items_snapshot();
+    assert!(
+        !items
+            .iter()
+            .any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "orphan")),
+        "the orphan call is removed"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "done")),
+        "the completed chain is preserved"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|it| matches!(it, ContextItem::ToolResult { call_id, .. } if call_id == "done")),
+        "the completed chain keeps its result"
+    );
+}
+
+#[test]
+fn remove_abandoned_inputs_keeps_completed_chains_and_pending_calls() {
+    // A completed chain (call WITH result) followed by a new input is real
+    // work — never removed…
+    let mut cm = cm(10_000);
+    cm.add_user("first");
+    cm.add_tool_call("done", "fs_read", "{}");
+    cm.add_tool_result("done", "contents");
+    cm.add_user("second");
+    assert!(!cm.remove_abandoned_inputs());
+    assert_eq!(cm.items_snapshot().len(), 4);
+}
+
+#[test]
+fn remove_abandoned_inputs_never_touches_a_pending_live_call() {
+    // A call at the very END of the timeline (result still pending, no new
+    // input yet) is a live run — never touched.
+    let mut cm = cm(10_000);
+    cm.add_user("live");
+    cm.add_tool_call("pending", "fs_read", "{}");
+    assert!(!cm.remove_abandoned_inputs());
+    assert_eq!(cm.items_snapshot().len(), 2);
+}
+
 // ── Useless tool-chain sweep ──────────────────────────────────────────────
 
 #[test]
@@ -173,11 +259,15 @@ fn sweep_useless_chains_removes_dead_chains_but_keeps_the_newest() {
     cm.sweep_useless_chains();
     let items = cm.items_snapshot();
     assert!(
-        !items.iter().any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "dead")),
+        !items
+            .iter()
+            .any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "dead")),
         "the useless chain is removed"
     );
     assert!(
-        items.iter().any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "alive")),
+        items
+            .iter()
+            .any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "alive")),
         "the useful chain survives"
     );
 }
@@ -230,11 +320,15 @@ fn llm_compaction_request_uses_update_mode_with_previous_summary() {
 
     let request = cm.llm_compaction_request().expect("request exists");
     assert!(
-        request.prompt.contains("[Previous summary]: previous anchor"),
+        request
+            .prompt
+            .contains("[Previous summary]: previous anchor"),
         "the previous summary stays in the timeline"
     );
     assert!(
-        request.prompt.contains("Update the summary labeled [Previous summary]"),
+        request
+            .prompt
+            .contains("Update the summary labeled [Previous summary]"),
         "update mode is selected"
     );
 }
@@ -259,7 +353,9 @@ fn apply_llm_summary_replaces_everything() {
     assert!(ok);
     let items = cm.items_snapshot();
     assert_eq!(items.len(), 1);
-    assert!(matches!(&items[0], ContextItem::Compaction { summary, .. } if summary == "## Objective\n- summarized"));
+    assert!(
+        matches!(&items[0], ContextItem::Compaction { summary, .. } if summary == "## Objective\n- summarized")
+    );
 }
 
 // ── Save / restore ────────────────────────────────────────────────────────
@@ -291,12 +387,46 @@ fn save_restore_roundtrip_preserves_items_and_bookkeeping() {
 #[test]
 fn overflow_stuck_state_lifecycle() {
     let mut cm = cm(10_000);
-    assert!(!cm.overflow_stuck("provider-a"));
-    cm.mark_overflow("provider-a");
-    assert!(cm.overflow_stuck("provider-a"));
-    assert!(!cm.overflow_stuck("provider-b"));
+    assert!(!cm.overflow_stuck("model-a"));
+    cm.mark_overflow("model-a");
+    assert!(cm.overflow_stuck("model-a"));
+    assert!(!cm.overflow_stuck("model-b"));
     cm.clear_overflow();
-    assert!(!cm.overflow_stuck("provider-a"));
+    assert!(!cm.overflow_stuck("model-a"));
+}
+
+#[test]
+fn overflow_stuck_is_keyed_by_model_not_provider() {
+    // The stuck constraint is the model's WINDOW, not the provider's API: a
+    // model switch inside the same provider must clear the stuck state.
+    let mut cm = cm(10_000);
+    cm.mark_overflow("gpt-4o");
+    cm.sync_model("gpt-4o");
+    assert!(cm.overflow_stuck("gpt-4o"), "same model → still stuck");
+    cm.sync_model("gpt-4o-mini");
+    assert!(
+        !cm.overflow_stuck("gpt-4o"),
+        "a model switch clears the stuck state"
+    );
+    assert!(!cm.overflow_stuck("gpt-4o-mini"));
+}
+
+#[test]
+fn apply_llm_summary_keeps_the_stuck_state_when_the_verdict_fails() {
+    let mut cm = cm(1000); // trigger = 800
+    cm.mark_overflow("gpt-4o");
+    // A degenerate summary that lands above the trigger reports failure AND
+    // keeps the stuck state — the next request may still overflow, and the
+    // stuck guard exists to stop burning doomed calls.
+    let ok = cm.apply_llm_summary(prose_copies(200));
+    assert!(!ok);
+    assert!(
+        cm.overflow_stuck("gpt-4o"),
+        "a failed compaction must not clear the stuck overflow"
+    );
+    // A second (small) summary succeeds and clears the stuck state.
+    assert!(cm.apply_llm_summary("tiny".into()));
+    assert!(!cm.overflow_stuck("gpt-4o"));
 }
 
 // ── Display info ──────────────────────────────────────────────────────────
@@ -380,9 +510,13 @@ fn cached_token_total_stays_in_sync_across_all_mutations() {
 
 // ── Context window discovery ───────────────────────────────────────────────
 
-#[tokio::test]
-async fn with_discovered_context_uses_discovered_value() {
-    let cm = ContextManager::with_discovered_context("openai/gpt-4o").await;
+// The window→budget mapping is exercised OFFLINE through the pure
+// `from_window` constructor; the network path (`with_discovered_context`) is
+// a thin delegation kept for production and covered by an ignored smoke test.
+
+#[test]
+fn from_window_resizes_a_real_discovered_window() {
+    let cm = ContextManager::from_window(Some(128_000));
     assert_eq!(
         cm.display_info().max_tokens,
         effective_context_window(128_000),
@@ -390,67 +524,35 @@ async fn with_discovered_context_uses_discovered_value() {
     );
 }
 
-#[tokio::test]
-async fn with_discovered_context_falls_back_to_default() {
-    let cm = ContextManager::with_discovered_context("invalid-model-xyz-12345").await;
+#[test]
+fn from_window_falls_back_to_the_default_without_discovery() {
+    let cm = ContextManager::from_window(None);
     assert_eq!(
         cm.display_info().max_tokens,
         MAX_CONTEXT_TOKENS,
-        "Invalid model should fall back to default MAX_CONTEXT_TOKENS"
+        "No discovery → the default MAX_CONTEXT_TOKENS"
     );
 }
 
-#[tokio::test]
-async fn with_discovered_context_works_with_claude_models() {
-    let cm = ContextManager::with_discovered_context("claude-opus-5").await;
-    assert_eq!(
-        cm.display_info().max_tokens,
-        effective_context_window(1_000_000),
-        "Budget should be the effective context of the discovered 1M window"
-    );
-}
-
-#[tokio::test]
-async fn with_discovered_context_creates_valid_context_manager() {
-    let mut cm = ContextManager::with_discovered_context("openai/gpt-4o").await;
+#[test]
+fn from_window_creates_a_valid_context_manager() {
+    let mut cm = ContextManager::from_window(Some(128_000));
     assert_eq!(cm.total_tokens(), 0, "New context manager should be empty");
     cm.add_user("test message");
-    assert!(cm.total_tokens() > 0, "Should track tokens after adding content");
+    assert!(
+        cm.total_tokens() > 0,
+        "Should track tokens after adding content"
+    );
 }
 
-// ── Provider-error catalog (windows observed from API errors) ─────────────
-
-#[test]
-fn error_catalog_matches_case_and_vendor_tolerant() {
-    let mut catalog = HashMap::new();
-    catalog.insert("openai/gpt-4o".to_string(), 128_000);
-    catalog.insert("claude-sonnet-4-5".to_string(), 200_000);
-    // Exact, bare, capitalized and vendor-prefixed spellings all resolve.
+#[tokio::test]
+#[ignore = "hits the real discovery APIs (network) — run explicitly"]
+async fn with_discovered_context_resolves_a_known_model() {
+    let cm = ContextManager::with_discovered_context("openai/gpt-4o").await;
     assert_eq!(
-        find_window_in_error_catalog("gpt-4o", &catalog),
-        Some(128_000)
+        cm.display_info().max_tokens,
+        effective_context_window(128_000)
     );
-    assert_eq!(
-        find_window_in_error_catalog("GPT-4O", &catalog),
-        Some(128_000)
-    );
-    assert_eq!(
-        find_window_in_error_catalog("anthropic/claude-sonnet-4-5", &catalog),
-        Some(200_000)
-    );
-    // Unknown models fall through.
-    assert_eq!(find_window_in_error_catalog("unknown-model", &catalog), None);
-}
-
-#[test]
-fn error_catalog_round_trips_through_disk() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(API_ERROR_CATALOG_FILE);
-    let mut catalog = HashMap::new();
-    catalog.insert("gpt-4o".to_string(), 128_000);
-    save_error_catalog(&path, &catalog);
-    let loaded = load_error_catalog(&path).unwrap();
-    assert_eq!(loaded.get("gpt-4o"), Some(&128_000));
 }
 
 // ── Split-and-concatenate (the context-window contingency) ─────────────────
@@ -472,23 +574,53 @@ fn split_chunks_whole_items_in_order_with_continuity_and_commits_atomically() {
     // Chunk 1 = the giant first item alone (whole), historical order.
     let first = cm.split_next_chunk().expect("chunk 1");
     assert!(first.prompt.contains("[Conversation chunk to summarize]"));
-    assert!(first.prompt.contains("abcd efgh"), "the first item is included");
-    assert!(first.prompt.contains("## Objective"), "the first chunk embeds the anchored template");
-    assert!(!first.prompt.contains("[Continuation context"), "no continuity on the very first chunk");
-    assert!(!first.prompt.contains("short a"), "the chunk boundary never splits an item: item 2 stays out");
+    assert!(
+        first.prompt.contains("abcd efgh"),
+        "the first item is included"
+    );
+    assert!(
+        first.prompt.contains("## Objective"),
+        "the first chunk embeds the anchored template"
+    );
+    assert!(
+        !first.prompt.contains("[Continuation context"),
+        "no continuity on the very first chunk"
+    );
+    assert!(
+        !first.prompt.contains("short a"),
+        "the chunk boundary never splits an item: item 2 stays out"
+    );
 
     cm.advance_split("## Objective\n- the giant first part", first.chunk_end);
     assert!(!cm.split_all_consumed(), "more items remain");
-    assert_eq!(cm.items_snapshot().len(), before, "the timeline is untouched while the split is in progress");
+    assert_eq!(
+        cm.items_snapshot().len(),
+        before,
+        "the timeline is untouched while the split is in progress"
+    );
 
     // Chunk 2 = the remaining whole items + the continuity tail to glue on.
     let second = cm.split_next_chunk().expect("chunk 2");
-    assert!(second.prompt.contains("[Continuation context"), "continuation chunks carry the tail of the previous summary");
+    assert!(
+        second.prompt.contains("[Continuation context"),
+        "continuation chunks carry the tail of the previous summary"
+    );
     assert!(second.prompt.contains("the giant first part"));
     assert!(second.prompt.contains("short a") && second.prompt.contains("short c"));
-    assert!(!second.prompt.contains("abcd efgh"), "summarized items are never re-sent");
-    assert!(!second.prompt.contains("Output exactly the Markdown structure"), "continuation chunks do not re-embed the template instruction");
-    assert!(!second.prompt.contains("## Work State"), "continuation chunks do not restart the template skeleton");
+    assert!(
+        !second.prompt.contains("abcd efgh"),
+        "summarized items are never re-sent"
+    );
+    assert!(
+        !second
+            .prompt
+            .contains("Output exactly the Markdown structure"),
+        "continuation chunks do not re-embed the template instruction"
+    );
+    assert!(
+        !second.prompt.contains("## Work State"),
+        "continuation chunks do not restart the template skeleton"
+    );
 
     cm.advance_split("### Active\n- the rest", second.chunk_end);
     assert!(cm.split_all_consumed(), "every item has been summarized");
@@ -514,18 +646,30 @@ fn split_warns_only_when_the_buffer_accumulation_is_concerning() {
 
     let projection = cm.split_projection();
     assert_eq!(projection.ceiling, 4000, "40% of the window is the ceiling");
-    assert_eq!(projection.warn_at, 3200, "80% of the ceiling is the warning point");
+    assert_eq!(
+        projection.warn_at, 3200,
+        "80% of the ceiling is the warning point"
+    );
     assert!(!projection.should_warn, "an empty buffer never warns");
 
     let first = cm.split_next_chunk().expect("chunk 1");
-    assert!(!first.prompt.contains("TOKEN LIMIT"), "the model is left to act naturally while the buffer is small");
+    assert!(
+        !first.prompt.contains("TOKEN LIMIT"),
+        "the model is left to act naturally while the buffer is small"
+    );
     // A bloated first summary crosses the threshold: the next chunk must ask
     // the summarizer to be terse, with a computed target.
     cm.advance_split(&"summary content ".repeat(3000), first.chunk_end);
-    assert!(cm.split_projection().should_warn, "a bloated buffer triggers the limit message");
+    assert!(
+        cm.split_projection().should_warn,
+        "a bloated buffer triggers the limit message"
+    );
     let second = cm.split_next_chunk().expect("chunk 2");
     assert!(second.prompt.contains("TOKEN LIMIT"));
-    assert!(second.prompt.contains("AT MOST ~"), "the limit carries a target");
+    assert!(
+        second.prompt.contains("AT MOST ~"),
+        "the limit carries a target"
+    );
     cm.advance_split("concise summary", second.chunk_end);
     assert!(cm.split_all_consumed());
 }
@@ -544,7 +688,11 @@ fn split_abort_leaves_the_timeline_untouched() {
 
     cm.abort_split();
     assert!(!cm.split_active(), "staging is dropped");
-    assert_eq!(cm.items_snapshot().len(), before.len(), "the timeline is untouched");
+    assert_eq!(
+        cm.items_snapshot().len(),
+        before.len(),
+        "the timeline is untouched"
+    );
     assert!(
         cm.items_snapshot()
             .iter()
@@ -561,14 +709,19 @@ fn commit_split_requires_the_buffer_to_fit_the_window() {
     cm.advance_split(&"overshoot ".repeat(200), request.chunk_end);
     assert!(cm.split_all_consumed());
 
-    assert!(!cm.commit_split(), "an anchor larger than the window must not commit");
-    assert_eq!(cm.items_snapshot().len(), 1, "the timeline stays exactly as it was");
     assert!(
-        cm.items_snapshot().iter().any(|it| matches!(
-            it,
-            ContextItem::User { original, .. } if original == "keep me verbatim"
-        ))
+        !cm.commit_split(),
+        "an anchor larger than the window must not commit"
     );
+    assert_eq!(
+        cm.items_snapshot().len(),
+        1,
+        "the timeline stays exactly as it was"
+    );
+    assert!(cm.items_snapshot().iter().any(|it| matches!(
+        it,
+        ContextItem::User { original, .. } if original == "keep me verbatim"
+    )));
 }
 
 #[test]
@@ -577,7 +730,10 @@ fn commit_split_without_work_returns_false() {
     cm.add_user("hi");
     assert!(!cm.commit_split(), "no active split → false");
     cm.begin_split(10_000);
-    assert!(!cm.commit_split(), "an empty buffer must not wipe the timeline");
+    assert!(
+        !cm.commit_split(),
+        "an empty buffer must not wipe the timeline"
+    );
     assert_eq!(cm.items_snapshot().len(), 1, "nothing was committed");
 }
 
@@ -603,8 +759,13 @@ fn split_staging_survives_save_restore_and_resumes() {
         restored.split_projection().buffer_tokens,
         cm.split_projection().buffer_tokens
     );
-    let next = restored.split_next_chunk().expect("resumes where it stopped");
-    assert!(!next.prompt.contains("abcd efgh"), "the summarized chunk is not re-sent after a restore");
+    let next = restored
+        .split_next_chunk()
+        .expect("resumes where it stopped");
+    assert!(
+        !next.prompt.contains("abcd efgh"),
+        "the summarized chunk is not re-sent after a restore"
+    );
     assert!(next.prompt.contains("second part"));
     assert!(next.prompt.contains("[Continuation context"));
     restored.advance_split("summary of part two", next.chunk_end);
@@ -627,12 +788,18 @@ fn manual_compaction_requests_llm_below_the_normal_trigger() {
     let mut cm = cm(100_000); // normal trigger = 80k
     cm.add_user("explore the repo");
     cm.add_assistant(&prose_copies(10), true);
-    assert!(cm.total_tokens() < cm.trigger(), "precondition: below the normal trigger");
+    assert!(
+        cm.total_tokens() < cm.trigger(),
+        "precondition: below the normal trigger"
+    );
     assert_eq!(cm.run(), RunOutcome::Resolved);
 
     cm.begin_manual_compaction();
     assert!(matches!(cm.run(), RunOutcome::NeedsLlmCompaction));
-    assert!(cm.llm_compaction_request().is_some(), "the summarizer request must exist");
+    assert!(
+        cm.llm_compaction_request().is_some(),
+        "the summarizer request must exist"
+    );
     let ok = cm.apply_llm_summary("## Objective\n- compacted".into());
     cm.end_manual_compaction();
     assert!(ok);
@@ -644,5 +811,8 @@ fn has_compactable_content_rejects_a_lone_previous_summary() {
     let mut cm = cm(1000);
     assert!(!cm.has_compactable_content(), "empty timeline");
     let _ = cm.apply_llm_summary("previous anchor".into());
-    assert!(!cm.has_compactable_content(), "a lone previous summary is not compactable content");
+    assert!(
+        !cm.has_compactable_content(),
+        "a lone previous summary is not compactable content"
+    );
 }

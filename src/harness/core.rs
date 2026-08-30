@@ -1022,12 +1022,15 @@ impl Harness {
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
         use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
-        let provider = self.connector.provider_name().unwrap_or("?");
+        // The stuck state is keyed by MODEL: the constraint is the model's
+        // context window, not the provider's API — a model switch inside the
+        // same provider must get a fresh chance.
+        let model = self.connector.effective_model().unwrap_or("?").to_string();
         // The provider's window already overflowed and the split could not fit
         // the context: the summarizer call is doomed — skip it and re-surface
         // the notification (throttled) instead of burning a paid call per
         // dispatch.
-        if self.context_manager.overflow_stuck(provider) {
+        if self.context_manager.overflow_stuck(&model) {
             self.notify_context_overflow(tx);
             return false;
         }
@@ -1078,7 +1081,7 @@ impl Harness {
                     }
                     // The split could not fit the context into the window —
                     // stuck.
-                    self.context_manager.mark_overflow(provider);
+                    self.context_manager.mark_overflow(&model);
                     self.notify_context_overflow(tx);
                     self.compaction_generic_retries = 0;
                     break CompactionOutcome::Failed;
@@ -1204,7 +1207,7 @@ impl Harness {
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
         use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
-        let provider = self.connector.provider_name().unwrap_or("?");
+        let model = self.connector.effective_model().unwrap_or("?").to_string();
         // Resume an in-progress split without needing a fresh window (the
         // window is persisted in the staging). A fresh split sizes against the
         // known window, falling back to the current token budget when the
@@ -1262,7 +1265,7 @@ impl Harness {
                     // window guess was wrong — abort and mark the overflow
                     // stuck so the caller notifies the user.
                     self.context_manager.abort_split();
-                    self.context_manager.mark_overflow(provider);
+                    self.context_manager.mark_overflow(&model);
                     self.notify_context_overflow(tx);
                     break false;
                 }
@@ -2190,10 +2193,11 @@ impl Harness {
             }
         }
 
-        // A model/provider switch clears a previously recorded stuck
-        // context-window overflow — the new provider gets a fresh chance.
+        // A model switch clears a previously recorded stuck context-window
+        // overflow — the new model gets a fresh chance (keyed by MODEL, so a
+        // switch inside the same provider also clears it).
         self.context_manager
-            .sync_provider(self.connector.provider_name().unwrap_or("?"));
+            .sync_model(self.connector.effective_model().unwrap_or("?"));
         self.compaction_generic_retries = 0;
 
         // Mirror the tools' current TODO list into the dedicated protected
@@ -2336,7 +2340,7 @@ impl Harness {
                         continue;
                     }
                     self.context_manager
-                        .mark_overflow(self.connector.provider_name().unwrap_or("?"));
+                        .mark_overflow(self.connector.effective_model().unwrap_or("?"));
                     self.notify_context_overflow(&tx);
                 }
                 break attempt;

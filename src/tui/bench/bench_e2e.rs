@@ -102,9 +102,7 @@ fn shell_out(lines: usize) -> String {
 /// (one user/assistant/tool-call/tool-result round per iteration), so
 /// `ContextSnapshot`/`Done` events measure the real cost of moving the context
 /// through the UI thread and serializing it — not an empty `Default::default()`.
-pub(crate) fn realistic_context(
-    rounds: usize,
-) -> cosh::harness::context::ContextManagerState {
+pub(crate) fn realistic_context(rounds: usize) -> cosh::harness::context::ContextManagerState {
     use cosh::harness::context::{ContextItem, ContextManagerState};
     let mut items = Vec::with_capacity(rounds * 4);
     let mut next_id = 1u64;
@@ -141,7 +139,7 @@ pub(crate) fn realistic_context(
         items: items.into_iter().collect(),
         next_id,
         max_tokens: 100_000,
-        overflow_provider: None,
+        overflow_model: None,
         split: None,
     }
 }

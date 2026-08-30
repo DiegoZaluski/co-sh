@@ -8,7 +8,7 @@
 //! Each JSONL file represents one complete chat session:
 //!
 //! - Line 1: Session metadata (JSON object with title, created_at, cwd, model,
-//!   and the context-manager session state — `max_tokens`, `overflow_provider`,
+//!   and the context-manager session state — `max_tokens`, `overflow_model`,
 //!   `next_id`).
 //! - Lines 2+: One [`ContextItem`](cosh::harness::context_manager::ContextItem)
 //!   per line — the single source of truth for the conversation context. The
@@ -69,9 +69,10 @@ struct SessionHeader {
     /// Token budget persisted from the context manager.
     #[serde(default)]
     max_tokens: usize,
-    /// Stuck context-window overflow provider (see `ContextManagerState`).
-    #[serde(default)]
-    overflow_provider: Option<String>,
+    /// Stuck context-window overflow model (see `ContextManagerState`).
+    /// The `overflow_provider` alias keeps older session files readable.
+    #[serde(default, alias = "overflow_provider")]
+    overflow_model: Option<String>,
     /// Monotonic item id counter persisted from the context manager.
     #[serde(default)]
     next_id: u64,
@@ -364,7 +365,7 @@ impl SessionStore {
             items: parsed.items.into_iter().collect(),
             next_id: parsed.header.next_id,
             max_tokens: parsed.header.max_tokens,
-            overflow_provider: parsed.header.overflow_provider,
+            overflow_model: parsed.header.overflow_model,
             split: parsed.split,
         })
     }
@@ -555,7 +556,7 @@ impl SessionStore {
             model,
             reasoning: session.reasoning.clone(),
             max_tokens: context.max_tokens,
-            overflow_provider: context.overflow_provider.clone(),
+            overflow_model: context.overflow_model.clone(),
             next_id: context.next_id,
         }
     }
@@ -718,7 +719,7 @@ fn context_from_messages(messages: &[Message]) -> ContextManagerState {
         items: items.into_iter().collect(),
         next_id,
         max_tokens: cosh::harness::context::MAX_CONTEXT_TOKENS,
-        overflow_provider: None,
+        overflow_model: None,
         split: None,
     }
 }
@@ -1076,9 +1077,34 @@ mod tests {
             items: items.into_iter().collect(),
             next_id: 42,
             max_tokens: 100_000,
-            overflow_provider: None,
+            overflow_model: None,
             split: None,
         }
+    }
+
+    /// A session file written by an OLDER build carries the header key
+    /// `overflow_provider`; the alias must keep it loadable (and the stale
+    /// provider-shaped value harmless).
+    #[test]
+    fn old_header_with_overflow_provider_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let file = store.sessions_dir.join("session-legacy.jsonl");
+        let header = r#"{"title":"legacy","title_generated":false,"created_at":0,"cwd":"/tmp","provider":"openai","model":null,"max_tokens":100000,"overflow_provider":"openai","next_id":2}"#;
+        let item = r#"{"User":{"id":1,"original":"hi"}}"#;
+        std::fs::write(&file, format!("{header}\n{item}\n")).unwrap();
+
+        let state = store
+            .load_context("legacy")
+            .expect("an old-format session must load");
+        assert_eq!(state.overflow_model.as_deref(), Some("openai"));
+        // The stale provider-shaped value is inert: the next loop start calls
+        // `sync_model(effective_model)`, which differs from "openai" and
+        // clears the state.
+        let mut cm = cosh::harness::context::ContextManager::new(100_000);
+        cm.restore_state(&state);
+        cm.sync_model("gpt-4o-mini");
+        assert!(!cm.overflow_stuck("gpt-4o-mini"));
     }
 
     fn user_item(id: u64, text: &str) -> ContextItem {

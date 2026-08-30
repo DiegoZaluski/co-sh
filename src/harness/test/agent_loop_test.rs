@@ -616,7 +616,7 @@ async fn run_agent_loop_marks_provider_stuck_when_split_cannot_fit() {
         h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
             .await;
         let _ = state_tx.send((
-            h.context_manager.overflow_stuck("openai"),
+            h.context_manager.overflow_stuck("gpt-4o-mini"),
             h.context_manager.items_snapshot(),
         ));
     });
@@ -796,7 +796,7 @@ async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
     ]);
     h.context_manager.close_loop();
     // The provider is already recorded as overflowing (marked stuck).
-    h.context_manager.mark_overflow("openai");
+    h.context_manager.mark_overflow("gpt-4o-mini");
     h = h.with_mock_stream(Ok(vec!["final answer"]));
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1067,7 +1067,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
             .await;
         let _ = state_tx.send((
             h.context_manager.items_snapshot(),
-            h.context_manager.overflow_stuck("openai"),
+            h.context_manager.overflow_stuck("gpt-4o-mini"),
         ));
     });
 
