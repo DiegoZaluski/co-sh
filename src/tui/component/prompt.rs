@@ -911,25 +911,38 @@ impl PromptView {
             muted_style,
         );
 
-        // Model name on the right side of the footer line. When a concrete
-        // reasoning level was chosen (low/medium/high/etc., i.e. not the
-        // model default), show it first so the user can recall both the level
-        // and the model, e.g. ` high . deepseek-ai/deepseek-v4-flash`.
+        // Model + reasoning level on the agent-label row — the same line as
+        // Build/Ask/Yolo, inside the input box, right-aligned. Order is model
+        // first, then the reasoning level, e.g.
+        // ` deepseek-ai/deepseek-v4-flash . high`. When the level is the model
+        // default (or unset) only the model name is shown. The text is
+        // truncated with an ellipsis so it always respects the box interior
+        // and never overlaps the agent label on the left.
         if !model_name.is_empty() {
-            let reason_prefix = match reasoning {
-                Some(r) if !r.is_empty() && r != "default" => format!("{r} . "),
+            let reason_suffix = match reasoning {
+                Some(r) if !r.is_empty() && r != "default" => format!(" . {r}"),
                 _ => String::new(),
             };
-            let model_text = format!(" {reason_prefix}{model_name}");
-            let model_x = area.right().saturating_sub(model_text.len() as u16);
-            draw_text_line(
-                buf,
-                &model_text,
-                model_x,
-                footer_y,
-                model_text.len() as u16,
-                muted_style,
-            );
+            let full_text = format!("{model_name}{reason_suffix}");
+            // Interior width mirrors `max_line_w`: 3 columns of chrome on each
+            // side (border + 2 padding).
+            let interior_w = input_area.width.saturating_sub(6) as usize;
+            // Reserve room for the agent label plus one spacer column.
+            let label_w = agent_label.chars().count() + 1;
+            let avail = interior_w.saturating_sub(label_w);
+            let (text, text_w) = if full_text.chars().count() > avail {
+                let clipped: String = full_text.chars().take(avail.saturating_sub(1)).collect();
+                (format!("{clipped}\u{2026}"), avail)
+            } else {
+                let w = full_text.chars().count();
+                (full_text, w)
+            };
+            if text_w > 0 {
+                let text_w = text_w as u16;
+                // End at the right interior edge, mirroring the left `x_off`.
+                let text_x = input_area.right().saturating_sub(3 + text_w);
+                draw_text_line(buf, &text, text_x, label_y, text_w, muted_style);
+            }
         }
 
         // ── Chat logo animation ───────────────────────────────────────────
