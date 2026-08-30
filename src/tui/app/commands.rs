@@ -164,8 +164,8 @@ impl App {
 
     /// User-triggered `/compact`: run the LLM summary NOW instead of waiting
     /// for the 80% trigger. Refusals are surfaced as toasts; the work runs on
-    /// a one-off tokio task that rebuilds a Harness from the persisted JSONL
-    /// item log — between loops no harness exists, and while a loop runs its
+    /// a one-off tokio task that rebuilds a Harness from the persisted `.ctx`
+    /// snapshot — between loops no harness exists, and while a loop runs its
     /// context manager is untouchable, so both cases refuse.
     pub(super) fn start_manual_compaction(&mut self) {
         use crate::ui::toast::{ToastOptions, ToastVariant};

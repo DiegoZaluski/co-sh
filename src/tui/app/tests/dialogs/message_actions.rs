@@ -365,12 +365,11 @@ async fn clicking_multiline_user_message_opens_message_actions_without_panicking
         sessions_dir.join("session-1788063765396.jsonl"),
         concat!(
             r#"{"title":"Aug 30 01:22","title_generated":false,"created_at":1788063765396,"#,
-            r#""cwd":"/home/inky/co-sh","provider":"opencode","model":"big-pickle","#,
-            r#""reasoning":"high","max_tokens":100000,"overflow_model":null,"next_id":3}"#,
+            r#""cwd":"/home/inky/co-sh","provider":"opencode","model":"big-pickle","reasoning":"high"}"#,
             "\n",
-            r#"{"User":{"id":1,"original":"Crie um AGENT.md para o projeto,\n1. pesquise como cria um AGENT.md eficiente \n2. estude o projeto e implemente"}}"#,
+            r#"{"id":"msg-0","role":"user","parts":[{"type":"Text","text":"Crie um AGENT.md para o projeto,\n1. pesquise como cria um AGENT.md eficiente \n2. estude o projeto e implemente","synthetic":false}],"created_at":1788063765396,"agent":null,"model":null}"#,
             "\n",
-            r#"{"Assistant":{"id":2,"original":"Error: HTTP 401 - ModelError","closable":true}}"#,
+            r#"{"id":"msg-err-1","role":"assistant","parts":[{"type":"Text","text":"Error: HTTP 401 - ModelError","synthetic":false}],"created_at":1788063765396,"agent":null,"model":null}"#,
             "\n",
         ),
     )

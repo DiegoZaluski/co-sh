@@ -306,8 +306,7 @@ impl App {
             })
             .unwrap_or_default();
 
-        // Load companion context state (the JSONL item log) for session
-        // resumption.
+        // Load companion context state (.ctx file) for session resumption.
         let ctx_state: Option<cosh::harness::ContextManagerState> = self
             .state
             .current_session_id
@@ -444,7 +443,7 @@ impl App {
                         .with_fallbacks(remaining)
                         .with_local_base_urls(local_base_urls);
 
-                    // Restore the authoritative context from the JSONL item log.
+                    // Restore the authoritative context from the .ctx companion file.
                     if let Some(ref state) = ctx_state {
                         harness.context_manager.restore_state(state);
                     }

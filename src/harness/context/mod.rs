@@ -43,9 +43,9 @@ const COMPACT_PCT: usize = 80;
 
 /// A single conversation item in display order. **One item = one message** in
 /// [`ContextManager::build_messages`], so message positions are preserved by
-/// construction. This is also the persisted representation: the JSONL session
-/// log holds one [`ContextItem`] per line (see `session_store`), so the
-/// timeline is restored verbatim from disk.
+/// construction. This is also the persisted representation: the `.ctx`
+/// companion file holds a bincode-encoded snapshot of the whole state (see
+/// `session_store`), so the timeline is restored verbatim from disk.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ContextItem {
     /// A user prompt. **Protected**: its original text stays verbatim until
@@ -164,10 +164,17 @@ impl ContextItem {
 
 // LLM compaction (the last-resort fallback, driven by the harness)
 
-/// Snapshot of context manager state for JSON persistence (the session JSONL
-/// log). Nothing is in-flight between save and restore — the snapshot is a
-/// plain clone. `overflow_model` records the stuck context-window overflow,
-/// and `split` the staging of an in-progress split-and-concatenate.
+/// Snapshot of context manager state for bincode persistence (the `.ctx`
+/// companion file). Nothing is in-flight between save and restore — the
+/// snapshot is a plain clone. `overflow_model` records the stuck
+/// context-window overflow, and `split` the staging of an in-progress
+/// split-and-concatenate.
+///
+/// NOTE: bincode 1.x is positional — ADDING a field is a format break (an
+/// old snapshot fails the whole deserialization and the TUI falls back to the
+/// JSONL history; the accepted dev-stage tradeoff). The field is keyed by
+/// MODEL, not provider: the stuck constraint is the model's window, so a
+/// model switch inside the same provider must clear it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextManagerState {
     pub items: VecDeque<ContextItem>,
@@ -177,14 +184,27 @@ pub struct ContextManagerState {
     /// could not be relieved by the split. While set (same model), the
     /// harness skips the doomed summarizer call and only re-notifies — until
     /// the user switches the model or starts a new session. `None` = no known
-    /// stuck overflow. Keyed by MODEL, not provider: the stuck constraint is
-    /// the model's window, so a model switch inside the same provider must
-    /// clear it.
-    #[serde(default, alias = "overflow_provider")]
+    /// stuck overflow.
     pub overflow_model: Option<String>,
     /// Staging of an in-progress split-and-concatenate, so an interrupted
     /// split resumes exactly where it stopped.
     pub split: Option<SplitState>,
+}
+
+impl ContextManagerState {
+    /// Bincode-encode this snapshot for the `.ctx` companion file. Returns an
+    /// empty vec on a serialization failure (the caller logs it) — an empty
+    /// payload never deserializes, so a corrupt write is indistinguishable
+    /// from a missing companion file and the JSONL history fallback applies.
+    pub fn to_bincode(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap_or_default()
+    }
+
+    /// Decode a bincode-encoded snapshot read from a `.ctx` companion file.
+    /// `None` = the payload is missing or corrupt (see [`Self::to_bincode`]).
+    pub fn from_bincode(bytes: &[u8]) -> Option<Self> {
+        bincode::deserialize(bytes).ok()
+    }
 }
 
 impl Default for ContextManagerState {
@@ -955,9 +975,9 @@ impl ContextManager {
         self.items.iter().cloned().collect()
     }
 
-    /// Serializable snapshot for JSON persistence (the session JSONL log).
-    /// Nothing is in-flight between save and restore — the snapshot is a plain
-    /// clone.
+    /// Serializable snapshot for bincode persistence (the `.ctx` companion
+    /// file). Nothing is in-flight between save and restore — the snapshot is
+    /// a plain clone.
     pub fn save_state(&self) -> ContextManagerState {
         ContextManagerState {
             items: self.items.clone(),

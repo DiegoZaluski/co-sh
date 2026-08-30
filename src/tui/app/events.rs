@@ -738,57 +738,29 @@ impl App {
 
                     // Persist the styled error line NOW: the loop is over, no
                     // `Done` snapshot follows, so without this save the error
-                    // would vanish (or collapse into plain assistant prose via
-                    // the best-effort fallback) after a restart. Harness paths
-                    // carry the snapshot with the display-only Error item
-                    // already recorded; TUI-side failures (thread runtime,
-                    // connector construction, panic) record the item here —
-                    // appending it to the persisted context so the
-                    // model-facing timeline stays clean either way. Gated on
-                    // `is_valid_session` exactly like Done/Stopped/snapshot:
-                    // a prompt that never got a real answer is NOT dialog and
-                    // must not pollute the sidebar with empty sessions.
+                    // would vanish after a restart. Harness paths carry the
+                    // snapshot with the display-only Error item already
+                    // recorded (the model-facing timeline stays clean); a
+                    // TUI-side failure (thread runtime, connector
+                    // construction, panic) has nothing to persist into the
+                    // context — the display JSONL alone carries the styled
+                    // error line and the `.ctx` on disk stays untouched.
+                    // Gated on `is_valid_session` exactly like
+                    // Done/Stopped/snapshot: a prompt that never got a real
+                    // answer is NOT dialog and must not pollute the sidebar
+                    // with empty sessions.
                     if let Some(id) = self.state.current_session_id.clone() {
                         let should_save = self
                             .state
                             .session_cache
                             .get(&id)
                             .is_some_and(crate::session_store::is_valid_session);
-                        if should_save {
-                            let persisted = match context {
-                                Some(ctx) => ctx,
-                                None => {
-                                    // NOTE: the disk log may be one turn behind
-                                    // (a prompt that failed before the harness
-                                    // registered it) — the restored transcript
-                                    // then shows the error without that prompt.
-                                    // Accepted: the failure never reached the
-                                    // model either, so nothing was "lost".
-                                    let mut ctx =
-                                        self.session_store.load_context(&id).unwrap_or_else(|| {
-                                            self.state
-                                                .session_cache
-                                                .get(&id)
-                                                .map(|s| {
-                                                    crate::session_store::context_from_messages(
-                                                        &s.messages,
-                                                    )
-                                                })
-                                                .unwrap_or_default()
-                                        });
-                                    ctx.items.push_back(
-                                        cosh::harness::context::ContextItem::Error {
-                                            id: ctx.next_id,
-                                            content: format!("Error: {message}"),
-                                        },
-                                    );
-                                    ctx.next_id += 1;
-                                    ctx
-                                }
-                            };
-                            if let Some(session) = self.state.session_cache.get(&id) {
-                                self.session_store
-                                    .save_session_async_with_context(session, persisted);
+                        if should_save && let Some(session) = self.state.session_cache.get(&id) {
+                            match context {
+                                Some(ctx) => self
+                                    .session_store
+                                    .save_session_async_with_context(session, ctx),
+                                None => self.session_store.save_session_async(session),
                             }
                         }
                     }
