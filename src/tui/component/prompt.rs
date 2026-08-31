@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::time::SystemTime;
 
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
+use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use ratatui::buffer::Buffer;
@@ -10,6 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
 use crate::logo::ChatLogo;
+use crate::lsp_colors;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
 use crate::types::{AgentColors, MessageRole, Part, Session};
@@ -69,6 +71,80 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
             cell.set_style(style);
         }
     }
+}
+
+/// Black or white depending on the background luminance, for readable text on
+/// the colored language tags (mirrors the pending-queue row helper).
+fn contrast_on(bg: RGBA) -> Color {
+    let (r, g, b, _) = bg.to_ints();
+    let lum = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
+    if lum > 128.0 {
+        Color::Rgb(0, 0, 0)
+    } else {
+        Color::Rgb(255, 255, 255)
+    }
+}
+
+/// Draw the inline LSP status segment on the prompt footer: an `LSP` label
+/// followed by one colored tag per active server, or `disabled` when LSP is
+/// turned off. Servers without a dedicated language color fall back to the
+/// theme's primary color. Draws up to `max_w` columns starting at `x`,
+/// returning the next free column.
+fn draw_lsp_segment(
+    buf: &mut Buffer,
+    available: bool,
+    servers: &[String],
+    mut x: u16,
+    y: u16,
+    max_w: u16,
+    theme: &Theme,
+) -> u16 {
+    let muted_style = Style::default().fg(rgba_color(theme.text_muted));
+    let label = "LSP ";
+
+    // "disabled" means LSP itself is off — not "no server running". When LSP
+    // is on but nothing is running, just show the bare `LSP` label, no tags.
+    if !available {
+        let text = format!("{label} disabled");
+        draw_text_line(buf, &text, x, y, max_w, muted_style);
+        return x + text.chars().count() as u16;
+    }
+
+    for (i, ch) in label.chars().enumerate() {
+        if x + i as u16 >= x + max_w {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
+            cell.set_char(ch);
+            cell.set_style(muted_style);
+        }
+    }
+    x += label.chars().count() as u16;
+
+    for server in servers {
+        // The lookup gives the short human label (e.g. "Rust" for
+        // `rust-analyzer`); unknown servers keep their raw name. Tag color
+        // is the language's logo color, or theme.primary when unknown.
+        let (label, bg) = match lsp_colors::lsp_tag(server) {
+            Some((lbl, color)) => (lbl, color),
+            None => (server.as_str(), theme.primary),
+        };
+        let fg = contrast_on(bg);
+        let bg_color = rgba_color(bg);
+        let tag = format!(" {label} ");
+        for (i, ch) in tag.chars().enumerate() {
+            let cx = x + i as u16;
+            if cx >= x + max_w {
+                return cx;
+            }
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                cell.set_char(ch);
+                cell.set_style(Style::default().fg(fg).bg(bg_color));
+            }
+        }
+        x += tag.chars().count() as u16;
+    }
+    x
 }
 
 /// Display name for a model: drop any lab/org prefix — e.g.
@@ -933,22 +1009,45 @@ impl PromptView {
         }
 
         let muted_style = Style::default().fg(rgba_color(theme.text_muted));
-        let footer_text = if state
+        // The LSP status only appears after the first user message lowers the
+        // box from its initial position — while the session is empty (input
+        // still raised) the footer shows only the mode hint.
+        let has_conversation = state
             .current_session()
-            .is_none_or(|s| s.messages.is_empty())
-        {
-            "tab change mode"
-        } else {
+            .is_some_and(|s| !s.messages.is_empty());
+        let footer_text = if has_conversation {
             "esc interrupt"
+        } else {
+            "tab change mode"
         };
+        let mut footer_x = area.x + 1;
+        let footer_max_w = area.width.saturating_sub(2);
         draw_text_line(
             buf,
             footer_text,
-            area.x + 1,
+            footer_x,
             footer_y,
-            area.width.saturating_sub(2),
+            footer_max_w,
             muted_style,
         );
+        footer_x = footer_x.saturating_add(footer_text.chars().count() as u16);
+
+        // Inline LSP status: ` LSP <tag> <tag>…`, tags painted with the
+        // language's logo color (theme.primary fallback), disabled when empty.
+        // Omitted entirely while the input box is still raised (no message yet).
+        if has_conversation {
+            footer_x = footer_x.saturating_add(3);
+            let remaining = footer_max_w.saturating_sub(footer_x.saturating_sub(area.x));
+            draw_lsp_segment(
+                buf,
+                state.lsp_available,
+                &state.lsp_servers,
+                footer_x,
+                footer_y,
+                remaining,
+                theme,
+            );
+        }
 
         // Provider + model + reasoning level on the agent-label row — the
         // same line as Build/Ask/Yolo, inside the input box, right-aligned.

@@ -6,6 +6,7 @@ mod config;
 mod fallback;
 mod keymap;
 mod logo;
+mod lsp_colors;
 mod routes;
 mod session_store;
 mod state;

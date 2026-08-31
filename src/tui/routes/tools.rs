@@ -65,10 +65,6 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
         ("skills_read", "Read a skill"),
         ("skills_read_asset", "Read a skill asset"),
         ("skills_match_skills", "Match skills to task"),
-        (
-            "lsp",
-            "Language-server tools (diagnostics, definitions, references, symbols, hover, rename…)",
-        ),
     ]
 }
 
@@ -232,4 +228,20 @@ fn max_row_width() -> usize {
 
 const fn visible_items(area: Rect) -> usize {
     (area.height.saturating_sub(3)) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every entry in the Internal Tools list has a unique name so toggling
+    /// one row never masks another.
+    #[test]
+    fn tool_names_are_unique() {
+        let mut names: Vec<&str> = internal_tools().iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        let len = names.len();
+        names.dedup();
+        assert_eq!(names.len(), len);
+    }
 }

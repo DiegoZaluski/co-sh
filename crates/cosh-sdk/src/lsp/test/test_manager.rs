@@ -178,6 +178,66 @@ async fn specs_without_marker_ancestry_are_skipped() {
 }
 
 #[tokio::test]
+async fn root_discovery_uses_distinctive_markers_and_ignores_generic() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(root.join(".git"), "").unwrap();
+
+    let manager = Manager::build(
+        ManagerConfig::new(root.clone()),
+        vec![
+            // Rust: Cargo.toml is a distinctive marker → discovered.
+            spec("rust-analyzer", "unused", &[".rs"], &["Cargo.toml", ".git"]),
+            // Bare .git alone must NOT pull in a matching server.
+            spec("yaml-ls", "unused", &[".yaml"], &[".git"]),
+            spec("clangd", "unused", &[".c"], &["Makefile", ".git"]),
+        ],
+        never_factory(),
+    );
+
+    let keys = manager.matches_for_root(&root);
+    let found: Vec<String> = keys.iter().map(|k| k.server.clone()).collect();
+    assert_eq!(
+        found,
+        vec!["rust-analyzer".to_string()],
+        "Cargo.toml wins, .git alone is generic"
+    );
+}
+
+#[tokio::test]
+async fn ensure_for_root_spawns_discoverable_servers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    std::fs::write(root.join("go.mod"), "module x\n").unwrap();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let mut config = ManagerConfig::new(root.clone());
+    config.resolves_binaries = false;
+    let manager = Manager::build(
+        config,
+        vec![
+            spec("gopls", "unused", &[".go"], &["go.mod"]),
+            spec("yaml-ls", "unused", &[".yaml"], &[".git"]),
+        ],
+        working_factory(counter.clone(), Arc::new(Mutex::new(Vec::new()))),
+    );
+
+    let handles = manager.ensure_for_root(&root).await.unwrap();
+    assert_eq!(handles.len(), 1, "only gopls is discovered at the root");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "one spawn, no double process"
+    );
+
+    // Idempotent: re-ensuring reuses the running client.
+    let again = manager.ensure_for_root(&root).await.unwrap();
+    assert_eq!(again.len(), 1);
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn unsupported_extension_matches_nothing_and_is_not_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let manager = Manager::build(

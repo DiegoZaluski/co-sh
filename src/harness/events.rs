@@ -38,6 +38,19 @@ pub enum HarnessEvent {
     ToolError { error: String },
     /// A reasoning block from the LLM.
     Reasoning { text: String },
+    /// Snapshot of the language-server status for the TUI's prompt footer.
+    /// Emitted from the agent loop as LSP state changes. Rendered as colored
+    /// language tags (one per active server); `available` tells the TUI
+    /// whether LSP is configured on at all, so it can distinguish "no server
+    /// running right now" from "LSP disabled" (`COSH_LSP=off`).
+    LspServers {
+        /// Whether LSP is enabled (`COSH_LSP` not `off`). Independent of how
+        /// many servers are currently running.
+        available: bool,
+        /// Catalog server names currently alive (e.g. `rust-analyzer`),
+        /// deduplicated and unsorted.
+        servers: Vec<String>,
+    },
     /// The agent loop finished normally (no more tool calls).
     Done {
         /// Context manager state for persistence (the JSONL session log).

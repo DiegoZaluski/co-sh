@@ -678,35 +678,28 @@ fn write_tool_if_enabled(
 
 /// Build the language-server wrapper bound to `cwd`.
 ///
-/// Returns `None` when `COSH_LSP=off|0|false` or no tokio runtime is active.
+/// Shares the process-wide singleton ([`crate::harness::lsp::global_lsp`]) with
+/// the passive diagnostics path — one server process per language, not one per
+/// wrapper. Returns `None` when `COSH_LSP=off|0|false`, the config-driven LSP
+/// switch is off, no tokio runtime is active, or under `cfg(test)`.
 fn build_lsp(cwd: &str) -> Option<Arc<Lsp>> {
-    if matches!(
-        std::env::var("COSH_LSP").as_deref(),
-        Ok("off" | "0" | "false")
-    ) {
-        return None;
+    #[cfg(test)]
+    {
+        let _ = cwd;
+        None
     }
-
-    let root = std::path::PathBuf::from(cwd);
-    let mut config = cosh_sdk::lsp::ManagerConfig::new(root);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    config.events = Some(event_tx);
-
-    let manager = Arc::new(cosh_sdk::lsp::Manager::with_config(config));
-    let diagnostics = Arc::new(cosh_sdk::lsp::DiagnosticsEngine::new());
-
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        let engine = Arc::clone(&diagnostics);
-        runtime.spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                engine.ingest_event(&event);
-            }
-        });
-    } else {
-        return None;
+    #[cfg(not(test))]
+    {
+        if !crate::harness::lsp::lsp_enabled()
+            || matches!(
+                std::env::var("COSH_LSP").as_deref(),
+                Ok("off" | "0" | "false")
+            )
+        {
+            return None;
+        }
+        crate::harness::lsp::global_lsp(cwd)
     }
-
-    Some(Arc::new(Lsp::with_manager(manager, diagnostics)))
 }
 
 impl Tools for CoshTools {

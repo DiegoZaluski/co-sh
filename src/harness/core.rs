@@ -22,7 +22,6 @@ use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use std::collections::HashMap;
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(test))]
@@ -321,35 +320,29 @@ pub struct HarnessTool {
 
 /// Build the language-server wrapper bound to `cwd`.
 ///
-/// Returns `None` when `COSH_LSP=off|0|false` or no tokio runtime is active.
+/// Returns `None` when `COSH_LSP=off|0|false`, the config-driven LSP switch is
+/// off, no tokio runtime is active, or under `cfg(test)` (unit tests must not
+/// spawn real language servers; LSP behavior is covered by the SDK/tools
+/// suites). The engine itself is the process-wide singleton in
+/// [`crate::harness::lsp::global_lsp`].
 fn build_lsp(cwd: &str) -> Option<Arc<Lsp>> {
-    if matches!(
-        std::env::var("COSH_LSP").as_deref(),
-        Ok("off" | "0" | "false")
-    ) {
-        return None;
+    #[cfg(test)]
+    {
+        let _ = cwd;
+        None
     }
-
-    let root = PathBuf::from(cwd);
-    let mut config = cosh_sdk::lsp::ManagerConfig::new(root);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    config.events = Some(event_tx);
-
-    let manager = Arc::new(cosh_sdk::lsp::Manager::with_config(config));
-    let diagnostics = Arc::new(cosh_sdk::lsp::DiagnosticsEngine::new());
-
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        let engine = Arc::clone(&diagnostics);
-        runtime.spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                engine.ingest_event(&event);
-            }
-        });
-    } else {
-        return None;
+    #[cfg(not(test))]
+    {
+        if !crate::harness::lsp::lsp_enabled()
+            || matches!(
+                std::env::var("COSH_LSP").as_deref(),
+                Ok("off" | "0" | "false")
+            )
+        {
+            return None;
+        }
+        crate::harness::lsp::global_lsp(cwd)
     }
-
-    Some(Arc::new(Lsp::with_manager(manager, diagnostics)))
 }
 
 /// After a successful fs_write/fs_edit, drain errors-only diagnostics for the
@@ -2089,6 +2082,47 @@ impl Harness {
         self.tool_call_synthetic
     }
 
+    /// Catalog names of every language server currently alive (Starting or
+    /// Ready) across both managers this harness drives — its own passive
+    /// diagnostics manager and the one inside [`CoshTools`] used by the
+    /// `lsp_*` tools. Deduplicated, order not guaranteed. An empty slice means
+    /// no server is running right now.
+    fn active_lsp_server_names(&self) -> Vec<String> {
+        use std::collections::HashSet;
+
+        let mut servers = HashSet::new();
+        let mut collect = |lsp: Option<&Arc<Lsp>>| {
+            if let Some(lsp) = lsp {
+                for (key, lifecycle) in lsp.manager().states() {
+                    if matches!(
+                        lifecycle,
+                        cosh_sdk::lsp::ClientLifecycle::Starting
+                            | cosh_sdk::lsp::ClientLifecycle::Ready
+                    ) {
+                        servers.insert(key.server);
+                    }
+                }
+            }
+        };
+        collect(self.lsp.as_ref());
+        collect(self.cosh_tools.as_ref().and_then(|c| c.lsp()));
+        servers.into_iter().collect()
+    }
+
+    /// Whether LSP is enabled at all (`COSH_LSP` not `off`): true when either
+    /// manager built a wrapper. Distinct from how many servers run right now.
+    fn lsp_available(&self) -> bool {
+        self.lsp.is_some() || self.cosh_tools.as_ref().and_then(|c| c.lsp()).is_some()
+    }
+
+    /// Snapshot of the current LSP engine state for the TUI's footer/tags.
+    fn lsp_snapshot_event(&self) -> super::events::HarnessEvent {
+        super::events::HarnessEvent::LspServers {
+            available: self.lsp_available(),
+            servers: self.active_lsp_server_names(),
+        }
+    }
+
     /// Run the full agent loop: stream LLM response, dispatch tool calls,
     /// feed results back to the LLM, and repeat — until the model finishes
     /// without requesting tools, stop is called,
@@ -2170,6 +2204,11 @@ impl Harness {
         // iteration so the user prompt is not sent twice).
         let mut current_input = String::new();
         let mut iteration = 0u64;
+
+        // Immediate LSP snapshot: the TUI's footer/tags must reflect the
+        // engine state from the first moment of the turn, not only after the
+        // first full cycle completes.
+        let _ = tx.send(self.lsp_snapshot_event());
 
         // Crush-style loop detection: watch the last N tool-calling
         // iterations for an identical tool+input+result signature. A
@@ -2426,9 +2465,9 @@ impl Harness {
                             // the SESSION, not the model — a fallback switch
                             // must not silently drop them (each field is only
                             // read by the caller family that implements it).
-                            let mut c = c.with_model(&model).with_prompt_cache_ttl_1h(
-                                self.connector.prompt_cache_ttl_1h(),
-                            );
+                            let mut c = c
+                                .with_model(&model)
+                                .with_prompt_cache_ttl_1h(self.connector.prompt_cache_ttl_1h());
                             if let Some(key) = self.connector.prompt_cache_key() {
                                 c = c.with_prompt_cache_key(key);
                             }
@@ -2591,6 +2630,7 @@ impl Harness {
                 if iteration >= MAX_ITERATIONS {
                     // log::debug!("run_agent_loop MAX_ITERATIONS={MAX_ITERATIONS} reached");
                     self.context_manager.close_loop();
+                    let _ = tx.send(self.lsp_snapshot_event());
                     let _ = tx.send(HarnessEvent::Done {
                         context: self.context_manager.save_state(),
                     });
@@ -3226,6 +3266,7 @@ impl Harness {
                             .to_string(),
                         variant: ToastVariant::Info,
                     });
+                    let _ = tx.send(self.lsp_snapshot_event());
                     let _ = tx.send(HarnessEvent::Done {
                         context: self.context_manager.save_state(),
                     });
@@ -3241,6 +3282,7 @@ impl Harness {
                         // Safety net — emit a terminal event so the TUI does
                         // not stay in a "running" state.
                         self.context_manager.close_loop();
+                        let _ = tx.send(self.lsp_snapshot_event());
                         let _ = tx.send(HarnessEvent::Done {
                             context: self.context_manager.save_state(),
                         });
@@ -3260,6 +3302,7 @@ impl Harness {
                         // Safety net — emit a terminal event so the TUI does
                         // not stay in a "running" state.
                         self.context_manager.close_loop();
+                        let _ = tx.send(self.lsp_snapshot_event());
                         let _ = tx.send(HarnessEvent::Done {
                             context: self.context_manager.save_state(),
                         });
@@ -3277,6 +3320,9 @@ impl Harness {
                 // The final text response becomes the loop's Closure.
                 // log::debug!("run_agent_loop DONE (no tools)");
                 self.context_manager.close_loop();
+                // Final LSP snapshot: this break skips the per-cycle emission
+                // below, so send the freshest state here.
+                let _ = tx.send(self.lsp_snapshot_event());
                 let _ = tx.send(HarnessEvent::Done {
                     context: self.context_manager.save_state(),
                 });
@@ -3298,6 +3344,13 @@ impl Harness {
             }
             let _ = tx.send(HarnessEvent::ContextInfo {
                 info: self.context_manager.display_info(),
+            });
+
+            // Keep the TUI's LSP status tags fresh: servers spawn lazily as
+            // tools touch files, so re-snapshot every cycle.
+            let _ = tx.send(HarnessEvent::LspServers {
+                available: self.lsp_available(),
+                servers: self.active_lsp_server_names(),
             });
 
             // Incremental persistence: hand the TUI a snapshot of the running
@@ -3445,25 +3498,40 @@ impl Harness {
                 self.sync_todo_context();
             }
 
+            // LSP auto-discovery: touching a file starts the language server
+            // covering it, so the footer reflects the language and
+            // hover/diagnostics are ready without the model calling an lsp
+            // tool (mirrors opencode's lazy-per-file discovery).
+            let target_path = args_map
+                .get("targets")
+                .and_then(|t| t.get("targets"))
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|t| t.get("path"))
+                .and_then(|p| p.as_str())
+                .unwrap_or_default();
+
             // Passive LSP feedback: after a successful write/edit, drain
             // errors-only diagnostics for the touched file and append them as
             // a system-reminder so the model can fix issues immediately.
             if matches!(tool_name.as_str(), "fs_write" | "fs_edit")
                 && let Some(lsp) = &self.lsp
+                && !target_path.is_empty()
+                && let Some(note) = passive_lsp_note(lsp, target_path).await
             {
-                let path = args_map
-                    .get("targets")
-                    .and_then(|t| t.get("targets"))
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|t| t.get("path"))
-                    .and_then(|p| p.as_str())
-                    .unwrap_or_default();
-                if !path.is_empty()
-                    && let Some(note) = passive_lsp_note(lsp, path).await
-                {
-                    return Ok(format!("{result}{note}"));
-                }
+                return Ok(format!("{result}{note}"));
+            }
+
+            // Reading a file spawns its server (get-or-spawn) so the language
+            // shows up in the footer and diagnostics are primed.
+            if tool_name == "fs_read"
+                && let Some(lsp) = &self.lsp
+                && !target_path.is_empty()
+            {
+                let _ = lsp
+                    .manager()
+                    .ensure_for_file(std::path::Path::new(target_path))
+                    .await;
             }
 
             return Ok(result);

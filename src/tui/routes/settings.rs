@@ -70,6 +70,12 @@ fn settings_items() -> &'static [SettingsItem] {
             description: "How long OpenAI may keep your prompt cache (24h helps resumed sessions; older models ignore it)",
             event: "",
         },
+        SettingsItem {
+            id: "lsp",
+            label: "Language servers",
+            description: "Run language servers for diagnostics, hover, symbols and related `lsp_*` tools",
+            event: "",
+        },
     ]
 }
 
@@ -93,7 +99,11 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
 /// state from the persisted one-time prompt answer.
 fn is_enabled(item: &SettingsItem, setup: &Setup) -> bool {
     if item.event.is_empty() {
-        return item.id == "zen_free_gateway" && setup.zen_public_opt_in() == Some(true);
+        return match item.id {
+            "zen_free_gateway" => setup.zen_public_opt_in() == Some(true),
+            "lsp" => setup.lsp,
+            _ => false,
+        };
     }
     setup.hooks.is_event_enabled(item.event)
 }
@@ -306,6 +316,9 @@ pub enum SettingsAction {
     /// ([`cosh_sdk::connector::set_zen_public_tier_enabled`]) so connectors
     /// built from now on honor the new state.
     ZenGatewayToggled,
+    /// The LSP switch flipped; caller must `setup.save()`, flip the harness's
+    /// process-wide LSP flag, and resync the app's `lsp_available` state.
+    LspToggled,
     /// Open the registration box: blank when `index` is `None`.
     OpenHookForm {
         event: &'static str,
@@ -362,6 +375,11 @@ impl SettingsView {
                     setup.providers.zen_public_opt_in = Some(!enabled);
                     self.selection.clamp(selectable_rows(setup).len());
                     return Some(SettingsAction::ZenGatewayToggled);
+                }
+                if item.event.is_empty() && item.id == "lsp" {
+                    setup.lsp = !setup.lsp;
+                    self.selection.clamp(selectable_rows(setup).len());
+                    return Some(SettingsAction::LspToggled);
                 }
                 // Each category flips only its own event's switch.
                 match item.event {
@@ -670,6 +688,7 @@ mod tests {
                 SettingsRow::Category(2),
                 SettingsRow::Category(3),
                 SettingsRow::Category(4),
+                SettingsRow::Category(5),
             ]
         );
 
@@ -696,6 +715,7 @@ mod tests {
                 SettingsRow::Category(2),
                 SettingsRow::Category(3),
                 SettingsRow::Category(4),
+                SettingsRow::Category(5),
             ]
         );
     }
@@ -793,6 +813,39 @@ mod tests {
         );
         assert_eq!(setup.zen_public_opt_in(), Some(false));
         assert!(!is_enabled(&settings_items()[2], &setup));
+    }
+
+    /// The LSP row is a standalone switch: activating it flips
+    /// `setup.lsp` and reports the dedicated action so callers resync
+    /// the harness's process-wide LSP flag.
+    #[test]
+    fn lsp_toggle_round_trip() {
+        let mut setup = Setup::default();
+        assert!(setup.lsp);
+        let mut view = SettingsView::new();
+
+        let lsp_row = |setup: &Setup| {
+            selectable_rows(setup)
+                .iter()
+                .position(|r| matches!(r, SettingsRow::Category(5)))
+                .expect("lsp category row exists")
+        };
+
+        view.selection.selected_index = lsp_row(&setup);
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::LspToggled)
+        );
+        assert!(!setup.lsp);
+        assert!(!is_enabled(&settings_items()[5], &setup));
+
+        view.selection.selected_index = lsp_row(&setup);
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::LspToggled)
+        );
+        assert!(setup.lsp);
+        assert!(is_enabled(&settings_items()[5], &setup));
     }
 
     #[test]

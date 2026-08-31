@@ -209,6 +209,34 @@ impl Manager {
             .collect()
     }
 
+    /// Catalog entries whose root markers point at `dir`, used for startup
+    /// auto-discovery of the workspace's language server *before* any file is
+    /// touched.
+    ///
+    /// Only *distinctive* markers count — generic placeholders shared by many
+    /// languages (`.git`, `Makefile`) never act as a positive signal, so a
+    /// bare git repo does not start one server per catalog entry.
+    pub fn matches_for_root(&self, dir: &Path) -> Vec<ClientKey> {
+        let mut seen = std::collections::HashSet::new();
+        let dir = absolute(dir);
+        self.inner
+            .catalog
+            .iter()
+            .filter(|spec| {
+                spec.root_markers
+                    .iter()
+                    .any(|marker| !is_generic_root_marker(marker) && dir.join(marker).exists())
+            })
+            .filter_map(|spec| {
+                let key = ClientKey {
+                    root: dir.clone(),
+                    server: spec.name.to_owned(),
+                };
+                seen.insert(key.clone()).then_some(key)
+            })
+            .collect()
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────────
 
     /// Ensure every applicable server for `path` is running; return handles.
@@ -221,6 +249,32 @@ impl Manager {
         let mut soft_error: Option<LspError> = None;
 
         for (key, _spec_name) in self.matches_for_file(path) {
+            match self.ensure_client(&key).await {
+                Ok(client) => handles.push(client),
+                Err(err @ (LspError::Unavailable(_) | LspError::Spawn { .. })) => {
+                    soft_error.get_or_insert(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        match (handles.is_empty(), soft_error) {
+            (true, Some(err)) => Err(err),
+            _ => Ok(handles),
+        }
+    }
+
+    /// Ensure every discoverable server for the workspace `dir` is running,
+    /// without a specific file anchor. Already-running clients are reused; a
+    /// shared spawn is awaited by concurrent callers.
+    ///
+    /// Soft errors behave exactly like [`Self::ensure_for_file`]: a missing
+    /// binary or a failed spawn never masks servers that did start.
+    pub async fn ensure_for_root(&self, dir: &Path) -> Result<Vec<Arc<LanguageServer>>, LspError> {
+        let mut handles = Vec::new();
+        let mut soft_error: Option<LspError> = None;
+
+        for key in self.matches_for_root(dir) {
             match self.ensure_client(&key).await {
                 Ok(client) => handles.push(client),
                 Err(err @ (LspError::Unavailable(_) | LspError::Spawn { .. })) => {
@@ -639,6 +693,14 @@ fn spawn_event_relay(
             }
         }
     });
+}
+
+/// Root markers shared across many languages that never, on their own,
+/// identify a project's language (e.g. `.git`, a bare `Makefile`). Excluded
+/// from directory-root discovery so a plain git repo does not start one server
+/// per catalog entry.
+fn is_generic_root_marker(marker: &str) -> bool {
+    matches!(marker, ".git" | "Makefile")
 }
 
 /// Walk up from `path`'s directory to `workspace_root` looking for any of the

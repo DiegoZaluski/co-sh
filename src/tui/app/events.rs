@@ -492,6 +492,10 @@ impl App {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
+                    // opencode model: the LSP engine is session-scoped (the
+                    // process-wide singleton keeps servers alive between
+                    // turns), so the footer keeps showing the last snapshot.
+                    // It is refreshed by the next turn's opening snapshot.
                     // Safety net: a "Summarizing" line interrupted at its start
                     // must not stay running (the stopwatch would tick forever).
                     self.finalize_stale_compaction_lines();
@@ -643,6 +647,8 @@ impl App {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
+                    // Session-scoped servers (see the Done handler): keep the
+                    // last LSP snapshot; the next turn refreshes it.
                     self.finalize_stale_compaction_lines();
                     self.toast_state.show(ToastOptions {
                         title: Some("Interrupted".into()),
@@ -665,6 +671,16 @@ impl App {
                 }
                 HarnessEvent::ContextInfo { info } => {
                     self.context_info = Some(info);
+                }
+
+                HarnessEvent::LspServers { available, servers } => {
+                    // Snapshot of the LSP status for the prompt footer.
+                    // Session-scoped (opencode model): the list persists
+                    // across turns until a newer snapshot, the user disables
+                    // LSP, or the process ends — it is never cleared by loop
+                    // lifecycle events.
+                    self.state.lsp_available = available;
+                    self.state.lsp_servers = servers;
                 }
 
                 HarnessEvent::ContextSnapshot { context } => {

@@ -1109,15 +1109,24 @@ impl App {
                         );
                         self.setup.save();
                     }
+                    Some(crate::routes::settings::SettingsAction::LspToggled) => {
+                        cosh::harness::lsp::set_lsp_enabled(self.setup.lsp);
+                        self.state.lsp_available = self.setup.lsp;
+                        // Disabling is the one user-driven invalidation: drop
+                        // the visible servers now instead of waiting for the
+                        // next turn.
+                        if !self.setup.lsp {
+                            self.state.lsp_servers.clear();
+                        }
+                        self.setup.save();
+                    }
                     Some(crate::routes::settings::SettingsAction::OpenHookForm {
                         event,
                         index,
                     }) => {
                         self.open_hook_form(event, index);
                     }
-                    Some(crate::routes::settings::SettingsAction::OpenCacheInput {
-                        setting,
-                    }) => {
+                    Some(crate::routes::settings::SettingsAction::OpenCacheInput { setting }) => {
                         self.open_cache_ttl_input(setting);
                     }
                     None => {}

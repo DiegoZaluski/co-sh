@@ -65,7 +65,12 @@ pub struct AppState {
     pub working_directory: String,
     pub mode: Mode,
     pub connected: bool,
-    pub lsp_count: usize,
+    /// Whether LSP is enabled at all (`COSH_LSP`). Distinct from how many
+    /// servers are running — the footer shows "disabled" only when false.
+    pub lsp_available: bool,
+    /// Catalog names of the language servers currently active; rendered as
+    /// colored tags in the prompt footer. Empty disables the tags.
+    pub lsp_servers: Vec<String>,
     pub mcp_count: usize,
     pub mcp_errors: usize,
     pub permission_count: usize,
@@ -86,7 +91,8 @@ impl AppState {
             working_directory: String::new(),
             mode: Mode::Build,
             connected: false,
-            lsp_count: 0,
+            lsp_available: false,
+            lsp_servers: Vec::new(),
             mcp_count: 0,
             mcp_errors: 0,
             permission_count: 0,
@@ -504,7 +510,8 @@ impl AppState {
         self.current_session_id = Some("demo-1".to_string());
         self.working_directory = "~/cosh".to_string();
         self.connected = true;
-        self.lsp_count = 2;
+        self.lsp_available = true;
+        self.lsp_servers = vec!["rust-analyzer".to_string(), "gopls".to_string()];
         self.mcp_count = 3;
         self.mcp_errors = 0;
         self.permission_count = 1;

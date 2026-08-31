@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 /// Root object persisted as `~/.config/cosh/setup.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct Setup {
     pub appearance: Appearance,
     pub tools: Tools,
@@ -25,6 +24,23 @@ pub struct Setup {
     pub providers: Providers,
     pub model: Model,
     pub cache: Cache,
+    /// Master switch for the LSP engine (kept flat: it has no sub-options).
+    pub lsp: bool,
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self {
+            appearance: Appearance::default(),
+            tools: Tools::default(),
+            routing: Routing::default(),
+            hooks: Hooks::default(),
+            providers: Providers::default(),
+            model: Model::default(),
+            cache: Cache::default(),
+            lsp: true,
+        }
+    }
 }
 
 // Categories

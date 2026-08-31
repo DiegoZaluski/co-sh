@@ -74,23 +74,23 @@ impl FooterView {
             );
 
             if state.permission_count > 0 {
-                let s = format!("  perm:{}", state.permission_count);
+                let s = format!("  perm {}", state.permission_count);
                 rx = rx.saturating_sub(s.len() as u16);
                 draw_text_line(buf, &s, rx, area.y, s.len() as u16, muted);
             }
 
             if state.mcp_count > 0 || state.mcp_errors > 0 {
                 let s = if state.mcp_errors > 0 {
-                    format!("  mcp:{}/{}", state.mcp_count, state.mcp_errors)
+                    format!("  mcp {}/{}", state.mcp_count, state.mcp_errors)
                 } else {
-                    format!("  mcp:{}", state.mcp_count)
+                    format!("  mcp {}", state.mcp_count)
                 };
                 rx = rx.saturating_sub(s.len() as u16);
                 draw_text_line(buf, &s, rx, area.y, s.len() as u16, muted);
             }
 
-            if state.lsp_count > 0 {
-                let s = format!("  lsp:{}", state.lsp_count);
+            if !state.lsp_servers.is_empty() {
+                let s = format!("  lsp {}", state.lsp_servers.len());
                 rx = rx.saturating_sub(s.len() as u16);
                 draw_text_line(buf, &s, rx, area.y, s.len() as u16, muted);
             }

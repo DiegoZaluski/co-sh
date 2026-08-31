@@ -455,6 +455,19 @@ impl App {
                                 );
                                 self.setup.save();
                             }
+                            Some(crate::routes::settings::SettingsAction::LspToggled) => {
+                                // Keep the harness's process-wide LSP flag and
+                                // the prompt footer in sync with the new switch.
+                                cosh::harness::lsp::set_lsp_enabled(self.setup.lsp);
+                                self.state.lsp_available = self.setup.lsp;
+                                // Disabling is the one user-driven
+                                // invalidation: drop the visible servers now
+                                // instead of waiting for the next turn.
+                                if !self.setup.lsp {
+                                    self.state.lsp_servers.clear();
+                                }
+                                self.setup.save();
+                            }
                             Some(crate::routes::settings::SettingsAction::OpenHookForm {
                                 event,
                                 index,

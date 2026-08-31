@@ -405,6 +405,13 @@ impl App {
         // titles) without each construction site needing the setup file.
         cosh_sdk::connector::set_zen_public_tier_enabled(setup.zen_public_opt_in() == Some(true));
 
+        // Propagate the persisted LSP switch to the process-wide flag the
+        // harness consults when building language servers, and seed the app
+        // state so the prompt footer reflects it even before the first agent
+        // loop emits an LSP event.
+        cosh::harness::lsp::set_lsp_enabled(setup.lsp);
+        state.lsp_available = setup.lsp;
+
         let usage_store = crate::usage::UsageStore::new();
 
         // Boot-time refresh of the models.dev catalog: keeps token prices and

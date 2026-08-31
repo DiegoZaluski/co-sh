@@ -9,6 +9,7 @@ pub mod correction_memory;
 pub mod events;
 pub mod guardrails;
 pub mod hooks;
+pub mod lsp;
 pub mod title;
 pub mod tools;
 pub mod truncate;

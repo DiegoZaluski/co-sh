@@ -291,18 +291,16 @@ impl App {
 
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
-            use tokio::runtime::Builder;
+            use std::sync::OnceLock;
+            use tokio::runtime::Runtime;
 
-            let rt = match Builder::new_current_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = event_tx.send(HarnessEvent::Error {
-                        message: format!("runtime: {e}"),
-                        context: None,
-                    });
-                    return;
-                }
-            };
+            // One runtime for the whole process, not one per turn: the LSP
+            // singleton's ingestion/auto-discovery tasks and the language
+            // servers' transport tasks must outlive individual turns — a
+            // per-turn runtime would kill them (and, via `kill_on_drop`, the
+            // server processes) the moment a turn ends.
+            static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+            let rt = RUNTIME.get_or_init(|| Runtime::new().expect("shared agent runtime"));
 
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 rt.block_on(async {
