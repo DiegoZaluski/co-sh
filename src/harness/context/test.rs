@@ -141,12 +141,11 @@ fn remove_abandoned_inputs_drops_the_earlier_consecutive_turn() {
     cm.add_user("abandoned");
     cm.add_user("current");
     assert!(cm.remove_abandoned_inputs());
-    let items = cm.items_snapshot();
-    assert_eq!(items.len(), 1);
-    assert!(matches!(
-        &items[0],
-        ContextItem::User { original, .. } if original == "current"
-    ));
+    // Append-only: the abandoned turn stays in the timeline, hidden.
+    assert_eq!(cm.items_snapshot().len(), 2);
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 1, "only the current input reaches the model");
+    assert_eq!(msgs[0].content.as_deref(), Some("current"));
 }
 
 #[test]
@@ -169,12 +168,11 @@ fn remove_abandoned_inputs_drops_a_partial_runs_orphan_tool_call() {
     cm.add_tool_call("orphan", "fs_read", "{}");
     cm.add_user("current");
     assert!(cm.remove_abandoned_inputs());
-    let items = cm.items_snapshot();
-    assert_eq!(items.len(), 1);
-    assert!(
-        matches!(&items[0], ContextItem::User { original, .. } if original == "current"),
-        "only the newest input survives"
-    );
+    // Append-only: the abandoned turn + the orphan call stay, hidden.
+    assert_eq!(cm.items_snapshot().len(), 3);
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 1, "only the newest input reaches the model");
+    assert_eq!(msgs[0].content.as_deref(), Some("current"));
 }
 
 #[test]
@@ -185,7 +183,12 @@ fn remove_abandoned_inputs_drops_parallel_orphan_calls() {
     cm.add_tool_call("orphan-b", "find_grep", "{}");
     cm.add_user("current");
     assert!(cm.remove_abandoned_inputs());
-    assert_eq!(cm.items_snapshot().len(), 1);
+    // Append-only: 5 items stay (2 users + 2 orphan calls + ... the newest
+    // user); the orphans and the abandoned turn are hidden from the model.
+    assert_eq!(cm.items_snapshot().len(), 4);
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].content.as_deref(), Some("current"));
 }
 
 #[test]
@@ -200,25 +203,17 @@ fn remove_abandoned_inputs_drops_the_orphan_in_a_mixed_parallel_run() {
     cm.add_tool_result("done", "3 matches");
     cm.add_user("current");
     assert!(cm.remove_abandoned_inputs());
-    let items = cm.items_snapshot();
-    assert!(
-        !items
-            .iter()
-            .any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "orphan")),
-        "the orphan call is removed"
-    );
-    assert!(
-        items
-            .iter()
-            .any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "done")),
-        "the completed chain is preserved"
-    );
-    assert!(
-        items
-            .iter()
-            .any(|it| matches!(it, ContextItem::ToolResult { call_id, .. } if call_id == "done")),
-        "the completed chain keeps its result"
-    );
+    // Append-only: everything stays in the timeline; the orphan call is
+    // hidden, the completed chain and the prompt that produced it (a turn
+    // WITH output is real work, never abandoned) stay visible.
+    assert_eq!(cm.items_snapshot().len(), 5);
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 4);
+    assert_eq!(msgs[0].content.as_deref(), Some("abandoned"));
+    assert_eq!(msgs[1].role, "assistant", "the tool call of the done chain");
+    assert_eq!(msgs[2].role, "tool");
+    assert_eq!(msgs[2].tool_call_id.as_deref(), Some("done"));
+    assert_eq!(msgs[3].content.as_deref(), Some("current"));
 }
 
 #[test]
@@ -258,16 +253,21 @@ fn a_fresh_input_after_a_compaction_with_nothing_produced_between_is_abandoned()
     cm.add_user("abandoned retry");
     cm.add_user("next input");
     assert!(cm.remove_abandoned_inputs());
-    let items = cm.items_snapshot();
-    assert_eq!(items.len(), 2);
-    assert!(matches!(items[0], ContextItem::Compaction { .. }));
-    assert!(matches!(&items[1], ContextItem::User { original, .. } if original == "next input"));
+    // Append-only: all four items stay; the abandoned retry is HIDDEN.
+    assert_eq!(cm.items_snapshot().len(), 4);
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 2, "summary + newest input reach the model");
+    assert_eq!(
+        msgs[0].content.as_deref(),
+        Some("## Objective\n- do the task")
+    );
+    assert_eq!(msgs[1].content.as_deref(), Some("next input"));
 }
 
 // ── Useless tool-chain sweep ──────────────────────────────────────────────
 
 #[test]
-fn sweep_useless_chains_removes_dead_chains_but_keeps_the_newest() {
+fn sweep_useless_chains_hides_dead_chains_but_keeps_the_newest() {
     let mut cm = cm(100_000);
     cm.add_user("task");
     cm.add_tool_call("dead", "find_glob", "{}");
@@ -276,18 +276,23 @@ fn sweep_useless_chains_removes_dead_chains_but_keeps_the_newest() {
     cm.add_tool_result("alive", "3 matches");
 
     cm.sweep_useless_chains();
-    let items = cm.items_snapshot();
+    // Append-only: the dead chain STAYS in the timeline, hidden from the
+    // model; the useful chain stays visible.
+    assert_eq!(cm.items_snapshot().len(), 5);
+    let msgs = cm.build_messages("");
     assert!(
-        !items
-            .iter()
-            .any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "dead")),
-        "the useless chain is removed"
+        !msgs.iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|c| c.contains("no matches"))),
+        "the dead chain's result never reaches the model"
     );
     assert!(
-        items
-            .iter()
-            .any(|it| matches!(it, ContextItem::ToolCall { call_id, .. } if call_id == "alive")),
-        "the useful chain survives"
+        msgs.iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|c| c.contains("3 matches"))),
+        "the useful chain's result survives"
     );
 }
 
@@ -364,16 +369,34 @@ fn llm_compaction_request_is_none_below_the_trigger_or_empty() {
 }
 
 #[test]
-fn apply_llm_summary_replaces_everything() {
+fn apply_llm_summary_hides_everything_behind_the_summary() {
+    // Append-only: the summary is appended and the pre-existing timeline is
+    // hidden behind the boundary — kept on disk for revert/fork, never shown
+    // to the model.
     let mut cm = cm(10_000);
     cm.add_user("a");
     cm.add_assistant("b", true);
     let ok = cm.apply_llm_summary("## Objective\n- summarized".into());
     assert!(ok);
     let items = cm.items_snapshot();
-    assert_eq!(items.len(), 1);
+    assert_eq!(items.len(), 3, "nothing is deleted");
     assert!(
-        matches!(&items[0], ContextItem::Compaction { summary, .. } if summary == "## Objective\n- summarized")
+        matches!(&items[2], ContextItem::Compaction { summary, .. } if summary == "## Objective\n- summarized")
+    );
+    // The model sees ONLY the summary.
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(
+        msgs[0].content.as_deref(),
+        Some("## Objective\n- summarized")
+    );
+    // The token budget reflects the visible-only view (the hidden items left
+    // the total).
+    let visible_only = cm.display_info().total_tokens;
+    let brute_all: usize = items.iter().map(|it| it.tokens(cm.encoding)).sum();
+    assert!(
+        visible_only < brute_all,
+        "hidden items must leave the budget ({visible_only} vs {brute_all})"
     );
 }
 
@@ -465,9 +488,12 @@ fn display_info_reports_tokens_and_budget() {
 #[test]
 fn cached_token_total_stays_in_sync_across_all_mutations() {
     let check = |cm: &ContextManager| {
+        // The cache tracks the VISIBLE total only — hidden items (append-only
+        // history) left it.
         let brute: usize = cm
             .items
             .iter()
+            .filter(|it| !cm.is_hidden(it))
             .map(|it| it.tokens(cm.encoding))
             .sum::<usize>()
             .saturating_add(cm.todo.tokens(cm.encoding));
@@ -644,16 +670,30 @@ fn split_chunks_whole_items_in_order_with_continuity_and_commits_atomically() {
     cm.advance_split("### Active\n- the rest", second.chunk_end);
     assert!(cm.split_all_consumed(), "every item has been summarized");
 
-    // The atomic commit replaces the WHOLE timeline with the buffer.
+    // The atomic commit appends the buffer as ONE Compaction anchor and hides
+    // the whole pre-existing timeline behind it (append-only — nothing is
+    // deleted).
     assert!(cm.commit_split(), "the commit succeeds");
     let items = cm.items_snapshot();
-    assert_eq!(items.len(), 1, "one Compaction anchor after the commit");
-    let ContextItem::Compaction { summary, .. } = &items[0] else {
-        panic!("expected a single Compaction anchor");
+    assert!(
+        items.len() > 1,
+        "the pre-split timeline is retained behind the anchor"
+    );
+    let ContextItem::Compaction { summary, .. } = &items[items.len() - 1] else {
+        panic!("the anchor is appended as the newest item");
     };
     assert!(summary.contains("the giant first part"));
     assert!(summary.contains("the rest"));
     assert!(!cm.split_active(), "staging is cleared after the commit");
+    // The model sees only the anchor.
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 1);
+    assert!(
+        msgs[0]
+            .content
+            .as_deref()
+            .is_some_and(|c| c.contains("the rest"))
+    );
 }
 
 #[test]
@@ -794,10 +834,14 @@ fn split_staging_survives_save_restore_and_resumes() {
     restored.advance_split("summary of part three", last.chunk_end);
     assert!(restored.split_all_consumed());
     assert!(restored.commit_split());
-    let ContextItem::Compaction { summary, .. } = &restored.items_snapshot()[0] else {
-        panic!("expected the committed anchor");
+    let items = restored.items_snapshot();
+    let ContextItem::Compaction { summary, .. } = &items[items.len() - 1] else {
+        panic!("expected the committed anchor (appended last)");
     };
     assert!(summary.contains("part one") && summary.contains("part three"));
+    // The restored split resumes on the VISIBLE timeline: the pre-boundary
+    // items are never re-summarized.
+    assert_eq!(restored.build_messages("").len(), 1);
 }
 
 // ── Manual /compact (trigger override) ────────────────────────────────────
@@ -822,7 +866,15 @@ fn manual_compaction_requests_llm_below_the_normal_trigger() {
     let ok = cm.apply_llm_summary("## Objective\n- compacted".into());
     cm.end_manual_compaction();
     assert!(ok);
-    assert_eq!(cm.items.len(), 1, "the timeline folds into one anchor");
+    // Append-only: the timeline is NOT folded into one anchor — everything
+    // stays, hidden behind the boundary; only the summary is visible.
+    assert_eq!(cm.items.len(), 3);
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(
+        msgs[0].content.as_deref(),
+        Some("## Objective\n- compacted")
+    );
 }
 
 #[test]

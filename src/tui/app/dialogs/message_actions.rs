@@ -114,6 +114,13 @@ impl App {
                     return;
                 }
                 let prompt_text = message_prompt_text(msg);
+                // Snapshot BEFORE the destructive rewrite: both files go to
+                // /tmp/cosh/undo/<session-id>/vN so `/undo` can roll the
+                // revert back while the tmp lives.
+                let (jsonl_path, ctx_path) = self.session_store.session_paths(&session.id.clone());
+                let _undo_version = self
+                    .undo_store
+                    .snapshot(&session.id, &jsonl_path, &ctx_path);
                 let removed_ids: std::collections::HashSet<u64> = session.messages[idx..]
                     .iter()
                     .flat_map(|m| session.ctx_ids.get(&m.id).cloned().unwrap_or_default())
@@ -128,19 +135,17 @@ impl App {
                     .ctx_ids
                     .retain(|k, _| remaining.contains(k.as_str()));
                 // Reflect in the model-facing context: the items behind the
-                // reverted messages are removed from the `.ctx` too. Unknown
-                // ids (compaction/sweep shrank the timeline) are simply not
-                // there anymore — a filter can never miss. ACCEPTED inverse
-                // gap: messages created after a compaction/sweep carry no
-                // ctx_ids (frozen mapping), so their items cannot be located
-                // and survive a revert of them — the model may still see
-                // post-compaction content the display dropped. No `.ctx` on
-                // disk means there is nothing to reflect (display-only
-                // session). NOTE the snapshot is read HERE, on the caller
-                // thread: a context save queued-but-unexecuted for this
-                // session is superseded by this job (FIFO lands the revert
-                // last) — benign while the action is idle-gated, since the
-                // superseded items back tail messages being removed anyway.
+                // reverted messages are DELETED from the `.ctx` (the snapshot
+                // above is the escape hatch). Visibility markers are adjusted
+                // by the filter: deleting the Compaction anchor un-compacts —
+                // the surviving pre-compaction history becomes visible to the
+                // model again. No `.ctx` on disk means there is nothing to
+                // reflect (display-only session). NOTE the snapshot is read
+                // HERE, on the caller thread: a context save queued-but-
+                // unexecuted for this session is superseded by this job (FIFO
+                // lands the revert last) — benign while the action is
+                // idle-gated, since the superseded items back tail messages
+                // being removed anyway.
                 if let Some(context) = self
                     .session_store
                     .load_ctx_filtered(&session.id, |id| !removed_ids.contains(&id))

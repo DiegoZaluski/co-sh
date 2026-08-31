@@ -26,7 +26,7 @@
 //! at least one user message AND at least one valid assistant response
 //! (error-only responses don't count as dialog).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -231,12 +231,10 @@ impl SessionStore {
     ///
     /// Conservative: if the group count does not match the message count the
     /// mapping is left UNCHANGED — bookkeeping must never corrupt itself by
-    /// guessing. NOTE this is not only a streaming race guard: compaction
-    /// (`apply_llm_summary`) and the useless-chain sweep permanently shrink
-    /// the item timeline while display messages only ever grow, so a session
-    /// touched by either keeps its last pre-event mapping from here on (stale
-    /// ids are inert when filtered against the `.ctx`; revert/fork must treat
-    /// unknown ids as already-gone).
+    /// guessing. With append-only visibility (compaction/sweep hide instead
+    /// of delete) the counts match by construction for as long as the session
+    /// lives; the guard is a safety net against streaming races and future
+    /// mutation sites that break the invariant.
     fn update_ctx_ids(session: &mut Session, context: &ContextManagerState) {
         let mut groups: Vec<Vec<u64>> = Vec::new();
         let mut call_group: HashMap<&str, usize> = HashMap::new();
@@ -449,32 +447,35 @@ impl SessionStore {
         }
     }
 
-    /// Load the `.ctx` snapshot for a session with the item timeline filtered
-    /// by `keep` (an item id survives when `keep(item_id)` is true), so
-    /// display actions (revert, fork) can derive the model-facing state that
-    /// matches the truncated transcript. Bookkeeping (`next_id`,
-    /// `max_tokens`, `overflow_model`, `split`) is kept as-is: ids only grow,
-    /// and a gap in the timeline is harmless. Returns `None` when there is no
-    /// companion file to filter (the caller falls back to a display-only
-    /// save).
+    /// Load the `.ctx` snapshot for a session with the item timeline TRUNCATED
+    /// by `keep` (an item id survives when `keep(item_id)` is true) — a real
+    /// deletion, backing the destructive display actions (revert, fork). The
+    /// visibility markers are adjusted to the surviving timeline: a deleted
+    /// compaction anchor clears `visible_from` (un-compaction — the surviving
+    /// pre-compaction history becomes model-visible again) and `hidden` ids of
+    /// deleted items are pruned. Bookkeeping (`next_id`, `max_tokens`,
+    /// `overflow_model`, `split`) is kept as-is: ids only grow, and a gap in
+    /// the timeline is harmless. Returns `None` when there is no companion
+    /// file to filter (the caller falls back to a display-only save).
     pub fn load_ctx_filtered(
         &self,
         session_id: &str,
         keep: impl Fn(u64) -> bool,
     ) -> Option<ContextManagerState> {
         let mut state = self.load_context(session_id)?;
-        state.items.retain(|item| {
-            let id = match item {
-                ContextItem::User { id, .. }
-                | ContextItem::Assistant { id, .. }
-                | ContextItem::ToolCall { id, .. }
-                | ContextItem::ToolResult { id, .. }
-                | ContextItem::Closure { id, .. }
-                | ContextItem::Compaction { id, .. }
-                | ContextItem::Error { id, .. } => *id,
-            };
-            keep(id)
-        });
+        state.items.retain(|item| keep(item.id()));
+        // Adjust the visibility markers to the truncated timeline:
+        // - a boundary that no longer exists means the compaction anchor was
+        //   cut away (revert past the compaction point) — everything that
+        //   survives is visible again ("un-compaction");
+        // - hidden ids of deleted items are pruned.
+        if let Some(boundary) = state.visible_from
+            && !state.items.iter().any(|it| it.id() == boundary)
+        {
+            state.visible_from = None;
+        }
+        let live: HashSet<u64> = state.items.iter().map(ContextItem::id).collect();
+        state.hidden.retain(|h| live.contains(h));
         Some(state)
     }
 
@@ -488,6 +489,12 @@ impl SessionStore {
     /// Check whether a session with the given ID exists on disk.
     pub fn has_session(&self, session_id: &str) -> bool {
         self.file_path(session_id).exists()
+    }
+
+    /// On-disk paths (JSONL, `.ctx`) of a session — for the /tmp undo
+    /// snapshots taken before destructive display actions (revert).
+    pub fn session_paths(&self, session_id: &str) -> (PathBuf, PathBuf) {
+        (self.file_path(session_id), self.ctx_file_path(session_id))
     }
 
     // ── Companion .ctx file (bincode-encoded ContextManagerState) ──────────
@@ -998,6 +1005,8 @@ mod tests {
             max_tokens: 100_000,
             overflow_model: None,
             split: None,
+            visible_from: None,
+            hidden: Default::default(),
         }
     }
 
@@ -1934,5 +1943,104 @@ mod tests {
             "an orphaned .ctx is removed on store creation"
         );
         assert!(fresh.load_session("8000").is_some(), "the session survives");
+    }
+
+    /// Reverting past the compaction point deletes the Compaction anchor —
+    /// `visible_from` clears and the surviving pre-compaction history becomes
+    /// model-visible again (un-compaction). Hidden ids of deleted items are
+    /// pruned.
+    #[test]
+    fn revert_past_the_compaction_boundary_un_compacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("7400", "Uncompact", vec![]);
+        // Timeline: pre-compaction history (id 1, hidden by the boundary),
+        // the anchor (id 2), a post-compaction item (id 3), and a swept
+        // chain (ids 4-5, individually hidden).
+        let mut context = make_context(vec![
+            user_item(1, "pre-compaction"),
+            assistant_item(2, "the anchor"),
+            user_item(3, "post"),
+            ContextItem::ToolCall {
+                id: 4,
+                call_id: "swept".into(),
+                name: "find".into(),
+                arguments: "{}".into(),
+                thought_signature: String::new(),
+                thinking_blocks: Vec::new(),
+            },
+            ContextItem::ToolResult {
+                id: 5,
+                call_id: "swept".into(),
+                content: "no matches".into(),
+                useless: true,
+            },
+        ]);
+        context.visible_from = Some(2); // hides id 1
+        context.hidden.insert(4);
+        context.hidden.insert(5);
+        store.save_session_with_context(&session, &context);
+
+        // Revert EVERYTHING before id 3 (the cut sits before the anchor): ids
+        // 1 and 2 are deleted — including the anchor — and the swept chain is
+        // dropped with it.
+        let reverted = store
+            .load_ctx_filtered("7400", |id| id == 3)
+            .expect("the .ctx exists");
+        assert_eq!(reverted.items.len(), 1);
+        assert_eq!(reverted.items[0].id(), 3);
+        assert_eq!(reverted.visible_from, None, "the anchor is gone");
+        assert!(
+            reverted.hidden.is_empty(),
+            "hidden ids of deleted items are pruned"
+        );
+        // The model sees the survivor again (no boundary, not hidden).
+        let mut cm = cosh::harness::context::ContextManager::new(100_000);
+        cm.restore_state(&reverted);
+        let msgs = cm.build_messages("");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content.as_deref(), Some("post"));
+
+        // Control: a cut AFTER the anchor keeps the boundary (compaction
+        // still holds).
+        let partial = store
+            .load_ctx_filtered("7400", |id| id <= 3)
+            .expect("the .ctx exists");
+        assert_eq!(partial.visible_from, Some(2), "the anchor survived");
+    }
+
+    /// With append-only visibility the ctx_ids mapping NEVER freezes: the
+    /// timeline retains every item through compaction, so groups keep
+    /// matching the display and the mapping keeps updating.
+    #[test]
+    fn ctx_ids_keep_updating_across_a_compaction() {
+        let mut session = make_test_session(
+            "7401",
+            "Mapping After Compaction",
+            vec![
+                make_user_msg("msg-0", "old prompt"),
+                make_assistant_msg("msg-1", "old answer"),
+                // The compaction summary streams as its own display message.
+                make_assistant_msg("msg-summary", "## Objective\n- summarized"),
+                make_user_msg("msg-2", "new prompt"),
+            ],
+        );
+        // Snapshot AFTER a compaction: ids 1-2 pre-boundary (hidden), the
+        // anchor (3) and the new prompt (4) visible.
+        let mut context = make_context(vec![
+            user_item(1, "old prompt"),
+            assistant_item(2, "old answer"),
+            assistant_item(3, "## Objective\n- summarized"),
+            user_item(4, "new prompt"),
+        ]);
+        context.visible_from = Some(3);
+        context.hidden.insert(1);
+        context.hidden.insert(2);
+
+        SessionStore::update_ctx_ids(&mut session, &context);
+        assert_eq!(session.ctx_ids["msg-0"], vec![1]);
+        assert_eq!(session.ctx_ids["msg-1"], vec![2]);
+        assert_eq!(session.ctx_ids["msg-summary"], vec![3]);
+        assert_eq!(session.ctx_ids["msg-2"], vec![4]);
     }
 }

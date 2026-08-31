@@ -5,6 +5,7 @@ mod queue_actions;
 mod text_input;
 mod theme;
 mod tool_call;
+mod undo;
 
 use super::super::App;
 

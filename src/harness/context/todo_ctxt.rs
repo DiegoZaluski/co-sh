@@ -19,9 +19,9 @@
 //! call, so it is structurally immune to every compaction phase:
 //!
 //! - the useless-chain sweep never touches it (it is not an item at all);
-//! - even the LLM compaction — which replaces the WHOLE timeline with a
-//!   summary — leaves it intact, because the block is re-rendered from the
-//!   mirror afterwards.
+//! - even the LLM compaction — which hides the WHOLE pre-existing timeline
+//!   behind its summary anchor — leaves it intact, because the block is
+//!   re-rendered from the mirror afterwards.
 //!
 //! Its tokens still count toward the context budget ([`ContextManager`]'s
 //! `total_tokens`), so the 80% compaction trigger stays honest — but nothing
@@ -392,7 +392,8 @@ mod tests {
 
     // The whole point of the dedicated block: every compaction phase must
     // leave it untouched — the useless-chain sweep (`run`) and the LLM
-    // compaction (`apply_llm_summary`, which replaces the entire timeline).
+    // compaction (`apply_llm_summary`, which hides the entire pre-existing
+    // timeline behind its anchor).
     #[test]
     fn todo_block_survives_every_compaction_phase() {
         let mut m = cm(1000); // trigger = 800
@@ -424,8 +425,8 @@ mod tests {
                 .contains("## Tool TODOs")
         );
 
-        // Phase 3 (LLM compaction replaces the WHOLE timeline): the block is
-        // re-rendered from the mirror and survives.
+        // Phase 3 (LLM compaction hides the WHOLE pre-existing timeline):
+        // the block is re-rendered from the mirror and survives.
         m.apply_llm_summary("## Objective\n- keep going".to_string());
         assert!(
             m.build_messages("")[0]

@@ -373,6 +373,9 @@ impl App {
                             DialogType::MessageActions { .. } => {
                                 self.handle_message_actions_dialog_key(KeyCode::Up);
                             }
+                            DialogType::UndoList { .. } => {
+                                self.handle_undo_dialog_key(KeyCode::Up);
+                            }
                             DialogType::QueueActions { .. } => {
                                 self.handle_queue_actions_dialog_key(KeyCode::Up);
                             }
@@ -433,6 +436,9 @@ impl App {
                             }
                             DialogType::MessageActions { .. } => {
                                 self.handle_message_actions_dialog_key(KeyCode::Down);
+                            }
+                            DialogType::UndoList { .. } => {
+                                self.handle_undo_dialog_key(KeyCode::Down);
                             }
                             DialogType::QueueActions { .. } => {
                                 self.handle_queue_actions_dialog_key(KeyCode::Down);
@@ -594,6 +600,16 @@ impl App {
                                 let message_id = message_id.clone();
                                 self.dialog.pop();
                                 self.run_message_action(action, &message_id);
+                                return Ok(true);
+                            }
+                            DialogType::UndoList {
+                                session_id,
+                                versions,
+                            } => {
+                                let (session_id, versions) = (session_id.clone(), versions.clone());
+                                let selected = d.selected.min(versions.len().saturating_sub(1));
+                                self.dialog.pop();
+                                self.restore_undo_version(&session_id, &versions[selected]);
                                 return Ok(true);
                             }
                             DialogType::QueueActions { queue, index, .. } => {

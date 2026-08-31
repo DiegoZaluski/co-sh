@@ -120,6 +120,8 @@ impl App {
             }
         } else if cmd.name == "rename" {
             self.open_rename_dialog();
+        } else if cmd.name == "undo" {
+            self.open_undo_dialog();
         } else if cmd.name == "background" {
             self.toggle_transparent_background();
         } else if cmd.name == "bell" {

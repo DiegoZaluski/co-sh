@@ -7,7 +7,8 @@
 //! anchored summary. The implementation lives on [`ContextManager`] (this
 //! module is a descendant of the context module, so it can reach its private
 //! fields); the timeline is NEVER touched until
-//! [`ContextManager::commit_split`] replaces it atomically.
+//! [`ContextManager::commit_split`] appends it as one anchor and hides the
+//! pre-split timeline behind the visibility boundary (append-only).
 
 use super::summarize::{SPLIT_SUMMARIZER_SYSTEM, build_split_prompt, serialize_item};
 use super::{ContextItem, ContextManager};
@@ -41,8 +42,9 @@ pub(super) const SPLIT_CALL_OVERHEAD: usize = 8000;
 ///
 /// The timeline is NEVER touched while a split is in progress: chunks are
 /// serialized from the items and their summaries accumulate here. Only when
-/// every item has been consumed does [`ContextManager::commit_split`] replace
-/// the timeline with the concatenated buffer — atomically. Because the
+/// every item has been consumed does [`ContextManager::commit_split`] append
+/// the concatenated buffer as one anchor and hide the pre-split timeline
+/// behind the visibility boundary — atomically. Because the
 /// timeline is untouched, this state can be persisted with the snapshot and
 /// the split resumes exactly where it stopped.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -153,6 +155,19 @@ impl ContextManager {
         }
     }
 
+    /// Raw timeline indexes of the model-VISIBLE items, in order. The split
+    /// (like `build_messages`) only ever consumes visible items: hidden
+    /// ones (pre-compaction, swept, abandoned) are "not there" — they were
+    /// either already folded into a summary or never reached the model.
+    fn visible_indices(&self) -> Vec<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| !self.is_hidden(it))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// True when every item has been consumed by the split — the harness then
     /// commits the buffer. Also true when no split is staged (nothing to
     /// commit).
@@ -160,7 +175,10 @@ impl ContextManager {
     pub fn split_all_consumed(&self) -> bool {
         match self.split.as_ref() {
             None => true,
-            Some(_) => self.split_cursor_idx() >= self.items.len(),
+            Some(_) => {
+                let visible = self.visible_indices();
+                self.split_cursor_idx() >= visible.len()
+            }
         }
     }
 
@@ -174,8 +192,12 @@ impl ContextManager {
     /// failed call can be retried with the same chunk.
     pub fn split_next_chunk(&mut self) -> Option<SplitChunkRequest> {
         self.split.as_ref()?;
-        let start_idx = self.split_cursor_idx();
-        if start_idx >= self.items.len() {
+        // The split consumes the VISIBLE timeline only (see visible_indices):
+        // `start`/`end` are positions in the visible sequence, mapped back to
+        // raw items for serialization.
+        let visible = self.visible_indices();
+        let start = self.split_cursor_idx();
+        if start >= visible.len() {
             return None;
         }
         let projection = self.split_projection();
@@ -186,32 +208,30 @@ impl ContextManager {
         let overhead = SPLIT_CALL_OVERHEAD.min(window / 2).max(1);
         let budget = window.saturating_sub(overhead).max(1);
         let mut chunk_tokens = 0usize;
-        let mut end_idx = start_idx; // exclusive
-        for (i, item) in self.items.iter().enumerate().skip(start_idx) {
-            let tokens = item.tokens(self.encoding);
+        let mut end = start; // exclusive, in visible-sequence positions
+        for (pos, &raw_idx) in visible.iter().enumerate().skip(start) {
+            let tokens = self.items[raw_idx].tokens(self.encoding);
             // Always include the first item whole, even when it alone exceeds
             // the budget (structural integrity beats budget precision).
-            if end_idx > start_idx && chunk_tokens + tokens > budget {
+            if end > start && chunk_tokens + tokens > budget {
                 break;
             }
             chunk_tokens += tokens;
-            end_idx = i + 1;
+            end = pos + 1;
         }
-        let chunk_text = self
-            .items
+        let chunk_text = visible[start..end]
             .iter()
-            .skip(start_idx)
-            .take(end_idx - start_idx)
-            .map(serialize_item)
+            .map(|&raw_idx| serialize_item(&self.items[raw_idx]))
             .filter(|line| !line.is_empty())
             .collect::<Vec<String>>()
             .join("\n\n");
-        let chunk_end = self.items.get(end_idx - 1).map(ContextItem::id);
-        let remaining_tokens: usize = self
-            .items
+        let chunk_end = visible
+            .get(end - 1)
+            .and_then(|&raw_idx| self.items.get(raw_idx))
+            .map(ContextItem::id);
+        let remaining_tokens: usize = visible[end..]
             .iter()
-            .skip(end_idx)
-            .map(|it| it.tokens(self.encoding))
+            .map(|&raw_idx| self.items[raw_idx].tokens(self.encoding))
             .sum();
 
         // Early containment: only when the buffer accumulation is concerning
@@ -289,7 +309,7 @@ impl ContextManager {
         split.cursor = chunk_end.map(|id| id + 1);
     }
 
-    /// Commit the split atomically: replace the ENTIRE timeline with a single
+    /// Commit the split atomically: append the buffer as a single
     /// [`ContextItem::Compaction`] holding the concatenated buffer — the same
     /// end state as a normal LLM compaction. The timeline is only touched
     /// here, and only when every item has been summarized AND the buffer fits
@@ -324,14 +344,15 @@ impl ContextManager {
         self.split = None;
     }
 
-    /// Index of the next un-summarized item (`None` cursor → the beginning).
+    /// Index (into the VISIBLE sequence) of the next un-summarized item
+    /// (`None` cursor → the beginning).
     fn split_cursor_idx(&self) -> usize {
+        let visible = self.visible_indices();
         match self.split.as_ref().and_then(|s| s.cursor) {
-            Some(cid) => self
-                .items
+            Some(cid) => visible
                 .iter()
-                .position(|it| it.id() >= cid)
-                .unwrap_or(self.items.len()),
+                .position(|&raw_idx| self.items[raw_idx].id() >= cid)
+                .unwrap_or(visible.len()),
             None => 0,
         }
     }

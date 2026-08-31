@@ -98,6 +98,11 @@ impl App {
                 return Ok(false);
             }
 
+            // Check the /undo versions dialog
+            if self.is_undo_dialog_visible() && self.handle_undo_dialog_key(key.code) {
+                return Ok(false);
+            }
+
             // Check the per-queued-message actions dialog
             if self.is_queue_actions_dialog_visible()
                 && self.handle_queue_actions_dialog_key(key.code)

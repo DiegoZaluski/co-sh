@@ -1,7 +1,7 @@
 use super::super::core::Harness;
 use super::super::core::result_is_useless;
 use super::super::events::HarnessEvent;
-use crate::harness::context::ContextItem;
+use crate::harness::context::{ContextItem, ContextManagerState};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -895,7 +895,7 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
     // The harness (with its context manager) is moved into the task; the CM
     // state after the loop is reported back through this channel.
     let (state_tx, mut state_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(Vec<ContextItem>, usize)>();
+        tokio::sync::mpsc::unbounded_channel::<(ContextManagerState, usize)>();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -905,7 +905,7 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
         h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
             .await;
         let info = h.context_manager.display_info();
-        let _ = state_tx.send((h.context_manager.items_snapshot(), info.total_tokens));
+        let _ = state_tx.send((h.context_manager.save_state(), info.total_tokens));
     });
 
     let mut events = Vec::new();
@@ -929,12 +929,18 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
             Err(_) => continue,
         }
     }
-    let (items, total_tokens) =
+    let (state, total_tokens) =
         tokio::time::timeout(tokio::time::Duration::from_secs(2), state_rx.recv())
             .await
             .ok()
             .flatten()
-            .unwrap_or((Vec::new(), 0));
+            .unwrap_or((ContextManagerState::default(), 0));
+    let items = state.items;
+    // Visibility mirror (append-only): the model sees items past the boundary
+    // and outside the hidden set.
+    let is_visible = |it: &ContextItem| {
+        it.id() >= state.visible_from.unwrap_or(0) && !state.hidden.contains(&it.id())
+    };
     handle.abort();
 
     // The split surfaced the SAME continuous "Summarizing" box to the TUI.
@@ -975,38 +981,44 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
         "the loop completes after the split; events={events:?}"
     );
 
-    // The split committed ATOMICALLY: the whole timeline became a single
-    // Compaction anchor.
+    // The split committed append-only: the buffer became ONE Compaction
+    // anchor appended after the (now hidden) pre-split timeline.
+    let anchor_idx = items
+        .iter()
+        .position(|it| {
+            matches!(it, ContextItem::Compaction { summary, .. }
+            if summary.contains("summarized chunk"))
+        })
+        .expect("the buffer is committed as the new anchor");
     assert!(
-        matches!(
-            &items[0],
-            ContextItem::Compaction { summary, .. }
-                if summary.contains("summarized chunk")
-        ),
-        "the buffer is committed as the new anchor; items={items:?}"
-    );
-    assert!(
-        !items.iter().any(|it| matches!(
+        items.iter().take(anchor_idx).any(|it| matches!(
             it,
             ContextItem::User { original, .. } | ContextItem::Assistant { original, .. }
                 if original.starts_with("u ") || original.starts_with("a ")
         )),
-        "the giant history was folded into the anchor — nothing stays verbatim"
+        "the giant history is RETAINED behind the anchor (append-only)"
     );
     // The re-added in-flight input and the loop's final answer follow it.
     assert!(
         matches!(
-            &items[1],
+            &items[anchor_idx + 1],
             ContextItem::User { original, .. } if original == "hi"
         ),
         "the in-flight input is re-added after the split; items={items:?}"
     );
     assert!(
         matches!(
-            &items[2],
+            &items[anchor_idx + 2],
             ContextItem::Closure { content, .. } if content == "final answer"
         ),
         "the loop's final answer follows the anchor; items={items:?}"
+    );
+    // The model sees only: anchor, in-flight input, final answer.
+    let visible_count = items.iter().filter(|it| is_visible(it)).count();
+    assert_eq!(visible_count, 3, "anchor + in-flight input + final answer");
+    assert!(
+        !is_visible(&items[0]),
+        "the pre-split history is hidden behind the boundary"
     );
     // Contenção antecipada: the committed anchor fits the known window.
     assert!(
@@ -1056,7 +1068,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         .with_mock_stream(Ok(vec!["final answer"]));
 
     let (state_tx, mut state_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(Vec<ContextItem>, bool)>();
+        tokio::sync::mpsc::unbounded_channel::<(ContextManagerState, bool)>();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1066,7 +1078,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
             .await;
         let _ = state_tx.send((
-            h.context_manager.items_snapshot(),
+            h.context_manager.save_state(),
             h.context_manager.overflow_stuck("gpt-4o-mini"),
         ));
     });
@@ -1092,11 +1104,15 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
             Err(_) => continue,
         }
     }
-    let (items, stuck) = tokio::time::timeout(tokio::time::Duration::from_secs(2), state_rx.recv())
+    let (state, stuck) = tokio::time::timeout(tokio::time::Duration::from_secs(2), state_rx.recv())
         .await
         .ok()
         .flatten()
-        .unwrap_or((Vec::new(), false));
+        .unwrap_or((ContextManagerState::default(), false));
+    let items = state.items;
+    let is_visible = |it: &ContextItem| {
+        it.id() >= state.visible_from.unwrap_or(0) && !state.hidden.contains(&it.id())
+    };
     handle.abort();
 
     // The single-shot overflow escalated into the split, which SUCCEEDED.
@@ -1148,23 +1164,38 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         "the loop completes; events={events:?}"
     );
 
-    // Atomic commit: the whole timeline became the concatenated anchor.
+    // Append-only commit: the concatenated anchor is appended; the old
+    // timeline is retained but hidden behind the boundary.
+    let anchor = items.iter().find_map(|it| match it {
+        ContextItem::Compaction { summary, .. }
+            if summary.contains("reactive chunk one")
+                && summary.contains("reactive chunk three") =>
+        {
+            Some(summary.clone())
+        }
+        _ => None,
+    });
     assert!(
-        matches!(
-            &items[0],
-            ContextItem::Compaction { summary, .. }
-                if summary.contains("reactive chunk one")
-                    && summary.contains("reactive chunk three")
-        ),
+        anchor.is_some(),
         "the concatenated buffer is the new anchor; items={items:?}"
     );
     assert!(
-        !items.iter().any(|it| matches!(
+        items.iter().any(|it| matches!(
             it,
             ContextItem::User { original, .. } | ContextItem::Assistant { original, .. }
                 if original.starts_with("u ") || original.starts_with("a ")
         )),
-        "the giant history was folded into the anchor"
+        "the giant history is RETAINED behind the anchor (append-only)"
+    );
+    // The model sees only the anchor and whatever came after it.
+    assert!(
+        !items.iter().any(|it| is_visible(it)
+            && matches!(
+                it,
+                ContextItem::User { original, .. } | ContextItem::Assistant { original, .. }
+                    if original.starts_with("u ")
+            )),
+        "the pre-split history never reaches the model"
     );
     // The reactive split resolves without marking the provider stuck.
     assert!(

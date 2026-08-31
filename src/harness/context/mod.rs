@@ -95,9 +95,10 @@ pub enum ContextItem {
     /// assistant text in place.
     Closure { id: u64, content: String },
     /// The continuation summary produced by the LLM compaction (the
-    /// last-resort fallback). Replaces the WHOLE timeline in place; renders as
-    /// an assistant message. The next LLM compaction folds it into the new
-    /// summary (update mode).
+    /// last-resort fallback). Appended as an anchor that hides the
+    /// pre-existing timeline behind the visibility boundary (append-only);
+    /// renders as an assistant message. The next LLM compaction folds it
+    /// into the new summary (update mode).
     Compaction { id: u64, summary: String },
     /// A terminal API/runtime error surfaced to the user. DISPLAY-ONLY:
     /// [`ContextManager::build_messages`] skips it (an API failure must never
@@ -110,7 +111,7 @@ pub enum ContextItem {
 }
 
 impl ContextItem {
-    fn id(&self) -> u64 {
+    pub fn id(&self) -> u64 {
         match self {
             ContextItem::User { id, .. }
             | ContextItem::Assistant { id, .. }
@@ -170,6 +171,12 @@ impl ContextItem {
 /// context-window overflow, and `split` the staging of an in-progress
 /// split-and-concatenate.
 ///
+/// The timeline is APPEND-ONLY: nothing is ever removed by compaction, the
+/// useless-chain sweep or the abandoned-input cleanup. Those events only move
+/// the VISIBILITY markers (`visible_from` boundary + `hidden` set), so the
+/// full history stays on disk for revert/fork at any point of the session —
+/// the model's view is exactly what the markers say.
+///
 /// NOTE: bincode 1.x is positional — ADDING a field is a format break (an
 /// old snapshot fails the whole deserialization and the TUI falls back to the
 /// JSONL history; the accepted dev-stage tradeoff). The field is keyed by
@@ -189,6 +196,16 @@ pub struct ContextManagerState {
     /// Staging of an in-progress split-and-concatenate, so an interrupted
     /// split resumes exactly where it stopped.
     pub split: Option<SplitState>,
+    /// Compaction boundary: every item with `id < visible_from` is
+    /// pre-compaction — folded into the `Compaction` summary item, kept on
+    /// disk for revert/fork but never shown to the model. `None` = nothing
+    /// was compacted yet (the whole timeline is visible).
+    pub visible_from: Option<u64>,
+    /// Item ids hidden from the model one by one (useless-chain sweep,
+    /// abandoned prompts, cancelled-run debris). Kept in the timeline for
+    /// revert/fork; never sent to the model. Ids below `visible_from` are
+    /// implicitly hidden too and are pruned from here on compaction.
+    pub hidden: HashSet<u64>,
 }
 
 impl ContextManagerState {
@@ -215,6 +232,8 @@ impl Default for ContextManagerState {
             max_tokens: MAX_CONTEXT_TOKENS,
             overflow_model: None,
             split: None,
+            visible_from: None,
+            hidden: HashSet::new(),
         }
     }
 }
@@ -282,6 +301,16 @@ pub struct ContextManager {
     /// atomically by [`Self::commit_split`]. Persisted with the snapshot so an
     /// interrupted split resumes exactly where it stopped.
     split: Option<SplitState>,
+    /// Compaction boundary: every item with `id < visible_from` is
+    /// pre-compaction — folded into the `Compaction` summary item, kept in
+    /// the timeline for revert/fork but never shown to the model. `None` =
+    /// nothing was compacted yet (the whole timeline is visible).
+    visible_from: Option<u64>,
+    /// Item ids hidden from the model one by one (useless-chain sweep,
+    /// abandoned prompts, cancelled-run debris). Kept in the timeline for
+    /// revert/fork; never sent to the model. Ids below `visible_from` are
+    /// implicitly hidden too and are pruned from here on compaction.
+    hidden: HashSet<u64>,
     /// The dedicated protected TODO block: mirrors the tools' `Plan` list and
     /// renders it as a protected block at the FRONT of the messages (merged
     /// into the leading `user` turn when there is one, so no two consecutive
@@ -289,7 +318,7 @@ pub struct ContextManager {
     /// [`todo_ctxt`] for the protection and removal rules.
     todo: TodoContext,
     /// Running token total of `items` (excluding the TODO block), kept in sync
-    /// by the few mutation primitives (`push_item`, `remove_at`,
+    /// by the few mutation primitives (`push_item`, `hide_at`,
     /// `apply_llm_summary`, `recompute_cached_tokens`) so `total_tokens()` is
     /// O(1) instead of re-tokenizing every item through tiktoken on each call.
     /// Rebuilt wholesale on restore and on encoding change. There is NO
@@ -327,6 +356,8 @@ impl ContextManager {
             encoding: TokenEncoding::Cl100k,
             overflow_model: None,
             split: None,
+            visible_from: None,
+            hidden: HashSet::new(),
             todo: TodoContext::new(),
             cached_items_tokens: 0,
             manual_compaction: false,
@@ -578,20 +609,29 @@ impl ContextManager {
         removed
     }
 
-    /// Remove orphan `ToolCall`s in the tool-item zone that sits between the
+    /// Hide orphan `ToolCall`s in the tool-item zone that sits between the
     /// trailing run of user turns and the older history: a call without its
     /// result, followed by NEW input, is debris from a cancelled run (a
     /// pending call of a live run is never followed by a user turn). The zone
     /// is scanned back to front until the first non-tool item; completed
     /// chains inside it (call WITH result — including mixed parallel runs
-    /// where only some results arrived) are preserved whole. Returns whether
-    /// anything was removed.
+    /// where only some results arrived) are preserved whole. Append-only:
+    /// the debris STAYS in the timeline, hidden from the model. Returns
+    /// whether anything was hidden.
     fn drop_orphan_calls_before_trailing_users(&mut self) -> bool {
-        // Index where the trailing run of User items starts.
+        // Everything below works on VISIBLE items only: a hidden item is "not
+        // there" for both the model and this scan — treating it otherwise
+        // would re-hide the same debris forever (the caller loops until
+        // quiescence). Indexes are the raw timeline positions.
         let mut trailing_users = 0usize;
-        for item in self.items.iter().rev() {
+        let mut users_start = self.items.len();
+        for (idx, item) in self.items.iter().enumerate().rev() {
+            if self.is_hidden(item) {
+                continue;
+            }
             if matches!(item, ContextItem::User { .. }) {
                 trailing_users += 1;
+                users_start = idx;
             } else {
                 break;
             }
@@ -599,21 +639,25 @@ impl ContextManager {
         if trailing_users == 0 {
             return false;
         }
-        let users_start = self.items.len() - trailing_users;
-        // All `call_id`s that have a result in the timeline — a call holding
-        // one of these is a completed chain, never orphan debris.
+        // All `call_id`s that have a VISIBLE result in the timeline — a call
+        // holding one of these is a completed chain, never orphan debris.
         let paired: HashSet<String> = self
             .items
             .iter()
+            .filter(|it| !self.is_hidden(it))
             .filter_map(|it| match it {
                 ContextItem::ToolResult { call_id, .. } => Some(call_id.clone()),
                 _ => None,
             })
             .collect();
-        let mut removed = false;
+        let mut hidden_any = false;
         let mut idx = users_start;
         while idx > 0 {
             idx -= 1;
+            if self.is_hidden(&self.items[idx]) {
+                // Hidden debris from an earlier pass — not part of the zone.
+                continue;
+            }
             let doomed = match &self.items[idx] {
                 ContextItem::ToolCall { call_id, .. } => !paired.contains(call_id),
                 // A tool result (of a preserved call) does not end the zone:
@@ -622,33 +666,38 @@ impl ContextManager {
                 _ => break,
             };
             if doomed {
-                self.remove_at(idx);
-                removed = true;
+                self.hide_at(idx);
+                hidden_any = true;
             }
         }
-        removed
+        hidden_any
     }
 
-    /// Drop every trailing `User` turn but the newest (the abandoned-input
-    /// rule). Returns whether anything was removed.
+    /// Hide every trailing `User` turn but the newest (the abandoned-input
+    /// rule) — append-only: they stay in the timeline, never shown to the
+    /// model. Returns whether anything was hidden.
     fn drop_abandoned_user_runs(&mut self) -> bool {
-        // Count the trailing consecutive User turns.
-        let mut trailing_users = 0usize;
-        for item in self.items.iter().rev() {
+        // Count the trailing consecutive VISIBLE User turns (a hidden one is
+        // "not there" — skipping it, not breaking, so an already-hidden run
+        // below the visible frontier never trips the quiescence loop).
+        let mut user_indices: Vec<usize> = Vec::new();
+        for (idx, item) in self.items.iter().enumerate().rev() {
+            if self.is_hidden(item) {
+                continue;
+            }
             if matches!(item, ContextItem::User { .. }) {
-                trailing_users += 1;
+                user_indices.push(idx);
             } else {
                 break;
             }
         }
-        if trailing_users <= 1 {
+        if user_indices.len() <= 1 {
             return false;
         }
-        // Keep the NEWEST input (the last item); drop the rest of the run.
-        let start = self.items.len() - trailing_users;
-        let end = self.items.len() - 1;
-        for _ in start..end {
-            self.remove_at(start);
+        // Keep the NEWEST input (the last visible item); hide the rest of
+        // the run.
+        for &idx in &user_indices[1..] {
+            self.hide_at(idx);
         }
         true
     }
@@ -676,14 +725,20 @@ impl ContextManager {
         }
         let draft_id = *id;
         let content = original.clone();
-        // Drop the draft and re-push it as a Closure (same id) — both through
-        // the mutation primitives, so the token total stays in sync.
+        // Swap the draft in place for a Closure (SAME id, immediate). This is
+        // a transform, not a hide: the item's identity and visibility are
+        // unchanged, so the token cache is adjusted by the exact delta.
         let last = self.items.len() - 1;
-        self.remove_at(last);
-        self.push_item(ContextItem::Closure {
+        let old_tokens = self.items[last].tokens(self.encoding);
+        self.items[last] = ContextItem::Closure {
             id: draft_id,
             content,
-        });
+        };
+        let new_tokens = self.items[last].tokens(self.encoding);
+        self.cached_items_tokens = self
+            .cached_items_tokens
+            .saturating_sub(old_tokens)
+            .saturating_add(new_tokens);
     }
 
     /// The final text of a completed agent loop: the `Closure` content of the
@@ -715,20 +770,27 @@ impl ContextManager {
         }
     }
 
-    /// Remove every tool chain whose result is marked `useless`, except the
+    /// Hide every tool chain whose result is marked `useless`, except the
     /// newest chain (the one the model has not reacted to yet). Runs at the
-    /// start of every [`Self::run`], regardless of the budget.
+    /// start of every [`Self::run`], regardless of the budget. The chains
+    /// STAY in the timeline (append-only) — only their visibility flips, so
+    /// revert/fork keep reaching them.
     fn sweep_useless_chains(&mut self) {
         // The newest chain (the one the model has not seen yet) is preserved:
         // its CALL id is the chain identity, so BOTH halves are excluded.
+        // Visibility-aware throughout: a chain already hidden by an earlier
+        // pass is inert (re-hiding it would be a no-op, but scanning it could
+        // wrongly anchor `newest_call_id`).
         let newest_call_id: Option<String> = self
             .items
             .iter()
             .rev()
+            .filter(|it| !self.is_hidden(it))
             .find_map(|it| it.call_id().map(str::to_string));
         let useless_call_ids: HashSet<String> = self
             .items
             .iter()
+            .filter(|it| !self.is_hidden(it))
             .filter_map(|it| match it {
                 ContextItem::ToolResult {
                     call_id,
@@ -738,12 +800,16 @@ impl ContextManager {
                 _ => None,
             })
             .collect();
-        // Back-to-front so removing a chain never invalidates a pending index;
-        // remove_item also drops the partner half, so its index is skipped
-        // naturally by the next iteration.
+        // Back-to-front so hiding a chain never invalidates a pending index;
+        // hide_item also hides the partner half, so its index is skipped
+        // naturally by the next iteration. Idempotent: an already-hidden
+        // chain lands in the set again (a no-op).
         let mut idx = self.items.len();
         while idx > 0 {
             idx -= 1;
+            if self.is_hidden(&self.items[idx]) {
+                continue;
+            }
             let doomed = match &self.items[idx] {
                 ContextItem::ToolCall { call_id, .. } | ContextItem::ToolResult { call_id, .. } => {
                     newest_call_id.as_deref() != Some(call_id.as_str())
@@ -752,7 +818,7 @@ impl ContextManager {
                 _ => false,
             };
             if doomed {
-                self.remove_item(idx);
+                self.hide_item(idx);
             }
         }
     }
@@ -775,13 +841,18 @@ impl ContextManager {
         if self.items.is_empty() || self.total_tokens() < self.trigger() {
             return None;
         }
+        // Only model-VISIBLE content is summarized: pre-compaction items are
+        // already folded into the previous summary, hidden chains were
+        // rejected — re-summarizing them would bloat the request and pollute
+        // the new summary.
         let has_previous_summary = self
             .items
             .iter()
-            .any(|it| matches!(it, ContextItem::Compaction { .. }));
+            .any(|it| matches!(it, ContextItem::Compaction { .. }) && !self.is_hidden(it));
         let context = self
             .items
             .iter()
+            .filter(|it| !self.is_hidden(it))
             .map(serialize_item)
             .filter(|line| !line.is_empty())
             .collect::<Vec<String>>()
@@ -792,19 +863,26 @@ impl ContextManager {
         })
     }
 
-    /// Apply the LLM-compaction summary: replace the ENTIRE timeline with a
-    /// single [`ContextItem::Compaction`] (the continuation summary). Returns
+    /// Apply the LLM-compaction summary: the ENTIRE pre-existing timeline is
+    /// hidden behind the new [`ContextItem::Compaction`] item (append-only —
+    /// nothing is deleted; revert past the boundary un-compacts). Returns
     /// whether the total is now below the 80% trigger — the summary should be
     /// small enough, but a degenerate huge summary is surfaced so the harness
     /// can report failure. The verdict always uses the NORMAL trigger (manual
-    /// `/compact` mode zeroes [`Self::trigger`] only for the run; a manual pass
-    /// legitimately lands far below it).
+    /// `/compact` mode zeroes [`Self::trigger`] only for the run; a manual
+    /// pass legitimately lands far below it).
     pub fn apply_llm_summary(&mut self, summary: String) -> bool {
         let id = self.next_id();
-        self.items.clear();
-        // The whole timeline is gone — reset the total before pushing the
-        // single replacement item.
-        self.cached_items_tokens = 0;
+        // The boundary hides every pre-existing item (all ids are < `id` —
+        // it was just allocated); the Compaction item itself is visible.
+        self.visible_from = Some(id);
+        // Ids below the boundary are implicitly hidden — prune them so the
+        // set stays tight (swept/abandoned items pre-compaction are covered
+        // by the boundary from here on).
+        self.hidden.retain(|&h| h >= id);
+        // The cached total now covers only the visible timeline: re-tokenize
+        // (rare event; the recompute itself skips hidden items).
+        self.recompute_cached_tokens();
         self.push_item(ContextItem::Compaction { id, summary });
         let fits = self.total_tokens() < self.normal_trigger();
         // A compaction that LANDED below the trigger is proof the provider
@@ -862,13 +940,16 @@ impl ContextManager {
     /// harness already owns via [`add_user`](Self::add_user)).
     pub fn build_messages(&self, current_input: &str) -> Vec<ChatMessage> {
         let mut messages = Vec::with_capacity(self.items.len() + 1);
-        // Skip leading tool results — a `tool` message right after `system` is
-        // rejected by some providers (e.g. Mistral). Orphans should not exist
-        // thanks to chain-aware phase removal, but a restored snapshot could
-        // still hold them.
+        // Visibility filter FIRST (O(1) per item — boundary compare + hash
+        // lookup): pre-compaction and individually hidden items never reach
+        // the model. Then skip leading tool results — a `tool` message right
+        // after `system` is rejected by some providers (e.g. Mistral).
+        // Orphans should not exist thanks to chain-aware hiding, but a
+        // restored snapshot could still hold them.
         for item in self
             .items
             .iter()
+            .filter(|it| !self.is_hidden(it))
             .skip_while(|it| matches!(it, ContextItem::ToolResult { .. }))
         {
             match item {
@@ -985,6 +1066,8 @@ impl ContextManager {
             max_tokens: self.max_tokens,
             overflow_model: self.overflow_model.clone(),
             split: self.split.clone(),
+            visible_from: self.visible_from,
+            hidden: self.hidden.clone(),
         }
     }
 
@@ -999,6 +1082,8 @@ impl ContextManager {
         // Split progress is REAL progress (the buffer + cursor) — a restored
         // session resumes the split exactly where it stopped.
         self.split = state.split.clone();
+        self.visible_from = state.visible_from;
+        self.hidden = state.hidden.clone();
         // The TODO block mirror is not persisted (the tools' Plan state is
         // not part of the snapshot): clear it so a restored session never
         // surfaces a stale block — the harness re-syncs it at the next loop
@@ -1026,11 +1111,17 @@ impl ContextManager {
     }
 
     /// Rebuild the cached token total from scratch. Called when the encoding
-    /// changes (every item's estimated cost changes) and on restore.
+    /// changes (every item's estimated cost changes), on restore and on
+    /// compaction. Counts ONLY model-visible items — the cache represents
+    /// what the provider would be sent, never the hidden append-only history.
     fn recompute_cached_tokens(&mut self) {
-        self.cached_items_tokens = self.items.iter().fold(0usize, |acc, it| {
-            acc.saturating_add(it.tokens(self.encoding))
-        });
+        self.cached_items_tokens = self
+            .items
+            .iter()
+            .filter(|it| !self.is_hidden(it))
+            .fold(0usize, |acc, it| {
+                acc.saturating_add(it.tokens(self.encoding))
+            });
     }
 
     /// Token count at which the 80% compaction trigger fires: 80% of the
@@ -1063,13 +1154,14 @@ impl ContextManager {
         self.manual_compaction = false;
     }
 
-    /// True when there is anything worth compacting: at least one timeline
-    /// item beyond a lone previous summary (a session that only holds the
-    /// last `/compact` result has nothing new to fold).
+    /// True when there is anything worth compacting: at least one VISIBLE
+    /// item that is not itself the (newest) compaction summary. Append-only
+    /// means the timeline grows forever — the check is on visibility, never
+    /// on the raw length.
     pub fn has_compactable_content(&self) -> bool {
-        !self.items.is_empty()
-            && !(self.items.len() == 1
-                && matches!(self.items.front(), Some(ContextItem::Compaction { .. })))
+        self.items
+            .iter()
+            .any(|it| !self.is_hidden(it) && !matches!(it, ContextItem::Compaction { .. }))
     }
 
     fn total_tokens(&self) -> usize {
@@ -1083,7 +1175,12 @@ impl ContextManager {
         // cost.
         #[cfg(debug_assertions)]
         {
-            let brute: usize = self.items.iter().map(|it| it.tokens(self.encoding)).sum();
+            let brute: usize = self
+                .items
+                .iter()
+                .filter(|it| !self.is_hidden(it))
+                .map(|it| it.tokens(self.encoding))
+                .sum();
             debug_assert_eq!(
                 self.cached_items_tokens, brute,
                 "cached token total drifted from items ({}, expected {})",
@@ -1094,14 +1191,42 @@ impl ContextManager {
             .saturating_add(self.todo.tokens(self.encoding))
     }
 
-    /// Remove the item at `idx`. For tool items the matching call/result
-    /// partner is removed too, so the native `tool_call → tool` chain can
+    /// Whether the model must NEVER see this item: it sits before the
+    /// compaction boundary (folded into the `Compaction` summary) or it was
+    /// hidden individually (useless-chain sweep, abandoned prompt). O(1) —
+    /// an integer compare plus a hash lookup; no scans anywhere.
+    fn is_hidden(&self, item: &ContextItem) -> bool {
+        let id = item.id();
+        id < self.visible_from.unwrap_or(0) || self.hidden.contains(&id)
+    }
+
+    /// Hide the item at `idx`: it stays in the timeline (revert/fork can
+    /// still reach it) but is never sent to the model. The item's cost
+    /// leaves the cached token total — the doomed item is re-tokenized here
+    /// (hiding is rare and bounded, so this is the cheap side of not keeping
+    /// a per-item cost map in sync).
+    fn hide_at(&mut self, idx: usize) {
+        let (id, tokens) = match &self.items[idx] {
+            ContextItem::User { id, .. }
+            | ContextItem::Assistant { id, .. }
+            | ContextItem::ToolCall { id, .. }
+            | ContextItem::ToolResult { id, .. }
+            | ContextItem::Closure { id, .. }
+            | ContextItem::Compaction { id, .. }
+            | ContextItem::Error { id, .. } => (*id, self.items[idx].tokens(self.encoding)),
+        };
+        self.hidden.insert(id);
+        self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
+    }
+
+    /// Hide the item at `idx`. For tool items the matching call/result
+    /// partner is hidden too, so the native `tool_call → tool` chain can
     /// never break (a lone `tool` message or an orphaned tool call is
     /// rejected by providers).
-    fn remove_item(&mut self, idx: usize) {
+    fn hide_item(&mut self, idx: usize) {
         let is_call = matches!(self.items[idx], ContextItem::ToolCall { .. });
         let Some(cid) = self.items[idx].call_id().map(str::to_string) else {
-            self.remove_at(idx);
+            self.hide_at(idx);
             return;
         };
         let partner = self.items.iter().position(|it| match it {
@@ -1110,26 +1235,13 @@ impl ContextManager {
             _ => false,
         });
         match partner {
-            // Remove both halves so the native pairing never breaks; the
-            // higher index first so the lower one stays valid.
+            // Hide both halves so the native pairing never breaks.
             Some(p) => {
-                self.remove_at(idx.max(p));
-                self.remove_at(idx.min(p));
+                self.hide_at(idx.max(p));
+                self.hide_at(idx.min(p));
             }
-            // No partner (orphan) — remove just this item.
-            None => self.remove_at(idx),
+            // No partner (orphan) — hide just this item.
+            None => self.hide_at(idx),
         }
-    }
-
-    /// Remove the item at `idx` and adjust the cached token total (the doomed
-    /// item's cost is re-tokenized here — removals are rare and bounded, so
-    /// this is the cheap side of not keeping a per-item cost map in sync).
-    fn remove_at(&mut self, idx: usize) {
-        // Removals are rare and bounded — re-tokenizing the doomed item here
-        // (instead of keeping a per-item cost map in sync) is the cheap side
-        // of the trade.
-        let tokens = self.items[idx].tokens(self.encoding);
-        self.items.remove(idx);
-        self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
     }
 }

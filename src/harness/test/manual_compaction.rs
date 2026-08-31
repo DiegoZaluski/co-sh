@@ -4,7 +4,7 @@
 //! the remainder — reusing the automatic compaction's events end to end.
 
 use super::super::core::Harness;
-use crate::harness::context::{ContextManager, RunOutcome};
+use crate::harness::context::{ContextItem, ContextManager, RunOutcome};
 use crate::harness::core::ManualCompactionOutcome;
 use crate::harness::events::{HarnessEvent, LlmCompactionEvent};
 use std::sync::Arc;
@@ -32,11 +32,15 @@ async fn compact_on_demand_grinds_then_summarizes_below_the_trigger() {
     let outcome = h.compact_on_demand(&tx, stop_signal).await;
 
     assert_eq!(outcome, ManualCompactionOutcome::Compacted);
-    assert_eq!(
-        h.context_manager.items_snapshot().len(),
-        1,
-        "the timeline folds into the single summary"
+    // Append-only: the timeline is retained behind the new anchor — the model
+    // sees only the summary.
+    let items = h.context_manager.items_snapshot();
+    assert!(
+        items.len() > 1,
+        "the pre-compaction timeline is retained (append-only)"
     );
+    assert!(matches!(items.last(), Some(ContextItem::Compaction { .. })));
+    assert_eq!(h.context_manager.build_messages("").len(), 1);
 
     // The automatic path's lifecycle reached the TUI: Started + Finished and
     // a persisted snapshot.

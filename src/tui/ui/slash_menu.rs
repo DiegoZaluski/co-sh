@@ -122,6 +122,10 @@ impl SlashMenu {
                 name: "rename".into(),
                 desc: "Rename the current session".into(),
             },
+            SlashCommand {
+                name: "undo".into(),
+                desc: "Roll back to a pre-revert snapshot".into(),
+            },
         ];
 
         Self {

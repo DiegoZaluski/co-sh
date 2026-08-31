@@ -261,6 +261,14 @@ pub enum DialogType {
         is_last_user_message: bool,
     },
 
+    /// `/undo`: versioned `/tmp` snapshots taken before each revert. A bare
+    /// borderless list (`v1`, `v2`, …) — Enter or click rolls the session
+    /// files back to the picked version.
+    UndoList {
+        session_id: String,
+        versions: Vec<String>,
+    },
+
     /// Action picker for a PENDING queued message (the rows above the
     /// prompt): Edit, Delete, Copy. `queue` + `index` identify the clicked
     /// message inside its `VecDeque`.
@@ -555,6 +563,46 @@ impl DialogState {
                 if y_click >= list_top {
                     let row = (y_click - list_top) as usize;
                     if row < max_visible {
+                        instance.selected = row;
+                        return DialogAction::Confirmed;
+                    }
+                }
+
+                DialogAction::Consumed
+            }
+            DialogType::UndoList { versions, .. } => {
+                // Same compact geometry as the MessageActions dialog; the
+                // list holds one row per /tmp version.
+                let max_w = 64u16.min(area.width.saturating_sub(4));
+                let dialog_w = max_w.max(20).min(area.width.saturating_sub(2));
+                let items = versions.len().max(1);
+                let dialog_h = (items + 5) as u16;
+                let dialog_y = area
+                    .y
+                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+
+                if x < dialog_x
+                    || x >= dialog_x + dialog_w
+                    || y_click < dialog_y
+                    || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+
+                let header_pad = 4;
+                let header_x = dialog_x + header_pad;
+                let header_w = dialog_w.saturating_sub(header_pad * 2);
+                let esc_label = "esc";
+                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
+                if y_click == dialog_y + 1 && x >= esc_x && x < esc_x + esc_label.len() as u16 {
+                    return DialogAction::Dismissed;
+                }
+
+                let list_top = dialog_y + 4;
+                if y_click >= list_top {
+                    let row = (y_click - list_top) as usize;
+                    if row < items {
                         instance.selected = row;
                         return DialogAction::Confirmed;
                     }
@@ -2003,6 +2051,102 @@ impl DialogState {
                         y,
                         list_w.saturating_sub(2),
                         Style::default().fg(name_fg).bg(name_bg),
+                    );
+                }
+            }
+            DialogType::UndoList { versions, .. } => {
+                // Borderless floating box in the left-panel color — bare
+                // version list, exactly like the MessageActions surface.
+                let max_w = 64u16.min(area.width.saturating_sub(4));
+                let items = versions.len().max(1);
+                let dialog_h = (items + 5) as u16;
+                let dialog_w = max_w.max(20).min(area.width.saturating_sub(2));
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_y = area
+                    .y
+                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
+                let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+                let bg_color = rgba_color(theme.background_panel);
+                for y in dialog_area.y..dialog_area.bottom() {
+                    for x in dialog_area.x..dialog_area.right() {
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(
+                                Style::default()
+                                    .bg(bg_color)
+                                    .remove_modifier(Modifier::all()),
+                            );
+                            cell.set_diff_option(CellDiffOption::None);
+                        }
+                    }
+                }
+
+                let header_pad = 4;
+                let header_x = dialog_x + header_pad;
+                let header_w = dialog_w.saturating_sub(header_pad * 2);
+
+                let title_style = Style::default()
+                    .fg(rgba_color(theme.text))
+                    .add_modifier(Modifier::BOLD);
+                draw_text_line(buf, "Undo", header_x, dialog_y + 1, header_w, title_style);
+                let esc_label = "esc";
+                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
+                draw_text_line(
+                    buf,
+                    esc_label,
+                    esc_x,
+                    dialog_y + 1,
+                    header_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                // Line 2: subtle hint (muted).
+                draw_text_line(
+                    buf,
+                    "restore a snapshot",
+                    header_x,
+                    dialog_y + 2,
+                    header_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                // Lines 4+: bare version rows — nothing but the list.
+                let list_top = dialog_y + 4;
+                let list_pad = 1;
+                let list_x = dialog_x + list_pad;
+                let list_w = dialog_w.saturating_sub(list_pad * 2);
+                let selection = instance.selected.min(versions.len().saturating_sub(1));
+
+                for (idx, version) in versions.iter().enumerate() {
+                    let y = list_top + idx as u16;
+                    let is_selected = idx == selection;
+
+                    for cx in list_x..list_x + list_w {
+                        if let Some(cell) = buf.cell_mut((cx, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(bg_color));
+                        }
+                    }
+
+                    let name_style = if is_selected {
+                        Style::default()
+                            .fg(rgba_color(theme.primary))
+                            .add_modifier(Modifier::BOLD)
+                            .bg(bg_color)
+                    } else {
+                        Style::default().fg(rgba_color(theme.text)).bg(bg_color)
+                    };
+
+                    let indicator = if is_selected { "🞴 " } else { "   " };
+                    draw_text_line(buf, indicator, list_x, y, 3, name_style);
+                    draw_text_line(
+                        buf,
+                        version,
+                        list_x + 3,
+                        y,
+                        list_w.saturating_sub(3),
+                        name_style,
                     );
                 }
             }

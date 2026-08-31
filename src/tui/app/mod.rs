@@ -279,6 +279,9 @@ pub struct App {
     setup: crate::util::setup::Setup,
     /// Session persistence store (JSONL files on disk).
     session_store: SessionStore,
+    /// `/tmp` versioned snapshots taken before destructive display actions
+    /// (revert) — the `/undo` escape hatch.
+    undo_store: crate::undo_store::UndoStore,
     /// When set, the current Confirm dialog is asking about deleting a session.
     pending_delete_session_id: Option<String>,
     /// Message captured while the one-time Zen free-gateway prompt was open;
@@ -448,6 +451,7 @@ impl App {
             model_cache: crate::util::cache::StaleCache::new("cache", "model.json"),
             setup,
             session_store,
+            undo_store: crate::undo_store::UndoStore::new(),
             pending_delete_session_id: None,
             pending_zen_message: None,
             title_generated: false,

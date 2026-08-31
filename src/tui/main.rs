@@ -12,6 +12,7 @@ mod state;
 mod theme;
 mod types;
 mod ui;
+mod undo_store;
 mod usage;
 mod util;
 
