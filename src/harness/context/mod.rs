@@ -312,10 +312,12 @@ pub struct ContextManager {
     /// implicitly hidden too and are pruned from here on compaction.
     hidden: HashSet<u64>,
     /// The dedicated protected TODO block: mirrors the tools' `Plan` list and
-    /// renders it as a protected block at the FRONT of the messages (merged
-    /// into the leading `user` turn when there is one, so no two consecutive
-    /// `user` messages ever reach the provider). Never summarized — see
-    /// [`todo_ctxt`] for the protection and removal rules.
+    /// renders it as a protected block at the END of the messages (merged into
+    /// the trailing `user` turn when there is one — block first, steering
+    /// after — so no two consecutive `user` messages ever reach the provider).
+    /// The tail placement keeps the stable `[system → history]` prefix cached
+    /// across `plan_*` re-renders. Never summarized — see [`todo_ctxt`] for
+    /// the protection and removal rules.
     todo: TodoContext,
     /// Running token total of `items` (excluding the TODO block), kept in sync
     /// by the few mutation primitives (`push_item`, `hide_at`,
@@ -456,9 +458,11 @@ impl ContextManager {
     /// Replace the mirrored tool TODO list. The harness syncs it from the
     /// tools' `Plan` state at loop start and after every `plan_*` dispatch.
     /// The dedicated [`TodoContext`] renders it as a protected block at the
-    /// FRONT of the messages — structurally immune to every compaction phase
-    /// (see [`todo_ctxt`] for the removal rules: all tasks terminal, or the
-    /// model empties the plan).
+    /// END of the messages — after the history, merged into a trailing `user`
+    /// turn — structurally immune to every compaction phase and placed at the
+    /// tail so a re-render never invalidates the provider's prefix cache (see
+    /// [`todo_ctxt`] for the removal rules: all tasks terminal, or the model
+    /// empties the plan).
     pub fn set_todo_list(&mut self, list: TodoList) {
         self.todo.sync(list);
     }
@@ -1011,25 +1015,29 @@ impl ContextManager {
         {
             messages.push(user_message(current_input));
         }
-        // The protected TODO block goes at the FRONT — right after the system
-        // prompt (passed separately by the harness), before the conversation
-        // history. It is re-rendered live from the tools' Plan state on every
+        // The protected TODO block goes at the END — after the conversation
+        // history and the steering input, right where the model is about to
+        // generate. It is re-rendered live from the tools' Plan state on every
         // call, so it is structurally immune to even the LLM compaction (see
-        // `todo_ctxt`). When the first history message is itself a `user`
-        // turn, the block is MERGED into it instead of being injected as a
-        // second consecutive `user` message (rejected by some providers).
+        // `todo_ctxt`). The tail placement preserves the providers' exact-
+        // prefix caching: the stable [system → history] prefix keeps hitting
+        // the cache even when a `plan_*` dispatch re-renders the block, since
+        // a change only invalidates the tail (new, uncached content anyway).
+        // When the last message is itself a `user` turn, the block is MERGED
+        // into it (block first, steering after) instead of being injected as
+        // a second consecutive `user` message (rejected by some providers).
         if let Some(block) = self.todo.text() {
-            match messages.first_mut() {
-                Some(first) if first.role == "user" => {
-                    let existing = first.content.take().unwrap_or_default();
+            match messages.last_mut() {
+                Some(last) if last.role == "user" => {
+                    let existing = last.content.take().unwrap_or_default();
                     let mut combined = block;
                     if !existing.is_empty() {
                         combined.push_str("\n\n");
                         combined.push_str(&existing);
                     }
-                    first.content = Some(combined);
+                    last.content = Some(combined);
                 }
-                _ => messages.insert(0, user_message(&block)),
+                _ => messages.push(user_message(&block)),
             }
         }
         messages

@@ -3,13 +3,27 @@
 //! The [`ContextManager`](super::ContextManager) is the single owner of the
 //! conversation timeline. This separate mini-manager owns ONLY the tool TODO
 //! list — the plan the agent is executing — and renders it as a single
-//! protected block placed at the FRONT of the message list: right after the
-//! system prompt (which the harness passes separately), before the
-//! conversation history. When the first history message is itself a `user`
-//! turn, the block is merged into it (avoiding two consecutive `user`
-//! messages, which some providers reject); otherwise it is injected as its
-//! own `user` message. The model therefore always sees the current plan
-//! without needing to call `plan_todo_read` first, and cannot forget it.
+//! protected block placed at the END of the message list: after the
+//! conversation history and the steering input, right where the model is
+//! about to generate. When the last message is itself a `user` turn, the
+//! block is merged into it (block first, steering after — avoiding two
+//! consecutive `user` messages, which some providers reject); otherwise it is
+//! injected as its own trailing `user` message. The model therefore always
+//! sees the current plan without needing to call `plan_todo_read` first, and
+//! cannot forget it.
+//!
+//! # Cache-friendly placement
+//!
+//! Every provider caches the prompt by EXACT PREFIX (Anthropic `cache_control`
+//! auto mode, OpenAI automatic prefix caching, Gemini implicit caching). The
+//! tail placement keeps the stable `[system → history]` prefix byte-identical
+//! across requests, so a `plan_*` dispatch that re-renders the block only
+//! invalidates the tail — which is new, uncached content anyway. A front
+//! placement would instead invalidate the WHOLE history on every TODO change
+//! (a full-price reprocessing of the entire context on that request). The
+//! block "moving" one position per appended history turn costs nothing:
+//! prefix matching only needs the leading portion to match, and the history
+//! is append-only.
 //!
 //! # Protection
 //!
@@ -344,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn build_messages_merges_the_block_into_the_leading_user_turn() {
+    fn build_messages_merges_the_block_into_the_trailing_user_turn() {
         let mut m = cm(10_000);
         m.add_user("hello");
         m.set_todo_list(list(vec![group(
@@ -353,7 +367,8 @@ mod tests {
         )]));
         let msgs = m.build_messages("");
         // Merged: a single user message carrying the block AND the prompt —
-        // never two consecutive `user` messages.
+        // never two consecutive `user` messages. The block leads the merged
+        // message; the prompt follows it.
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "user");
         let text = msgs[0].content.as_deref().unwrap();
@@ -365,10 +380,11 @@ mod tests {
     }
 
     #[test]
-    fn build_messages_injects_the_block_when_the_first_turn_is_not_user() {
+    fn build_messages_injects_the_block_when_the_last_turn_is_not_user() {
         let mut m = cm(10_000);
-        // A restored/compacted timeline whose first message is the anchor
-        // (assistant role): the block cannot be merged — it is injected.
+        // A restored/compacted timeline whose visible history is just the
+        // assistant anchor: the block cannot be merged — it is appended as
+        // its own trailing `user` message.
         m.set_todo_list(list(vec![group(
             "Database",
             vec![item("task-1", TodoStatus::Pending)],
@@ -378,16 +394,16 @@ mod tests {
         m.apply_llm_summary("## Objective\n- keep going".into());
         let msgs = m.build_messages("");
         assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].role, "assistant");
+        let last = msgs.last().unwrap();
+        assert_eq!(last.role, "user");
         assert!(
-            msgs[0]
-                .content
+            last.content
                 .as_deref()
                 .unwrap()
                 .contains("## Tool TODOs"),
-            "the block is its own leading message here"
+            "the block is its own trailing message here"
         );
-        assert_eq!(msgs[1].role, "assistant");
     }
 
     // The whole point of the dedicated block: every compaction phase must
@@ -418,7 +434,9 @@ mod tests {
         // The useless-chain sweep: the block survives.
         m.run();
         assert!(
-            m.build_messages("")[0]
+            m.build_messages("")
+                .last()
+                .unwrap()
                 .content
                 .as_deref()
                 .unwrap()
@@ -429,7 +447,9 @@ mod tests {
         // the block is re-rendered from the mirror and survives.
         m.apply_llm_summary("## Objective\n- keep going".to_string());
         assert!(
-            m.build_messages("")[0]
+            m.build_messages("")
+                .last()
+                .unwrap()
                 .content
                 .as_deref()
                 .unwrap()
@@ -442,7 +462,9 @@ mod tests {
         m.add_tool_result_flagged("t1", "no matches", true);
         m.sweep_useless_chains();
         assert!(
-            m.build_messages("")[0]
+            m.build_messages("")
+                .last()
+                .unwrap()
                 .content
                 .as_deref()
                 .unwrap()
