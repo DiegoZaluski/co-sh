@@ -590,13 +590,12 @@ impl App {
                             }
                             DialogType::MessageActions {
                                 message_id,
-                                is_last_user_message,
+                                is_user_message,
                                 ..
                             } => {
-                                let max_options = if *is_last_user_message { 3 } else { 1 };
+                                let max_options = if *is_user_message { 3 } else { 1 };
                                 let selected = d.selected.min(max_options - 1);
-                                let action =
-                                    App::message_action_index(selected, *is_last_user_message);
+                                let action = App::message_action_index(selected, *is_user_message);
                                 let message_id = message_id.clone();
                                 self.dialog.pop();
                                 self.run_message_action(action, &message_id);
@@ -948,18 +947,13 @@ impl App {
             {
                 if let Some(message_id) = self.session_view.pending_message_action.take() {
                     let session = self.state.current_session();
-                    let is_last_user_message = session
-                        .and_then(|s| {
-                            s.messages
-                                .iter()
-                                .rposition(|m| m.role == crate::types::MessageRole::User)
-                        })
-                        .zip(
-                            session
-                                .and_then(|s| s.messages.iter().position(|m| m.id == message_id)),
-                        )
-                        .map(|(last_user_idx, clicked_idx)| last_user_idx == clicked_idx)
-                        .unwrap_or(false);
+                    // Any USER message offers Revert/Fork (append-only context
+                    // makes the mapping valid for the whole timeline) — legacy
+                    // rule was "last user message only". Assistant messages
+                    // keep Copy-only.
+                    let is_user_message = session
+                        .and_then(|s| s.messages.iter().find(|m| m.id == message_id))
+                        .is_some_and(|m| m.role == crate::types::MessageRole::User);
 
                     let preview = session
                         .and_then(|s| s.messages.iter().find(|m| m.id == message_id))
@@ -969,7 +963,7 @@ impl App {
                     self.dialog.replace(DialogType::MessageActions {
                         message_id,
                         preview,
-                        is_last_user_message,
+                        is_user_message,
                     });
                     self.session_view.hovered_msg_idx = None;
                 }

@@ -20,19 +20,19 @@ impl App {
             return false;
         }
 
-        let (message_id, is_last_user_message) = match self.dialog.current() {
+        let (message_id, is_user_message) = match self.dialog.current() {
             Some(d) => match &d.dialog_type {
                 DialogType::MessageActions {
                     message_id,
-                    is_last_user_message,
+                    is_user_message,
                     ..
-                } => (message_id.clone(), *is_last_user_message),
+                } => (message_id.clone(), *is_user_message),
                 _ => return false,
             },
             None => return false,
         };
 
-        let max_options = if is_last_user_message { 3 } else { 1 };
+        let max_options = if is_user_message { 3 } else { 1 };
 
         match key {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -57,7 +57,7 @@ impl App {
                     .current()
                     .map_or(0, |d| d.selected.min(max_options - 1));
                 self.dialog.pop();
-                let action = Self::message_action_index(selected, is_last_user_message);
+                let action = Self::message_action_index(selected, is_user_message);
                 self.run_message_action(action, &message_id);
                 true
             }
@@ -71,14 +71,11 @@ impl App {
 
     /// Map the visual selection index to the action enum index.
     ///
-    /// - If `is_last_user_message`: selection 0=Revert, 1=Copy, 2=Fork
+    /// - If `is_user_message`: selection 0=Revert, 1=Copy, 2=Fork
     /// - Otherwise: only Copy is shown (visual index 0) → action index 1
-    pub(in crate::app) fn message_action_index(
-        selected: usize,
-        is_last_user_message: bool,
-    ) -> usize {
-        if is_last_user_message {
-            debug_assert!(selected < 3, "selected must be 0..2 for last user message");
+    pub(in crate::app) fn message_action_index(selected: usize, is_user_message: bool) -> usize {
+        if is_user_message {
+            debug_assert!(selected < 3, "selected must be 0..2 for a user message");
             selected
         } else {
             1 // Copy

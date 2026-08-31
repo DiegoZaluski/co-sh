@@ -247,18 +247,18 @@ pub enum DialogType {
         field: usize,
         cursor_pos: usize,
     },
-    /// Per-message action picker shown when clicking a user message in the
+    /// Per-message action picker shown when clicking a message in the
     /// transcript (port of opencode's "Message Actions" dialog): Copy always
-    /// available, Revert/Fork only for the last user message. `message_id`
-    /// identifies the clicked message.
+    /// available; Revert/Fork for ANY user message (append-only context makes
+    /// the mapping valid for the whole timeline). `message_id` identifies the
+    /// clicked message.
     MessageActions {
         message_id: String,
         /// Truncated text of the clicked message shown as context.
         preview: String,
-        /// Whether this is the last user message in the session (only the
-        /// last user message can be reverted/forked — the context item log is
-        /// truncated at the message boundary).
-        is_last_user_message: bool,
+        /// Whether the clicked message is a user message (assistant messages
+        /// keep Copy-only).
+        is_user_message: bool,
     },
 
     /// `/undo`: versioned `/tmp` snapshots taken before each revert. A bare
@@ -523,20 +523,15 @@ impl DialogState {
                 DialogAction::Consumed
             }
             DialogType::MessageActions {
-                is_last_user_message,
-                ..
+                is_user_message, ..
             } => {
-                // Same compact geometry as the ReasoningList (3 items for last
-                // user message, 1 item for older messages).
+                // Same compact geometry as the ReasoningList (3 items for a
+                // user message, 1 item for assistant messages).
                 let max_w = 64u16.min(area.width.saturating_sub(4));
                 let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
-                let max_visible = if *is_last_user_message {
-                    3usize
-                } else {
-                    1usize
-                };
+                let max_visible = if *is_user_message { 3usize } else { 1usize };
                 let dialog_h = (max_visible + 5) as u16;
                 let dialog_y = area
                     .y
@@ -2153,9 +2148,9 @@ impl DialogState {
             DialogType::MessageActions {
                 message_id: _,
                 preview,
-                is_last_user_message,
+                is_user_message,
             } => {
-                let selection = if *is_last_user_message {
+                let selection = if *is_user_message {
                     instance.selected.min(2)
                 } else {
                     // Only "Copy" is offered: the selection stays on row 0.
@@ -2165,11 +2160,7 @@ impl DialogState {
                 let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
 
-                let items = if *is_last_user_message {
-                    3usize
-                } else {
-                    1usize
-                };
+                let items = if *is_user_message { 3usize } else { 1usize };
                 let dialog_h = (items + 5) as u16;
                 let dialog_y = area
                     .y
@@ -2237,13 +2228,14 @@ impl DialogState {
 
                 // Lines 4+: the actions. The selected row is marked
                 // with the project's 🞴 indicator and primary color instead
-                // of a background swap. Only the last user message can be
-                // reverted/forked (the transcript is truncated at that point).
+                // of a background swap. Any user message can be reverted/
+                // forked (append-only context: the mapping covers the whole
+                // timeline).
                 let list_top = dialog_y + 4;
                 let list_pad = 1;
                 let list_x = dialog_x + list_pad;
                 let list_w = dialog_w.saturating_sub(list_pad * 2);
-                let options = if *is_last_user_message {
+                let options = if *is_user_message {
                     vec![
                         ("Revert", "Restore prompt, drop later messages"),
                         ("Copy", "Copy message text to clipboard"),

@@ -89,9 +89,9 @@ fn message_prompt_text_joins_non_synthetic_parts() {
 async fn message_actions_keyboard_cycles_three_options() {
     let mut app = app_with_user_message();
     app.dialog.replace(DialogType::MessageActions {
-        message_id: "u2".into(), // Last user message
+        message_id: "u2".into(), // A user message
         preview: "second".into(),
-        is_last_user_message: true,
+        is_user_message: true,
     });
     assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
     assert_eq!(app.dialog.current().unwrap().selected, 1);
@@ -106,9 +106,25 @@ async fn message_actions_keyboard_cycles_three_options() {
 }
 
 #[tokio::test]
+async fn message_actions_revert_works_at_a_non_last_user_message() {
+    // The legacy rule only allowed reverting the LAST user message; with
+    // append-only context the whole timeline is addressable. Reverting the
+    // FIRST message drops everything (the entire tail) and restores its
+    // prompt.
+    let mut app = app_with_user_message();
+    app.run_message_action(0, "u1");
+    let session = app.state.current_session().unwrap();
+    assert!(
+        session.messages.is_empty(),
+        "reverting the first message drops the entire tail"
+    );
+    assert_eq!(app.prompt_view.input, "hello world");
+    assert_eq!(app.prompt_view.cursor_pos, app.prompt_view.input.len());
+}
+
 async fn message_actions_revert_truncates_and_restores_prompt() {
     let mut app = app_with_user_message();
-    app.run_message_action(0, "u2"); // Use last user message for revert
+    app.run_message_action(0, "u2"); // Revert at a user message
     let session = app.state.current_session().unwrap();
     let ids: Vec<&str> = session.messages.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(
@@ -124,12 +140,12 @@ async fn message_actions_revert_truncates_and_restores_prompt() {
 #[tokio::test]
 async fn message_actions_fork_branches_new_session_up_to_message() {
     let mut app = app_with_user_message();
-    app.run_message_action(2, "u2"); // Use last user message for fork
+    app.run_message_action(2, "u2"); // Fork at a user message
     let old = app.state.current_session().unwrap();
     assert_eq!(
         old.messages.len(),
         3,
-        "fork keeps messages up to and including the last user message"
+        "fork keeps messages up to and including the clicked message"
     );
     assert!(old.messages.iter().any(|m| m.id == "u2"));
     assert!(old.title.contains("(fork)"));
@@ -162,9 +178,9 @@ async fn message_actions_copy_writes_clipboard_text() {
 async fn message_actions_dialog_renders_title_and_options() {
     let mut app = app_with_user_message();
     app.dialog.replace(DialogType::MessageActions {
-        message_id: "u2".into(), // Last user message
+        message_id: "u2".into(), // A user message
         preview: "second".into(),
-        is_last_user_message: true,
+        is_user_message: true,
     });
     let theme = app.theme.clone();
     let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
@@ -186,12 +202,14 @@ async fn message_actions_dialog_renders_title_and_options() {
 }
 
 #[tokio::test]
-async fn message_actions_non_last_user_message_only_shows_copy() {
+async fn message_actions_older_user_message_shows_all_options() {
+    // Append-only context: ANY user message can be reverted/forked — the
+    // legacy "last user message only" restriction is gone.
     let mut app = app_with_user_message();
     app.dialog.replace(DialogType::MessageActions {
         message_id: "u1".into(), // Not the last user message
         preview: "hello world".into(),
-        is_last_user_message: false,
+        is_user_message: true,
     });
     let theme = app.theme.clone();
     let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
@@ -209,14 +227,9 @@ async fn message_actions_non_last_user_message_only_shows_copy() {
     };
     let all: String = (0..24).map(line).collect();
     assert!(all.contains("Message Actions"), "title rendered");
-    assert!(all.contains("Copy"), "Copy is always available");
     assert!(
-        !all.contains("Revert"),
-        "Revert should not be shown for non-last user message"
-    );
-    assert!(
-        !all.contains("Fork"),
-        "Fork should not be shown for non-last user message"
+        all.contains("Revert") && all.contains("Copy") && all.contains("Fork"),
+        "a non-last user message now offers all three actions"
     );
 }
 
@@ -250,9 +263,9 @@ async fn message_actions_single_user_message_shows_all_options() {
     app.state.current_session_id = Some("single".into());
 
     app.dialog.replace(DialogType::MessageActions {
-        message_id: "u1".into(), // Only user message, so it's also the last
+        message_id: "u1".into(), // A user message
         preview: "only message".into(),
-        is_last_user_message: true,
+        is_user_message: true,
     });
     let theme = app.theme.clone();
     let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
@@ -279,30 +292,44 @@ async fn message_actions_single_user_message_shows_all_options() {
 #[test]
 fn message_action_index_maps_correctly() {
     use super::super::App;
-    assert_eq!(App::message_action_index(0, true), 0, "last user: 0=Revert");
-    assert_eq!(App::message_action_index(1, true), 1, "last user: 1=Copy");
-    assert_eq!(App::message_action_index(2, true), 2, "last user: 2=Fork");
+    assert_eq!(
+        App::message_action_index(0, true),
+        0,
+        "user message: 0=Revert"
+    );
+    assert_eq!(
+        App::message_action_index(1, true),
+        1,
+        "user message: 1=Copy"
+    );
+    assert_eq!(
+        App::message_action_index(2, true),
+        2,
+        "user message: 2=Fork"
+    );
     assert_eq!(
         App::message_action_index(0, false),
         1,
-        "non-last: visual 0 maps to Copy (1)"
+        "assistant message: visual 0 maps to Copy (1)"
     );
 }
 
 #[tokio::test]
-async fn message_actions_non_last_keyboard_only_cycles_one_option() {
+async fn message_actions_older_user_message_keyboard_cycles_three_options() {
     let mut app = app_with_user_message();
     app.dialog.replace(DialogType::MessageActions {
         message_id: "u1".into(),
         preview: "hello world".into(),
-        is_last_user_message: false,
+        is_user_message: true,
     });
-    // Down stays at 0 (only 1 option)
+    // Down cycles through all 3 options (Revert/Copy/Fork).
     assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
-    assert_eq!(app.dialog.current().unwrap().selected, 0);
-    // Up also stays at 0
+    assert_eq!(app.dialog.current().unwrap().selected, 1);
+    assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
+    assert_eq!(app.dialog.current().unwrap().selected, 2);
+    // Up goes back.
     assert!(app.handle_message_actions_dialog_key(KeyCode::Up));
-    assert_eq!(app.dialog.current().unwrap().selected, 0);
+    assert_eq!(app.dialog.current().unwrap().selected, 1);
     // Enter executes Copy (action index 1)
     assert!(app.handle_message_actions_dialog_key(KeyCode::Enter));
     assert!(!app.dialog.visible(), "dialog closed after Enter");
