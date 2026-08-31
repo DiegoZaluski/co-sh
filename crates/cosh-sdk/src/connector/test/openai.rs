@@ -128,6 +128,43 @@ async fn request_body_shape_and_reasoning() {
     assert_eq!(input[1]["role"], "user");
 }
 
+/// The prompt-cache controls are only on the wire when set: the affinity
+/// key and the extended retention are top-level Responses fields, and a
+/// default connector sends neither.
+#[tokio::test]
+async fn prompt_cache_key_and_retention_only_when_set() {
+    let (port, captured, _raw, handle) = mock_server(&text_stream("ok"), 200);
+    let c = openai_connector(port)
+        .with_prompt_cache_key("sess-123")
+        .with_prompt_cache_retention("24h");
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["prompt_cache_key"], "sess-123");
+    assert_eq!(json["prompt_cache_retention"], "24h");
+
+    // Default: neither field is sent.
+    let (port, captured, _raw, handle) = mock_server(&text_stream("ok"), 200);
+    let c = openai_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json.get("prompt_cache_key").is_none());
+    assert!(json.get("prompt_cache_retention").is_none());
+}
+
 /// In inline mode the request must NOT carry native `tools`.
 #[tokio::test]
 async fn inline_mode_omits_tools() {

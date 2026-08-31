@@ -330,6 +330,20 @@ fn build_request(
     if let Some(user) = &params.user {
         map.insert("user".to_string(), Value::String(user.clone()));
     }
+    // Prompt-cache controls: the affinity key routes the session's requests
+    // to the machines holding its cached prefixes (required for reliable
+    // matching on GPT-5.6+); the retention extends how long those prefixes
+    // stay cached. Both are Responses-API top-level fields; unset = the
+    // provider's default behavior.
+    if let Some(key) = &params.prompt_cache_key {
+        map.insert("prompt_cache_key".to_string(), Value::String(key.clone()));
+    }
+    if let Some(retention) = &params.openai_cache_retention {
+        map.insert(
+            "prompt_cache_retention".to_string(),
+            Value::String(retention.clone()),
+        );
+    }
     req
 }
 

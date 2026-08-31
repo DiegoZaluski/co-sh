@@ -2420,8 +2420,22 @@ impl Harness {
                     let (provider, model) = self.fallbacks.remove(0);
                     match Connector::new(&provider) {
                         Ok(c) => {
+                            // Carry the session-level prompt-cache settings
+                            // across the rebuild: the TTL choice, the cache-
+                            // affinity key and the retention choice belong to
+                            // the SESSION, not the model — a fallback switch
+                            // must not silently drop them (each field is only
+                            // read by the caller family that implements it).
+                            let mut c = c.with_model(&model).with_prompt_cache_ttl_1h(
+                                self.connector.prompt_cache_ttl_1h(),
+                            );
+                            if let Some(key) = self.connector.prompt_cache_key() {
+                                c = c.with_prompt_cache_key(key);
+                            }
+                            if let Some(retention) = self.connector.prompt_cache_retention() {
+                                c = c.with_prompt_cache_retention(retention);
+                            }
                             let mut c = c
-                                .with_model(&model)
                                 // Re-apply the tool-call mode: the fallback
                                 // connector is built from scratch and would
                                 // otherwise silently revert to Native (the

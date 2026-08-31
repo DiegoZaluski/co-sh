@@ -259,6 +259,55 @@ impl Connector {
         self
     }
 
+    /// The 1-hour prompt-cache TTL state set via
+    /// [`with_prompt_cache_ttl_1h`](Self::with_prompt_cache_ttl_1h).
+    ///
+    /// Lets callers (e.g. the harness) re-apply the same choice when the
+    /// connector is rebuilt for a fallback provider or model.
+    #[must_use]
+    pub fn prompt_cache_ttl_1h(&self) -> bool {
+        self.params.prompt_cache.one_hour
+    }
+
+    /// Send the OpenAI Responses-API `prompt_cache_key` on requests.
+    ///
+    /// The key routes a session's requests to the machines holding its
+    /// cached prompt prefixes, which directly improves cache hit rates;
+    /// GPT-5.6 and later require it for reliable cache-breakpoint matching.
+    /// Pass a stable, non-identifying value (a session UUID or hash) shared
+    /// by every request of the same conversation. Other providers ignore
+    /// the setting entirely.
+    pub fn with_prompt_cache_key(mut self, v: impl Into<String>) -> Self {
+        self.params.prompt_cache_key = Some(v.into());
+        self
+    }
+
+    /// The cache-affinity key set via
+    /// [`with_prompt_cache_key`](Self::with_prompt_cache_key).
+    #[must_use]
+    pub fn prompt_cache_key(&self) -> Option<&str> {
+        self.params.prompt_cache_key.as_deref()
+    }
+
+    /// Extend the OpenAI prompt-cache retention (Responses API only, e.g.
+    /// `"24h"`).
+    ///
+    /// Longer retention keeps cached prefixes alive across hours-long gaps,
+    /// so a resumed session hits the cache again instead of reprocessing
+    /// the whole context. Unset = the model-dependent default. Only
+    /// supported by recent OpenAI models — older ones ignore the field.
+    pub fn with_prompt_cache_retention(mut self, v: impl Into<String>) -> Self {
+        self.params.openai_cache_retention = Some(v.into());
+        self
+    }
+
+    /// The retention set via
+    /// [`with_prompt_cache_retention`](Self::with_prompt_cache_retention).
+    #[must_use]
+    pub fn prompt_cache_retention(&self) -> Option<&str> {
+        self.params.openai_cache_retention.as_deref()
+    }
+
     /// Send a chat completion request with a user prompt.
     ///
     /// # Errors

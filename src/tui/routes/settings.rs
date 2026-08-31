@@ -58,7 +58,33 @@ fn settings_items() -> &'static [SettingsItem] {
             description: "Use OpenCode's free models without login when no API key is set",
             event: "",
         },
+        SettingsItem {
+            id: "anthropic_cache_ttl",
+            label: "Anthropic cache TTL",
+            description: "How long Anthropic's prompt cache survives between turns (1h costs 2x per write but rides out long tool calls)",
+            event: "",
+        },
+        SettingsItem {
+            id: "openai_cache_retention",
+            label: "OpenAI cache retention",
+            description: "How long OpenAI may keep your prompt cache (24h helps resumed sessions; older models ignore it)",
+            event: "",
+        },
     ]
+}
+
+/// The current value of a CHOICE setting (rendered in place of the ✔/✗
+/// switch symbol), or `None` for plain switches.
+fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
+    match id {
+        "anthropic_cache_ttl" => Some(crate::util::setup::format_cache_duration(
+            setup.cache.anthropic_ttl_min,
+        )),
+        "openai_cache_retention" => Some(crate::util::setup::format_cache_duration(
+            setup.cache.openai_retention_min,
+        )),
+        _ => None,
+    }
 }
 
 /// Each category owns its own switch, so toggling one never leaks into the
@@ -285,6 +311,9 @@ pub enum SettingsAction {
         event: &'static str,
         index: Option<usize>,
     },
+    /// Open the cache-duration input box for `setting` (a Settings-item id:
+    /// "anthropic_cache_ttl" / "openai_cache_retention").
+    OpenCacheInput { setting: &'static str },
 }
 
 // View
@@ -320,6 +349,12 @@ impl SettingsView {
         match rows.get(idx)? {
             SettingsRow::Category(i) => {
                 let item = &settings_items()[*i];
+                // Choice settings (cache TTL/retention) open a duration
+                // input box instead of toggling a switch — the value is a
+                // free-form user choice, not a hardcoded cycle.
+                if cache_choice_value(item.id, setup).is_some() {
+                    return Some(SettingsAction::OpenCacheInput { setting: item.id });
+                }
                 // Standalone switches (no hook sub-list) flip their own
                 // persisted field.
                 if item.event.is_empty() && item.id == "zen_free_gateway" {
@@ -420,6 +455,21 @@ impl SettingsView {
                     let shown = in_window(idx, visible, self.selection.scroll_offset);
                     let item = &settings_items()[*item];
 
+                    // Choice rows render "label: value" instead of the
+                    // ✔/✗ switch symbol.
+                    if let Some(value) = cache_choice_value(item.id, setup) {
+                        let label = format!("{}: {}", item.label, value);
+                        draw_text(
+                            buf,
+                            &label,
+                            row_x + 2,
+                            y,
+                            area,
+                            Style::default().fg(if is_selected && shown { primary } else { fg }),
+                        );
+                        continue;
+                    }
+
                     let enabled = is_enabled(item, setup);
                     let symbol = if enabled { "✔" } else { "✗" };
                     let sym_color = if enabled { Color::Green } else { Color::Red };
@@ -497,6 +547,10 @@ fn max_row_width(setup: &Setup) -> usize {
         .iter()
         .map(|item| {
             let mut len = item.description.len().max(2 + item.label.len()); // "✔ PreToolUse hooks"
+            // Choice rows render "label: value" at the same indent.
+            if let Some(v) = cache_choice_value(item.id, setup) {
+                len = len.max(2 + item.label.len() + 2 + v.len());
+            }
             if item.id == "zen_free_gateway" {
                 len = len.max(ZEN_TERMS_LINK.len());
             }
@@ -614,6 +668,8 @@ mod tests {
                 SettingsRow::Category(0),
                 SettingsRow::Category(1),
                 SettingsRow::Category(2),
+                SettingsRow::Category(3),
+                SettingsRow::Category(4),
             ]
         );
 
@@ -638,8 +694,70 @@ mod tests {
                     event: POST_TOOL_USE_EVENT
                 },
                 SettingsRow::Category(2),
+                SettingsRow::Category(3),
+                SettingsRow::Category(4),
             ]
         );
+    }
+
+    /// The cache TTL/retention rows are CHOICE settings: activation opens
+    /// the duration input box (no value changes in place), and the rendered
+    /// label carries the currently configured duration.
+    #[test]
+    fn cache_choices_open_the_duration_input() {
+        let mut setup = Setup::default();
+        assert_eq!(
+            cache_choice_value("anthropic_cache_ttl", &setup),
+            Some("default".to_string())
+        );
+
+        let mut view = SettingsView::new();
+        view.selection.selected_index = selectable_rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Category(3)))
+            .unwrap();
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::OpenCacheInput {
+                setting: "anthropic_cache_ttl"
+            })
+        );
+        // Activation NEVER mutates the persisted value by itself.
+        assert_eq!(setup.cache.anthropic_ttl_min, 0);
+
+        view.selection.selected_index = selectable_rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Category(4)))
+            .unwrap();
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::OpenCacheInput {
+                setting: "openai_cache_retention"
+            })
+        );
+        assert_eq!(setup.cache.openai_retention_min, 0);
+
+        // The rendered row carries the configured value ("label: value").
+        setup.cache.anthropic_ttl_min = 90;
+        setup.cache.openai_retention_min = 1440;
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme, &setup);
+        let all: String = (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| {
+                        buf.cell((x, y))
+                            .map(|c| c.symbol().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<String>();
+        assert!(all.contains("Anthropic cache TTL: 1h30m"));
+        assert!(all.contains("OpenAI cache retention: 24h"));
+        assert!(!all.contains("✗ Anthropic cache TTL"));
     }
 
     /// The Zen free-gateway row flips the persisted answer BOTH ways from

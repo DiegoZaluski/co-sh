@@ -461,6 +461,11 @@ impl App {
                             }) => {
                                 self.open_hook_form(event, index);
                             }
+                            Some(crate::routes::settings::SettingsAction::OpenCacheInput {
+                                setting,
+                            }) => {
+                                self.open_cache_ttl_input(setting);
+                            }
                             None => {}
                         }
                         return Ok(false);

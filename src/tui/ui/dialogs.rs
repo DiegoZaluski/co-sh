@@ -224,6 +224,15 @@ pub enum DialogType {
         input: String,
         cursor_pos: usize,
     },
+    /// Cache duration entry for one prompt-cache setting (Settings screen).
+    /// The user types a duration ("30m", "1h", "1h30m") or "default";
+    /// `setting` selects which persisted field the input applies to (a
+    /// Settings-item id: "anthropic_cache_ttl" / "openai_cache_retention").
+    CacheTtlInput {
+        setting: &'static str,
+        input: String,
+        cursor_pos: usize,
+    },
     /// Rename the current session: a text prompt prefilled with the current
     /// title, Enter applies, Esc cancels.
     RenameSession {
@@ -688,7 +697,9 @@ impl DialogState {
 
                 DialogAction::Consumed
             }
-            DialogType::ApiKeyInput { .. } | DialogType::LocalUrlInput { .. } => {
+            DialogType::ApiKeyInput { .. }
+            | DialogType::LocalUrlInput { .. }
+            | DialogType::CacheTtlInput { .. } => {
                 // Click outside the dialog box → dismiss
                 let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
                 let dialog_h = 7;
@@ -1476,6 +1487,24 @@ impl DialogState {
                     &instance.cursor,
                     &format!("Server URL for {provider}"),
                     "e.g. http://127.0.0.1:8080",
+                    false,
+                    input,
+                    *cursor_pos,
+                );
+            }
+            DialogType::CacheTtlInput {
+                input,
+                cursor_pos,
+                ..
+            } => {
+                render_text_input_dialog(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    "Prompt cache duration",
+                    "e.g. 30m, 1h, 1h30m — empty or \"default\" resets",
                     false,
                     input,
                     *cursor_pos,
@@ -2594,8 +2623,10 @@ fn render_text_input_dialog(
     let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
     let _dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
-    // Fill background with theme background_element color
-    let bg_color = rgba_color(theme.background_element);
+    // Fill background with the LEFT PANEL color — the modal box reads as
+    // the same surface layer as the sidebar (the hook registration form
+    // already follows this rule).
+    let bg_color = rgba_color(theme.background_panel);
     for y in dialog_y..dialog_y + dialog_h {
         for x in dialog_x..dialog_x + dialog_w {
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -2683,10 +2714,11 @@ fn render_text_input_dialog(
         Style::default().fg(rgba_color(theme.text_muted)),
     );
 
-    // Input field (blinking cursor at cursor_pos)
+    // Input field (blinking cursor at cursor_pos) — same surface as the
+    // box itself (the left panel color), never the old element color.
     let input_x = content_x;
     let input_y = dialog_y + 4;
-    let bg_element = rgba_color(theme.background_element);
+    let bg_element = bg_color;
 
     // Clear input field background
     for cx in input_x..input_x + content_w {

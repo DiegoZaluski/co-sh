@@ -234,6 +234,13 @@ impl App {
         let cwd = self.state.working_directory.clone();
         let mode = self.state.mode;
 
+        // Session-level prompt-cache settings: the user's TTL/retention
+        // choices (Settings screen) and the session id as the OpenAI
+        // cache-affinity key — a routing hint, never user data.
+        let anthropic_ttl_1h = self.setup.anthropic_cache_ttl_1h();
+        let openai_cache_retention = self.setup.openai_cache_retention().map(String::from);
+        let cache_key = self.state.current_session_id.clone();
+
         // Create a fresh answer channel for this agent loop invocation
         let (answer_tx, answer_rx) = mpsc::unbounded_channel();
         self.answer_tx = answer_tx;
@@ -304,6 +311,23 @@ impl App {
 
                     let connector;
                     let mut remaining: Vec<(String, String)> = Vec::new();
+                    // Apply the session-level prompt-cache settings to every
+                    // connector this loop builds: TTL/retention choices and
+                    // the cache-affinity key. Each field is only read by the
+                    // caller that implements it (Claude TTL, OpenAI
+                    // key/retention), so applying them unconditionally is
+                    // safe across fallback families.
+                    let apply_cache = |c: Connector| {
+                        let c = c.with_prompt_cache_ttl_1h(anthropic_ttl_1h);
+                        let c = match &cache_key {
+                            Some(id) => c.with_prompt_cache_key(id),
+                            None => c,
+                        };
+                        match &openai_cache_retention {
+                            Some(retention) => c.with_prompt_cache_retention(retention),
+                            None => c,
+                        }
+                    };
                     if model.as_deref() == Some("auto") {
                         let mut last_err = String::new();
                         let mut found = None;
@@ -333,7 +357,7 @@ impl App {
                                     {
                                         c = c.with_reasoning_effort(resolved);
                                     }
-                                    found = Some((c, i));
+                                    found = Some((apply_cache(c), i));
                                     break;
                                 }
                                 Err(e) => {
@@ -375,7 +399,7 @@ impl App {
                                 // inline) — the two delivery paths are
                                 // mutually exclusive at the request level.
                                 let with_model = with_model.with_tool_call_mode(tool_call_mode);
-                                connector = if let Some(ref r) = reasoning {
+                                let with_model = if let Some(ref r) = reasoning {
                                     // Map the chosen level onto the closest
                                     // one the model actually accepts (e.g.
                                     // "medium" on a low/high-only model) —
@@ -395,6 +419,7 @@ impl App {
                                 } else {
                                     with_model
                                 };
+                                connector = apply_cache(with_model);
                             }
                             Err(e) => {
                                 let _ = event_tx.send(HarnessEvent::Error {

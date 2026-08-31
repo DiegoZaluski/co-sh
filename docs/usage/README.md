@@ -6,4 +6,5 @@ Unlike the other `docs/` directories (which document implementation details for 
 
 ## Available Guides
 
-- [PreToolUse Hooks](hooks.md) — Run custom shell commands before each tool call to block, allow, rewrite, or inject context.
+- [Lifecycle Hooks](hooks.md) — Run custom shell commands before each tool call (PreToolUse) or after each successful call (PostToolUse) to block, allow, rewrite, or inject context.
+- [Setup Reference](setup.md) — Complete reference for `~/.config/cosh/setup.json`: appearance, tools, routing, hooks, providers, model persistence, prompt caching, and environment variables.

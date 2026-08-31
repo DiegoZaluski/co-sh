@@ -44,6 +44,9 @@ impl App {
                         }
                         | DialogType::LocalUrlInput {
                             input, cursor_pos, ..
+                        }
+                        | DialogType::CacheTtlInput {
+                            input, cursor_pos, ..
                         } = &mut d.dialog_type
                     {
                         let cleaned: String =

@@ -320,6 +320,18 @@ pub struct Parameters {
     /// the conversation grows, which is what agentic multi-turn loops want.
     #[zeroize(skip)]
     pub(crate) prompt_cache: PromptCacheConfig,
+    /// OpenAI Responses API only: cache-affinity routing key
+    /// (`prompt_cache_key`). Improves cache hit rates by routing a session's
+    /// requests to the machines holding its cached prefixes; GPT-5.6+ needs
+    /// it for reliable breakpoint matching. Other callers are unaffected.
+    #[zeroize(skip)]
+    pub(crate) prompt_cache_key: Option<String>,
+    /// OpenAI Responses API only: extended prompt-cache retention
+    /// (`prompt_cache_retention`, e.g. `"24h"`). Longer retention helps
+    /// sessions resumed hours later hit the cache again. Unset = the
+    /// model-dependent default. Other callers are unaffected.
+    #[zeroize(skip)]
+    pub(crate) openai_cache_retention: Option<String>,
     /// Opaque session identifier for cache-affinity routing. When set,
     /// requests carry `x-session-id` and `x-session-affinity` headers with
     /// this value so gateways/proxies can pin a session's requests (and
@@ -365,6 +377,8 @@ impl Default for Parameters {
             retry_delay_override: None,
             max_retries: None,
             prompt_cache: PromptCacheConfig::default(),
+            prompt_cache_key: None,
+            openai_cache_retention: None,
             session_id: None,
             user: None,
             base_url: None,

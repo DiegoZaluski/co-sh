@@ -71,6 +71,52 @@ async fn hook_input_dialog_esc_discards() {
     );
 }
 
+/// The cache-duration input accepts "1h30m"-style free-form durations:
+/// Enter parses and persists the minutes; an invalid value keeps the box
+/// open without touching setup.
+#[tokio::test]
+async fn cache_ttl_input_parses_and_persists_minutes() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.dialog.show(DialogType::CacheTtlInput {
+        setting: "anthropic_cache_ttl",
+        input: String::new(),
+        cursor_pos: 0,
+    });
+
+    // Typing goes through the shared single-input mechanics.
+    for ch in "1h30m".chars() {
+        assert!(app.handle_text_input_dialog_key(KeyCode::Char(ch)));
+    }
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(!app.dialog.visible(), "a valid duration closes the box");
+    assert_eq!(app.setup.cache.anthropic_ttl_min, 90);
+    assert!(app.setup.anthropic_cache_ttl_1h(), "90m maps onto the 1h TTL");
+
+    // Invalid input keeps the box open and persists nothing.
+    app.dialog.show(DialogType::CacheTtlInput {
+        setting: "openai_cache_retention",
+        input: "abc".into(),
+        cursor_pos: 3,
+    });
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(app.dialog.visible(), "an invalid duration stays open");
+    assert_eq!(app.setup.cache.openai_retention_min, 0);
+
+    // "default" resets the setting to 0 (the invalid "abc" is erased first).
+    for _ in 0..3 {
+        app.handle_text_input_dialog_key(KeyCode::Backspace);
+    }
+    for ch in "default".chars() {
+        app.handle_text_input_dialog_key(KeyCode::Char(ch));
+    }
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(!app.dialog.visible());
+    assert_eq!(app.setup.cache.openai_retention_min, 0);
+    assert_eq!(app.setup.openai_cache_retention(), None);
+}
+
 /// Clicking a value row inside the hook panel focuses the field and
 /// moves the insertion point (app-level path: Up-event gate included).
 #[tokio::test]

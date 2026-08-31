@@ -24,6 +24,7 @@ pub struct Setup {
     pub hooks: Hooks,
     pub providers: Providers,
     pub model: Model,
+    pub cache: Cache,
 }
 
 // Categories
@@ -120,6 +121,85 @@ pub struct Model {
     pub model: String,
     /// Reasoning effort for the last selected model (`None` = model default).
     pub reasoning: Option<String>,
+}
+
+// Cache
+
+/// Prompt-cache preferences.
+///
+/// The duration is the user's WISH in minutes; the connector layer maps it
+/// onto the closest value the target API actually supports (Anthropic only
+/// accepts 5m/1h TTLs; OpenAI only the 24h retention), so an arbitrary
+/// choice can never produce a rejected request. `0` = provider default.
+/// These are per-profile trade-offs (a longer-lived cache costs more per
+/// write and only pays off for certain usage patterns), so they are user
+/// settings chosen in the Settings screen rather than fixed behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Cache {
+    /// Anthropic prompt-cache TTL wish, in minutes (`0` = the 5-minute
+    /// default; any value above 5 maps onto the 1h TTL).
+    pub anthropic_ttl_min: u32,
+    /// OpenAI prompt-cache retention wish, in minutes (`0` = the
+    /// model-dependent default; any value above 0 maps onto the 24h
+    /// retention).
+    pub openai_retention_min: u32,
+}
+
+/// Parse a user-entered cache duration into minutes: `45`, `45m`, `1h`,
+/// `1h30m`, `90 m` (case-insensitive; a bare number means minutes).
+/// `""`, `"0"` and `"default"` mean the provider default (`None`).
+pub fn parse_cache_duration(input: &str) -> Result<Option<u32>, String> {
+    const INVALID: &str =
+        "Invalid duration. Use minutes or hours, e.g. 30m, 1h, 1h30m — or \"default\".";
+    let s = input.trim().to_lowercase();
+    if s.is_empty() || s == "default" {
+        return Ok(None);
+    }
+    let mut total: u32 = 0;
+    let mut num = String::new();
+    for ch in s.chars() {
+        match ch {
+            '0'..='9' => num.push(ch),
+            'm' => {
+                total = total.saturating_add(parse_duration_segment(&mut num, 1, INVALID)?);
+            }
+            'h' => {
+                total = total.saturating_add(parse_duration_segment(&mut num, 60, INVALID)?);
+            }
+            ' ' => {}
+            _ => return Err(INVALID.to_string()),
+        }
+    }
+    // A trailing bare number means minutes ("45" == "45m").
+    if !num.is_empty() {
+        total = total.saturating_add(parse_duration_segment(&mut num, 1, INVALID)?);
+    }
+    if total > 24 * 60 {
+        return Err("Maximum cache duration is 24h.".to_string());
+    }
+    Ok(Some(total))
+}
+
+/// Consume the accumulated digits as `value × multiplier` minutes.
+fn parse_duration_segment(num: &mut String, multiplier: u32, invalid: &str) -> Result<u32, String> {
+    let value: u32 = num.parse().map_err(|_| invalid.to_string())?;
+    num.clear();
+    Ok(value.saturating_mul(multiplier))
+}
+
+/// Human rendering of a duration in minutes: `0` → "default", whole hours →
+/// "1h", sub-hour → "45m", mixed → "1h30m".
+pub fn format_cache_duration(min: u32) -> String {
+    if min == 0 {
+        "default".to_string()
+    } else if min.is_multiple_of(60) {
+        format!("{}h", min / 60)
+    } else if min < 60 {
+        format!("{min}m")
+    } else {
+        format!("{}h{:02}m", min / 60, min % 60)
+    }
 }
 
 // Providers
@@ -303,6 +383,22 @@ impl Setup {
         self.providers.zen_public_opt_in
     }
 
+    /// Whether the user chose an extended Anthropic prompt-cache TTL (any
+    /// wish above the 5-minute default maps onto the 1h TTL — the only
+    /// extended value the API supports).
+    #[must_use]
+    pub fn anthropic_cache_ttl_1h(&self) -> bool {
+        self.cache.anthropic_ttl_min > 5
+    }
+
+    /// The extended OpenAI prompt-cache retention the user chose
+    /// (`None` = the model-dependent default; any wish maps onto the 24h
+    /// retention — the only extended value the API supports).
+    #[must_use]
+    pub fn openai_cache_retention(&self) -> Option<&'static str> {
+        (self.cache.openai_retention_min > 0).then_some("24h")
+    }
+
     /// Record the user's FINAL answer to the free-gateway prompt and
     /// persist. Deliberately write-once: a stored answer is never flipped by
     /// later calls, so the prompt can only come back by removing the field
@@ -328,6 +424,43 @@ mod tests {
         assert!(!parsed.appearance.transparent_background);
         assert_eq!(parsed.tools.tool_call_mode, "native");
         assert!(parsed.providers.local.is_empty());
+        assert_eq!(parsed.cache.anthropic_ttl_min, 0);
+        assert_eq!(parsed.cache.openai_retention_min, 0);
+    }
+
+    /// Free-form duration parsing: bare minutes, unit suffixes, mixed
+    /// forms, defaults — and the invalid inputs that must be rejected.
+    #[test]
+    fn cache_duration_parse_and_format_roundtrip() {
+        assert_eq!(parse_cache_duration(""), Ok(None));
+        assert_eq!(parse_cache_duration("default"), Ok(None));
+        assert_eq!(parse_cache_duration("0m"), Ok(Some(0)));
+        assert_eq!(parse_cache_duration("45"), Ok(Some(45)));
+        assert_eq!(parse_cache_duration("45m"), Ok(Some(45)));
+        assert_eq!(parse_cache_duration("90 M"), Ok(Some(90)));
+        assert_eq!(parse_cache_duration("1h"), Ok(Some(60)));
+        assert_eq!(parse_cache_duration("1H30m"), Ok(Some(90)));
+        assert_eq!(parse_cache_duration("2 h"), Ok(Some(120)));
+        assert!(parse_cache_duration("abc").is_err());
+        assert!(parse_cache_duration("1.5h").is_err());
+        assert!(parse_cache_duration("25h").is_err());
+        assert!(parse_cache_duration("100000000000m").is_err());
+
+        assert_eq!(format_cache_duration(0), "default");
+        assert_eq!(format_cache_duration(45), "45m");
+        assert_eq!(format_cache_duration(60), "1h");
+        assert_eq!(format_cache_duration(90), "1h30m");
+        assert_eq!(format_cache_duration(1440), "24h");
+
+        // The mapping accessors: Anthropic maps anything above 5 minutes
+        // onto the 1h TTL; OpenAI maps anything above 0 onto 24h.
+        let mut setup = Setup::default();
+        assert!(!setup.anthropic_cache_ttl_1h());
+        assert_eq!(setup.openai_cache_retention(), None);
+        setup.cache.anthropic_ttl_min = 30;
+        setup.cache.openai_retention_min = 1440;
+        assert!(setup.anthropic_cache_ttl_1h());
+        assert_eq!(setup.openai_cache_retention(), Some("24h"));
     }
 
     #[test]

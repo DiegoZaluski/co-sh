@@ -12,6 +12,7 @@ impl App {
                 Some(
                     DialogType::ApiKeyInput { .. }
                         | DialogType::LocalUrlInput { .. }
+                        | DialogType::CacheTtlInput { .. }
                         | DialogType::RenameSession { .. },
                 )
             )
@@ -40,6 +41,7 @@ impl App {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput { cursor_pos, .. }
                     | DialogType::LocalUrlInput { cursor_pos, .. }
+                    | DialogType::CacheTtlInput { cursor_pos, .. }
                     | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                     && *cursor_pos > 0
                 {
@@ -55,6 +57,9 @@ impl App {
                     | DialogType::LocalUrlInput {
                         input, cursor_pos, ..
                     }
+                    | DialogType::CacheTtlInput {
+                        input, cursor_pos, ..
+                    }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -68,6 +73,7 @@ impl App {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput { cursor_pos, .. }
                     | DialogType::LocalUrlInput { cursor_pos, .. }
+                    | DialogType::CacheTtlInput { cursor_pos, .. }
                     | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                 {
                     *cursor_pos = 0;
@@ -80,6 +86,9 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::LocalUrlInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::CacheTtlInput {
                         input, cursor_pos, ..
                     }
                     | DialogType::RenameSession {
@@ -96,6 +105,9 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::LocalUrlInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::CacheTtlInput {
                         input, cursor_pos, ..
                     }
                     | DialogType::RenameSession {
@@ -116,6 +128,9 @@ impl App {
                     | DialogType::LocalUrlInput {
                         input, cursor_pos, ..
                     }
+                    | DialogType::CacheTtlInput {
+                        input, cursor_pos, ..
+                    }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -133,6 +148,9 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::LocalUrlInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::CacheTtlInput {
                         input, cursor_pos, ..
                     }
                     | DialogType::RenameSession {
@@ -467,6 +485,26 @@ impl App {
         });
     }
 
+    /// Open the cache-duration input box for `setting` (a Settings-item id),
+    /// prefilled with the currently configured duration (blank = default).
+    pub(in crate::app) fn open_cache_ttl_input(&mut self, setting: &'static str) {
+        let minutes = match setting {
+            "anthropic_cache_ttl" => self.setup.cache.anthropic_ttl_min,
+            _ => self.setup.cache.openai_retention_min,
+        };
+        let current = crate::util::setup::format_cache_duration(minutes);
+        let input = if current == "default" {
+            String::new()
+        } else {
+            current
+        };
+        self.dialog.show(DialogType::CacheTtlInput {
+            setting,
+            cursor_pos: input.len(),
+            input,
+        });
+    }
+
     /// Perform the save for the current text input dialog (API key → keyring,
     /// local URL → setup.json). Returns `true` when the input was accepted.
     pub(in crate::app) fn save_text_input_dialog(&mut self) -> bool {
@@ -547,6 +585,33 @@ impl App {
                     self.setup.set_local_base_url(provider, trimmed);
                     self.model_cache.invalidate(provider);
                     true
+                }
+            }
+            DialogType::CacheTtlInput { setting, input, .. } => {
+                match crate::util::setup::parse_cache_duration(input) {
+                    Ok(minutes) => {
+                        let minutes = minutes.unwrap_or(0);
+                        match *setting {
+                            "anthropic_cache_ttl" => {
+                                self.setup.cache.anthropic_ttl_min = minutes;
+                            }
+                            _ => {
+                                self.setup.cache.openai_retention_min = minutes;
+                            }
+                        }
+                        self.setup.save();
+                        true
+                    }
+                    Err(message) => {
+                        use crate::ui::toast::{ToastOptions, ToastVariant};
+                        self.toast_state.show(ToastOptions {
+                            title: Some("Duration not saved".into()),
+                            message,
+                            variant: ToastVariant::Error,
+                            duration_ms: 6000,
+                        });
+                        false
+                    }
                 }
             }
             DialogType::HookInput { .. } => self.save_hook_input_dialog(),
