@@ -106,7 +106,18 @@ impl App {
                     }
                 }
                 HarnessEvent::Token { text } => {
-                    if text.trim().is_empty() {
+                    // Whitespace-only deltas are significant MID-STREAM when
+                    // they carry a newline (paragraph/line breaks): Gemini's
+                    // streamGenerateContent and several OpenAI-compatible
+                    // tokenizers emit standalone `"\n\n"` chunks, and
+                    // dropping them glues together text that should start
+                    // on a new line (the "missing line break" that only
+                    // some providers show). Whitespace WITHOUT a newline
+                    // stays noise (it renders identically bundled with the
+                    // words around it), and a whitespace-only delta never
+                    // OPENS a bubble either.
+                    let whitespace_only = text.trim().is_empty();
+                    if whitespace_only && !text.contains('\n') {
                         continue;
                     }
                     let cur_session = self.state.current_session_id.clone();
@@ -116,11 +127,19 @@ impl App {
                     // Append to the CURRENT attempt's message only — a fresh
                     // attempt never bleeds into the previous iteration's
                     // message (its tool parts would be at risk on a reset).
-                    let target = self
-                        .stream_msg_id
-                        .take()
+                    let taken_id = self.stream_msg_id.take();
+                    let target = taken_id
+                        .as_ref()
                         .filter(|(sid, _)| cur_session.as_deref() == Some(sid.as_str()))
-                        .and_then(|(_, mid)| session.messages.iter_mut().find(|m| m.id == mid));
+                        .and_then(|(_, mid)| session.messages.iter_mut().find(|m| m.id == *mid));
+                    if whitespace_only && target.is_none() {
+                        // Leading whitespace before any text must never open
+                        // a blank bubble — and the stream id goes back
+                        // untouched: a break chunk must not disturb the
+                        // attempt's bookkeeping.
+                        self.stream_msg_id = taken_id;
+                        continue;
+                    }
                     match target {
                         Some(msg) => {
                             self.stream_msg_id = cur_session.map(|sid| (sid, msg.id.clone()));

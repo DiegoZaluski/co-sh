@@ -365,3 +365,137 @@ async fn resuming_with_a_ctx_file_stays_silent() {
         "no toast when context exists"
     );
 }
+
+/// An app wired with one fresh current session, ready to receive harness
+/// events through the real intake (`poll_events`).
+fn app_with_fresh_session(title: &str) -> App {
+    let mut app = App::new("/tmp".to_string());
+    let id = generate_session_id();
+    app.state.add_empty_session(
+        id.clone(),
+        title.into(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    );
+    app.state.current_session_id = Some(id);
+    app
+}
+
+/// Assistant text parts currently on screen, in order.
+fn assistant_texts(app: &App) -> Vec<String> {
+    app.state
+        .current_session()
+        .unwrap()
+        .messages
+        .iter()
+        .filter(|m| m.role == crate::types::MessageRole::Assistant)
+        .flat_map(|m| {
+            m.parts.iter().filter_map(|p| match p {
+                crate::types::Part::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+/// Providers that emit whitespace-only stream deltas carrying a newline
+/// (Gemini's `streamGenerateContent` and several OpenAI-compatible
+/// tokenizers) used to lose their paragraph breaks: the token intake
+/// dropped EVERY whitespace-only token, so `["Hello", "\n\n", "world"]`
+/// glued into "Helloworld" — the "missing line break" that only some
+/// providers show. Newline-bearing deltas must survive (the markdown
+/// renderer turns `\n\n` into a paragraph break); pure whitespace WITHOUT a
+/// newline stays dropped (the old guard's noise filter).
+#[tokio::test]
+async fn newline_only_stream_deltas_keep_their_line_break() {
+    use cosh::harness::HarnessEvent;
+    let mut app = app_with_fresh_session("stream intake");
+    // Gemini-style standalone break chunks interleaved with word deltas,
+    // plus the whitespace-only shapes the old guard must keep dropping.
+    for text in ["Hello", "\n\n", "world", "  ", "!", "\t", "\n\n", "Bye"] {
+        app.event_tx
+            .send(HarnessEvent::Token { text: text.into() })
+            .ok();
+    }
+    app.poll_events();
+
+    // ONE message — the break deltas append, they never split the stream —
+    // with every newline intact and the bare-space/tab deltas gone.
+    assert_eq!(
+        assistant_texts(&app),
+        vec!["Hello\n\nworld!\n\nBye"],
+        "newline-bearing whitespace deltas are breaks, not noise"
+    );
+}
+
+/// The two tokenization styles produce the SAME transcript: a provider that
+/// streams breaks as standalone chunks (Gemini-like) and one that bundles
+/// the newline with the adjacent word (OpenAI-like) must render
+/// identically — that is what makes the bug per-provider instead of
+/// universal.
+#[tokio::test]
+async fn standalone_break_chunk_matches_bundled_newline_output() {
+    use cosh::harness::HarnessEvent;
+    let mut gemini = app_with_fresh_session("standalone breaks");
+    for text in ["Hello", "\n\n", "world"] {
+        gemini
+            .event_tx
+            .send(HarnessEvent::Token { text: text.into() })
+            .ok();
+    }
+    gemini.poll_events();
+
+    let mut openai = app_with_fresh_session("bundled breaks");
+    for text in ["Hello", "\n\nworld"] {
+        openai
+            .event_tx
+            .send(HarnessEvent::Token { text: text.into() })
+            .ok();
+    }
+    openai.poll_events();
+
+    assert_eq!(
+        assistant_texts(&gemini),
+        vec!["Hello\n\nworld"],
+        "standalone break deltas compose the full text"
+    );
+    assert_eq!(
+        assistant_texts(&gemini),
+        assistant_texts(&openai),
+        "both tokenization styles render identically"
+    );
+}
+
+/// A newline-only delta arriving BEFORE any text (stream not open yet)
+/// neither opens an assistant bubble nor breaks the next token's intake:
+/// the bubble still starts at the first real word, without a leading blank
+/// line.
+#[tokio::test]
+async fn leading_newline_delta_neither_opens_a_bubble_nor_breaks_the_stream() {
+    use cosh::harness::HarnessEvent;
+    let mut app = app_with_fresh_session("leading break");
+    app.event_tx
+        .send(HarnessEvent::Token {
+            text: "\n\n".into(),
+        })
+        .ok();
+    app.poll_events();
+    assert!(
+        assistant_texts(&app).is_empty(),
+        "whitespace must never open an empty bubble"
+    );
+
+    app.event_tx
+        .send(HarnessEvent::Token {
+            text: "Hello".into(),
+        })
+        .ok();
+    app.poll_events();
+    assert_eq!(
+        assistant_texts(&app),
+        vec!["Hello"],
+        "the stream continues normally after a dropped leading break"
+    );
+}
