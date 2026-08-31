@@ -74,8 +74,8 @@ fn walk(
     }
 }
 
-/// Indentation preserves hierarchy; containers prefix their children when the
-/// server did not already fill `container`.
+/// One line per symbol; enclosing symbols prefix their children as
+/// `container::name`.
 fn render(symbols: &[SymbolEntry]) -> String {
     symbols
         .iter()

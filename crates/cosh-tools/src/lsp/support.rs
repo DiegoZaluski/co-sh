@@ -3,11 +3,21 @@
 //! Private to the module: engines take these deps explicitly so they stay
 //! testable without the wrapper.
 
-use std::{ops::Range, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use cosh_sdk::lsp::{
-    DiagnosticsEngine, LanguageServer, LspError, Manager, lsp_types::OneOf, lsp_types::Position,
-    lsp_types::ServerCapabilities, offset_to_position, position_to_offset,
+    DiagnosticsEngine, LanguageServer, LspError, Manager, PositionEncoding,
+    lsp_types::{
+        DocumentChangeOperation, DocumentChanges, OneOf, Position, ServerCapabilities, TextEdit,
+        WorkspaceEdit,
+    },
+    offset_to_position, position_to_offset, uri_to_path,
 };
 
 /// Everything an engine needs from the wrapper, borrowed.
@@ -133,8 +143,9 @@ pub fn uri(path: &Path) -> Result<cosh_sdk::lsp::lsp_types::Uri, String> {
     cosh_sdk::lsp::uri_from_path(path).map_err(|err| err.to_string())
 }
 
-/// Capability predicate for `bool | registration-options` providers.
-pub fn provider_enabled(provider: &Option<OneOf<bool, serde_json::Value>>) -> bool {
+/// Capability predicate for `bool | registration-options` providers: an
+/// explicit `false` disables the capability; any options payload enables it.
+pub fn provider_enabled<T>(provider: &Option<OneOf<bool, T>>) -> bool {
     match provider {
         Some(OneOf::Left(enabled)) => *enabled,
         Some(OneOf::Right(_)) => true,
@@ -175,7 +186,7 @@ where
         match client.request_raw(&method, Some(params), timeout).await {
             Ok(value) if value.is_null() => continue,
             Ok(value) => {
-                let parsed: T = serde_json::from_value(value.clone()).map_err(|err| {
+                let parsed: T = serde_json::from_value(value).map_err(|err| {
                     format!("server `{}` returned malformed data: {err}", client.name())
                 })?;
                 return Ok(Some(parsed));
@@ -231,6 +242,111 @@ pub(crate) fn symbol_kind_name(kind: cosh_sdk::lsp::lsp_types::SymbolKind) -> St
 }
 
 // ── WorkspaceEdit application (shared by rename + code_actions) ────────
+
+/// Flatten a WorkspaceEdit into per-file planned edits, sorted back-to-front
+/// by byte offset so splicing never shifts pending ranges.
+///
+/// Handles both `changes` and `documentChanges`: our capabilities announce
+/// `documentChanges=false`, so conforming servers use `changes` — but both
+/// are handled defensively; some servers ignore negotiation.
+pub fn flatten_workspace_edit(
+    edit: &WorkspaceEdit,
+    encoding: PositionEncoding,
+) -> Result<BTreeMap<String, Vec<PlannedEdit>>, String> {
+    let mut out: BTreeMap<String, Vec<PlannedEdit>> = BTreeMap::new();
+
+    if let Some(document_changes) = &edit.document_changes {
+        match document_changes {
+            DocumentChanges::Edits(edits) => {
+                for doc_edit in edits {
+                    for edit in doc_edit.edits.iter() {
+                        let text_edit = match edit {
+                            OneOf::Left(edit) => edit,
+                            OneOf::Right(annotated) => &annotated.text_edit,
+                        };
+                        push_edit(
+                            uri_to_path(&doc_edit.text_document.uri),
+                            text_edit,
+                            encoding,
+                            &mut out,
+                        );
+                    }
+                }
+            }
+            DocumentChanges::Operations(ops) => {
+                for op in ops {
+                    match op {
+                        DocumentChangeOperation::Op(resource_op) => {
+                            log::warn!(
+                                "edit plan carries an unhandled resource op: {resource_op:?}"
+                            );
+                        }
+                        DocumentChangeOperation::Edit(doc_edit) => {
+                            for edit in doc_edit.edits.iter() {
+                                let text_edit = match edit {
+                                    OneOf::Left(edit) => edit,
+                                    OneOf::Right(annotated) => &annotated.text_edit,
+                                };
+                                push_edit(
+                                    uri_to_path(&doc_edit.text_document.uri),
+                                    text_edit,
+                                    encoding,
+                                    &mut out,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(changes) = &edit.changes {
+        for (uri, edits) in changes {
+            for edit in edits {
+                push_edit(uri_to_path(uri), edit, encoding, &mut out);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn push_edit(
+    target: Option<PathBuf>,
+    edit: &TextEdit,
+    encoding: PositionEncoding,
+    out: &mut BTreeMap<String, Vec<PlannedEdit>>,
+) {
+    let Some(path) = target else {
+        log::warn!("skipping non-file edit target");
+        return;
+    };
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) => {
+            log::warn!(
+                "skipping unreadable edit target `{}`: {err}",
+                path.display()
+            );
+            return;
+        }
+    };
+
+    let span = Range {
+        start: position_to_offset(&text, edit.range.start, encoding),
+        end: position_to_offset(&text, edit.range.end, encoding),
+    };
+
+    out.entry(path.display().to_string())
+        .or_default()
+        .push(PlannedEdit {
+            span,
+            new_text: edit.new_text.clone(),
+            line: usize::try_from(edit.range.start.line).unwrap_or(0) + 1,
+        });
+}
 
 /// One concrete replacement on disk.
 pub struct PlannedEdit {

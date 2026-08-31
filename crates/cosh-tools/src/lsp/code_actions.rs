@@ -9,7 +9,7 @@
 //! Without this, the model would need to manually figure out the fix from
 //! the diagnostic message — slower and more error-prone.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use cosh_sdk::lsp::{
     LanguageServer, PositionEncoding,
@@ -164,35 +164,12 @@ fn extract_edit_files(edit: Option<&WorkspaceEdit>) -> Vec<String> {
     files
 }
 
-/// Apply a WorkspaceEdit to disk using the shared splicing logic.
+/// Apply a WorkspaceEdit to disk using the shared flattening + splicing
+/// logic (handles both `changes` and `documentChanges`).
 fn apply_workspace_edit(edit: &WorkspaceEdit, encoding: PositionEncoding) -> Result<(), String> {
-    let mut per_file: BTreeMap<PathBuf, Vec<super::support::PlannedEdit>> = BTreeMap::new();
-
-    if let Some(changes) = &edit.changes {
-        for (uri, edits) in changes {
-            let Some(path) = cosh_sdk::lsp::uri_to_path(uri) else {
-                continue;
-            };
-            let text = std::fs::read_to_string(&path)
-                .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
-
-            let entry = per_file.entry(path).or_default();
-            for edit in edits {
-                let span = std::ops::Range {
-                    start: cosh_sdk::lsp::position_to_offset(&text, edit.range.start, encoding),
-                    end: cosh_sdk::lsp::position_to_offset(&text, edit.range.end, encoding),
-                };
-                entry.push(super::support::PlannedEdit {
-                    span,
-                    new_text: edit.new_text.clone(),
-                    line: usize::try_from(edit.range.start.line).unwrap_or(0) + 1,
-                });
-            }
-        }
-    }
-
+    let per_file = support::flatten_workspace_edit(edit, encoding)?;
     for (path, planned) in &per_file {
-        super::support::apply_edits(path, planned)?;
+        support::apply_edits(Path::new(path), planned)?;
     }
     Ok(())
 }

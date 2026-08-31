@@ -1,7 +1,7 @@
 //! `lsp_hover` engine: type/signature documentation at a position.
 
 use cosh_sdk::lsp::lsp_types::{
-    Hover,
+    Hover, HoverContents, MarkedString,
     request::{HoverRequest, Request as _},
 };
 use serde_json::json;
@@ -40,8 +40,8 @@ pub async fn run_hover(
 /// Flatten any of the three hover content shapes into plain text/markdown.
 fn render_contents(hover: &Hover) -> Option<String> {
     match &hover.contents {
-        lsp_types_shape::HoverContents::Scalar(value) => render_marked_string(value),
-        lsp_types_shape::HoverContents::Array(values) => {
+        HoverContents::Scalar(value) => render_marked_string(value),
+        HoverContents::Array(values) => {
             let parts: Vec<String> = values.iter().filter_map(render_marked_string).collect();
             if parts.is_empty() {
                 None
@@ -49,17 +49,15 @@ fn render_contents(hover: &Hover) -> Option<String> {
                 Some(parts.join("\n\n"))
             }
         }
-        lsp_types_shape::HoverContents::Markup(markup) => Some(markup.value.clone()),
+        HoverContents::Markup(markup) => Some(markup.value.clone()),
     }
 }
 
-fn render_marked_string(value: &lsp_types_shape::MarkedString) -> Option<String> {
+fn render_marked_string(value: &MarkedString) -> Option<String> {
     match value {
-        lsp_types_shape::MarkedString::String(text) => Some(text.clone()),
-        lsp_types_shape::MarkedString::LanguageString(block) => {
+        MarkedString::String(text) => Some(text.clone()),
+        MarkedString::LanguageString(block) => {
             Some(format!("```{}\n{}\n```", block.language, block.value))
         }
     }
 }
-
-use cosh_sdk::lsp::lsp_types as lsp_types_shape;

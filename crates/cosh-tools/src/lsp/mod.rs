@@ -519,12 +519,16 @@ fn json_description(
     description: &'static str,
     properties: &serde_json::Value,
 ) -> ToolDescription {
+    let mut schema = serde_json::json!({
+        "type": "object",
+        "properties": properties["properties"].clone(),
+    });
+    if let Some(required) = properties.get("required") {
+        schema["required"] = required.clone();
+    }
     serde_json::json!({
         "name": name,
         "description": description,
-        "inputSchema": {
-            "type": "object",
-            "properties": properties["properties"].clone(),
-        }
+        "inputSchema": schema,
     })
 }

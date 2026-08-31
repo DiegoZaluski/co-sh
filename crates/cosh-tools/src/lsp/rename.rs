@@ -9,19 +9,11 @@
 //! the model, looking at real numbers ("3 files, 12 edits") instead of a
 //! blind yes/no gate buried in the stack.
 
-use std::{
-    collections::BTreeMap,
-    ops::Range,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
-use cosh_sdk::lsp::{
-    PositionEncoding,
-    lsp_types::{
-        DocumentChangeOperation, DocumentChanges, OneOf as LspOneOf, TextEdit, WorkspaceEdit,
-        request::{Rename as RenameRequest, Request as _},
-    },
-    position_to_offset, uri_to_path,
+use cosh_sdk::lsp::lsp_types::{
+    WorkspaceEdit,
+    request::{Rename as RenameRequest, Request as _},
 };
 use serde_json::json;
 
@@ -52,14 +44,7 @@ pub async fn run_rename(
     let response: Option<WorkspaceEdit> = super::support::first_answer(
         &clients,
         deps.request_timeout,
-        |caps| {
-            caps.rename_provider
-                .as_ref()
-                .is_some_and(|provider| match provider {
-                    LspOneOf::Left(enabled) => *enabled,
-                    LspOneOf::Right(_) => true,
-                })
-        },
+        |caps| super::support::provider_enabled(&caps.rename_provider),
         |_client| (RenameRequest::METHOD.to_owned(), params.clone()),
     )
     .await?;
@@ -69,7 +54,7 @@ pub async fn run_rename(
 
     // Edits must be spliced with the same units they were computed in.
     let encoding = clients[0].position_encoding();
-    let plans = collect_edits(&workspace_edit, encoding)?;
+    let plans = support::flatten_workspace_edit(&workspace_edit, encoding)?;
 
     if plans.is_empty() {
         return Err("the server returned an empty rename plan".into());
@@ -118,110 +103,7 @@ pub async fn run_rename(
     })
 }
 
-/// Flatten a WorkspaceEdit into per-file planned replacements, sorted
-/// back-to-front by byte offset so splicing never shifts pending ranges.
-fn collect_edits(
-    edit: &WorkspaceEdit,
-    encoding: PositionEncoding,
-) -> Result<BTreeMap<String, Vec<support::PlannedEdit>>, String> {
-    let mut out: BTreeMap<String, Vec<support::PlannedEdit>> = BTreeMap::new();
-
-    // Our capabilities announce documentChanges=false, so conforming servers
-    // use `changes` — but handle both defensively; some ignore negotiation.
-    if let Some(document_changes) = &edit.document_changes {
-        match document_changes {
-            DocumentChanges::Edits(edits) => {
-                for doc_edit in edits {
-                    for edit in doc_edit.edits.iter() {
-                        let text_edit = match edit {
-                            LspOneOf::Left(edit) => edit,
-                            LspOneOf::Right(annotated) => &annotated.text_edit,
-                        };
-                        push_edit(
-                            uri_to_path(&doc_edit.text_document.uri),
-                            text_edit,
-                            encoding,
-                            &mut out,
-                        );
-                    }
-                }
-            }
-            DocumentChanges::Operations(ops) => {
-                for op in ops {
-                    match op {
-                        DocumentChangeOperation::Op(resource_op) => {
-                            log::warn!(
-                                "rename plan carries an unhandled resource op: {resource_op:?}"
-                            );
-                        }
-                        DocumentChangeOperation::Edit(doc_edit) => {
-                            for edit in doc_edit.edits.iter() {
-                                let text_edit = match edit {
-                                    LspOneOf::Left(edit) => edit,
-                                    LspOneOf::Right(annotated) => &annotated.text_edit,
-                                };
-                                push_edit(
-                                    uri_to_path(&doc_edit.text_document.uri),
-                                    text_edit,
-                                    encoding,
-                                    &mut out,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(changes) = &edit.changes {
-        for (uri, edits) in changes {
-            for edit in edits {
-                push_edit(uri_to_path(uri), edit, encoding, &mut out);
-            }
-        }
-    }
-
-    Ok(out)
-}
-
-fn push_edit(
-    target: Option<PathBuf>,
-    edit: &TextEdit,
-    encoding: PositionEncoding,
-    out: &mut BTreeMap<String, Vec<support::PlannedEdit>>,
-) {
-    let Some(path) = target else {
-        log::warn!("skipping non-file rename target");
-        return;
-    };
-
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) => {
-            log::warn!(
-                "skipping unreadable rename target `{}`: {err}",
-                path.display()
-            );
-            return;
-        }
-    };
-
-    let span = Range {
-        start: position_to_offset(&text, edit.range.start, encoding),
-        end: position_to_offset(&text, edit.range.end, encoding),
-    };
-
-    out.entry(path.display().to_string())
-        .or_default()
-        .push(support::PlannedEdit {
-            span,
-            new_text: edit.new_text.clone(),
-            line: usize::try_from(edit.range.start.line).unwrap_or(0) + 1,
-        });
-}
-
-/// Splice one file's edits back-to-front. Overlaps abort before any write.
+/// One planned edit rendered as `L{line} → {new}` for the plan preview.
 fn preview_line(edit: &support::PlannedEdit) -> String {
     format!("L{} → {}", edit.line, ellipsize(&edit.new_text, 60))
 }

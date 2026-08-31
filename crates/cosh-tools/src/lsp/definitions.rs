@@ -33,14 +33,7 @@ pub async fn run_definitions(
     let response = super::support::first_answer(
         &clients,
         deps.request_timeout,
-        |caps| {
-            caps.definition_provider
-                .as_ref()
-                .is_some_and(|provider| match provider {
-                    cosh_sdk::lsp::lsp_types::OneOf::Left(enabled) => *enabled,
-                    cosh_sdk::lsp::lsp_types::OneOf::Right(_) => true,
-                })
-        },
+        |caps| super::support::provider_enabled(&caps.definition_provider),
         |_client| (GotoDefinition::METHOD.to_owned(), params.clone()),
     )
     .await?;

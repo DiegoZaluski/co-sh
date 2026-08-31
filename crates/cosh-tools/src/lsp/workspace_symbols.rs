@@ -34,14 +34,7 @@ pub async fn run_workspace_symbols(
     let response: Option<Vec<WorkspaceSymbol>> = super::support::first_answer(
         &clients,
         deps.request_timeout,
-        |caps| {
-            caps.workspace_symbol_provider
-                .as_ref()
-                .is_some_and(|provider| match provider {
-                    cosh_sdk::lsp::lsp_types::OneOf::Left(enabled) => *enabled,
-                    cosh_sdk::lsp::lsp_types::OneOf::Right(_) => true,
-                })
-        },
+        |caps| super::support::provider_enabled(&caps.workspace_symbol_provider),
         |_client| (WorkspaceSymbolRequest::METHOD.to_owned(), params.clone()),
     )
     .await?;

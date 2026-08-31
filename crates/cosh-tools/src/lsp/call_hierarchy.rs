@@ -73,7 +73,6 @@ pub async fn run_call_hierarchy(
                 )
                 .await?;
             let unwrapped = response.unwrap_or_default();
-            eprintln!("DBG outgoing got {} results", unwrapped.len());
             unwrapped
                 .into_iter()
                 .take(max_items)
@@ -96,7 +95,6 @@ pub async fn run_call_hierarchy(
                 )
                 .await?;
             let unwrapped = response.unwrap_or_default();
-            eprintln!("DBG outgoing got {} results", unwrapped.len());
             unwrapped
                 .into_iter()
                 .take(max_items)

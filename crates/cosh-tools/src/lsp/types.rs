@@ -134,7 +134,7 @@ pub struct SymbolEntry {
     /// 1-based definition position.
     pub line: u32,
     pub character: u32,
-    /// Container name when the server reports one (e.g. enclosing impl).
+    /// Enclosing symbol from the hierarchy walk (e.g. the impl or parent fn).
     pub container: Option<String>,
 }
 

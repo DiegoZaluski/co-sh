@@ -6,8 +6,6 @@ use cosh_sdk::lsp::ClientKey;
 
 use super::{support::Deps, types::RestartInput, types::RestartOutput};
 
-/// Stop the server(s) serving `file_path` (or all running servers), then warm
-/// them back up so the agent's next query does not pay the spawn latency.
 fn key_names(keys: &[cosh_sdk::lsp::ClientKey]) -> String {
     keys.iter()
         .map(|key| key.server.as_str())
@@ -15,6 +13,8 @@ fn key_names(keys: &[cosh_sdk::lsp::ClientKey]) -> String {
         .join(", ")
 }
 
+/// Stop the server(s) serving `file_path` (or all running servers), then warm
+/// them back up so the agent's next query does not pay the spawn latency.
 pub async fn run_restart(deps: &Deps<'_>, input: &RestartInput) -> Result<RestartOutput, String> {
     let keys: Vec<ClientKey> = match &input.file_path {
         Some(file_path) => {
