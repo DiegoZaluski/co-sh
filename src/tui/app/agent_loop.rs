@@ -269,49 +269,18 @@ impl App {
         self.maybe_disable_recall_tool(&mut disabled_tools);
 
         let event_tx_panic = event_tx.clone();
-        // Build conversation history from existing session messages
-        let history: Vec<(String, String)> = self
-            .state
-            .current_session()
-            .map(|s| {
-                s.messages
-                    .iter()
-                    // Terminal API/runtime errors are display-only: a provider
-                    // failure must never enter the model-facing conversation
-                    // as if it were assistant output (the authoritative item
-                    // log path keeps them out too — `build_messages` skips
-                    // `ContextItem::Error`).
-                    .filter(|m| !m.id.starts_with("msg-err-"))
-                    .filter_map(|m| {
-                        let role = match m.role {
-                            crate::types::MessageRole::User => "user",
-                            crate::types::MessageRole::Assistant => "assistant",
-                        };
-                        let text: String = m
-                            .parts
-                            .iter()
-                            .filter_map(|p| match p {
-                                crate::types::Part::Text(t) => Some(t.text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        if text.is_empty() {
-                            None
-                        } else {
-                            Some((role.to_owned(), text))
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
 
         // Load companion context state (.ctx file) for session resumption.
+        // This is the ONLY model-facing history source: the JSONL transcript is
+        // display-only and is NEVER parsed into the context. No `.ctx` (a fresh
+        // session, or a companion file that is missing/corrupt) means the loop
+        // starts with an empty context — the user is told via toast below.
         let ctx_state: Option<cosh::harness::ContextManagerState> = self
             .state
             .current_session_id
             .as_ref()
             .and_then(|id| self.session_store.load_context(id));
+        self.warn_if_resuming_without_ctx(&ctx_state);
 
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
@@ -439,11 +408,12 @@ impl App {
 
                     let mut harness = Harness::new(connector, &cwd, disabled_tools)
                         .with_mode(mode)
-                        .with_history(&history)
                         .with_fallbacks(remaining)
                         .with_local_base_urls(local_base_urls);
 
-                    // Restore the authoritative context from the .ctx companion file.
+                    // Restore the authoritative context from the .ctx companion
+                    // file. No `.ctx` — no history; the JSONL transcript is
+                    // display-only and never feeds the model.
                     if let Some(ref state) = ctx_state {
                         harness.context_manager.restore_state(state);
                     }
@@ -479,6 +449,41 @@ impl App {
                 });
             }
         });
+    }
+
+    /// A persisted session whose `.ctx` went missing (deleted companion file,
+    /// corrupt payload) would silently "forget" the whole conversation —
+    /// surface that instead of resuming quietly. The gate is the on-disk
+    /// JSONL: a brand-new session's FIRST prompt also has a message on screen
+    /// with no `.ctx` yet (the companion is only written by Done/Stopped/
+    /// snapshot saves) — that is normal, not data loss. Known interim noise:
+    /// an early TUI-side failure persists the JSONL alone, so a resend warns
+    /// even though nothing reached the model either (accepted; TODO.md task 4
+    /// routes more saves through the context-aware path).
+    pub(super) fn warn_if_resuming_without_ctx(
+        &mut self,
+        ctx_state: &Option<cosh::harness::ContextManagerState>,
+    ) {
+        let Some(id) = self.state.current_session_id.as_ref() else {
+            return;
+        };
+        if ctx_state.is_none()
+            && self.session_store.has_session(id)
+            && self
+                .state
+                .current_session()
+                .is_some_and(|s| !s.messages.is_empty())
+        {
+            use crate::ui::toast::{ToastOptions, ToastVariant};
+            self.toast_state.show(ToastOptions {
+                title: Some("Context lost".into()),
+                message: "Session context file not found — the conversation \
+                          starts without history."
+                    .into(),
+                variant: ToastVariant::Warning,
+                duration_ms: 6000,
+            });
+        }
     }
 
     /// Called when an agent loop terminates. Leftover "next request"

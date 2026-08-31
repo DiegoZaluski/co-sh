@@ -476,7 +476,7 @@ impl App {
 
                     // Persist session to disk if it has valid dialog
                     if let Some(id) = self.state.current_session_id.clone()
-                        && let Some(session) = self.state.session_cache.get(&id)
+                        && let Some(session) = self.state.session_cache.get_mut(&id)
                         && is_valid_session(session)
                     {
                         self.session_store
@@ -631,7 +631,7 @@ impl App {
 
                     // Persist session to disk even when stopped (partial dialog is still valuable)
                     if let Some(id) = self.state.current_session_id.clone()
-                        && let Some(session) = self.state.session_cache.get(&id)
+                        && let Some(session) = self.state.session_cache.get_mut(&id)
                         && is_valid_session(session)
                     {
                         self.session_store
@@ -755,7 +755,8 @@ impl App {
                             .session_cache
                             .get(&id)
                             .is_some_and(crate::session_store::is_valid_session);
-                        if should_save && let Some(session) = self.state.session_cache.get(&id) {
+                        if should_save && let Some(session) = self.state.session_cache.get_mut(&id)
+                        {
                             match context {
                                 Some(ctx) => self
                                     .session_store
@@ -871,7 +872,7 @@ impl App {
             return;
         }
         if let Some(id) = self.state.current_session_id.clone()
-            && let Some(session) = self.state.session_cache.get(&id)
+            && let Some(session) = self.state.session_cache.get_mut(&id)
             && is_valid_session(session)
         {
             self.session_store

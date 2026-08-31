@@ -10,7 +10,8 @@ fn click(app: &mut App, column: u16, row: u16) {
         row,
         modifiers: KeyModifiers::NONE,
     };
-    app.handle_mouse_event(evt(CKind::Down(CBtn::Left))).unwrap();
+    app.handle_mouse_event(evt(CKind::Down(CBtn::Left)))
+        .unwrap();
     app.handle_mouse_event(evt(CKind::Up(CBtn::Left))).unwrap();
 }
 
@@ -40,7 +41,10 @@ async fn confirm_quit_yes_click_quits_even_with_slash_menu_open() {
         app.should_quit,
         "clicking Yes on the quit confirm must set should_quit"
     );
-    assert!(!app.dialog.visible(), "confirm dialog closes after the click");
+    assert!(
+        !app.dialog.visible(),
+        "confirm dialog closes after the click"
+    );
 }
 
 /// Same click, but in a real Session with the prompt holding "/" so the
@@ -77,7 +81,10 @@ async fn confirm_quit_yes_click_in_session_with_live_slash_menu() {
         app.should_quit,
         "clicking Yes on the quit confirm must set should_quit"
     );
-    assert!(!app.dialog.visible(), "confirm dialog closes after the click");
+    assert!(
+        !app.dialog.visible(),
+        "confirm dialog closes after the click"
+    );
 }
 
 /// Full real-input flow: type "/" through the key handler, press Ctrl+C
@@ -209,4 +216,3 @@ async fn confirm_quit_swallows_other_keys() {
     );
     assert!(app.is_confirm_dialog_visible());
 }
-

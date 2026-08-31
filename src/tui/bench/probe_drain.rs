@@ -76,6 +76,7 @@ async fn probe_drain_costs() {
             provider: None,
             model: None,
             reasoning: None,
+            ctx_ids: Default::default(),
             messages,
         });
         app.state.current_session_id = Some("probe".into());

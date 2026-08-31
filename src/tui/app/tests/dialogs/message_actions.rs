@@ -16,6 +16,7 @@ fn app_with_user_message() -> App {
         provider: None,
         model: None,
         reasoning: None,
+        ctx_ids: Default::default(),
         messages: vec![
             Message {
                 id: "u1".into(),
@@ -134,10 +135,17 @@ async fn message_actions_fork_branches_new_session_up_to_message() {
     assert!(old.title.contains("(fork)"));
     assert_ne!(old.id, "t", "the fork is a brand-new session id");
     // Regression: the fork must be persisted to disk so it survives restarts.
-    assert!(
-        app.session_store.load_session(&old.id).is_some(),
-        "fork session must be saved to disk"
-    );
+    // The save runs on the FIFO writer thread, so poll briefly for it.
+    let fork_id = old.id.clone();
+    let mut saved = false;
+    for _ in 0..200 {
+        if app.session_store.load_session(&fork_id).is_some() {
+            saved = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(saved, "fork session must be saved to disk");
 }
 
 #[tokio::test]
@@ -225,6 +233,7 @@ async fn message_actions_single_user_message_shows_all_options() {
         provider: None,
         model: None,
         reasoning: None,
+        ctx_ids: Default::default(),
         messages: vec![Message {
             id: "u1".into(),
             role: MessageRole::User,

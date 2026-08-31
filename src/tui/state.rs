@@ -155,6 +155,7 @@ impl AppState {
                 provider: None,
                 model: None,
                 reasoning: None,
+                ctx_ids: Default::default(),
             },
         );
     }
@@ -289,6 +290,7 @@ impl AppState {
             provider: None,
             model: None,
             reasoning: None,
+            ctx_ids: Default::default(),
             messages: vec![
                 Message {
                     id: "msg-1".to_string(),

@@ -99,6 +99,7 @@ fn setup(n_msgs: usize) -> (App, Terminal<TestBackend>) {
         provider: None,
         model: None,
         reasoning: None,
+        ctx_ids: Default::default(),
         messages,
     });
     app.state.current_session_id = Some(id);

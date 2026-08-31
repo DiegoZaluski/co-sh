@@ -1,4 +1,5 @@
 use super::App;
+use crate::session_store::generate_session_id;
 
 /// When the agent loop ends (Done/Stopped) before a "next request" message
 /// was consumed, it must be promoted to the "next agent loop" queue so it
@@ -7,7 +8,7 @@ use super::App;
 #[tokio::test]
 async fn loop_end_promotes_unconsumed_next_request_to_next_loop() {
     let mut app = App::new("/tmp".to_string());
-    let id = super::generate_session_id();
+    let id = crate::session_store::generate_session_id();
     app.state.add_empty_session(
         id.clone(),
         "promotion test".into(),
@@ -57,7 +58,7 @@ async fn loop_end_promotes_unconsumed_next_request_to_next_loop() {
 #[tokio::test]
 async fn loop_end_orphaned_next_request_becomes_first_next_loop_candidate() {
     let mut app = App::new("/tmp".to_string());
-    let id = super::generate_session_id();
+    let id = crate::session_store::generate_session_id();
     app.state.add_empty_session(
         id.clone(),
         "orphan test".into(),
@@ -98,7 +99,7 @@ async fn mid_stream_reset_never_eats_the_previous_iteration_transcript() {
     use cosh::harness::HarnessEvent;
 
     let mut app = App::new("/tmp".to_string());
-    let id = super::generate_session_id();
+    let id = crate::session_store::generate_session_id();
     app.state.add_empty_session(
         id.clone(),
         "reset test".into(),
@@ -212,5 +213,155 @@ async fn mid_stream_reset_never_eats_the_previous_iteration_transcript() {
             .count(),
         1,
         "the tool message is still intact after the mid-attempt reset"
+    );
+}
+
+/// Resuming a session whose `.ctx` companion is missing must NOT feed any
+/// model-facing history: the JSONL transcript is display-only and is never
+/// parsed into the context. The only observable outcome is the "context
+/// lost" toast — a session that already shows dialog AND exists on disk
+/// must not resume silently as if the model remembered nothing on purpose.
+#[tokio::test]
+async fn resuming_without_a_ctx_file_warns_and_starts_with_empty_context() {
+    let mut app = App::new("/tmp".to_string());
+    // Isolate the store in a temp dir — persisting tests must never leak
+    // session files into the real user data dir.
+    let dir = tempfile::tempdir().unwrap();
+    app.session_store =
+        crate::session_store::SessionStore::with_dir(dir.path().to_path_buf(), "testhash".into());
+    let id = generate_session_id();
+    app.state.add_empty_session(
+        id.clone(),
+        "ctx-less resume".into(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    );
+    app.state.current_session_id = Some(id.clone());
+    // Dialog already on screen, but no `.ctx` was ever written for it.
+    app.state.current_session_mut().expect("session").messages = vec![crate::types::Message {
+        id: "msg-0".into(),
+        role: crate::types::MessageRole::User,
+        parts: vec![crate::types::Part::Text(crate::types::TextPart {
+            text: "earlier prompt".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    }];
+    // The session was persisted (display-only save) BEFORE its `.ctx` went
+    // missing — the on-disk JSONL is what distinguishes "lost context" from
+    // a brand-new session's first prompt.
+    let persisted = app.state.current_session().unwrap().clone();
+    app.session_store.save_session(&persisted);
+
+    // The store has no companion file for this session: `load_context`
+    // returns None and the loop would start with an empty context.
+    assert!(
+        app.session_store.load_context(&id).is_none(),
+        "no .ctx on disk — the context source is absent"
+    );
+    app.warn_if_resuming_without_ctx(&None);
+
+    let toast = app
+        .toast_state
+        .current
+        .expect("the context-lost toast shows");
+    assert_eq!(toast.title.as_deref(), Some("Context lost"));
+    assert!(matches!(
+        toast.variant,
+        crate::ui::toast::ToastVariant::Warning
+    ));
+    assert!(toast.message.contains("without history"));
+}
+
+/// A brand-new session's FIRST prompt also puts a message on screen with no
+/// `.ctx` on disk yet (the companion is only written by Done/Stopped/snapshot
+/// saves) — that is the normal path and must never warn. The on-disk JSONL
+/// gate (persisted session vs fresh one) is what keeps this quiet.
+#[tokio::test]
+async fn fresh_session_first_prompt_does_not_warn() {
+    let mut app = App::new("/tmp".to_string());
+    let id = format!("{}-fresh", generate_session_id());
+    app.state.add_empty_session(
+        id.clone(),
+        "fresh session".into(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    );
+    app.state.current_session_id = Some(id.clone());
+    // The user message is already in the display when the loop starts...
+    app.state.current_session_mut().expect("session").messages = vec![crate::types::Message {
+        id: "msg-0".into(),
+        role: crate::types::MessageRole::User,
+        parts: vec![crate::types::Part::Text(crate::types::TextPart {
+            text: "first prompt".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    }];
+    // ...but NOTHING was persisted yet: no JSONL, no `.ctx`.
+    assert!(!app.session_store.has_session(&id));
+    app.warn_if_resuming_without_ctx(&None);
+    assert!(
+        app.toast_state.current.is_none(),
+        "a fresh session must never see the context-lost toast"
+    );
+}
+
+/// A session WITH its `.ctx` companion (or a brand-new session with no
+/// dialog) must never trigger the context-lost toast: the warning is
+/// reserved for sessions that visibly lost context they once had.
+#[tokio::test]
+async fn resuming_with_a_ctx_file_stays_silent() {
+    let mut app = App::new("/tmp".to_string());
+    // Isolate the store in a temp dir — persisting tests must never leak
+    // session files into the real user data dir.
+    let dir = tempfile::tempdir().unwrap();
+    app.session_store =
+        crate::session_store::SessionStore::with_dir(dir.path().to_path_buf(), "testhash".into());
+    let id = format!("{}-ctx", generate_session_id());
+    app.state.add_empty_session(
+        id.clone(),
+        "ctx present".into(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    );
+    app.state.current_session_id = Some(id.clone());
+    app.state.current_session_mut().expect("session").messages = vec![crate::types::Message {
+        id: "msg-0".into(),
+        role: crate::types::MessageRole::User,
+        parts: vec![crate::types::Part::Text(crate::types::TextPart {
+            text: "earlier prompt".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    }];
+    // Persist a real companion file so the resume path finds context. An
+    // empty-but-present snapshot is deliberate: FILE PRESENCE is the
+    // authority — a `.ctx` that decodes means the context is whatever the
+    // harness last persisted, not a loss.
+    let state: cosh::harness::ContextManagerState = Default::default();
+    app.session_store
+        .save_session_with_context(&app.state.current_session().unwrap().clone(), &state);
+
+    let loaded = app
+        .session_store
+        .load_context(&id)
+        .expect("the .ctx decodes");
+    app.warn_if_resuming_without_ctx(&Some(loaded));
+    assert!(
+        app.toast_state.current.is_none(),
+        "no toast when context exists"
     );
 }

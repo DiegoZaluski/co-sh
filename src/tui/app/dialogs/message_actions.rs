@@ -114,9 +114,42 @@ impl App {
                     return;
                 }
                 let prompt_text = message_prompt_text(msg);
+                let removed_ids: std::collections::HashSet<u64> = session.messages[idx..]
+                    .iter()
+                    .flat_map(|m| session.ctx_ids.get(&m.id).cloned().unwrap_or_default())
+                    .collect();
                 let session = self.state.current_session_mut().expect("session");
                 session.messages.truncate(idx);
-                self.session_store.save_session_async(session);
+                // Drop bookkeeping entries for the removed messages so a later
+                // display-only save cannot re-persist dead mappings.
+                let remaining: std::collections::HashSet<&str> =
+                    session.messages.iter().map(|m| m.id.as_str()).collect();
+                session
+                    .ctx_ids
+                    .retain(|k, _| remaining.contains(k.as_str()));
+                // Reflect in the model-facing context: the items behind the
+                // reverted messages are removed from the `.ctx` too. Unknown
+                // ids (compaction/sweep shrank the timeline) are simply not
+                // there anymore — a filter can never miss. ACCEPTED inverse
+                // gap: messages created after a compaction/sweep carry no
+                // ctx_ids (frozen mapping), so their items cannot be located
+                // and survive a revert of them — the model may still see
+                // post-compaction content the display dropped. No `.ctx` on
+                // disk means there is nothing to reflect (display-only
+                // session). NOTE the snapshot is read HERE, on the caller
+                // thread: a context save queued-but-unexecuted for this
+                // session is superseded by this job (FIFO lands the revert
+                // last) — benign while the action is idle-gated, since the
+                // superseded items back tail messages being removed anyway.
+                if let Some(context) = self
+                    .session_store
+                    .load_ctx_filtered(&session.id, |id| !removed_ids.contains(&id))
+                {
+                    self.session_store
+                        .save_session_async_with_context(session, context);
+                } else {
+                    self.session_store.save_session_async(session);
+                }
                 self.finalize_stale_compaction_lines();
                 self.session_view.hovered_msg_idx = None;
                 if !prompt_text.is_empty() {
@@ -151,6 +184,7 @@ impl App {
                     });
                     return;
                 }
+                let parent_id = session.id.clone();
                 let mut forked = session.clone();
                 forked.messages.truncate(idx + 1);
                 forked.id = generate_session_id();
@@ -160,14 +194,33 @@ impl App {
                     .unwrap_or_default()
                     .as_millis() as u64;
                 forked.title_generated = session.title_generated;
+                // The fork's model-facing context: the parent's items that
+                // back the KEPT messages (bookkeeping ids in the mapping that
+                // are not on disk anymore — compaction/sweep — are inert and
+                // filtered out here too). No parent `.ctx` → the fork is
+                // saved display-only and starts without context (a later
+                // resume warns, truthfully).
+                let kept_ids: std::collections::HashSet<u64> = forked
+                    .messages
+                    .iter()
+                    .flat_map(|m| forked.ctx_ids.get(&m.id).cloned().unwrap_or_default())
+                    .collect();
+                let kept_msg_ids: std::collections::HashSet<&str> =
+                    forked.messages.iter().map(|m| m.id.as_str()).collect();
+                forked
+                    .ctx_ids
+                    .retain(|k, _| kept_msg_ids.contains(k.as_str()));
+                let fork_context = self
+                    .session_store
+                    .load_ctx_filtered(&parent_id, |id| kept_ids.contains(&id));
+                match fork_context {
+                    Some(context) => self
+                        .session_store
+                        .save_session_async_with_context(&mut forked, context),
+                    None => self.session_store.save_session_async(&forked),
+                }
                 let new_id = forked.id.clone();
                 self.state.add_session(forked);
-                // Retrieve the forked session from cache and persist it to disk.
-                // add_session does not change current_session_id, so
-                // current_session() still points to the old session.
-                if let Some(fork_ref) = self.state.session_cache.peek(&new_id) {
-                    self.session_store.save_session(fork_ref);
-                }
                 self.finalize_stale_compaction_lines();
                 self.state.switch_to_session(new_id, &self.session_store);
                 self.session_view.hovered_msg_idx = None;

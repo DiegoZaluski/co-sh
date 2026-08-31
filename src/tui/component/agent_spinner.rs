@@ -336,7 +336,10 @@ mod tests {
 
         // Verify initial colors are from theme1
         assert_eq!(spinner.gradient_colors[0], theme1.primary);
-        assert_eq!(spinner.gradient_colors[NUM_CYCLING_CHARS - 1], theme1.accent);
+        assert_eq!(
+            spinner.gradient_colors[NUM_CYCLING_CHARS - 1],
+            theme1.accent
+        );
         assert_eq!(spinner.label_color, theme1.text_muted);
 
         // Update to theme2
@@ -344,7 +347,10 @@ mod tests {
 
         // Verify colors are now from theme2
         assert_eq!(spinner.gradient_colors[0], theme2.primary);
-        assert_eq!(spinner.gradient_colors[NUM_CYCLING_CHARS - 1], theme2.accent);
+        assert_eq!(
+            spinner.gradient_colors[NUM_CYCLING_CHARS - 1],
+            theme2.accent
+        );
         assert_eq!(spinner.label_color, theme2.text_muted);
     }
 }

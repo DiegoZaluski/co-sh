@@ -290,6 +290,7 @@ async fn bench_e2e_agent_loop() {
             provider: None,
             model: None,
             reasoning: None,
+            ctx_ids: Default::default(),
             messages,
         });
         app.state.current_session_id = Some(id);

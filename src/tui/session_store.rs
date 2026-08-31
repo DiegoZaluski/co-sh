@@ -26,6 +26,7 @@
 //! at least one user message AND at least one valid assistant response
 //! (error-only responses don't count as dialog).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,7 +35,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh32::xxh32;
 
-use cosh::harness::context::ContextManagerState;
+use cosh::harness::context::{ContextItem, ContextManagerState};
 
 use crate::types::{Message, MessageRole, Part, Session};
 
@@ -87,10 +88,12 @@ impl SessionStore {
         let cwd_hash = compute_cwd_hash();
         let sessions_dir = proj_dirs.data_dir().join("sessions").join(&cwd_hash);
         std::fs::create_dir_all(&sessions_dir).ok();
-        Self {
+        let store = Self {
             sessions_dir,
             cwd_hash,
-        }
+        };
+        store.sweep_orphan_ctx();
+        store
     }
 
     /// Test-only store rooted at an explicit directory (lets integration
@@ -98,31 +101,42 @@ impl SessionStore {
     #[cfg(test)]
     pub(crate) fn with_dir(sessions_dir: std::path::PathBuf, cwd_hash: String) -> Self {
         std::fs::create_dir_all(&sessions_dir).ok();
-        Self {
+        let store = Self {
             sessions_dir,
             cwd_hash,
-        }
+        };
+        store.sweep_orphan_ctx();
+        store
     }
 
     // ── Public API ────────────────────────────────────────────────────────
 
     /// Persist a session to disk as a JSONL file in the current CWD's
-    /// subdirectory.
+    /// subdirectory, immediately on the CALLER thread.
     ///
-    /// This is the display-only save path (title rename, message edit,
+    /// This is the display-only save shape (title rename, message edit,
     /// session switch, fork, revert): the `.ctx` companion file already on
     /// disk is left untouched, so the authoritative model-facing context can
-    /// never be clobbered by a display edit.
+    /// never be clobbered by a display edit. SYNCHRONOUS — test plumbing
+    /// only; production callers must use [`Self::save_session_async`] so the
+    /// write is FIFO-ordered on the writer thread.
     pub fn save_session(&self, session: &Session) {
         self.write_session(session);
     }
 
-    /// Persist a session together with an explicit context-manager snapshot.
-    /// This is the harness path (Done / Stopped / ContextSnapshot): the JSONL
-    /// transcript and the bincode `.ctx` snapshot are written together.
+    /// Persist a session together with an explicit context-manager snapshot,
+    /// writing both files immediately on the CALLER thread (the harness paths
+    /// Done / Stopped / ContextSnapshot use the async variant instead). The
+    /// session's `ctx_ids` map is refreshed from the snapshot before persisting
+    /// — but only on the CLONE persisted here; the caller's session (and any
+    /// cache holding it) is NOT updated. If you need the cache refreshed, use
+    /// [`Self::save_session_async_with_context`] with a mutable session.
+    /// SYNCHRONOUS — test plumbing only; production saves must go through the
+    /// FIFO writer thread.
     pub fn save_session_with_context(&self, session: &Session, context: &ContextManagerState) {
-        self.write_session(session);
-        self.write_ctx(&session.id, context);
+        let mut session = session.clone();
+        Self::update_ctx_ids(&mut session, context);
+        self.persist(&mut session, Some(context));
     }
 
     /// Persist a session WITHOUT blocking the caller (the UI thread),
@@ -138,15 +152,20 @@ impl SessionStore {
     /// writer thread. A single writer keeps FIFO ordering, so a newer snapshot
     /// can never be clobbered by an older in-flight one.
     ///
-    /// The context is taken BY VALUE and moved onto the writer thread — no deep
-    /// clone of the context items happens on the caller (UI) thread, only a
-    /// cheap `VecDeque` pointer move. The bincode pass runs on the writer
-    /// thread too.
+    /// Takes the session MUTABLY: the `ctx_ids` mapping (message id → context
+    /// item ids) is computed from the snapshot and written back into the
+    /// caller's session, so the in-memory cache always carries the mapping a
+    /// later display-only save (title rename, revert, fork) needs to persist
+    /// it unchanged. The context is taken BY VALUE and moved onto the writer
+    /// thread — no deep clone of the context items happens on the caller (UI)
+    /// thread, only a cheap `VecDeque` pointer move. The bincode pass runs on
+    /// the writer thread too.
     pub fn save_session_async_with_context(
         &self,
-        session: &crate::types::Session,
+        session: &mut crate::types::Session,
         context: ContextManagerState,
     ) {
+        Self::update_ctx_ids(session, &context);
         self.enqueue_save(SaveJob {
             session: Box::new(session.clone()),
             context: Some(context),
@@ -156,20 +175,21 @@ impl SessionStore {
     /// Hand a save job to the single background writer thread. FIFO ordering is
     /// preserved, so a newer snapshot always lands after (and wins over) an
     /// older in-flight job.
+    ///
+    /// Each job carries its own `SessionStore` clone: the writer thread is a
+    /// process-wide singleton, but it must persist to the ENQUEUING store's
+    /// directory — binding one store at first use would silently route every
+    /// later job to that first store's directory.
     fn enqueue_save(&self, job: SaveJob) {
-        static WRITER: std::sync::OnceLock<std::sync::mpsc::Sender<SaveJob>> =
+        static WRITER: std::sync::OnceLock<std::sync::mpsc::Sender<(SessionStore, SaveJob)>> =
             std::sync::OnceLock::new();
         let tx = WRITER.get_or_init(|| {
-            let (tx, rx) = std::sync::mpsc::channel::<SaveJob>();
-            let store = self.clone();
+            let (tx, rx) = std::sync::mpsc::channel::<(SessionStore, SaveJob)>();
             let spawned = std::thread::Builder::new()
                 .name("session-save".into())
                 .spawn(move || {
-                    while let Ok(job) = rx.recv() {
-                        store.write_session(&job.session);
-                        if let Some(context) = &job.context {
-                            store.write_ctx(&job.session.id, context);
-                        }
+                    while let Ok((store, mut job)) = rx.recv() {
+                        store.persist(&mut job.session, job.context.as_ref());
                     }
                 });
             if spawned.is_err() {
@@ -179,45 +199,114 @@ impl SessionStore {
         });
         // If the thread failed to spawn there is no receiver; fall back to a
         // synchronous save rather than dropping the snapshot.
-        if let Err(send_err) = tx.send(job) {
-            let job = send_err.0;
-            self.write_session(&job.session);
-            if let Some(context) = &job.context {
-                self.write_ctx(&job.session.id, context);
-            }
+        if let Err(send_err) = tx.send((self.clone(), job)) {
+            let (_, mut job) = send_err.0;
+            self.persist(&mut job.session, job.context.as_ref());
         }
     }
 
-    /// Update only the title in an existing session file on disk.
+    /// Persist one snapshot atomically. The `.ctx` companion file is written
+    /// BEFORE the JSONL transcript: both writes are individually atomic
+    /// renames, but the pair is not a transaction, so a crash between the two
+    /// renames must leave the context AHEAD of the display (the model knows
+    /// more than the transcript shows) — never behind (a transcript that
+    /// references context the model never saw).
+    fn persist(&self, session: &mut Session, context: Option<&ContextManagerState>) {
+        if let Some(context) = context {
+            self.write_ctx(&session.id, context);
+        }
+        self.write_session(session);
+    }
+
+    /// Compute the message id → context item ids mapping for a session against
+    /// a context snapshot, and store it in `session.ctx_ids`.
     ///
-    /// Reads the file, replaces the title in the first-line JSON header,
-    /// and writes it back. This is much cheaper than a full rewrite and is
-    /// used by the async title generation path.
-    pub fn update_title(&self, session_id: &str, new_title: &str) {
-        let file_path = self.file_path(session_id);
-        let Ok(contents) = std::fs::read_to_string(&file_path) else {
-            return;
-        };
-        let mut out_lines: Vec<String> = Vec::new();
-        let mut first = true;
-        for line in contents.lines() {
-            if first {
-                first = false;
-                // Replace the title field in the JSON header (line 0).
-                if let Ok(mut header) = serde_json::from_str::<SessionHeader>(line) {
-                    header.title = new_title.to_string();
-                    header.title_generated = true;
-                    if let Ok(json) = serde_json::to_string(&header) {
-                        out_lines.push(json);
-                        continue;
+    /// The grouping mirrors the display renderer's expectations exactly: each
+    /// `User` item is its own message; a `ToolCall` opens an assistant message
+    /// that absorbs every `ToolResult` carrying its `call_id` (matched
+    /// order-independently, so interleaved parallel chains group correctly; an
+    /// orphan result renders as a message of its own, exactly like the display);
+    /// a text-ish item (`Assistant` / `Closure` / `Compaction` / `Error`) is a
+    /// message of its own.
+    ///
+    /// Conservative: if the group count does not match the message count the
+    /// mapping is left UNCHANGED — bookkeeping must never corrupt itself by
+    /// guessing. NOTE this is not only a streaming race guard: compaction
+    /// (`apply_llm_summary`) and the useless-chain sweep permanently shrink
+    /// the item timeline while display messages only ever grow, so a session
+    /// touched by either keeps its last pre-event mapping from here on (stale
+    /// ids are inert when filtered against the `.ctx`; revert/fork must treat
+    /// unknown ids as already-gone).
+    fn update_ctx_ids(session: &mut Session, context: &ContextManagerState) {
+        let mut groups: Vec<Vec<u64>> = Vec::new();
+        let mut call_group: HashMap<&str, usize> = HashMap::new();
+        for item in &context.items {
+            match item {
+                ContextItem::User { id, .. } => groups.push(vec![*id]),
+                ContextItem::ToolCall { id, call_id, .. } => {
+                    call_group.insert(call_id.as_str(), groups.len());
+                    groups.push(vec![*id]);
+                }
+                ContextItem::ToolResult { id, call_id, .. } => {
+                    match call_group.get(call_id.as_str()) {
+                        Some(&group_idx) => groups[group_idx].push(*id),
+                        None => groups.push(vec![*id]),
                     }
                 }
+                ContextItem::Assistant { id, .. }
+                | ContextItem::Closure { id, .. }
+                | ContextItem::Compaction { id, .. }
+                | ContextItem::Error { id, .. } => groups.push(vec![*id]),
             }
-            out_lines.push(line.to_string());
         }
-        if let Err(e) = std::fs::write(&file_path, out_lines.join("\n")) {
-            log::warn!("failed to update title for session {session_id}: {e}");
+
+        if groups.len() != session.messages.len() {
+            log::warn!(
+                "ctx_ids mapping skipped for session {}: {} item groups \
+                 vs {} display messages",
+                session.id,
+                groups.len(),
+                session.messages.len()
+            );
+            return;
         }
+        for (message, ids) in session.messages.iter().zip(groups) {
+            session.ctx_ids.insert(message.id.clone(), ids);
+        }
+    }
+
+    /// Rename a session on disk. The rename goes through the FIFO writer
+    /// thread as a display-only save (rewrites the file atomically from the
+    /// on-disk content, title swapped). The WRITE is FIFO-ordered, but the
+    /// content is captured on the caller thread: a context save queued but
+    /// not yet executed can be superseded by the title job's older snapshot
+    /// (an accepted, microseconds-wide window — see the round-1 review of
+    /// this task). No-op when the session is not on disk (logged), or when
+    /// the file holds unparseable lines: a full rewrite would permanently
+    /// drop them, so the rename refuses instead.
+    pub fn update_title(&self, session_id: &str, new_title: &str) {
+        if let Ok(contents) = std::fs::read_to_string(self.file_path(session_id)) {
+            let lines = contents.lines().filter(|l| !l.trim().is_empty()).count();
+            if let Some(loaded) = self.load_session(session_id)
+                && lines != loaded.messages.len() + 1
+            {
+                log::warn!(
+                    "refusing to rename session {session_id}: {lines} on-disk lines \
+                     but {} messages parsed (corrupt line — a rewrite would drop it)",
+                    loaded.messages.len()
+                );
+                return;
+            }
+        } else {
+            return;
+        }
+        let Some(mut session) = self.load_session(session_id) else {
+            log::warn!("refusing to rename session {session_id}: unparseable header");
+            return;
+        };
+        session.title = new_title.to_string();
+        session.title_generated = true;
+        self.save_session_async(&session);
     }
 
     /// Load all session files from the current CWD's subdirectory, sorted by
@@ -306,13 +395,19 @@ impl SessionStore {
 
         // Remaining lines: messages
         let mut messages: Vec<Message> = Vec::new();
+        let mut ctx_ids_by_message: HashMap<String, Vec<u64>> = HashMap::new();
         for (idx, line) in lines.iter().enumerate() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
             match serde_json::from_str::<StoredMessage>(line) {
-                Ok(stored) => messages.push(stored.into_message()),
+                Ok(stored) => {
+                    if !stored.ctx_ids.is_empty() {
+                        ctx_ids_by_message.insert(stored.id.clone(), stored.ctx_ids.clone());
+                    }
+                    messages.push(stored.into_message());
+                }
                 Err(e) => {
                     // A corrupted line loses exactly one message — log it
                     // (session id, 1-based line number, parse error) rather
@@ -334,6 +429,7 @@ impl SessionStore {
             provider: header.provider,
             model: header.model,
             reasoning: header.reasoning,
+            ctx_ids: ctx_ids_by_message,
         })
     }
 
@@ -351,6 +447,35 @@ impl SessionStore {
                 None
             }
         }
+    }
+
+    /// Load the `.ctx` snapshot for a session with the item timeline filtered
+    /// by `keep` (an item id survives when `keep(item_id)` is true), so
+    /// display actions (revert, fork) can derive the model-facing state that
+    /// matches the truncated transcript. Bookkeeping (`next_id`,
+    /// `max_tokens`, `overflow_model`, `split`) is kept as-is: ids only grow,
+    /// and a gap in the timeline is harmless. Returns `None` when there is no
+    /// companion file to filter (the caller falls back to a display-only
+    /// save).
+    pub fn load_ctx_filtered(
+        &self,
+        session_id: &str,
+        keep: impl Fn(u64) -> bool,
+    ) -> Option<ContextManagerState> {
+        let mut state = self.load_context(session_id)?;
+        state.items.retain(|item| {
+            let id = match item {
+                ContextItem::User { id, .. }
+                | ContextItem::Assistant { id, .. }
+                | ContextItem::ToolCall { id, .. }
+                | ContextItem::ToolResult { id, .. }
+                | ContextItem::Closure { id, .. }
+                | ContextItem::Compaction { id, .. }
+                | ContextItem::Error { id, .. } => *id,
+            };
+            keep(id)
+        });
+        Some(state)
     }
 
     /// Delete a session file and its companion `.ctx` file from disk.
@@ -375,7 +500,7 @@ impl SessionStore {
     /// Save bincode-encoded context manager state alongside the JSONL session.
     pub fn save_ctx(&self, session_id: &str, state: &[u8]) {
         let path = self.ctx_file_path(session_id);
-        if let Err(e) = std::fs::write(&path, state) {
+        if let Err(e) = atomic_write(&path, state) {
             log::warn!("failed to save context state for session {session_id}: {e}");
         }
     }
@@ -402,9 +527,8 @@ impl SessionStore {
 
     /// Write the header and message lines for a session.
     ///
-    /// The write is atomic: the content is written to a `.tmp` sibling and
-    /// `fs::rename`d over the final path (atomic on the same filesystem); a
-    /// reader only ever sees the complete old or new file.
+    /// The write is atomic (see [`atomic_write`]): a reader only ever sees the
+    /// complete old or new file.
     fn write_session(&self, session: &Session) {
         let file_path = self.file_path(&session.id);
         let header = self.build_header(session);
@@ -419,7 +543,11 @@ impl SessionStore {
 
         // Lines 2+: messages.
         for (i, msg) in session.messages.iter().enumerate() {
-            match serde_json::to_string(&StoredMessage::from(msg)) {
+            let mut stored = StoredMessage::from(msg);
+            if let Some(ids) = session.ctx_ids.get(&msg.id) {
+                stored.ctx_ids = ids.clone();
+            }
+            match serde_json::to_string(&stored) {
                 Ok(json) => lines.push(json),
                 Err(e) => {
                     log::warn!(
@@ -430,15 +558,8 @@ impl SessionStore {
             }
         }
 
-        let tmp_path = file_path.with_extension("jsonl.tmp");
-        if let Err(e) = std::fs::write(&tmp_path, lines.join("\n")) {
+        if let Err(e) = atomic_write(&file_path, lines.join("\n").as_bytes()) {
             log::warn!("failed to save session {}: {e}", session.id);
-            let _ = std::fs::remove_file(&tmp_path);
-            return;
-        }
-        if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
-            log::warn!("failed to finalize session {}: {e}", session.id);
-            let _ = std::fs::remove_file(&tmp_path);
             return;
         }
 
@@ -542,6 +663,33 @@ impl SessionStore {
         })
     }
 
+    /// Delete orphaned `.ctx` companions — a companion file whose JSONL session
+    /// is gone. Orphans can arise from a crash between the two `remove_file`s
+    /// of `delete_session`/eviction (JSONL first), from a failed JSONL write
+    /// whose `.ctx` write still succeeded, or from manual deletion; they leak
+    /// disk silently (nothing lists them) and must never resurrect context
+    /// state. Runs once per store creation, O(n) over the sessions directory.
+    fn sweep_orphan_ctx(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("ctx") {
+                continue;
+            }
+            // A `.ctx` is orphaned when its same-stem `.jsonl` is missing.
+            if !path.with_extension("jsonl").exists()
+                && let Err(e) = std::fs::remove_file(&path)
+            {
+                log::warn!(
+                    "failed to remove orphaned context file {}: {e}",
+                    path.display()
+                );
+            }
+        }
+    }
+
     /// Remove the oldest session files if we exceed the maximum count for this CWD.
     fn evict_old_sessions(&self) {
         let mut files: Vec<(PathBuf, u64)> = Vec::new();
@@ -582,6 +730,39 @@ impl Default for SessionStore {
     }
 }
 
+/// Atomically persist `bytes` at `path`: write to a `.tmp` sibling in the same
+/// directory, then `fs::rename` over the final path (atomic on the same
+/// filesystem). A reader only ever sees the complete old or the complete new
+/// file, and a crash mid-write never leaves a torn file at `path` — the tmp
+/// sibling is removed on any write/rename failure (a process kill can leave a
+/// `.tmp` behind; it is invisible to listing and eviction, which filter on
+/// real extensions).
+fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    // The tmp sibling must live in the SAME directory as the target so the
+    // rename stays on one filesystem (cross-device rename fails). The full
+    // file name is kept (suffix appended, extension NOT replaced) so the JSONL
+    // and the `.ctx` of one session never share a tmp path across the writer
+    // thread and a sync save. NOTE: two writers racing on the SAME target
+    // still share one deterministic tmp name — production saves all run on
+    // the FIFO writer thread now (TODO.md task 4); only tests and the
+    // spawn-failure fallback remain synchronous.
+    let tmp_path = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp")
+    ));
+    let write = || -> std::io::Result<()> {
+        std::fs::write(&tmp_path, bytes)?;
+        std::fs::rename(&tmp_path, path)
+    };
+    match write() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            std::fs::remove_file(&tmp_path).ok();
+            Err(e)
+        }
+    }
+}
+
 // ── Lightweight summary (no full message deserialization) ────────────────
 
 /// A summary of a session, used for listing in the sidebar/history.
@@ -615,6 +796,11 @@ struct StoredMessage {
     created_at: u64,
     agent: Option<String>,
     model: Option<String>,
+    /// Context-manager item ids backing this message (see
+    /// `update_ctx_ids`). Bookkeeping for display actions — never parsed
+    /// into a context.
+    #[serde(default)]
+    ctx_ids: Vec<u64>,
 }
 
 impl From<&Message> for StoredMessage {
@@ -629,6 +815,7 @@ impl From<&Message> for StoredMessage {
             created_at: msg.created_at,
             agent: msg.agent.clone(),
             model: msg.model.clone(),
+            ctx_ids: Vec::new(),
         }
     }
 }
@@ -746,6 +933,7 @@ mod tests {
             provider: None,
             model: None,
             reasoning: None,
+            ctx_ids: HashMap::new(),
         }
     }
 
@@ -1430,5 +1618,321 @@ mod tests {
         let msgs = cm.build_messages("");
         assert_eq!(msgs.len(), 1, "only the user prompt reaches the model");
         assert_eq!(msgs[0].role, "user");
+    }
+
+    /// The ctx_ids mapping: a merged tool chain in the display (one assistant
+    /// message carrying the call+result) maps to MULTIPLE context items — the
+    /// call, its result and the answer text — with ids that let revert/fork
+    /// truncate the exact items behind a clicked message. The mapping is
+    /// computed from a snapshot, persisted in the JSONL lines, and survives a
+    /// reload.
+    #[test]
+    fn ctx_ids_map_merged_tool_chains_and_survive_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let session = make_test_session(
+            "7000",
+            "Mapping Session",
+            vec![
+                make_user_msg("msg-0", "edit the file"),
+                make_assistant_msg("msg-tool", "editing"),
+                make_assistant_msg("msg-1", "done"),
+            ],
+        );
+        let context = make_context(vec![
+            user_item(1, "edit the file"),
+            ContextItem::ToolCall {
+                id: 2,
+                call_id: "call-a".into(),
+                name: "fs_edit".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+                thought_signature: String::new(),
+                thinking_blocks: Vec::new(),
+            },
+            ContextItem::ToolResult {
+                id: 3,
+                call_id: "call-a".into(),
+                content: "--- a.rs\n+++ b.rs\n@@ -1 +1 @@\n-old\n+new".into(),
+                useless: false,
+            },
+            assistant_item(4, "editing"),
+        ]);
+
+        let mut persisted = session.clone();
+        SessionStore::update_ctx_ids(&mut persisted, &context);
+        // User message → the User item; the tool-chain message → call +
+        // result (a merged chain maps to MULTIPLE items); the text answer →
+        // its own Assistant item.
+        assert_eq!(persisted.ctx_ids["msg-0"], vec![1]);
+        assert_eq!(persisted.ctx_ids["msg-tool"], vec![2, 3]);
+        assert_eq!(persisted.ctx_ids["msg-1"], vec![4]);
+
+        store.save_session_with_context(&persisted, &context);
+
+        // The mapping survives a reload (persisted per JSONL line).
+        let loaded = store.load_session("7000").unwrap();
+        assert_eq!(loaded.ctx_ids["msg-0"], vec![1]);
+        assert_eq!(loaded.ctx_ids["msg-tool"], vec![2, 3]);
+        assert_eq!(loaded.ctx_ids["msg-1"], vec![4]);
+    }
+
+    /// Interleaved parallel tool chains (the result of call-a comes after the
+    /// call of chain b) still group correctly: each result joins its own
+    /// call's group, order-independently.
+    #[test]
+    fn ctx_ids_handle_interleaved_parallel_chains() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let session = make_test_session(
+            "7001",
+            "Parallel Session",
+            vec![
+                make_user_msg("msg-0", "read both"),
+                make_assistant_msg("msg-tool-a", "chain a"),
+                make_assistant_msg("msg-tool-b", "chain b"),
+                make_assistant_msg("msg-1", "chain a answer"),
+                make_assistant_msg("msg-2", "chain b answer"),
+            ],
+        );
+        let context = make_context(vec![
+            user_item(1, "read both"),
+            ContextItem::ToolCall {
+                id: 2,
+                call_id: "call-a".into(),
+                name: "fs_read".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+                thought_signature: String::new(),
+                thinking_blocks: Vec::new(),
+            },
+            ContextItem::ToolCall {
+                id: 3,
+                call_id: "call-b".into(),
+                name: "fs_read".into(),
+                arguments: r#"{"path":"b.rs"}"#.into(),
+                thought_signature: String::new(),
+                thinking_blocks: Vec::new(),
+            },
+            ContextItem::ToolResult {
+                id: 4,
+                call_id: "call-a".into(),
+                content: "contents of a".into(),
+                useless: false,
+            },
+            ContextItem::ToolResult {
+                id: 5,
+                call_id: "call-b".into(),
+                content: "contents of b".into(),
+                useless: false,
+            },
+            assistant_item(6, "chain a"),
+            assistant_item(7, "chain b"),
+        ]);
+
+        let mut persisted = session.clone();
+        SessionStore::update_ctx_ids(&mut persisted, &context);
+        assert_eq!(persisted.ctx_ids["msg-0"], vec![1]);
+        assert_eq!(persisted.ctx_ids["msg-tool-a"], vec![2, 4]);
+        assert_eq!(persisted.ctx_ids["msg-tool-b"], vec![3, 5]);
+        assert_eq!(persisted.ctx_ids["msg-1"], vec![6]);
+        assert_eq!(persisted.ctx_ids["msg-2"], vec![7]);
+
+        store.save_session_with_context(&persisted, &context);
+        let loaded = store.load_session("7001").unwrap();
+        assert_eq!(loaded.ctx_ids["msg-tool-b"], vec![3, 5]);
+        assert_eq!(loaded.ctx_ids["msg-2"], vec![7]);
+    }
+
+    /// A mismatch between item groups and display messages (e.g. a display
+    /// save racing a streaming turn) must leave the existing mapping
+    /// UNCHANGED — the bookkeeping never guesses.
+    #[test]
+    fn ctx_ids_mapping_is_untouched_on_a_count_mismatch() {
+        let session = make_test_session("7002", "Mismatch", vec![make_user_msg("msg-0", "hi")]);
+        // Two groups on the context side vs one display message.
+        let context = make_context(vec![user_item(1, "hi"), assistant_item(2, "hello")]);
+
+        let mut persisted = session.clone();
+        let before = persisted.ctx_ids.clone();
+        SessionStore::update_ctx_ids(&mut persisted, &context);
+        assert_eq!(
+            persisted.ctx_ids, before,
+            "a mismatched mapping must not be guessed"
+        );
+    }
+
+    /// `load_ctx_filtered` is the engine behind display actions: revert drops
+    /// the items behind the reverted messages (keep = NOT removed), fork keeps
+    /// only the items behind the kept messages (keep = IN kept). Bookkeeping
+    /// (`next_id` etc.) is untouched so ids keep growing monotonically.
+    #[test]
+    fn load_ctx_filtered_supports_revert_and_fork() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session(
+            "7100",
+            "Filter Session",
+            vec![
+                make_user_msg("msg-0", "hi"),
+                make_assistant_msg("msg-tool", "editing"),
+                make_assistant_msg("msg-1", "done"),
+            ],
+        );
+        let context = make_context(vec![
+            user_item(1, "hi"),
+            ContextItem::ToolCall {
+                id: 2,
+                call_id: "call-a".into(),
+                name: "fs_edit".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+                thought_signature: String::new(),
+                thinking_blocks: Vec::new(),
+            },
+            ContextItem::ToolResult {
+                id: 3,
+                call_id: "call-a".into(),
+                content: "diff".into(),
+                useless: false,
+            },
+            assistant_item(4, "done"),
+        ]);
+        store.save_session_with_context(&session, &context);
+
+        // Revert at msg-tool: items 2 and 3 (and everything after) go away.
+        let removed: std::collections::HashSet<u64> = [2u64, 3, 4].into_iter().collect();
+        let reverted = store
+            .load_ctx_filtered("7100", |id| !removed.contains(&id))
+            .expect("the .ctx exists");
+        assert_eq!(reverted.items.len(), 1, "only the user item survives");
+        let ContextItem::User { id, .. } = &reverted.items[0] else {
+            panic!("expected the user item");
+        };
+        assert_eq!(*id, 1);
+        assert_eq!(reverted.next_id, context.next_id, "bookkeeping untouched");
+
+        // Fork at msg-tool: only items 1 and 2 (up to and including the
+        // clicked message's chain) are kept.
+        let kept: std::collections::HashSet<u64> = [1u64, 2].into_iter().collect();
+        let forked = store
+            .load_ctx_filtered("7100", |id| kept.contains(&id))
+            .expect("the .ctx exists");
+        assert_eq!(forked.items.len(), 2);
+
+        // No companion file at all → the caller must fall back to a
+        // display-only save.
+        assert!(
+            store
+                .load_ctx_filtered("no-ctx-session", |_| true)
+                .is_none()
+        );
+    }
+
+    /// End-to-end through the FIFO queue: revert derives the filtered
+    /// snapshot from the on-disk `.ctx`, persists BOTH files async, and a
+    /// reload shows the truncated timeline with the JSONL mapping intact.
+    #[test]
+    fn revert_round_trips_both_files_through_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session(
+            "7200",
+            "Queue Revert",
+            vec![
+                make_user_msg("msg-0", "hi"),
+                make_assistant_msg("msg-tool", "editing"),
+                make_assistant_msg("msg-1", "done"),
+            ],
+        );
+        let context = make_context(vec![
+            user_item(1, "hi"),
+            assistant_item(2, "editing"),
+            assistant_item(3, "done"),
+        ]);
+        store.save_session_with_context(&session, &context);
+
+        // The user reverts at msg-1 (drop msg-1 and everything after): the
+        // mapping frozen in the session (task 3) says item 3 backs it.
+        let mut reverted = session.clone();
+        reverted.messages.truncate(2);
+        reverted
+            .ctx_ids
+            .retain(|k, _| reverted.messages.iter().any(|m| &m.id == k));
+        let removed: std::collections::HashSet<u64> = [3u64].into_iter().collect();
+        let new_ctx = store
+            .load_ctx_filtered("7200", |id| !removed.contains(&id))
+            .expect("the .ctx exists");
+        store.save_session_async_with_context(&mut reverted, new_ctx);
+
+        // The save runs on the FIFO writer thread — poll for the landing.
+        // The JSONL is the job's completion barrier (the `.ctx` necessarily
+        // landed before it within the same job), so poll on the transcript.
+        for _ in 0..200 {
+            if let Some(loaded) = store.load_session("7200")
+                && loaded.messages.len() == 2
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let loaded_ctx = store.load_context("7200").expect("the .ctx reloads");
+        assert_eq!(
+            loaded_ctx.items.len(),
+            2,
+            "item 3 was removed from the context"
+        );
+        let loaded = store.load_session("7200").unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.ctx_ids["msg-0"], vec![1]);
+        assert_eq!(loaded.ctx_ids["msg-tool"], vec![2]);
+    }
+
+    /// update_title must REFUSE to rewrite a file that holds unparseable
+    /// lines: a full rewrite would permanently drop them. The on-disk title
+    /// stays untouched instead.
+    #[test]
+    fn update_title_refuses_a_file_with_a_corrupt_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("7300", "Corrupt Line", vec![make_user_msg("msg-0", "hi")]);
+        store.save_session(&session);
+        let file = store.sessions_dir.join("session-7300.jsonl");
+        let original = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, format!("{original}{{broken json\n")).unwrap();
+
+        store.update_title("7300", "Renamed");
+
+        let contents = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            contents.contains("broken json"),
+            "the corrupt line must stay on disk"
+        );
+        assert!(
+            contents.contains("\"Corrupt Line\""),
+            "the title must stay untouched (the rename refused)"
+        );
+    }
+
+    /// Orphaned `.ctx` companions (JSONL gone, companion left behind by a
+    /// crash between the two removals, a failed JSONL write, or a manual
+    /// delete) are swept on store creation. A matching pair is never touched.
+    #[test]
+    fn orphaned_ctx_files_are_swept_on_store_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("8000", "Kept", vec![make_user_msg("msg-0", "hi")]);
+        store.save_session(&session);
+        store.save_ctx("8000", b"kept-context");
+        // An orphan: no session-8001.jsonl anywhere.
+        store.save_ctx("8001", b"orphan-context");
+
+        // A fresh store over the same directory sweeps the orphan.
+        let fresh = SessionStore::with_dir(dir.path().join("testhash"), "testhash".into());
+        assert!(fresh.load_ctx("8000").is_some(), "a matched pair is kept");
+        assert!(
+            fresh.load_ctx("8001").is_none(),
+            "an orphaned .ctx is removed on store creation"
+        );
+        assert!(fresh.load_session("8000").is_some(), "the session survives");
     }
 }
