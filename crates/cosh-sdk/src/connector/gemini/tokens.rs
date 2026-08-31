@@ -47,6 +47,7 @@ pub fn extract_usage(raw: &str) -> Option<TokenUsage> {
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: meta.cached_content_token_count,
         reasoning_tokens: meta.thoughts_token_count,
+        reported_cost: None,
     })
 }
 

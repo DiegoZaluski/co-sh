@@ -46,7 +46,8 @@ impl Connector {
     /// Supported providers: `claude`, `openai`, `groq`, `mistral`, `together`, `openrouter`,
     /// `xai`, `deepseek`, `perplexity`, `fireworks`, `cohere`, `huggingface`,
     /// `sambanova`, `poe`, `cerebras`, `nvidia`, `anyscale`, `vercel`, `cloudflare`,
-    /// `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `gemini`, `zai`, `opencode`.
+    /// `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `gemini`, `zai`, `opencode`,
+    /// `zen`, `opencode-go`.
     ///
     /// # Errors
     ///
@@ -186,15 +187,19 @@ impl Connector {
         self
     }
 
-    /// OpenCode Zen only: permit the anonymous free tier when no account key
-    /// resolves. Requests then carry the sentinel `Bearer public` and are
-    /// restricted to the gateway's zero-cost models
+    /// OpenCode Zen anonymous entry point only (`opencode` provider): permit
+    /// the free tier when no account key resolves. Requests then carry the
+    /// sentinel `Bearer public` and are restricted to the gateway's
+    /// zero-cost models
     /// ([`ZEN_FREE_MODELS`](super::provider::ZEN_FREE_MODELS)); any other
     /// model fails fast with
     /// [`AnonymousModelBlocked`](ConnectorError::AnonymousModelBlocked).
     ///
     /// Off by default — callers enable it only after an explicit user opt-in,
-    /// and a resolved account key always wins over the sentinel.
+    /// and a resolved account key always wins over the sentinel. The
+    /// documented `zen` and `opencode-go` gateways are key-based (Zen's own
+    /// catalog already includes the free models), so this flag is a no-op
+    /// for them.
     pub fn with_zen_public_tier(mut self, enabled: bool) -> Self {
         self.params.zen_public_tier = enabled;
         self
@@ -592,16 +597,25 @@ impl Connector {
     /// per-frame results (take input/cache from `message_start`, take the
     /// latest non-zero output from `message_delta`) rather than summing.
     ///
+    /// The REAL cost the provider reported inside the response
+    /// (`usage.cost`, or the OpenCode Zen/Go top-level `cost`) is stamped
+    /// onto [`TokenUsage::reported_cost`] — the usage panel should display
+    /// [`TokenUsage::effective_cost`] so the gateway's actual billed amount
+    /// supersedes the price-table estimate.
+    ///
     /// Returns `None` when no usage object is present or the JSON is invalid.
     #[must_use]
     pub fn token_usage(&self, raw: &str) -> Option<TokenUsage> {
         let provider = self.provider().ok()?;
-        match provider.family {
+        let mut usage = match provider.family {
             Family::Claude => claude::extract_usage(raw),
             Family::OpenAICompatible => openai_compatible::extract_usage(raw),
             Family::OpenAi => openai::extract_usage(raw),
             Family::Gemini => gemini::extract_usage(raw),
-        }
+        }?;
+        usage.reported_cost =
+            super::output::extract_reported_cost(raw).or(usage.reported_cost);
+        Some(usage)
     }
 
     /// The provider name (e.g. `"openai"`, `"claude"`, `"gemini"`).

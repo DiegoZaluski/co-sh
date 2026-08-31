@@ -1,6 +1,6 @@
 use super::error::ConnectorError;
 use super::output::StreamChunk;
-use super::provider::{ProviderConfig, ZEN_PROVIDER, ZEN_USER_AGENT};
+use super::provider::{ProviderConfig, ZEN_USER_AGENT, is_opencode_gateway};
 use async_stream::stream;
 use std::pin::Pin;
 use std::sync::OnceLock;
@@ -198,15 +198,16 @@ pub(crate) fn apply_session_headers(
 /// Build the provider-extra headers for the given provider — shared by the
 /// plain send paths and the retry wrapper. Two concerns live here:
 /// - OpenRouter's required `HTTP-Referer` / `X-Title` identification;
-/// - the OpenCode Zen gateway's honest `User-Agent`: co-sh identifies itself
-///   as the calling client and keeps whatever (stricter) anonymous rate-limit
-///   bucket that earns — imitating the official client to obtain its limits
-///   would circumvent the provider's access rules.
+/// - the OpenCode gateways' honest `User-Agent` (anonymous alternative,
+///   documented Zen, Go): co-sh identifies itself as the calling client and
+///   keeps whatever (stricter) rate-limit bucket that earns — imitating the
+///   official client to obtain its limits would circumvent the provider's
+///   access rules.
 pub(crate) fn apply_provider_headers(
     request_builder: reqwest::RequestBuilder,
     config: &ProviderConfig,
 ) -> reqwest::RequestBuilder {
-    let request_builder = if config.name == ZEN_PROVIDER {
+    let request_builder = if is_opencode_gateway(config.name) {
         request_builder.header("User-Agent", ZEN_USER_AGENT)
     } else {
         request_builder

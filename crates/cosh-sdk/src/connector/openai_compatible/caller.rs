@@ -194,6 +194,12 @@ struct ChatChunkResponse {
     /// keep-alives.
     #[serde(default)]
     usage: Option<Usage>,
+    /// The OpenCode Zen/Go gateways end the stream with a non-standard
+    /// trailer `{"choices":[],"cost":"0"}` — the REAL billed cost outside
+    /// the usage object, typed as a JSON string (anomalyco/opencode#42918).
+    /// Present only there (and never on keep-alives).
+    #[serde(default)]
+    cost: Option<serde_json::Value>,
 }
 
 #[allow(dead_code)]
@@ -446,9 +452,12 @@ fn process_sse_response(
                             // Usage-only frame (include_usage): surface it
                             // as an empty-content chunk so consumers tracking
                             // the last raw frame see it (it carries usage).
-                            // Pure keep-alives have neither usage nor error
-                            // and are skipped.
-                            if ccr.usage.is_some() {
+                            // Same for the OpenCode Zen/Go cost trailer
+                            // (`{"choices":[],"cost":"0"}` — the gateway's
+                            // real billed amount rides there, NOT inside
+                            // usage). Pure keep-alives have neither usage
+                            // nor cost and are skipped.
+                            if ccr.usage.is_some() || ccr.cost.is_some() {
                                 yield Ok(StreamChunk {
                                     raw: data,
                                     token: String::new(),
@@ -668,6 +677,13 @@ fn build_chat_request(
 /// and no account key resolved, the gateway's `public` sentinel is returned
 /// instead of an error — every caller then enforces the free-model
 /// restriction (see [`zen_anonymous`]).
+///
+/// The sentinel applies ONLY to the undocumented anonymous entry point
+/// ([`ZEN_PROVIDER`](super::super::provider::ZEN_PROVIDER)). The documented
+/// `zen` and `opencode-go` gateways are key-based: with an account key the
+/// user already reaches the free models through Zen itself, so the anonymous
+/// alternative is invalidated there — the opt-in flags are ignored and a
+/// missing key fails with `MissingApiKey`.
 fn resolve_api_key(
     config: &ProviderConfig,
     params: &Parameters,

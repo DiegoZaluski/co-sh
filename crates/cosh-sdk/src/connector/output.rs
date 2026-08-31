@@ -36,6 +36,19 @@ impl ChatOutput {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// The REAL cost (USD) the provider reported inside this response, if
+    /// any.
+    ///
+    /// Same wire shapes as [`ChatStream::reported_cost`]: `usage.cost`
+    /// (OpenRouter/Vercel) or a top-level `cost` — numeric or numeric
+    /// string — as the OpenCode Zen/Go gateways send. This is the
+    /// authoritative billed amount; prefer it over the price-table estimate
+    /// (fall back to [`TokenUsage::cost`] when `None`).
+    #[must_use]
+    pub fn reported_cost(&self) -> Option<f64> {
+        extract_reported_cost(&self.raw)
+    }
 }
 
 /// A single chunk from a streaming chat response.
@@ -160,11 +173,12 @@ pub struct ChatStream {
     /// merge — see [`TokenUsage::merge_stream`]). Cleared on the retry
     /// middleware's reset marker so a re-streamed attempt starts fresh.
     usage: Option<TokenUsage>,
-    /// REAL cost (USD) reported by the provider itself inside its usage
-    /// object (`usage.cost` — OpenRouter, Vercel AI Gateway, OpenCode Zen).
-    /// This is the authoritative billed amount and always supersedes any
-    /// local price-table estimate. Gateways that do not report a cost leave
-    /// this `None`. Cleared on the retry middleware's reset marker.
+    /// REAL cost (USD) reported by the provider itself inside the response
+    /// (`usage.cost` — OpenRouter, Vercel AI Gateway; a top-level `cost` on
+    /// the final frame — OpenCode Zen/Go). This is the authoritative billed
+    /// amount and always supersedes any local price-table estimate.
+    /// Gateways that do not report a cost leave this `None`. Cleared on the
+    /// retry middleware's reset marker.
     reported_cost: Option<f64>,
     family: Family,
     finished: bool,
@@ -203,14 +217,16 @@ impl ChatStream {
         self.usage
     }
 
-    /// Returns the REAL cost (USD) the provider reported inside its usage
-    /// object (`usage.cost`), if any.
+    /// Returns the REAL cost (USD) the provider reported inside the
+    /// response, if any.
     ///
-    /// Some gateways (OpenRouter, Vercel AI Gateway, OpenCode Zen) embed the
-    /// exact amount they billed in every response — this is the authoritative
-    /// spend figure and always supersedes a local price-table estimate.
-    /// Providers that do not report a cost return `None`, in which case the
-    /// caller falls back to the token-count × catalog-price estimate.
+    /// Wire shapes recognized: `usage.cost` (OpenRouter, Vercel AI Gateway)
+    /// and the OpenCode Zen/Go gateways' trailing top-level `cost` —
+    /// numeric or numeric string — on the final streamed frame. This is the
+    /// authoritative spend figure and always supersedes a local price-table
+    /// estimate. Providers that do not report a cost return `None`, in
+    /// which case the caller falls back to the token-count × catalog-price
+    /// estimate ([`TokenUsage::cost`]).
     pub async fn reported_cost(&mut self) -> Option<f64> {
         if !self.finished {
             use tokio_stream::StreamExt;
@@ -263,8 +279,16 @@ impl Stream for ChatStream {
                 // Reported cost only ever arrives on the FINAL frame and only
                 // grows within one request, so keep the max seen. Stays `None`
                 // for providers that do not report a cost.
+                let mut cost = self.reported_cost;
                 if let Some(c) = extract_reported_cost(&chunk.raw) {
-                    self.reported_cost = Some(self.reported_cost.map_or(c, |prev| prev.max(c)));
+                    cost = Some(cost.map_or(c, |prev| prev.max(c)));
+                    self.reported_cost = cost;
+                }
+                // Keep the usage object's copy in sync so `usage()`
+                // consumers (the TUI usage panel) see the real billed
+                // amount without a second accessor call.
+                if let Some(u) = &mut self.usage {
+                    u.reported_cost = cost;
                 }
             }
             self.last_raw = Some(chunk.raw.clone());
@@ -290,17 +314,33 @@ fn extract_family_usage(family: Family, raw: &str) -> Option<TokenUsage> {
 
 /// Extract the REAL billed cost (USD) from a raw response/SSE frame.
 ///
-/// Family-agnostic on purpose: every gateway that follows the OpenAI response
-/// shape and reports what it actually charged does so as `usage.cost` (a USD
-/// number inside the usage object — OpenRouter documents this field; Vercel AI
-/// Gateway and OpenCode Zen follow the same shape). Families whose native
-/// response shape has no `usage` object (Claude, Gemini) simply never match.
+/// Two wire shapes are recognized, both carrying what the gateway actually
+/// charged:
+/// - `usage.cost` (a number inside the usage object) — OpenRouter documents
+///   this field; the Vercel AI Gateway follows the same shape.
+/// - a TOP-LEVEL `cost` — how the OpenCode Zen/Go gateways report it: the
+///   streamed chat completion ends with a final frame
+///   `{"choices":[],"cost":"0"}` outside the usage object, typed as a JSON
+///   string (observed on the wire; see anomalyco/opencode issues #42918 and
+///   #26213). Numeric strings are accepted, so `"cost":"0.0042"` and
+///   `"cost":0.0042` both parse.
 ///
-/// Rejects negative or non-finite values: a malformed cost must never poison
-/// the spend totals — `None` falls back to the estimate path.
-fn extract_reported_cost(raw: &str) -> Option<f64> {
+/// Family-agnostic on purpose. Families whose native response shape has no
+/// `usage`/`cost` object (Claude, Gemini) simply never match.
+///
+/// Rejects negative or non-finite/non-numeric values: a malformed cost must
+/// never poison the spend totals — `None` falls back to the estimate path.
+pub(crate) fn extract_reported_cost(raw: &str) -> Option<f64> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let cost = v.get("usage")?.get("cost")?.as_f64()?;
+    let value = v
+        .get("usage")
+        .and_then(|usage| usage.get("cost"))
+        .or_else(|| v.get("cost"))?;
+    let cost = match value {
+        serde_json::Value::Number(n) => n.as_f64()?,
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
     if cost.is_finite() && cost >= 0.0 {
         Some(cost)
     } else {
@@ -324,6 +364,32 @@ mod tests {
         assert_eq!(extract_reported_cost(raw), Some(0.95));
     }
 
+    /// The OpenCode Zen/Go gateways end the stream with a non-standard
+    /// trailer carrying a TOP-LEVEL `cost`, typed as a JSON string — the
+    /// exact frame captured on the wire (anomalyco/opencode#42918).
+    #[test]
+    fn extracts_reported_cost_from_opencode_top_level_string() {
+        let raw = r#"{"choices":[],"cost":"0"}"#;
+        assert_eq!(extract_reported_cost(raw), Some(0.0));
+        let raw = r#"{"choices":[],"cost":"0.0042"}"#;
+        assert!((extract_reported_cost(raw).unwrap() - 0.0042).abs() < 1e-12);
+        // Numeric form of the same field (in case the gateway tightens the
+        // type later).
+        let raw = r#"{"choices":[],"cost":0.0042}"#;
+        assert!((extract_reported_cost(raw).unwrap() - 0.0042).abs() < 1e-12);
+        // Non-streaming responses report the same top-level shape.
+        let raw = r#"{"id":"x","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":8,"completion_tokens":6},"cost":"0.0031"}"#;
+        assert!((extract_reported_cost(raw).unwrap() - 0.0031).abs() < 1e-12);
+    }
+
+    /// `usage.cost` wins when both shapes appear in one frame (the usage
+    /// field is the more specific location).
+    #[test]
+    fn usage_cost_takes_precedence_over_top_level() {
+        let raw = r#"{"usage":{"prompt_tokens":8,"cost":0.95},"cost":"0"}"#;
+        assert_eq!(extract_reported_cost(raw), Some(0.95));
+    }
+
     #[test]
     fn zero_reported_cost_is_valid() {
         // Free-tier models genuinely report $0 — this MUST be kept so the
@@ -341,14 +407,23 @@ mod tests {
 
     #[test]
     fn non_numeric_or_invalid_cost_is_none() {
+        // Non-numeric strings are not costs.
         assert_eq!(
-            extract_reported_cost(r#"{"usage":{"cost":"0.95"}}"#),
+            extract_reported_cost(r#"{"usage":{"cost":"free"}}"#),
             None
         );
+        assert_eq!(extract_reported_cost(r#"{"cost":true}"#), None);
         assert_eq!(extract_reported_cost(r#"{"usage":{"cost":-1.0}}"#), None);
         let nan = f64::NAN;
         let raw = format!(r#"{{"usage":{{"cost":{nan}}}}}"#);
         assert_eq!(extract_reported_cost(&raw), None);
+    }
+
+    /// Numeric strings parse: the OpenCode gateways type `cost` as a JSON
+    /// string on the wire (#42918), which must not fall back to estimation.
+    #[test]
+    fn numeric_string_cost_is_valid() {
+        assert_eq!(extract_reported_cost(r#"{"usage":{"cost":"0.95"}}"#), Some(0.95));
     }
 
     #[tokio::test]
@@ -396,6 +471,54 @@ mod tests {
         while stream.next().await.is_some() {}
         assert_eq!(stream.reported_cost().await, None);
         assert_eq!(stream.usage().await, None);
+    }
+
+    /// End-to-end over the frames the OpenCode Zen/Go gateways actually
+    /// send (`anomalyco/opencode#42918`): a usage-only frame followed by the
+    /// non-standard `{"choices":[],"cost":"0"}` trailer. The REAL billed
+    /// cost must surface both via `reported_cost()` and inside the
+    /// `usage()` object — the TUI usage panel's single source.
+    #[tokio::test]
+    async fn opencode_cost_trailer_lands_in_stream_usage() {
+        use tokio_stream::StreamExt;
+        let frames = vec![
+            Ok(StreamChunk {
+                raw: r#"{"id":"","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi!"},"finish_reason":null}]}"#.into(),
+                token: "Hi!".into(),
+                reasoning: String::new(),
+                finish_reason: None,
+                thinking_blocks: None,
+                tool_call: None,
+                reset: false,
+            }),
+            Ok(StreamChunk {
+                raw: r#"{"id":"gen-...","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":8,"completion_tokens":6,"total_tokens":14}}"#.into(),
+                token: String::new(),
+                reasoning: String::new(),
+                finish_reason: Some("stop".into()),
+                thinking_blocks: None,
+                tool_call: None,
+                reset: false,
+            }),
+            // The gateway's cost trailer: no id/object/created/model.
+            Ok(StreamChunk {
+                raw: r#"{"choices":[],"cost":"0"}"#.into(),
+                token: String::new(),
+                reasoning: String::new(),
+                finish_reason: None,
+                thinking_blocks: None,
+                tool_call: None,
+                reset: false,
+            }),
+        ];
+        let mut stream =
+            ChatStream::new(Box::pin(tokio_stream::iter(frames)), Family::OpenAICompatible);
+        while stream.next().await.is_some() {}
+        assert_eq!(stream.reported_cost().await, Some(0.0));
+        let usage = stream.usage().await.unwrap();
+        assert_eq!(usage.input_tokens, 8);
+        assert_eq!(usage.output_tokens, 6);
+        assert_eq!(usage.reported_cost, Some(0.0));
     }
 }
 

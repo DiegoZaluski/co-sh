@@ -15,7 +15,8 @@ use zeroize::Zeroizing;
 /// service: [`Connector::with_service_keyring`](crate::connector::Connector::with_service_keyring).
 pub const COSH_SERVICE: &str = "cosh";
 
-/// Provider name of the OpenCode Zen gateway (`https://opencode.ai/zen/v1`).
+/// Provider name of the UNDOCUMENTED anonymous entry point into the OpenCode
+/// Zen gateway (`https://opencode.ai/zen/v1`).
 ///
 /// The gateway deliberately serves an anonymous free tier: requests carrying
 /// [`ZEN_PUBLIC_KEY`] are answered only for models flagged `allowAnonymous`
@@ -29,6 +30,29 @@ pub const COSH_SERVICE: &str = "cosh";
 /// - we identify ourselves with our own User-Agent and never imitate the
 ///   official client's headers to obtain its rate-limit bucket.
 pub const ZEN_PROVIDER: &str = "opencode";
+
+/// Provider name of the DOCUMENTED OpenCode Zen gateway
+/// (`https://opencode.ai/zen/v1`, `https://opencode.ai/docs/zen`).
+///
+/// Key-based access to the full Zen catalog: an account key from
+/// `opencode.ai/auth` unlocks every model, including the `-free` ones, so
+/// the anonymous free-tier alternative ([`ZEN_PROVIDER`]) is INVALIDATED in
+/// this scenario — connectors built for this provider never send the
+/// `public` sentinel and the `zen_public_tier` opt-in has no effect on
+/// them. A missing key fails with [`ConnectorError::MissingApiKey`].
+pub const OPENCODE_ZEN_PROVIDER: &str = "zen";
+
+/// Provider name of the OpenCode Go gateway
+/// (`https://opencode.ai/zen/go/v1`, `https://opencode.ai/docs/go`).
+///
+/// A $10/month subscription serving popular open coding models (GLM, Kimi,
+/// Qwen, DeepSeek, MiniMax, MiMo, …) behind the same OpenAI-compatible
+/// surface as Zen. Subscriptions are managed through an OpenCode Zen
+/// account, so the key copied from `opencode.ai/auth` works on both
+/// gateways — `OPENCODE_GO_API_KEY` is tried first and
+/// `OPENCODE_API_KEY` is accepted as a fallback. There is no anonymous
+/// tier: a key is always required.
+pub const OPENCODE_GO_PROVIDER: &str = "opencode-go";
 
 /// Sentinel bearer token accepted by the Zen gateway for ANONYMOUS access:
 /// only zero-cost models are served and per-IP limits apply. Never sent when
@@ -62,6 +86,20 @@ pub const ZEN_USER_AGENT: &str = concat!("cosh/", env!("CARGO_PKG_VERSION"));
 #[must_use]
 pub fn is_zen_free_model(model: &str) -> bool {
     ZEN_FREE_MODELS.contains(&model)
+}
+
+/// Whether the provider is hosted on the OpenCode gateway infrastructure
+/// (`opencode.ai/zen/...`): the anonymous free alternative
+/// ([`ZEN_PROVIDER`]), the documented Zen gateway
+/// ([`OPENCODE_ZEN_PROVIDER`]) and the Go subscription gateway
+/// ([`OPENCODE_GO_PROVIDER`]). All of them identify themselves with the
+/// honest [`ZEN_USER_AGENT`].
+#[must_use]
+pub fn is_opencode_gateway(name: &str) -> bool {
+    matches!(
+        name,
+        ZEN_PROVIDER | OPENCODE_ZEN_PROVIDER | OPENCODE_GO_PROVIDER
+    )
 }
 
 /// Process-wide opt-in state for the Zen anonymous free tier.
@@ -433,6 +471,30 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             "x-preview-f-free",
         ),
     ),
+    // Documented OpenCode Zen gateway: same base URL as the anonymous
+    // entry point above, but strictly key-based — the full catalog
+    // (including the free models) is served to the account key, so the
+    // anonymous alternative is invalidated for this provider.
+    (
+        "zen",
+        ProviderConfig::cloud(
+            "zen",
+            Family::OpenAICompatible,
+            "https://opencode.ai/zen/v1",
+            "gpt-5.6-luna",
+        ),
+    ),
+    // OpenCode Go: $10/month subscription for open coding models, served
+    // from the same account as Zen (hence the shared-key fallback).
+    (
+        "opencode-go",
+        ProviderConfig::cloud(
+            "opencode-go",
+            Family::OpenAICompatible,
+            "https://opencode.ai/zen/go/v1",
+            "glm-5.3-flash",
+        ),
+    ),
     // ── Local providers (configured by URL, no API key) ──────────────
     (
         "ollama",
@@ -514,13 +576,28 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     ("zai", "ZAI_API_KEY"),
     ("charm", "CHARM_API_KEY"),
     ("opencode", "OPENCODE_API_KEY"),
+    ("zen", "OPENCODE_API_KEY"),
+    ("opencode-go", "OPENCODE_GO_API_KEY"),
 ];
+
+/// Secondary key sources for providers whose subscriptions share an account:
+/// a Go subscription is managed through the same OpenCode Zen account, so a
+/// key saved under the Zen variable also unlocks the Go gateway. Consulted
+/// only after the provider's own env var (keyring then environment) misses.
+const API_KEY_FALLBACK_ENVS: &[(&str, &str)] = &[("opencode-go", "OPENCODE_API_KEY")];
 
 pub fn get_provider(name: &str) -> Option<&'static ProviderConfig> {
     PROVIDERS
         .iter()
         .find(|(key, _)| *key == name)
         .map(|(_, config)| config)
+}
+
+/// Keyring first, environment second — the shared resolution used for both
+/// a provider's primary env var and its fallback (see
+/// [`API_KEY_FALLBACK_ENVS`]).
+fn resolve_env_var_key(service: &str, env_var: &str) -> Option<String> {
+    keyring_lookup(service, env_var).or_else(|| std::env::var(env_var).ok())
 }
 
 pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {
@@ -534,11 +611,23 @@ pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {
     // so stale shell/.env exports don't shadow the key the user configured.
     // Environment variables remain a fallback for providers never stored.
     let service = service.unwrap_or(COSH_SERVICE);
-    if let Some(key) = keyring_lookup(service, env_var) {
+    if let Some(key) = resolve_env_var_key(service, env_var) {
         return Some(key);
     }
 
-    std::env::var(env_var).ok()
+    // Shared-account providers (opencode-go) accept the account key saved
+    // under the parent gateway's variable when their own is unset.
+    let fallback = API_KEY_FALLBACK_ENVS
+        .iter()
+        .find(|(name, _)| *name == provider)
+        .map(|(_, var)| *var);
+    if let Some(fallback_var) = fallback
+        && let Some(key) = resolve_env_var_key(service, fallback_var)
+    {
+        return Some(key);
+    }
+
+    None
 }
 
 /// Return all known provider names.

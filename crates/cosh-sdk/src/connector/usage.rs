@@ -15,10 +15,19 @@
 //!
 //! Cache *creation* has no OpenAI/Gemini equivalent, so it stays zero for
 //! those families.
+//!
+//! ## Real vs estimated cost
+//!
+//! Some gateways report what they actually billed inside the response
+//! itself (OpenRouter's `usage.cost`; the OpenCode Zen/Go gateways append a
+//! final frame with a top-level `cost` — see `extract_reported_cost`). That
+//! REAL amount lands in [`TokenUsage::reported_cost`]; the usage panel
+//! should always prefer it over the price-table path via
+//! [`TokenUsage::effective_cost`].
 
 /// Full token usage from an LLM response (or streaming usage frame),
 /// normalized across provider families.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
     /// Input tokens NOT served from or written to the prompt cache.
     #[serde(default)]
@@ -40,6 +49,13 @@ pub struct TokenUsage {
     /// `thoughtsTokenCount`). Included in `output_tokens`.
     #[serde(default)]
     pub reasoning_tokens: u32,
+    /// REAL cost (USD) the provider reported inside the response itself
+    /// (`usage.cost` on OpenRouter/Vercel; a top-level `cost` on the final
+    /// OpenCode Zen/Go frame). `None` when the provider does not report a
+    /// cost — callers then fall back to the price-table path
+    /// ([`TokenUsage::cost`]). Prefer [`TokenUsage::effective_cost`].
+    #[serde(default)]
+    pub reported_cost: Option<f64>,
 }
 
 impl TokenUsage {
@@ -72,6 +88,14 @@ impl TokenUsage {
                 .cache_read_input_tokens
                 .max(next.cache_read_input_tokens),
             reasoning_tokens: self.reasoning_tokens.max(next.reasoning_tokens),
+            // Within one request the reported cost only ever grows (it
+            // arrives on the FINAL frame); keep the max seen, preserving a
+            // value that only one side carries.
+            reported_cost: match (self.reported_cost, next.reported_cost) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) => Some(a),
+                (None, b) => b,
+            },
         }
     }
 
@@ -90,6 +114,15 @@ impl TokenUsage {
             + f64::from(self.cache_read_input_tokens) * pricing.cache_read
             + f64::from(self.cache_creation_input_tokens) * pricing.cache_write)
             / MTOK
+    }
+
+    /// The cost the usage panel should display: the provider's REAL billed
+    /// amount when it reported one (`reported_cost` — authoritative, it is
+    /// what the gateway actually charged), falling back to the price-table
+    /// computation ([`cost`](Self::cost)) for providers that do not.
+    #[must_use]
+    pub fn effective_cost(&self, pricing: &Pricing) -> f64 {
+        self.reported_cost.unwrap_or_else(|| self.cost(pricing))
     }
 }
 
@@ -126,6 +159,7 @@ mod tests {
             cache_creation_input_tokens: 400,
             cache_read_input_tokens: 8000,
             reasoning_tokens: 0,
+            reported_cost: None,
         };
         let delta = TokenUsage {
             input_tokens: 0,
@@ -133,12 +167,64 @@ mod tests {
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
             reasoning_tokens: 0,
+            reported_cost: None,
         };
         let merged = start.merge_stream(delta);
         assert_eq!(merged.input_tokens, 1200);
         assert_eq!(merged.output_tokens, 350);
         assert_eq!(merged.cache_creation_input_tokens, 400);
         assert_eq!(merged.cache_read_input_tokens, 8000);
+    }
+
+    /// The reported cost rides the same per-field-max merge: a gateway that
+    /// only sends it on the final frame must not lose it, and a later frame
+    /// can only raise it.
+    #[test]
+    fn merge_stream_keeps_reported_cost() {
+        let none = TokenUsage::default();
+        let mut with_cost = TokenUsage {
+            reported_cost: Some(0.42),
+            ..TokenUsage::default()
+        };
+        assert_eq!(none.merge_stream(with_cost).reported_cost, Some(0.42));
+        let higher = TokenUsage {
+            reported_cost: Some(0.95),
+            ..TokenUsage::default()
+        };
+        with_cost = with_cost.merge_stream(higher);
+        assert_eq!(with_cost.reported_cost, Some(0.95));
+        // A lower value never regresses the total.
+        let lower = TokenUsage {
+            reported_cost: Some(0.1),
+            ..TokenUsage::default()
+        };
+        assert_eq!(
+            with_cost.merge_stream(lower).reported_cost,
+            Some(0.95)
+        );
+    }
+
+    /// The TUI usage panel prefers the provider's REAL billed cost and only
+    /// falls back to the price-table estimate when none was reported.
+    #[test]
+    fn effective_cost_prefers_reported_value() {
+        let pricing = Pricing {
+            input: 2.50,
+            output: 10.0,
+            cache_read: 1.25,
+            cache_write: 0.0,
+        };
+        let mut usage = TokenUsage {
+            input_tokens: 2_000_000,
+            output_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // No reported cost: the price-table path.
+        assert!((usage.effective_cost(&pricing) - 15.0).abs() < 1e-9);
+        // Real billed amount supersedes the estimate (e.g. a gateway
+        // subscription whose billed rate differs from list price).
+        usage.reported_cost = Some(0.03);
+        assert!((usage.effective_cost(&pricing) - 0.03).abs() < 1e-9);
     }
 
     #[test]
