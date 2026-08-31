@@ -1342,11 +1342,14 @@ impl Harness {
     /// Emit a [`HarnessEvent::Usage`] for a just-completed stream, if the
     /// provider reported usage and the TUI is listening. Drains the stream
     /// (its accumulated usage) first. Used by every LLM request so session
-    /// token/cost tracking reflects real API usage.
+    /// token/cost tracking reflects real API usage. Also carries the REAL
+    /// cost reported by the provider (`usage.cost`), when it reports one.
     async fn emit_usage(&self, stream: &mut ChatStream) {
         let Some(usage) = stream.usage().await else {
             return;
         };
+        // The stream is fully drained by now, so this never blocks.
+        let reported_cost = stream.reported_cost().await;
         if let Some(ref tx) = self.reasoning_tx {
             let _ = tx.send(super::events::HarnessEvent::Usage {
                 usage,
@@ -1356,6 +1359,7 @@ impl Harness {
                     .unwrap_or("unknown")
                     .to_owned(),
                 model: self.connector.model().unwrap_or("").to_owned(),
+                reported_cost,
             });
         }
     }

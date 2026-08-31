@@ -1218,6 +1218,41 @@ pub async fn lookup_pricing(model_name: &str, cache_dir: Option<&str>) -> Option
     pricing
 }
 
+/// Re-download the models.dev catalog and rewrite the on-disk cache.
+///
+/// Called once at app boot so token prices and context windows stay current
+/// instead of aging with whatever copy was cached when the model was first
+/// seen. The response is validated (must parse as a catalog) BEFORE it
+/// replaces the cache: a failed download or a malformed payload keeps the
+/// existing cache untouched — stale data beats no data. This differs from
+/// [`lookup_pricing`], which only downloads when a model is missing.
+///
+/// Returns `true` when the cache was refreshed (or already existed and the
+/// refresh succeeded), `false` when no fresh copy could be obtained and no
+/// usable cache exists afterwards.
+pub async fn refresh_pricing_catalog(cache_dir: Option<&str>) -> bool {
+    let cache = cache_dir.and_then(resolve_cache_dir).map(CatalogCache::new);
+    let response = reqwest::get("https://models.dev/api.json").await;
+    if let Ok(response) = response
+        && response.status().is_success()
+        && let Ok(raw) = response.text().await
+        // Validate BEFORE replacing the cache: a malformed payload must
+        // never evict a working copy.
+        && serde_json::from_str::<ModelsDevCatalog>(&raw).is_ok()
+    {
+        if let Some(cache) = &cache {
+            cache.save_raw(MODELS_DEV_CATALOG_FILE, &raw);
+        }
+        return true;
+    }
+    // Network/parse failure: fall back to reporting whether a usable cache
+    // still exists so the caller can log accordingly.
+    cache
+        .as_ref()
+        .map(|c| c.load_raw(MODELS_DEV_CATALOG_FILE).is_some())
+        .unwrap_or(false)
+}
+
 /// Attempts to discover the context window size for a given model.
 ///
 /// Resolution order (fastest first):

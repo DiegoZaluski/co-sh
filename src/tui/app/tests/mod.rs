@@ -30,6 +30,7 @@ fn isolate_home() {
 
 mod agent_loop;
 mod commands;
+mod cost;
 mod dialogs;
 mod keys;
 mod model_persistence;

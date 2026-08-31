@@ -853,8 +853,9 @@ impl App {
                     usage,
                     provider,
                     model,
+                    reported_cost,
                 } => {
-                    self.record_usage(usage, &provider, &model);
+                    self.record_usage(usage, &provider, &model, reported_cost);
                 }
             }
         }

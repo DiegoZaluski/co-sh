@@ -160,6 +160,12 @@ pub struct ChatStream {
     /// merge — see [`TokenUsage::merge_stream`]). Cleared on the retry
     /// middleware's reset marker so a re-streamed attempt starts fresh.
     usage: Option<TokenUsage>,
+    /// REAL cost (USD) reported by the provider itself inside its usage
+    /// object (`usage.cost` — OpenRouter, Vercel AI Gateway, OpenCode Zen).
+    /// This is the authoritative billed amount and always supersedes any
+    /// local price-table estimate. Gateways that do not report a cost leave
+    /// this `None`. Cleared on the retry middleware's reset marker.
+    reported_cost: Option<f64>,
     family: Family,
     finished: bool,
 }
@@ -173,6 +179,7 @@ impl ChatStream {
             inner,
             last_raw: None,
             usage: None,
+            reported_cost: None,
             family,
             finished: false,
         }
@@ -194,6 +201,22 @@ impl ChatStream {
             while self.next().await.is_some() {}
         }
         self.usage
+    }
+
+    /// Returns the REAL cost (USD) the provider reported inside its usage
+    /// object (`usage.cost`), if any.
+    ///
+    /// Some gateways (OpenRouter, Vercel AI Gateway, OpenCode Zen) embed the
+    /// exact amount they billed in every response — this is the authoritative
+    /// spend figure and always supersedes a local price-table estimate.
+    /// Providers that do not report a cost return `None`, in which case the
+    /// caller falls back to the token-count × catalog-price estimate.
+    pub async fn reported_cost(&mut self) -> Option<f64> {
+        if !self.finished {
+            use tokio_stream::StreamExt;
+            while self.next().await.is_some() {}
+        }
+        self.reported_cost
     }
 
     /// Returns the last raw SSE frame received from the stream.
@@ -229,11 +252,20 @@ impl Stream for ChatStream {
                 // The retry middleware is re-streaming a failed attempt from
                 // the beginning: drop the failed attempt's partial usage.
                 self.usage = None;
-            } else if let Some(u) = extract_family_usage(self.family, &chunk.raw) {
-                self.usage = Some(match self.usage {
-                    Some(prev) => prev.merge_stream(u),
-                    None => u,
-                });
+                self.reported_cost = None;
+            } else {
+                if let Some(u) = extract_family_usage(self.family, &chunk.raw) {
+                    self.usage = Some(match self.usage {
+                        Some(prev) => prev.merge_stream(u),
+                        None => u,
+                    });
+                }
+                // Reported cost only ever arrives on the FINAL frame and only
+                // grows within one request, so keep the max seen. Stays `None`
+                // for providers that do not report a cost.
+                if let Some(c) = extract_reported_cost(&chunk.raw) {
+                    self.reported_cost = Some(self.reported_cost.map_or(c, |prev| prev.max(c)));
+                }
             }
             self.last_raw = Some(chunk.raw.clone());
         }
@@ -253,6 +285,117 @@ fn extract_family_usage(family: Family, raw: &str) -> Option<TokenUsage> {
         Family::OpenAi => super::openai::extract_usage(raw),
         Family::Claude => super::claude::extract_usage(raw),
         Family::Gemini => super::gemini::extract_usage(raw),
+    }
+}
+
+/// Extract the REAL billed cost (USD) from a raw response/SSE frame.
+///
+/// Family-agnostic on purpose: every gateway that follows the OpenAI response
+/// shape and reports what it actually charged does so as `usage.cost` (a USD
+/// number inside the usage object — OpenRouter documents this field; Vercel AI
+/// Gateway and OpenCode Zen follow the same shape). Families whose native
+/// response shape has no `usage` object (Claude, Gemini) simply never match.
+///
+/// Rejects negative or non-finite values: a malformed cost must never poison
+/// the spend totals — `None` falls back to the estimate path.
+fn extract_reported_cost(raw: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let cost = v.get("usage")?.get("cost")?.as_f64()?;
+    if cost.is_finite() && cost >= 0.0 {
+        Some(cost)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_reported_cost_from_openai_shape() {
+        let raw = r#"{"usage":{"prompt_tokens":194,"completion_tokens":2,"cost":0.95}}"#;
+        assert_eq!(extract_reported_cost(raw), Some(0.95));
+    }
+
+    #[test]
+    fn extracts_reported_cost_from_openrouter_streaming_frame() {
+        let raw = r#"{"object":"chat.completion.chunk","usage":{"prompt_tokens":194,"completion_tokens":2,"cost":0.95,"cost_details":{"upstream_inference_cost":19},"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":100}}}"#;
+        assert_eq!(extract_reported_cost(raw), Some(0.95));
+    }
+
+    #[test]
+    fn zero_reported_cost_is_valid() {
+        // Free-tier models genuinely report $0 — this MUST be kept so the
+        // estimate path does not bill a free model.
+        let raw = r#"{"usage":{"prompt_tokens":10,"completion_tokens":2,"cost":0}}"#;
+        assert_eq!(extract_reported_cost(raw), Some(0.0));
+    }
+
+    #[test]
+    fn missing_cost_or_usage_is_none() {
+        assert_eq!(extract_reported_cost(r#"{"usage":{"prompt_tokens":1}}"#), None);
+        assert_eq!(extract_reported_cost(r#"{"choices":[]}"#), None);
+        assert_eq!(extract_reported_cost("not json"), None);
+    }
+
+    #[test]
+    fn non_numeric_or_invalid_cost_is_none() {
+        assert_eq!(
+            extract_reported_cost(r#"{"usage":{"cost":"0.95"}}"#),
+            None
+        );
+        assert_eq!(extract_reported_cost(r#"{"usage":{"cost":-1.0}}"#), None);
+        let nan = f64::NAN;
+        let raw = format!(r#"{{"usage":{{"cost":{nan}}}}}"#);
+        assert_eq!(extract_reported_cost(&raw), None);
+    }
+
+    #[tokio::test]
+    async fn reported_cost_accumulates_across_frames_and_survives_drain() {
+        use tokio_stream::StreamExt;
+        let frame = |cost: f64| {
+            Ok(StreamChunk {
+                raw: format!(r#"{{"usage":{{"prompt_tokens":10,"completion_tokens":2,"cost":{cost}}}}}"#),
+                token: String::new(),
+                reasoning: String::new(),
+                finish_reason: None,
+                thinking_blocks: None,
+                tool_call: None,
+                reset: false,
+            })
+        };
+        let frames = vec![frame(0.4), frame(0.95)];
+        let mut stream =
+            ChatStream::new(Box::pin(tokio_stream::iter(frames)), Family::OpenAICompatible);
+        while stream.next().await.is_some() {}
+        // Final-frame cost wins (per-request cost only grows).
+        assert_eq!(stream.reported_cost().await, Some(0.95));
+    }
+
+    #[tokio::test]
+    async fn reported_cost_is_cleared_on_retry_reset() {
+        use tokio_stream::StreamExt;
+        let cost_frame = |reset: bool| {
+            Ok(StreamChunk {
+                raw: r#"{"usage":{"prompt_tokens":10,"completion_tokens":2,"cost":0.95}}"#.into(),
+                token: String::new(),
+                reasoning: String::new(),
+                finish_reason: None,
+                thinking_blocks: None,
+                tool_call: None,
+                reset,
+            })
+        };
+        // A failed attempt whose partial cost arrived before the reset marker
+        // must NOT leak into the retried response (or it would be counted
+        // twice once the retry's own final frame lands).
+        let frames = vec![cost_frame(false), Ok(StreamChunk::reset())];
+        let mut stream =
+            ChatStream::new(Box::pin(tokio_stream::iter(frames)), Family::OpenAICompatible);
+        while stream.next().await.is_some() {}
+        assert_eq!(stream.reported_cost().await, None);
+        assert_eq!(stream.usage().await, None);
     }
 }
 

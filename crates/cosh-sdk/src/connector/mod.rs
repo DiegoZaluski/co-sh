@@ -25,7 +25,8 @@ pub mod retry;
 pub use client::Connector;
 pub use discovery::{
     ModelReasoning, discover_context_window, effective_context_window, lookup_pricing,
-    model_pricing, model_reasoning, model_reasoning_from_catalog, resolve_reasoning_effort,
+    model_pricing, model_reasoning, model_reasoning_from_catalog, refresh_pricing_catalog,
+    resolve_reasoning_effort,
 };
 pub use error::ConnectorError;
 pub use output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};

@@ -163,6 +163,13 @@ pub enum HarnessEvent {
         provider: String,
         /// The model that served the request.
         model: String,
+        /// REAL cost (USD) reported by the provider inside its usage object
+        /// (`usage.cost` — OpenRouter, Vercel AI Gateway, OpenCode Zen). The
+        /// authoritative billed amount: always supersedes the local
+        /// price-table estimate. `None` when the provider does not report a
+        /// cost (the TUI then falls back to the estimate, or to no cost at
+        /// all when no price is known).
+        reported_cost: Option<f64>,
     },
 }
 

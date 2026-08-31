@@ -21,6 +21,10 @@ pub struct DashboardData {
     pub session_tokens: u64,
     /// Real cost of the current session (None until a price is known).
     pub session_cost: Option<f64>,
+    /// Whether the current session has requests whose spend could not be
+    /// resolved at all (no provider-reported cost, no catalog price). Drives
+    /// the yellow warning next to the session cost line.
+    pub session_unpriced: bool,
     /// Spend for the selected period (per provider + total).
     pub period: SpendSummary,
     /// The period currently selected.
@@ -145,9 +149,15 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &DashboardData, theme: &Theme)
         Style::default().fg(text),
     );
     y += 1;
-    let cost_str = match data.session_cost {
-        Some(c) => format_usd(c),
-        None => "—".to_string(),
+    // No resolvable cost is surfaced as a yellow warning, never as a silent
+    // `$0`/`—` (an understated total is worse than an honest one).
+    let (cost_str, cost_style) = match data.session_cost {
+        Some(c) => (format_usd(c), Style::default().fg(text)),
+        None if data.session_unpriced => (
+            "unpriced".to_string(),
+            Style::default().fg(rgba_color(theme.warning)),
+        ),
+        None => ("—".to_string(), Style::default().fg(muted)),
     };
     draw_text(
         buf,
@@ -155,11 +165,7 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &DashboardData, theme: &Theme)
         inner,
         y,
         area.width,
-        Style::default().fg(if data.session_cost.is_some() {
-            text
-        } else {
-            muted
-        }),
+        cost_style,
     );
     y += 2;
 
@@ -218,6 +224,23 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &DashboardData, theme: &Theme)
             Style::default().fg(primary),
         );
         y += 1;
+    }
+
+    // ── Unpriced warning (pinned above the Total, yellow) ──
+    // Requests whose spend could not be resolved (no provider-reported cost
+    // AND no catalog price) are excluded from the dollar totals — say so
+    // instead of letting the total silently understate the real spend.
+    if data.period.unpriced > 0 && budget_bottom > area.y {
+        let warn =
+            format!("⚠ {} req. unpriced", data.period.unpriced);
+        draw_text(
+            buf,
+            &warn,
+            inner,
+            budget_bottom,
+            area.width,
+            Style::default().fg(rgba_color(theme.warning)),
+        );
     }
 
     // ── Total (pinned to bottom, same amount column) ──
