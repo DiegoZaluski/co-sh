@@ -281,13 +281,23 @@ fn severity_then_position(diag: &Diagnostic) -> (DiagnosticSeverity, u32, u32, &
 /// Inverse of the client's percent-encoding: `file://` URIs to paths.
 ///
 /// Non-`file` schemes yield `None` — servers occasionally publish against
-/// `untitled:` or `jdt://` documents an agent never touched. Invalid `%`
-/// sequences pass through as literal text rather than failing the whole uri.
+/// `untitled:` or `jdt://` documents an agent never touched. The authority
+/// component must be empty or `localhost` (RFC 8089 equivalence); any other
+/// host is not a local file path. Invalid `%` sequences pass through as
+/// literal text rather than failing the whole uri.
 pub fn uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
     let raw = uri.as_str();
     let rest = raw.strip_prefix("file://")?;
 
-    let bytes = rest.as_bytes();
+    // Split off the authority: `file:///path` (empty) vs `file://host/path`.
+    // A bare `file://host` with no path at all is not a usable file path.
+    let (authority, path) = rest.split_once('/')?;
+    if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+        log::debug!("ignoring diagnostics for non-local uri {raw}");
+        return None;
+    }
+
+    let bytes = path.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
@@ -303,9 +313,10 @@ pub fn uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
         }
     }
 
-    Some(PathBuf::from(
-        String::from_utf8_lossy(&decoded).into_owned(),
-    ))
+    Some(PathBuf::from(format!(
+        "/{}",
+        String::from_utf8_lossy(&decoded)
+    )))
 }
 
 /// Severity filter applied when rendering diagnostics for a model.

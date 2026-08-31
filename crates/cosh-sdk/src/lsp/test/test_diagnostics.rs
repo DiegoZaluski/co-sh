@@ -174,6 +174,32 @@ fn uri_to_path_decodes_percent_escapes() {
     assert_eq!(uri_to_path(&Uri::from_str("https://x/y").unwrap()), None);
 }
 
+#[test]
+fn uri_to_path_handles_authority_component() {
+    // Empty authority (the common shape) and the RFC 8089 `localhost`
+    // equivalence both map to local paths.
+    assert_eq!(
+        uri_to_path(&Uri::from_str("file:///tmp/a.rs").unwrap()),
+        Some(PathBuf::from("/tmp/a.rs"))
+    );
+    assert_eq!(
+        uri_to_path(&Uri::from_str("file://localhost/tmp/a.rs").unwrap()),
+        Some(PathBuf::from("/tmp/a.rs"))
+    );
+    // Any other host is not a local file this engine opened.
+    assert_eq!(
+        uri_to_path(&Uri::from_str("file://remote.host/tmp/a.rs").unwrap()),
+        None
+    );
+    // No path at all is not a usable file path.
+    assert_eq!(uri_to_path(&Uri::from_str("file://localhost").unwrap()), None);
+    // Windows drive-letter form keeps its leading slash shape.
+    assert_eq!(
+        uri_to_path(&Uri::from_str("file:///C:/src/a.rs").unwrap()),
+        Some(PathBuf::from("/C:/src/a.rs"))
+    );
+}
+
 // ── Settle-wait ──────────────────────────────────────────────────────────
 
 #[tokio::test]

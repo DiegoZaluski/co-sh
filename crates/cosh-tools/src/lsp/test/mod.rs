@@ -73,6 +73,7 @@ fn one_spec_manager(dir: &std::path::Path, factory: ClientFactory) -> Manager {
             command: "unused",
             args: &[],
             extensions: &[".fake"],
+            filenames: &[],
             root_markers: &["marker.txt"],
         }],
         factory,
@@ -552,6 +553,7 @@ async fn workspace_symbols_requires_running_servers() {
         command: "unused",
         args: &[],
         extensions: &[".fake"],
+        filenames: &[],
         root_markers: &["marker.txt"],
     }];
     let manager = Arc::new(Manager::build(config, catalog, factory));

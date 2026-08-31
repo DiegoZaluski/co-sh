@@ -1,7 +1,7 @@
 //! Curated language-server catalog and discovery helpers.
 //!
-//! Matching is by exact file extension (lowercase, dot included) plus
-//! root-marker walk-up — the loose heuristics that made crush start the wrong
+//! Matching is by exact file extension (lowercase, dot included) or by
+//! exact extensionless file name (`Dockerfile`), plus root-marker walk-up — the loose heuristics that made crush start the wrong
 //! server for a language (#1751) are exactly what this avoids.
 //!
 //! Servers are expected on `PATH`; there is no auto-install. Missing binaries
@@ -23,6 +23,8 @@ pub struct ServerSpec {
     pub args: &'static [&'static str],
     /// File extensions served, lowercase with leading dot (`".rs"`).
     pub extensions: &'static [&'static str],
+    /// Extensionless file names claimed by this spec, lowercase (`"dockerfile"`).
+    pub filenames: &'static [&'static str],
     /// Files/directories identifying the project root, checked walking up
     /// from the touched file toward the workspace root. Empty = always use
     /// the workspace root.
@@ -36,6 +38,28 @@ impl ServerSpec {
         self.extensions
             .iter()
             .any(|candidate| *candidate == extension)
+    }
+
+    /// Whether this spec claims a file by its (case-insensitive) name.
+    /// Covers extensionless files such as `Dockerfile`.
+    pub fn handles_file_name(&self, file_name: &str) -> bool {
+        let file_name = file_name.to_ascii_lowercase();
+        self.filenames
+            .iter()
+            .any(|candidate| *candidate == file_name)
+    }
+
+    /// Whether this spec claims `path`, by extension or by exact file name.
+    pub fn handles(&self, path: &Path) -> bool {
+        if path
+            .file_name()
+            .is_some_and(|file_name| self.handles_file_name(&file_name.to_string_lossy()))
+        {
+            return true;
+        }
+        path.extension()
+            .map(|ext| format!(".{}", ext.to_string_lossy()))
+            .is_some_and(|ext| self.handles_extension(&ext))
     }
 
     /// Resolve the binary path against `PATH`. Returns `None` when absent or
@@ -53,6 +77,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "rust-analyzer",
         command: "rust-analyzer",
         args: &[],
+        filenames: &[],
         extensions: &[".rs"],
         root_markers: &["Cargo.toml", "rust-toolchain.toml", ".git"],
     },
@@ -60,6 +85,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "clangd",
         command: "clangd",
         args: &[],
+        filenames: &[],
         extensions: &[".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"],
         root_markers: &[
             "compile_commands.json",
@@ -73,6 +99,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "zls",
         command: "zls",
         args: &[],
+        filenames: &[],
         extensions: &[".zig", ".zon"],
         root_markers: &["build.zig", ".git"],
     },
@@ -81,6 +108,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "gopls",
         command: "gopls",
         args: &[],
+        filenames: &[],
         extensions: &[".go"],
         root_markers: &["go.work", "go.mod", ".git"],
     },
@@ -88,6 +116,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "pyright",
         command: "pyright-langserver",
         args: &["--stdio"],
+        filenames: &[],
         extensions: &[".py", ".pyi"],
         root_markers: &[
             "pyproject.toml",
@@ -101,6 +130,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "typescript-language-server",
         command: "typescript-language-server",
         args: &["--stdio"],
+        filenames: &[],
         extensions: &[".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"],
         root_markers: &["package.json", "tsconfig.json", "jsconfig.json", ".git"],
     },
@@ -108,6 +138,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "ruby-lsp",
         command: "ruby-lsp",
         args: &[],
+        filenames: &[],
         extensions: &[".rb", ".erb", ".rake", ".gemspec"],
         root_markers: &["Gemfile", "Rakefile", ".ruby-version", ".git"],
     },
@@ -115,6 +146,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "php-actor",
         command: "php-actor",
         args: &["language-server"],
+        filenames: &[],
         extensions: &[".php"],
         root_markers: &["composer.json", "composer.lock", ".git"],
     },
@@ -123,6 +155,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "elixir-ls",
         command: "elixir-ls",
         args: &[],
+        filenames: &[],
         extensions: &[".ex", ".exs"],
         root_markers: &["mix.exs", ".git"],
     },
@@ -130,6 +163,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "erlang-ls",
         command: "erlang_ls",
         args: &[],
+        filenames: &[],
         extensions: &[".erl", ".hrl"],
         root_markers: &["rebar.config", "erlang_ls.config", ".git"],
     },
@@ -138,6 +172,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "jdtls",
         command: "jdtls",
         args: &[],
+        filenames: &[],
         extensions: &[".java"],
         root_markers: &[
             "pom.xml",
@@ -151,6 +186,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "kotlin-language-server",
         command: "kotlin-language-server",
         args: &[],
+        filenames: &[],
         extensions: &[".kt", ".kts"],
         root_markers: &[
             "build.gradle.kts",
@@ -164,6 +200,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "clojure-lsp",
         command: "clojure-lsp",
         args: &[],
+        filenames: &[],
         extensions: &[".clj", ".cljs", ".cljc", ".edn"],
         root_markers: &["deps.edn", "project.clj", "shadow-cljs.edn", ".git"],
     },
@@ -172,6 +209,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "haskell-language-server",
         command: "haskell-language-server-wrapper",
         args: &["--lsp"],
+        filenames: &[],
         extensions: &[".hs", ".lhs"],
         root_markers: &["stack.yaml", "cabal.project", "*.cabal", ".git"],
     },
@@ -179,6 +217,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "ocamllsp",
         command: "ocamllsp",
         args: &[],
+        filenames: &[],
         extensions: &[".ml", ".mli"],
         root_markers: &["dune-project", "Makefile", ".git"],
     },
@@ -187,6 +226,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "bash-language-server",
         command: "bash-language-server",
         args: &["start"],
+        filenames: &[],
         extensions: &[".sh", ".bash", ".zsh"],
         root_markers: &[],
     },
@@ -194,6 +234,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "lua-language-server",
         command: "lua-language-server",
         args: &["--lsp"],
+        filenames: &[],
         extensions: &[".lua"],
         root_markers: &[".luarc.json", ".luacheckrc", ".git"],
     },
@@ -201,6 +242,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "taplo",
         command: "taplo",
         args: &["lsp", "stdio"],
+        filenames: &[],
         extensions: &[".toml"],
         root_markers: &["Cargo.toml", "pyproject.toml", ".git"],
     },
@@ -208,6 +250,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "yaml-language-server",
         command: "yaml-language-server",
         args: &["--stdio"],
+        filenames: &[],
         extensions: &[".yml", ".yaml"],
         root_markers: &[],
     },
@@ -215,6 +258,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "marksman",
         command: "marksman",
         args: &[],
+        filenames: &[],
         extensions: &[".md", ".markdown"],
         root_markers: &[],
     },
@@ -223,6 +267,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "vscode-html-language-server",
         command: "vscode-html-language-server",
         args: &["--stdio"],
+        filenames: &[],
         extensions: &[".html", ".htm"],
         root_markers: &[],
     },
@@ -230,6 +275,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "vscode-css-language-server",
         command: "vscode-css-language-server",
         args: &["--stdio"],
+        filenames: &[],
         extensions: &[".css", ".scss", ".less"],
         root_markers: &[],
     },
@@ -237,7 +283,8 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "dockerfile-language-server-nodejs",
         command: "dockerfile-language-server-nodejs",
         args: &["--stdio"],
-        extensions: &["dockerfile", ".dockerfile"],
+        filenames: &["dockerfile"],
+        extensions: &[".dockerfile"],
         root_markers: &["Dockerfile", "docker-compose.yml", ".git"],
     },
     // ── Nix ─────────────────────────────────────────────────────────────
@@ -245,6 +292,7 @@ pub const CATALOG: &[ServerSpec] = &[
         name: "nixd",
         command: "nixd",
         args: &[],
+        filenames: &[],
         extensions: &[".nix"],
         root_markers: &["flake.nix", "shell.nix", "default.nix", ".git"],
     },
@@ -363,5 +411,59 @@ mod tests {
         #[cfg(unix)]
         assert!(lookup_on_path("sh").is_some());
         assert!(lookup_on_path("definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn handles_matches_extensionless_files_by_name() {
+        let docker = CATALOG
+            .iter()
+            .find(|s| s.name == "dockerfile-language-server-nodejs")
+            .unwrap();
+        assert!(docker.handles(Path::new("Dockerfile")));
+        assert!(docker.handles(Path::new("dockerfile")));
+        assert!(docker.handles(Path::new("/a/b/DOCKERFILE")));
+        assert!(docker.handles(Path::new("build.dockerfile")));
+        assert!(!docker.handles(Path::new("Dockerfile.bak")));
+        assert!(!docker.handles(Path::new("docker-compose.yml")));
+    }
+
+    #[test]
+    fn handles_survives_non_utf8_file_names() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let docker = CATALOG
+            .iter()
+            .find(|s| s.name == "dockerfile-language-server-nodejs")
+            .unwrap();
+        let weird = Path::new(OsStr::from_bytes(b"doc\xffuments/Dockerfile"));
+        assert!(docker.handles(weird));
+
+        let rust = CATALOG.iter().find(|s| s.name == "rust-analyzer").unwrap();
+        let weird_rs = Path::new(OsStr::from_bytes(b"proj\xffct.rs"));
+        assert!(
+            rust.handles(weird_rs),
+            "lossy extension matching preserved for non-UTF-8 stems"
+        );
+    }
+
+    #[test]
+    fn every_spec_filename_is_lowercase_and_extensionless() {
+        for spec in CATALOG {
+            for name in spec.filenames {
+                assert!(
+                    *name == name.to_ascii_lowercase() && !name.contains('.'),
+                    "`{}` filename `{name}` must be lowercase without extension",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn handles_by_extension_only_when_no_name_match() {
+        let rust = CATALOG.iter().find(|s| s.name == "rust-analyzer").unwrap();
+        assert!(rust.handles(Path::new("src/lib.rs")));
+        assert!(!rust.handles(Path::new("rs")));
     }
 }

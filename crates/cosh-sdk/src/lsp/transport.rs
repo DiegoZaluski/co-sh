@@ -257,11 +257,27 @@ impl Transport {
         let id = self.next_id();
 
         let (tx, rx) = oneshot::channel();
-        self.shared
-            .pending
-            .lock()
-            .expect("pending map lock")
-            .insert(id.clone(), PendingEntry { tx });
+        let session_dead = {
+            let mut pending = self.shared.pending.lock().expect("pending map lock");
+            pending.insert(id.clone(), PendingEntry { tx });
+            // Re-checked while holding the pending lock: `terminate` drains
+            // this same map AFTER flipping the terminal watch, so either our
+            // entry was drained (its sender got `StreamClosed`) or we observe
+            // the terminal state here and undo the insert ourselves. Either
+            // way a request against a dead session never waits out its
+            // deadline on a response that will never come.
+            self.shared.exit_tx.borrow().is_some()
+        };
+        if session_dead {
+            self.shared
+                .pending
+                .lock()
+                .expect("pending map lock")
+                .remove(&id);
+            return RequestFuture {
+                inner: Box::pin(async { Err(LspError::NotRunning) }),
+            };
+        }
 
         if self
             .enqueue_frame(jsonrpc::encode_request(&id, method, params.as_ref()))

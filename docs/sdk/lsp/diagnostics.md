@@ -14,6 +14,14 @@ Each publisher replaces its own entry wholesale (the protocol's own
 replace-whole-document semantics). An empty publish clears that server's
 entry; when no server has anything left for a file, the path disappears.
 
+### URI-to-path resolution
+
+`uri_to_path` decodes `file://` URIs into local paths. Only an empty
+authority or `localhost` is accepted (RFC 8089 equivalence); any other
+host is rejected as non-local. Invalid `%` sequences pass through as
+literal text rather than failing the whole URI. The decoded path is
+always absolute with a leading `/`.
+
 ## Change tracking
 
 A global `AtomicU64` version bumps on every **real** mutation — identical

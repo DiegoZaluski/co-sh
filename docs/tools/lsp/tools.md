@@ -48,8 +48,11 @@ enough.
 
 ## Discovery
 
-Servers are discovered from a built-in catalog (~25 entries) by file
-extension + root-marker walk-up. Binaries must be on `PATH`; missing ones
+Servers are discovered from a built-in catalog (~26 entries) by file
+extension or exact extensionless file name (e.g. `Dockerfile`) plus
+root-marker walk-up. Matching is strict: only an exact extension (`.rs`,
+`.dockerfile`) or a case-insensitive exact name (`dockerfile`) claims a
+spec — no loose heuristics. Binaries must be on `PATH`; missing ones
 soft-skip without blocking other servers for the same file.
 
 ## MCP wiring

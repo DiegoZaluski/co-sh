@@ -29,6 +29,7 @@ fn spec(
         command,
         args: &[],
         extensions,
+        filenames: &[],
         root_markers: markers,
     }
 }
@@ -135,7 +136,8 @@ async fn root_resolution_walks_up_to_nearest_marker() {
         .find(|(_, name)| *name == "rust-nested")
         .unwrap();
     assert_eq!(
-        nested.0.root, pkg,
+        nested.0.root,
+        pkg.canonicalize().unwrap(),
         "nearest marker wins over workspace root"
     );
 
@@ -144,7 +146,8 @@ async fn root_resolution_walks_up_to_nearest_marker() {
         .find(|(_, name)| *name == "rust-markerless")
         .unwrap();
     assert_eq!(
-        markerless.0.root, root,
+        markerless.0.root,
+        root.canonicalize().unwrap(),
         "marker-less specs fall back to workspace root"
     );
 }
@@ -189,6 +192,64 @@ async fn unsupported_extension_matches_nothing_and_is_not_an_error() {
 
     let handles = manager.ensure_for_file(&file).await.unwrap();
     assert!(handles.is_empty());
+}
+
+#[tokio::test]
+async fn extensionless_files_match_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("Dockerfile");
+    std::fs::write(&file, "FROM scratch\n").unwrap();
+
+    let manager = Manager::build(
+        ManagerConfig::new(root.clone()),
+        vec![ServerSpec {
+            name: "docker-ls",
+            command: "unused",
+            args: &[],
+            extensions: &[".dockerfile"],
+            filenames: &["dockerfile"],
+            root_markers: &["Dockerfile"],
+        }],
+        never_factory(),
+    );
+
+    let matches = manager.matches_for_file(&file);
+    assert_eq!(matches.len(), 1, "bare `Dockerfile` claims the spec");
+    assert_eq!(matches[0].0.root, root.canonicalize().unwrap());
+}
+
+/// The same project reached through a symlink must resolve to the same
+/// `ClientKey` — otherwise two processes of one server run against one
+/// project.
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinked_project_resolves_to_canonical_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(project.join("lib.rs"), "").unwrap();
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+
+    let manager = Manager::build(
+        ManagerConfig::new(root.clone()),
+        vec![spec("rust", "unused", &[".rs"], &["Cargo.toml"])],
+        never_factory(),
+    );
+
+    let direct = manager.matches_for_file(&project.join("lib.rs"));
+    let via_link = manager.matches_for_file(&link.join("lib.rs"));
+
+    assert_eq!(direct.len(), 1);
+    assert_eq!(via_link.len(), 1, "symlinked file stays inside workspace");
+    assert_eq!(
+        direct[0].0, via_link[0].0,
+        "symlink and real path must share one ClientKey"
+    );
+    assert_eq!(direct[0].0.root, project.canonicalize().unwrap());
 }
 
 /// Two servers of the same language with different roots coexist (the
@@ -513,7 +574,7 @@ async fn managed_events_are_tagged_with_identity() {
         match &event.event {
             crate::lsp::Event::StateChanged(_) => {
                 assert_eq!(event.server, "tagged");
-                assert_eq!(event.root, dir.path());
+                assert_eq!(event.root, dir.path().canonicalize().unwrap());
                 break;
             }
             _ => continue,

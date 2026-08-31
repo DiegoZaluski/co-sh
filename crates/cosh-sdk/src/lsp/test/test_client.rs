@@ -377,6 +377,97 @@ async fn death_flips_state_to_exited() {
     assert!(matches!(client.state(), ServerState::Exited { .. }));
 }
 
+/// The transport may terminate BEFORE the exit watcher subscribes (instant
+/// EOF at startup). The watcher must still observe the pre-existing terminal
+/// reason instead of leaving the state stuck in `Starting` forever.
+#[tokio::test]
+async fn instant_eof_at_startup_still_reaches_exited() {
+    // Client-side halves of a peer dropped before the client is assembled:
+    // every read returns EOF immediately.
+    let (_server_peer, client_stream) = spawn_fake_server(1024);
+    drop(_server_peer);
+    let (read_half, write_half) = tokio::io::split(client_stream);
+    let (dead_stderr, _dead_peer) = tokio::io::duplex(1);
+
+    let mut config = LanguageServerConfig::new(
+        "instant-death",
+        std::path::PathBuf::from("/unused/instant-death"),
+        std::path::PathBuf::from("/tmp"),
+    );
+    let (events_tx, mut events) = mpsc::unbounded_channel();
+    config.events = Some(events_tx);
+
+    let client = LanguageServer::from_streams(config, read_half, write_half, Some(dead_stderr));
+
+    // Nudge the scheduler so the transport's reader task gets every chance
+    // to observe the EOF before the watcher would (the old race window).
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+
+    let deadline = Duration::from_secs(2);
+    loop {
+        match tokio::time::timeout(deadline, events.recv()).await.unwrap() {
+            Some(Event::StateChanged(ServerState::Exited { .. })) => break,
+            Some(_) => continue,
+            None => panic!("event stream closed before Exited"),
+        }
+    }
+    assert!(matches!(client.state(), ServerState::Exited { .. }));
+}
+
+/// Concurrent first touches of the same file must produce exactly one
+/// didOpen (the docs lock serializes the claim and the wire sends). True
+/// parallelism matters: the old pre-fix window only opened when two touches
+/// ran on different worker threads simultaneously.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_touches_send_exactly_one_did_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("raced.txt");
+    std::fs::write(&path, "content").unwrap();
+
+    let (client, mut server, _events) = running_client("{}", serde_json::Value::Null).await;
+
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let collector_handle = {
+        let collected = std::sync::Arc::clone(&collected);
+        tokio::spawn(async move {
+            while let Some(msg) = server.next_client_message().await {
+                collected.lock().unwrap().push(msg);
+            }
+        })
+    };
+
+    let client = std::sync::Arc::new(client);
+    let touches: Vec<_> = (0..8)
+        .map(|_| {
+            let client = std::sync::Arc::clone(&client);
+            let path = path.clone();
+            tokio::spawn(async move { client.touch_file(&path).await })
+        })
+        .collect();
+    for touch in touches {
+        touch.await.unwrap().unwrap();
+    }
+
+    // One watched-files nudge + exactly one didOpen.
+    for _ in 0..50 {
+        if collected.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(client);
+    let _ = collector_handle.await;
+
+    let wire = collected.lock().unwrap().join("\n");
+    assert_eq!(
+        wire.matches("\"textDocument/didOpen\"").count(),
+        1,
+        "8 concurrent touches → exactly one didOpen"
+    );
+}
+
 /// Graceful shutdown sequence on the wire: shutdown request → exit
 /// notification → (flush) → stopped state.
 #[tokio::test]

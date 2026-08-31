@@ -193,15 +193,11 @@ impl Manager {
     /// Resolve which `(key, spec-name)` pairs claim `path`, in catalog order,
     /// duplicates removed.
     pub fn matches_for_file(&self, path: &Path) -> Vec<(ClientKey, &'static str)> {
-        let Some(extension) = extension_of(path) else {
-            return Vec::new();
-        };
-
         let mut seen = std::collections::HashSet::new();
         self.inner
             .catalog
             .iter()
-            .filter(|spec| spec.handles_extension(&extension))
+            .filter(|spec| spec.handles(path))
             .filter_map(|spec| {
                 let root = resolve_project_root(path, spec, &self.inner.config.root)?;
                 let key = ClientKey {
@@ -645,11 +641,6 @@ fn spawn_event_relay(
     });
 }
 
-fn extension_of(path: &Path) -> Option<String> {
-    let extension = path.extension()?.to_string_lossy().into_owned();
-    Some(format!(".{extension}"))
-}
-
 /// Walk up from `path`'s directory to `workspace_root` looking for any of the
 /// spec's markers; the first directory containing one wins. Marker-less specs
 /// always resolve to the workspace root; specs whose markers appear nowhere in
@@ -657,10 +648,12 @@ fn extension_of(path: &Path) -> Option<String> {
 ///
 /// The walk is purely lexical (no symlink/canonicalization): a file reached
 /// through a link pointing outside the workspace simply finds no markers and
-/// is skipped — the safe direction.
+/// is skipped — the safe direction. The *returned* root is canonicalized
+/// (see [`canonical_root`]) so the key is stable across lexical aliases; a
+/// symlinked project directory may therefore surface as its real path.
 fn resolve_project_root(path: &Path, spec: &ServerSpec, workspace_root: &Path) -> Option<PathBuf> {
     if spec.root_markers.is_empty() {
-        return Some(workspace_root.to_path_buf());
+        return Some(canonical_root(workspace_root));
     }
 
     let file_abs = absolute(path);
@@ -676,11 +669,44 @@ fn resolve_project_root(path: &Path, spec: &ServerSpec, workspace_root: &Path) -
             .iter()
             .any(|marker| dir.join(marker).exists())
         {
-            return Some(dir.to_path_buf());
+            return Some(canonical_root(dir));
         }
         current = dir.parent();
     }
     None
+}
+
+/// Best-effort canonicalization of a resolved project root.
+///
+/// Without it, the same directory reached through different lexical paths
+/// (a symlink into the tree, a non-canonical workspace root) produces
+/// distinct `ClientKey`s — and thus two processes of the same server for one
+/// project. When the path cannot be canonicalized (it may not exist yet),
+/// the lexical path is kept: distinct-but-equal keys degrade to a redundant
+/// server, never to a missing one.
+fn canonical_root(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    strip_windows_verbatim(&canonical)
+}
+
+/// Windows `canonicalize` returns verbatim (`\\?\C:\…`) paths. Servers and
+/// `uri_from_path` expect plain drive paths, so strip the prefix — keeping
+/// the `\\?\UNC\` form mapped back to its `\\server\share` spelling.
+#[cfg(windows)]
+fn strip_windows_verbatim(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{stripped}"))
+    } else if let Some(stripped) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_windows_verbatim(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 fn absolute(path: &Path) -> PathBuf {

@@ -64,12 +64,43 @@ pub fn offset_to_position(
 /// Out-of-range lines/characters clamp to the nearest valid boundary instead
 /// of failing: servers routinely send positions computed against stale
 /// content, and failing those would turn a stale answer into a hard error.
+///
+/// Single pass over the bytes with no allocation: lines before the target
+/// are skipped by chasing line terminators, then only the target line's
+/// content is decoded character by character.
 pub fn position_to_offset(text: &str, position: Position, encoding: PositionEncoding) -> usize {
-    let bounds = line_bounds(text);
-    let (start, end) = match bounds.get(position.line as usize) {
-        Some(&bounds) => bounds,
-        None => return text.len(),
-    };
+    let bytes = text.as_bytes();
+    let target = position.line as usize;
+
+    // Chase terminators until the target line's content starts. A `\n`,
+    // `\r\n` or lone `\r` each end a line. `reached` stays false when the
+    // text has fewer lines than the target (clamps to the end below).
+    let mut reached = target == 0;
+    let mut line = 0usize;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while !reached && i < bytes.len() {
+        match bytes[i] {
+            b'\n' => i += 1,
+            b'\r' => i += if bytes.get(i + 1) == Some(&b'\n') { 2 } else { 1 },
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        line += 1;
+        start = i;
+        reached = line == target;
+    }
+    if !reached {
+        return text.len();
+    }
+
+    // End of the target line's content (terminators excluded).
+    let mut end = start;
+    while end < bytes.len() && bytes[end] != b'\n' && bytes[end] != b'\r' {
+        end += 1;
+    }
 
     let mut units = 0u32;
     for (idx, ch) in text[start..end].char_indices() {
@@ -82,38 +113,6 @@ pub fn position_to_offset(text: &str, position: Position, encoding: PositionEnco
         };
     }
     end
-}
-
-/// Byte range of each line's *content* (terminators excluded), per LSP line
-/// semantics (`\n`, `\r\n`, lone `\r`). A trailing terminator yields a final
-/// empty line; so does empty input.
-fn line_bounds(text: &str) -> Vec<(usize, usize)> {
-    let bytes = text.as_bytes();
-    let mut bounds = Vec::new();
-    let mut start = 0usize;
-    let mut i = 0usize;
-
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\n' => {
-                bounds.push((start, i));
-                i += 1;
-                start = i;
-            }
-            b'\r' => {
-                bounds.push((start, i));
-                i += if bytes.get(i + 1) == Some(&b'\n') {
-                    2
-                } else {
-                    1
-                };
-                start = i;
-            }
-            _ => i += 1,
-        }
-    }
-    bounds.push((start, text.len()));
-    bounds
 }
 
 #[cfg(test)]

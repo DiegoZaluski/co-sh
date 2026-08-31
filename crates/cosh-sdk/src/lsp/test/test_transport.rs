@@ -363,8 +363,41 @@ async fn requests_after_death_fail_fast() {
     .await
     .expect("request resolves promptly after session death");
     assert!(
-        outcome.is_err(),
-        "request after death must fail, got {outcome:?}"
+        matches!(
+            outcome,
+            Err(LspError::NotRunning) | Err(LspError::StreamClosed)
+        ),
+        "request after death must fail fast, got {outcome:?}"
+    );
+    drop(transport);
+}
+
+/// The terminal watch must be consulted when a request is issued: a request
+/// racing `terminate`'s pending-map drain resolves immediately instead of
+/// blocking until its deadline on a response that can never arrive.
+#[tokio::test]
+async fn request_never_waits_out_deadline_after_close() {
+    let (server, client_stream) = spawn_fake_server(64 * 1024);
+    let transport = start_transport("test", client_stream);
+    drop(server);
+
+    // Reader observes EOF → terminate() flips the watch and drains pending.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Deadline long enough that a `Timeout` outcome (the old bug: waiting on
+    // a dead session) would blow the outer budget.
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(600),
+        transport.request("dead", None, Duration::from_secs(30)),
+    )
+    .await
+    .expect("request against a closed session must not hang");
+    assert!(
+        matches!(
+            outcome,
+            Err(LspError::NotRunning) | Err(LspError::StreamClosed)
+        ),
+        "expected a fast terminal error, got {outcome:?}"
     );
     drop(transport);
 }

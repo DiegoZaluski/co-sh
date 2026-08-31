@@ -443,74 +443,85 @@ impl LanguageServer {
         text.hash(&mut hasher);
         let hash = hasher.finish();
 
-        let mut evicted = Vec::new();
-        {
-            let mut docs = self.inner.docs.lock().expect("documents lock");
-
-            if let Some(doc) = docs.get_mut(path) {
-                if doc.hash == hash {
-                    return Ok(TouchOutcome::Unchanged);
-                }
-                doc.version += 1;
-                doc.hash = hash;
-                let version = doc.version;
-                drop(docs);
-
-                self.send_did_change(path, version, text)?;
-                return Ok(TouchOutcome::Changed);
-            }
-
-            while docs.len() >= OPEN_DOCS_CAPACITY {
-                match docs.pop_lru() {
-                    Some((path, _doc)) => evicted.push(path),
-                    None => break,
-                }
-            }
-        }
-
-        // didClose for evictees goes out before the successor opens.
-        for stale in &evicted {
-            self.close_file_internal(stale)?;
-        }
-
         let uri = uri_from_path(path)?;
         let language_id = language_id_for_path(path);
 
-        // Nudge watchers before the open (opencode's tsserver/clangd fix).
-        self.inner.transport.notify(
-            DidChangeWatchedFilesNotification::METHOD,
-            Some(
-                serde_json::to_value(DidChangeWatchedFilesParams {
-                    changes: vec![FileEvent {
-                        uri: uri.clone(),
-                        typ: FileChangeType::CREATED,
-                    }],
-                })
-                .expect("serializable"),
-            ),
-        )?;
+        // Held across the wire notifications below: they are all synchronous
+        // channel sends, so the lock serializes every toucher of one path —
+        // a didChange can never overtake the didOpen it depends on, and two
+        // concurrent first touches cannot both send didOpen.
+        let mut docs = self.inner.docs.lock().expect("documents lock");
 
-        self.inner.transport.notify(
-            DidOpenTextDocument::METHOD,
-            Some(
-                serde_json::to_value(DidOpenTextDocumentParams {
-                    text_document: TextDocumentItem {
-                        uri,
-                        language_id,
-                        version: 0,
-                        text,
-                    },
-                })
-                .expect("serializable"),
-            ),
-        )?;
+        if let Some(doc) = docs.get_mut(path) {
+            if doc.hash == hash {
+                return Ok(TouchOutcome::Unchanged);
+            }
+            doc.version += 1;
+            doc.hash = hash;
+            let version = doc.version;
+            let sent = self.send_did_change(path, version, text);
+            if sent.is_err() {
+                // The session is dying; forget the document so a later
+                // touch can start clean.
+                docs.pop(path);
+            }
+            return sent.map(|_| TouchOutcome::Changed);
+        }
 
-        self.inner
-            .docs
-            .lock()
-            .expect("documents lock")
-            .put(path.to_path_buf(), OpenDoc { version: 0, hash });
-        Ok(TouchOutcome::Opened)
+        let mut evicted = Vec::new();
+        while docs.len() >= OPEN_DOCS_CAPACITY {
+            match docs.pop_lru() {
+                Some((stale, _doc)) => evicted.push(stale),
+                None => break,
+            }
+        }
+
+        // Claim the slot before sending anything: concurrent touches now
+        // observe the pending open instead of issuing duplicate didOpen.
+        docs.put(path.to_path_buf(), OpenDoc { version: 0, hash });
+
+        // didClose for evictees goes out before the successor opens; the
+        // watched-files nudge precedes the open (opencode's tsserver/clangd
+        // fix).
+        let opened = (|| -> Result<(), LspError> {
+            for stale in &evicted {
+                self.close_file_internal(stale)?;
+            }
+            self.inner.transport.notify(
+                DidChangeWatchedFilesNotification::METHOD,
+                Some(
+                    serde_json::to_value(DidChangeWatchedFilesParams {
+                        changes: vec![FileEvent {
+                            uri: uri.clone(),
+                            typ: FileChangeType::CREATED,
+                        }],
+                    })
+                    .expect("serializable"),
+                ),
+            )?;
+            self.inner.transport.notify(
+                DidOpenTextDocument::METHOD,
+                Some(
+                    serde_json::to_value(DidOpenTextDocumentParams {
+                        text_document: TextDocumentItem {
+                            uri,
+                            language_id,
+                            version: 0,
+                            text,
+                        },
+                    })
+                    .expect("serializable"),
+                ),
+            )?;
+            Ok(())
+        })();
+
+        if opened.is_err() {
+            // The session is dying; undo the claim so a later touch can
+            // start clean.
+            docs.pop(path);
+        }
+        opened.map(|_| TouchOutcome::Opened)
     }
 
     fn send_did_change(&self, path: &Path, version: i32, text: String) -> Result<(), LspError> {
@@ -993,19 +1004,27 @@ async fn exit_watcher(
     inner: std::sync::Weak<Inner>,
     mut exited: watch::Receiver<Option<ExitReason>>,
 ) {
-    if exited.changed().await.is_ok() {
-        let Some(reason) = exited.borrow_and_update().clone() else {
+    loop {
+        // Observe the current value BEFORE waiting: this task subscribes
+        // after the transport's background tasks already exist, so the
+        // session may have terminated in between. `changed()` only reports
+        // changes past the subscription point and would never fire for a
+        // pre-existing terminal reason.
+        if let Some(reason) = exited.borrow_and_update().clone() {
+            let Some(inner) = inner.upgrade() else { return };
+            if matches!(
+                inner.state_tx.borrow().clone(),
+                ServerState::Starting | ServerState::Running
+            ) {
+                log::info!("language server `{}` terminated: {reason}", inner.name);
+                let state = ServerState::Exited { reason };
+                inner.state_tx.send_replace(state.clone());
+                emit_event(&inner, Event::StateChanged(state));
+            }
             return;
-        };
-        let Some(inner) = inner.upgrade() else { return };
-        if matches!(
-            inner.state_tx.borrow().clone(),
-            ServerState::Starting | ServerState::Running
-        ) {
-            log::info!("language server `{}` terminated: {reason}", inner.name);
-            let state = ServerState::Exited { reason };
-            inner.state_tx.send_replace(state.clone());
-            emit_event(&inner, Event::StateChanged(state));
+        }
+        if exited.changed().await.is_err() {
+            return;
         }
     }
 }
