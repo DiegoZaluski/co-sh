@@ -1403,8 +1403,8 @@ impl DialogState {
                 let max_visible = (area.height.saturating_sub(4)) as usize;
                 let max_visible = max_visible.min(entries).max(1).clamp(1, 20);
                 let list_h = max_visible as u16;
-                // Title row + list rows + padding top/bottom (no border)
-                let dialog_h = 1 + list_h + 2;
+                // Title row + gap row + list rows + padding top/bottom (no border)
+                let dialog_h = 1 + 1 + list_h + 2;
                 let dialog_w = max_w;
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
                 let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
@@ -1426,8 +1426,11 @@ impl DialogState {
                     }
                 }
 
-                // Title line
-                let title_text = "Keyboard Shortcuts";
+                // Title line — main title of the box, wearing the theme's
+                // primary as a background so it gets its own color band.
+                let title_text = " Keyboard Shortcuts ";
+                let title_fg = hook_marker_fg(theme);
+                let title_bg = rgba_color(theme.primary);
                 draw_text_line(
                     buf,
                     title_text,
@@ -1435,7 +1438,8 @@ impl DialogState {
                     dialog_y + 1,
                     dialog_w.saturating_sub(4),
                     Style::default()
-                        .fg(rgba_color(theme.text))
+                        .fg(title_fg)
+                        .bg(title_bg)
                         .add_modifier(Modifier::BOLD),
                 );
 
@@ -1448,7 +1452,7 @@ impl DialogState {
 
                 // Draw each visible shortcut row (scope headers + key bindings)
                 for (i, entry) in SHORTCUTS.iter().enumerate().skip(scroll).take(max_visible) {
-                    let ry = dialog_y + 2 + (i - scroll) as u16;
+                    let ry = dialog_y + 3 + (i - scroll) as u16;
 
                     match entry {
                         ShortcutLine::Gap => {
