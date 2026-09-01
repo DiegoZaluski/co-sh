@@ -192,7 +192,10 @@ fn uri_to_path_handles_authority_component() {
         None
     );
     // No path at all is not a usable file path.
-    assert_eq!(uri_to_path(&Uri::from_str("file://localhost").unwrap()), None);
+    assert_eq!(
+        uri_to_path(&Uri::from_str("file://localhost").unwrap()),
+        None
+    );
     // Windows drive-letter form keeps its leading slash shape.
     assert_eq!(
         uri_to_path(&Uri::from_str("file:///C:/src/a.rs").unwrap()),

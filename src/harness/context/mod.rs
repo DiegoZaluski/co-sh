@@ -16,13 +16,14 @@ mod error_catalog;
 mod split;
 mod summarize;
 
-pub use error_catalog::{error_catalog_window, save_error_catalog_window};
-pub use split::{SplitChunkRequest, SplitProjection, SplitState};
+pub use error_catalog::error_catalog_window;
+pub use split::{SplitChunkRequest, SplitState};
 use summarize::{SUMMARIZER_SYSTEM, build_llm_prompt, serialize_item};
 #[cfg(test)]
 mod test;
-pub mod todo_ctxt;
+mod todo_ctxt;
 
+use error_catalog::save_error_catalog_window;
 use crate::util::TokenEncoding;
 use cosh_sdk::connector::{
     ChatMessage, ClaudeThinkingBlock, ToolCallFunctionMsg, ToolCallMsg,
@@ -128,8 +129,9 @@ impl ContextItem {
     /// manager via [`ContextManager::set_model`], not per item).
     fn tokens(&self, enc: TokenEncoding) -> usize {
         match self {
-            ContextItem::User { original, .. } => enc.estimate(original),
-            ContextItem::Assistant { original, .. } => enc.estimate(original),
+            ContextItem::User { original, .. } | ContextItem::Assistant { original, .. } => {
+                enc.estimate(original)
+            }
             ContextItem::ToolCall {
                 name,
                 arguments,
@@ -488,23 +490,11 @@ impl ContextManager {
         });
     }
 
-    /// Add a tool CALL. Structural, never prose-compressed.
+    /// Add a tool CALL. Structural, never prose-compressed. Renders as an
+    /// `assistant` message with native `tool_calls` and no provider-specific
+    /// replay metadata (the empty-signature path).
     pub fn add_tool_call(&mut self, call_id: &str, name: &str, arguments: &str) {
-        self.add_tool_call_with_signature(call_id, name, arguments, "");
-    }
-
-    /// Add a tool CALL carrying a Gemini 3.x `thought_signature` (the native
-    /// `functionCall` sibling the model attached — must be replayed verbatim
-    /// in the next request's history). Structural, never prose-compressed.
-    /// Every non-Gemini path passes an empty signature.
-    pub fn add_tool_call_with_signature(
-        &mut self,
-        call_id: &str,
-        name: &str,
-        arguments: &str,
-        thought_signature: &str,
-    ) {
-        self.add_tool_call_with_thinking(call_id, name, arguments, thought_signature, Vec::new());
+        self.add_tool_call_with_thinking(call_id, name, arguments, "", Vec::new());
     }
 
     /// Add a tool CALL carrying the Claude extended-thinking blocks that
@@ -865,10 +855,9 @@ impl ContextManager {
         // The boundary hides every pre-existing item (all ids are < `id` —
         // it was just allocated); the Compaction item itself is visible.
         self.visible_from = Some(id);
-        // Ids below the boundary are implicitly hidden — prune them so the
-        // set stays tight (swept/abandoned items pre-compaction are covered
-        // by the boundary from here on).
-        self.hidden.retain(|&h| h >= id);
+        // All pre-existing hidden ids sit below the new boundary — the
+        // boundary covers them from here on, so the set empties.
+        self.hidden.clear();
         // The cached total now covers only the visible timeline: re-tokenize
         // (rare event; the recompute itself skips hidden items).
         self.recompute_cached_tokens();
@@ -901,10 +890,18 @@ impl ContextManager {
         self.overflow_model = Some(model.to_string());
     }
 
+    /// The current token budget — the discovered window or the default. The
+    /// harness uses it (with the error-reported window) to detect the
+    /// context-exceeds-window split trigger.
+    #[must_use]
+    pub const fn max_tokens(&self) -> usize {
+        self.max_tokens
+    }
+
     /// Forget a recorded stuck overflow — called when the model changes
     /// (model switch) or a compaction succeeds, so the next overflow starts
     /// fresh.
-    pub fn clear_overflow(&mut self) {
+    fn clear_overflow(&mut self) {
         self.overflow_model = None;
     }
 
@@ -1158,14 +1155,13 @@ impl ContextManager {
     }
 
     fn total_tokens(&self) -> usize {
-        // Debug-only invariant: the incremental caches have 13+ sync points,
-        // so a future mutation that forgets to update them would silently
-        // corrupt compaction timing (saturating arithmetic masks underflow).
-        // Every call to `total_tokens` — which the whole test suite makes
-        // constantly — cross-checks the cached total against a brute-force
-        // recompute AND the per-item map against the items themselves in
-        // debug builds, failing fast on drift. Compiled out in release: zero
-        // cost.
+        // Debug-only invariant: the incremental cache has a handful of sync
+        // points, so a future mutation that forgets to update it would
+        // silently corrupt compaction timing (saturating arithmetic masks
+        // underflow). Every call to `total_tokens` — which the whole test
+        // suite makes constantly — cross-checks the cached total against a
+        // brute-force recompute in debug builds, failing fast on drift.
+        // Compiled out in release: zero cost.
         #[cfg(debug_assertions)]
         {
             let brute: usize = self
@@ -1199,15 +1195,8 @@ impl ContextManager {
     /// (hiding is rare and bounded, so this is the cheap side of not keeping
     /// a per-item cost map in sync).
     fn hide_at(&mut self, idx: usize) {
-        let (id, tokens) = match &self.items[idx] {
-            ContextItem::User { id, .. }
-            | ContextItem::Assistant { id, .. }
-            | ContextItem::ToolCall { id, .. }
-            | ContextItem::ToolResult { id, .. }
-            | ContextItem::Closure { id, .. }
-            | ContextItem::Compaction { id, .. }
-            | ContextItem::Error { id, .. } => (*id, self.items[idx].tokens(self.encoding)),
-        };
+        let id = self.items[idx].id();
+        let tokens = self.items[idx].tokens(self.encoding);
         self.hidden.insert(id);
         self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
     }

@@ -1468,9 +1468,7 @@ impl DialogState {
                                 head_x,
                                 ry,
                                 head_w,
-                                Style::default()
-                                    .fg(text_color)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(text_color).add_modifier(Modifier::BOLD),
                             );
                         }
                         ShortcutLine::Key(key_str, desc) => {
@@ -1540,9 +1538,7 @@ impl DialogState {
                 );
             }
             DialogType::CacheTtlInput {
-                input,
-                cursor_pos,
-                ..
+                input, cursor_pos, ..
             } => {
                 render_text_input_dialog(
                     buf,

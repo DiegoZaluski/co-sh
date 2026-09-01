@@ -216,11 +216,11 @@ async fn mid_stream_reset_never_eats_the_previous_iteration_transcript() {
     );
 }
 
-/// Resuming a session whose `.ctx` companion is missing must NOT feed any
-/// model-facing history: the JSONL transcript is display-only and is never
-/// parsed into the context. The only observable outcome is the "context
-/// lost" toast — a session that already shows dialog AND exists on disk
-/// must not resume silently as if the model remembered nothing on purpose.
+/// Resuming a session whose context records are missing must NOT feed any
+/// model-facing history: the display transcript is never parsed into the
+/// context. The only observable outcome is the "context lost" toast — a
+/// session that already shows dialog AND exists on disk must not resume
+/// silently as if the model remembered nothing on purpose.
 #[tokio::test]
 async fn resuming_without_a_ctx_file_warns_and_starts_with_empty_context() {
     let mut app = App::new("/tmp".to_string());
@@ -239,7 +239,7 @@ async fn resuming_without_a_ctx_file_warns_and_starts_with_empty_context() {
             .as_millis() as u64,
     );
     app.state.current_session_id = Some(id.clone());
-    // Dialog already on screen, but no `.ctx` was ever written for it.
+    // Dialog already on screen, but no context was ever persisted for it.
     app.state.current_session_mut().expect("session").messages = vec![crate::types::Message {
         id: "msg-0".into(),
         role: crate::types::MessageRole::User,
@@ -251,19 +251,19 @@ async fn resuming_without_a_ctx_file_warns_and_starts_with_empty_context() {
         agent: None,
         model: None,
     }];
-    // The session was persisted (display-only save) BEFORE its `.ctx` went
+    // The session was persisted (display-only save) BEFORE its context went
     // missing — the on-disk JSONL is what distinguishes "lost context" from
     // a brand-new session's first prompt.
     let persisted = app.state.current_session().unwrap().clone();
     app.session_store.save_session(&persisted);
 
-    // The store has no companion file for this session: `load_context`
-    // returns None and the loop would start with an empty context.
+    // The file carries no context records: `load_context` returns None and
+    // the loop would start with an empty context.
     assert!(
         app.session_store.load_context(&id).is_none(),
-        "no .ctx on disk — the context source is absent"
+        "no context records on disk — the context source is absent"
     );
-    app.warn_if_resuming_without_ctx(&None);
+    app.warn_if_resuming_without_context(&None);
 
     let toast = app
         .toast_state
@@ -278,7 +278,7 @@ async fn resuming_without_a_ctx_file_warns_and_starts_with_empty_context() {
 }
 
 /// A brand-new session's FIRST prompt also puts a message on screen with no
-/// `.ctx` on disk yet (the companion is only written by Done/Stopped/snapshot
+/// context on disk yet (records are only written by Done/Stopped/snapshot
 /// saves) — that is the normal path and must never warn. The on-disk JSONL
 /// gate (persisted session vs fresh one) is what keeps this quiet.
 #[tokio::test]
@@ -306,16 +306,16 @@ async fn fresh_session_first_prompt_does_not_warn() {
         agent: None,
         model: None,
     }];
-    // ...but NOTHING was persisted yet: no JSONL, no `.ctx`.
+    // ...but NOTHING was persisted yet: no JSONL at all.
     assert!(!app.session_store.has_session(&id));
-    app.warn_if_resuming_without_ctx(&None);
+    app.warn_if_resuming_without_context(&None);
     assert!(
         app.toast_state.current.is_none(),
         "a fresh session must never see the context-lost toast"
     );
 }
 
-/// A session WITH its `.ctx` companion (or a brand-new session with no
+/// A session WITH persisted context (or a brand-new session with no
 /// dialog) must never trigger the context-lost toast: the warning is
 /// reserved for sessions that visibly lost context they once had.
 #[tokio::test]
@@ -347,10 +347,10 @@ async fn resuming_with_a_ctx_file_stays_silent() {
         agent: None,
         model: None,
     }];
-    // Persist a real companion file so the resume path finds context. An
-    // empty-but-present snapshot is deliberate: FILE PRESENCE is the
-    // authority — a `.ctx` that decodes means the context is whatever the
-    // harness last persisted, not a loss.
+    // Persist real context records so the resume path finds context. An
+    // empty-but-present snapshot is deliberate: RECORD PRESENCE is the
+    // authority — a decodable context means it is whatever the harness
+    // last persisted, not a loss.
     let state: cosh::harness::ContextManagerState = Default::default();
     app.session_store
         .save_session_with_context(&app.state.current_session().unwrap().clone(), &state);
@@ -358,8 +358,8 @@ async fn resuming_with_a_ctx_file_stays_silent() {
     let loaded = app
         .session_store
         .load_context(&id)
-        .expect("the .ctx decodes");
-    app.warn_if_resuming_without_ctx(&Some(loaded));
+        .expect("the context records load");
+    app.warn_if_resuming_without_context(&Some(loaded));
     assert!(
         app.toast_state.current.is_none(),
         "no toast when context exists"

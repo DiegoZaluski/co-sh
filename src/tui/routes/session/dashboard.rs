@@ -231,8 +231,7 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &DashboardData, theme: &Theme)
     // AND no catalog price) are excluded from the dollar totals — say so
     // instead of letting the total silently understate the real spend.
     if data.period.unpriced > 0 && budget_bottom > area.y {
-        let warn =
-            format!("⚠ {} req. unpriced", data.period.unpriced);
+        let warn = format!("⚠ {} req. unpriced", data.period.unpriced);
         draw_text(
             buf,
             &warn,

@@ -400,7 +400,10 @@ mod tests {
 
     #[test]
     fn missing_cost_or_usage_is_none() {
-        assert_eq!(extract_reported_cost(r#"{"usage":{"prompt_tokens":1}}"#), None);
+        assert_eq!(
+            extract_reported_cost(r#"{"usage":{"prompt_tokens":1}}"#),
+            None
+        );
         assert_eq!(extract_reported_cost(r#"{"choices":[]}"#), None);
         assert_eq!(extract_reported_cost("not json"), None);
     }
@@ -408,10 +411,7 @@ mod tests {
     #[test]
     fn non_numeric_or_invalid_cost_is_none() {
         // Non-numeric strings are not costs.
-        assert_eq!(
-            extract_reported_cost(r#"{"usage":{"cost":"free"}}"#),
-            None
-        );
+        assert_eq!(extract_reported_cost(r#"{"usage":{"cost":"free"}}"#), None);
         assert_eq!(extract_reported_cost(r#"{"cost":true}"#), None);
         assert_eq!(extract_reported_cost(r#"{"usage":{"cost":-1.0}}"#), None);
         let nan = f64::NAN;
@@ -423,7 +423,10 @@ mod tests {
     /// string on the wire (#42918), which must not fall back to estimation.
     #[test]
     fn numeric_string_cost_is_valid() {
-        assert_eq!(extract_reported_cost(r#"{"usage":{"cost":"0.95"}}"#), Some(0.95));
+        assert_eq!(
+            extract_reported_cost(r#"{"usage":{"cost":"0.95"}}"#),
+            Some(0.95)
+        );
     }
 
     #[tokio::test]
@@ -431,7 +434,9 @@ mod tests {
         use tokio_stream::StreamExt;
         let frame = |cost: f64| {
             Ok(StreamChunk {
-                raw: format!(r#"{{"usage":{{"prompt_tokens":10,"completion_tokens":2,"cost":{cost}}}}}"#),
+                raw: format!(
+                    r#"{{"usage":{{"prompt_tokens":10,"completion_tokens":2,"cost":{cost}}}}}"#
+                ),
                 token: String::new(),
                 reasoning: String::new(),
                 finish_reason: None,
@@ -441,8 +446,10 @@ mod tests {
             })
         };
         let frames = vec![frame(0.4), frame(0.95)];
-        let mut stream =
-            ChatStream::new(Box::pin(tokio_stream::iter(frames)), Family::OpenAICompatible);
+        let mut stream = ChatStream::new(
+            Box::pin(tokio_stream::iter(frames)),
+            Family::OpenAICompatible,
+        );
         while stream.next().await.is_some() {}
         // Final-frame cost wins (per-request cost only grows).
         assert_eq!(stream.reported_cost().await, Some(0.95));
@@ -466,8 +473,10 @@ mod tests {
         // must NOT leak into the retried response (or it would be counted
         // twice once the retry's own final frame lands).
         let frames = vec![cost_frame(false), Ok(StreamChunk::reset())];
-        let mut stream =
-            ChatStream::new(Box::pin(tokio_stream::iter(frames)), Family::OpenAICompatible);
+        let mut stream = ChatStream::new(
+            Box::pin(tokio_stream::iter(frames)),
+            Family::OpenAICompatible,
+        );
         while stream.next().await.is_some() {}
         assert_eq!(stream.reported_cost().await, None);
         assert_eq!(stream.usage().await, None);
@@ -511,8 +520,10 @@ mod tests {
                 reset: false,
             }),
         ];
-        let mut stream =
-            ChatStream::new(Box::pin(tokio_stream::iter(frames)), Family::OpenAICompatible);
+        let mut stream = ChatStream::new(
+            Box::pin(tokio_stream::iter(frames)),
+            Family::OpenAICompatible,
+        );
         while stream.next().await.is_some() {}
         assert_eq!(stream.reported_cost().await, Some(0.0));
         let usage = stream.usage().await.unwrap();

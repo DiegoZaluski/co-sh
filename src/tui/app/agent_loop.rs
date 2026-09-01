@@ -288,7 +288,7 @@ impl App {
             .current_session_id
             .as_ref()
             .and_then(|id| self.session_store.load_context(id));
-        self.warn_if_resuming_without_ctx(&ctx_state);
+        self.warn_if_resuming_without_context(&ctx_state);
 
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
@@ -484,7 +484,7 @@ impl App {
     /// an early TUI-side failure persists the display messages alone, so a
     /// resend warns even though nothing reached the model either (accepted;
     /// TODO.md task 4 routes more saves through the context-aware path).
-    pub(super) fn warn_if_resuming_without_ctx(
+    pub(super) fn warn_if_resuming_without_context(
         &mut self,
         ctx_state: &Option<cosh::harness::ContextManagerState>,
     ) {
@@ -501,7 +501,7 @@ impl App {
             use crate::ui::toast::{ToastOptions, ToastVariant};
             self.toast_state.show(ToastOptions {
                 title: Some("Context lost".into()),
-                message: "Session context file not found — the conversation \
+                message: "Session context not found — the conversation \
                           starts without history."
                     .into(),
                 variant: ToastVariant::Warning,

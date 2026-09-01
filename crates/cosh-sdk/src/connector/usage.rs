@@ -198,10 +198,7 @@ mod tests {
             reported_cost: Some(0.1),
             ..TokenUsage::default()
         };
-        assert_eq!(
-            with_cost.merge_stream(lower).reported_cost,
-            Some(0.95)
-        );
+        assert_eq!(with_cost.merge_stream(lower).reported_cost, Some(0.95));
     }
 
     /// The TUI usage panel prefers the provider's REAL billed cost and only

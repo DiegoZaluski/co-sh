@@ -82,7 +82,13 @@ pub fn position_to_offset(text: &str, position: Position, encoding: PositionEnco
     while !reached && i < bytes.len() {
         match bytes[i] {
             b'\n' => i += 1,
-            b'\r' => i += if bytes.get(i + 1) == Some(&b'\n') { 2 } else { 1 },
+            b'\r' => {
+                i += if bytes.get(i + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                }
+            }
             _ => {
                 i += 1;
                 continue;

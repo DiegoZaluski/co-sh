@@ -966,8 +966,7 @@ mod tests {
                     // Predecessor check via the sequential-y invariant:
                     // layout[line.y - 1] is the row right above this one.
                     assert!(
-                        line.y >= 1
-                            && matches!(layout[(line.y - 1) as usize].line, Line::Blank),
+                        line.y >= 1 && matches!(layout[(line.y - 1) as usize].line, Line::Blank),
                         "description at y={} must follow a blank line",
                         line.y
                     );

@@ -613,8 +613,7 @@ impl Connector {
             Family::OpenAi => openai::extract_usage(raw),
             Family::Gemini => gemini::extract_usage(raw),
         }?;
-        usage.reported_cost =
-            super::output::extract_reported_cost(raw).or(usage.reported_cost);
+        usage.reported_cost = super::output::extract_reported_cost(raw).or(usage.reported_cost);
         Some(usage)
     }
 

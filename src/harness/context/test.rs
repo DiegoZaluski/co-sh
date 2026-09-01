@@ -518,7 +518,7 @@ fn cached_token_total_stays_in_sync_across_all_mutations() {
     check(&cm);
     cm.add_tool_result_flagged("c1", &"result ".repeat(300), false);
     check(&cm);
-    cm.add_tool_call_with_signature("c2", "find", "{}", "sig");
+    cm.add_tool_call_with_thinking("c2", "find", "{}", "sig", Vec::new());
     check(&cm);
     cm.add_tool_result("c2", &"r2 ".repeat(100));
     check(&cm);
@@ -701,14 +701,10 @@ fn split_warns_only_when_the_buffer_accumulation_is_concerning() {
     let mut cm = cm(10_000);
     cm.add_user(&"abcd efgh ijkl mnop qrst uvwx yz12 3456 7890 ".repeat(2000)); // id 1
     cm.add_user("second prompt"); // id 2
-    cm.begin_split(10_000); // ceiling = 4000, warn_at = 3200
+    cm.begin_split(10_000); // ceiling = 4000, warn at 3200 (80% of the ceiling)
 
     let projection = cm.split_projection();
     assert_eq!(projection.ceiling, 4000, "40% of the window is the ceiling");
-    assert_eq!(
-        projection.warn_at, 3200,
-        "80% of the ceiling is the warning point"
-    );
     assert!(!projection.should_warn, "an empty buffer never warns");
 
     let first = cm.split_next_chunk().expect("chunk 1");

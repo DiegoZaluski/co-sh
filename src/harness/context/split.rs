@@ -16,18 +16,18 @@ use serde::{Deserialize, Serialize};
 
 /// The final anchor buffer must stay at or below this fraction of the model's
 /// window (the "ceiling" — the max capacity of the concatenation buffer).
-pub(super) const SPLIT_BUFFER_MAX_PCT: f64 = 0.40;
+const SPLIT_BUFFER_MAX_PCT: f64 = 0.40;
 
 /// Fraction of the buffer ceiling at which the limit message starts being
 /// sent to the summarizer. Below it the model is left to act naturally (a
 /// long-session summary rarely approaches the ceiling); only when the
 /// accumulation becomes concerning do we ask it to be more terse.
-pub(super) const SPLIT_WARN_PCT: f64 = 0.80;
+const SPLIT_WARN_PCT: f64 = 0.80;
 
 /// How many trailing chars of the previous chunk summary are carried into the
 /// next chunk as the continuity snippet, so the final buffer reads as one
 /// continuous summary (no visible seam).
-pub(super) const SPLIT_CONTINUITY_CHARS: usize = 1200;
+const SPLIT_CONTINUITY_CHARS: usize = 1200;
 
 /// Fixed token overhead reserved per chunk call: the summarizer system prompt,
 /// the split template/instructions, the continuity snippet, the metadata lines
@@ -36,7 +36,7 @@ pub(super) const SPLIT_CONTINUITY_CHARS: usize = 1200;
 /// capped at half the window (see [`ContextManager::split_next_chunk`]) so a
 /// small window (a small fallback model) keeps a usable chunk budget instead
 /// of degrading to one item per chunk.
-pub(super) const SPLIT_CALL_OVERHEAD: usize = 8000;
+const SPLIT_CALL_OVERHEAD: usize = 8000;
 
 /// Persistent staging state of the split-and-concatenate contingency.
 ///
@@ -77,9 +77,8 @@ pub struct SplitProjection {
     pub buffer_tokens: usize,
     /// The ceiling: [`SPLIT_BUFFER_MAX_PCT`] of the model window.
     pub ceiling: usize,
-    /// The warning point: [`SPLIT_WARN_PCT`] of the ceiling.
-    pub warn_at: usize,
-    /// Whether the limit message should be sent on the next chunk.
+    /// Whether the limit message should be sent on the next chunk (the
+    /// buffer reached [`SPLIT_WARN_PCT`] of the ceiling).
     pub should_warn: bool,
 }
 
@@ -98,20 +97,11 @@ pub struct SplitChunkRequest {
     pub chunk_end: Option<u64>,
 }
 
-// The impl block continues here: these methods are the split lifecycle
-// (begin → next_chunk/advance → commit/abort).
+// Split lifecycle: begin → next_chunk/advance → commit/abort.
 
 impl ContextManager {
     // Split-and-concatenate (the context-window contingency, driven by the
     // harness). The timeline is untouched until commit_split.
-
-    /// The current token budget — the discovered window or the default. The
-    /// harness uses it (with the error-reported window) to detect the
-    /// context-exceeds-window split trigger.
-    #[must_use]
-    pub const fn max_tokens(&self) -> usize {
-        self.max_tokens
-    }
 
     /// True when a split-and-concatenate is in progress (or staged after a
     /// restore, waiting to resume).
@@ -141,17 +131,15 @@ impl ContextManager {
     /// Live budget projection of the in-progress split: buffer accumulation
     /// vs the ceiling.
     #[must_use]
-    pub fn split_projection(&self) -> SplitProjection {
+    pub(super) fn split_projection(&self) -> SplitProjection {
         let split = self.split.as_ref();
         let window = split.map_or(self.max_tokens, |s| s.window);
         let buffer_tokens = split.map_or(0, |s| s.buffer_tokens);
         let ceiling = (window as f64 * SPLIT_BUFFER_MAX_PCT) as usize;
-        let warn_at = (ceiling as f64 * SPLIT_WARN_PCT) as usize;
         SplitProjection {
             buffer_tokens,
             ceiling,
-            warn_at,
-            should_warn: buffer_tokens >= warn_at,
+            should_warn: buffer_tokens >= (ceiling as f64 * SPLIT_WARN_PCT) as usize,
         }
     }
 
@@ -190,8 +178,8 @@ impl ContextManager {
     /// Returns `None` when every item has been consumed (the harness should
     /// commit). The cursor only advances on [`Self::advance_split`], so a
     /// failed call can be retried with the same chunk.
-    pub fn split_next_chunk(&mut self) -> Option<SplitChunkRequest> {
-        self.split.as_ref()?;
+    pub fn split_next_chunk(&self) -> Option<SplitChunkRequest> {
+        let split = self.split.as_ref()?;
         // The split consumes the VISIBLE timeline only (see visible_indices):
         // `start`/`end` are positions in the visible sequence, mapped back to
         // raw items for serialization.
@@ -201,12 +189,11 @@ impl ContextManager {
             return None;
         }
         let projection = self.split_projection();
-        let window = self.split.as_ref().map_or(self.max_tokens, |s| s.window);
         // Reserve the per-call overhead, capped at half the window so a small
         // window (a small fallback model) keeps a usable chunk budget instead
         // of degrading to one item per chunk.
-        let overhead = SPLIT_CALL_OVERHEAD.min(window / 2).max(1);
-        let budget = window.saturating_sub(overhead).max(1);
+        let overhead = SPLIT_CALL_OVERHEAD.min(split.window / 2).max(1);
+        let budget = split.window.saturating_sub(overhead).max(1);
         let mut chunk_tokens = 0usize;
         let mut end = start; // exclusive, in visible-sequence positions
         for (pos, &raw_idx) in visible.iter().enumerate().skip(start) {
@@ -251,11 +238,10 @@ impl ContextManager {
             None
         };
 
-        let first_chunk = self.split.as_ref().is_none_or(|s| s.continuity.is_empty());
-        let continuity = self.split.as_ref().map_or("", |s| s.continuity.as_str());
+        let first_chunk = split.continuity.is_empty();
         let prompt = build_split_prompt(
             first_chunk,
-            continuity,
+            &split.continuity,
             &chunk_text,
             target_tokens,
             remaining_tokens,

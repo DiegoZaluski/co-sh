@@ -92,7 +92,10 @@ async fn cache_ttl_input_parses_and_persists_minutes() {
     assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
     assert!(!app.dialog.visible(), "a valid duration closes the box");
     assert_eq!(app.setup.cache.anthropic_ttl_min, 90);
-    assert!(app.setup.anthropic_cache_ttl_1h(), "90m maps onto the 1h TTL");
+    assert!(
+        app.setup.anthropic_cache_ttl_1h(),
+        "90m maps onto the 1h TTL"
+    );
 
     // Invalid input keeps the box open and persists nothing.
     app.dialog.show(DialogType::CacheTtlInput {

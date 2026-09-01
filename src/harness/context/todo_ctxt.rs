@@ -57,7 +57,6 @@
 //! rendering of the real todo list.
 
 use crate::util::TokenEncoding;
-use cosh_sdk::connector::{ChatMessage, user_message};
 use cosh_tools::plan::types::{TodoList, TodoStatus};
 
 /// The dedicated, fully-protected TODO context block.
@@ -101,25 +100,10 @@ impl TodoContext {
         self.rendered = None;
     }
 
-    /// True when the block must be rendered: a non-empty list with at least
-    /// one task that is not terminal. An empty list or an all-terminal list
-    /// means the plan is over — the block is gone (removal rules 1 and 2).
-    #[must_use]
-    pub fn visible(&self) -> bool {
-        self.rendered.is_some()
-    }
-
     /// The block text, or `None` when not visible.
     #[must_use]
     pub(crate) fn text(&self) -> Option<String> {
         self.rendered.clone()
-    }
-
-    /// Render the block as a provider-ready `user` message, or `None` when
-    /// the block is not visible (the plan is over).
-    #[must_use]
-    pub fn message(&self) -> Option<ChatMessage> {
-        self.text().map(|text| user_message(&text))
     }
 
     /// Estimated token cost of the rendered block (`0` when not visible).
@@ -213,8 +197,7 @@ mod tests {
     #[test]
     fn empty_context_renders_no_block() {
         let tc = TodoContext::new();
-        assert!(!tc.visible());
-        assert!(tc.message().is_none());
+        assert!(tc.text().is_none());
         assert_eq!(tc.tokens(enc()), 0);
     }
 
@@ -222,8 +205,7 @@ mod tests {
     fn empty_list_hides_the_block() {
         let mut tc = TodoContext::new();
         tc.sync(TodoList::default());
-        assert!(!tc.visible(), "an empty list has nothing to show");
-        assert!(tc.message().is_none());
+        assert!(tc.text().is_none(), "an empty list has nothing to show");
     }
 
     #[test]
@@ -233,10 +215,7 @@ mod tests {
             "Database",
             vec![item("task-1", TodoStatus::Pending)],
         )]));
-        assert!(tc.visible());
-        let msg = tc.message().expect("a visible block renders");
-        assert_eq!(msg.role, "user");
-        let text = msg.content.unwrap_or_default();
+        let text = tc.text().expect("a visible block renders");
         assert!(text.contains("## Tool TODOs"));
         assert!(text.contains("### Database"));
         assert!(text.contains("- [ ] do task-1"));
@@ -252,11 +231,7 @@ mod tests {
                 item("task-2", TodoStatus::Pending),
             ],
         )]));
-        assert!(
-            tc.visible(),
-            "a single pending task keeps the whole block alive"
-        );
-        let text = tc.message().unwrap().content.unwrap();
+        let text = tc.text().expect("a single pending task keeps the block alive");
         assert!(
             text.contains("- [x] do task-1"),
             "completed tasks remain visible, crossed off"
@@ -272,7 +247,7 @@ mod tests {
             vec![item("task-1", TodoStatus::Completed)],
         )]));
         assert!(
-            !tc.visible(),
+            tc.text().is_none(),
             "removal rule 1: all tasks completed → the block is gone"
         );
     }
@@ -285,7 +260,7 @@ mod tests {
             vec![item("task-1", TodoStatus::Cancelled)],
         )]));
         assert!(
-            !tc.visible(),
+            tc.text().is_none(),
             "cancelled tasks are terminal too → the block is gone"
         );
     }
@@ -297,11 +272,11 @@ mod tests {
             "Database",
             vec![item("task-1", TodoStatus::Pending)],
         )]));
-        assert!(tc.visible());
+        assert!(tc.text().is_some());
         // The model removed the last task (Remove/Clean) → the list is empty.
         tc.sync(TodoList::default());
         assert!(
-            !tc.visible(),
+            tc.text().is_none(),
             "removal rule 2: the model emptied the plan → the block is gone"
         );
     }
@@ -313,10 +288,9 @@ mod tests {
             "Database",
             vec![item("task-1", TodoStatus::Pending)],
         )]));
-        assert!(tc.visible());
+        assert!(tc.text().is_some());
         tc.clear();
-        assert!(!tc.visible());
-        assert!(tc.message().is_none());
+        assert!(tc.text().is_none());
     }
 
     #[test]
@@ -331,7 +305,7 @@ mod tests {
                 depends_on: vec!["task-1".to_string()],
             }],
         )]));
-        let text = tc.message().unwrap().content.unwrap();
+        let text = tc.text().unwrap();
         assert!(text.contains("- [*] user endpoints  (depends: task-1)"));
     }
 

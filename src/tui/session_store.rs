@@ -16,14 +16,11 @@
 //! - Lines 2+: Tagged records, one JSON object per line:
 //!   `{"Message": …}` — a display message ([`StoredMessage`]);
 //!   `{"Item": …}` — one [`ContextItem`] of the model-facing timeline, in
-//!   conversation order. Legacy files (written before the unification) hold
-//!   bare message objects with no tag; they load as messages.
+//!   conversation order.
 //!
-//! ## Mapping of the former `.ctx` companion file
+//! ## Context layout in the file
 //!
-//! Everything the bincode companion used to carry lives in the JSONL now:
-//!
-//! | `.ctx` field     | JSONL location                                    |
+//! | Context state    | JSONL location                                    |
 //! |------------------|---------------------------------------------------|
 //! | `items`          | `Item` records, one per line, timeline order      |
 //! | `next_id`        | header `context` object                           |
@@ -44,15 +41,6 @@
 //! `Item` record AND a `msg-ctx-` status message). The `ctx_ids` map on each
 //! message line is pure bookkeeping that lets display actions (revert, fork)
 //! locate the items backing a message; it is never parsed into a context.
-//!
-//! ## Legacy `.ctx` companions
-//!
-//! Sessions written by older builds carry a bincode `session-{id}.ctx`
-//! companion. [`SessionStore::load_context`] falls back to it when the JSONL
-//! header holds no context bookkeeping; the first context-aware save writes
-//! the unified JSONL and deletes the companion. Until then, display-only
-//! saves leave it untouched, and orphaned companions (JSONL gone) are swept
-//! on store creation.
 //!
 //! Sessions are grouped by CWD (current working directory). The CWD path is
 //! hashed with xxHash32 to produce a deterministic subdirectory name, so
@@ -106,8 +94,8 @@ struct ContextBookkeeping {
 /// Deserialize the header's `context` object, downgrading a present-but-
 /// unreadable object to `None` (with a warning) instead of failing the
 /// whole header: a context format break must never take the display
-/// transcript down with it (the reader then falls back to the legacy
-/// companion, and a resume surfaces the "Context lost" toast).
+/// transcript down with it (the resume then surfaces the "Context lost"
+/// toast).
 fn deserialize_context<'de, D>(deserializer: D) -> Result<Option<ContextBookkeeping>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -134,11 +122,45 @@ impl From<&ContextManagerState> for ContextBookkeeping {
     }
 }
 
+impl ContextBookkeeping {
+    /// Rebuild the full snapshot: this header bookkeeping plus the item
+    /// records read from the file body (in timeline order).
+    fn into_state(self, items: VecDeque<ContextItem>) -> ContextManagerState {
+        ContextManagerState {
+            items,
+            next_id: self.next_id,
+            max_tokens: self.max_tokens,
+            overflow_model: self.overflow_model,
+            split: self.split,
+            visible_from: self.visible_from,
+            hidden: self.hidden,
+        }
+    }
+
+    /// Drop a compaction boundary whose anchor item is missing from the
+    /// loaded timeline (the anchor record was skipped, corrupt, or lost):
+    /// without the anchor the model would see NOTHING below the boundary —
+    /// the summary and the history both gone. Surfacing the surviving raw
+    /// history is the better fallback, and it mirrors `load_ctx_filtered`'s
+    /// un-compaction rule (a deleted anchor clears `visible_from`).
+    fn drop_dangling_boundary<'a>(&mut self, items: impl Iterator<Item = &'a ContextItem>) {
+        let Some(boundary) = self.visible_from else {
+            return;
+        };
+        if !items.into_iter().any(|it| it.id() == boundary) {
+            log::warn!(
+                "compaction anchor {boundary} is missing from the session records — \
+                 clearing the compaction boundary (un-compaction)"
+            );
+            self.visible_from = None;
+        }
+    }
+}
+
 /// One tagged record on a session line (lines 2+ of the JSONL): a display
 /// message or one item of the model-facing context timeline. Externally
 /// tagged, so a message line is `{"Message":{…}}` and an item line is
-/// `{"Item":{"User":{…}}}` — legacy untagged message lines fail the
-/// [`Record`] parse and are retried as bare [`StoredMessage`]s.
+/// `{"Item":{"User":{…}}}`.
 #[derive(Debug, Serialize, Deserialize)]
 enum Record {
     Message(StoredMessage),
@@ -149,19 +171,17 @@ enum Record {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionHeader {
     title: String,
-    #[serde(default)]
     title_generated: bool,
     created_at: u64,
     cwd: String,
     provider: Option<String>,
     model: Option<String>,
     /// Reasoning effort (`None` = model default) for the last model used.
-    #[serde(default)]
     reasoning: Option<String>,
-    /// Context-manager bookkeeping (see [`ContextBookkeeping`]). `None` on
-    /// legacy files written before the JSONL unification — the reader then
-    /// falls back to the bincode `.ctx` companion.
-    #[serde(default, deserialize_with = "deserialize_context")]
+    /// Context-manager bookkeeping (see [`ContextBookkeeping`]). `None` for
+    /// a session that has no model-facing context yet (never saved with
+    /// context).
+    #[serde(deserialize_with = "deserialize_context")]
     context: Option<ContextBookkeeping>,
 }
 
@@ -187,12 +207,10 @@ impl SessionStore {
         let cwd_hash = compute_cwd_hash();
         let sessions_dir = proj_dirs.data_dir().join("sessions").join(&cwd_hash);
         std::fs::create_dir_all(&sessions_dir).ok();
-        let store = Self {
+        Self {
             sessions_dir,
             cwd_hash,
-        };
-        store.sweep_orphan_ctx();
-        store
+        }
     }
 
     /// Test-only store rooted at an explicit directory (lets integration
@@ -200,12 +218,10 @@ impl SessionStore {
     #[cfg(test)]
     pub(crate) fn with_dir(sessions_dir: std::path::PathBuf, cwd_hash: String) -> Self {
         std::fs::create_dir_all(&sessions_dir).ok();
-        let store = Self {
+        Self {
             sessions_dir,
             cwd_hash,
-        };
-        store.sweep_orphan_ctx();
-        store
+        }
     }
 
     // ── Public API ────────────────────────────────────────────────────────
@@ -309,76 +325,69 @@ impl SessionStore {
 
     /// Persist one snapshot atomically. A context-aware save writes the
     /// message records, the item records and the header bookkeeping from the
-    /// SAME snapshot, then retires a legacy `.ctx` companion. A display-only
-    /// save splices the context records (item lines + bookkeeping) from the
-    /// file currently on disk — read on the writer thread at execution time,
-    /// so any context save queued earlier lands first (FIFO) and the splice
-    /// source is always at least as new as the messages being written.
-    /// `update_ctx_ids` is the CALLER's duty (the async path refreshes the
-    /// in-memory session before enqueueing).
+    /// SAME snapshot. A display-only save splices the context records (item
+    /// lines + bookkeeping) from the file currently on disk — read on the
+    /// writer thread at execution time, so any context save queued earlier
+    /// lands first (FIFO) and the splice source is always at least as new as
+    /// the messages being written. `update_ctx_ids` is the CALLER's duty
+    /// (the async path refreshes the in-memory session before enqueueing).
     fn persist(&self, session: &Session, context: Option<&ContextManagerState>) {
         match context {
             Some(state) => {
-                let written = self.write_session(
+                self.write_session(
                     session,
                     Some(&ContextBookkeeping::from(state)),
                     state.items.iter(),
                 );
-                // Retire the legacy bincode companion ONLY after the unified
-                // write actually landed: the companion is the last copy of a
-                // legacy session's context, so a failed write must leave it
-                // in place (context is never left behind display).
-                if written {
-                    self.delete_ctx(&session.id);
-                }
             }
             None => {
-                let (bookkeeping, items) = self.read_disk_context(&session.id);
+                let (bookkeeping, items) = self
+                    .read_context(&session.id)
+                    .map_or((None, VecDeque::new()), |(b, i)| (Some(b), i));
                 self.write_session(session, bookkeeping.as_ref(), items.iter());
             }
         }
     }
 
-    /// Read the context section (header bookkeeping + item records) of the
-    /// session file currently on disk — the splice source for display-only
-    /// saves. Returns `(None, empty)` for a missing file or a legacy file
-    /// without embedded context (its `.ctx` companion stays authoritative
-    /// until the next context-aware save migrates it).
-    fn read_disk_context(
+    /// Read the context section (header bookkeeping + item records) of a
+    /// session file. Returns `None` for a missing file, an unparseable header
+    /// or a file without embedded context (a session with no model-facing
+    /// context yet). A corrupt item record loses exactly that item (logged);
+    /// a compaction boundary whose anchor was lost is cleared, so the
+    /// surviving raw history still reaches the model.
+    fn read_context(
         &self,
         session_id: &str,
-    ) -> (Option<ContextBookkeeping>, Vec<ContextItem>) {
-        let Ok(content) = std::fs::read_to_string(self.file_path(session_id)) else {
-            return (None, Vec::new());
-        };
+    ) -> Option<(ContextBookkeeping, VecDeque<ContextItem>)> {
+        let content = std::fs::read_to_string(self.file_path(session_id)).ok()?;
         let mut lines = content.lines();
-        let Some(header_line) = lines.next() else {
-            return (None, Vec::new());
-        };
-        let Ok(header) = serde_json::from_str::<SessionHeader>(header_line.trim()) else {
-            return (None, Vec::new());
-        };
-        let Some(mut bookkeeping) = header.context else {
-            return (None, Vec::new());
-        };
-        let mut items = Vec::new();
+        let header: SessionHeader = serde_json::from_str(lines.next()?.trim()).ok()?;
+        let mut bookkeeping = header.context?;
+        let mut items = VecDeque::new();
         let mut skipped = 0usize;
         for line in lines {
-            match serde_json::from_str::<Record>(line.trim()) {
-                Ok(Record::Item(item)) => items.push(item),
-                // Message records (and empty lines) are not context.
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Record>(line) {
+                Ok(Record::Item(item)) => items.push_back(item),
+                // Message records are the display transcript, not context.
                 Ok(Record::Message(_)) => continue,
                 Err(_) => skipped += 1,
             }
         }
         if skipped > 0 {
+            // The bookkeeping still describes the FULL timeline, but the
+            // skipped records' items are gone — say so (the header and the
+            // item records can disagree after a corrupt write).
             log::warn!(
-                "skipped {skipped} unreadable record(s) while splicing the context of \
+                "skipped {skipped} unreadable record(s) while reading the context of \
                  session {session_id}"
             );
         }
         bookkeeping.drop_dangling_boundary(items.iter());
-        (Some(bookkeeping), items)
+        Some((bookkeeping, items))
     }
 
     /// Compute the message id → context item ids mapping for a session against
@@ -480,24 +489,7 @@ impl SessionStore {
     /// Only sessions from the same CWD as the current process are returned,
     /// giving natural per-directory isolation.
     pub fn list_sessions(&self) -> Vec<SessionSummary> {
-        let mut summaries: Vec<SessionSummary> = Vec::new();
-
-        let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
-            return summaries;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-
-            if let Some(summary) = self.read_summary(&path) {
-                summaries.push(summary);
-            }
-        }
-
-        // Sort newest first by timestamp
+        let mut summaries = self.list_in_dir(&self.sessions_dir);
         summaries.sort_by(|a, b| b.session_id.cmp(&a.session_id));
         summaries
     }
@@ -508,38 +500,31 @@ impl SessionStore {
     /// which directory each session belongs to.
     pub fn list_all_sessions(&self) -> Vec<SessionSummary> {
         let mut summaries: Vec<SessionSummary> = Vec::new();
-
-        // Parent directory of all per-CWD subdirectories
-        let base = match self.sessions_dir.parent() {
-            Some(p) => p.to_path_buf(),
-            None => return summaries,
+        // Parent directory of all per-CWD subdirectories.
+        let Some(base) = self.sessions_dir.parent().map(PathBuf::from) else {
+            return summaries;
         };
-
         let Ok(entries) = std::fs::read_dir(&base) else {
             return summaries;
         };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Ok(dir_entries) = std::fs::read_dir(&path) else {
-                continue;
-            };
-            for file_entry in dir_entries.flatten() {
-                let file_path = file_entry.path();
-                if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                if let Some(summary) = self.read_summary(&file_path) {
-                    summaries.push(summary);
-                }
-            }
+        for entry in entries.flatten().filter(|e| e.path().is_dir()) {
+            summaries.extend(self.list_in_dir(&entry.path()));
         }
-
         summaries.sort_by(|a, b| b.session_id.cmp(&a.session_id));
         summaries
+    }
+
+    /// Read every session summary in one directory (unsorted).
+    fn list_in_dir(&self, dir: &std::path::Path) -> Vec<SessionSummary> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().extension().and_then(|e| e.to_str()) == Some("jsonl"))
+                    .filter_map(|e| self.read_summary(&e.path()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Load a full session from its JSONL file (the display transcript —
@@ -559,8 +544,7 @@ impl SessionStore {
         let header: SessionHeader = serde_json::from_str(lines[0]).ok()?;
         lines.remove(0);
 
-        // Remaining lines: tagged records (legacy untagged lines load as
-        // messages)
+        // Remaining lines: tagged records.
         let mut messages: Vec<Message> = Vec::new();
         let mut ctx_ids_by_message: HashMap<String, Vec<u64>> = HashMap::new();
         for (idx, line) in lines.iter().enumerate() {
@@ -572,21 +556,16 @@ impl SessionStore {
                 Ok(Record::Message(stored)) => stored,
                 // A context item record — not part of the display transcript.
                 Ok(Record::Item(_)) => continue,
-                Err(record_err) => match serde_json::from_str::<StoredMessage>(line) {
-                    Ok(stored) => stored,
-                    Err(e) => {
-                        // A corrupted line loses exactly one message — log it
-                        // (session id, 1-based line number, parse error)
-                        // rather than silently dropping a chunk of the
-                        // transcript.
-                        log::warn!(
-                            "skipping unparseable line {} in session {session_id}: {e} \
-                             (record parse: {record_err})",
-                            idx + 2
-                        );
-                        continue;
-                    }
-                },
+                // A corrupted line loses exactly one message — log it
+                // (session id, 1-based line number, parse error) rather than
+                // silently dropping a chunk of the transcript.
+                Err(e) => {
+                    log::warn!(
+                        "skipping unparseable line {} in session {session_id}: {e}",
+                        idx + 2
+                    );
+                    continue;
+                }
             };
             if !stored.ctx_ids.is_empty() {
                 ctx_ids_by_message.insert(stored.id.clone(), stored.ctx_ids.clone());
@@ -613,69 +592,10 @@ impl SessionStore {
     /// order and combined with the header bookkeeping into the exact
     /// snapshot the harness last persisted.
     ///
-    /// A legacy file (header without embedded context) falls back to the
-    /// bincode `.ctx` companion of pre-unification builds. Returns `None`
-    /// if neither source exists or decodes.
+    /// Returns `None` if the file does not exist, cannot be parsed, or
+    /// carries no embedded context.
     pub fn load_context(&self, session_id: &str) -> Option<ContextManagerState> {
-        if let Some(state) = self.load_unified_context(session_id) {
-            return Some(state);
-        }
-        self.load_legacy_ctx(session_id)
-    }
-
-    /// Reconstruct the context state from the unified JSONL: header
-    /// bookkeeping + `Item` records in timeline order. `None` when the file
-    /// is missing, its header is unparseable, or it predates the
-    /// unification (no embedded context — the legacy companion is the
-    /// source then).
-    fn load_unified_context(&self, session_id: &str) -> Option<ContextManagerState> {
-        let content = std::fs::read_to_string(self.file_path(session_id)).ok()?;
-        let mut lines = content.lines();
-        let header: SessionHeader = serde_json::from_str(lines.next()?.trim()).ok()?;
-        let mut bookkeeping = header.context?;
-        let mut items: VecDeque<ContextItem> = VecDeque::new();
-        let mut skipped = 0usize;
-        for line in lines {
-            match serde_json::from_str::<Record>(line.trim()) {
-                Ok(Record::Item(item)) => items.push_back(item),
-                // Message records are the display transcript, not context.
-                Ok(Record::Message(_)) => continue,
-                Err(_) => skipped += 1,
-            }
-        }
-        if skipped > 0 {
-            // The bookkeeping still describes the FULL timeline, but the
-            // skipped records' items are gone — say so (the header and the
-            // item records can disagree after a corrupt write).
-            log::warn!(
-                "skipped {skipped} unreadable record(s) while loading the context of \
-                 session {session_id}"
-            );
-        }
-        bookkeeping.drop_dangling_boundary(items.iter());
-        Some(ContextManagerState {
-            items,
-            next_id: bookkeeping.next_id,
-            max_tokens: bookkeeping.max_tokens,
-            overflow_model: bookkeeping.overflow_model,
-            split: bookkeeping.split,
-            visible_from: bookkeeping.visible_from,
-            hidden: bookkeeping.hidden,
-        })
-    }
-
-    /// Legacy fallback: decode a bincode `.ctx` companion written by
-    /// pre-unification builds. Returns `None` if no companion file exists
-    /// or it cannot be decoded.
-    fn load_legacy_ctx(&self, session_id: &str) -> Option<ContextManagerState> {
-        let bytes = self.load_ctx(session_id)?;
-        match bincode::deserialize::<ContextManagerState>(&bytes) {
-            Ok(state) => Some(state),
-            Err(e) => {
-                log::warn!("failed to decode context state for session {session_id}: {e}");
-                None
-            }
-        }
+        self.read_context(session_id).map(|(b, items)| b.into_state(items))
     }
 
     /// Load the context snapshot for a session with the item timeline TRUNCATED
@@ -710,11 +630,9 @@ impl SessionStore {
         Some(state)
     }
 
-    /// Delete a session file and its companion `.ctx` file from disk.
+    /// Delete a session file from disk.
     pub fn delete_session(&self, session_id: &str) {
-        let file_path = self.file_path(session_id);
-        std::fs::remove_file(&file_path).ok();
-        self.delete_ctx(session_id);
+        std::fs::remove_file(self.file_path(session_id)).ok();
     }
 
     /// Check whether a session with the given ID exists on disk.
@@ -722,34 +640,10 @@ impl SessionStore {
         self.file_path(session_id).exists()
     }
 
-    /// On-disk paths (JSONL + legacy `.ctx` companion) of a session — for
-    /// the /tmp undo snapshots taken before destructive display actions
-    /// (revert). The companion path may not exist; the snapshot captures its
-    /// absence so a rollback of a pre-unification session stays consistent.
-    pub fn session_paths(&self, session_id: &str) -> (PathBuf, PathBuf) {
-        (self.file_path(session_id), self.ctx_file_path(session_id))
-    }
-
-    // ── Legacy .ctx companions (bincode, pre-unification builds) ───────────
-
-    /// Build path for the legacy bincode `.ctx` companion file.
-    fn ctx_file_path(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir.join(format!("session-{session_id}.ctx"))
-    }
-
-    /// Load the raw bytes of a legacy `.ctx` companion file.
-    /// Returns `None` if no companion file exists or it cannot be read.
-    fn load_ctx(&self, session_id: &str) -> Option<Vec<u8>> {
-        let path = self.ctx_file_path(session_id);
-        std::fs::read(&path).ok()
-    }
-
-    /// Delete the legacy `.ctx` companion file for a session (a no-op when
-    /// none exists). Called when the unified JSONL becomes authoritative
-    /// (context-aware save, session deletion) so a stale companion can
-    /// never resurrect old context state.
-    fn delete_ctx(&self, session_id: &str) {
-        std::fs::remove_file(self.ctx_file_path(session_id)).ok();
+    /// On-disk path of a session's JSONL — for the /tmp undo snapshots taken
+    /// before destructive display actions (revert).
+    pub fn session_path(&self, session_id: &str) -> PathBuf {
+        self.file_path(session_id)
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
@@ -763,20 +657,19 @@ impl SessionStore {
     /// Write the header line, the message records and the item records for a
     /// session. `bookkeeping`/`items` come from the context snapshot on a
     /// context-aware save, or are spliced from the previous on-disk file on a
-    /// display-only save (`None`/empty for a fresh or legacy session — a
-    /// legacy file keeps its `.ctx` companion as the context source).
+    /// display-only save (`None`/empty for a fresh session that has no
+    /// model-facing context yet).
     ///
     /// The write is atomic (see [`atomic_write`]): a reader only ever sees the
     /// complete old or new file, so the display transcript and the context
-    /// records can never tear apart. Returns whether the write landed (a
-    /// failure is logged and leaves the previous file — and any legacy
-    /// companion — untouched).
+    /// records can never tear apart. A failure is logged and leaves the
+    /// previous file untouched.
     fn write_session<'a>(
         &self,
         session: &Session,
         bookkeeping: Option<&ContextBookkeeping>,
         items: impl Iterator<Item = &'a ContextItem>,
-    ) -> bool {
+    ) {
         let file_path = self.file_path(&session.id);
         let header = self.build_header(session, bookkeeping.cloned());
 
@@ -821,11 +714,10 @@ impl SessionStore {
 
         if let Err(e) = atomic_write(&file_path, lines.join("\n").as_bytes()) {
             log::warn!("failed to save session {}: {e}", session.id);
-            return false;
+            return;
         }
 
         self.evict_old_sessions();
-        true
     }
 
     /// Build a `SessionHeader` from a `Session`, populating `cwd` with the
@@ -833,9 +725,10 @@ impl SessionStore {
     /// bookkeeping into the header's `context` field.
     ///
     /// The session's own recorded model selection (provider + model +
-    /// reasoning) wins. Sessions without one — e.g. saved before this
-    /// feature — fall back to deriving provider/model from the last valid
-    /// assistant message, which preserves the old behavior.
+    /// reasoning) wins. Sessions without one — the user never committed a
+    /// model selection in this session — fall back to deriving provider/model
+    /// from the last valid assistant message, so the header still carries the
+    /// concrete model that actually served the session.
     fn build_header(
         &self,
         session: &Session,
@@ -897,10 +790,12 @@ impl SessionStore {
 
         let header: SessionHeader = serde_json::from_str(first_line).ok()?;
 
-        // Count the message records (item records are context, not dialog).
+        // Count the message records (item records are context, not dialog;
+        // a corrupt line is not a message either — counting it would inflate
+        // the summary's message count).
         let mut message_count: usize = 0;
         for line in reader.lines().map_while(Result::ok) {
-            if !line.trim().is_empty() && classify_line(&line) != LineKind::Item {
+            if !line.trim().is_empty() && classify_line(&line) == LineKind::Message {
                 message_count += 1;
             }
         }
@@ -918,33 +813,6 @@ impl SessionStore {
             cwd: header.cwd,
             model: header.model,
         })
-    }
-
-    /// Delete orphaned `.ctx` companions — a companion file whose JSONL session
-    /// is gone. Orphans can arise from a crash between the two `remove_file`s
-    /// of `delete_session`/eviction (JSONL first), from a failed JSONL write
-    /// whose `.ctx` write still succeeded, or from manual deletion; they leak
-    /// disk silently (nothing lists them) and must never resurrect context
-    /// state. Runs once per store creation, O(n) over the sessions directory.
-    fn sweep_orphan_ctx(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("ctx") {
-                continue;
-            }
-            // A `.ctx` is orphaned when its same-stem `.jsonl` is missing.
-            if !path.with_extension("jsonl").exists()
-                && let Err(e) = std::fs::remove_file(&path)
-            {
-                log::warn!(
-                    "failed to remove orphaned context file {}: {e}",
-                    path.display()
-                );
-            }
-        }
     }
 
     /// Remove the oldest session files if we exceed the maximum count for this CWD.
@@ -974,9 +842,6 @@ impl SessionStore {
         let to_remove = files.len() - MAX_SESSIONS_ON_DISK;
         for (path, _) in files.iter().take(to_remove) {
             std::fs::remove_file(path).ok();
-            // Remove companion .ctx file too
-            let ctx_path = path.with_extension("ctx");
-            std::fs::remove_file(&ctx_path).ok();
         }
     }
 }
@@ -989,33 +854,6 @@ impl Default for SessionStore {
 
 // ── Line classification ───────────────────────────────────────────────────
 
-/// Drop a compaction boundary whose anchor item is missing from the loaded
-/// timeline (the anchor record was skipped, corrupt, or lost): without the
-/// anchor the model would see NOTHING below the boundary — the summary and
-/// the history both gone. Surfacing the surviving raw history is the better
-/// fallback, and it mirrors `load_ctx_filtered`'s un-compaction rule (a
-/// deleted anchor clears `visible_from`).
-impl ContextBookkeeping {
-    /// Drop a compaction boundary whose anchor item is missing from the
-    /// loaded timeline (the anchor record was skipped, corrupt, or lost):
-    /// without the anchor the model would see NOTHING below the boundary —
-    /// the summary and the history both gone. Surfacing the surviving raw
-    /// history is the better fallback, and it mirrors `load_ctx_filtered`'s
-    /// un-compaction rule (a deleted anchor clears `visible_from`).
-    fn drop_dangling_boundary<'a>(&mut self, items: impl Iterator<Item = &'a ContextItem>) {
-        let Some(boundary) = self.visible_from else {
-            return;
-        };
-        if !items.into_iter().any(|it| it.id() == boundary) {
-            log::warn!(
-                "compaction anchor {boundary} is missing from the session records — \
-                 clearing the compaction boundary (un-compaction)"
-            );
-            self.visible_from = None;
-        }
-    }
-}
-
 /// The kind of a session-file body line: a display message record, a context
 /// item record, or an unparseable/corrupt line. Used by the cheap counting
 /// passes ([`SessionStore::read_summary`], [`SessionStore::update_title`]).
@@ -1025,7 +863,7 @@ impl ContextBookkeeping {
 /// drop it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineKind {
-    /// A `{"Message": …}` record or a legacy untagged message line.
+    /// A `{"Message": …}` record.
     Message,
     /// A `{"Item": …}` context record — not part of the display transcript.
     Item,
@@ -1043,14 +881,7 @@ fn classify_line(line: &str) -> LineKind {
     match serde_json::from_str::<Record>(line) {
         Ok(Record::Message(_)) => LineKind::Message,
         Ok(Record::Item(_)) => LineKind::Item,
-        Err(_) => {
-            // Legacy pre-unification message line: a bare StoredMessage.
-            if serde_json::from_str::<StoredMessage>(line).is_ok() {
-                LineKind::Message
-            } else {
-                LineKind::Corrupt
-            }
-        }
+        Err(_) => LineKind::Corrupt,
     }
 }
 
@@ -1063,10 +894,8 @@ fn classify_line(line: &str) -> LineKind {
 /// real extensions).
 fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     // The tmp sibling must live in the SAME directory as the target so the
-    // rename stays on one filesystem (cross-device rename fails). The full
-    // file name is kept (suffix appended, extension NOT replaced) so the JSONL
-    // and the `.ctx` of one session never share a tmp path across the writer
-    // thread and a sync save. NOTE: two writers racing on the SAME target
+    // rename stays on one filesystem (cross-device rename fails). NOTE: two
+    // writers racing on the SAME target
     // still share one deterministic tmp name — production saves all run on
     // the FIFO writer thread now (TODO.md task 4); only tests and the
     // spawn-failure fallback remain synchronous.
@@ -1123,7 +952,6 @@ struct StoredMessage {
     /// Context-manager item ids backing this message (see
     /// `update_ctx_ids`). Bookkeeping for display actions — never parsed
     /// into a context.
-    #[serde(default)]
     ctx_ids: Vec<u64>,
 }
 
@@ -1463,19 +1291,6 @@ mod tests {
         assert_eq!(loaded.model.as_deref(), Some("deepseek-ai/deepseek-v4-pro"));
         assert_eq!(loaded.provider.as_deref(), Some("nvidia"));
         assert_eq!(loaded.reasoning.as_deref(), Some("high"));
-
-        // A legacy header without the reasoning field still loads.
-        let file = store.file_path("12345");
-        let contents = std::fs::read_to_string(&file).unwrap();
-        let mut lines: Vec<&str> = contents.lines().collect();
-        let mut header: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        header.as_object_mut().unwrap().remove("reasoning");
-        let header_line = header.to_string();
-        lines[0] = &header_line;
-        std::fs::write(&file, lines.join("\n")).unwrap();
-        let loaded = store.load_session("12345").unwrap();
-        assert_eq!(loaded.reasoning, None);
-        assert_eq!(loaded.model.as_deref(), Some("deepseek-ai/deepseek-v4-pro"));
     }
 
     #[test]
@@ -1539,107 +1354,47 @@ mod tests {
         assert_eq!(list[1].session_id, "1000");
     }
 
-    /// A legacy session (pre-unification JSONL without embedded context +
-    /// bincode `.ctx` companion) still resumes with its model-facing context:
-    /// `load_context` falls back to the companion when the header carries no
-    /// bookkeeping.
+    /// A session whose file carries no embedded context (never saved with
+    /// context — e.g. a display-only session) has no model-facing context:
+    /// `load_context` returns `None`, and the resume warns truthfully.
     #[test]
-    fn legacy_ctx_companion_still_loads_as_the_context_source() {
+    fn a_session_without_embedded_context_loads_display_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
-        // A legacy on-disk pair: display-only JSONL (no header context) + a
-        // bincode companion written by an older build.
         let session = make_test_session(
             "12345",
-            "Legacy Session",
+            "Display Only",
             vec![
                 make_user_msg("msg-0", "Hello"),
                 make_assistant_msg("msg-1", "Hi"),
             ],
         );
         store.save_session(&session);
-        let context = make_context(vec![user_item(1, "Hello"), assistant_item(2, "Hi")]);
-        std::fs::write(
-            store.ctx_file_path("12345"),
-            bincode::serialize(&context).unwrap(),
-        )
-        .unwrap();
 
-        // The companion is the context source for the legacy file.
-        let loaded = store.load_context("12345").expect("legacy fallback");
-        assert_eq!(loaded.items.len(), 2);
-        assert_eq!(loaded.next_id, 42);
+        assert!(store.load_context("12345").is_none());
 
-        // Deleting the session removes the companion too — a stale `.ctx`
-        // must never resurrect deleted context state on a future resume.
+        // Deleting the session removes its file.
         store.delete_session("12345");
         assert!(!store.has_session("12345"));
-        assert!(store.load_ctx("12345").is_none());
         assert!(store.load_context("12345").is_none());
     }
 
-    /// Once the JSONL carries embedded context, a stale legacy companion is
-    /// ignored: the unified file is the single source of truth.
+    /// A context-aware save whose write FAILS leaves the previous file —
+    /// and its context records — untouched (a partial write never drops
+    /// the model-facing context).
     #[test]
-    fn legacy_companion_is_ignored_once_the_jsonl_carries_context() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(&dir);
-
-        let session = make_test_session(
-            "12346",
-            "Migrated Session",
-            vec![
-                make_user_msg("msg-0", "Hello"),
-                make_assistant_msg("msg-1", "Hi"),
-            ],
-        );
-        // A stale companion holding DIFFERENT items than the live context.
-        let stale = make_context(vec![user_item(1, "stale prompt")]);
-        std::fs::write(
-            store.ctx_file_path("12346"),
-            bincode::serialize(&stale).unwrap(),
-        )
-        .unwrap();
-
-        let context = make_context(vec![user_item(1, "Hello"), assistant_item(2, "Hi")]);
-        store.save_session_with_context(&session, &context);
-
-        // The unified save retired the companion, and the context comes from
-        // the JSONL records — never from the stale bincode payload.
-        assert!(
-            store.load_ctx("12346").is_none(),
-            "the companion was retired by the unified save"
-        );
-        let loaded = store.load_context("12346").unwrap();
-        assert_eq!(loaded.items.len(), 2);
-        let ContextItem::User { original, .. } = &loaded.items[0] else {
-            panic!("expected the live user item");
-        };
-        assert_eq!(original, "Hello");
-    }
-
-    /// A context-aware save whose unified write FAILS must keep the legacy
-    /// `.ctx` companion: for a legacy session the companion is the only copy
-    /// of the model-facing context, and the context is never left behind the
-    /// display. Once a write succeeds, the companion is retired.
-    #[test]
-    fn a_failed_context_save_keeps_the_legacy_companion() {
+    fn a_failed_context_save_leaves_the_previous_file_intact() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
         let session = make_test_session(
             "12347",
-            "Legacy Migration",
+            "Failed Write",
             vec![make_user_msg("msg-0", "Hello")],
         );
-        store.save_session(&session);
-        let context = make_context(vec![user_item(1, "Hello")]);
-        std::fs::write(
-            store.ctx_file_path("12347"),
-            bincode::serialize(&context).unwrap(),
-        )
-        .unwrap();
+        let context = make_context(vec![user_item(1, "Hello"), assistant_item(2, "Hi")]);
+        store.save_session_with_context(&session, &context);
 
         // Sabotage the JSONL path: a directory where the file must be written
         // makes the atomic rename fail (the tmp sibling is written fine, the
@@ -1647,25 +1402,20 @@ mod tests {
         let path = store.file_path("12347");
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
-        store.save_session_with_context(&session, &context);
+        let shrunk = make_context(vec![user_item(1, "Hello")]);
+        store.save_session_with_context(&session, &shrunk);
 
-        assert!(
-            store.load_ctx("12347").is_some(),
-            "the companion survives a failed unified write"
-        );
-
-        // Heal the sabotage: the next context save lands, and only then is
-        // the companion retired.
+        // Heal the sabotage: the next context save lands with the new
+        // snapshot.
         std::fs::remove_dir(&path).unwrap();
-        store.save_session_with_context(&session, &context);
-        assert!(store.load_ctx("12347").is_none(), "retired after success");
+        store.save_session_with_context(&session, &shrunk);
         assert_eq!(store.load_context("12347").unwrap().items.len(), 1);
     }
 
     /// A header whose `context` object is unreadable (e.g. a bookkeeping
     /// format break) must not take the display transcript down with it:
-    /// the session still loads, and the context source degrades to the
-    /// legacy companion (here: absent → the resume warns truthfully).
+    /// the session still loads, and the context degrades to absent
+    /// (the resume warns truthfully).
     #[test]
     fn an_unreadable_header_context_degrades_to_display_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -1874,16 +1624,11 @@ mod tests {
         );
 
         store.save_session(&session);
-        // A leftover legacy companion from the pre-unification era.
-        std::fs::write(store.ctx_file_path("12345"), b"context-state").ok();
         assert!(store.has_session("12345"));
-        assert!(store.load_ctx("12345").is_some());
 
-        // Deleting the session must also remove its companion .ctx file — a
-        // stale .ctx would resurrect deleted context state on a future resume.
+        // Deleting the session removes its file from disk.
         store.delete_session("12345");
         assert!(!store.has_session("12345"));
-        assert!(store.load_ctx("12345").is_none());
     }
 
     #[test]
@@ -1901,31 +1646,21 @@ mod tests {
                 ],
             );
             store.save_session(&session);
-            // A leftover legacy companion per session.
-            std::fs::write(store.ctx_file_path(&format!("{i:05}")), b"context-state").ok();
         }
 
         let list = store.list_sessions();
         assert!(list.len() <= MAX_SESSIONS_ON_DISK);
 
-        // Every surviving session still has its companion .ctx, and the
-        // evicted ones lost both files — no orphaned .ctx can resurrect a
-        // session that was evicted from disk.
+        // The evicted sessions lost their files — nothing lingers on disk.
         let survivor_ids: std::collections::HashSet<String> =
             list.iter().map(|s| s.session_id.clone()).collect();
         for i in 0..(MAX_SESSIONS_ON_DISK + 5) {
             let id = format!("{i:05}");
-            if survivor_ids.contains(&id) {
-                assert!(
-                    store.load_ctx(&id).is_some(),
-                    "surviving session {id} keeps its .ctx"
-                );
-            } else {
-                assert!(
-                    store.load_ctx(&id).is_none(),
-                    "evicted session {id} lost its .ctx too"
-                );
-            }
+            assert_eq!(
+                store.has_session(&id),
+                survivor_ids.contains(&id),
+                "session {id} eviction state"
+            );
         }
     }
 
@@ -2027,7 +1762,8 @@ mod tests {
 
     /// Reasoning ("+ Thought") blocks are part of the display message, so
     /// they survive a reload straight from the JSONL — without ever entering
-    /// the model-facing context (the `.ctx` snapshot carries no reasoning).
+    /// the model-facing context (the persisted context records carry no
+    /// reasoning).
     #[test]
     fn test_reasoning_persists_for_display_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -2078,7 +1814,8 @@ mod tests {
         );
         assert!(matches!(&parts[1], Part::Text(t) if t.text == "Because of Rayleigh scattering."));
 
-        // The .ctx snapshot keeps the reasoning OUT of the model context.
+        // The persisted context records keep the reasoning OUT of the model
+        // context.
         let state = store.load_context("6000").unwrap();
         let mut cm = cosh::harness::context::ContextManager::new(100_000);
         cm.restore_state(&state);
@@ -2481,29 +2218,6 @@ mod tests {
             contents.contains("\"Corrupt Line\""),
             "the title must stay untouched (the rename refused)"
         );
-    }
-
-    /// Orphaned `.ctx` companions (JSONL gone, companion left behind by a
-    /// crash between the two removals, a failed JSONL write, or a manual
-    /// delete) are swept on store creation. A matching pair is never touched.
-    #[test]
-    fn orphaned_ctx_files_are_swept_on_store_creation() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(&dir);
-        let session = make_test_session("8000", "Kept", vec![make_user_msg("msg-0", "hi")]);
-        store.save_session(&session);
-        std::fs::write(store.ctx_file_path("8000"), b"kept-context").ok();
-        // An orphan: no session-8001.jsonl anywhere.
-        std::fs::write(store.ctx_file_path("8001"), b"orphan-context").ok();
-
-        // A fresh store over the same directory sweeps the orphan.
-        let fresh = SessionStore::with_dir(dir.path().join("testhash"), "testhash".into());
-        assert!(fresh.load_ctx("8000").is_some(), "a matched pair is kept");
-        assert!(
-            fresh.load_ctx("8001").is_none(),
-            "an orphaned .ctx is removed on store creation"
-        );
-        assert!(fresh.load_session("8000").is_some(), "the session survives");
     }
 
     /// Reverting past the compaction point deletes the Compaction anchor —

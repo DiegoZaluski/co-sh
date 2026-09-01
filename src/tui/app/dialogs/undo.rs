@@ -101,10 +101,9 @@ impl App {
         }
     }
 
-    /// Roll the session file back to a snapshot: copy the stored JSONL (and
-    /// a legacy `.ctx` companion, when the snapshot era had one) over the
-    /// live ones, drop the session from the cache so the next access reloads
-    /// from disk, and refresh the sidebar summaries.
+    /// Roll the session file back to a snapshot: copy the stored JSONL over
+    /// the live one, drop the session from the cache so the next access
+    /// reloads from disk, and refresh the sidebar summaries.
     pub(in crate::app) fn restore_undo_version(&mut self, session_id: &str, version: &str) {
         if self.state.status == crate::types::SessionStatus::Working {
             self.toast_state.show(ToastOptions {
@@ -115,8 +114,8 @@ impl App {
             });
             return;
         }
-        let (jsonl, ctx) = self.session_store.session_paths(session_id);
-        if !self.undo_store.restore(session_id, version, &jsonl, &ctx) {
+        let jsonl = self.session_store.session_path(session_id);
+        if !self.undo_store.restore(session_id, version, &jsonl) {
             self.toast_state.show(ToastOptions {
                 title: Some("Undo".into()),
                 message: format!("Could not restore {version}."),

@@ -111,13 +111,11 @@ impl App {
                     return;
                 }
                 let prompt_text = message_prompt_text(msg);
-                // Snapshot BEFORE the destructive rewrite: both files go to
-                // /tmp/cosh/undo/<session-id>/vN so `/undo` can roll the
-                // revert back while the tmp lives.
-                let (jsonl_path, ctx_path) = self.session_store.session_paths(&session.id.clone());
-                let _undo_version = self
-                    .undo_store
-                    .snapshot(&session.id, &jsonl_path, &ctx_path);
+                // Snapshot BEFORE the destructive rewrite: the session JSONL
+                // goes to /tmp/cosh/undo/<session-id>/vN so `/undo` can roll
+                // the revert back while the tmp lives.
+                let jsonl_path = self.session_store.session_path(&session.id);
+                let _undo_version = self.undo_store.snapshot(&session.id, &jsonl_path);
                 let removed_ids: std::collections::HashSet<u64> = session.messages[idx..]
                     .iter()
                     .flat_map(|m| session.ctx_ids.get(&m.id).cloned().unwrap_or_default())
