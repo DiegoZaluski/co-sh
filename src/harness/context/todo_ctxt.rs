@@ -398,10 +398,7 @@ mod tests {
         let last = msgs.last().unwrap();
         assert_eq!(last.role, "user");
         assert!(
-            last.content
-                .as_deref()
-                .unwrap()
-                .contains("## Tool TODOs"),
+            last.content.as_deref().unwrap().contains("## Tool TODOs"),
             "the block is its own trailing message here"
         );
     }

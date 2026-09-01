@@ -782,8 +782,8 @@ impl App {
                     // TUI-side failure (thread runtime, connector
                     // construction, panic) has nothing to persist into the
                     // context — the display JSONL alone carries the styled
-                    // error line and the `.ctx` on disk stays untouched.
-                    // Gated on `is_valid_session` exactly like
+                    // error line and the context records on disk stay
+                    // untouched. Gated on `is_valid_session` exactly like
                     // Done/Stopped/snapshot: a prompt that never got a real
                     // answer is NOT dialog and must not pollute the sidebar
                     // with empty sessions.

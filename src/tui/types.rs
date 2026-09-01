@@ -24,8 +24,9 @@ pub struct Session {
     /// Mapping of message id → context-manager item ids (see
     /// `session_store::update_ctx_ids`). Pure bookkeeping: it lets display
     /// actions (revert, fork) locate the model-facing items that back each
-    /// displayed message, so they can reflect in the `.ctx` companion file.
-    /// It is NEVER model-facing data and never parsed into a context.
+    /// displayed message, so they can be reflected in the context records
+    /// of the session JSONL. It is NEVER model-facing data and never parsed
+    /// into a context.
     #[serde(default)]
     pub ctx_ids: std::collections::HashMap<String, Vec<u64>>,
 }

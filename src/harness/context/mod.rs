@@ -43,8 +43,8 @@ const COMPACT_PCT: usize = 80;
 
 /// A single conversation item in display order. **One item = one message** in
 /// [`ContextManager::build_messages`], so message positions are preserved by
-/// construction. This is also the persisted representation: the `.ctx`
-/// companion file holds a bincode-encoded snapshot of the whole state (see
+/// construction. This is also the persisted representation: the TUI's session
+/// store writes each item as a JSONL record inside the session file (see
 /// `session_store`), so the timeline is restored verbatim from disk.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ContextItem {
@@ -165,10 +165,11 @@ impl ContextItem {
 
 // LLM compaction (the last-resort fallback, driven by the harness)
 
-/// Snapshot of context manager state for bincode persistence (the `.ctx`
-/// companion file). Nothing is in-flight between save and restore — the
-/// snapshot is a plain clone. `overflow_model` records the stuck
-/// context-window overflow, and `split` the staging of an in-progress
+/// Snapshot of context manager state, carried by the harness events
+/// (`Done`/`Stopped`/`Error`/`ContextSnapshot`) and handed to the TUI for
+/// persistence. Nothing is in-flight between save and restore — the snapshot
+/// is a plain clone. `overflow_model` records the stuck context-window
+/// overflow, and `split` the staging of an in-progress
 /// split-and-concatenate.
 ///
 /// The timeline is APPEND-ONLY: nothing is ever removed by compaction, the
@@ -177,11 +178,11 @@ impl ContextItem {
 /// full history stays on disk for revert/fork at any point of the session —
 /// the model's view is exactly what the markers say.
 ///
-/// NOTE: bincode 1.x is positional — ADDING a field is a format break (an
-/// old snapshot fails the whole deserialization and the TUI falls back to the
-/// JSONL history; the accepted dev-stage tradeoff). The field is keyed by
-/// MODEL, not provider: the stuck constraint is the model's window, so a
-/// model switch inside the same provider must clear it.
+/// Persistence is the TUI's concern (`session_store`): the items are written
+/// as JSONL `Item` records and the remaining fields as header bookkeeping
+/// inside the session file. The field is keyed by MODEL, not provider: the
+/// stuck constraint is the model's window, so a model switch inside the same
+/// provider must clear it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextManagerState {
     pub items: VecDeque<ContextItem>,
@@ -206,22 +207,6 @@ pub struct ContextManagerState {
     /// revert/fork; never sent to the model. Ids below `visible_from` are
     /// implicitly hidden too and are pruned from here on compaction.
     pub hidden: HashSet<u64>,
-}
-
-impl ContextManagerState {
-    /// Bincode-encode this snapshot for the `.ctx` companion file. Returns an
-    /// empty vec on a serialization failure (the caller logs it) — an empty
-    /// payload never deserializes, so a corrupt write is indistinguishable
-    /// from a missing companion file and the JSONL history fallback applies.
-    pub fn to_bincode(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap_or_default()
-    }
-
-    /// Decode a bincode-encoded snapshot read from a `.ctx` companion file.
-    /// `None` = the payload is missing or corrupt (see [`Self::to_bincode`]).
-    pub fn from_bincode(bytes: &[u8]) -> Option<Self> {
-        bincode::deserialize(bytes).ok()
-    }
 }
 
 impl Default for ContextManagerState {
@@ -1064,9 +1049,9 @@ impl ContextManager {
         self.items.iter().cloned().collect()
     }
 
-    /// Serializable snapshot for bincode persistence (the `.ctx` companion
-    /// file). Nothing is in-flight between save and restore — the snapshot is
-    /// a plain clone.
+    /// Serializable snapshot for persistence (the session JSONL's context
+    /// records). Nothing is in-flight between save and restore — the snapshot
+    /// is a plain clone.
     pub fn save_state(&self) -> ContextManagerState {
         ContextManagerState {
             items: self.items.clone(),

@@ -1343,7 +1343,7 @@ fn result_is_useless_reads_find_grep_json_contract() {
 // ── Incremental persistence: ContextSnapshot events ───────────────────────
 //
 // The harness emits a context snapshot per tool dispatch (with a test-zeroed
-// cadence) so the TUI can persist the `.ctx` companion file mid-run. This test
+// cadence) so the TUI can persist the session context records mid-run. This test
 // proves the snapshots (1) arrive during the run, (2) are valid
 // [`ContextManagerState`]s,
 // (3) reflect progress — each later snapshot owns the tool call/result

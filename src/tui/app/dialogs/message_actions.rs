@@ -132,11 +132,12 @@ impl App {
                     .ctx_ids
                     .retain(|k, _| remaining.contains(k.as_str()));
                 // Reflect in the model-facing context: the items behind the
-                // reverted messages are DELETED from the `.ctx` (the snapshot
-                // above is the escape hatch). Visibility markers are adjusted
-                // by the filter: deleting the Compaction anchor un-compacts —
-                // the surviving pre-compaction history becomes visible to the
-                // model again. No `.ctx` on disk means there is nothing to
+                // reverted messages are DELETED from the session file's
+                // context records (the snapshot above is the escape hatch).
+                // Visibility markers are adjusted by the filter: deleting
+                // the Compaction anchor un-compacts — the surviving
+                // pre-compaction history becomes visible to the model again.
+                // No context records on disk means there is nothing to
                 // reflect (display-only session). NOTE the snapshot is read
                 // HERE, on the caller thread: a context save queued-but-
                 // unexecuted for this session is superseded by this job (FIFO
@@ -199,9 +200,9 @@ impl App {
                 // The fork's model-facing context: the parent's items that
                 // back the KEPT messages (bookkeeping ids in the mapping that
                 // are not on disk anymore — compaction/sweep — are inert and
-                // filtered out here too). No parent `.ctx` → the fork is
-                // saved display-only and starts without context (a later
-                // resume warns, truthfully).
+                // filtered out here too). No parent context records → the
+                // fork is saved display-only and starts without context (a
+                // later resume warns, truthfully).
                 let kept_ids: std::collections::HashSet<u64> = forked
                     .messages
                     .iter()

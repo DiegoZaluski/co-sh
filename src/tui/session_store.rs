@@ -1,21 +1,58 @@
 //! Session persistence module.
 //!
 //! Stores chat sessions as individual JSONL files organized by CWD:
-//! `{data_dir}/sessions/{cwd_hash}/session-{timestamp}.jsonl`, each with a
-//! bincode-encoded `.ctx` companion file holding the context-manager state.
+//! `{data_dir}/sessions/{cwd_hash}/session-{timestamp}.jsonl`. The JSONL is
+//! the SINGLE source of storage for session data — both the display
+//! transcript and the model-facing agent context.
 //!
 //! ## Format
 //!
 //! Each JSONL file represents one complete chat session:
 //!
 //! - Line 1: Session metadata (JSON object with title, created_at, cwd, etc.)
-//! - Lines 2+: Each message serialized as a JSON object, one per line.
+//!   plus the context-manager bookkeeping (see [`ContextBookkeeping`]: id
+//!   counter, budget, overflow state, split staging and the visibility
+//!   markers).
+//! - Lines 2+: Tagged records, one JSON object per line:
+//!   `{"Message": …}` — a display message ([`StoredMessage`]);
+//!   `{"Item": …}` — one [`ContextItem`] of the model-facing timeline, in
+//!   conversation order. Legacy files (written before the unification) hold
+//!   bare message objects with no tag; they load as messages.
 //!
-//! The JSONL is the DISPLAY-ONLY transcript. The model-facing context lives
-//! in the companion `session-{id}.ctx` file: a bincode-encoded
-//! [`ContextManagerState`] (items, id counter, budget, overflow state and the
-//! split staging) restored verbatim into the harness on resume. The two files
-//! are written together but never parsed into each other.
+//! ## Mapping of the former `.ctx` companion file
+//!
+//! Everything the bincode companion used to carry lives in the JSONL now:
+//!
+//! | `.ctx` field     | JSONL location                                    |
+//! |------------------|---------------------------------------------------|
+//! | `items`          | `Item` records, one per line, timeline order      |
+//! | `next_id`        | header `context` object                           |
+//! | `max_tokens`     | header `context` object                           |
+//! | `overflow_model` | header `context` object                           |
+//! | `split`          | header `context` object                           |
+//! | `visible_from`   | header `context` object                           |
+//! | `hidden`         | header `context` object                           |
+//!
+//! ## Display-only data and display-only context items
+//!
+//! Some data exists only for display and is never restored into the agent
+//! context: reasoning ("+ Thought") blocks and tool statuses live in the
+//! message parts; synthetic text parts never reach the model. Two context
+//! items are display-only in the model-facing direction: `Error` (persisted
+//! as an `Item` record AND a `msg-err-` message, but skipped by
+//! `ContextManager::build_messages`) and `Compaction` (persisted as an
+//! `Item` record AND a `msg-ctx-` status message). The `ctx_ids` map on each
+//! message line is pure bookkeeping that lets display actions (revert, fork)
+//! locate the items backing a message; it is never parsed into a context.
+//!
+//! ## Legacy `.ctx` companions
+//!
+//! Sessions written by older builds carry a bincode `session-{id}.ctx`
+//! companion. [`SessionStore::load_context`] falls back to it when the JSONL
+//! header holds no context bookkeeping; the first context-aware save writes
+//! the unified JSONL and deletes the companion. Until then, display-only
+//! saves leave it untouched, and orphaned companions (JSONL gone) are swept
+//! on store creation.
 //!
 //! Sessions are grouped by CWD (current working directory). The CWD path is
 //! hashed with xxHash32 to produce a deterministic subdirectory name, so
@@ -26,7 +63,7 @@
 //! at least one user message AND at least one valid assistant response
 //! (error-only responses don't count as dialog).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,20 +72,77 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh32::xxh32;
 
-use cosh::harness::context::{ContextItem, ContextManagerState};
+use cosh::harness::context::{ContextItem, ContextManagerState, SplitState};
 
 use crate::types::{Message, MessageRole, Part, Session};
 
 /// Number of session files to keep on disk per CWD. Oldest files are evicted first.
 const MAX_SESSIONS_ON_DISK: usize = 50;
 
-/// A queued session snapshot for the background save-writer thread. When
-/// `context` is `None` the writer preserves the `.ctx` file already on disk (a
-/// display-only save — title rename, message edit, session switch — must never
-/// clobber the authoritative context).
+/// A queued session snapshot for the background save-writer thread. A
+/// display-only save (title rename, message edit, session switch) must
+/// never clobber the authoritative context, so when `context` is `None`
+/// the writer preserves the context records already on disk (item lines +
+/// header bookkeeping).
 struct SaveJob {
     session: Box<crate::types::Session>,
     context: Option<ContextManagerState>,
+}
+
+/// The context-manager bookkeeping persisted in the session header: every
+/// field of [`ContextManagerState`] except `items` (the items live as `Item`
+/// records, one per line, after the message records). Kept in the header so
+/// a reload reconstructs the exact snapshot the harness last persisted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextBookkeeping {
+    next_id: u64,
+    max_tokens: usize,
+    overflow_model: Option<String>,
+    split: Option<SplitState>,
+    visible_from: Option<u64>,
+    hidden: HashSet<u64>,
+}
+
+/// Deserialize the header's `context` object, downgrading a present-but-
+/// unreadable object to `None` (with a warning) instead of failing the
+/// whole header: a context format break must never take the display
+/// transcript down with it (the reader then falls back to the legacy
+/// companion, and a resume surfaces the "Context lost" toast).
+fn deserialize_context<'de, D>(deserializer: D) -> Result<Option<ContextBookkeeping>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<ContextBookkeeping>::deserialize(deserializer) {
+        Ok(context) => Ok(context),
+        Err(e) => {
+            log::warn!("unreadable context bookkeeping in session header: {e}");
+            Ok(None)
+        }
+    }
+}
+
+impl From<&ContextManagerState> for ContextBookkeeping {
+    fn from(state: &ContextManagerState) -> Self {
+        Self {
+            next_id: state.next_id,
+            max_tokens: state.max_tokens,
+            overflow_model: state.overflow_model.clone(),
+            split: state.split.clone(),
+            visible_from: state.visible_from,
+            hidden: state.hidden.clone(),
+        }
+    }
+}
+
+/// One tagged record on a session line (lines 2+ of the JSONL): a display
+/// message or one item of the model-facing context timeline. Externally
+/// tagged, so a message line is `{"Message":{…}}` and an item line is
+/// `{"Item":{"User":{…}}}` — legacy untagged message lines fail the
+/// [`Record`] parse and are retried as bare [`StoredMessage`]s.
+#[derive(Debug, Serialize, Deserialize)]
+enum Record {
+    Message(StoredMessage),
+    Item(ContextItem),
 }
 
 /// Metadata stored as the first JSONL line in each session file.
@@ -64,6 +158,11 @@ struct SessionHeader {
     /// Reasoning effort (`None` = model default) for the last model used.
     #[serde(default)]
     reasoning: Option<String>,
+    /// Context-manager bookkeeping (see [`ContextBookkeeping`]). `None` on
+    /// legacy files written before the JSONL unification — the reader then
+    /// falls back to the bincode `.ctx` companion.
+    #[serde(default, deserialize_with = "deserialize_context")]
+    context: Option<ContextBookkeeping>,
 }
 
 /// Manages reading and writing session files to disk, isolated by CWD.
@@ -115,17 +214,19 @@ impl SessionStore {
     /// subdirectory, immediately on the CALLER thread.
     ///
     /// This is the display-only save shape (title rename, message edit,
-    /// session switch, fork, revert): the `.ctx` companion file already on
-    /// disk is left untouched, so the authoritative model-facing context can
-    /// never be clobbered by a display edit. SYNCHRONOUS — test plumbing
+    /// session switch, fork, revert): the context records already on disk
+    /// (item lines + header bookkeeping) are spliced verbatim into the new
+    /// file, so the authoritative model-facing context can never be
+    /// clobbered by a display edit. SYNCHRONOUS — test plumbing
     /// only; production callers must use [`Self::save_session_async`] so the
     /// write is FIFO-ordered on the writer thread.
     pub fn save_session(&self, session: &Session) {
-        self.write_session(session);
+        self.persist(session, None);
     }
 
     /// Persist a session together with an explicit context-manager snapshot,
-    /// writing both files immediately on the CALLER thread (the harness paths
+    /// writing the unified JSONL (message records + item records + header
+    /// bookkeeping) immediately on the CALLER thread (the harness paths
     /// Done / Stopped / ContextSnapshot use the async variant instead). The
     /// session's `ctx_ids` map is refreshed from the snapshot before persisting
     /// — but only on the CLONE persisted here; the caller's session (and any
@@ -136,11 +237,12 @@ impl SessionStore {
     pub fn save_session_with_context(&self, session: &Session, context: &ContextManagerState) {
         let mut session = session.clone();
         Self::update_ctx_ids(&mut session, context);
-        self.persist(&mut session, Some(context));
+        self.persist(&session, Some(context));
     }
 
     /// Persist a session WITHOUT blocking the caller (the UI thread),
-    /// preserving the `.ctx` file already on disk. See [`Self::save_session`].
+    /// preserving the context records already on disk. See
+    /// [`Self::save_session`].
     pub fn save_session_async(&self, session: &crate::types::Session) {
         self.enqueue_save(SaveJob {
             session: Box::new(session.clone()),
@@ -158,8 +260,8 @@ impl SessionStore {
     /// later display-only save (title rename, revert, fork) needs to persist
     /// it unchanged. The context is taken BY VALUE and moved onto the writer
     /// thread — no deep clone of the context items happens on the caller (UI)
-    /// thread, only a cheap `VecDeque` pointer move. The bincode pass runs on
-    /// the writer thread too.
+    /// thread, only a cheap `VecDeque` pointer move. The serialization pass
+    /// runs on the writer thread too.
     pub fn save_session_async_with_context(
         &self,
         session: &mut crate::types::Session,
@@ -188,8 +290,8 @@ impl SessionStore {
             let spawned = std::thread::Builder::new()
                 .name("session-save".into())
                 .spawn(move || {
-                    while let Ok((store, mut job)) = rx.recv() {
-                        store.persist(&mut job.session, job.context.as_ref());
+                    while let Ok((store, job)) = rx.recv() {
+                        store.persist(&job.session, job.context.as_ref());
                     }
                 });
             if spawned.is_err() {
@@ -200,22 +302,83 @@ impl SessionStore {
         // If the thread failed to spawn there is no receiver; fall back to a
         // synchronous save rather than dropping the snapshot.
         if let Err(send_err) = tx.send((self.clone(), job)) {
-            let (_, mut job) = send_err.0;
-            self.persist(&mut job.session, job.context.as_ref());
+            let (_, job) = send_err.0;
+            self.persist(&job.session, job.context.as_ref());
         }
     }
 
-    /// Persist one snapshot atomically. The `.ctx` companion file is written
-    /// BEFORE the JSONL transcript: both writes are individually atomic
-    /// renames, but the pair is not a transaction, so a crash between the two
-    /// renames must leave the context AHEAD of the display (the model knows
-    /// more than the transcript shows) — never behind (a transcript that
-    /// references context the model never saw).
-    fn persist(&self, session: &mut Session, context: Option<&ContextManagerState>) {
-        if let Some(context) = context {
-            self.write_ctx(&session.id, context);
+    /// Persist one snapshot atomically. A context-aware save writes the
+    /// message records, the item records and the header bookkeeping from the
+    /// SAME snapshot, then retires a legacy `.ctx` companion. A display-only
+    /// save splices the context records (item lines + bookkeeping) from the
+    /// file currently on disk — read on the writer thread at execution time,
+    /// so any context save queued earlier lands first (FIFO) and the splice
+    /// source is always at least as new as the messages being written.
+    /// `update_ctx_ids` is the CALLER's duty (the async path refreshes the
+    /// in-memory session before enqueueing).
+    fn persist(&self, session: &Session, context: Option<&ContextManagerState>) {
+        match context {
+            Some(state) => {
+                let written = self.write_session(
+                    session,
+                    Some(&ContextBookkeeping::from(state)),
+                    state.items.iter(),
+                );
+                // Retire the legacy bincode companion ONLY after the unified
+                // write actually landed: the companion is the last copy of a
+                // legacy session's context, so a failed write must leave it
+                // in place (context is never left behind display).
+                if written {
+                    self.delete_ctx(&session.id);
+                }
+            }
+            None => {
+                let (bookkeeping, items) = self.read_disk_context(&session.id);
+                self.write_session(session, bookkeeping.as_ref(), items.iter());
+            }
         }
-        self.write_session(session);
+    }
+
+    /// Read the context section (header bookkeeping + item records) of the
+    /// session file currently on disk — the splice source for display-only
+    /// saves. Returns `(None, empty)` for a missing file or a legacy file
+    /// without embedded context (its `.ctx` companion stays authoritative
+    /// until the next context-aware save migrates it).
+    fn read_disk_context(
+        &self,
+        session_id: &str,
+    ) -> (Option<ContextBookkeeping>, Vec<ContextItem>) {
+        let Ok(content) = std::fs::read_to_string(self.file_path(session_id)) else {
+            return (None, Vec::new());
+        };
+        let mut lines = content.lines();
+        let Some(header_line) = lines.next() else {
+            return (None, Vec::new());
+        };
+        let Ok(header) = serde_json::from_str::<SessionHeader>(header_line.trim()) else {
+            return (None, Vec::new());
+        };
+        let Some(mut bookkeeping) = header.context else {
+            return (None, Vec::new());
+        };
+        let mut items = Vec::new();
+        let mut skipped = 0usize;
+        for line in lines {
+            match serde_json::from_str::<Record>(line.trim()) {
+                Ok(Record::Item(item)) => items.push(item),
+                // Message records (and empty lines) are not context.
+                Ok(Record::Message(_)) => continue,
+                Err(_) => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            log::warn!(
+                "skipped {skipped} unreadable record(s) while splicing the context of \
+                 session {session_id}"
+            );
+        }
+        bookkeeping.drop_dangling_boundary(items.iter());
+        (Some(bookkeeping), items)
     }
 
     /// Compute the message id → context item ids mapping for a session against
@@ -275,23 +438,27 @@ impl SessionStore {
 
     /// Rename a session on disk. The rename goes through the FIFO writer
     /// thread as a display-only save (rewrites the file atomically from the
-    /// on-disk content, title swapped). The WRITE is FIFO-ordered, but the
-    /// content is captured on the caller thread: a context save queued but
-    /// not yet executed can be superseded by the title job's older snapshot
-    /// (an accepted, microseconds-wide window — see the round-1 review of
-    /// this task). No-op when the session is not on disk (logged), or when
-    /// the file holds unparseable lines: a full rewrite would permanently
-    /// drop them, so the rename refuses instead.
+    /// on-disk content, title swapped — the context records are spliced
+    /// verbatim). The WRITE is FIFO-ordered, but the content is captured on
+    /// the caller thread: a context save queued but not yet executed can be
+    /// superseded by the title job's older snapshot (an accepted,
+    /// microseconds-wide window — see the round-1 review of this task).
+    /// No-op when the session is not on disk (logged), or when the file
+    /// holds unparseable lines: a full rewrite would permanently drop them,
+    /// so the rename refuses instead.
     pub fn update_title(&self, session_id: &str, new_title: &str) {
         if let Ok(contents) = std::fs::read_to_string(self.file_path(session_id)) {
-            let lines = contents.lines().filter(|l| !l.trim().is_empty()).count();
-            if let Some(loaded) = self.load_session(session_id)
-                && lines != loaded.messages.len() + 1
-            {
+            // Skip the header (line 1 — not a record) and empty lines; any
+            // other unparseable line makes the rewrite refuse.
+            let corrupt = contents
+                .lines()
+                .enumerate()
+                .filter(|(i, l)| *i != 0 && !l.trim().is_empty())
+                .any(|(_, l)| classify_line(l) == LineKind::Corrupt);
+            if corrupt {
                 log::warn!(
-                    "refusing to rename session {session_id}: {lines} on-disk lines \
-                     but {} messages parsed (corrupt line — a rewrite would drop it)",
-                    loaded.messages.len()
+                    "refusing to rename session {session_id}: corrupt line on disk \
+                     (a rewrite would drop it)"
                 );
                 return;
             }
@@ -375,7 +542,8 @@ impl SessionStore {
         summaries
     }
 
-    /// Load a full session from its JSONL file.
+    /// Load a full session from its JSONL file (the display transcript —
+    /// message records only; item records are skipped).
     ///
     /// Returns `None` if the file does not exist or cannot be parsed.
     pub fn load_session(&self, session_id: &str) -> Option<Session> {
@@ -391,7 +559,8 @@ impl SessionStore {
         let header: SessionHeader = serde_json::from_str(lines[0]).ok()?;
         lines.remove(0);
 
-        // Remaining lines: messages
+        // Remaining lines: tagged records (legacy untagged lines load as
+        // messages)
         let mut messages: Vec<Message> = Vec::new();
         let mut ctx_ids_by_message: HashMap<String, Vec<u64>> = HashMap::new();
         for (idx, line) in lines.iter().enumerate() {
@@ -399,23 +568,30 @@ impl SessionStore {
             if line.is_empty() {
                 continue;
             }
-            match serde_json::from_str::<StoredMessage>(line) {
-                Ok(stored) => {
-                    if !stored.ctx_ids.is_empty() {
-                        ctx_ids_by_message.insert(stored.id.clone(), stored.ctx_ids.clone());
+            let stored = match serde_json::from_str::<Record>(line) {
+                Ok(Record::Message(stored)) => stored,
+                // A context item record — not part of the display transcript.
+                Ok(Record::Item(_)) => continue,
+                Err(record_err) => match serde_json::from_str::<StoredMessage>(line) {
+                    Ok(stored) => stored,
+                    Err(e) => {
+                        // A corrupted line loses exactly one message — log it
+                        // (session id, 1-based line number, parse error)
+                        // rather than silently dropping a chunk of the
+                        // transcript.
+                        log::warn!(
+                            "skipping unparseable line {} in session {session_id}: {e} \
+                             (record parse: {record_err})",
+                            idx + 2
+                        );
+                        continue;
                     }
-                    messages.push(stored.into_message());
-                }
-                Err(e) => {
-                    // A corrupted line loses exactly one message — log it
-                    // (session id, 1-based line number, parse error) rather
-                    // than silently dropping a chunk of the transcript.
-                    log::warn!(
-                        "skipping unparseable line {} in session {session_id}: {e}",
-                        idx + 2
-                    );
-                }
+                },
+            };
+            if !stored.ctx_ids.is_empty() {
+                ctx_ids_by_message.insert(stored.id.clone(), stored.ctx_ids.clone());
             }
+            messages.push(stored.into_message());
         }
 
         Some(Session {
@@ -431,23 +607,78 @@ impl SessionStore {
         })
     }
 
-    /// Load the context-manager state for a session from its bincode-encoded
-    /// `.ctx` companion file — the authoritative model-facing context,
-    /// restored verbatim into the harness on resume.
+    /// Load the context-manager state for a session from its JSONL file —
+    /// the authoritative model-facing context, restored verbatim into the
+    /// harness on resume. The item records are concatenated in timeline
+    /// order and combined with the header bookkeeping into the exact
+    /// snapshot the harness last persisted.
     ///
-    /// Returns `None` if no companion file exists or it cannot be decoded.
+    /// A legacy file (header without embedded context) falls back to the
+    /// bincode `.ctx` companion of pre-unification builds. Returns `None`
+    /// if neither source exists or decodes.
     pub fn load_context(&self, session_id: &str) -> Option<ContextManagerState> {
+        if let Some(state) = self.load_unified_context(session_id) {
+            return Some(state);
+        }
+        self.load_legacy_ctx(session_id)
+    }
+
+    /// Reconstruct the context state from the unified JSONL: header
+    /// bookkeeping + `Item` records in timeline order. `None` when the file
+    /// is missing, its header is unparseable, or it predates the
+    /// unification (no embedded context — the legacy companion is the
+    /// source then).
+    fn load_unified_context(&self, session_id: &str) -> Option<ContextManagerState> {
+        let content = std::fs::read_to_string(self.file_path(session_id)).ok()?;
+        let mut lines = content.lines();
+        let header: SessionHeader = serde_json::from_str(lines.next()?.trim()).ok()?;
+        let mut bookkeeping = header.context?;
+        let mut items: VecDeque<ContextItem> = VecDeque::new();
+        let mut skipped = 0usize;
+        for line in lines {
+            match serde_json::from_str::<Record>(line.trim()) {
+                Ok(Record::Item(item)) => items.push_back(item),
+                // Message records are the display transcript, not context.
+                Ok(Record::Message(_)) => continue,
+                Err(_) => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            // The bookkeeping still describes the FULL timeline, but the
+            // skipped records' items are gone — say so (the header and the
+            // item records can disagree after a corrupt write).
+            log::warn!(
+                "skipped {skipped} unreadable record(s) while loading the context of \
+                 session {session_id}"
+            );
+        }
+        bookkeeping.drop_dangling_boundary(items.iter());
+        Some(ContextManagerState {
+            items,
+            next_id: bookkeeping.next_id,
+            max_tokens: bookkeeping.max_tokens,
+            overflow_model: bookkeeping.overflow_model,
+            split: bookkeeping.split,
+            visible_from: bookkeeping.visible_from,
+            hidden: bookkeeping.hidden,
+        })
+    }
+
+    /// Legacy fallback: decode a bincode `.ctx` companion written by
+    /// pre-unification builds. Returns `None` if no companion file exists
+    /// or it cannot be decoded.
+    fn load_legacy_ctx(&self, session_id: &str) -> Option<ContextManagerState> {
         let bytes = self.load_ctx(session_id)?;
-        match ContextManagerState::from_bincode(&bytes) {
-            Some(state) => Some(state),
-            None => {
-                log::warn!("failed to decode context state for session {session_id}");
+        match bincode::deserialize::<ContextManagerState>(&bytes) {
+            Ok(state) => Some(state),
+            Err(e) => {
+                log::warn!("failed to decode context state for session {session_id}: {e}");
                 None
             }
         }
     }
 
-    /// Load the `.ctx` snapshot for a session with the item timeline TRUNCATED
+    /// Load the context snapshot for a session with the item timeline TRUNCATED
     /// by `keep` (an item id survives when `keep(item_id)` is true) — a real
     /// deletion, backing the destructive display actions (revert, fork). The
     /// visibility markers are adjusted to the surviving timeline: a deleted
@@ -455,8 +686,8 @@ impl SessionStore {
     /// pre-compaction history becomes model-visible again) and `hidden` ids of
     /// deleted items are pruned. Bookkeeping (`next_id`, `max_tokens`,
     /// `overflow_model`, `split`) is kept as-is: ids only grow, and a gap in
-    /// the timeline is harmless. Returns `None` when there is no companion
-    /// file to filter (the caller falls back to a display-only save).
+    /// the timeline is harmless. Returns `None` when there is no context
+    /// source to filter (the caller falls back to a display-only save).
     pub fn load_ctx_filtered(
         &self,
         session_id: &str,
@@ -491,36 +722,33 @@ impl SessionStore {
         self.file_path(session_id).exists()
     }
 
-    /// On-disk paths (JSONL, `.ctx`) of a session — for the /tmp undo
-    /// snapshots taken before destructive display actions (revert).
+    /// On-disk paths (JSONL + legacy `.ctx` companion) of a session — for
+    /// the /tmp undo snapshots taken before destructive display actions
+    /// (revert). The companion path may not exist; the snapshot captures its
+    /// absence so a rollback of a pre-unification session stays consistent.
     pub fn session_paths(&self, session_id: &str) -> (PathBuf, PathBuf) {
         (self.file_path(session_id), self.ctx_file_path(session_id))
     }
 
-    // ── Companion .ctx file (bincode-encoded ContextManagerState) ──────────
+    // ── Legacy .ctx companions (bincode, pre-unification builds) ───────────
 
-    /// Build path for the companion `.ctx` file.
+    /// Build path for the legacy bincode `.ctx` companion file.
     fn ctx_file_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir.join(format!("session-{session_id}.ctx"))
     }
 
-    /// Save bincode-encoded context manager state alongside the JSONL session.
-    pub fn save_ctx(&self, session_id: &str, state: &[u8]) {
-        let path = self.ctx_file_path(session_id);
-        if let Err(e) = atomic_write(&path, state) {
-            log::warn!("failed to save context state for session {session_id}: {e}");
-        }
-    }
-
-    /// Load bincode-encoded context manager state for a session.
+    /// Load the raw bytes of a legacy `.ctx` companion file.
     /// Returns `None` if no companion file exists or it cannot be read.
-    pub fn load_ctx(&self, session_id: &str) -> Option<Vec<u8>> {
+    fn load_ctx(&self, session_id: &str) -> Option<Vec<u8>> {
         let path = self.ctx_file_path(session_id);
         std::fs::read(&path).ok()
     }
 
-    /// Delete the companion `.ctx` file for a session.
-    pub fn delete_ctx(&self, session_id: &str) {
+    /// Delete the legacy `.ctx` companion file for a session (a no-op when
+    /// none exists). Called when the unified JSONL becomes authoritative
+    /// (context-aware save, session deletion) so a stale companion can
+    /// never resurrect old context state.
+    fn delete_ctx(&self, session_id: &str) {
         std::fs::remove_file(self.ctx_file_path(session_id)).ok();
     }
 
@@ -532,13 +760,25 @@ impl SessionStore {
             .join(format!("session-{session_id}.jsonl"))
     }
 
-    /// Write the header and message lines for a session.
+    /// Write the header line, the message records and the item records for a
+    /// session. `bookkeeping`/`items` come from the context snapshot on a
+    /// context-aware save, or are spliced from the previous on-disk file on a
+    /// display-only save (`None`/empty for a fresh or legacy session — a
+    /// legacy file keeps its `.ctx` companion as the context source).
     ///
     /// The write is atomic (see [`atomic_write`]): a reader only ever sees the
-    /// complete old or new file.
-    fn write_session(&self, session: &Session) {
+    /// complete old or new file, so the display transcript and the context
+    /// records can never tear apart. Returns whether the write landed (a
+    /// failure is logged and leaves the previous file — and any legacy
+    /// companion — untouched).
+    fn write_session<'a>(
+        &self,
+        session: &Session,
+        bookkeeping: Option<&ContextBookkeeping>,
+        items: impl Iterator<Item = &'a ContextItem>,
+    ) -> bool {
         let file_path = self.file_path(&session.id);
-        let header = self.build_header(session);
+        let header = self.build_header(session, bookkeeping.cloned());
 
         let mut lines = Vec::new();
 
@@ -548,13 +788,13 @@ impl SessionStore {
             Err(e) => log::warn!("failed to serialize header for session {}: {e}", session.id),
         }
 
-        // Lines 2+: messages.
+        // Message records: one per display message.
         for (i, msg) in session.messages.iter().enumerate() {
             let mut stored = StoredMessage::from(msg);
             if let Some(ids) = session.ctx_ids.get(&msg.id) {
                 stored.ctx_ids = ids.clone();
             }
-            match serde_json::to_string(&stored) {
+            match serde_json::to_string(&Record::Message(stored)) {
                 Ok(json) => lines.push(json),
                 Err(e) => {
                     log::warn!(
@@ -565,33 +805,42 @@ impl SessionStore {
             }
         }
 
+        // Item records: the model-facing context timeline, one per line.
+        for item in items {
+            match serde_json::to_string(&Record::Item(item.clone())) {
+                Ok(json) => lines.push(json),
+                Err(e) => {
+                    log::warn!(
+                        "failed to serialize context item {} for session {}: {e}",
+                        item.id(),
+                        session.id
+                    )
+                }
+            }
+        }
+
         if let Err(e) = atomic_write(&file_path, lines.join("\n").as_bytes()) {
             log::warn!("failed to save session {}: {e}", session.id);
-            return;
+            return false;
         }
 
         self.evict_old_sessions();
-    }
-
-    /// Bincode-encode the context snapshot and write it to the `.ctx`
-    /// companion file.
-    fn write_ctx(&self, session_id: &str, context: &ContextManagerState) {
-        let bytes = context.to_bincode();
-        if bytes.is_empty() {
-            log::warn!("failed to serialize context state for session {session_id}");
-            return;
-        }
-        self.save_ctx(session_id, &bytes);
+        true
     }
 
     /// Build a `SessionHeader` from a `Session`, populating `cwd` with the
-    /// canonicalized current working directory.
+    /// canonicalized current working directory and carrying the context
+    /// bookkeeping into the header's `context` field.
     ///
     /// The session's own recorded model selection (provider + model +
     /// reasoning) wins. Sessions without one — e.g. saved before this
     /// feature — fall back to deriving provider/model from the last valid
     /// assistant message, which preserves the old behavior.
-    fn build_header(&self, session: &Session) -> SessionHeader {
+    fn build_header(
+        &self,
+        session: &Session,
+        context: Option<ContextBookkeeping>,
+    ) -> SessionHeader {
         let (provider, model) = match (&session.provider, &session.model.as_deref()) {
             // A recorded selection (provider + model written together) wins.
             (Some(_), Some(_)) => (session.provider.clone(), session.model.clone()),
@@ -630,6 +879,7 @@ impl SessionStore {
             provider,
             model,
             reasoning: session.reasoning.clone(),
+            context,
         }
     }
 
@@ -647,10 +897,10 @@ impl SessionStore {
 
         let header: SessionHeader = serde_json::from_str(first_line).ok()?;
 
-        // Count remaining non-empty lines (messages)
+        // Count the message records (item records are context, not dialog).
         let mut message_count: usize = 0;
         for line in reader.lines().map_while(Result::ok) {
-            if !line.trim().is_empty() {
+            if !line.trim().is_empty() && classify_line(&line) != LineKind::Item {
                 message_count += 1;
             }
         }
@@ -734,6 +984,73 @@ impl SessionStore {
 impl Default for SessionStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ── Line classification ───────────────────────────────────────────────────
+
+/// Drop a compaction boundary whose anchor item is missing from the loaded
+/// timeline (the anchor record was skipped, corrupt, or lost): without the
+/// anchor the model would see NOTHING below the boundary — the summary and
+/// the history both gone. Surfacing the surviving raw history is the better
+/// fallback, and it mirrors `load_ctx_filtered`'s un-compaction rule (a
+/// deleted anchor clears `visible_from`).
+impl ContextBookkeeping {
+    /// Drop a compaction boundary whose anchor item is missing from the
+    /// loaded timeline (the anchor record was skipped, corrupt, or lost):
+    /// without the anchor the model would see NOTHING below the boundary —
+    /// the summary and the history both gone. Surfacing the surviving raw
+    /// history is the better fallback, and it mirrors `load_ctx_filtered`'s
+    /// un-compaction rule (a deleted anchor clears `visible_from`).
+    fn drop_dangling_boundary<'a>(&mut self, items: impl Iterator<Item = &'a ContextItem>) {
+        let Some(boundary) = self.visible_from else {
+            return;
+        };
+        if !items.into_iter().any(|it| it.id() == boundary) {
+            log::warn!(
+                "compaction anchor {boundary} is missing from the session records — \
+                 clearing the compaction boundary (un-compaction)"
+            );
+            self.visible_from = None;
+        }
+    }
+}
+
+/// The kind of a session-file body line: a display message record, a context
+/// item record, or an unparseable/corrupt line. Used by the cheap counting
+/// passes ([`SessionStore::read_summary`], [`SessionStore::update_title`]).
+/// The classification is a FULL typed parse — a line that carries the right
+/// tag but an unreadable payload (e.g. a `Part` variant written by a newer
+/// build) must count as [`LineKind::Corrupt`], or a rewrite would silently
+/// drop it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineKind {
+    /// A `{"Message": …}` record or a legacy untagged message line.
+    Message,
+    /// A `{"Item": …}` context record — not part of the display transcript.
+    Item,
+    /// Neither — a corrupt line a rewrite must never drop.
+    Corrupt,
+}
+
+/// Classify one body line of a session file (see [`LineKind`]). Empty lines
+/// are `Corrupt` by this classifier; callers skip them beforehand.
+fn classify_line(line: &str) -> LineKind {
+    let line = line.trim();
+    if line.is_empty() {
+        return LineKind::Corrupt;
+    }
+    match serde_json::from_str::<Record>(line) {
+        Ok(Record::Message(_)) => LineKind::Message,
+        Ok(Record::Item(_)) => LineKind::Item,
+        Err(_) => {
+            // Legacy pre-unification message line: a bare StoredMessage.
+            if serde_json::from_str::<StoredMessage>(line).is_ok() {
+                LineKind::Message
+            } else {
+                LineKind::Corrupt
+            }
+        }
     }
 }
 
@@ -1222,29 +1539,239 @@ mod tests {
         assert_eq!(list[1].session_id, "1000");
     }
 
+    /// A legacy session (pre-unification JSONL without embedded context +
+    /// bincode `.ctx` companion) still resumes with its model-facing context:
+    /// `load_context` falls back to the companion when the header carries no
+    /// bookkeeping.
     #[test]
-    fn test_ctx_roundtrip_and_delete() {
+    fn legacy_ctx_companion_still_loads_as_the_context_source() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
-        // No companion file yet → load returns None.
-        assert!(store.load_ctx("12345").is_none());
+        // A legacy on-disk pair: display-only JSONL (no header context) + a
+        // bincode companion written by an older build.
+        let session = make_test_session(
+            "12345",
+            "Legacy Session",
+            vec![
+                make_user_msg("msg-0", "Hello"),
+                make_assistant_msg("msg-1", "Hi"),
+            ],
+        );
+        store.save_session(&session);
+        let context = make_context(vec![user_item(1, "Hello"), assistant_item(2, "Hi")]);
+        std::fs::write(
+            store.ctx_file_path("12345"),
+            bincode::serialize(&context).unwrap(),
+        )
+        .unwrap();
 
-        // Save → load returns the exact bytes written.
-        let payload: &[u8] = b"bincode-encoded-context-state";
-        store.save_ctx("12345", payload);
-        assert_eq!(store.load_ctx("12345").as_deref(), Some(payload));
+        // The companion is the context source for the legacy file.
+        let loaded = store.load_context("12345").expect("legacy fallback");
+        assert_eq!(loaded.items.len(), 2);
+        assert_eq!(loaded.next_id, 42);
 
-        // Delete removes the companion file.
-        store.delete_ctx("12345");
+        // Deleting the session removes the companion too — a stale `.ctx`
+        // must never resurrect deleted context state on a future resume.
+        store.delete_session("12345");
+        assert!(!store.has_session("12345"));
         assert!(store.load_ctx("12345").is_none());
+        assert!(store.load_context("12345").is_none());
+    }
+
+    /// Once the JSONL carries embedded context, a stale legacy companion is
+    /// ignored: the unified file is the single source of truth.
+    #[test]
+    fn legacy_companion_is_ignored_once_the_jsonl_carries_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let session = make_test_session(
+            "12346",
+            "Migrated Session",
+            vec![
+                make_user_msg("msg-0", "Hello"),
+                make_assistant_msg("msg-1", "Hi"),
+            ],
+        );
+        // A stale companion holding DIFFERENT items than the live context.
+        let stale = make_context(vec![user_item(1, "stale prompt")]);
+        std::fs::write(
+            store.ctx_file_path("12346"),
+            bincode::serialize(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let context = make_context(vec![user_item(1, "Hello"), assistant_item(2, "Hi")]);
+        store.save_session_with_context(&session, &context);
+
+        // The unified save retired the companion, and the context comes from
+        // the JSONL records — never from the stale bincode payload.
+        assert!(
+            store.load_ctx("12346").is_none(),
+            "the companion was retired by the unified save"
+        );
+        let loaded = store.load_context("12346").unwrap();
+        assert_eq!(loaded.items.len(), 2);
+        let ContextItem::User { original, .. } = &loaded.items[0] else {
+            panic!("expected the live user item");
+        };
+        assert_eq!(original, "Hello");
+    }
+
+    /// A context-aware save whose unified write FAILS must keep the legacy
+    /// `.ctx` companion: for a legacy session the companion is the only copy
+    /// of the model-facing context, and the context is never left behind the
+    /// display. Once a write succeeds, the companion is retired.
+    #[test]
+    fn a_failed_context_save_keeps_the_legacy_companion() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let session = make_test_session(
+            "12347",
+            "Legacy Migration",
+            vec![make_user_msg("msg-0", "Hello")],
+        );
+        store.save_session(&session);
+        let context = make_context(vec![user_item(1, "Hello")]);
+        std::fs::write(
+            store.ctx_file_path("12347"),
+            bincode::serialize(&context).unwrap(),
+        )
+        .unwrap();
+
+        // Sabotage the JSONL path: a directory where the file must be written
+        // makes the atomic rename fail (the tmp sibling is written fine, the
+        // rename over a directory errors).
+        let path = store.file_path("12347");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        store.save_session_with_context(&session, &context);
+
+        assert!(
+            store.load_ctx("12347").is_some(),
+            "the companion survives a failed unified write"
+        );
+
+        // Heal the sabotage: the next context save lands, and only then is
+        // the companion retired.
+        std::fs::remove_dir(&path).unwrap();
+        store.save_session_with_context(&session, &context);
+        assert!(store.load_ctx("12347").is_none(), "retired after success");
+        assert_eq!(store.load_context("12347").unwrap().items.len(), 1);
+    }
+
+    /// A header whose `context` object is unreadable (e.g. a bookkeeping
+    /// format break) must not take the display transcript down with it:
+    /// the session still loads, and the context source degrades to the
+    /// legacy companion (here: absent → the resume warns truthfully).
+    #[test]
+    fn an_unreadable_header_context_degrades_to_display_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let session = make_test_session(
+            "12348",
+            "Broken Bookkeeping",
+            vec![make_user_msg("msg-0", "hi")],
+        );
+        store.save_session(&session);
+        let file = store.file_path("12348");
+        let original = std::fs::read_to_string(&file).unwrap();
+        // Corrupt ONLY the context object: a string where a number belongs.
+        let broken = original.replacen(
+            "\"context\":null",
+            "\"context\":{\"next_id\":\"not-a-number\"}",
+            1,
+        );
+        assert_ne!(broken, original, "the header carried a context object");
+        std::fs::write(&file, broken).unwrap();
+
+        let loaded = store
+            .load_session("12348")
+            .expect("the display transcript survives the bookkeeping break");
+        assert_eq!(loaded.messages.len(), 1);
+        assert!(store.load_context("12348").is_none());
+    }
+
+    /// A corrupt item record loses exactly that item — and a compaction
+    /// boundary whose anchor was among the lost records is CLEARED, so the
+    /// surviving raw history reaches the model instead of an amnesiac empty
+    /// view (mirrors `load_ctx_filtered`'s un-compaction rule).
+    #[test]
+    fn a_lost_compaction_anchor_clears_the_boundary_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let session = make_test_session("12349", "Lost Anchor", vec![]);
+        let mut context = make_context(vec![
+            user_item(1, "pre-compaction"),
+            assistant_item(2, "the anchor"),
+        ]);
+        context.visible_from = Some(2); // hides id 1
+        store.save_session_with_context(&session, &context);
+
+        // Corrupt the anchor's item record on disk.
+        let file = store.file_path("12349");
+        let contents = std::fs::read_to_string(&file).unwrap();
+        let patched: String = contents
+            .lines()
+            .map(|l| {
+                if l.contains("\"the anchor\"") {
+                    "{\"Item\":{\"Assistant\":{\"id\":2,\"original\":".to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&file, patched).unwrap();
+
+        let loaded = store.load_context("12349").unwrap();
+        assert_eq!(loaded.items.len(), 1, "the corrupt anchor is dropped");
+        assert_eq!(
+            loaded.visible_from, None,
+            "the boundary cleared with its anchor"
+        );
+        // The surviving history reaches the model again.
+        let mut cm = cosh::harness::context::ContextManager::new(100_000);
+        cm.restore_state(&loaded);
+        assert_eq!(cm.build_messages("").len(), 1);
+    }
+
+    /// A line with the right record tag but an unreadable payload (e.g.
+    /// written by a newer build) counts as corrupt: `update_title` refuses
+    /// the rewrite instead of silently dropping the message.
+    #[test]
+    fn update_title_refuses_a_tagged_line_with_an_unreadable_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("7301", "Bad Payload", vec![make_user_msg("msg-0", "hi")]);
+        store.save_session(&session);
+        let file = store.file_path("7301");
+        let original = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, format!("{original}{{\"Message\":123}}\n")).unwrap();
+
+        store.update_title("7301", "Renamed");
+
+        let contents = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            contents.contains("{\"Message\":123}"),
+            "the unreadable record must stay on disk"
+        );
+        assert!(
+            contents.contains("\"Bad Payload\""),
+            "the title must stay untouched (the rename refused)"
+        );
+        assert_eq!(classify_line("{\"Message\":123}"), LineKind::Corrupt);
     }
 
     /// The full context snapshot — items, bookkeeping AND the split staging —
-    /// round-trips verbatim through the bincode `.ctx` companion file, so an
-    /// interrupted split resumes exactly where it stopped.
+    /// round-trips verbatim through the session JSONL (item records + header
+    /// bookkeeping), so an interrupted split resumes exactly where it stopped.
     #[test]
-    fn test_context_roundtrips_through_the_ctx_file() {
+    fn context_state_roundtrips_through_the_session_jsonl() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
@@ -1259,6 +1786,9 @@ mod tests {
             window: 100_000,
             buffer_tokens: 1234,
         });
+        // Visibility markers ride in the header bookkeeping.
+        context.visible_from = Some(2);
+        context.hidden.insert(1);
 
         store.save_session_with_context(&session, &context);
 
@@ -1267,16 +1797,29 @@ mod tests {
         assert_eq!(loaded.next_id, 42);
         assert_eq!(loaded.max_tokens, 100_000);
         assert_eq!(loaded.overflow_model.as_deref(), Some("gpt-4o-mini"));
-        let split = loaded.split.expect("split staging was persisted");
+        let split = loaded.split.clone().expect("split staging was persisted");
         assert_eq!(split.buffer, "## Objective\n- summarized so far");
         assert_eq!(split.cursor, Some(2));
         assert_eq!(split.continuity, "tail of the last chunk");
         assert_eq!(split.window, 100_000);
         assert_eq!(split.buffer_tokens, 1234);
+        assert_eq!(loaded.visible_from, Some(2));
+        assert!(loaded.hidden.contains(&1));
+
+        // The visibility markers are live: the restored manager hides the
+        // pre-compaction item from the model.
+        let mut cm = cosh::harness::context::ContextManager::new(100_000);
+        cm.restore_state(&loaded);
+        let msgs = cm.build_messages("");
+        assert_eq!(msgs.len(), 1, "item 1 is behind the boundary");
     }
 
+    /// A display-only save SPLICES the context records from the on-disk file:
+    /// the item records and the header bookkeeping survive verbatim, while
+    /// the display messages (even new ones) are rewritten — the display edit
+    /// can never clobber the model-facing context.
     #[test]
-    fn test_save_session_preserves_existing_context() {
+    fn display_only_save_splices_the_on_disk_context_records() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
 
@@ -1288,18 +1831,32 @@ mod tests {
                 make_assistant_msg("msg-1", "Hi"),
             ],
         );
-        let context = make_context(vec![user_item(1, "Hello"), assistant_item(2, "Hi")]);
+        let mut context = make_context(vec![user_item(1, "Hello"), assistant_item(2, "Hi")]);
+        context.visible_from = Some(2);
+        context.hidden.insert(1);
         store.save_session_with_context(&session, &context);
 
-        // A display-only save (e.g. title rename) must not clobber the .ctx.
+        // A display-only save: renamed title AND an extra display message
+        // (e.g. a synthetic line the TUI added without the harness).
         let mut renamed = session.clone();
         renamed.title = "Renamed".to_string();
+        renamed.messages.push(make_user_msg("msg-2", "extra line"));
         store.save_session(&renamed);
 
-        let context = store.load_context("1000").unwrap();
-        assert_eq!(context.items.len(), 2);
+        // The context records survived the rewrite untouched.
+        let loaded = store.load_context("1000").unwrap();
+        assert_eq!(loaded.items.len(), 2);
+        assert_eq!(loaded.visible_from, Some(2));
+        assert!(loaded.hidden.contains(&1));
+        assert_eq!(loaded.next_id, 42);
+
+        // The display changes landed, and the summary counts messages (not
+        // item records).
         let session = store.load_session("1000").unwrap();
         assert_eq!(session.title, "Renamed");
+        assert_eq!(session.messages.len(), 3);
+        let summary = store.list_sessions().into_iter().next().unwrap();
+        assert_eq!(summary.message_count, 3);
     }
 
     #[test]
@@ -1317,7 +1874,8 @@ mod tests {
         );
 
         store.save_session(&session);
-        store.save_ctx("12345", b"context-state");
+        // A leftover legacy companion from the pre-unification era.
+        std::fs::write(store.ctx_file_path("12345"), b"context-state").ok();
         assert!(store.has_session("12345"));
         assert!(store.load_ctx("12345").is_some());
 
@@ -1343,7 +1901,8 @@ mod tests {
                 ],
             );
             store.save_session(&session);
-            store.save_ctx(&format!("{i:05}"), b"context-state");
+            // A leftover legacy companion per session.
+            std::fs::write(store.ctx_file_path(&format!("{i:05}")), b"context-state").ok();
         }
 
         let list = store.list_sessions();
@@ -1582,9 +2141,9 @@ mod tests {
 
     /// The full error-display contract across a save/restore: the API error
     /// lives in the JSONL as a `msg-err-` message (the styled red error box)
-    /// and in the `.ctx` as a display-only `Error` item that
-    /// `build_messages` skips — so the model never inherits a provider
-    /// failure after a restart.
+    /// and as a display-only `Error` item record that `build_messages`
+    /// skips — so the model never inherits a provider failure after a
+    /// restart.
     #[test]
     fn api_errors_keep_their_display_semantics_across_a_restart() {
         let dir = tempfile::tempdir().unwrap();
@@ -1812,7 +2371,7 @@ mod tests {
         let removed: std::collections::HashSet<u64> = [2u64, 3, 4].into_iter().collect();
         let reverted = store
             .load_ctx_filtered("7100", |id| !removed.contains(&id))
-            .expect("the .ctx exists");
+            .expect("the context records exist");
         assert_eq!(reverted.items.len(), 1, "only the user item survives");
         let ContextItem::User { id, .. } = &reverted.items[0] else {
             panic!("expected the user item");
@@ -1825,10 +2384,10 @@ mod tests {
         let kept: std::collections::HashSet<u64> = [1u64, 2].into_iter().collect();
         let forked = store
             .load_ctx_filtered("7100", |id| kept.contains(&id))
-            .expect("the .ctx exists");
+            .expect("the context records exist");
         assert_eq!(forked.items.len(), 2);
 
-        // No companion file at all → the caller must fall back to a
+        // No context source at all → the caller must fall back to a
         // display-only save.
         assert!(
             store
@@ -1838,10 +2397,11 @@ mod tests {
     }
 
     /// End-to-end through the FIFO queue: revert derives the filtered
-    /// snapshot from the on-disk `.ctx`, persists BOTH files async, and a
-    /// reload shows the truncated timeline with the JSONL mapping intact.
+    /// snapshot from the on-disk context records, persists the unified file
+    /// async, and a reload shows the truncated timeline with the mapping
+    /// intact.
     #[test]
-    fn revert_round_trips_both_files_through_the_queue() {
+    fn revert_round_trips_the_unified_file_through_the_queue() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
         let session = make_test_session(
@@ -1870,12 +2430,13 @@ mod tests {
         let removed: std::collections::HashSet<u64> = [3u64].into_iter().collect();
         let new_ctx = store
             .load_ctx_filtered("7200", |id| !removed.contains(&id))
-            .expect("the .ctx exists");
+            .expect("the context records exist");
         store.save_session_async_with_context(&mut reverted, new_ctx);
 
         // The save runs on the FIFO writer thread — poll for the landing.
-        // The JSONL is the job's completion barrier (the `.ctx` necessarily
-        // landed before it within the same job), so poll on the transcript.
+        // The message records are written in the same atomic file as the
+        // context records, so polling on the transcript is the completion
+        // barrier.
         for _ in 0..200 {
             if let Some(loaded) = store.load_session("7200")
                 && loaded.messages.len() == 2
@@ -1884,7 +2445,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let loaded_ctx = store.load_context("7200").expect("the .ctx reloads");
+        let loaded_ctx = store.load_context("7200").expect("the context reloads");
         assert_eq!(
             loaded_ctx.items.len(),
             2,
@@ -1931,9 +2492,9 @@ mod tests {
         let store = test_store(&dir);
         let session = make_test_session("8000", "Kept", vec![make_user_msg("msg-0", "hi")]);
         store.save_session(&session);
-        store.save_ctx("8000", b"kept-context");
+        std::fs::write(store.ctx_file_path("8000"), b"kept-context").ok();
         // An orphan: no session-8001.jsonl anywhere.
-        store.save_ctx("8001", b"orphan-context");
+        std::fs::write(store.ctx_file_path("8001"), b"orphan-context").ok();
 
         // A fresh store over the same directory sweeps the orphan.
         let fresh = SessionStore::with_dir(dir.path().join("testhash"), "testhash".into());
@@ -1986,7 +2547,7 @@ mod tests {
         // dropped with it.
         let reverted = store
             .load_ctx_filtered("7400", |id| id == 3)
-            .expect("the .ctx exists");
+            .expect("the context records exist");
         assert_eq!(reverted.items.len(), 1);
         assert_eq!(reverted.items[0].id(), 3);
         assert_eq!(reverted.visible_from, None, "the anchor is gone");
@@ -2005,7 +2566,7 @@ mod tests {
         // still holds).
         let partial = store
             .load_ctx_filtered("7400", |id| id <= 3)
-            .expect("the .ctx exists");
+            .expect("the context records exist");
         assert_eq!(partial.visible_from, Some(2), "the anchor survived");
     }
 

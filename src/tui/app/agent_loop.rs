@@ -277,11 +277,12 @@ impl App {
 
         let event_tx_panic = event_tx.clone();
 
-        // Load companion context state (.ctx file) for session resumption.
-        // This is the ONLY model-facing history source: the JSONL transcript is
-        // display-only and is NEVER parsed into the context. No `.ctx` (a fresh
-        // session, or a companion file that is missing/corrupt) means the loop
-        // starts with an empty context — the user is told via toast below.
+        // Load the session's persisted context state (the `Item` records of
+        // the session JSONL) for session resumption. This is the ONLY
+        // model-facing history source: the display transcript is never parsed
+        // into the context. No context records (a fresh session, or a file
+        // that is missing/corrupt) means the loop starts with an empty
+        // context — the user is told via toast below.
         let ctx_state: Option<cosh::harness::ContextManagerState> = self
             .state
             .current_session_id
@@ -434,9 +435,9 @@ impl App {
                         .with_fallbacks(remaining)
                         .with_local_base_urls(local_base_urls);
 
-                    // Restore the authoritative context from the .ctx companion
-                    // file. No `.ctx` — no history; the JSONL transcript is
-                    // display-only and never feeds the model.
+                    // Restore the authoritative context from the session
+                    // file's context records. No context — no history; the
+                    // display transcript is never fed to the model.
                     if let Some(ref state) = ctx_state {
                         harness.context_manager.restore_state(state);
                     }
@@ -474,15 +475,15 @@ impl App {
         });
     }
 
-    /// A persisted session whose `.ctx` went missing (deleted companion file,
-    /// corrupt payload) would silently "forget" the whole conversation —
+    /// A persisted session whose context records went missing (deleted session
+    /// file, corrupt payload) would silently "forget" the whole conversation —
     /// surface that instead of resuming quietly. The gate is the on-disk
     /// JSONL: a brand-new session's FIRST prompt also has a message on screen
-    /// with no `.ctx` yet (the companion is only written by Done/Stopped/
+    /// with no context records yet (they are only written by Done/Stopped/
     /// snapshot saves) — that is normal, not data loss. Known interim noise:
-    /// an early TUI-side failure persists the JSONL alone, so a resend warns
-    /// even though nothing reached the model either (accepted; TODO.md task 4
-    /// routes more saves through the context-aware path).
+    /// an early TUI-side failure persists the display messages alone, so a
+    /// resend warns even though nothing reached the model either (accepted;
+    /// TODO.md task 4 routes more saves through the context-aware path).
     pub(super) fn warn_if_resuming_without_ctx(
         &mut self,
         ctx_state: &Option<cosh::harness::ContextManagerState>,

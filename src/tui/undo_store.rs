@@ -1,10 +1,13 @@
 //! `/tmp` undo snapshots for destructive display actions (revert).
 //!
-//! A revert rewrites both session files (JSONL transcript + bincode `.ctx`
-//! context) with the tail deleted. Before the rewrite lands, the CURRENT
-//! files are copied to `/tmp/cosh/undo/<session-id>/vN/` so the user can roll
-//! back while the tmp directory is alive (lost on reboot — accepted: the
-//! snapshot is an escape hatch, not a backup).
+//! A revert rewrites the session JSONL (display messages + context records)
+//! with the tail deleted. Before the rewrite lands, the CURRENT file is
+//! copied to `/tmp/cosh/undo/<session-id>/vN/` so the user can roll back
+//! while the tmp directory is alive (lost on reboot — accepted: the snapshot
+//! is an escape hatch, not a backup). A legacy bincode `.ctx` companion, if
+//! one still exists (pre-unification session not yet migrated), is captured
+//! and restored alongside so the rollback stays consistent for that era
+//! too.
 //!
 //! Versions are numbered `v1..vN` per session; the oldest is dropped when the
 //! [`UNDO_VERSIONS_CAP`] is reached. Rollback restores BOTH files, so display

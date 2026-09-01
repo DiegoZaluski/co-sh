@@ -1185,7 +1185,7 @@ impl Harness {
 
         // Refresh the budget display and persist the compacted context via
         // the TUI's normal paths (the ContextSnapshot handler writes both the
-        // session JSONL and the `.ctx` companion file).
+        // session JSONL, display and context records alike).
         let _ = tx.send(HarnessEvent::ContextInfo {
             info: self.context_manager.display_info(),
         });
@@ -2218,7 +2218,7 @@ impl Harness {
         let mut loop_window: VecDeque<String> = VecDeque::with_capacity(LOOP_DETECTION_WINDOW_SIZE);
 
         // Throttle the periodic context snapshots so the TUI can persist the
-        // `.ctx` companion file incrementally without serializing the whole
+        // context records incrementally without serializing the whole
         // context on every tool dispatch. The snapshot itself is emitted on
         // the agent thread (the expensive clone never touches the UI thread).
         let mut last_snapshot = std::time::Instant::now();

@@ -101,9 +101,10 @@ impl App {
         }
     }
 
-    /// Roll the session files back to a snapshot: copy the stored JSONL +
-    /// `.ctx` over the live ones, drop the session from the cache so the
-    /// next access reloads from disk, and refresh the sidebar summaries.
+    /// Roll the session file back to a snapshot: copy the stored JSONL (and
+    /// a legacy `.ctx` companion, when the snapshot era had one) over the
+    /// live ones, drop the session from the cache so the next access reloads
+    /// from disk, and refresh the sidebar summaries.
     pub(in crate::app) fn restore_undo_version(&mut self, session_id: &str, version: &str) {
         if self.state.status == crate::types::SessionStatus::Working {
             self.toast_state.show(ToastOptions {
@@ -142,9 +143,10 @@ impl App {
                     self.session_store
                         .save_session_async_with_context(&mut restored, context);
                 }
-                // The restored snapshot had NO `.ctx` (display-only era):
-                // re-save the transcript anyway so a queued-but-unexecuted
-                // job still lands before the restored content.
+                // The restored snapshot had no context records (display-only
+                // era): re-save the transcript anyway so a
+                // queued-but-unexecuted job still lands before the restored
+                // content.
                 None => self.session_store.save_session_async(&restored),
             }
         }
