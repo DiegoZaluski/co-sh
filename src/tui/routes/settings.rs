@@ -283,8 +283,12 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
                 },
             });
             y += 1;
-            // Breathing room BELOW the hook list, so "+ Add hook" never sits
-            // glued to the next section's description.
+        }
+        // Breathing room BELOW every section, so standalone switches (no
+        // hook sub-list) never sit glued to the next section's description.
+        // The last section needs no trailing blank: it would only inflate
+        // content_height and skew the vertical centering.
+        if item + 1 < settings_items().len() {
             lines.push(LayoutLine {
                 y,
                 line: Line::Blank,
@@ -918,6 +922,58 @@ mod tests {
         let entry = validate_hook("", "^fs_read$", "true", "").expect("valid");
         assert_eq!(entry.matcher, "^fs_read$");
         assert_eq!(entry.timeout, None);
+    }
+
+    /// VERIFICATION + REGRESSION: every section must end with one blank line
+    /// before the next section's description. Standalone switches (no hook
+    /// sub-list) used to be glued together because the gap only existed
+    /// inside the enabled-hook branch. Also asserts the layout's `y` values
+    /// are strictly sequential — a dropped `y += 1` elsewhere (e.g. after
+    /// the AddHook row) would make two lines share a row and silently eat a
+    /// gap while every successor check still passed.
+    #[test]
+    fn sections_are_separated_by_a_blank_line() {
+        // Both a no-hook layout and one with populated hook sub-lists so
+        // hook sections exercise their full Category→Blank→Hook→AddHook→Blank
+        // sequence.
+        let setups = [
+            Setup::default(),
+            setup_with_hooks(true, &[("block rm", "exit 2"), ("b", "cmd b")]),
+        ];
+        for setup in &setups {
+            let layout = build_layout(setup);
+
+            // Strictly sequential y: no duplicate rows, no skipped rows.
+            for (i, line) in layout.iter().enumerate() {
+                assert_eq!(
+                    line.y, i as u16,
+                    "layout y must be strictly sequential at index {i}"
+                );
+            }
+
+            // A section always STARTS with its description, so every
+            // Description (except the first, which follows the title) must
+            // be preceded by exactly one blank line — this holds regardless
+            // of whether the previous section ended in a toggle, a hook row
+            // or an "+ Add hook" entry.
+            let mut first_description = true;
+            for line in &layout {
+                if matches!(line.line, Line::Description(_)) {
+                    if first_description {
+                        first_description = false;
+                        continue;
+                    }
+                    // Predecessor check via the sequential-y invariant:
+                    // layout[line.y - 1] is the row right above this one.
+                    assert!(
+                        line.y >= 1
+                            && matches!(layout[(line.y - 1) as usize].line, Line::Blank),
+                        "description at y={} must follow a blank line",
+                        line.y
+                    );
+                }
+            }
+        }
     }
 
     #[test]
