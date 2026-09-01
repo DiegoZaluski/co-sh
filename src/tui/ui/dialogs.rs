@@ -33,23 +33,37 @@ pub(crate) fn model_entry_matches_filter(entry: &ModelEntry, filter: &str) -> bo
     entry.model.to_lowercase().contains(&needle) || entry.provider.to_lowercase().contains(&needle)
 }
 
-/// List of (`key_combo`, description) for the Shortcuts dialog
+/// Rows for the Shortcuts dialog. A `Header` is a scope title rendered full
+/// width; a `Key` is a (`key_combo`, description) pair. Global shortcuts
+/// (usable anywhere) appear first without a scope title.
+enum ShortcutLine {
+    Gap,
+    Header(&'static str),
+    Key(&'static str, &'static str),
+}
+
 /// Only non-obvious compound shortcuts — basic nav/enter/esc are excluded
-const SHORTCUTS: &[(&str, &str)] = &[
-    ("Tab", "Toggle mode (Build/Ask)"),
-    ("Ctrl+B", "Toggle left panel (open/close)"),
-    ("Ctrl+U", "Left panel: usage dashboard"),
-    ("Ctrl+S", "Left panel: session history"),
-    ("Tab", "Dashboard open: cycle period (Shift+Tab back)"),
-    ("Ctrl+C", "Toggle conceal (hide assistant text)"),
-    ("Ctrl+T", "Toggle thinking (show/hide reasoning)"),
-    ("Ctrl+D", "Toggle tool details (show/hide completed)"),
-    ("Ctrl+G", "Toggle generic tool output"),
-    ("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
-    ("\u{2190}/\u{2192}", "Right panel history (focused slot)"),
-    ("Alt+\u{2190}/\u{2192}", "Switch agent queue (right panel)"),
-    ("Shift+B", "Previous agent queue (panel focused)"),
-    ("Shift+N", "Next agent queue (panel focused)"),
+const SHORTCUTS: &[ShortcutLine] = &[
+    ShortcutLine::Key("Ctrl+K", "Show/hide keyboard shortcuts"),
+    ShortcutLine::Key("Ctrl+B", "Toggle left panel"),
+    ShortcutLine::Key("Ctrl+C", "Copy selection / Quit cosh?"),
+    ShortcutLine::Key("Ctrl+T", "Toggle thinking (show/hide reasoning)"),
+    ShortcutLine::Key("Ctrl+D", "Toggle tool details (show/hide completed)"),
+    ShortcutLine::Key("Ctrl+G", "Toggle generic tool output"),
+    ShortcutLine::Gap,
+    ShortcutLine::Header("Session"),
+    ShortcutLine::Key("Tab", "Cycle mode (Build/Ask/Yolo)"),
+    ShortcutLine::Key("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
+    ShortcutLine::Gap,
+    ShortcutLine::Header("Left panel"),
+    ShortcutLine::Key("Ctrl+U", "Usage dashboard"),
+    ShortcutLine::Key("Ctrl+S", "Session history"),
+    ShortcutLine::Key("Tab", "Cycle dashboard period (Shift+Tab back)"),
+    ShortcutLine::Gap,
+    ShortcutLine::Header("Right panel"),
+    ShortcutLine::Key("\u{2190}/\u{2192}", "Step panel history (focused slot)"),
+    ShortcutLine::Key("Alt+\u{2190}/\u{2192}", "Switch agent queue"),
+    ShortcutLine::Key("Shift+B / Shift+N", "Cycle agent queue (panel focused)"),
 ];
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
@@ -1432,27 +1446,56 @@ impl DialogState {
                 let text_color = rgba_color(theme.text);
                 let accent = rgba_color(theme.primary);
 
-                // Draw each visible shortcut
+                // Draw each visible shortcut row (scope headers + key bindings)
                 for (i, entry) in SHORTCUTS.iter().enumerate().skip(scroll).take(max_visible) {
                     let ry = dialog_y + 2 + (i - scroll) as u16;
-                    let (key_str, desc) = (entry.0, entry.1);
 
-                    // Key column (left-aligned, accent color, fixed width)
-                    let key_x = dialog_x + 2;
-                    let key_w = 15u16;
-                    draw_text_line(buf, key_str, key_x, ry, key_w, Style::default().fg(accent));
+                    match entry {
+                        ShortcutLine::Gap => {
+                            // Blank spacer row between sections
+                        }
+                        ShortcutLine::Header(title) => {
+                            // Scope title, full width, same color as the dialog title
+                            let head_x = dialog_x + 2;
+                            let head_w = dialog_w.saturating_sub(4);
+                            draw_text_line(
+                                buf,
+                                title,
+                                head_x,
+                                ry,
+                                head_w,
+                                Style::default()
+                                    .fg(text_color)
+                                    .add_modifier(Modifier::BOLD),
+                            );
+                        }
+                        ShortcutLine::Key(key_str, desc) => {
+                            // Key column (left-aligned, accent color, fixed width)
+                            let key_x = dialog_x + 2;
+                            let key_w = 15u16;
+                            draw_text_line(
+                                buf,
+                                key_str,
+                                key_x,
+                                ry,
+                                key_w,
+                                Style::default().fg(accent),
+                            );
 
-                    // Description column
-                    let desc_x = key_x + key_w;
-                    let desc_w = dialog_w.saturating_sub(2).saturating_sub(desc_x - dialog_x);
-                    draw_text_line(
-                        buf,
-                        desc,
-                        desc_x,
-                        ry,
-                        desc_w,
-                        Style::default().fg(text_color),
-                    );
+                            // Description column
+                            let desc_x = key_x + key_w;
+                            let desc_w =
+                                dialog_w.saturating_sub(2).saturating_sub(desc_x - dialog_x);
+                            draw_text_line(
+                                buf,
+                                desc,
+                                desc_x,
+                                ry,
+                                desc_w,
+                                Style::default().fg(text_color),
+                            );
+                        }
+                    }
                 }
             }
             DialogType::ApiKeyInput {
