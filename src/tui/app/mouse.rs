@@ -413,6 +413,7 @@ impl App {
                         && self.sidebar.open
                         && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                         && x < SIDEBAR_WIDTH
+                        && self.state.status == crate::types::SessionStatus::Idle
                     {
                         self.sidebar.select_prev(self.state.session_summaries.len());
                     } else if matches!(self.mode(), AppMode::Session)
@@ -477,6 +478,7 @@ impl App {
                         && self.sidebar.open
                         && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                         && x < SIDEBAR_WIDTH
+                        && self.state.status == crate::types::SessionStatus::Idle
                     {
                         self.sidebar.select_next(self.state.session_summaries.len());
                     } else if matches!(self.mode(), AppMode::Session)
@@ -540,16 +542,22 @@ impl App {
                     self.session_view
                         .update_hover(y, session_area, &self.state, &self.config);
                     // Hover tracking for the pending queued rows above the prompt.
-                    self.hovered_queue_row = match self.compute_pending_queues_area() {
-                        Some(area)
-                            if x >= area.x
-                                && x < area.right()
-                                && y >= area.y
-                                && y < area.bottom() =>
-                        {
-                            Some((y - area.y) as usize)
+                    self.hovered_queue_row = if self.state.status
+                        == crate::types::SessionStatus::Idle
+                    {
+                        match self.compute_pending_queues_area() {
+                            Some(area)
+                                if x >= area.x
+                                    && x < area.right()
+                                    && y >= area.y
+                                    && y < area.bottom() =>
+                            {
+                                Some((y - area.y) as usize)
+                            }
+                            _ => None,
                         }
-                        _ => None,
+                    } else {
+                        None
                     };
                 }
             }
@@ -1252,6 +1260,16 @@ impl App {
         let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
         match self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
             SidebarAction::SwitchTo(session_id) => {
+                if self.state.status != crate::types::SessionStatus::Idle {
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Switch session".into()),
+                        message: "The agent is working — wait for it to finish.".into(),
+                        variant: ToastVariant::Warning,
+                        duration_ms: 4000,
+                    });
+                    return true;
+                }
                 self.state.right_panel =
                     crate::routes::session::right_panel::types::RightPanelState::new();
                 self.finalize_stale_compaction_lines();

@@ -259,6 +259,7 @@ impl App {
                             self.sidebar.selection.scroll_offset + (my - content_start_y) as usize;
                         if let Some(summary) = self.state.session_summaries.get(idx)
                             && summary.title_generated
+                            && self.state.status == crate::types::SessionStatus::Idle
                         {
                             self.toast_state.show(crate::ui::toast::ToastOptions {
                                 title: None,

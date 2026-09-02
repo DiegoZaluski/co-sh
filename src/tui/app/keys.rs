@@ -309,15 +309,29 @@ impl App {
             {
                 match key.code {
                     KeyCode::Up => {
-                        self.sidebar.select_prev(self.state.session_summaries.len());
+                        if self.state.status == crate::types::SessionStatus::Idle {
+                            self.sidebar.select_prev(self.state.session_summaries.len());
+                        }
                         return Ok(false);
                     }
                     KeyCode::Down => {
-                        self.sidebar.select_next(self.state.session_summaries.len());
+                        if self.state.status == crate::types::SessionStatus::Idle {
+                            self.sidebar.select_next(self.state.session_summaries.len());
+                        }
                         return Ok(false);
                     }
                     KeyCode::Enter => match self.sidebar.handle_key(key.code, &self.state) {
                         SidebarAction::SwitchTo(session_id) => {
+                            if self.state.status != crate::types::SessionStatus::Idle {
+                                use crate::ui::toast::{ToastOptions, ToastVariant};
+                                self.toast_state.show(ToastOptions {
+                                    title: Some("Switch session".into()),
+                                    message: "The agent is working — wait for it to finish.".into(),
+                                    variant: ToastVariant::Warning,
+                                    duration_ms: 4000,
+                                });
+                                return Ok(false);
+                            }
                             self.state.right_panel =
                                 crate::routes::session::right_panel::types::RightPanelState::new();
                             self.finalize_stale_compaction_lines();

@@ -111,7 +111,7 @@ impl SidebarView {
 
         // Update selection to clicked item
         let total = state.session_summaries.len();
-        if clicked_idx < total {
+        if clicked_idx < total && state.status == crate::types::SessionStatus::Idle {
             self.selection.selected_index = clicked_idx;
         }
 
