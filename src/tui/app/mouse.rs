@@ -248,9 +248,36 @@ impl App {
                 self.state.right_panel.stop_auto_scroll();
                 let _rect = self.drag_selection.take();
                 let drag_start = self.mouse_down_pos.take();
+                let drag_start_x = drag_start.map(|(sx, _)| sx);
                 let is_drag =
                     self.mouse_drag_active || drag_start.is_some_and(|(sx, sy)| sx != x || sy != y);
                 self.mouse_drag_active = false;
+
+                // Clicks that start and land over the open session-list
+                // sidebar belong to the sidebar — never to whatever occupies
+                // the same row in the chat (the prompt input or a user
+                // message). Route them there before any chat handling below
+                // so a session click is not stolen by the prompt's focus
+                // logic or opens Message actions, even when the click
+                // arrived as a tiny drag.
+                let started_in_sidebar = drag_start_x.is_none_or(|sx| sx < SIDEBAR_WIDTH);
+                if self.is_over_open_sidebar(x)
+                    && started_in_sidebar
+                    && !self.dialog.visible()
+                    && !self.question_dialog.visible
+                    && !self.permission_dialog.visible
+                {
+                    self.sidebar_focused = true;
+                    self.dispatch_sidebar_up(button, x, y, modifiers);
+                    return Ok(true);
+                }
+
+                // A drag that began inside the prompt/chat but was released
+                // over the open sidebar must not leave the prompt focused:
+                // the cursor is now outside the prompt's area.
+                if self.is_over_open_sidebar(x) && !started_in_sidebar {
+                    self.prompt_view.blur();
+                }
 
                 if is_drag {
                     // Auto-copy a create-db field drag selection on release.
@@ -489,24 +516,42 @@ impl App {
 
         // Only handle left-click UP events (standard "click" action)
         if event_type != MouseEventType::Up || button != MouseButton::Left {
-            // Hover tracking for user messages (opencode-style highlight).
+            // Hover tracking for user messages and pending-queue rows
+            // (opencode-style highlight). Moving over the sidebar clears any
+            // leftover chat highlight instead of leaving it "lit".
             if matches!(event_type, MouseEventType::Move)
                 && matches!(self.mode(), AppMode::Session)
                 && !self.dialog.visible()
                 && !self.question_dialog.visible
             {
-                let session_area = self.session_viewport_area();
-                self.session_view
-                    .update_hover(y, session_area, &self.state, &self.config);
-                // Hover tracking for the pending queued rows above the prompt.
-                self.hovered_queue_row = match self.compute_pending_queues_area() {
-                    Some(area)
-                        if x >= area.x && x < area.right() && y >= area.y && y < area.bottom() =>
-                    {
-                        Some((y - area.y) as usize)
-                    }
-                    _ => None,
-                };
+                if self.is_over_open_sidebar(x) {
+                    self.session_view.clear_hover();
+                    self.hovered_queue_row = None;
+                } else if matches!(self.mode(), AppMode::Session)
+                    && should_show_right_panel(self.terminal_size().width, &self.state.right_panel)
+                    && Self::is_in_right_panel(x, self.terminal_size())
+                {
+                    // The cursor is over the right panel, not chat content:
+                    // clear any leftover chat highlight.
+                    self.session_view.clear_hover();
+                    self.hovered_queue_row = None;
+                } else {
+                    let session_area = self.session_viewport_area();
+                    self.session_view
+                        .update_hover(y, session_area, &self.state, &self.config);
+                    // Hover tracking for the pending queued rows above the prompt.
+                    self.hovered_queue_row = match self.compute_pending_queues_area() {
+                        Some(area)
+                            if x >= area.x
+                                && x < area.right()
+                                && y >= area.y
+                                && y < area.bottom() =>
+                        {
+                            Some((y - area.y) as usize)
+                        }
+                        _ => None,
+                    };
+                }
             }
             return Ok(true);
         }
@@ -876,37 +921,8 @@ impl App {
                 && x < SIDEBAR_WIDTH;
         }
 
-        if self.sidebar.open
-            && matches!(self.left_panel, super::LeftPanelMode::History)
-            && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
-        {
-            let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
-            match self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
-                SidebarAction::SwitchTo(session_id) => {
-                    self.state.right_panel =
-                        crate::routes::session::right_panel::types::RightPanelState::new();
-                    self.finalize_stale_compaction_lines();
-                    self.state
-                        .switch_to_session(session_id, &self.session_store);
-                    // Returning to a session restores the last model used there.
-                    self.restore_current_session_model();
-                    self.session_view.hovered_msg_idx = None;
-                    self.title_generated = true;
-                    self.finalize_stale_compaction_lines();
-                    return Ok(true);
-                }
-                SidebarAction::RequestDelete(session_id) => {
-                    self.pending_delete_session_id = Some(session_id);
-                    self.dialog.show(DialogType::Confirm {
-                        message: "Delete this session?".into(),
-                    });
-                    if let Some(d) = self.dialog.current_mut() {
-                        d.selected = 1;
-                    }
-                    return Ok(true);
-                }
-                SidebarAction::None => {}
-            }
+        if self.dispatch_sidebar_up(button, x, y, modifiers) {
+            return Ok(true);
         }
 
         // 6b. Pending queued-message rows (Queue Actions): clicking a row
@@ -1216,5 +1232,48 @@ impl App {
         }
 
         Ok(true)
+    }
+
+    /// Whether the given column lies over the open session-list sidebar.
+    fn is_over_open_sidebar(&self, x: u16) -> bool {
+        self.sidebar.open
+            && matches!(self.left_panel, super::LeftPanelMode::History)
+            && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
+            && x < SIDEBAR_WIDTH
+    }
+
+    /// Route a left-click to the sidebar if it landed on a session.
+    /// Returns `true` when the click was consumed by the sidebar.
+    fn dispatch_sidebar_up(&mut self, button: MouseButton, x: u16, y: u16, modifiers: MouseModifiers) -> bool {
+        if !self.is_over_open_sidebar(x) {
+            return false;
+        }
+        let mouse = MouseEvent::new(MouseEventType::Up, button, x, y, modifiers);
+        let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
+        match self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
+            SidebarAction::SwitchTo(session_id) => {
+                self.state.right_panel =
+                    crate::routes::session::right_panel::types::RightPanelState::new();
+                self.finalize_stale_compaction_lines();
+                self.state.switch_to_session(session_id, &self.session_store);
+                // Returning to a session restores the last model used there.
+                self.restore_current_session_model();
+                self.session_view.hovered_msg_idx = None;
+                self.title_generated = true;
+                self.finalize_stale_compaction_lines();
+                true
+            }
+            SidebarAction::RequestDelete(session_id) => {
+                self.pending_delete_session_id = Some(session_id);
+                self.dialog.show(DialogType::Confirm {
+                    message: "Delete this session?".into(),
+                });
+                if let Some(d) = self.dialog.current_mut() {
+                    d.selected = 1;
+                }
+                true
+            }
+            SidebarAction::None => false,
+        }
     }
 }

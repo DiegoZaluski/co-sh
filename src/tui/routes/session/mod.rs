@@ -1889,7 +1889,9 @@ impl SessionView {
         false
     }
 
-    fn clear_hover(&mut self) -> bool {
+    /// Clear the hovered user-message highlight (the opencode-style row tint).
+    /// `true` when the hover target was set and is now cleared.
+    pub fn clear_hover(&mut self) -> bool {
         if self.hovered_msg_idx.is_some() {
             self.hovered_msg_idx = None;
             return true;

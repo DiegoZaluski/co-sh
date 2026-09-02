@@ -37,3 +37,4 @@ mod model_persistence;
 mod providers;
 mod rag;
 mod render;
+mod sidebar_mouse;
