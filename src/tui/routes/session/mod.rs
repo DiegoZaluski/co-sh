@@ -4088,25 +4088,46 @@ impl SessionView {
             let start_y = anchor_screen_y.min(focus_screen_y);
             let end_y = anchor_screen_y.max(focus_screen_y);
 
-            let (start_x, end_x) = if anchor_screen_y == start_y {
+            // Direction and row bands are matched against CONTENT rows, not
+            // the clamped screen rows (mirrors `get_text_in_region`): an
+            // endpoint whose row scrolled OUT of the viewport is clamped to
+            // the edge for the iteration bounds, but that edge row is then a
+            // MIDDLE row of the selection and must be highlighted full-width.
+            // Matching clamped screen rows instead froze the initial
+            // mouse-down x on the first/last visible line for the whole drag
+            // (e.g. an upward drag past the top edge kept the partial band on
+            // the last line).
+            let anchor_content_y = self.selection_anchor_content_y;
+            let focus_content_y = self.selection_focus_content_y;
+            let (top_x, bottom_x) = if anchor_content_y <= focus_content_y {
                 (anchor_x, focus_x)
             } else {
                 (focus_x, anchor_x)
             };
+            let top_content_y = anchor_content_y.min(focus_content_y);
+            let bottom_content_y = anchor_content_y.max(focus_content_y);
 
             let content_min_x = inner_area.x + 3;
             let content_max_x = (inner_area.x + 3 + max_w).saturating_sub(1);
 
             for cy in start_y..=end_y {
-                let (lx1, lx2) = if start_y == end_y {
-                    (start_x.min(end_x), start_x.max(end_x))
-                } else if cy == start_y {
-                    (start_x, content_max_x)
-                } else if cy == end_y {
-                    (content_min_x, end_x)
-                } else {
-                    (content_min_x, content_max_x)
-                };
+                // Content row under this screen row. Rows outside the true
+                // content span (selection fully clamped off-screen) are not
+                // part of the selection — skip them.
+                let row_content_y = i32::from(cy) - vp_top + self.scroll_y;
+                if row_content_y < top_content_y || row_content_y > bottom_content_y {
+                    continue;
+                }
+                let (lx1, lx2) =
+                    if row_content_y == top_content_y && row_content_y == bottom_content_y {
+                        (top_x.min(bottom_x), top_x.max(bottom_x))
+                    } else if row_content_y == top_content_y {
+                        (top_x, content_max_x)
+                    } else if row_content_y == bottom_content_y {
+                        (content_min_x, bottom_x)
+                    } else {
+                        (content_min_x, content_max_x)
+                    };
 
                 let lx1 = lx1.max(content_min_x);
                 let lx2 = lx2.min(content_max_x);

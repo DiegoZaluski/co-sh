@@ -835,6 +835,84 @@ fn drag_selection_render_tolerates_zero_height_viewport() {
     view.render(&mut buf, area, &state, &theme, &config, 0.016);
 }
 
+/// Regression: an upward drag that passes the viewport's top edge auto-scrolls,
+/// leaving the anchor content row BELOW the viewport and the focus row ABOVE
+/// it. Both endpoints clamp onto the viewport edge rows for the iteration
+/// bounds, but those edge rows are then MIDDLE rows of the selection and must
+/// be highlighted full-width. The old code matched bands against the clamped
+/// screen rows, so the last visible line kept the partial band from the
+/// initial mouse-down x — it "retained the initial formatting" for the whole
+/// drag (and the first line did the same on a downward drag).
+#[test]
+fn drag_past_viewport_edges_highlights_edge_rows_full_width() {
+    let msg = build_streaming_message(400);
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 20);
+    // Scroll into the middle of the content FIRST (the render may clamp it),
+    // so the baseline and selection frames show the same content rows.
+    view.scroll_y = 30;
+    let mut base = Buffer::empty(area);
+    view.render(&mut base, area, &state, &theme, &config, 0.016);
+    let scroll = view.scroll_y;
+
+    // Drag upward past the top edge: the anchor content row is far below the
+    // visible band, the focus row far above it. Both clamp onto the viewport
+    // edges.
+    view.mouse_down_scroll_y = scroll;
+    view.drag_selection = Some((40, 19, 20, 0));
+    view.selection_anchor_content_y = scroll + 100;
+    view.selection_focus_content_y = scroll - 100;
+
+    let mut sel = Buffer::empty(area);
+    view.render(&mut sel, area, &state, &theme, &config, 0.016);
+
+    // inner_area: x = 0 + 2, width = 80 - 4. Content band: x + 3 .. x + 3 + max_w - 1.
+    let content_min_x = 5u16;
+    let content_max_x = 5 + 70u16 - 1; // max_w = inner width (76) - 6 = 70
+
+    // Every cell in the viewport must be either untouched or exactly
+    // fg/bg-swapped (the selection highlight). In particular the TOP and
+    // BOTTOM rows — both are middle rows of this selection — must be
+    // inverted across the FULL content width wherever they carry text.
+    let mut inverted_rows = 0usize;
+    for y in 0..20u16 {
+        let mut row_inverted = false;
+        for x in content_min_x..=content_max_x {
+            let (b, s) = match (base.cell((x, y)), sel.cell((x, y))) {
+                (Some(b), Some(s)) => (b, s),
+                _ => panic!("missing cell at ({x}, {y})"),
+            };
+            if b.fg == b.bg {
+                // fg/bg swap is a no-op here; nothing to assert.
+                continue;
+            }
+            assert_eq!(
+                s.fg, b.bg,
+                "row {y} col {x}: fg not inverted (edge row must be full-width)"
+            );
+            assert_eq!(
+                s.bg, b.fg,
+                "row {y} col {x}: bg not inverted (edge row must be full-width)"
+            );
+            row_inverted = true;
+        }
+        if row_inverted {
+            inverted_rows += 1;
+        }
+    }
+    // Guard against a vacuous pass: most rows of this dense message must
+    // actually carry highlighted text.
+    assert!(
+        inverted_rows >= 15,
+        "expected most of the {inverted_rows}-row viewport to be highlighted"
+    );
+}
+
 /// Extract the text currently in the buffer (one line per row).
 fn buffer_text(buf: &Buffer) -> String {
     let mut out = String::new();

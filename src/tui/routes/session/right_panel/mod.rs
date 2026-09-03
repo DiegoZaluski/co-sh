@@ -952,19 +952,39 @@ fn highlight_section_selection(
 
     let start_y = anchor_screen_y.min(focus_screen_y);
     let end_y = anchor_screen_y.max(focus_screen_y);
-    let (start_x, end_x) = if anchor_screen_y == start_y {
+    // Direction and row bands are matched against CONTENT rows, not the
+    // clamped screen rows (mirrors the chat highlight): an endpoint whose row
+    // scrolled OUT of the section band is clamped to the edge for the
+    // iteration bounds, but that edge row is then a MIDDLE row of the
+    // selection and must be highlighted full-width. Matching clamped screen
+    // rows instead froze the initial mouse-down x on the first/last visible
+    // row for the whole drag.
+    let anchor_content_y = state.selection_anchor_content_y;
+    let focus_content_y = state.selection_focus_content_y;
+    let (top_x, bottom_x) = if anchor_content_y <= focus_content_y {
         (anchor_x, focus_x)
     } else {
         (focus_x, anchor_x)
     };
+    let top_content_y = anchor_content_y.min(focus_content_y);
+    let bottom_content_y = anchor_content_y.max(focus_content_y);
 
     for cy in start_y..=end_y {
-        let (lx1, lx2) = if start_y == end_y {
-            (start_x.min(end_x), start_x.max(end_x))
-        } else if cy == start_y {
-            (start_x, content_max_x)
-        } else if cy == end_y {
-            (content_min_x, end_x)
+        // Content row under this screen row. Rows outside the true content
+        // span (selection fully clamped off-screen) are not part of the
+        // selection — skip them.
+        let row_content_y = i32::from(cy)
+            .saturating_sub(content_top)
+            .saturating_add(band.scroll_y);
+        if row_content_y < top_content_y || row_content_y > bottom_content_y {
+            continue;
+        }
+        let (lx1, lx2) = if row_content_y == top_content_y && row_content_y == bottom_content_y {
+            (top_x.min(bottom_x), top_x.max(bottom_x))
+        } else if row_content_y == top_content_y {
+            (top_x, content_max_x)
+        } else if row_content_y == bottom_content_y {
+            (content_min_x, bottom_x)
         } else {
             (content_min_x, content_max_x)
         };
@@ -1490,6 +1510,134 @@ mod tests {
             })
         });
         assert!(changed, "subagent drag must highlight the subagent box");
+    }
+
+    /// Regression: an upward drag that passes the section's top edge
+    /// auto-scrolls, leaving the anchor content row BELOW the visible band
+    /// and the focus row ABOVE it. Both endpoints clamp onto the band edge
+    /// rows for the iteration bounds, but those edge rows are then MIDDLE
+    /// rows of the selection and must be highlighted full-width. The old
+    /// code matched bands against the clamped screen rows, so the last
+    /// visible row kept the partial band from the initial mouse-down x.
+    #[test]
+    fn drag_past_band_edges_highlights_edge_rows_full_width() {
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+
+        // Long, wide output lines so every visible content row carries text
+        // out to the band's right edge (truncated at inner_w).
+        let output: String = (0..80)
+            .map(|i| {
+                format!("data line {i:02} 0123456789012345678901234567890123456789012345678\n")
+            })
+            .collect();
+        state.start_pty("ls".to_string(), None);
+        state.complete_last_pty(output);
+
+        // Baseline render (no selection) — also populates section_layouts.
+        let mut base = Buffer::empty(Rect::new(0, 0, 50, 60));
+        render_right_panel(&mut base, Rect::new(0, 0, 50, 60), &mut state, &theme, 120);
+
+        let band = state
+            .section_layouts
+            .iter()
+            .find(|l| l.kind == types::SectionKind::Bash)
+            .copied()
+            .expect("bash section on screen");
+
+        // Drag upward past the band's top edge: the anchor content row is far
+        // below the visible band, the focus row far above it. Both clamp onto
+        // the band edge rows.
+        state.selection_section = Some(types::SectionKind::Bash);
+        state.drag_selection = Some((
+            6,
+            u16::try_from(band.bottom - 1).unwrap(),
+            30,
+            u16::try_from(band.content_top).unwrap(),
+        ));
+        state.selection_anchor_content_y = 200;
+        state.selection_focus_content_y = -50;
+
+        let mut sel = Buffer::empty(Rect::new(0, 0, 50, 60));
+        render_right_panel(&mut sel, Rect::new(0, 0, 50, 60), &mut state, &theme, 120);
+
+        // Content columns: inner_x(2) + LEFT_PAD(1) .. + inner_w(46) - 1.
+        // Text is truncated to exactly this width, so every content row
+        // carries fg!=bg cells across the whole range.
+        const TEXT_X0: u16 = 3;
+        const TEXT_X1: u16 = 48;
+
+        // Within the text columns, every cell must be either untouched
+        // (outside the highlight band) or exactly fg/bg-swapped (inside it),
+        // and each row must be CONSISTENT: a row with any swapped cell must
+        // have ALL its fg!=bg cells swapped. The old code left the tail of
+        // the clamped edge row in its initial formatting (mixed row).
+        let mut swapped_rows = 0usize;
+        let mut first_row_swapped = false;
+        let mut last_row_swapped = false;
+        for y in band.top..band.bottom {
+            let mut swapped = 0usize;
+            let mut unchanged = 0usize;
+            for x in TEXT_X0..=TEXT_X1 {
+                let (b, s) = match (base.cell((x, y as u16)), sel.cell((x, y as u16))) {
+                    (Some(b), Some(s)) => (b, s),
+                    _ => panic!("missing cell at ({x}, {y})"),
+                };
+                assert_eq!(
+                    b.symbol(),
+                    s.symbol(),
+                    "row {y} col {x}: symbol changed by selection highlight"
+                );
+                if b.fg == b.bg {
+                    // fg/bg swap is a no-op here; nothing to assert.
+                    continue;
+                }
+                if s.fg == b.fg && s.bg == b.bg {
+                    unchanged += 1;
+                } else if s.fg == b.bg && s.bg == b.fg {
+                    swapped += 1;
+                } else {
+                    panic!(
+                        "row {y} col {x}: cell neither unchanged nor inverted \
+                         (b.fg={:?} b.bg={:?}, s.fg={:?} s.bg={:?})",
+                        b.fg, b.bg, s.fg, s.bg
+                    );
+                }
+            }
+            assert!(
+                swapped == 0 || unchanged == 0,
+                "row {y}: mixed row — {swapped} inverted and {unchanged} unchanged cells \
+                 (edge rows must be full-width)"
+            );
+            if swapped > 0 {
+                swapped_rows += 1;
+                if y == band.content_top {
+                    first_row_swapped = true;
+                }
+                if y == band.bottom - 2 {
+                    last_row_swapped = true;
+                }
+            }
+        }
+        // The FIRST and LAST content rows are the clamped edge rows of this
+        // selection — both are middle rows of the true content span and must
+        // be highlighted (the old bug froze the initial mouse-down x there).
+        assert!(
+            first_row_swapped,
+            "top content row (row {}) must be highlighted",
+            band.content_top
+        );
+        assert!(
+            last_row_swapped,
+            "bottom content row (row {}) must be highlighted",
+            band.bottom - 2
+        );
+        // Guard against a vacuous pass: the band must actually contain
+        // highlighted content rows.
+        assert!(
+            swapped_rows >= 3,
+            "expected several highlighted content rows, got {swapped_rows}"
+        );
     }
 
     /// Regression: a bash PTY appearing while a subagent is present must not
