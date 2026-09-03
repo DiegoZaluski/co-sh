@@ -28,6 +28,28 @@ impl App {
                 return Ok(false);
             }
 
+            // ESC sovereign while an agent loop is running: whatever
+            // incidental UI state is active (a prompt/field text selection,
+            // the sidebar focus, the slash menu, the permission dialog, an
+            // overlay), the FIRST job of ESC is to interrupt the loop.
+            // Flag the shared stop signal here — before any gate below can
+            // swallow the key — then let ESC fall through so it still
+            // performs its normal local action (clear selection, close
+            // menu/dialog). Regression: those gates used to consume ESC
+            // without setting `stop_signal`, so the loop kept running.
+            // `Retry` is covered too: an Error event can flip the status
+            // while a loop is still winding down, and ESC must still stop
+            // it. (Idle no-op: the flag is reset by `start_agent_loop`.)
+            if key.code == KeyCode::Esc
+                && matches!(
+                    self.state.status,
+                    crate::types::SessionStatus::Working
+                        | crate::types::SessionStatus::Retry { .. }
+                )
+            {
+                self.stop_signal.store(true, Ordering::Relaxed);
+            }
+
             // Escape clears selection if there is one.
             if key.code == KeyCode::Esc && self.prompt_view.has_selection() {
                 self.prompt_view.clear_selection();

@@ -149,3 +149,156 @@ async fn shift_b_n_type_normally_without_panel_focus() {
     assert_eq!(app.prompt_view.input, "BN", "Shift+N must type when idle");
     assert_eq!(app.state.right_panel.panel_focus, None);
 }
+
+/// Regression: ESC must interrupt the agent loop no matter what
+/// incidental UI state is active. The gates below `process_key_event`'s
+/// confirm-dialog sovereignty used to consume ESC before the
+/// Interrupt/Cancel handlers ran, leaving the loop running. The guard at
+/// the top of `process_key_event` now flags the shared stop signal first,
+/// then ESC still performs its normal local action.
+#[tokio::test]
+async fn esc_while_working_sets_stop_signal_despite_prompt_selection() {
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.state.status = crate::types::SessionStatus::Working;
+
+    app.prompt_view.input = "abc".into();
+    app.prompt_view.sel_start = Some(0);
+    app.prompt_view.sel_end = Some(2);
+    assert!(app.prompt_view.has_selection());
+
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC with a prompt selection must still interrupt the loop"
+    );
+    assert!(
+        !app.prompt_view.has_selection(),
+        "ESC keeps its local action: clearing the selection"
+    );
+}
+
+/// Regression: ESC while Working must flag the stop signal even when the
+/// sidebar has focus (the old gate only unfocused the sidebar).
+#[tokio::test]
+async fn esc_while_working_sets_stop_signal_despite_sidebar_focus() {
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.state.status = crate::types::SessionStatus::Working;
+    app.sidebar_focused = true;
+
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC with sidebar focus must still interrupt the loop"
+    );
+    assert!(!app.sidebar_focused, "ESC keeps unfocusing the sidebar");
+}
+
+/// Regression: ESC while Working must flag the stop signal even when the
+/// slash menu is open (the old gate only cleared the prompt and closed
+/// the menu).
+#[tokio::test]
+async fn esc_while_working_sets_stop_signal_despite_slash_menu() {
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.state.status = crate::types::SessionStatus::Working;
+    app.slash_menu.visible = true;
+    app.prompt_view.input = "/pl".into();
+
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC with the slash menu open must still interrupt the loop"
+    );
+    assert!(!app.slash_menu.visible, "ESC keeps closing the slash menu");
+}
+
+/// Regression: ESC on the permission dialog used to only DENY the pending
+/// permission — the loop kept running (the model would just try something
+/// else). ESC must now interrupt the loop as well.
+#[tokio::test]
+async fn esc_while_working_sets_stop_signal_on_permission_dialog() {
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.state.status = crate::types::SessionStatus::Working;
+    app.permission_dialog.visible = true;
+
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC on the permission dialog must interrupt the loop"
+    );
+    assert!(
+        !app.permission_dialog.visible,
+        "ESC keeps denying/closing the permission dialog"
+    );
+}
+
+/// ESC must NOT flag the stop signal when no agent loop is running —
+/// closing overlays while idle must stay side-effect-free.
+#[tokio::test]
+async fn esc_while_idle_does_not_set_stop_signal() {
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.slash_menu.visible = true;
+
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        !app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC while idle must not touch the stop signal"
+    );
+    assert!(!app.slash_menu.visible, "ESC keeps closing the slash menu");
+}
+
+/// The quit confirm keeps modal sovereignty: while it is visible, ESC
+/// drives the dialog and must NOT reach the interrupt guard, even if the
+/// loop is still marked Working.
+#[tokio::test]
+async fn esc_with_confirm_dialog_visible_does_not_set_stop_signal() {
+    use crossterm::event::{KeyCode as K, KeyEvent, KeyModifiers};
+
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.state.status = crate::types::SessionStatus::Working;
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "new".into(),
+        desc: String::new(),
+    });
+    app.process_key_event(KeyEvent::new(K::Char('/'), KeyModifiers::NONE))
+        .unwrap();
+    app.process_key_event(KeyEvent::new(K::Char('c'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.is_confirm_dialog_visible());
+
+    app.process_key_event(KeyEvent::new(K::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        !app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "confirm-dialog ESC must not set the stop signal (sovereignty)"
+    );
+    assert!(!app.is_confirm_dialog_visible());
+}

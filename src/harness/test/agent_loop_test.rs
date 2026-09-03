@@ -1,9 +1,10 @@
 use super::super::core::Harness;
+use super::super::core::INTERRUPTED_MARKER;
 use super::super::core::result_is_useless;
 use super::super::events::HarnessEvent;
 use crate::harness::context::{ContextItem, ContextManagerState};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[tokio::test]
 async fn test_agent_loop_simple_conversation() {
@@ -1577,4 +1578,79 @@ async fn queued_next_request_message_enters_the_next_request_with_tool_work() {
         items.last(),
         Some(ContextItem::Closure { content, .. }) if content == "all done"
     ));
+}
+
+/// ESC pressed MID-STREAM must stop the agent loop — never complete the
+/// truncated turn. Regression: the streaming chunk loop used to `break` on
+/// the stop signal and fall through to `Ok("done")`, so `run_agent_loop`
+/// treated the interrupted response as a finished assistant turn and emitted
+/// a spurious `Done` (and with queued messages, the TUI auto-started the
+/// NEXT loop — the run appeared to keep going after ESC).
+#[tokio::test]
+async fn test_agent_loop_stop_mid_stream() {
+    let mut h = Harness::new_test()
+        .with_mock_stream(Ok(vec!["Hello", " world", " more", " done"]))
+        // 100ms between tokens gives the test a wide window to flip the
+        // stop signal while the stream is still running.
+        .with_mock_stream_delay_ms(100);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let stop_for_loop = stop_signal.clone();
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_for_loop)
+            .await;
+    });
+
+    // Let the first token land, then press ESC "mid-stream".
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+    stop_signal.store(true, Ordering::Relaxed);
+
+    // Collect events until the terminal one (bounded so a regression that
+    // keeps the loop running fails instead of hanging the suite).
+    let mut terminal: Option<HarnessEvent> = None;
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_terminal = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error { .. }
+                );
+                if is_terminal {
+                    terminal = Some(event);
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    let _ = handle.abort();
+
+    // The loop MUST report `Stopped` — not `Done` (the turn was interrupted,
+    // not completed) and not `Error`.
+    assert!(
+        matches!(terminal, Some(HarnessEvent::Stopped { .. })),
+        "mid-stream ESC must stop the loop; got terminal={terminal:?}"
+    );
+}
+
+/// Direct contract: a stream interrupted by the stop signal must return the
+/// `INTERRUPTED_MARKER` error, never `Ok`. (Pre-set signal — the mid-stream
+/// path is covered by `test_agent_loop_stop_mid_stream` above.)
+#[tokio::test]
+async fn test_stream_chat_with_messages_stop_yields_interrupted_marker() {
+    let mut h = Harness::new_test().with_mock_stream(Ok(vec!["Hello", " world"]));
+    let stop_signal = Arc::new(AtomicBool::new(true));
+    h.set_stop_signal_for_test(stop_signal);
+
+    let result = h.stream_chat_with_messages("sys", &[], |_| {}).await;
+    assert_eq!(result.unwrap_err(), INTERRUPTED_MARKER);
 }

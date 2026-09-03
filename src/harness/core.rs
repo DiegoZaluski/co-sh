@@ -197,7 +197,7 @@ const SUBAGENT_INTERNAL_NOTE: &str = "When the `agent` argument is omitted or em
 /// to stop the current generation. Compared by identity (constant), not by
 /// string value — prevents the fallback retry from misinterpreting a user
 /// cancellation as a connector error.
-const INTERRUPTED_MARKER: &str = "__cosh_interrupted__";
+pub(crate) const INTERRUPTED_MARKER: &str = "__cosh_interrupted__";
 
 /// Internal marker returned by a stream function when the provider rejected
 /// the request because the prompt exceeds its context window. Compared by
@@ -511,6 +511,11 @@ pub struct Harness {
     pub(crate) mock_chat_queue: VecDeque<Result<String, String>>,
     #[cfg(test)]
     pub(crate) mock_stream_queue: VecDeque<Result<Vec<String>, String>>,
+    /// Test-only per-token pause (ms) applied by the mock stream so tests
+    /// can interleave with it — e.g. set the stop signal mid-stream and
+    /// assert the loop stops instead of completing the turn.
+    #[cfg(test)]
+    pub(crate) mock_stream_delay_ms: u64,
     /// Test-only queue of NATIVE (structured) tool calls, consumed one list
     /// per stream right after its string tokens. Lets a test drive a real
     /// provider-delivered `tool_calls`/`tool_use`/`functionCall` through the
@@ -598,6 +603,8 @@ impl Harness {
             mock_chat_queue: VecDeque::new(),
             #[cfg(test)]
             mock_stream_queue: VecDeque::new(),
+            #[cfg(test)]
+            mock_stream_delay_ms: 0,
             #[cfg(test)]
             mock_native_stream_queue: VecDeque::new(),
             #[cfg(test)]
@@ -1520,6 +1527,22 @@ impl Harness {
                         on_event(StreamEvent::Reset);
                     }
                     for token in &tokens {
+                        // Mid-stream stop: an interrupted mock turn must
+                        // surface the INTERRUPTED_MARKER error exactly like
+                        // the real stream path — never a silent `Ok("done")`
+                        // that makes the loop treat the truncation as a
+                        // completed turn.
+                        if self
+                            .stop_signal
+                            .as_ref()
+                            .is_some_and(|s| s.load(Ordering::Relaxed))
+                        {
+                            return Err(INTERRUPTED_MARKER.to_string());
+                        }
+                        if self.mock_stream_delay_ms > 0 {
+                            tokio::time::sleep(Duration::from_millis(self.mock_stream_delay_ms))
+                                .await;
+                        }
                         self.dispatch_chunk(token, None, &mut extractor, &mut on_event);
                     }
                     // Test-only: route structured native tool calls through the
@@ -1601,7 +1624,12 @@ impl Harness {
                     .is_some_and(|s| s.load(Ordering::Relaxed));
                 if stop {
                     log::debug!("stream_chat_with_messages STOPPED by signal");
-                    break;
+                    // Surface the interruption as the marker error — NOT as a
+                    // completed turn. Falling through to `Ok("done")` here
+                    // made the agent loop treat the truncated response as a
+                    // finished assistant turn and CONTINUE (Done → queued
+                    // loop auto-restart) instead of stopping.
+                    return Err(INTERRUPTED_MARKER.to_string());
                 }
             }
 
@@ -1858,7 +1886,12 @@ impl Harness {
                     .is_some_and(|s| s.load(Ordering::Relaxed));
                 if stop {
                     // log::debug!("stream_chat STOPPED by signal");
-                    break;
+                    // Same contract as [`Self::stream_chat_with_messages`]:
+                    // an interrupted stream must surface the marker error —
+                    // the compaction caller maps it to
+                    // `CompactionErr::Interrupted` (a silent `Ok` would make
+                    // the truncation look like a finished summary).
+                    return Err(INTERRUPTED_MARKER.to_string());
                 }
             }
 
@@ -3790,6 +3823,7 @@ impl Harness {
             mock_chat_response: None,
             mock_chat_queue: VecDeque::new(),
             mock_stream_queue: VecDeque::new(),
+            mock_stream_delay_ms: 0,
             mock_native_stream_queue: VecDeque::new(),
             #[cfg(test)]
             mock_finish_reasons: VecDeque::new(),
@@ -3881,6 +3915,24 @@ impl Harness {
             );
         }
         self
+    }
+
+    /// Test-only per-token pause for the mock stream (ms). Lets a test
+    /// interleave with the streamed tokens — e.g. set the stop signal
+    /// mid-stream and assert the loop surfaces `Stopped` (never a spurious
+    /// `Done` from a truncated turn).
+    #[cfg(test)]
+    pub(crate) fn with_mock_stream_delay_ms(mut self, ms: u64) -> Self {
+        self.mock_stream_delay_ms = ms;
+        self
+    }
+
+    /// Test-only: install a stop signal directly (mirrors the wiring
+    /// `run_agent_loop_inner` / `compact_on_demand` perform) so tests can
+    /// exercise the stream functions' stop contract in isolation.
+    #[cfg(test)]
+    pub(crate) fn set_stop_signal_for_test(&mut self, stop_signal: Arc<AtomicBool>) {
+        self.stop_signal = Some(stop_signal);
     }
 
     /// Queue NATIVE (structured) tool calls for the NEXT stream, delivered
