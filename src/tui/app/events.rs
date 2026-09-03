@@ -18,11 +18,38 @@ impl App {
     pub(super) fn handle_events(&mut self) -> io::Result<bool> {
         self.toast_state.tick(50);
 
+        // Block briefly for the FIRST event, then drain everything already
+        // buffered. Input events (mouse drag during a copy selection, mouse
+        // wheel, key auto-repeat) arrive in bursts far faster than one per
+        // frame — consuming exactly one event per loop iteration let the
+        // internal event queue back up, so the selection highlight / cursor
+        // visibly lagged behind the mouse and then "normalized" once the
+        // burst ended. Draining the whole buffer per call applies every
+        // pending input BEFORE the next render, keeping the cursor speed
+        // constant at any event rate.
         if !event::poll(Duration::from_millis(50))? {
             return Ok(false);
         }
 
-        match event::read()? {
+        let mut quit = false;
+        loop {
+            let evt = event::read()?;
+            if self.process_event(evt)? {
+                quit = true;
+                break;
+            }
+            if !event::poll(Duration::from_millis(0))? {
+                break;
+            }
+        }
+        Ok(quit)
+    }
+
+    /// Dispatch a single input event. Returns `Ok(true)` when the app should
+    /// quit. Extracted from `handle_events` so a whole buffered batch can be
+    /// drained with the same per-event semantics.
+    fn process_event(&mut self, event: Event) -> io::Result<bool> {
+        match event {
             Event::Key(key) => {
                 if key.kind == KeyEventKind::Press {
                     return self.process_key_event(key);
