@@ -40,6 +40,17 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
 /// question-text region.
 const SCROLL_STEP: usize = 3;
 
+/// Virtual option appended by the TUI to every `SingleChoice` question so the
+/// user can always give a free-text answer. Never sent by the model — the tool
+/// description explicitly tells it NOT to invent its own custom/other entry.
+pub const CUSTOM_RESPONSE_LABEL: &str = "Personalize your response";
+
+/// Placeholder shown in the custom-answer input when it is empty.
+const CUSTOM_PLACEHOLDER: &str = "Type your custom answer...";
+
+/// Suffix rendered after the recommended `SingleChoice` option.
+const RECOMMENDED_SUFFIX: &str = " (Recommended)";
+
 const fn left_border_chars() -> BorderCharacters {
     BorderCharacters {
         top_left: ' ',
@@ -68,7 +79,9 @@ struct ReviewStyles {
 /// Per-question state tracked by the dialog.
 #[derive(Debug, Clone)]
 struct QuestionState {
-    /// For SingleChoice/YesNo: which option index is selected (None = nothing selected)
+    /// For SingleChoice/YesNo: which option index is selected (None = nothing selected).
+    /// For SingleChoice the virtual custom row lives at index
+    /// `options.len()` (see [`QuestionDialog::custom_index`]).
     single_selection: Option<usize>,
     /// For `MultiChoice`: which option indices are checked
     multi_selection: Vec<usize>,
@@ -76,17 +89,23 @@ struct QuestionState {
     text_input: String,
     /// For Text: the cursor position (in chars) within `text_input`.
     cursor_pos: usize,
+    /// For SingleChoice custom row: the typed custom answer.
+    custom_text: String,
+    /// Cursor position (in chars) within `custom_text`.
+    custom_cursor: usize,
     /// Whether this question has been "answered" (user pressed Enter on it)
     answered: bool,
 }
 
 impl QuestionState {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             single_selection: None,
             multi_selection: Vec::new(),
             text_input: String::new(),
             cursor_pos: 0,
+            custom_text: String::new(),
+            custom_cursor: 0,
             answered: false,
         }
     }
@@ -114,9 +133,30 @@ pub struct QuestionDialog {
     /// the box height (e.g. a question longer than the viewport). Only the
     /// question text scrolls; options and the footer stay fixed.
     text_scroll: usize,
+    /// Scroll offset (in flat display rows) for the options viewport. The box
+    /// grows upward to fit the content first (`required_height`); this offset
+    /// only kicks in as a last resort when the options alone exceed the
+    /// available height. It auto-follows `selected_row` every frame, so the
+    /// focused row — including the trailing custom row — is never stranded
+    /// off-screen.
+    opt_scroll: usize,
     /// Blinking cursor for the Text-answer input field. Its `terminal_focused`
     /// is synced by the App before each render, like every other cursor.
     pub cursor: Cursor,
+}
+
+/// One flat display row inside the options viewport. Every variant occupies
+/// exactly one terminal row, so hit-testing is a plain index comparison.
+#[derive(Debug, Clone)]
+enum OptFlatRow {
+    /// Wrapped line of selectable option `row`.
+    Label { row: usize, text: String },
+    /// The SingleChoice custom-answer input line below the custom row.
+    CustomInput,
+    /// Blank breathing row after option `row`'s block, so adjacent options
+    /// read as separate items. Never trailing: the last block sits directly
+    /// above the footer.
+    Gap { row: usize },
 }
 
 impl QuestionDialog {
@@ -129,6 +169,7 @@ impl QuestionDialog {
             current_tab: 0,
             selected_row: 0,
             text_scroll: 0,
+            opt_scroll: 0,
             cursor: Cursor::new(),
         }
     }
@@ -142,8 +183,43 @@ impl QuestionDialog {
         self.current_tab = 0;
         self.selected_row = 0;
         self.text_scroll = 0;
+        self.opt_scroll = 0;
         self.submitted = false;
         self.visible = true;
+    }
+
+    /// Virtual custom-row index for a `SingleChoice` question: one past the
+    /// last model-provided option. `None` for every other question type.
+    fn custom_index(&self, tab: usize) -> Option<usize> {
+        let q = self.questions.get(tab)?;
+        if q.question_type != QuestionType::SingleChoice {
+            return None;
+        }
+        Some(q.options.as_ref().map_or(0, Vec::len))
+    }
+
+    /// Whether the custom-answer input field should be drawn for `tab`.
+    /// Always true for `SingleChoice`: the box starts pre-expanded with the
+    /// field visible so users see the personalization affordance upfront —
+    /// nobody must navigate first to discover it, and focusing the custom
+    /// row never shifts the layout afterwards.
+    fn should_show_custom_input(&self, tab: usize) -> bool {
+        self.custom_index(tab).is_some()
+    }
+
+    /// Display text for a `SingleChoice` option, with the `(Recommended)`
+    /// badge when it matches `q.recommended`. Robust to payloads that were
+    /// not normalized (old sessions / tests): the badge is matched by value,
+    /// not by position.
+    fn display_option(q: &QuestionItem, opt: &str) -> String {
+        if q.question_type == QuestionType::SingleChoice
+            && q.recommended.as_deref() == Some(opt)
+            && !opt.ends_with(RECOMMENDED_SUFFIX)
+        {
+            format!("{opt}{RECOMMENDED_SUFFIX}")
+        } else {
+            opt.to_string()
+        }
     }
 
     /// Build the answer items from the current dialog state.
@@ -151,15 +227,29 @@ impl QuestionDialog {
     pub fn build_answers(&self) -> Vec<AnswerItem> {
         self.questions
             .iter()
-            .zip(self.state.iter())
-            .map(|(q, s)| {
+            .enumerate()
+            .map(|(idx, q)| {
+                let s = &self.state[idx];
                 let (answer, selected) = match q.question_type {
                     QuestionType::Text => (Some(s.text_input.clone()), None),
                     QuestionType::SingleChoice => {
-                        let sel = s
-                            .single_selection
-                            .and_then(|i| q.options.as_ref()?.get(i).cloned());
-                        (None, sel.map(|s| vec![s]))
+                        let custom = q.options.as_ref().map_or(0, Vec::len);
+                        if s.single_selection == Some(custom) {
+                            // Custom row committed: the free-text answer travels
+                            // as the selection so the model sees what the user
+                            // actually typed. Empty custom text counts as
+                            // unanswered (consistent with other types).
+                            if s.custom_text.is_empty() {
+                                (None, None)
+                            } else {
+                                (None, Some(vec![s.custom_text.clone()]))
+                            }
+                        } else {
+                            let sel = s
+                                .single_selection
+                                .and_then(|i| q.options.as_ref()?.get(i).cloned());
+                            (None, sel.map(|s| vec![s]))
+                        }
                     }
                     QuestionType::MultiChoice => {
                         let sel: Option<Vec<String>> = s
@@ -215,9 +305,10 @@ impl QuestionDialog {
         match q.question_type {
             QuestionType::Text => 1,  // just the text input field
             QuestionType::YesNo => 2, // Yes / No
-            QuestionType::SingleChoice | QuestionType::MultiChoice => {
-                q.options.as_ref().map_or(0, std::vec::Vec::len)
-            }
+            // SingleChoice always appends the virtual custom row so the user
+            // can personalize even when the model did not offer that option.
+            QuestionType::SingleChoice => q.options.as_ref().map_or(1, |o| o.len() + 1),
+            QuestionType::MultiChoice => q.options.as_ref().map_or(0, std::vec::Vec::len),
         }
     }
 
@@ -331,29 +422,135 @@ impl QuestionDialog {
         self.cursor.note_activity();
     }
 
+    /// Whether the custom-answer input for the current tab is focused: a
+    /// `SingleChoice` tab with the virtual custom row highlighted.
+    fn is_custom_focused(&self) -> bool {
+        if self.is_confirm() {
+            return false;
+        }
+        let Some(q) = self.questions.get(self.current_tab) else {
+            return false;
+        };
+        if q.question_type != QuestionType::SingleChoice {
+            return false;
+        }
+        self.custom_index(self.current_tab) == Some(self.selected_row)
+    }
+
+    /// Insert `ch` into the SingleChoice custom answer at its cursor.
+    fn custom_insert_char(&mut self, ch: char) {
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            let pos = s.custom_cursor.min(s.custom_text.chars().count());
+            let byte_idx = Self::char_to_byte(&s.custom_text, pos);
+            s.custom_text.insert(byte_idx, ch);
+            s.custom_cursor = pos + 1;
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Delete the character before the custom cursor (Backspace).
+    fn custom_delete_before_cursor(&mut self) {
+        if let Some(s) = self.state.get_mut(self.current_tab)
+            && s.custom_cursor > 0
+        {
+            let byte_idx = Self::char_to_byte(&s.custom_text, s.custom_cursor - 1);
+            s.custom_text.remove(byte_idx);
+            s.custom_cursor -= 1;
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Delete the character under the custom cursor (Delete).
+    fn custom_delete_at_cursor(&mut self) {
+        if let Some(s) = self.state.get_mut(self.current_tab)
+            && s.custom_cursor < s.custom_text.chars().count()
+        {
+            let byte_idx = Self::char_to_byte(&s.custom_text, s.custom_cursor);
+            s.custom_text.remove(byte_idx);
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Move the custom cursor by `delta` chars, clamped to the input bounds.
+    fn custom_move_cursor(&mut self, delta: i32) {
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            let len = s.custom_text.chars().count() as i32;
+            let new = (s.custom_cursor as i32 + delta).clamp(0, len);
+            s.custom_cursor = new as usize;
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Move the custom cursor to the start of the previous word (Ctrl+Left).
+    fn custom_cursor_word_left(&mut self) {
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            let byte = Self::char_to_byte(&s.custom_text, s.custom_cursor);
+            let new_byte = crate::util::word_ops::find_word_start(&s.custom_text, byte);
+            if new_byte < byte {
+                s.custom_cursor = Self::byte_to_char(&s.custom_text, new_byte);
+            }
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Move the custom cursor to the start of the next word (Ctrl+Right).
+    fn custom_cursor_word_right(&mut self) {
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            let byte = Self::char_to_byte(&s.custom_text, s.custom_cursor);
+            let new_byte = crate::util::word_ops::find_word_end(&s.custom_text, byte);
+            if new_byte > byte {
+                s.custom_cursor = Self::byte_to_char(&s.custom_text, new_byte);
+            }
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Delete the word before the custom cursor (Ctrl+Backspace / Ctrl+W).
+    fn custom_delete_word_before_cursor(&mut self) {
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            let byte = Self::char_to_byte(&s.custom_text, s.custom_cursor);
+            let start = crate::util::word_ops::find_word_start(&s.custom_text, byte);
+            if start < byte {
+                s.custom_text.drain(start..byte);
+                s.custom_cursor = Self::byte_to_char(&s.custom_text, start);
+            }
+        }
+        self.cursor.note_activity();
+    }
+
     /// Paste text into the current Text question's answer at the cursor
-    /// (bracketed paste from the terminal, like the chat prompt).
+    /// (bracketed paste from the terminal, like the chat prompt). Also serves
+    /// the SingleChoice custom-answer input when its virtual row is focused.
     pub fn handle_paste(&mut self, text: &str) {
         if !self.visible {
             return;
         }
-        if !self
+        let is_text = self
             .questions
             .get(self.current_tab)
-            .is_some_and(|q| q.question_type == QuestionType::Text)
-        {
+            .is_some_and(|q| q.question_type == QuestionType::Text);
+        if is_text {
+            if let Some(s) = self.state.get_mut(self.current_tab) {
+                // The field is single-line: strip newlines so the pasted text
+                // stays aligned with the horizontal-scroll rendering (matching
+                // the ApiKeyInput dialog's paste handling).
+                let cleaned: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
+                let byte = Self::char_to_byte(&s.text_input, s.cursor_pos);
+                s.text_input.insert_str(byte, &cleaned);
+                s.cursor_pos += cleaned.chars().count();
+            }
+            self.cursor.note_activity();
             return;
         }
-        if let Some(s) = self.state.get_mut(self.current_tab) {
-            // The field is single-line: strip newlines so the pasted text
-            // stays aligned with the horizontal-scroll rendering (matching
-            // the ApiKeyInput dialog's paste handling).
-            let cleaned: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
-            let byte = Self::char_to_byte(&s.text_input, s.cursor_pos);
-            s.text_input.insert_str(byte, &cleaned);
-            s.cursor_pos += cleaned.chars().count();
+        if self.is_custom_focused() {
+            if let Some(s) = self.state.get_mut(self.current_tab) {
+                let cleaned: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
+                let byte = Self::char_to_byte(&s.custom_text, s.custom_cursor);
+                s.custom_text.insert_str(byte, &cleaned);
+                s.custom_cursor += cleaned.chars().count();
+            }
+            self.cursor.note_activity();
         }
-        self.cursor.note_activity();
     }
 
     /// Handle a single key code with no modifiers. The App passes the full
@@ -468,7 +665,95 @@ impl QuestionDialog {
             }
         }
 
-        // Tab navigation (Left/Right/h/l/Tab move between tabs on option tabs)
+        // SingleChoice custom row is an inline free-text field: printable keys
+        // type into it, Left/Right/Home/End move its cursor, Enter commits the
+        // custom answer and advances. Up/Down/Tab/Esc intentionally fall
+        // through so the user can still leave the row (arrows), switch tabs
+        // (Tab) or dismiss (Esc) while focused on it.
+        if !is_confirm && self.is_custom_focused() {
+            match code {
+                KeyCode::Char(ch) if !ctrl => {
+                    self.custom_insert_char(ch);
+                    return true;
+                }
+                KeyCode::Char('w') if ctrl => {
+                    self.custom_delete_word_before_cursor();
+                    return true;
+                }
+                KeyCode::Char(_) if ctrl => {
+                    return true;
+                }
+                KeyCode::Backspace => {
+                    if ctrl {
+                        self.custom_delete_word_before_cursor();
+                    } else {
+                        self.custom_delete_before_cursor();
+                    }
+                    return true;
+                }
+                KeyCode::Delete => {
+                    self.custom_delete_at_cursor();
+                    return true;
+                }
+                KeyCode::Left => {
+                    if ctrl {
+                        self.custom_cursor_word_left();
+                    } else {
+                        self.custom_move_cursor(-1);
+                    }
+                    return true;
+                }
+                KeyCode::Right => {
+                    if ctrl {
+                        self.custom_cursor_word_right();
+                    } else {
+                        self.custom_move_cursor(1);
+                    }
+                    return true;
+                }
+                KeyCode::Home => {
+                    if let Some(s) = self.state.get_mut(self.current_tab) {
+                        s.custom_cursor = 0;
+                    }
+                    self.cursor.note_activity();
+                    return true;
+                }
+                KeyCode::End => {
+                    if let Some(s) = self.state.get_mut(self.current_tab) {
+                        s.custom_cursor = s.custom_text.chars().count();
+                    }
+                    self.cursor.note_activity();
+                    return true;
+                }
+                KeyCode::Tab => {
+                    if tab_count > 1 {
+                        self.current_tab = (self.current_tab + 1) % tab_count;
+                        self.selected_row = 0;
+                        self.text_scroll = 0;
+                    }
+                    return true;
+                }
+                KeyCode::Enter => {
+                    if let Some(custom) = self.custom_index(self.current_tab)
+                        && let Some(s) = self.state.get_mut(self.current_tab)
+                    {
+                        s.single_selection = Some(custom);
+                        s.answered = true;
+                    }
+                    if tab_count > 1 {
+                        self.current_tab = (self.current_tab + 1) % tab_count;
+                        self.selected_row = 0;
+                        self.text_scroll = 0;
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        // Tab navigation (Left/Right/h/l/Tab move between tabs on option tabs).
+        // While the custom input is focused, Left/Right/Tab/h/l are consumed
+        // by the custom-editing block above, so they never reach here.
         match code {
             KeyCode::Left | KeyCode::Char('h') => {
                 if tab_count > 1 {
@@ -692,7 +977,11 @@ impl QuestionDialog {
                 return true;
             }
         } else {
-            let start_y = area.y + 1 + u16::from(tab_count > 1) + 1; // after tabs + separator
+            // Same layout as `render`: top pad (1), plus the tab-bar row and
+            // its separator (+2) only when several questions share the dialog
+            // (`questions.len()`, not the `+1` confirm count used below for
+            // navigation).
+            let start_y = area.y + 1 + 2 * u16::from(self.questions.len() > 1);
             let opt_rows = self.option_row_count(self.current_tab, inner_w);
             // The question-text region occupies a fixed number of rows; the
             // options start right below it (plus a 1-row gap). Same layout as
@@ -703,65 +992,120 @@ impl QuestionDialog {
                 .saturating_sub(1);
             let option_y = start_y + text_h + 1;
 
-            if let Some(q) = self.questions.get(self.current_tab) {
-                let wrapped = self.option_wrapped_lines(self.current_tab, inner_w);
-                // Hit-test each option across its wrapped rows
-                let mut oy = option_y;
-                for (row, lines) in wrapped.iter().enumerate() {
-                    let rows = lines.len() as u16;
-                    if y_click >= oy && y_click < oy + rows {
-                        self.selected_row = row;
-                        match q.question_type {
-                            QuestionType::Text => {
-                                // Click the input field: place the cursor at the
-                                // clicked character position.
-                                let text_x = inner_x + 2; // after the "  " prefix
-                                if let Some(s) = self.state.get_mut(self.current_tab) {
-                                    let len = s.text_input.chars().count();
-                                    let field_w = inner_w.saturating_sub(2) as usize;
-                                    // Replicate `render`'s h_scroll so clicks land
-                                    // on the characters currently visible.
-                                    let h_scroll = if s.cursor_pos >= field_w && len > field_w {
-                                        s.cursor_pos - field_w + 1
-                                    } else {
-                                        0
-                                    };
-                                    let clicked = (i64::from(x).saturating_sub(i64::from(text_x)))
-                                        .max(0)
-                                        as usize;
-                                    s.cursor_pos = (h_scroll + clicked).min(len);
-                                }
-                                self.cursor.note_activity();
-                                return true;
+            if let Some(q) = self.questions.get(self.current_tab).cloned() {
+                let tab = self.current_tab;
+                // Same viewport as `render_options`: visible window over the
+                // flat rows starting at `opt_scroll`.
+                let capacity = footer_y.saturating_sub(option_y) as usize;
+                self.ensure_selected_visible(tab, inner_w, capacity);
+                let flat = self.flat_option_rows(tab, inner_w);
+                let custom_idx = self.custom_index(tab);
+                let base = self.opt_scroll;
+                for (ai, frow) in flat.iter().enumerate().skip(base).take(capacity) {
+                    let oy = option_y + (ai - base) as u16;
+                    if y_click != oy {
+                        continue;
+                    }
+                    match frow {
+                        OptFlatRow::CustomInput => {
+                            // Clicking the input focuses the custom row and
+                            // places the cursor, mirroring Text input clicks.
+                            if let Some(custom) = custom_idx {
+                                self.selected_row = custom;
                             }
-                            QuestionType::SingleChoice | QuestionType::YesNo => {
-                                if let Some(s) = self.state.get_mut(self.current_tab) {
-                                    s.single_selection = Some(row);
-                                    s.answered = true;
-                                }
-                                // Move to next tab
-                                if tab_count > 1 {
-                                    self.current_tab = (self.current_tab + 1) % tab_count;
-                                    self.selected_row = 0;
-                                    self.text_scroll = 0;
-                                }
-                                return true;
+                            let text_x = inner_x + 2;
+                            if let Some(s) = self.state.get_mut(tab) {
+                                let len = s.custom_text.chars().count();
+                                let field_w = inner_w.saturating_sub(2) as usize;
+                                let h_scroll = if s.custom_cursor >= field_w && len > field_w {
+                                    s.custom_cursor - field_w + 1
+                                } else {
+                                    0
+                                };
+                                let clicked = (i64::from(x).saturating_sub(i64::from(text_x)))
+                                    .max(0) as usize;
+                                s.custom_cursor = (h_scroll + clicked).min(len);
                             }
-                            QuestionType::MultiChoice => {
-                                if let Some(s) = self.state.get_mut(self.current_tab) {
-                                    if let Some(pos) =
-                                        s.multi_selection.iter().position(|&i| i == row)
-                                    {
-                                        s.multi_selection.remove(pos);
-                                    } else {
-                                        s.multi_selection.push(row);
+                            self.cursor.note_activity();
+                            return true;
+                        }
+                        // A gap row acts as its option above (generous click
+                        // target): clicking breathing space selects just like
+                        // clicking the option itself.
+                        OptFlatRow::Label { row, .. } | OptFlatRow::Gap { row } => {
+                            let row = *row;
+                            self.selected_row = row;
+                            match q.question_type {
+                                QuestionType::Text => {
+                                    // Click the input field: place the cursor at the
+                                    // clicked character position.
+                                    let text_x = inner_x + 2; // after the "  " prefix
+                                    if let Some(s) = self.state.get_mut(tab) {
+                                        let len = s.text_input.chars().count();
+                                        let field_w = inner_w.saturating_sub(2) as usize;
+                                        // Replicate `render`'s h_scroll so clicks land
+                                        // on the characters currently visible.
+                                        let h_scroll = if s.cursor_pos >= field_w && len > field_w {
+                                            s.cursor_pos - field_w + 1
+                                        } else {
+                                            0
+                                        };
+                                        let clicked =
+                                            (i64::from(x).saturating_sub(i64::from(text_x))).max(0)
+                                                as usize;
+                                        s.cursor_pos = (h_scroll + clicked).min(len);
                                     }
+                                    self.cursor.note_activity();
+                                    return true;
                                 }
-                                return true;
+                                QuestionType::SingleChoice => {
+                                    let is_custom = custom_idx == Some(row);
+                                    if is_custom {
+                                        // Focus the custom input; don't advance —
+                                        // the user still has to type + Enter.
+                                        self.cursor.note_activity();
+                                        return true;
+                                    }
+                                    if let Some(s) = self.state.get_mut(tab) {
+                                        s.single_selection = Some(row);
+                                        s.answered = true;
+                                    }
+                                    // Move to next tab
+                                    if tab_count > 1 {
+                                        self.current_tab = (self.current_tab + 1) % tab_count;
+                                        self.selected_row = 0;
+                                        self.text_scroll = 0;
+                                    }
+                                    return true;
+                                }
+                                QuestionType::YesNo => {
+                                    if let Some(s) = self.state.get_mut(tab) {
+                                        s.single_selection = Some(row);
+                                        s.answered = true;
+                                    }
+                                    // Move to next tab
+                                    if tab_count > 1 {
+                                        self.current_tab = (self.current_tab + 1) % tab_count;
+                                        self.selected_row = 0;
+                                        self.text_scroll = 0;
+                                    }
+                                    return true;
+                                }
+                                QuestionType::MultiChoice => {
+                                    if let Some(s) = self.state.get_mut(tab) {
+                                        if let Some(pos) =
+                                            s.multi_selection.iter().position(|&i| i == row)
+                                        {
+                                            s.multi_selection.remove(pos);
+                                        } else {
+                                            s.multi_selection.push(row);
+                                        }
+                                    }
+                                    return true;
+                                }
                             }
                         }
                     }
-                    oy += rows;
                 }
             }
 
@@ -786,12 +1130,29 @@ impl QuestionDialog {
 
     /// Calculate the required height for the dialog.
     /// Public so that the App can allocate space before rendering.
+    ///
+    /// Growth policy: the box grows to fit its content for as long as the
+    /// screen allows — the only limit is the App-level responsive clamp
+    /// (`max_dialog_h`, i.e. the free space above the footer). Scrolling
+    /// (question text first, then the options viewport with focus-follow) only
+    /// engages past that budget, as a last resort. Deliberately there is NO
+    /// absolute content cap (unlike the prompt box, whose typing area caps at
+    /// `MAX_PROMPT_LINES`): an absolute cap would fold questionnaire items
+    /// away while free screen space is still available.
     pub fn required_height(&self, max_width: u16) -> u16 {
         if !self.visible {
             return 0;
         }
 
-        let padding_vertical = 5u16;
+        // Vertical chrome: top pad (1) + question/options gap (1) + bottom
+        // pad (1), plus the tab-bar row and its separator (1 + 1) only when
+        // several questions share the dialog. The footer hints row is counted
+        // separately.
+        let padding_vertical = 3u16;
+        // Tab-bar row + separator row, only when several questions share the
+        // dialog (mirrors `render`, where a lone question gets a single top
+        // pad row and no separator).
+        let tab_chrome = 2 * u16::from(self.questions.len() > 1);
         let footer = 1u16;
         // pad(3) + 2, matching `inner_w` used by `render`.
         let inner_w = max_width.saturating_sub(5);
@@ -811,15 +1172,14 @@ impl QuestionDialog {
                     rows += Self::wrap_decorated(purpose, "  └ ", "", inner_w).len() as u16;
                 }
             }
-            padding_vertical + rows + footer
+            padding_vertical + rows + tab_chrome + footer
         } else if let Some(q) = self.questions.get(self.current_tab) {
-            let tabs = u16::from(self.questions.len() > 1);
             let q_lines = Self::wrap_text(&q.question, inner_w).len() as u16;
             let p_lines = q.purpose.as_ref().map_or(0, |p| {
                 Self::wrap_decorated(p, "  (", ")", inner_w).len() as u16
             });
             let opt_rows = self.option_row_count(self.current_tab, inner_w);
-            padding_vertical + q_lines.max(1) + p_lines + opt_rows + tabs + footer
+            padding_vertical + q_lines.max(1) + p_lines + opt_rows + tab_chrome + footer
         } else {
             padding_vertical + footer
         }
@@ -838,6 +1198,67 @@ impl QuestionDialog {
             return;
         }
         self.text_scroll = self.text_scroll.saturating_sub(SCROLL_STEP);
+    }
+
+    /// Move keyboard focus by `delta` selectable rows, clamped at the ends.
+    /// Unlike Up/Down (which wrap), the wheel never wraps — it just stops at
+    /// the first/last option. Focus-only: nothing is committed and the tab
+    /// never changes; the viewport auto-follows on the next render.
+    fn move_focus(&mut self, delta: i32) {
+        let count = self.row_count(self.current_tab) as i32;
+        if count <= 0 {
+            return;
+        }
+        let next = (self.selected_row as i32 + delta).clamp(0, count - 1);
+        self.selected_row = next as usize;
+    }
+
+    /// Handle a mouse-wheel notch over the dialog (`area` is the area passed
+    /// to `render()`). The wheel is routed by region so every folded content
+    /// stays reachable by mouse: over the options viewport it walks focus
+    /// through the options (the viewport auto-follows); anywhere else it
+    /// scrolls the question text (or the review screen), as before.
+    /// Returns true when the dialog is visible (the notch is consumed).
+    pub fn handle_wheel(&mut self, y: u16, area: Rect, down: bool) -> bool {
+        if !self.visible {
+            return false;
+        }
+        if self.is_confirm() {
+            // Review screen scrolls through `text_scroll`.
+            if down {
+                self.scroll_down();
+            } else {
+                self.scroll_up();
+            }
+            return true;
+        }
+        // Same layout as `render`/`handle_mouse`: top pad (1), plus the
+        // tab-bar row and its separator (+2) only for several questions.
+        let inner_w = area.width.saturating_sub(5);
+        let height = self.required_height(area.width).min(area.height);
+        let footer_y = area.y + height.saturating_sub(2);
+        let start_y = area.y + 1 + 2 * u16::from(self.questions.len() > 1);
+        let opt_rows = self.option_row_count(self.current_tab, inner_w);
+        let text_h = footer_y
+            .saturating_sub(start_y)
+            .saturating_sub(opt_rows)
+            .saturating_sub(1);
+        let option_y = start_y + text_h + 1;
+
+        let is_options_tab = self.questions.get(self.current_tab).is_some_and(|q| {
+            matches!(
+                q.question_type,
+                QuestionType::SingleChoice | QuestionType::YesNo | QuestionType::MultiChoice
+            )
+        });
+        if is_options_tab && y >= option_y && y < footer_y {
+            self.move_focus(if down { 1 } else { -1 });
+        } else if down {
+            self.scroll_down();
+        } else {
+            self.scroll_up();
+        }
+        true
     }
 
     /// Wrap `text` into display lines of at most `width` characters.
@@ -941,40 +1362,137 @@ impl QuestionDialog {
     }
 
     /// Wrapped display lines for each option of the given tab. The option text
-    /// width excludes the 3-column indicator (`◉ ` / `☐ ` etc.).
+    /// width excludes the 3-column indicator (`◉ ` / `☐ ` etc.). For
+    /// `SingleChoice` the last entry is always the virtual
+    /// [`CUSTOM_RESPONSE_LABEL`] row appended by the TUI.
     fn option_wrapped_lines(&self, tab: usize, inner_w: u16) -> Vec<Vec<String>> {
         let Some(q) = self.questions.get(tab) else {
             return Vec::new();
         };
-        let opts: Vec<&str> = match q.question_type {
+        let opt_w = inner_w.saturating_sub(3);
+        match q.question_type {
             // The text input field occupies a single row; the placeholder line
             // keeps `option_row_count`/hit-testing consistent with the other
             // question types.
-            QuestionType::Text => return vec![vec![String::new()]],
-            QuestionType::YesNo => vec!["Yes", "No"],
-            QuestionType::SingleChoice | QuestionType::MultiChoice => q
+            QuestionType::Text => vec![vec![String::new()]],
+            QuestionType::YesNo => vec!["Yes", "No"]
+                .into_iter()
+                .map(|o| Self::wrap_text(o, opt_w))
+                .collect(),
+            QuestionType::MultiChoice => q
                 .options
                 .as_deref()
-                .map(|o| o.iter().map(String::as_str).collect())
-                .unwrap_or_default(),
-        };
-        let opt_w = inner_w.saturating_sub(3);
-        opts.into_iter()
-            .map(|o| Self::wrap_text(o, opt_w))
-            .collect()
+                .map(|o| o.iter().map(String::as_str).collect::<Vec<_>>())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|o| Self::wrap_text(o, opt_w))
+                .collect(),
+            QuestionType::SingleChoice => {
+                let mut out: Vec<Vec<String>> = Vec::new();
+                if let Some(opts) = q.options.as_deref() {
+                    for opt in opts {
+                        out.push(Self::wrap_text(&Self::display_option(q, opt), opt_w));
+                    }
+                }
+                out.push(Self::wrap_text(CUSTOM_RESPONSE_LABEL, opt_w));
+                out
+            }
+        }
     }
 
-    /// Total display rows occupied by the given tab's options (wrapped).
+    /// Total display rows occupied by the given tab's options: wrapped lines,
+    /// the SingleChoice custom-answer input line, and the blank gap row after
+    /// each option block but the last. Defined via [`Self::flat_option_rows`]
+    /// so height math can never drift from what is rendered and hit-tested.
     fn option_row_count(&self, tab: usize, inner_w: u16) -> u16 {
-        self.option_wrapped_lines(tab, inner_w)
+        self.flat_option_rows(tab, inner_w).len() as u16
+    }
+
+    /// Flat display rows of the options viewport for `tab`, in order: every
+    /// wrapped option line, the custom input line below the custom row, and a
+    /// blank gap row after each option block — between blocks so the eye can
+    /// tell where one option ends and the next begins, plus one trailing the
+    /// custom input so it never glues to the footer. Each entry is exactly
+    /// one terminal row.
+    fn flat_option_rows(&self, tab: usize, inner_w: u16) -> Vec<OptFlatRow> {
+        let wrapped = self.option_wrapped_lines(tab, inner_w);
+        let last = wrapped.len().saturating_sub(1);
+        let mut out = Vec::new();
+        for (row, lines) in wrapped.iter().enumerate() {
+            for line in lines {
+                out.push(OptFlatRow::Label {
+                    row,
+                    text: line.clone(),
+                });
+            }
+            let is_custom_input =
+                self.custom_index(tab) == Some(row) && self.should_show_custom_input(tab);
+            if is_custom_input {
+                out.push(OptFlatRow::CustomInput);
+            }
+            if row < last || is_custom_input {
+                out.push(OptFlatRow::Gap { row });
+            }
+        }
+        out
+    }
+
+    /// Absolute flat-row range `[start, end)` of selectable option `row`
+    /// (including its custom input line when present). `None` when `row` is
+    /// out of range (e.g. an empty `MultiChoice` payload rejected later).
+    fn option_flat_range(&self, tab: usize, inner_w: u16, row: usize) -> Option<(usize, usize)> {
+        let flat = self.flat_option_rows(tab, inner_w);
+        let start = flat
             .iter()
-            .map(|lines| lines.len() as u16)
-            .sum()
+            .position(|r| matches!(r, OptFlatRow::Label { row: r, .. } if *r == row))?;
+        // The block runs through the option's wrapped lines plus, for the
+        // custom row, its trailing input line (by construction it follows
+        // immediately).
+        let mut end = start;
+        while end < flat.len() {
+            match &flat[end] {
+                OptFlatRow::Label { row: r, .. } if *r == row => end += 1,
+                OptFlatRow::CustomInput => {
+                    // Only reachable right after the custom row's own lines.
+                    end += 1;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        Some((start, end))
+    }
+
+    /// Clamp `opt_scroll` so the `selected_row` block is visible inside a
+    /// viewport of `capacity` flat rows. Shifts minimally; when the block is
+    /// taller than the viewport its start is shown. With room to spare the
+    /// offset returns to 0 (no scroll chrome in the common case).
+    fn ensure_selected_visible(&mut self, tab: usize, inner_w: u16, capacity: usize) {
+        let total = self.flat_option_rows(tab, inner_w).len();
+        if capacity == 0 || total <= capacity {
+            self.opt_scroll = 0;
+            return;
+        }
+        let max_scroll = total.saturating_sub(capacity);
+        let Some((s0, s1)) = self.option_flat_range(tab, inner_w, self.selected_row) else {
+            self.opt_scroll = self.opt_scroll.min(max_scroll);
+            return;
+        };
+        if s0 < self.opt_scroll {
+            self.opt_scroll = s0;
+        } else if s1 > self.opt_scroll.saturating_add(capacity) {
+            if s1.saturating_sub(s0) >= capacity {
+                self.opt_scroll = s0;
+            } else {
+                self.opt_scroll = s1.saturating_sub(capacity);
+            }
+        }
+        self.opt_scroll = self.opt_scroll.min(max_scroll);
     }
 
     /// Render the question prompt inline inside the given area.
     /// `now` drives the input cursor's blink state (passed by the App).
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime) {
+    pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime) {
         if !self.visible {
             return;
         }
@@ -1077,10 +1595,13 @@ impl QuestionDialog {
                 }
             }
             y_pos += 1;
+            // --- Separator between the tab bar and the content ---
+            y_pos += 1;
         }
 
-        // --- Separator ---
-        y_pos += 1;
+        // Hidden option rows above/below the viewport (last-resort overflow
+        // only). Shown in the footer so folded items never feel "missing".
+        let mut opt_overflow: (usize, usize) = (0, 0);
 
         if is_confirm {
             self.render_review(buf, inner_x, inner_w, y_pos, footer_y, theme);
@@ -1181,7 +1702,9 @@ impl QuestionDialog {
                     }
                 }
                 QuestionType::YesNo | QuestionType::SingleChoice | QuestionType::MultiChoice => {
-                    self.render_options(buf, inner_x, inner_w, option_y, footer_y, theme);
+                    self.render_options(buf, inner_x, inner_w, option_y, footer_y, theme, now);
+                    let capacity = footer_y.saturating_sub(option_y) as usize;
+                    opt_overflow = self.options_overflow(self.current_tab, inner_w, capacity);
                 }
             }
         }
@@ -1228,8 +1751,56 @@ impl QuestionDialog {
         let enter_label = if is_confirm { "submit" } else { "confirm" };
         hint!("enter", enter_label, 1);
         hint!("esc", "dismiss", 0);
+        // Last-resort overflow affordance: when option rows fold above or
+        // below the viewport, say how many — folded items must read as
+        // scrollable, never as missing.
+        if !is_confirm {
+            let (above, below) = opt_overflow;
+            if above > 0 {
+                let label = format!("↑{above} more");
+                let w = label.chars().count() as u16;
+                draw_text_line(
+                    buf,
+                    &label,
+                    fx,
+                    footer_y,
+                    inner_w.saturating_sub(fx - inner_x),
+                    Style::default().fg(desc_fg).bg(bg),
+                );
+                fx += w + 1;
+            }
+            if below > 0 {
+                let label = format!("↓{below} more");
+                draw_text_line(
+                    buf,
+                    &label,
+                    fx,
+                    footer_y,
+                    inner_w.saturating_sub(fx - inner_x),
+                    Style::default().fg(desc_fg).bg(bg),
+                );
+                fx += label.chars().count() as u16 + 1;
+            }
+        }
         // Suppress "value assigned to `fx` is never read" warning
         let _ = fx;
+    }
+
+    /// Hidden CONTENT rows above/below a viewport of `capacity` flat rows.
+    /// Blank gap rows never count — the footer must flag folded items, not
+    /// breathing space. `(0, 0)` in the common case: everything fits.
+    fn options_overflow(&self, tab: usize, inner_w: u16, capacity: usize) -> (usize, usize) {
+        let flat = self.flat_option_rows(tab, inner_w);
+        let total = flat.len();
+        if total <= capacity {
+            return (0, 0);
+        }
+        let is_content = |r: &&OptFlatRow| !matches!(r, OptFlatRow::Gap { .. });
+        let above = self.opt_scroll.min(total);
+        let visible = capacity.min(total.saturating_sub(above));
+        let above_n = flat[..above].iter().filter(is_content).count();
+        let below_n = flat[above + visible..].iter().filter(is_content).count();
+        (above_n, below_n)
     }
 
     /// Render the confirm/review screen. Rows wrap and scroll when the box is
@@ -1308,110 +1879,191 @@ impl QuestionDialog {
         out
     }
 
-    /// Render YesNo / SingleChoice / MultiChoice options. Option labels wrap;
-    /// the active option's highlight spans all of its wrapped rows.
+    /// Render YesNo / SingleChoice / MultiChoice options inside a viewport of
+    /// `bottom - start_y` rows. The focused row uses the standard `🞴`
+    /// marker (same pattern as the permission box) — no background wash —
+    /// and a committed-but-unfocused row keeps its `🞴` in the accent color,
+    /// so focus and previous answer stay distinguishable. The custom row uses
+    /// the same markers (no pencil) to keep the list uniform. When the flat
+    /// rows exceed the viewport (last-resort overflow only — the box grows
+    /// first), the window auto-follows `selected_row`.
+    #[allow(clippy::too_many_arguments)]
     fn render_options(
-        &self,
+        &mut self,
         buf: &mut Buffer,
         inner_x: u16,
         inner_w: u16,
         start_y: u16,
         bottom: u16,
         theme: &Theme,
+        now: SystemTime,
     ) {
-        let Some(q) = self.questions.get(self.current_tab) else {
+        let Some(q) = self.questions.get(self.current_tab).cloned() else {
             return;
         };
-        let wrapped = self.option_wrapped_lines(self.current_tab, inner_w);
+        let tab = self.current_tab;
+        let capacity = bottom.saturating_sub(start_y) as usize;
+        self.ensure_selected_visible(tab, inner_w, capacity);
+        let flat = self.flat_option_rows(tab, inner_w);
         let opt_w = inner_w.saturating_sub(3);
-        let mut row_y = start_y;
-        for (i, lines) in wrapped.iter().enumerate() {
-            if row_y >= bottom {
-                break;
-            }
-            let is_active = i == self.selected_row;
 
-            let (indicator, indicator_color) = match q.question_type {
-                QuestionType::YesNo | QuestionType::SingleChoice => {
-                    let is_selected = self
-                        .state
-                        .get(self.current_tab)
-                        .is_some_and(|s| s.single_selection == Some(i));
-                    let ind = if is_selected { "🞴" } else { "  " };
-                    let col = if is_selected {
-                        theme.accent
-                    } else if is_active {
-                        theme.secondary
-                    } else {
-                        theme.text_muted
-                    };
-                    (ind, col)
+        // Absolute flat index of the first visible row, to detect each
+        // option's first wrapped line (the only one carrying the marker).
+        let base = self.opt_scroll;
+        for (vi, (ai, frow)) in flat
+            .iter()
+            .enumerate()
+            .skip(base)
+            .take(capacity)
+            .enumerate()
+        {
+            let ry = start_y + vi as u16;
+            match frow {
+                OptFlatRow::CustomInput => {
+                    self.render_custom_input(buf, inner_x, inner_w, ry, theme, now);
                 }
-                QuestionType::MultiChoice => {
-                    let is_checked = self
-                        .state
-                        .get(self.current_tab)
-                        .is_some_and(|s| s.multi_selection.contains(&i));
-                    let ind = if is_checked { "☑ " } else { "☐ " };
-                    let col = if is_checked {
-                        theme.accent
-                    } else if is_active {
-                        theme.secondary
-                    } else {
-                        theme.text_muted
-                    };
-                    (ind, col)
-                }
-                QuestionType::Text => unreachable!("Text questions have no options"),
-            };
+                // Breathing row: leave the panel background alone so the
+                // options above and below read as separate items.
+                OptFlatRow::Gap { .. } => {}
+                OptFlatRow::Label { row: i, text: line } => {
+                    let i = *i;
+                    let is_focused = i == self.selected_row;
+                    // First wrapped line of the option: the previous flat row
+                    // belongs to a different option (or is the input line, or
+                    // there is no previous row).
+                    let is_first_line = !matches!(
+                        ai.checked_sub(1).and_then(|p| flat.get(p)),
+                        Some(OptFlatRow::Label { row: prev, .. }) if *prev == i
+                    );
 
-            // Highlight every wrapped row of the active option.
-            if is_active {
-                let bg_color = rgba_color(theme.background_element);
-                for r in 0..lines.len() as u16 {
-                    let ry = row_y + r;
-                    if ry >= bottom {
-                        break;
-                    }
-                    for cx in inner_x..inner_x + inner_w {
-                        if let Some(cell) = buf.cell_mut((cx, ry)) {
-                            cell.set_char(' ');
-                            cell.set_style(Style::default().bg(bg_color));
+                    let (indicator, indicator_color) = match q.question_type {
+                        QuestionType::YesNo | QuestionType::SingleChoice => {
+                            let is_committed = self
+                                .state
+                                .get(tab)
+                                .is_some_and(|s| s.single_selection == Some(i));
+                            let marked = is_focused || is_committed;
+                            let ind = if marked { "🞴 " } else { "  " };
+                            let col = if is_committed {
+                                theme.accent
+                            } else if is_focused {
+                                theme.secondary
+                            } else {
+                                theme.text_muted
+                            };
+                            (ind, col)
                         }
-                    }
-                }
-            }
+                        QuestionType::MultiChoice => {
+                            let is_checked = self
+                                .state
+                                .get(tab)
+                                .is_some_and(|s| s.multi_selection.contains(&i));
+                            let ind = if is_checked { "☑ " } else { "☐ " };
+                            let col = if is_checked {
+                                theme.accent
+                            } else if is_focused {
+                                theme.secondary
+                            } else {
+                                theme.text_muted
+                            };
+                            (ind, col)
+                        }
+                        QuestionType::Text => unreachable!("Text questions have no options"),
+                    };
 
-            for (r, line) in lines.iter().enumerate() {
-                let ry = row_y + r as u16;
-                if ry >= bottom {
-                    break;
-                }
-                if r == 0 {
+                    if is_first_line {
+                        draw_text_line(
+                            buf,
+                            indicator,
+                            inner_x,
+                            ry,
+                            inner_w,
+                            Style::default().fg(rgba_color(indicator_color)),
+                        );
+                    }
+                    let opt_fg = if is_focused {
+                        theme.secondary
+                    } else {
+                        theme.text
+                    };
                     draw_text_line(
                         buf,
-                        indicator,
-                        inner_x,
+                        line,
+                        inner_x + 3,
                         ry,
-                        inner_w,
-                        Style::default().fg(rgba_color(indicator_color)),
+                        opt_w,
+                        Style::default().fg(rgba_color(opt_fg)),
                     );
                 }
-                let opt_fg = if is_active {
-                    theme.secondary
-                } else {
-                    theme.text
-                };
-                draw_text_line(
-                    buf,
-                    line,
-                    inner_x + 3,
-                    ry,
-                    opt_w,
-                    Style::default().fg(rgba_color(opt_fg)),
-                );
             }
-            row_y += lines.len() as u16;
+        }
+    }
+
+    /// Render the SingleChoice custom-answer input line (single-line field
+    /// with placeholder + blinking cursor, mirroring the Text tab).
+    fn render_custom_input(
+        &self,
+        buf: &mut Buffer,
+        inner_x: u16,
+        inner_w: u16,
+        y: u16,
+        theme: &Theme,
+        now: SystemTime,
+    ) {
+        let state = self.state.get(self.current_tab);
+        let input = state.map_or(String::new(), |s| s.custom_text.clone());
+        let cursor_pos = state.map_or(0, |s| s.custom_cursor);
+        let chars: Vec<char> = input.chars().collect();
+        let field_w = inner_w.saturating_sub(2) as usize; // after "  " prefix
+        let h_scroll = if cursor_pos >= field_w && chars.len() > field_w {
+            cursor_pos - field_w + 1
+        } else {
+            0
+        };
+        let show_placeholder = input.is_empty();
+        let input_fg = if show_placeholder {
+            rgba_color(theme.text_muted)
+        } else {
+            rgba_color(theme.text)
+        };
+        let bg = rgba_color(theme.background_panel);
+        let style = Style::default().fg(input_fg).bg(bg);
+
+        draw_text_line(buf, "  ", inner_x, y, inner_w, style);
+        let text_x = inner_x + 2;
+        let visible: String = if show_placeholder {
+            CUSTOM_PLACEHOLDER.chars().take(field_w).collect()
+        } else {
+            chars.iter().skip(h_scroll).take(field_w).collect()
+        };
+        for (i, ch) in visible.chars().enumerate() {
+            let cx = text_x + i as u16;
+            if cx >= text_x + field_w as u16 {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                cell.set_char(ch);
+                cell.set_style(style);
+            }
+        }
+
+        // Blinking cursor only while the custom row is focused; otherwise the
+        // typed draft stays visible without stealing the blink.
+        if self.is_custom_focused() {
+            let cursor_cell = cursor_pos.saturating_sub(h_scroll);
+            let cx = text_x + cursor_cell as u16;
+            if cx <= text_x + field_w as u16
+                && let Some(cell) = buf.cell_mut((cx, y))
+            {
+                match self.cursor.current_state(now) {
+                    CursorState::On => {
+                        cell.set_style(Style::default().fg(bg).bg(rgba_color(theme.text)));
+                    }
+                    CursorState::Off | CursorState::Blur => {
+                        cell.set_style(Style::default().fg(rgba_color(theme.text_muted)).bg(bg));
+                    }
+                }
+            }
         }
     }
 
@@ -1426,6 +2078,7 @@ impl QuestionDialog {
 
         if !s.answered
             && s.text_input.is_empty()
+            && s.custom_text.is_empty()
             && s.single_selection.is_none()
             && s.multi_selection.is_empty()
         {
@@ -1445,10 +2098,27 @@ impl QuestionDialog {
                 Some(1) => "No".into(),
                 _ => "(not answered)".into(),
             },
-            QuestionType::SingleChoice => s
-                .single_selection
-                .and_then(|i| q.options.as_ref()?.get(i).cloned())
-                .unwrap_or_else(|| "(not answered)".into()),
+            QuestionType::SingleChoice => {
+                let custom = q.options.as_ref().map_or(0, Vec::len);
+                if s.single_selection == Some(custom) {
+                    if s.custom_text.is_empty() {
+                        "(type your custom answer...)".into()
+                    } else {
+                        s.custom_text.clone()
+                    }
+                } else {
+                    s.single_selection
+                        .and_then(|i| q.options.as_ref()?.get(i).cloned())
+                        .unwrap_or_else(|| {
+                            if s.custom_text.is_empty() {
+                                "(not answered)".into()
+                            } else {
+                                // Typed but not committed yet: preview the draft.
+                                s.custom_text.clone()
+                            }
+                        })
+                }
+            }
             QuestionType::MultiChoice => {
                 let selected: Vec<&str> = s
                     .multi_selection
@@ -1488,6 +2158,7 @@ mod tests {
             purpose: None,
             options,
             required: true,
+            recommended: None,
         }
     }
 
@@ -1574,9 +2245,12 @@ mod tests {
             QuestionType::SingleChoice,
             Some(vec![long]),
         )]);
-        // 80 chars at width 37 (40 - 3 indicator column) → 3 wrapped rows.
-        assert_eq!(d.option_row_count(0, 40), 3);
-        assert_eq!(d.option_wrapped_lines(0, 40).len(), 1);
+        // 80 chars at width 37 (40 - 3 indicator column) → 3 wrapped rows,
+        // plus the TUI-owned virtual custom row (1 wrapped row), its
+        // always-visible input line (+1), the breathing gap between the two
+        // blocks (+1) and the trailing gap below the input (+1).
+        assert_eq!(d.option_row_count(0, 40), 7);
+        assert_eq!(d.option_wrapped_lines(0, 40).len(), 2);
         assert_eq!(d.option_wrapped_lines(0, 40)[0].len(), 3);
     }
 
@@ -1587,9 +2261,10 @@ mod tests {
         let width = 60u16;
         let height = d.required_height(width);
         // Layout math replicated from `render`: area.y = 0, single question
-        // (no tab bar), separator at y=1, footer at height-2.
+        // (no tab bar, hence no separator — just the top pad), footer at
+        // height-2.
         let footer_y = height.saturating_sub(2);
-        let y_pos = 2u16;
+        let y_pos = 1u16;
         let opt_rows = d.option_row_count(0, width.saturating_sub(5));
         let text_h = footer_y
             .saturating_sub(y_pos)
@@ -1759,5 +2434,587 @@ mod tests {
         assert!(lines[2].ends_with(')'));
         // Continuation lines align under the prefix.
         assert_eq!(lines[1].chars().take(2).collect::<String>(), "  ");
+    }
+
+    fn single_choice(id: &str, options: Vec<&str>, recommended: Option<&str>) -> QuestionItem {
+        QuestionItem {
+            id: id.to_string(),
+            question: "pick?".to_string(),
+            question_type: QuestionType::SingleChoice,
+            purpose: None,
+            options: Some(options.into_iter().map(str::to_string).collect()),
+            required: true,
+            recommended: recommended.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn single_choice_always_has_custom_row() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        // 2 model options + 1 TUI-owned custom row.
+        assert_eq!(d.row_count(0), 3);
+        assert_eq!(d.custom_index(0), Some(2));
+        let wrapped = d.option_wrapped_lines(0, 40);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[2], vec![super::CUSTOM_RESPONSE_LABEL.to_string()]);
+        // Other types never get the custom row.
+        d.show_questions(vec![question(
+            "m1",
+            QuestionType::MultiChoice,
+            Some(vec!["A".into()]),
+        )]);
+        assert_eq!(d.custom_index(0), None);
+        assert_eq!(d.row_count(0), 1);
+        d.show_questions(vec![question("y1", QuestionType::YesNo, None)]);
+        assert_eq!(d.custom_index(0), None);
+        assert_eq!(d.row_count(0), 2);
+    }
+
+    #[test]
+    fn single_choice_recommended_gets_badge() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice(
+            "s1",
+            vec!["Deltas", "Snapshots"],
+            Some("Snapshots"),
+        )]);
+        let wrapped = d.option_wrapped_lines(0, 40);
+        assert_eq!(wrapped[0], vec!["Deltas".to_string()]);
+        assert_eq!(wrapped[1], vec!["Snapshots (Recommended)".to_string()]);
+        // Badge matches by value even when the payload was not normalized
+        // (recommended not first) — the tool normally sorts it to the top.
+        assert_eq!(
+            QuestionDialog::display_option(&d.questions[0], "Snapshots"),
+            "Snapshots (Recommended)"
+        );
+        assert_eq!(
+            QuestionDialog::display_option(&d.questions[0], "Deltas"),
+            "Deltas"
+        );
+    }
+
+    #[test]
+    fn single_choice_regular_selection_still_works() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        // Highlight first row (regular option) + Enter commits it.
+        assert_eq!(d.selected_row, 0);
+        d.handle_key(KeyCode::Enter);
+        let answers = d.build_answers();
+        assert_eq!(answers[0].selected, Some(vec!["A".to_string()]));
+        assert_eq!(d.question_summary(0), "A");
+    }
+
+    #[test]
+    fn single_choice_custom_typing_commits_free_text() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        // Move to the virtual custom row (last).
+        d.handle_key(KeyCode::Down);
+        d.handle_key(KeyCode::Down);
+        assert_eq!(d.selected_row, 2);
+        assert!(d.is_custom_focused());
+        // Typing goes to the custom buffer, not to navigation.
+        for ch in "my way".chars() {
+            d.handle_key(KeyCode::Char(ch));
+        }
+        assert_eq!(d.state[0].custom_text, "my way");
+        // Enter commits the custom answer and it travels as the selection.
+        d.handle_key(KeyCode::Enter);
+        let answers = d.build_answers();
+        assert_eq!(answers[0].selected, Some(vec!["my way".to_string()]));
+        assert_eq!(d.question_summary(0), "my way");
+    }
+
+    #[test]
+    fn single_choice_custom_empty_counts_as_unanswered() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        d.handle_key(KeyCode::Down);
+        d.handle_key(KeyCode::Down);
+        d.handle_key(KeyCode::Enter); // commit with no text typed
+        let answers = d.build_answers();
+        assert_eq!(answers[0].selected, None);
+        assert!(d.question_summary(0).contains("custom"));
+    }
+
+    #[test]
+    fn single_choice_custom_input_row_counts_in_height() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A"], Some("A"))]);
+        // The box starts pre-expanded: 1 option + gap + custom label + its
+        // input line + trailing gap below the input, upfront — focusing the
+        // custom row shifts nothing.
+        assert_eq!(d.option_row_count(0, 40), 5);
+        d.handle_key(KeyCode::Down);
+        assert_eq!(d.option_row_count(0, 40), 5);
+    }
+
+    #[test]
+    fn single_choice_custom_backspace_and_cursor() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        d.handle_key(KeyCode::Down);
+        d.handle_key(KeyCode::Down);
+        d.handle_key(KeyCode::Char('a'));
+        d.handle_key(KeyCode::Char('b'));
+        d.handle_key(KeyCode::Left);
+        d.handle_key(KeyCode::Char('X'));
+        assert_eq!(d.state[0].custom_text, "aXb");
+        d.handle_key(KeyCode::Backspace);
+        assert_eq!(d.state[0].custom_text, "ab");
+    }
+
+    #[test]
+    fn single_choice_custom_paste() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A"], Some("A"))]);
+        d.handle_key(KeyCode::Down); // focus custom
+        d.handle_paste("hello\nworld");
+        assert_eq!(d.state[0].custom_text, "helloworld");
+    }
+
+    #[test]
+    fn single_choice_number_key_jumps_to_regular_option() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![
+            single_choice("s1", vec!["A", "B"], Some("A")),
+            question("t2", QuestionType::Text, None),
+        ]);
+        // '2' selects the second regular option and advances to the next tab.
+        d.handle_key(KeyCode::Char('2'));
+        assert_eq!(d.current_tab, 1);
+        // First question committed to "B" (answer built even off-tab).
+        // Re-open to inspect: build_answers reflects the committed selection.
+        assert_eq!(d.build_answers()[0].selected, Some(vec!["B".to_string()]));
+    }
+
+    // --- Rendering helpers (buffer assertions) ---------------------------
+
+    fn test_theme() -> crate::theme::Theme {
+        crate::theme::ThemeRegistry::new().default_theme().clone()
+    }
+
+    fn screen_text(buf: &ratatui::buffer::Buffer) -> String {
+        let area = buf.area;
+        let mut out = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn grow_first_custom_row_visible_without_scroll() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        // Realistic payload: 3 options + TUI custom row, ample terminal.
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice(
+            "s1",
+            vec!["Deltas because x", "Snapshots because y", "Neither"],
+            Some("Snapshots because y"),
+        )]);
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        d.render(&mut buf, area, &theme, std::time::SystemTime::now());
+
+        // No last-resort scrolling: everything fits, offset stays 0.
+        assert_eq!(d.opt_scroll, 0);
+        let screen = screen_text(&buf);
+        // Recommended badge on top area, custom row at the bottom — no
+        // scrolling needed to discover either. The box starts pre-expanded:
+        // the custom input (placeholder) is already on screen, nothing only
+        // appears after navigating first.
+        assert!(screen.contains("Snapshots because y (Recommended)"));
+        assert!(screen.contains(super::CUSTOM_RESPONSE_LABEL));
+        assert!(
+            screen.contains(super::CUSTOM_PLACEHOLDER),
+            "custom input must be visible upfront:\n{screen}"
+        );
+        // Uniform markers: the pencil glyph is gone.
+        assert!(!screen.contains('✎'));
+        // Focus uses the standard marker, not a background wash: no cell may
+        // carry the wash color.
+        assert!(screen.contains("🞴"));
+        let wash = crate::theme::rgba_color(theme.background_element);
+        for cell in buf.content() {
+            assert_ne!(
+                cell.bg, wash,
+                "option rows must not use a background highlight"
+            );
+        }
+    }
+
+    #[test]
+    fn overflow_viewport_follows_focus_to_custom_row() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        // 10 long options: flat rows far exceed a tiny viewport.
+        let opts: Vec<String> = (1..=10)
+            .map(|i| format!("Option {i} with quite a lot of explanatory text padded to wrap"))
+            .collect();
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![QuestionItem {
+            id: "big".to_string(),
+            question: "pick?".to_string(),
+            question_type: QuestionType::SingleChoice,
+            purpose: None,
+            options: Some(opts),
+            required: true,
+            recommended: None,
+        }]);
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 40, 14);
+
+        // Focused top: no scroll yet, custom row below the fold — and the
+        // footer says so (folded items read as scrollable, never missing).
+        let mut buf = Buffer::empty(area);
+        d.render(&mut buf, area, &theme, std::time::SystemTime::now());
+        assert_eq!(d.opt_scroll, 0);
+        let screen = screen_text(&buf);
+        assert!(!screen.contains(super::CUSTOM_RESPONSE_LABEL));
+        assert!(
+            screen.contains('↓'),
+            "footer must flag folded rows:\n{screen}"
+        );
+        assert!(screen.contains("more"));
+        assert!(!screen.contains('↑'));
+
+        // Walk the focus down to the virtual custom row: the viewport must
+        // follow so the focused row (and its input) stays visible.
+        for _ in 0..10 {
+            d.handle_key(KeyCode::Down);
+        }
+        assert_eq!(d.selected_row, 10);
+        let mut buf2 = Buffer::empty(area);
+        d.render(&mut buf2, area, &theme, std::time::SystemTime::now());
+        assert!(
+            d.opt_scroll > 0,
+            "overflow must scroll instead of stranding the focus"
+        );
+        let screen2 = screen_text(&buf2);
+        assert!(screen2.contains(super::CUSTOM_RESPONSE_LABEL));
+        assert!(screen2.contains(super::CUSTOM_PLACEHOLDER));
+        assert!(
+            screen2.contains('↑'),
+            "scrolled viewport must flag rows above"
+        );
+        assert!(!screen2.contains('↓'), "custom block ends the list");
+    }
+
+    #[test]
+    fn gaps_separate_question_and_options() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        // Minimal payload: question (1 row), no purpose, two 1-row options.
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        // Override the visible question text with a short one-liner.
+        d.questions[0].question = "Q?".to_string();
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        d.render(&mut buf, area, &theme, std::time::SystemTime::now());
+        let screen = screen_text(&buf);
+        let rows: Vec<&str> = screen.split('\n').collect();
+        // Layout (single question: top pad only, no separator): row 0 top
+        // pad, row 1 question text, row 2 exactly one blank gap row, row 3
+        // first option, row 4 breathing gap, row 5 second option.
+        assert!(
+            rows[1].contains("Q?"),
+            "question text at row 1:\n{}",
+            rows[1]
+        );
+        assert_eq!(
+            rows[2].trim(),
+            "┃",
+            "exactly one blank gap row before the options"
+        );
+        assert!(rows[3].contains('A'), "first option right after the gap");
+        assert_eq!(
+            rows[4].trim(),
+            "┃",
+            "breathing gap between options so each item reads apart"
+        );
+        assert!(rows[5].contains('B'), "second option after its gap");
+        // Trailing breathing gap below the custom input: it must never glue
+        // to the footer hints.
+        assert!(rows[8].contains("Type your custom answer..."));
+        assert_eq!(rows[9].trim(), "┃", "bottom gap below the input");
+        assert!(rows[10].contains("enter"), "footer hints after the gap");
+    }
+
+    #[test]
+    fn required_height_grows_to_fit_without_absolute_cap() {
+        // Growth contract: the box fits its content exactly for as long as
+        // the screen allows — no absolute cap may fold items away while free
+        // space remains (only the App-level responsive clamp may scroll).
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A"], Some("A"))]);
+        // content = question(1) + options(A + gap + custom + always-on
+        // input + trailing gap = 5) = 6
+        // → chrome(3) + tabs(0) + content(6) + footer(1) = 10.
+        assert_eq!(d.required_height(80), 10);
+
+        // Huge payload: 30 one-row options interleaved with 30 gap rows +
+        // custom + input + trailing gap = 63 option rows,
+        // content = 1 + 63 = 64 → uncapped: 3 + 64 + 1 = 68.
+        let many: Vec<String> = (0..30).map(|i| format!("Option {i}")).collect();
+        let mut d2 = QuestionDialog::new();
+        d2.show_questions(vec![QuestionItem {
+            id: "big".to_string(),
+            question: "pick?".to_string(),
+            question_type: QuestionType::SingleChoice,
+            purpose: None,
+            options: Some(many),
+            required: true,
+            recommended: None,
+        }]);
+        assert_eq!(d2.required_height(80), 3 + 64 + 1);
+    }
+
+    #[test]
+    fn committed_and_focused_rows_share_standard_marker() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        // Commit row 1, then navigate back: focus (row 0) and previous
+        // answer (row 1) both carry 🞴 — focus in secondary, answer in
+        // accent — with no background wash and no pencil.
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![
+            single_choice("s1", vec!["A", "B"], Some("A")),
+            question("t2", QuestionType::Text, None),
+        ]);
+        d.handle_key(KeyCode::Down); // focus B
+        d.handle_key(KeyCode::Enter); // commit B, advance to t2
+        assert_eq!(d.current_tab, 1);
+        // Back to s1 via Tab (Left/Right edit the Text tab's cursor).
+        d.handle_key(KeyCode::Tab); // t2 -> confirm
+        d.handle_key(KeyCode::Tab); // confirm -> s1 (focus resets to 0)
+        assert_eq!(d.current_tab, 0);
+        assert_eq!(d.selected_row, 0);
+
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        d.render(&mut buf, area, &theme, std::time::SystemTime::now());
+        let screen = screen_text(&buf);
+        assert_eq!(
+            screen.matches("🞴").count(),
+            2,
+            "focus and previous answer must both use the standard marker:\n{screen}"
+        );
+        assert!(!screen.contains('✎'));
+        let wash = crate::theme::rgba_color(theme.background_element);
+        for cell in buf.content() {
+            assert_ne!(cell.bg, wash);
+        }
+        // The committed answer still builds correctly.
+        assert_eq!(d.build_answers()[0].selected, Some(vec!["B".to_string()]));
+    }
+
+    #[test]
+    fn mouse_click_selects_option_and_focuses_custom() {
+        use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+        use ratatui::layout::Rect;
+        // Clicking a regular row commits it (advances); clicking the custom
+        // row only focuses it so the user can type.
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        let area = Rect::new(0, 0, 80, 24);
+        let h = d.required_height(area.width);
+        let inner_w = area.width.saturating_sub(5);
+        let footer_y = area.y + h.saturating_sub(2);
+        // Single-question dialogs in these tests draw no tab bar and no
+        // separator — just the single top pad row (mirrors `render`).
+        let start_y = area.y + 1;
+        let opt_rows = d.option_row_count(0, inner_w);
+        let text_h = footer_y
+            .saturating_sub(start_y)
+            .saturating_sub(opt_rows)
+            .saturating_sub(1);
+        let option_y = start_y + text_h + 1;
+
+        // Flat rows (single-line options): A(+0), gap(+1), B(+2), gap(+3),
+        // custom(+4), input(+5).
+        let click_b = MouseEvent::new(
+            MouseEventType::Up,
+            MouseButton::Left,
+            area.x + 5,
+            option_y + 2,
+            MouseModifiers::none(),
+        );
+        assert!(d.handle_mouse(&click_b, area));
+        // Single question + confirm tab → advances to confirm.
+        assert_eq!(d.current_tab, 1);
+        assert_eq!(d.build_answers()[0].selected, Some(vec!["B".to_string()]));
+
+        // Fresh dialog: clicking the breathing gap after "A" acts as "A"
+        // (generous click target).
+        let mut dg = QuestionDialog::new();
+        dg.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        let click_gap = MouseEvent::new(
+            MouseEventType::Up,
+            MouseButton::Left,
+            area.x + 5,
+            option_y + 1,
+            MouseModifiers::none(),
+        );
+        assert!(dg.handle_mouse(&click_gap, area));
+        assert_eq!(dg.current_tab, 1);
+        assert_eq!(dg.build_answers()[0].selected, Some(vec!["A".to_string()]));
+
+        // Fresh dialog: click the virtual custom row (index 2).
+        let mut d2 = QuestionDialog::new();
+        d2.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        let h2 = d2.required_height(area.width);
+        let footer_y2 = area.y + h2.saturating_sub(2);
+        let opt_rows2 = d2.option_row_count(0, inner_w);
+        let text_h2 = footer_y2
+            .saturating_sub(start_y)
+            .saturating_sub(opt_rows2)
+            .saturating_sub(1);
+        let option_y2 = start_y + text_h2 + 1;
+        let click_custom = MouseEvent::new(
+            MouseEventType::Up,
+            MouseButton::Left,
+            area.x + 5,
+            option_y2 + 4,
+            MouseModifiers::none(),
+        );
+        assert!(d2.handle_mouse(&click_custom, area));
+        // Focused, not committed: still on the tab, nothing answered yet.
+        assert_eq!(d2.current_tab, 0);
+        assert_eq!(d2.selected_row, 2);
+        assert!(d2.is_custom_focused());
+
+        // Click the input line right below: places the cursor.
+        let click_input = MouseEvent::new(
+            MouseEventType::Up,
+            MouseButton::Left,
+            area.x + 5,
+            option_y2 + 5,
+            MouseModifiers::none(),
+        );
+        assert!(d2.handle_mouse(&click_input, area));
+        assert_eq!(d2.selected_row, 2);
+    }
+
+    // --- Mouse-wheel routing -------------------------------------------
+
+    /// First options row for a single-question dialog, mirroring the dialog
+    /// layout (same formula as `render`/`handle_mouse`).
+    fn test_option_y(d: &QuestionDialog, area: ratatui::layout::Rect) -> u16 {
+        let inner_w = area.width.saturating_sub(5);
+        let height = d.required_height(area.width).min(area.height);
+        let footer_y = area.y + height.saturating_sub(2);
+        // Single-question dialogs in these tests draw no tab bar.
+        // Single-question dialogs in these tests draw no tab bar and no
+        // separator — just the single top pad row (mirrors `render`).
+        let start_y = area.y + 1;
+        let opt_rows = d.option_row_count(0, inner_w);
+        let text_h = footer_y
+            .saturating_sub(start_y)
+            .saturating_sub(opt_rows)
+            .saturating_sub(1);
+        start_y + text_h + 1
+    }
+
+    #[test]
+    fn wheel_hidden_dialog_consumes_nothing() {
+        use ratatui::layout::Rect;
+        let mut d = QuestionDialog::new();
+        assert!(!d.visible);
+        assert!(!d.handle_wheel(5, Rect::new(0, 0, 80, 24), true));
+    }
+
+    #[test]
+    fn wheel_over_options_moves_focus_without_wrapping() {
+        use ratatui::layout::Rect;
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        let area = Rect::new(0, 0, 80, 24);
+        let option_y = test_option_y(&d, area);
+
+        // Walk down through the options (A, B, custom): focus-only, no
+        // commit, no tab change.
+        assert!(d.handle_wheel(option_y, area, true));
+        assert_eq!(d.selected_row, 1);
+        assert!(d.handle_wheel(option_y, area, true));
+        assert_eq!(d.selected_row, 2);
+        assert!(d.is_custom_focused());
+        // Clamped at the last row: unlike Down, the wheel never wraps.
+        assert!(d.handle_wheel(option_y, area, true));
+        assert_eq!(d.selected_row, 2);
+        assert!(d.state[0].single_selection.is_none());
+        assert_eq!(d.current_tab, 0);
+
+        // Walk back up, clamped at the first row.
+        assert!(d.handle_wheel(option_y, area, false));
+        assert_eq!(d.selected_row, 1);
+        assert!(d.handle_wheel(option_y, area, false));
+        assert_eq!(d.selected_row, 0);
+        assert!(d.handle_wheel(option_y, area, false));
+        assert_eq!(d.selected_row, 0);
+    }
+
+    #[test]
+    fn wheel_outside_options_scrolls_question_text() {
+        use ratatui::layout::Rect;
+        // Long purpose (overflowing text) + short options in a short box:
+        // text must scroll while the options stay put.
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![QuestionItem {
+            id: "s1".to_string(),
+            question: "pick?".to_string(),
+            question_type: QuestionType::SingleChoice,
+            purpose: Some("porque ".repeat(100)),
+            options: Some(vec!["A".to_string(), "B".to_string()]),
+            required: true,
+            recommended: Some("A".to_string()),
+        }]);
+        let area = Rect::new(0, 0, 80, 14);
+        let option_y = test_option_y(&d, area);
+        assert_eq!(d.text_scroll, 0);
+
+        // Wheel over the question-text region scrolls the text...
+        assert!(d.handle_wheel(option_y - 2, area, true));
+        assert_eq!(d.text_scroll, super::SCROLL_STEP);
+        assert_eq!(d.selected_row, 0);
+        // ...while wheel over the options moves focus and leaves the text.
+        assert!(d.handle_wheel(option_y, area, true));
+        assert_eq!(d.selected_row, 1);
+        assert_eq!(d.text_scroll, super::SCROLL_STEP);
+        assert!(d.handle_wheel(option_y, area, false));
+        assert_eq!(d.selected_row, 0);
+        assert_eq!(d.text_scroll, super::SCROLL_STEP);
+    }
+
+    #[test]
+    fn wheel_on_text_tab_scrolls_text() {
+        use ratatui::layout::Rect;
+        // Text tabs have no option rows: the wheel always scrolls the text.
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![QuestionItem {
+            id: "t1".to_string(),
+            question: "explique ".repeat(80),
+            question_type: QuestionType::Text,
+            purpose: None,
+            options: None,
+            required: true,
+            recommended: None,
+        }]);
+        let area = Rect::new(0, 0, 80, 12);
+        let option_y = test_option_y(&d, area);
+        assert!(d.handle_wheel(option_y, area, true));
+        assert_eq!(d.text_scroll, super::SCROLL_STEP);
     }
 }

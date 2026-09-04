@@ -423,7 +423,10 @@ impl App {
                     } else if matches!(self.mode(), AppMode::Session)
                         && self.question_dialog.visible
                     {
-                        self.question_dialog.scroll_up();
+                        // Region-routed: over the options it walks focus
+                        // through them, elsewhere it scrolls the text.
+                        let area = self.question_dialog_area();
+                        self.question_dialog.handle_wheel(y, area, false);
                     } else if matches!(self.mode(), AppMode::Session) {
                         self.session_view.scroll_by(-1.0);
                     } else if matches!(self.mode(), AppMode::Home) {
@@ -488,7 +491,10 @@ impl App {
                     } else if matches!(self.mode(), AppMode::Session)
                         && self.question_dialog.visible
                     {
-                        self.question_dialog.scroll_down();
+                        // Region-routed: over the options it walks focus
+                        // through them, elsewhere it scrolls the text.
+                        let area = self.question_dialog_area();
+                        self.question_dialog.handle_wheel(y, area, true);
                     } else if matches!(self.mode(), AppMode::Session) {
                         self.session_view.scroll_by(1.0);
                     } else if matches!(self.mode(), AppMode::Home) {
@@ -1240,6 +1246,48 @@ impl App {
         }
 
         Ok(true)
+    }
+
+    /// Geometry of the inline question dialog, mirroring the click path
+    /// below (and `render.rs`): full responsive height clamped to the free
+    /// space above the footer. Shared by the wheel arms and (via the same
+    /// math) the click path so region routing always agrees with rendering.
+    fn question_dialog_area(&self) -> Rect {
+        let area = self.terminal_size();
+        let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
+            self.left_panel_width()
+        } else {
+            0
+        };
+        let main_area = Rect::new(
+            area.x + sidebar_w,
+            area.y,
+            area.width.saturating_sub(sidebar_w),
+            area.height,
+        );
+        // When question dialog is visible, prompt is hidden (like OpenCode)
+        let footer_y = main_area.bottom().saturating_sub(1);
+        let prompt_h = if self.question_dialog.visible {
+            0
+        } else {
+            let prompt_budget = footer_y
+                .saturating_sub(area.y + 1)
+                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
+            self.prompt_view
+                .required_height(main_area.width.saturating_sub(4), prompt_budget)
+        };
+        let question_h = self
+            .question_dialog
+            .required_height(main_area.width.saturating_sub(4));
+        let prompt_area_y = footer_y.saturating_sub(prompt_h);
+        let question_h = question_h.min(prompt_area_y.saturating_sub(area.y + 1));
+        let question_area_y = prompt_area_y.saturating_sub(question_h);
+        Rect::new(
+            main_area.x + 2,
+            question_area_y,
+            main_area.width.saturating_sub(4),
+            question_h,
+        )
     }
 
     /// Whether the given column lies over the open session-list sidebar.
