@@ -59,6 +59,7 @@ fn main() {
                 purpose: Some("To name the crate".into()),
                 options: None,
                 required: true,
+                recommended: None,
             },
             QuestionItem {
                 id: "lang".into(),
@@ -67,6 +68,7 @@ fn main() {
                 purpose: Some("To scaffold the right project".into()),
                 options: Some(vec!["Rust".into(), "TypeScript".into()]),
                 required: true,
+                recommended: Some("Rust".into()),
             },
             QuestionItem {
                 id: "features".into(),
@@ -75,6 +77,7 @@ fn main() {
                 purpose: None,
                 options: Some(vec!["Speed".into(), "Tooling".into(), "Ecosystem".into()]),
                 required: false,
+                recommended: None,
             },
             QuestionItem {
                 id: "confirm".into(),
@@ -83,6 +86,7 @@ fn main() {
                 purpose: Some("Need the go-ahead".into()),
                 options: None,
                 required: true,
+                recommended: None,
             },
         ],
     };
@@ -152,5 +156,6 @@ fn item(id: &str, question: &str, question_type: QuestionType) -> QuestionItem {
         purpose: None,
         options: None,
         required: true,
+        recommended: None,
     }
 }

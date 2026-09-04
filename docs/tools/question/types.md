@@ -32,6 +32,7 @@ pub struct QuestionItem {
     pub options: Option<Vec<String>>, // choices for Single/MultiChoice
     #[serde(default = "default_required")]
     pub required: bool,          // defaults to true
+    pub recommended: Option<String>, // REQUIRED for SingleChoice: must match one of `options`
 }
 ```
 
@@ -49,6 +50,11 @@ Field-by-field:
   non-empty); forbidden for `YesNo`; ignored for `Text`.
 - **`required`** — whether the user must answer; defaults to `true` when the
   field is omitted (via `#[serde(default = "default_required")]`).
+- **`recommended`** — REQUIRED for `SingleChoice` (must exactly match one
+  entry of `options`; the tool moves it to the top automatically and the TUI
+  badges it `(Recommended)`); forbidden for `Text` / `MultiChoice` / `YesNo`.
+  Defaults to `None` for backwards-compatible deserialization (old payloads
+  parse, then fail validation with a clear message).
 
 ## `AnswerItem` — one answer
 
@@ -102,7 +108,8 @@ Because of the renames and defaults, the JSON form of a question is:
   "type": "SingleChoice",
   "purpose": "To scaffold the project",
   "options": ["Rust", "TypeScript"],
-  "required": true
+  "required": true,
+  "recommended": "Rust"
 }
 ```
 

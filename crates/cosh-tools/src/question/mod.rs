@@ -31,6 +31,7 @@
 //!             purpose: Some("To scaffold the project".into()),
 //!             options: None,
 //!             required: true,
+//!             recommended: None,
 //!         },
 //!     ],
 //! };
@@ -79,7 +80,14 @@ impl Question {
                     "give better answers.\n\n",
                     "Supported question types:\n",
                     "- **Text**: Free-text input (the user types an answer).\n",
-                    "- **SingleChoice**: Pick one option from a list.\n",
+                    "- **SingleChoice**: Pick exactly ONE option from a list. ",
+                    "You MUST tell which option you recommend via the ",
+                    "'recommended' field (it must exactly match one of 'options'). ",
+                    "Do NOT pre-sort 'options' yourself — the tool moves the ",
+                    "recommended option to the top automatically and the UI shows ",
+                    "it with a '(Recommended)' badge. Do NOT add your own ",
+                    "'custom/other/personalize' option — the UI always appends ",
+                    "a 'Personalize your response' entry for SingleChoice.\n",
                     "- **MultiChoice**: Pick zero or more options from a list.\n",
                     "- **YesNo**: A simple yes/no choice.\n\n",
                     "Rule of thumb: if you can reasonably infer the answer from ",
@@ -121,6 +129,10 @@ impl Question {
                                         "type": "boolean",
                                         "description": "Whether an answer is required. Defaults to true.",
                                         "default": true
+                                    },
+                                    "recommended": {
+                                        "type": "string",
+                                        "description": "REQUIRED for SingleChoice: the option you recommend (must exactly match one entry of 'options'). Forbidden for every other type. The tool moves it to the top automatically."
                                     }
                                 },
                                 "required": ["id", "question", "type"]
@@ -139,6 +151,11 @@ impl Question {
     /// The TUI layer intercepts the tool call, renders the dialog,
     /// captures user input, and returns it as the tool result.
     ///
+    /// SingleChoice questions are normalized: the `recommended` option is
+    /// moved to the top automatically so the model never has to pre-sort
+    /// `options` itself. The TUI renders that first entry with a
+    /// `(Recommended)` badge.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
@@ -146,7 +163,37 @@ impl Question {
     /// - A `SingleChoice` or `MultiChoice` question has no options.
     /// - A `YesNo` question has custom options (it uses built-in Yes/No).
     /// - Question IDs are not unique.
+    /// - A `SingleChoice` question has no `recommended` field, or the
+    ///   recommended value does not exactly match one of `options`.
+    /// - A non-`SingleChoice` question sets `recommended` (it is forbidden
+    ///   for `Text`, `MultiChoice` and `YesNo`).
     pub fn ask(&self, input: &QuestionInput) -> Result<QuestionOutput, String> {
+        let questions = Self::validate_and_normalize(input)?;
+        // The actual interaction with the user is handled by the TUI layer.
+        // This method validates input and returns the questions echoed back
+        // so the TUI can render them. The TUI intercepts the tool call,
+        // shows the dialog, captures user input, and returns the answers
+        // as the tool result.
+        Ok(QuestionOutput {
+            questions,
+            answers: Vec::new(),
+        })
+    }
+
+    /// Validate `input` and return the normalized questions.
+    ///
+    /// Normalization currently means: for every `SingleChoice` question, move
+    /// the `recommended` option to position 0 (stable for the rest). Shared
+    /// by [`Self::ask`] and the harness agent loop so both the direct tool
+    /// path and the `QuestionRequest` path see identical validation and
+    /// ordering.
+    ///
+    /// # Errors
+    ///
+    /// Same error contract as [`Self::ask`].
+    pub fn validate_and_normalize(
+        input: &QuestionInput,
+    ) -> Result<Vec<types::QuestionItem>, String> {
         // Validate questions
         if input.questions.is_empty() {
             return Err("No questions provided. Ask at least one question.".into());
@@ -161,7 +208,7 @@ impl Question {
 
             // Validate question type
             match q.question_type {
-                types::QuestionType::SingleChoice | types::QuestionType::MultiChoice => {
+                types::QuestionType::SingleChoice => {
                     let opts = q.options.as_ref().ok_or_else(|| {
                         format!(
                             "Question '{}' is {:?} but has no 'options' field",
@@ -171,6 +218,42 @@ impl Question {
                     if opts.is_empty() {
                         return Err(format!(
                             "Question '{}' has zero options. Provide at least one option.",
+                            q.id
+                        ));
+                    }
+                    let rec = q.recommended.as_ref().ok_or_else(|| {
+                        format!(
+                            "Question '{}' is SingleChoice but has no 'recommended' field. \
+                             Tell which option you recommend (it must exactly match one of 'options'); \
+                             the tool moves it to the top automatically.",
+                            q.id
+                        )
+                    })?;
+                    if !opts.iter().any(|o| o == rec) {
+                        return Err(format!(
+                            "Question '{}' recommends '{rec}' which is not one of its options. \
+                             'recommended' must exactly match one entry of 'options'.",
+                            q.id
+                        ));
+                    }
+                }
+                types::QuestionType::MultiChoice => {
+                    let opts = q.options.as_ref().ok_or_else(|| {
+                        format!(
+                            "Question '{}' is {:?} but has no 'options' field",
+                            q.id, q.question_type
+                        )
+                    })?;
+                    if opts.is_empty() {
+                        return Err(format!(
+                            "Question '{}' has zero options. Provide at least one option.",
+                            q.id
+                        ));
+                    }
+                    if q.recommended.is_some() {
+                        return Err(format!(
+                            "Question '{}' is MultiChoice but sets 'recommended'. \
+                             'recommended' is only allowed for SingleChoice.",
                             q.id
                         ));
                     }
@@ -185,21 +268,40 @@ impl Question {
                             q.id
                         ));
                     }
+                    if q.recommended.is_some() {
+                        return Err(format!(
+                            "Question '{}' is YesNo but sets 'recommended'. \
+                             'recommended' is only allowed for SingleChoice.",
+                            q.id
+                        ));
+                    }
                 }
                 types::QuestionType::Text => {
                     // Text has no restrictions on options
+                    if q.recommended.is_some() {
+                        return Err(format!(
+                            "Question '{}' is Text but sets 'recommended'. \
+                             'recommended' is only allowed for SingleChoice.",
+                            q.id
+                        ));
+                    }
                 }
             }
         }
 
-        // The actual interaction with the user is handled by the TUI layer.
-        // This method validates input and returns the questions echoed back
-        // so the TUI can render them. The TUI intercepts the tool call,
-        // shows the dialog, captures user input, and returns the answers
-        // as the tool result.
-        Ok(QuestionOutput {
-            questions: input.questions.clone(),
-            answers: Vec::new(),
-        })
+        // Normalize: move the recommended SingleChoice option to the top.
+        let mut out = input.questions.clone();
+        for q in &mut out {
+            if q.question_type == types::QuestionType::SingleChoice
+                && let Some(ref rec) = q.recommended.clone()
+                && let Some(ref mut opts) = q.options
+                && let Some(pos) = opts.iter().position(|o| o == rec)
+                && pos != 0
+            {
+                let item = opts.remove(pos);
+                opts.insert(0, item);
+            }
+        }
+        Ok(out)
     }
 }

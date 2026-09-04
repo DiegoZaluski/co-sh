@@ -48,6 +48,7 @@ let output = question.ask(&QuestionInput {
             purpose: Some("To generate the right project structure".into()),
             options: Some(vec!["Rust".into(), "TypeScript".into()]),
             required: true,
+            recommended: Some("Rust".into()),
         },
         // …more questions…
     ],
@@ -84,8 +85,17 @@ anything is presented. The rules:
 | Question IDs must be unique | `"Duplicate question id: 'q1'"` |
 | `SingleChoice` / `MultiChoice` must have an `options` field | `"Question 'q1' is SingleChoice but has no 'options' field"` |
 | …and at least one option | `"Question 'q1' has zero options. Provide at least one option."` |
+| `SingleChoice` must set `recommended` (exactly one of `options`) | `"Question 'q1' is SingleChoice but has no 'recommended' field..."` |
+| `SingleChoice` `recommended` must match one of `options` | `"Question 'q1' recommends 'X' which is not one of its options..."` |
 | `YesNo` must not have custom options (it uses built-in Yes/No) | `"Question 'q1' is YesNo but has custom options. YesNo uses built-in 'Yes' and 'No'."` |
+| `recommended` is forbidden for `Text` / `MultiChoice` / `YesNo` | `"Question 'q1' is ... but sets 'recommended'..."` |
 | `Text` | No restrictions on options (they are ignored) |
+
+`SingleChoice` questions are normalized: the `recommended` option is moved
+to position 0 automatically (the model must NOT pre-sort `options` itself)
+and the TUI renders it with a `(Recommended)` badge. The TUI also always
+appends a virtual `Personalize your response` entry to `SingleChoice` — the
+model must NOT invent its own custom/other option.
 
 Every error names the offending question id, so the model can fix exactly
 that item and retry. An empty `questions` array and duplicate ids fail the

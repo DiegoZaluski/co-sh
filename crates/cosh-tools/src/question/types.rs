@@ -19,6 +19,14 @@ pub struct QuestionItem {
     /// Whether an answer is required. Defaults to `true`.
     #[serde(default = "default_required")]
     pub required: bool,
+    /// The option the agent recommends for a `SingleChoice` question.
+    ///
+    /// Must exactly match one of `options`. The tool moves it to the top
+    /// automatically (the model must NOT pre-sort options itself) and the
+    /// TUI renders it with a `(Recommended)` badge. Required for
+    /// `SingleChoice`; forbidden for every other question type.
+    #[serde(default)]
+    pub recommended: Option<String>,
 }
 
 const fn default_required() -> bool {
