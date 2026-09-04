@@ -186,7 +186,7 @@ async fn bug05_question_answer_wait_ignores_stop_signal() {
             serde_json::json!({"type": "object", "properties": {"questions": {"type": "array"}}, "required": ["questions"]}),
         )
         .with_mock_stream(Ok(vec![
-            r#"{"name": "ask_questions", "arguments": {"questions": []}}"#,
+            r#"{"name": "ask_questions", "arguments": {"questions": [{"id": "q1", "question": "Q?", "type": "Text"}]}}"#,
         ]));
 
     let (tx, mut rx) = mpsc::unbounded_channel();

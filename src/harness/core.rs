@@ -2714,8 +2714,22 @@ impl Harness {
 
                     match input {
                         Ok(q_input) => {
+                            // Shared validation + normalization with the direct
+                            // tool path (`Question::ask`): SingleChoice requires
+                            // `recommended` and is auto-sorted to the top so the
+                            // TUI can badge it. On error the model gets a
+                            // ToolError and can fix + retry (no dialog shown).
+                            let normalized =
+                                cosh_tools::question::Question::validate_and_normalize(&q_input);
+                            let questions = match normalized {
+                                Ok(qs) => qs,
+                                Err(e) => {
+                                    let _ = tx.send(HarnessEvent::ToolError { error: e });
+                                    continue;
+                                }
+                            };
                             let _ = tx.send(HarnessEvent::QuestionRequest {
-                                questions: q_input.questions.clone(),
+                                questions: questions.clone(),
                             });
 
                             log::debug!("run_agent_loop WAITING for answer_rx");
@@ -2735,10 +2749,7 @@ impl Harness {
                             // log::debug!("run_agent_loop GOT answer={:?}", answer.is_some());
                             match answer {
                                 Some(Ok(answers)) => {
-                                    let output = QuestionOutput {
-                                        questions: q_input.questions,
-                                        answers,
-                                    };
+                                    let output = QuestionOutput { questions, answers };
                                     let json = serde_json::to_string(&output)
                                         .unwrap_or_else(|_| "{}".to_string());
                                     // Save to structured history (native tool format)
