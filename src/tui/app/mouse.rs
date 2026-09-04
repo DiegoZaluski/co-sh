@@ -780,41 +780,10 @@ impl App {
 
         // 4. Question dialog (inline, between session and prompt)
         if self.question_dialog.visible && matches!(self.mode(), AppMode::Session) {
-            let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                self.left_panel_width()
-            } else {
-                0
-            };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
-            // When question dialog is visible, prompt is hidden (like OpenCode)
-            let footer_y = main_area.bottom().saturating_sub(1);
-            let prompt_budget = footer_y
-                .saturating_sub(area.y + 1)
-                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
-            let prompt_h = if self.question_dialog.visible {
-                0
-            } else {
-                self.prompt_view
-                    .required_height(main_area.width.saturating_sub(4), prompt_budget)
-            };
-            let question_h = self
-                .question_dialog
-                .required_height(main_area.width.saturating_sub(4));
-            let prompt_area_y = footer_y.saturating_sub(prompt_h);
-            let question_h = question_h.min(prompt_area_y.saturating_sub(area.y + 1));
-            let question_area_y = prompt_area_y.saturating_sub(question_h);
-            let question_area = Rect::new(
-                main_area.x + 2,
-                question_area_y,
-                main_area.width.saturating_sub(4),
-                question_h,
-            );
+            // Same geometry as render (`session_main_area` + helper): a
+            // sidebar-only rect would admit clicks over the right panel and
+            // mis-offset the hit-test against the drawn rows.
+            let question_area = self.question_dialog_area();
             // Don't dispatch to question dialog if text selection is in progress
             if !self.mouse_drag_active && self.drag_selection.is_none() {
                 let consumed = self.question_dialog.handle_mouse(&mouse, question_area);
@@ -1248,23 +1217,17 @@ impl App {
         Ok(true)
     }
 
-    /// Geometry of the inline question dialog, mirroring the click path
-    /// below (and `render.rs`): full responsive height clamped to the free
-    /// space above the footer. Shared by the wheel arms and (via the same
-    /// math) the click path so region routing always agrees with rendering.
-    fn question_dialog_area(&self) -> Rect {
+    /// Geometry of the inline question dialog — the single source of truth
+    /// shared by the wheel arms, the click path and `render.rs`, so region
+    /// routing always agrees with what is drawn. Only meaningful while
+    /// `question_dialog.visible`: render then hides the prompt, pending
+    /// queues and spinner, which is exactly the layout assumed here.
+    pub(crate) fn question_dialog_area(&self) -> Rect {
         let area = self.terminal_size();
-        let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-            self.left_panel_width()
-        } else {
-            0
-        };
-        let main_area = Rect::new(
-            area.x + sidebar_w,
-            area.y,
-            area.width.saturating_sub(sidebar_w),
-            area.height,
-        );
+        // The same content area render uses (open sidebar AND right panel
+        // subtracted) so the rect always matches the drawn geometry — a
+        // sidebar-only main area would draw and hit-test over the panel.
+        let main_area = self.session_main_area(area).main;
         // When question dialog is visible, prompt is hidden (like OpenCode)
         let footer_y = main_area.bottom().saturating_sub(1);
         let prompt_h = if self.question_dialog.visible {

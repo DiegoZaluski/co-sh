@@ -5,7 +5,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use cosh_tools::question::types::{AnswerItem, QuestionItem, QuestionType};
+use cosh_tools::question::types::{
+    AnswerItem, CUSTOM_RESPONSE_LABEL, QuestionItem, QuestionType,
+};
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
@@ -40,11 +42,6 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
 /// question-text region.
 const SCROLL_STEP: usize = 3;
 
-/// Virtual option appended by the TUI to every `SingleChoice` question so the
-/// user can always give a free-text answer. Never sent by the model — the tool
-/// description explicitly tells it NOT to invent its own custom/other entry.
-pub const CUSTOM_RESPONSE_LABEL: &str = "Personalize your response";
-
 /// Placeholder shown in the custom-answer input when it is empty.
 const CUSTOM_PLACEHOLDER: &str = "Type your custom answer...";
 
@@ -76,6 +73,131 @@ struct ReviewStyles {
     purpose: Style,
 }
 
+/// A single-line text field: content plus a char-based cursor. One
+/// implementation serves both the Text question input and the SingleChoice
+/// custom-answer input, so editing behavior (cursor moves, word ops, paste)
+/// is defined exactly once.
+#[derive(Debug, Clone, Default)]
+struct LineEdit {
+    text: String,
+    /// Cursor position in chars (always on a char boundary).
+    cursor: usize,
+}
+
+impl LineEdit {
+    fn value(&self) -> &str {
+        &self.text
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// Insert `ch` at the cursor and advance it.
+    fn insert_char(&mut self, ch: char) {
+        let byte = Self::char_to_byte(&self.text, self.cursor.min(self.text.chars().count()));
+        self.text.insert(byte, ch);
+        self.cursor += 1;
+    }
+
+    /// Delete the character before the cursor (Backspace).
+    fn delete_before_cursor(&mut self) {
+        if self.cursor > 0 {
+            let byte = Self::char_to_byte(&self.text, self.cursor - 1);
+            self.text.remove(byte);
+            self.cursor -= 1;
+        }
+    }
+
+    /// Delete the character under the cursor (Delete).
+    fn delete_at_cursor(&mut self) {
+        if self.cursor < self.text.chars().count() {
+            let byte = Self::char_to_byte(&self.text, self.cursor);
+            self.text.remove(byte);
+        }
+    }
+
+    /// Move the cursor by `delta` chars, clamped to the input bounds.
+    fn move_cursor(&mut self, delta: i32) {
+        let len = self.text.chars().count() as i32;
+        self.cursor = (self.cursor as i32 + delta).clamp(0, len) as usize;
+    }
+
+    fn cursor_to_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn cursor_to_end(&mut self) {
+        self.cursor = self.text.chars().count();
+    }
+
+    /// Move the cursor to the start of the previous word (Ctrl+Left),
+    /// matching the chat prompt's `cursor_word_left`.
+    fn cursor_word_left(&mut self) {
+        let byte = Self::char_to_byte(&self.text, self.cursor);
+        let new_byte = crate::util::word_ops::find_word_start(&self.text, byte);
+        if new_byte < byte {
+            self.cursor = Self::byte_to_char(&self.text, new_byte);
+        }
+    }
+
+    /// Move the cursor to the start of the next word (Ctrl+Right),
+    /// matching the chat prompt's `cursor_word_right`.
+    fn cursor_word_right(&mut self) {
+        let byte = Self::char_to_byte(&self.text, self.cursor);
+        let new_byte = crate::util::word_ops::find_word_end(&self.text, byte);
+        if new_byte > byte {
+            self.cursor = Self::byte_to_char(&self.text, new_byte);
+        }
+    }
+
+    /// Delete the word (or run of whitespace then word) immediately before
+    /// the cursor (Ctrl+Backspace / Ctrl+W), matching the chat prompt's
+    /// `delete_word_before_cursor`.
+    fn delete_word_before_cursor(&mut self) {
+        let byte = Self::char_to_byte(&self.text, self.cursor);
+        let start = crate::util::word_ops::find_word_start(&self.text, byte);
+        if start < byte {
+            self.text.drain(start..byte);
+            self.cursor = Self::byte_to_char(&self.text, start);
+        }
+    }
+
+    /// Insert pre-filtered (single-line) text at the cursor — bracketed paste.
+    fn insert_str(&mut self, text: &str) {
+        let byte = Self::char_to_byte(&self.text, self.cursor);
+        self.text.insert_str(byte, text);
+        self.cursor += text.chars().count();
+    }
+
+    /// Place the cursor from a click at column `x` over the input line whose
+    /// text starts at `text_x` (inside a `field_w`-wide field). Replicates
+    /// the render's horizontal scroll so clicks land on the characters
+    /// currently visible.
+    fn place_cursor_from_click(&mut self, x: u16, text_x: u16, field_w: usize) {
+        let len = self.text.chars().count();
+        let h_scroll = if self.cursor >= field_w && len > field_w {
+            self.cursor - field_w + 1
+        } else {
+            0
+        };
+        let clicked = (i64::from(x).saturating_sub(i64::from(text_x))).max(0) as usize;
+        self.cursor = (h_scroll + clicked).min(len);
+    }
+
+    /// Byte offset of the `char_pos`-th character in `text`.
+    fn char_to_byte(text: &str, char_pos: usize) -> usize {
+        text.char_indices()
+            .nth(char_pos)
+            .map_or(text.len(), |(i, _)| i)
+    }
+
+    /// Char index of the character containing byte offset `byte` in `text`.
+    fn byte_to_char(text: &str, byte: usize) -> usize {
+        text[..byte.min(text.len())].chars().count()
+    }
+}
+
 /// Per-question state tracked by the dialog.
 #[derive(Debug, Clone)]
 struct QuestionState {
@@ -85,14 +207,10 @@ struct QuestionState {
     single_selection: Option<usize>,
     /// For `MultiChoice`: which option indices are checked
     multi_selection: Vec<usize>,
-    /// For Text: the typed text input
-    text_input: String,
-    /// For Text: the cursor position (in chars) within `text_input`.
-    cursor_pos: usize,
+    /// For Text: the answer being typed.
+    text: LineEdit,
     /// For SingleChoice custom row: the typed custom answer.
-    custom_text: String,
-    /// Cursor position (in chars) within `custom_text`.
-    custom_cursor: usize,
+    custom: LineEdit,
     /// Whether this question has been "answered" (user pressed Enter on it)
     answered: bool,
 }
@@ -102,10 +220,8 @@ impl QuestionState {
         Self {
             single_selection: None,
             multi_selection: Vec::new(),
-            text_input: String::new(),
-            cursor_pos: 0,
-            custom_text: String::new(),
-            custom_cursor: 0,
+            text: LineEdit::default(),
+            custom: LineEdit::default(),
             answered: false,
         }
     }
@@ -231,7 +347,7 @@ impl QuestionDialog {
             .map(|(idx, q)| {
                 let s = &self.state[idx];
                 let (answer, selected) = match q.question_type {
-                    QuestionType::Text => (Some(s.text_input.clone()), None),
+                    QuestionType::Text => (Some(s.text.value().to_owned()), None),
                     QuestionType::SingleChoice => {
                         let custom = q.options.as_ref().map_or(0, Vec::len);
                         if s.single_selection == Some(custom) {
@@ -239,10 +355,10 @@ impl QuestionDialog {
                             // as the selection so the model sees what the user
                             // actually typed. Empty custom text counts as
                             // unanswered (consistent with other types).
-                            if s.custom_text.is_empty() {
+                            if s.custom.is_empty() {
                                 (None, None)
                             } else {
-                                (None, Some(vec![s.custom_text.clone()]))
+                                (None, Some(vec![s.custom.value().to_owned()]))
                             }
                         } else {
                             let sel = s
@@ -316,45 +432,23 @@ impl QuestionDialog {
     /// advance the cursor. Resets the blink (the user is actively typing).
     fn text_insert_char(&mut self, ch: char) {
         if let Some(s) = self.state.get_mut(self.current_tab) {
-            let pos = s.cursor_pos.min(s.text_input.chars().count());
-            let byte_idx = s
-                .text_input
-                .char_indices()
-                .nth(pos)
-                .map_or(s.text_input.len(), |(i, _)| i);
-            s.text_input.insert(byte_idx, ch);
-            s.cursor_pos = pos + 1;
+            s.text.insert_char(ch);
         }
         self.cursor.note_activity();
     }
 
     /// Delete the character before the cursor (Backspace).
     fn text_delete_before_cursor(&mut self) {
-        if let Some(s) = self.state.get_mut(self.current_tab)
-            && s.cursor_pos > 0
-        {
-            let byte_idx = s
-                .text_input
-                .char_indices()
-                .nth(s.cursor_pos - 1)
-                .map_or(0, |(i, _)| i);
-            s.text_input.remove(byte_idx);
-            s.cursor_pos -= 1;
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            s.text.delete_before_cursor();
         }
         self.cursor.note_activity();
     }
 
     /// Delete the character under the cursor (Delete).
     fn text_delete_at_cursor(&mut self) {
-        if let Some(s) = self.state.get_mut(self.current_tab)
-            && s.cursor_pos < s.text_input.chars().count()
-        {
-            let byte_idx = s
-                .text_input
-                .char_indices()
-                .nth(s.cursor_pos)
-                .map_or(s.text_input.len(), |(i, _)| i);
-            s.text_input.remove(byte_idx);
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            s.text.delete_at_cursor();
         }
         self.cursor.note_activity();
     }
@@ -362,34 +456,16 @@ impl QuestionDialog {
     /// Move the text cursor by `delta` chars, clamped to the input bounds.
     fn text_move_cursor(&mut self, delta: i32) {
         if let Some(s) = self.state.get_mut(self.current_tab) {
-            let len = s.text_input.chars().count() as i32;
-            let new = (s.cursor_pos as i32 + delta).clamp(0, len);
-            s.cursor_pos = new as usize;
+            s.text.move_cursor(delta);
         }
         self.cursor.note_activity();
-    }
-
-    /// Byte offset of the `char_pos`-th character in `text`.
-    fn char_to_byte(text: &str, char_pos: usize) -> usize {
-        text.char_indices()
-            .nth(char_pos)
-            .map_or(text.len(), |(i, _)| i)
-    }
-
-    /// Char index of the character containing byte offset `byte` in `text`.
-    fn byte_to_char(text: &str, byte: usize) -> usize {
-        text[..byte.min(text.len())].chars().count()
     }
 
     /// Move the cursor to the start of the previous word (Ctrl+Left), matching
     /// the chat prompt's `cursor_word_left`.
     fn text_cursor_word_left(&mut self) {
         if let Some(s) = self.state.get_mut(self.current_tab) {
-            let byte = Self::char_to_byte(&s.text_input, s.cursor_pos);
-            let new_byte = crate::util::word_ops::find_word_start(&s.text_input, byte);
-            if new_byte < byte {
-                s.cursor_pos = Self::byte_to_char(&s.text_input, new_byte);
-            }
+            s.text.cursor_word_left();
         }
         self.cursor.note_activity();
     }
@@ -398,11 +474,7 @@ impl QuestionDialog {
     /// the chat prompt's `cursor_word_right`.
     fn text_cursor_word_right(&mut self) {
         if let Some(s) = self.state.get_mut(self.current_tab) {
-            let byte = Self::char_to_byte(&s.text_input, s.cursor_pos);
-            let new_byte = crate::util::word_ops::find_word_end(&s.text_input, byte);
-            if new_byte > byte {
-                s.cursor_pos = Self::byte_to_char(&s.text_input, new_byte);
-            }
+            s.text.cursor_word_right();
         }
         self.cursor.note_activity();
     }
@@ -412,12 +484,7 @@ impl QuestionDialog {
     /// `delete_word_before_cursor`.
     fn text_delete_word_before_cursor(&mut self) {
         if let Some(s) = self.state.get_mut(self.current_tab) {
-            let byte = Self::char_to_byte(&s.text_input, s.cursor_pos);
-            let start = crate::util::word_ops::find_word_start(&s.text_input, byte);
-            if start < byte {
-                s.text_input.drain(start..byte);
-                s.cursor_pos = Self::byte_to_char(&s.text_input, start);
-            }
+            s.text.delete_word_before_cursor();
         }
         self.cursor.note_activity();
     }
@@ -440,33 +507,23 @@ impl QuestionDialog {
     /// Insert `ch` into the SingleChoice custom answer at its cursor.
     fn custom_insert_char(&mut self, ch: char) {
         if let Some(s) = self.state.get_mut(self.current_tab) {
-            let pos = s.custom_cursor.min(s.custom_text.chars().count());
-            let byte_idx = Self::char_to_byte(&s.custom_text, pos);
-            s.custom_text.insert(byte_idx, ch);
-            s.custom_cursor = pos + 1;
+            s.custom.insert_char(ch);
         }
         self.cursor.note_activity();
     }
 
     /// Delete the character before the custom cursor (Backspace).
     fn custom_delete_before_cursor(&mut self) {
-        if let Some(s) = self.state.get_mut(self.current_tab)
-            && s.custom_cursor > 0
-        {
-            let byte_idx = Self::char_to_byte(&s.custom_text, s.custom_cursor - 1);
-            s.custom_text.remove(byte_idx);
-            s.custom_cursor -= 1;
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            s.custom.delete_before_cursor();
         }
         self.cursor.note_activity();
     }
 
     /// Delete the character under the custom cursor (Delete).
     fn custom_delete_at_cursor(&mut self) {
-        if let Some(s) = self.state.get_mut(self.current_tab)
-            && s.custom_cursor < s.custom_text.chars().count()
-        {
-            let byte_idx = Self::char_to_byte(&s.custom_text, s.custom_cursor);
-            s.custom_text.remove(byte_idx);
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            s.custom.delete_at_cursor();
         }
         self.cursor.note_activity();
     }
@@ -474,9 +531,7 @@ impl QuestionDialog {
     /// Move the custom cursor by `delta` chars, clamped to the input bounds.
     fn custom_move_cursor(&mut self, delta: i32) {
         if let Some(s) = self.state.get_mut(self.current_tab) {
-            let len = s.custom_text.chars().count() as i32;
-            let new = (s.custom_cursor as i32 + delta).clamp(0, len);
-            s.custom_cursor = new as usize;
+            s.custom.move_cursor(delta);
         }
         self.cursor.note_activity();
     }
@@ -484,11 +539,7 @@ impl QuestionDialog {
     /// Move the custom cursor to the start of the previous word (Ctrl+Left).
     fn custom_cursor_word_left(&mut self) {
         if let Some(s) = self.state.get_mut(self.current_tab) {
-            let byte = Self::char_to_byte(&s.custom_text, s.custom_cursor);
-            let new_byte = crate::util::word_ops::find_word_start(&s.custom_text, byte);
-            if new_byte < byte {
-                s.custom_cursor = Self::byte_to_char(&s.custom_text, new_byte);
-            }
+            s.custom.cursor_word_left();
         }
         self.cursor.note_activity();
     }
@@ -496,11 +547,7 @@ impl QuestionDialog {
     /// Move the custom cursor to the start of the next word (Ctrl+Right).
     fn custom_cursor_word_right(&mut self) {
         if let Some(s) = self.state.get_mut(self.current_tab) {
-            let byte = Self::char_to_byte(&s.custom_text, s.custom_cursor);
-            let new_byte = crate::util::word_ops::find_word_end(&s.custom_text, byte);
-            if new_byte > byte {
-                s.custom_cursor = Self::byte_to_char(&s.custom_text, new_byte);
-            }
+            s.custom.cursor_word_right();
         }
         self.cursor.note_activity();
     }
@@ -508,12 +555,7 @@ impl QuestionDialog {
     /// Delete the word before the custom cursor (Ctrl+Backspace / Ctrl+W).
     fn custom_delete_word_before_cursor(&mut self) {
         if let Some(s) = self.state.get_mut(self.current_tab) {
-            let byte = Self::char_to_byte(&s.custom_text, s.custom_cursor);
-            let start = crate::util::word_ops::find_word_start(&s.custom_text, byte);
-            if start < byte {
-                s.custom_text.drain(start..byte);
-                s.custom_cursor = Self::byte_to_char(&s.custom_text, start);
-            }
+            s.custom.delete_word_before_cursor();
         }
         self.cursor.note_activity();
     }
@@ -535,9 +577,7 @@ impl QuestionDialog {
                 // stays aligned with the horizontal-scroll rendering (matching
                 // the ApiKeyInput dialog's paste handling).
                 let cleaned: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
-                let byte = Self::char_to_byte(&s.text_input, s.cursor_pos);
-                s.text_input.insert_str(byte, &cleaned);
-                s.cursor_pos += cleaned.chars().count();
+                s.text.insert_str(&cleaned);
             }
             self.cursor.note_activity();
             return;
@@ -545,9 +585,7 @@ impl QuestionDialog {
         if self.is_custom_focused() {
             if let Some(s) = self.state.get_mut(self.current_tab) {
                 let cleaned: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
-                let byte = Self::char_to_byte(&s.custom_text, s.custom_cursor);
-                s.custom_text.insert_str(byte, &cleaned);
-                s.custom_cursor += cleaned.chars().count();
+                s.custom.insert_str(&cleaned);
             }
             self.cursor.note_activity();
         }
@@ -628,14 +666,14 @@ impl QuestionDialog {
                 }
                 KeyCode::Home => {
                     if let Some(s) = self.state.get_mut(self.current_tab) {
-                        s.cursor_pos = 0;
+                        s.text.cursor_to_start();
                     }
                     self.cursor.note_activity();
                     return true;
                 }
                 KeyCode::End => {
                     if let Some(s) = self.state.get_mut(self.current_tab) {
-                        s.cursor_pos = s.text_input.chars().count();
+                        s.text.cursor_to_end();
                     }
                     self.cursor.note_activity();
                     return true;
@@ -713,14 +751,14 @@ impl QuestionDialog {
                 }
                 KeyCode::Home => {
                     if let Some(s) = self.state.get_mut(self.current_tab) {
-                        s.custom_cursor = 0;
+                        s.custom.cursor_to_start();
                     }
                     self.cursor.note_activity();
                     return true;
                 }
                 KeyCode::End => {
                     if let Some(s) = self.state.get_mut(self.current_tab) {
-                        s.custom_cursor = s.custom_text.chars().count();
+                        s.custom.cursor_to_end();
                     }
                     self.cursor.note_activity();
                     return true;
@@ -842,6 +880,12 @@ impl QuestionDialog {
                     let num = (c as usize) - ('1' as usize);
                     if num < count {
                         self.selected_row = num;
+                        // The virtual custom row is a text field, not an
+                        // option: selecting it only focuses the input (the
+                        // same as clicking the row); Enter there commits.
+                        if self.custom_index(self.current_tab) == Some(num) {
+                            return true;
+                        }
                         // Auto-select the option (like OpenCode's moveTo + selectOption)
                         return self.handle_key(KeyCode::Enter);
                     }
@@ -891,6 +935,33 @@ impl QuestionDialog {
         false
     }
 
+    /// Footer hint labels, shared by the footer renderer and the mouse
+    /// hit-test so the clickable range can never drift from what is drawn.
+    const ENTER_KEY: &str = "enter";
+    const CONFIRM_DESC: &str = "confirm";
+    const SUBMIT_DESC: &str = "submit";
+    const ESC_LABEL: &str = "esc";
+
+    /// Column where the footer "esc" label starts, mirroring the `hint!`
+    /// drawing sequence in `render`: optional tab hint (advance 8),
+    /// `"enter"` key (+6 with gap), action label, +1 gap.
+    fn footer_esc_x(inner_x: u16, tab_count: usize, is_confirm: bool) -> u16 {
+        let mut fx = inner_x;
+        if tab_count > 1 {
+            // "⇆" is 3 bytes for a 1-column glyph, so the macro's byte
+            // advance (3 + 1 + 3 + 1) exceeds its visual 6 columns.
+            fx += 8;
+        }
+        fx += Self::ENTER_KEY.len() as u16 + 1;
+        fx += if is_confirm {
+            Self::SUBMIT_DESC
+        } else {
+            Self::CONFIRM_DESC
+        }
+        .len() as u16;
+        fx + 1
+    }
+
     /// Handle a mouse click on the question dialog.
     /// `area` is the area passed to `render()`.
     pub fn handle_mouse(&mut self, mouse: &MouseEvent, area: Rect) -> bool {
@@ -913,29 +984,20 @@ impl QuestionDialog {
 
         // --- Hit-test the footer action labels ---
         // `footer_y` must match `render`, where the hints are drawn at
-        // `inner_area.bottom() - 2`.
+        // `inner_area.bottom() - 2`. The "esc" column comes from
+        // [`Self::footer_esc_x`], the same math the footer renderer follows.
         let inner_x = area.x + 3;
         let inner_w = area.width.saturating_sub(5);
         let footer_y = area.y + height.saturating_sub(2);
 
-        // "esc" footer label
-        let esc_label = "esc";
         if y_click == footer_y {
-            // Determine the x position of the "esc" label in the footer
-            let mut fx = inner_x;
-            if tab_count > 1 {
-                fx += 4 + 4; // "⇆" + "tab"
-            }
-            fx += 5; // "enter"
-            fx += if is_confirm {
-                "submit".len() as u16
-            } else {
-                "select".len() as u16
-            };
-            fx += 2;
-            // Now fx points to "esc"
-            let esc_x = fx;
-            if x >= esc_x && x < esc_x + esc_label.len() as u16 {
+            // Only treat clicks as "esc" where the label is actually drawn:
+            // the footer renderer clips at the inner width, so an overflowing
+            // label (narrow terminal) has no click target.
+            let esc_x = Self::footer_esc_x(inner_x, tab_count, is_confirm);
+            let inner_end = inner_x + inner_w;
+            let esc_end = (esc_x + Self::ESC_LABEL.len() as u16).min(inner_end);
+            if esc_x < inner_end && x >= esc_x && x < esc_end {
                 self.visible = false;
                 return true;
             }
@@ -1015,16 +1077,8 @@ impl QuestionDialog {
                             }
                             let text_x = inner_x + 2;
                             if let Some(s) = self.state.get_mut(tab) {
-                                let len = s.custom_text.chars().count();
                                 let field_w = inner_w.saturating_sub(2) as usize;
-                                let h_scroll = if s.custom_cursor >= field_w && len > field_w {
-                                    s.custom_cursor - field_w + 1
-                                } else {
-                                    0
-                                };
-                                let clicked = (i64::from(x).saturating_sub(i64::from(text_x)))
-                                    .max(0) as usize;
-                                s.custom_cursor = (h_scroll + clicked).min(len);
+                                s.custom.place_cursor_from_click(x, text_x, field_w);
                             }
                             self.cursor.note_activity();
                             return true;
@@ -1041,19 +1095,8 @@ impl QuestionDialog {
                                     // clicked character position.
                                     let text_x = inner_x + 2; // after the "  " prefix
                                     if let Some(s) = self.state.get_mut(tab) {
-                                        let len = s.text_input.chars().count();
                                         let field_w = inner_w.saturating_sub(2) as usize;
-                                        // Replicate `render`'s h_scroll so clicks land
-                                        // on the characters currently visible.
-                                        let h_scroll = if s.cursor_pos >= field_w && len > field_w {
-                                            s.cursor_pos - field_w + 1
-                                        } else {
-                                            0
-                                        };
-                                        let clicked =
-                                            (i64::from(x).saturating_sub(i64::from(text_x))).max(0)
-                                                as usize;
-                                        s.cursor_pos = (h_scroll + clicked).min(len);
+                                        s.text.place_cursor_from_click(x, text_x, field_w);
                                     }
                                     self.cursor.note_activity();
                                     return true;
@@ -1635,8 +1678,8 @@ impl QuestionDialog {
                     // Text input field with the project's blinking cursor. The
                     // field scrolls horizontally to keep the cursor visible.
                     let state = self.state.get(self.current_tab);
-                    let input = state.map_or(String::new(), |s| s.text_input.clone());
-                    let cursor_pos = state.map_or(0, |s| s.cursor_pos);
+                    let input = state.map_or(String::new(), |s| s.text.value().to_owned());
+                    let cursor_pos = state.map_or(0, |s| s.text.cursor);
                     let chars: Vec<char> = input.chars().collect();
                     let field_w = inner_w.saturating_sub(2) as usize; // after "  " prefix
                     let h_scroll = if cursor_pos >= field_w && chars.len() > field_w {
@@ -1748,9 +1791,13 @@ impl QuestionDialog {
             hint!("⇆", "tab", 1);
         }
 
-        let enter_label = if is_confirm { "submit" } else { "confirm" };
-        hint!("enter", enter_label, 1);
-        hint!("esc", "dismiss", 0);
+        let enter_label = if is_confirm {
+            Self::SUBMIT_DESC
+        } else {
+            Self::CONFIRM_DESC
+        };
+        hint!(Self::ENTER_KEY, enter_label, 1);
+        hint!(Self::ESC_LABEL, "dismiss", 0);
         // Last-resort overflow affordance: when option rows fold above or
         // below the viewport, say how many — folded items must read as
         // scrollable, never as missing.
@@ -1851,12 +1898,13 @@ impl QuestionDialog {
     fn review_rows(&self, inner_w: u16, styles: &ReviewStyles) -> Vec<Vec<(String, Style)>> {
         let mut out: Vec<Vec<(String, Style)>> = Vec::new();
         out.push(vec![("Review your answers:".to_string(), styles.header)]);
+        let answers = self.build_answers();
         for (i, q) in self.questions.iter().enumerate() {
             let label = format!(" {}: ", q.id);
             let label_w = label.chars().count() as u16;
             let val_w = inner_w.saturating_sub(label_w);
             let display = self.question_summary(i);
-            let val_style = if self.state.get(i).is_some_and(|s| s.answered) {
+            let val_style = if answers.get(i).is_some_and(Self::answer_has_value) {
                 styles.value
             } else {
                 styles.unanswered
@@ -2011,8 +2059,8 @@ impl QuestionDialog {
         now: SystemTime,
     ) {
         let state = self.state.get(self.current_tab);
-        let input = state.map_or(String::new(), |s| s.custom_text.clone());
-        let cursor_pos = state.map_or(0, |s| s.custom_cursor);
+        let input = state.map_or(String::new(), |s| s.custom.value().to_owned());
+        let cursor_pos = state.map_or(0, |s| s.custom.cursor);
         let chars: Vec<char> = input.chars().collect();
         let field_w = inner_w.saturating_sub(2) as usize; // after "  " prefix
         let h_scroll = if cursor_pos >= field_w && chars.len() > field_w {
@@ -2067,6 +2115,24 @@ impl QuestionDialog {
         }
     }
 
+    /// Whether question `index` holds a submittable answer, per the same
+    /// contract as [`Self::build_answers`]: a committed-but-empty custom
+    /// answer or an empty Text input counts as unanswered, so the review
+    /// screen styles exactly what would actually be submitted.
+    fn has_answer(&self, index: usize) -> bool {
+        let answers = self.build_answers();
+        answers.get(index).is_some_and(Self::answer_has_value)
+    }
+
+    /// Whether a single built answer carries a submittable value.
+    fn answer_has_value(a: &AnswerItem) -> bool {
+        match (&a.answer, &a.selected) {
+            (Some(t), _) if !t.is_empty() => true,
+            (_, Some(sel)) => !sel.is_empty(),
+            _ => false,
+        }
+    }
+
     /// Build a one-line summary of the answer for a question (used in the review screen).
     fn question_summary(&self, index: usize) -> String {
         let Some(q) = self.questions.get(index) else {
@@ -2077,8 +2143,8 @@ impl QuestionDialog {
         };
 
         if !s.answered
-            && s.text_input.is_empty()
-            && s.custom_text.is_empty()
+            && s.text.is_empty()
+            && s.custom.is_empty()
             && s.single_selection.is_none()
             && s.multi_selection.is_empty()
         {
@@ -2087,10 +2153,10 @@ impl QuestionDialog {
 
         match q.question_type {
             QuestionType::Text => {
-                if s.text_input.is_empty() {
+                if s.text.is_empty() {
                     "(not answered)".into()
                 } else {
-                    s.text_input.clone()
+                    s.text.value().to_owned()
                 }
             }
             QuestionType::YesNo => match s.single_selection {
@@ -2101,20 +2167,22 @@ impl QuestionDialog {
             QuestionType::SingleChoice => {
                 let custom = q.options.as_ref().map_or(0, Vec::len);
                 if s.single_selection == Some(custom) {
-                    if s.custom_text.is_empty() {
-                        "(type your custom answer...)".into()
+                    if s.custom.is_empty() {
+                        // Committed with no text: not answerable as-is; the
+                        // review screen styles it as unanswered (has_answer).
+                        "(not answered)".into()
                     } else {
-                        s.custom_text.clone()
+                        s.custom.value().to_owned()
                     }
                 } else {
                     s.single_selection
                         .and_then(|i| q.options.as_ref()?.get(i).cloned())
                         .unwrap_or_else(|| {
-                            if s.custom_text.is_empty() {
+                            if s.custom.is_empty() {
                                 "(not answered)".into()
                             } else {
                                 // Typed but not committed yet: preview the draft.
-                                s.custom_text.clone()
+                                s.custom.value().to_owned()
                             }
                         })
                 }
@@ -2351,19 +2419,19 @@ mod tests {
         }
         // End: cursor after "foo". Ctrl+Left jumps to "foo".
         d.handle_key_event(ctrl_key(KeyCode::Left));
-        assert_eq!(d.state[0].cursor_pos, 12);
+        assert_eq!(d.state[0].text.cursor, 12);
         // Ctrl+Left again jumps to "world".
         d.handle_key_event(ctrl_key(KeyCode::Left));
-        assert_eq!(d.state[0].cursor_pos, 6);
+        assert_eq!(d.state[0].text.cursor, 6);
         // Ctrl+Left again jumps to "hello".
         d.handle_key_event(ctrl_key(KeyCode::Left));
-        assert_eq!(d.state[0].cursor_pos, 0);
+        assert_eq!(d.state[0].text.cursor, 0);
         // Ctrl+Right jumps to "world".
         d.handle_key_event(ctrl_key(KeyCode::Right));
-        assert_eq!(d.state[0].cursor_pos, 6);
+        assert_eq!(d.state[0].text.cursor, 6);
         // Ctrl+Right jumps to "foo".
         d.handle_key_event(ctrl_key(KeyCode::Right));
-        assert_eq!(d.state[0].cursor_pos, 12);
+        assert_eq!(d.state[0].text.cursor, 12);
     }
 
     #[test]
@@ -2409,7 +2477,7 @@ mod tests {
         d.handle_key(KeyCode::Char('x'));
         d.handle_key(KeyCode::Backspace);
         assert_eq!(d.build_answers()[0].answer.as_deref(), Some(""));
-        assert!(d.state[0].text_input.is_empty());
+        assert!(d.state[0].text.is_empty());
     }
 
     #[test]
@@ -2519,7 +2587,7 @@ mod tests {
         for ch in "my way".chars() {
             d.handle_key(KeyCode::Char(ch));
         }
-        assert_eq!(d.state[0].custom_text, "my way");
+        assert_eq!(d.state[0].custom.value(), "my way");
         // Enter commits the custom answer and it travels as the selection.
         d.handle_key(KeyCode::Enter);
         let answers = d.build_answers();
@@ -2536,7 +2604,61 @@ mod tests {
         d.handle_key(KeyCode::Enter); // commit with no text typed
         let answers = d.build_answers();
         assert_eq!(answers[0].selected, None);
-        assert!(d.question_summary(0).contains("custom"));
+        // The summary must not read as an answer: the review screen styles
+        // the row as unanswered (`has_answer`).
+        assert_eq!(d.question_summary(0), "(not answered)");
+        assert!(!d.has_answer(0));
+    }
+
+    #[test]
+    fn single_choice_number_key_focuses_custom_without_committing() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        // The virtual custom row is index 2 → key '3'.
+        d.handle_key(KeyCode::Char('3'));
+        // Focused only, like a click on the row — no commit, no tab advance.
+        assert_eq!(d.selected_row, 2);
+        assert!(d.is_custom_focused());
+        assert_eq!(d.current_tab, 0);
+        assert_eq!(d.build_answers()[0].selected, None);
+        // Regular options still commit directly ('2' → "B").
+        let mut d2 = QuestionDialog::new();
+        d2.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        d2.handle_key(KeyCode::Char('2'));
+        assert_eq!(d2.build_answers()[0].selected, Some(vec!["B".to_string()]));
+    }
+
+    #[test]
+    fn mouse_click_on_footer_esc_label_dismisses() {
+        use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+        use ratatui::layout::Rect;
+        // The hit-test must agree with the footer renderer's label layout
+        // (`footer_esc_x`), including the multi-question tab-hint offset.
+        for questions in [
+            vec![single_choice("s1", vec!["A", "B"], Some("A"))],
+            vec![
+                single_choice("s1", vec!["A", "B"], Some("A")),
+                question("t2", QuestionType::Text, None),
+            ],
+        ] {
+            let mut d = QuestionDialog::new();
+            d.show_questions(questions);
+            let area = Rect::new(0, 0, 80, 24);
+            let h = d.required_height(area.width);
+            let footer_y = area.y + h.saturating_sub(2);
+            let inner_x = area.x + 3;
+            let tab_count = d.tab_count();
+            let esc_x = QuestionDialog::footer_esc_x(inner_x, tab_count, d.is_confirm());
+            let click = MouseEvent::new(
+                MouseEventType::Up,
+                MouseButton::Left,
+                esc_x,
+                footer_y,
+                MouseModifiers::none(),
+            );
+            assert!(d.handle_mouse(&click, area));
+            assert!(!d.visible, "click on the drawn 'esc' label must dismiss");
+        }
     }
 
     #[test]
@@ -2561,9 +2683,9 @@ mod tests {
         d.handle_key(KeyCode::Char('b'));
         d.handle_key(KeyCode::Left);
         d.handle_key(KeyCode::Char('X'));
-        assert_eq!(d.state[0].custom_text, "aXb");
+        assert_eq!(d.state[0].custom.value(), "aXb");
         d.handle_key(KeyCode::Backspace);
-        assert_eq!(d.state[0].custom_text, "ab");
+        assert_eq!(d.state[0].custom.value(), "ab");
     }
 
     #[test]
@@ -2572,7 +2694,7 @@ mod tests {
         d.show_questions(vec![single_choice("s1", vec!["A"], Some("A"))]);
         d.handle_key(KeyCode::Down); // focus custom
         d.handle_paste("hello\nworld");
-        assert_eq!(d.state[0].custom_text, "helloworld");
+        assert_eq!(d.state[0].custom.value(), "helloworld");
     }
 
     #[test]

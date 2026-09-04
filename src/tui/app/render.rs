@@ -315,13 +315,6 @@ impl App {
                 0
             };
 
-            // Question dialog inline (between messages and prompt), only during session
-            let question_h = if is_session && self.question_dialog.visible {
-                self.question_dialog
-                    .required_height(main_area.width.saturating_sub(4))
-            } else {
-                0
-            };
             // Permission dialog (same position as question, mutually exclusive)
             let permission_h = if is_session && self.permission_dialog.visible {
                 self.permission_dialog
@@ -387,11 +380,25 @@ impl App {
             // (directly above the prompt).
             let spinner_area_y = pending_area_y.saturating_sub(spinner_h);
             let max_dialog_h = pending_area_y.saturating_sub(area.y + 1);
-            let question_h = question_h.min(max_dialog_h);
             let permission_h = permission_h.min(max_dialog_h);
             let queue_choice_h = queue_choice_h.min(max_dialog_h);
             let recommendation_h = recommendation_h.min(max_dialog_h);
-            let question_area_y = pending_area_y.saturating_sub(question_h);
+            // Question dialog: shared geometry with the mouse router
+            // (`App::question_dialog_area`) so clicks and the wheel always
+            // agree with what is drawn. With the dialog visible the prompt,
+            // pending queues and spinner are all hidden (pending_area_y ==
+            // footer_y), which is exactly the layout that helper assumes.
+            let question_area = if is_session && self.question_dialog.visible {
+                self.question_dialog_area()
+            } else {
+                Rect::new(
+                    main_area.x + 2,
+                    pending_area_y,
+                    main_area.width.saturating_sub(4),
+                    0,
+                )
+            };
+            let question_area_y = question_area.y;
             let permission_area_y = pending_area_y.saturating_sub(permission_h);
             let queue_choice_area_y = pending_area_y.saturating_sub(queue_choice_h);
             let recommendation_area_y = pending_area_y.saturating_sub(recommendation_h);
@@ -425,12 +432,6 @@ impl App {
                 spinner_area_y,
                 main_area.width.saturating_sub(4),
                 spinner_h,
-            );
-            let question_area = Rect::new(
-                main_area.x + 2,
-                question_area_y,
-                main_area.width.saturating_sub(4),
-                question_h,
             );
             let permission_area = Rect::new(
                 main_area.x + 2,
