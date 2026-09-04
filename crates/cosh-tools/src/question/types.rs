@@ -1,6 +1,14 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Virtual option the TUI appends to every `SingleChoice` question so the
+/// user can always give a free-text answer. Never sent by the model — the
+/// tool description explicitly tells it NOT to invent its own custom/other
+/// entry, and [`crate::question::Question::validate_and_normalize`] rejects
+/// payloads whose options collide with this reserved label (the TUI renders
+/// it as a separate row, so a colliding option would be unreachable).
+pub const CUSTOM_RESPONSE_LABEL: &str = "Personalize your response";
+
 /// A single question to ask the user.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QuestionItem {

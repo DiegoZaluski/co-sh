@@ -87,6 +87,7 @@ anything is presented. The rules:
 | …and at least one option | `"Question 'q1' has zero options. Provide at least one option."` |
 | `SingleChoice` must set `recommended` (exactly one of `options`) | `"Question 'q1' is SingleChoice but has no 'recommended' field..."` |
 | `SingleChoice` `recommended` must match one of `options` | `"Question 'q1' recommends 'X' which is not one of its options..."` |
+| `SingleChoice` option must not collide with the reserved custom-answer label (`"Personalize your response"`) | `"Question 'q1' has option 'X' which collides with the reserved custom-answer label..."` |
 | `YesNo` must not have custom options (it uses built-in Yes/No) | `"Question 'q1' is YesNo but has custom options. YesNo uses built-in 'Yes' and 'No'."` |
 | `recommended` is forbidden for `Text` / `MultiChoice` / `YesNo` | `"Question 'q1' is ... but sets 'recommended'..."` |
 | `Text` | No restrictions on options (they are ignored) |

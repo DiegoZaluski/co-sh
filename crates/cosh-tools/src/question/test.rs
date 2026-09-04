@@ -393,3 +393,28 @@ fn ask_recommended_deserializes_with_default_none() {
     let err = Question::new().ask(&input).unwrap_err();
     assert!(err.contains("recommended"));
 }
+
+#[test]
+fn ask_rejects_option_colliding_with_custom_label() {
+    // The TUI renders `CUSTOM_RESPONSE_LABEL` as its own virtual row, so an
+    // option with that exact name would be unreachable in the dialog.
+    let input = QuestionInput {
+        questions: vec![QuestionItem {
+            id: "s1".into(),
+            question: "Pick one?".into(),
+            question_type: QuestionType::SingleChoice,
+            purpose: None,
+            options: Some(vec![
+                crate::question::types::CUSTOM_RESPONSE_LABEL.into(),
+                "B".into(),
+            ]),
+            required: true,
+            recommended: Some("B".into()),
+        }],
+    };
+    let err = Question::new().ask(&input).unwrap_err();
+    assert!(
+        err.contains("reserved custom-answer label"),
+        "must reject colliding option: {err}"
+    );
+}

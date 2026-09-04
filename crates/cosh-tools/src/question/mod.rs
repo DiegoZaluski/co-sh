@@ -165,15 +165,13 @@ impl Question {
     /// - Question IDs are not unique.
     /// - A `SingleChoice` question has no `recommended` field, or the
     ///   recommended value does not exactly match one of `options`.
+    /// - A `SingleChoice` option collides with the reserved
+    ///   [`types::CUSTOM_RESPONSE_LABEL`] (the TUI renders that label as its
+    ///   own virtual row, so such an option would be unreachable).
     /// - A non-`SingleChoice` question sets `recommended` (it is forbidden
     ///   for `Text`, `MultiChoice` and `YesNo`).
     pub fn ask(&self, input: &QuestionInput) -> Result<QuestionOutput, String> {
         let questions = Self::validate_and_normalize(input)?;
-        // The actual interaction with the user is handled by the TUI layer.
-        // This method validates input and returns the questions echoed back
-        // so the TUI can render them. The TUI intercepts the tool call,
-        // shows the dialog, captures user input, and returns the answers
-        // as the tool result.
         Ok(QuestionOutput {
             questions,
             answers: Vec::new(),
@@ -233,6 +231,14 @@ impl Question {
                         return Err(format!(
                             "Question '{}' recommends '{rec}' which is not one of its options. \
                              'recommended' must exactly match one entry of 'options'.",
+                            q.id
+                        ));
+                    }
+                    if let Some(clash) = opts.iter().find(|o| *o == types::CUSTOM_RESPONSE_LABEL) {
+                        return Err(format!(
+                            "Question '{}' has option '{clash}' which collides with the \
+                             reserved custom-answer label. Do not add your own custom/other \
+                             entry — the UI always offers free text itself.",
                             q.id
                         ));
                     }
