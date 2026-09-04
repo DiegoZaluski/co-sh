@@ -12,9 +12,8 @@ impl App {
             .is_some_and(|d| matches!(d.dialog_type, DialogType::UndoList { .. }))
     }
 
-    /// `/undo`: open the version list for the CURRENT session. No versions on
-    /// tmp (nothing was reverted yet, or the machine rebooted) → informative
-    /// toast instead of an empty list.
+    /// `/undo`: open the persistent pre-revert references for the current
+    /// logical branch.
     pub(in crate::app) fn open_undo_dialog(&mut self) {
         let Some(session_id) = self.state.current_session_id.clone() else {
             self.toast_state.show(ToastOptions {
@@ -25,11 +24,11 @@ impl App {
             });
             return;
         };
-        let versions = self.undo_store.versions(&session_id);
+        let versions = self.session_store.undo_versions(&session_id);
         if versions.is_empty() {
             self.toast_state.show(ToastOptions {
                 title: Some("Undo".into()),
-                message: "No snapshots yet — they are created on each revert.".into(),
+                message: "No revert points yet.".into(),
                 variant: ToastVariant::Info,
                 duration_ms: 4000,
             });
@@ -101,9 +100,7 @@ impl App {
         }
     }
 
-    /// Roll the session file back to a snapshot: copy the stored JSONL over
-    /// the live one, drop the session from the cache so the next access
-    /// reloads from disk, and refresh the sidebar summaries.
+    /// Append a rollback reference, then reload the derived branch view.
     pub(in crate::app) fn restore_undo_version(&mut self, session_id: &str, version: &str) {
         if self.state.status == crate::types::SessionStatus::Working {
             self.toast_state.show(ToastOptions {
@@ -114,8 +111,7 @@ impl App {
             });
             return;
         }
-        let jsonl = self.session_store.session_path(session_id);
-        if !self.undo_store.restore(session_id, version, &jsonl) {
+        if !self.session_store.rollback_session(session_id, version) {
             self.toast_state.show(ToastOptions {
                 title: Some("Undo".into()),
                 message: format!("Could not restore {version}."),
@@ -124,31 +120,13 @@ impl App {
             });
             return;
         }
-        // The cached session (and its ctx_ids mapping) is stale now — force a
-        // reload from the restored files, and jump the view to the bottom of
-        // the restored transcript.
+        // The cached projection is stale now — force a replay and jump the
+        // view to the bottom of the selected state.
         self.state.session_cache.pop(session_id);
         self.state
             .ensure_session_cached(session_id, &self.session_store);
         self.state.session_summaries = self.session_store.list_sessions();
         self.session_view.scroll_to_bottom();
-        // Re-persist the restored state through the FIFO writer thread: any
-        // queued-but-unexecuted save job for this session lands BEFORE this
-        // re-save, so the queue's final word is the restored content (the
-        // direct copy above is only the fast path).
-        if let Some(mut restored) = self.state.session_cache.get_mut(session_id).cloned() {
-            match self.session_store.load_context(session_id) {
-                Some(context) => {
-                    self.session_store
-                        .save_session_async_with_context(&mut restored, context);
-                }
-                // The restored snapshot had no context records (display-only
-                // era): re-save the transcript anyway so a
-                // queued-but-unexecuted job still lands before the restored
-                // content.
-                None => self.session_store.save_session_async(&restored),
-            }
-        }
         self.toast_state.show(ToastOptions {
             title: Some("Undo".into()),
             message: format!("Session restored to {version}."),

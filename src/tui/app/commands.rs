@@ -49,8 +49,8 @@ impl App {
         self.state.add_empty_session(id.clone(), title, now_ms);
         self.state.current_session_id = Some(id);
         // A new session is restored with the globally persisted model (the
-        // last one the user selected), recorded on the session so its JSONL
-        // header carries it.
+        // last one the user selected), recorded on the session so its history
+        // carries it as metadata deltas.
         self.apply_global_model();
         self.title_generated = false;
         self.prompt_view.focus();

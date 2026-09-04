@@ -8,12 +8,12 @@ mod keymap;
 mod logo;
 mod lsp_colors;
 mod routes;
+mod session_history;
 mod session_store;
 mod state;
 mod theme;
 mod types;
 mod ui;
-mod undo_store;
 mod usage;
 mod util;
 

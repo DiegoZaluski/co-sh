@@ -23,7 +23,6 @@ use summarize::{SUMMARIZER_SYSTEM, build_llm_prompt, serialize_item};
 mod test;
 mod todo_ctxt;
 
-use error_catalog::save_error_catalog_window;
 use crate::util::TokenEncoding;
 use cosh_sdk::connector::{
     ChatMessage, ClaudeThinkingBlock, ToolCallFunctionMsg, ToolCallMsg,
@@ -31,6 +30,7 @@ use cosh_sdk::connector::{
     tool_result_message, user_message,
 };
 use cosh_tools::plan::types::TodoList;
+use error_catalog::save_error_catalog_window;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use todo_ctxt::TodoContext;
@@ -44,9 +44,9 @@ const COMPACT_PCT: usize = 80;
 
 /// A single conversation item in display order. **One item = one message** in
 /// [`ContextManager::build_messages`], so message positions are preserved by
-/// construction. This is also the persisted representation: the TUI's session
-/// store writes each item as a JSONL record inside the session file (see
-/// `session_store`), so the timeline is restored verbatim from disk.
+/// construction. The TUI session store persists item additions/replacements
+/// as immutable JSONL deltas, so this runtime projection is rebuilt verbatim
+/// from event history.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ContextItem {
     /// A user prompt. **Protected**: its original text stays verbatim until
@@ -180,9 +180,10 @@ impl ContextItem {
 /// full history stays on disk for revert/fork at any point of the session —
 /// the model's view is exactly what the markers say.
 ///
-/// Persistence is the TUI's concern (`session_store`): the items are written
-/// as JSONL `Item` records and the remaining fields as header bookkeeping
-/// inside the session file. The field is keyed by MODEL, not provider: the
+/// Persistence is the TUI's concern (`session_store`): it compares this
+/// transport projection with the replayed branch and appends fine-grained
+/// context deltas. This value is never an authoritative on-disk snapshot.
+/// The field is keyed by MODEL, not provider: the
 /// stuck constraint is the model's window, so a model switch inside the same
 /// provider must clear it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -280,13 +281,15 @@ pub struct ContextManager {
     encoding: TokenEncoding,
     /// The model whose context window overflowed the LLM compaction and
     /// could not be relieved by the split (see [`Self::overflow_stuck`]).
-    /// Persisted with the snapshot so a stuck session stays notified across
-    /// turns until the user switches the model or starts a new session.
+    /// Included in the transport projection and persisted as a context delta,
+    /// so a stuck session stays notified across turns until the user switches
+    /// the model or starts a new session.
     overflow_model: Option<String>,
     /// Persistent staging of the split-and-concatenate contingency. The
     /// timeline is untouched while it is `Some`; the buffer is committed
-    /// atomically by [`Self::commit_split`]. Persisted with the snapshot so an
-    /// interrupted split resumes exactly where it stopped.
+    /// atomically by [`Self::commit_split`]. Included in the transport
+    /// projection and persisted as a context delta so an interrupted split
+    /// resumes exactly where it stopped.
     split: Option<SplitState>,
     /// Compaction boundary: every item with `id < visible_from` is
     /// pre-compaction — folded into the `Compaction` summary item, kept in
@@ -1046,9 +1049,9 @@ impl ContextManager {
         self.items.iter().cloned().collect()
     }
 
-    /// Serializable snapshot for persistence (the session JSONL's context
-    /// records). Nothing is in-flight between save and restore — the snapshot
-    /// is a plain clone.
+    /// Serializable transport projection for persistence. The session store
+    /// converts differences into immutable deltas; this clone is not a second
+    /// source of truth.
     pub fn save_state(&self) -> ContextManagerState {
         ContextManagerState {
             items: self.items.clone(),

@@ -353,7 +353,7 @@ impl App {
 
     /// Apply a (model, provider, reasoning) selection: update the live LLM
     /// config, persist the selection globally in `setup.json`, and record it
-    /// on the current session so its JSONL header carries it. This is the
+    /// on the current session so its JSONL history carries it. This is the
     /// single write path shared by every model selection in the UI.
     pub(in crate::app) fn commit_model_selection(
         &mut self,
@@ -368,7 +368,7 @@ impl App {
         );
         self.setup.set_model_selection(provider, model, reasoning);
         self.record_model_on_current_session();
-        // Flush the session header right away so the selection survives the
+        // Append the session metadata right away so the selection survives the
         // window before the next ContextSnapshot (~10 s) or Done/Stopped save.
         if let Some(session) = self.state.current_session() {
             self.session_store.save_session_async(session);
@@ -390,7 +390,7 @@ impl App {
     }
 
     /// Record the active model selection on the current session so it is
-    /// persisted in the session's JSONL header on the next save.
+    /// persisted in the session's JSONL history on the next save.
     pub(in crate::app) fn record_model_on_current_session(&mut self) {
         if let Some(session) = self.state.current_session_mut() {
             session.provider = if self.llm_config.provider.is_empty() {
@@ -444,8 +444,8 @@ impl App {
                 self.set_llm_model(model, String::new(), reasoning);
             }
             // No usable recorded selection: either the session never had one,
-            // or the header only derived a bare model id without a provider
-            // (no `/`). Best-effort fallback for slash'd legacy headers in
+            // or the projection only derived a bare model id without a provider
+            // (no `/`). Best-effort fallback for slash'd legacy histories in
             // the `(Some, Some)` arm above; here we cannot pin a provider
             // confidently, so the active config stays as-is.
             _ => {}
