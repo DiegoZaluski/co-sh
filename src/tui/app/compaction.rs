@@ -46,6 +46,53 @@ impl App {
                     model: None,
                 });
             }
+            cosh::harness::events::LlmCompactionEvent::Progress {
+                phase,
+                completed,
+                total,
+            } => {
+                let label = match phase {
+                    cosh::harness::events::LlmCompactionPhase::Mapping => "Mapping segments",
+                    cosh::harness::events::LlmCompactionPhase::SequentialFallback => {
+                        "Mapping sequentially"
+                    }
+                    cosh::harness::events::LlmCompactionPhase::Reducing => "Reducing summaries",
+                    cosh::harness::events::LlmCompactionPhase::Validating => {
+                        "Validating checkpoint"
+                    }
+                    cosh::harness::events::LlmCompactionPhase::Correcting => {
+                        "Correcting checkpoint"
+                    }
+                };
+                if let Some(crate::types::Part::Compaction(part)) = session
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .flat_map(|message| message.parts.iter_mut())
+                    .find(
+                        |part| matches!(part, crate::types::Part::Compaction(c) if c.is_running()),
+                    )
+                {
+                    part.text = if total == 0 {
+                        label.to_string()
+                    } else {
+                        format!("{label}: {completed}/{total}")
+                    };
+                }
+            }
+            cosh::harness::events::LlmCompactionEvent::OutputStarted => {
+                if let Some(crate::types::Part::Compaction(part)) = session
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .flat_map(|message| message.parts.iter_mut())
+                    .find(
+                        |part| matches!(part, crate::types::Part::Compaction(c) if c.is_running()),
+                    )
+                {
+                    part.text.clear();
+                }
+            }
             cosh::harness::events::LlmCompactionEvent::Finished
             | cosh::harness::events::LlmCompactionEvent::Failed => {
                 Self::finalize_compaction_line(session);

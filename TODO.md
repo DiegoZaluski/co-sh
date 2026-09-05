@@ -83,18 +83,32 @@ conflict, and validate that decisions, constraints, and open work survived.
 - [x] `cargo clippy --lib --bin cosh --no-default-features -- -D warnings` passed.
 - [x] Targeted Rust formatting and `git diff --check` passed.
 
-## Phase 3 — Parallel mapping with sequential provider fallback (current)
+## Phase 3 — Parallel mapping with sequential provider fallback (complete)
 
-- [ ] Add bounded concurrent map execution using cloned no-tools connectors and stable ordinal-based result placement.
-- [ ] Preserve cancellation, per-request usage reporting, retry classification, and deterministic test behavior under concurrency.
-- [ ] Detect provider/rate/concurrency failures, retain successful map outputs, and retry only incomplete segments sequentially with bounded backoff.
-- [ ] Treat a genuine per-segment context overflow as a repartition signal rather than a concurrency failure.
-- [ ] Emit incremental context snapshots after each accepted map/reduce result so resumable staging is actually durable.
-- [ ] Make TUI progress phase-aware without interleaving parallel mini-summary text into a misleading final-summary stream.
-- [ ] Add tests for out-of-order completion, partial parallel failure, sequential fallback, cancellation, usage events, persistence snapshots, and exactly-once segment acceptance.
-- [ ] Validate harness and TUI compaction tests; mark Phase 3 complete before starting Phase 4.
+- [x] Stop scheduling new parallel calls after the first failure, drain already-running successes, and make fallback backoff and stalled streams interruptible.
+- [x] Apply overflow repartitioning in sequential fallback too; retain accepted map identities and display only the committed checkpoint after validation.
+- [x] Persist manual-compaction progress while the agent is idle; the existing snapshot handler only accepts working agent loops.
 
-## Phase 4 — Structured handoff and lifecycle integration
+- [x] Add bounded concurrent map execution using cloned no-tools connectors and stable ordinal-based result placement.
+- [x] Preserve cancellation, per-request usage reporting, retry classification, and deterministic test behavior under concurrency.
+- [x] Detect provider/rate/concurrency failures, retain successful map outputs, and retry only incomplete segments sequentially with bounded backoff.
+- [x] Treat a genuine per-segment context overflow as a repartition signal rather than a concurrency failure.
+- [x] Emit incremental context snapshots after each accepted map/reduce result so resumable staging is actually durable.
+- [x] Make TUI progress phase-aware without interleaving parallel mini-summary text into a misleading final-summary stream.
+- [x] Add tests for out-of-order completion, partial parallel failure, sequential fallback, cancellation, usage events, persistence snapshots, and exactly-once segment acceptance.
+- [x] Validate harness and TUI compaction tests; mark Phase 3 complete before starting Phase 4.
+
+### Phase 3 validation record
+
+- [x] Library tests: 230 passed, 1 ignored; TUI tests: 417 passed, 16 ignored.
+- [x] Local HTTP fixture verified no-tools requests and provider usage/cost events.
+- [x] Strict Clippy, targeted formatting, and byte-whitespace checks passed.
+
+## Phase 4 — Structured handoff and lifecycle integration (current)
+
+- [ ] Bound reduction levels and correction attempts, revalidate corrected candidates, and reject malformed control replies instead of committing them.
+- [ ] Verify source identity on resume and commit, preserve logical checkpoint-first ordering, and prevent partial rereads from claiming complete range coverage.
+- [ ] Account for prompt overhead and output limits in checkpoint calls and make undersized-window failures explicit and bounded.
 
 - [ ] Refine the checkpoint schema/prompt into protected task state: objective, constraints, decisions with provenance, file/artifact references, verified work, active work, blockers, and next action.
 - [ ] Ensure stale facts can be explicitly invalidated and do not survive merely because they appeared in an older checkpoint.

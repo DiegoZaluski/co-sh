@@ -9,6 +9,50 @@ fn slash_cmd(name: &str) -> crate::ui::slash_menu::SlashCommand {
     }
 }
 
+#[tokio::test]
+async fn compaction_progress_targets_the_running_box_and_final_output_replaces_status() {
+    use crate::types::{Message, MessageRole, Part, TextPart};
+    use cosh::harness::events::{LlmCompactionEvent, LlmCompactionPhase};
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(id.clone(), "compaction".into(), 0);
+    app.state.current_session_id = Some(id);
+    app.handle_llm_compaction_event(LlmCompactionEvent::Started);
+    app.state
+        .current_session_mut()
+        .unwrap()
+        .messages
+        .push(Message {
+            id: "later-input".into(),
+            role: MessageRole::User,
+            parts: vec![Part::Text(TextPart {
+                text: "keep raw".into(),
+                synthetic: false,
+            })],
+            created_at: 0,
+            agent: None,
+            model: None,
+        });
+    app.handle_llm_compaction_event(LlmCompactionEvent::Progress {
+        phase: LlmCompactionPhase::Mapping,
+        completed: 2,
+        total: 4,
+    });
+    let Part::Compaction(part) = &app.state.current_session().unwrap().messages[0].parts[0] else {
+        panic!()
+    };
+    assert_eq!(part.text, "Mapping segments: 2/4");
+    app.handle_llm_compaction_event(LlmCompactionEvent::OutputStarted);
+    app.handle_llm_compaction_token("validated checkpoint");
+    app.handle_llm_compaction_event(LlmCompactionEvent::Finished);
+    let Part::Compaction(part) = &app.state.current_session().unwrap().messages[0].parts[0] else {
+        panic!()
+    };
+    assert_eq!(part.text, "validated checkpoint");
+    assert!(!part.is_running());
+}
+
 /// Regression: Enter on `/toolcall` in the slash menu must open the
 /// mode picker dialog. It used to fall into the generic branch (fill the
 /// prompt with "/toolcall ") because the dispatch lived only in the

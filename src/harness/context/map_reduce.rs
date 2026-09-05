@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 const MAP_CALL_OVERHEAD: usize = 8_000;
 const REDUCE_CALL_OVERHEAD: usize = 6_000;
 const MAX_REREAD_RANGES: usize = 3;
+const MAX_REPARTITIONS: u8 = 3;
 const MAP_REDUCE_VERSION: u8 = 1;
 
 const fn map_reduce_version() -> u8 {
@@ -82,6 +83,14 @@ pub struct MapReduceState {
     pub audits: Vec<String>,
     #[serde(default)]
     pub final_summary: Option<String>,
+    /// Set after a provider rejects concurrent requests. Successful maps stay
+    /// accepted and all remaining segments run sequentially on resume.
+    #[serde(default)]
+    pub parallel_disabled: bool,
+    /// Bounded number of times an overflowing map segment has been split more
+    /// finely. Persisting it prevents restart loops against a bad window.
+    #[serde(default)]
+    pub repartitions: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +105,7 @@ pub struct ReduceRequest {
     pub level: usize,
     pub start: usize,
     pub end: usize,
+    pub total: usize,
     pub final_group: bool,
     pub covered_ranges: Vec<ContextItemRange>,
     pub system: String,
@@ -106,6 +116,7 @@ pub struct ReduceRequest {
 pub struct ValidationRequest {
     pub start: usize,
     pub end: usize,
+    pub total: usize,
     pub system: String,
     pub prompt: String,
 }
@@ -151,7 +162,123 @@ impl ContextManager {
             validation_cursor: 0,
             audits: Vec::new(),
             final_summary: None,
+            parallel_disabled: false,
+            repartitions: 0,
         });
+        true
+    }
+
+    #[must_use]
+    pub fn parallel_mapping_enabled(&self) -> bool {
+        self.map_reduce
+            .as_ref()
+            .is_some_and(|state| state.phase == MapReducePhase::Mapping && !state.parallel_disabled)
+    }
+
+    pub fn disable_parallel_mapping(&mut self) {
+        if let Some(state) = self.map_reduce.as_mut() {
+            state.parallel_disabled = true;
+        }
+    }
+
+    #[must_use]
+    pub fn map_progress(&self) -> (usize, usize) {
+        self.map_reduce.as_ref().map_or((0, 0), |state| {
+            (
+                state
+                    .segments
+                    .iter()
+                    .filter(|segment| segment.summary.is_some())
+                    .count(),
+                state.segments.len(),
+            )
+        })
+    }
+
+    /// Split every incomplete map segment against a smaller observed window.
+    /// Completed summaries remain attached to their original ordered ranges.
+    /// Returns false when the bounded repartition budget is exhausted or the
+    /// new partition cannot make any segment finer.
+    pub fn repartition_incomplete_maps(&mut self, requested_window: Option<usize>) -> bool {
+        let Some(mut state) = self.map_reduce.take() else {
+            return false;
+        };
+        if state.phase != MapReducePhase::Mapping || state.repartitions >= MAX_REPARTITIONS {
+            self.map_reduce = Some(state);
+            return false;
+        }
+        let next_window = requested_window
+            .filter(|window| *window < state.window)
+            .unwrap_or_else(|| state.window.saturating_mul(3) / 4)
+            .max(2);
+        let budget = call_payload_budget(next_window, MAP_CALL_OVERHEAD);
+        let old_slice_count: usize = state
+            .segments
+            .iter()
+            .filter(|segment| segment.summary.is_none())
+            .map(|segment| segment.slices.len())
+            .sum();
+        let old_segment_count = state
+            .segments
+            .iter()
+            .filter(|segment| segment.summary.is_none())
+            .count();
+        let original_segments = state.segments.clone();
+        let mut rebuilt = Vec::new();
+        for segment in std::mem::take(&mut state.segments) {
+            if segment.summary.is_some() {
+                rebuilt.push(segment);
+                continue;
+            }
+            let slices = self.split_slices_to_budget(&segment.slices, budget);
+            let mut current = Vec::new();
+            let mut held = 0usize;
+            for slice in slices {
+                let tokens = self.slice_tokens(&slice);
+                if !current.is_empty() && held.saturating_add(tokens) > budget {
+                    rebuilt.push(new_segment(0, std::mem::take(&mut current)));
+                    held = 0;
+                }
+                held = held.saturating_add(tokens);
+                current.push(slice);
+            }
+            if !current.is_empty() {
+                rebuilt.push(new_segment(0, current));
+            }
+        }
+        let new_slice_count: usize = rebuilt
+            .iter()
+            .filter(|segment| segment.summary.is_none())
+            .map(|segment| segment.slices.len())
+            .sum();
+        let new_segment_count = rebuilt
+            .iter()
+            .filter(|segment| segment.summary.is_none())
+            .count();
+        if next_window >= state.window
+            || (new_slice_count <= old_slice_count && new_segment_count <= old_segment_count)
+        {
+            state.segments = original_segments;
+            self.map_reduce = Some(state);
+            return false;
+        }
+        let next_ordinal = original_segments
+            .iter()
+            .map(|segment| segment.ordinal)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        for (offset, segment) in rebuilt
+            .iter_mut()
+            .filter(|segment| segment.summary.is_none())
+            .enumerate()
+        {
+            segment.ordinal = next_ordinal + offset;
+        }
+        state.window = next_window;
+        state.segments = rebuilt;
+        state.repartitions += 1;
+        self.map_reduce = Some(state);
         true
     }
 
@@ -241,6 +368,7 @@ impl ContextManager {
             level: state.level,
             start,
             end,
+            total: state.nodes.len(),
             final_group,
             covered_ranges: covered_ranges.clone(),
             system: REDUCE_SUMMARIZER_SYSTEM.to_string(),
@@ -364,6 +492,7 @@ impl ContextManager {
         Some(ValidationRequest {
             start,
             end,
+            total: state.segments.len(),
             system: VALIDATOR_SYSTEM.to_string(),
             prompt: build_validation_prompt(candidate, &summaries),
         })
@@ -491,6 +620,30 @@ impl ContextManager {
             segments.push(new_segment(segments.len(), current));
         }
         segments
+    }
+
+    fn split_slices_to_budget(&self, source: &[SegmentSlice], budget: usize) -> Vec<SegmentSlice> {
+        let mut slices = Vec::new();
+        for slice in source {
+            let Some(item) = self.items.iter().find(|item| item.id() == slice.item_id) else {
+                continue;
+            };
+            let rendered = serialize_item(item);
+            let Some(prefix) = rendered.get(..slice.end_byte) else {
+                continue;
+            };
+            let mut start = slice.start_byte;
+            while start < slice.end_byte {
+                let end = prefix_end_for_budget(prefix, start, budget, self.encoding);
+                slices.push(SegmentSlice {
+                    item_id: slice.item_id,
+                    start_byte: start,
+                    end_byte: end,
+                });
+                start = end;
+            }
+        }
+        slices
     }
 
     fn map_request(&self, segment: &MapSegment, window: usize) -> Option<MapRequest> {

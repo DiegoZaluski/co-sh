@@ -1,6 +1,6 @@
 #[cfg(not(test))]
 use super::context::error_catalog_window;
-use super::context::{ContextManager, MAX_CONTEXT_TOKENS, RunOutcome};
+use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
 use cosh_sdk::connector::{
@@ -27,6 +27,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 use tokio::time::Duration;
+
+#[cfg(test)]
+#[path = "test/map_reduce_test.rs"]
+mod map_reduce_test;
 
 /// One event delivered to a streaming callback: a text token, or the reset
 /// marker the SDK emits when it retries a mid-stream failure (the consumer
@@ -210,6 +214,10 @@ pub(crate) const CONTEXT_WINDOW_MARKER: &str = "__cosh_context_window_exceeded__
 /// before the harness gives up and surfaces a TUI notification.
 const MAX_COMPACTION_RETRIES: usize = 3;
 
+/// Maximum number of independent map requests in flight. Four gives useful
+/// latency reduction without assuming a provider grants high burst capacity.
+const MAP_CONCURRENCY: usize = 4;
+
 /// Base of the exponential backoff between summarizer retries (attempt N
 /// waits `2^(N-1) * BASE`).
 const COMPACTION_RETRY_BACKOFF_BASE: Duration = Duration::from_millis(250);
@@ -222,6 +230,19 @@ const OVERFLOW_TOAST_COOLDOWN: Duration = Duration::from_secs(15);
 /// Backoff after the `attempt`-th failed summarizer attempt (1-based).
 fn compaction_retry_backoff(attempt: usize) -> Duration {
     COMPACTION_RETRY_BACKOFF_BASE.saturating_mul(1u32 << attempt.min(4))
+}
+
+async fn wait_for_stop_signal(stop_signal: Option<Arc<AtomicBool>>) {
+    let Some(stop_signal) = stop_signal else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    loop {
+        if stop_signal.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Timeout for one context-window discovery call: a hanging network request
@@ -305,6 +326,11 @@ enum CompactionOutcome {
     ResolvedByContingency,
     /// The summarizer call failed or produced nothing.
     Failed,
+}
+
+struct ParallelMapResult {
+    ordinal: usize,
+    result: Result<String, CompactionErr>,
 }
 
 pub struct PromptSystem {
@@ -509,6 +535,9 @@ pub struct Harness {
     /// chunks' successes (the reactive fork).
     #[cfg(test)]
     pub(crate) mock_chat_queue: VecDeque<Result<String, String>>,
+    /// Per-map delay used to prove ordinal-stable out-of-order completion.
+    #[cfg(test)]
+    pub(crate) mock_map_delay_queue: VecDeque<u64>,
     #[cfg(test)]
     pub(crate) mock_stream_queue: VecDeque<Result<Vec<String>, String>>,
     /// Test-only per-token pause (ms) applied by the mock stream so tests
@@ -601,6 +630,8 @@ impl Harness {
             mock_chat_response: None,
             #[cfg(test)]
             mock_chat_queue: VecDeque::new(),
+            #[cfg(test)]
+            mock_map_delay_queue: VecDeque::new(),
             #[cfg(test)]
             mock_stream_queue: VecDeque::new(),
             #[cfg(test)]
@@ -1254,6 +1285,7 @@ impl Harness {
             event: LlmCompactionEvent::Started,
         });
         let result = self.drive_map_reduce(tx).await;
+        self.emit_compaction_snapshot(tx);
         self.compaction_generic_retries = 0;
         match &result {
             Err(CompactionErr::Other(message)) => {
@@ -1286,16 +1318,44 @@ impl Harness {
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> Result<bool, CompactionErr> {
+        use super::events::{HarnessEvent, LlmCompactionEvent, LlmCompactionPhase};
+
         loop {
-            if let Some(request) = self
-                .context_manager
-                .pending_map_requests()
-                .into_iter()
-                .next()
+            if self
+                .stop_signal
+                .as_ref()
+                .is_some_and(|signal| signal.load(Ordering::Relaxed))
             {
-                let summary = self
-                    .summarize_checkpoint_request(&request.system, &request.prompt, tx)
-                    .await?;
+                return Err(CompactionErr::Interrupted);
+            }
+            let pending = self.context_manager.pending_map_requests();
+            if !pending.is_empty() && self.context_manager.parallel_mapping_enabled() {
+                self.run_parallel_maps(pending, tx).await?;
+                continue;
+            }
+            if let Some(request) = pending.into_iter().next() {
+                let (completed, total) = self.context_manager.map_progress();
+                let _ = tx.send(HarnessEvent::LlmCompaction {
+                    event: LlmCompactionEvent::Progress {
+                        phase: LlmCompactionPhase::SequentialFallback,
+                        completed,
+                        total,
+                    },
+                });
+                let result = self
+                    .summarize_checkpoint_request(&request.system, &request.prompt, tx, false)
+                    .await;
+                let summary = match result {
+                    Err(CompactionErr::ContextWindow { window_tokens })
+                        if self
+                            .context_manager
+                            .repartition_incomplete_maps(window_tokens) =>
+                    {
+                        self.emit_compaction_snapshot(tx);
+                        continue;
+                    }
+                    result => result?,
+                };
                 if !self
                     .context_manager
                     .accept_map_summary(request.ordinal, &summary)
@@ -1304,12 +1364,30 @@ impl Harness {
                         "could not accept a MapReduce segment summary".into(),
                     ));
                 }
+                self.emit_compaction_snapshot(tx);
                 continue;
             }
 
             if let Some(request) = self.context_manager.next_reduce_request() {
+                let _ = tx.send(HarnessEvent::LlmCompaction {
+                    event: LlmCompactionEvent::Progress {
+                        phase: LlmCompactionPhase::Reducing,
+                        completed: request.start,
+                        total: request.total,
+                    },
+                });
+                if request.final_group {
+                    let _ = tx.send(HarnessEvent::LlmCompaction {
+                        event: LlmCompactionEvent::OutputStarted,
+                    });
+                }
                 let mut summary = self
-                    .summarize_checkpoint_request(&request.system, &request.prompt, tx)
+                    .summarize_checkpoint_request(
+                        &request.system,
+                        &request.prompt,
+                        tx,
+                        request.final_group,
+                    )
                     .await?;
                 let reread = self.context_manager.parse_reread_request(&summary);
                 if summary.trim().starts_with("REREAD:") && reread.is_empty() {
@@ -1325,7 +1403,12 @@ impl Harness {
                             CompactionErr::Other("reducer requested an invalid source range".into())
                         })?;
                     summary = self
-                        .summarize_checkpoint_request(&conflict.system, &conflict.prompt, tx)
+                        .summarize_checkpoint_request(
+                            &conflict.system,
+                            &conflict.prompt,
+                            tx,
+                            request.final_group,
+                        )
                         .await?;
                     if summary.trim().starts_with("REREAD:") {
                         return Err(CompactionErr::Other(
@@ -1341,34 +1424,311 @@ impl Harness {
                         "could not accept a MapReduce reduction".into(),
                     ));
                 }
+                self.emit_compaction_snapshot(tx);
                 continue;
             }
 
             if let Some(request) = self.context_manager.next_validation_request() {
+                let _ = tx.send(HarnessEvent::LlmCompaction {
+                    event: LlmCompactionEvent::Progress {
+                        phase: LlmCompactionPhase::Validating,
+                        completed: request.start,
+                        total: request.total,
+                    },
+                });
                 let audit = self
-                    .summarize_checkpoint_request(&request.system, &request.prompt, tx)
+                    .summarize_checkpoint_request(&request.system, &request.prompt, tx, false)
                     .await?;
                 if !self.context_manager.accept_validation(&request, &audit) {
                     return Err(CompactionErr::Other(
                         "could not accept a checkpoint validation result".into(),
                     ));
                 }
+                self.emit_compaction_snapshot(tx);
                 continue;
             }
 
             if let Some(request) = self.context_manager.correction_request() {
+                let _ = tx.send(HarnessEvent::LlmCompaction {
+                    event: LlmCompactionEvent::Progress {
+                        phase: LlmCompactionPhase::Correcting,
+                        completed: 0,
+                        total: 0,
+                    },
+                });
+                let _ = tx.send(HarnessEvent::LlmCompaction {
+                    event: LlmCompactionEvent::OutputStarted,
+                });
                 let corrected = self
-                    .summarize_checkpoint_request(&request.system, &request.prompt, tx)
+                    .summarize_checkpoint_request(&request.system, &request.prompt, tx, true)
                     .await?;
                 if !self.context_manager.accept_correction(&corrected) {
                     return Err(CompactionErr::Other(
                         "could not accept a corrected checkpoint".into(),
                     ));
                 }
+                self.emit_compaction_snapshot(tx);
                 continue;
             }
 
-            return Ok(self.context_manager.commit_map_reduce());
+            let committed = self.context_manager.commit_map_reduce();
+            if committed {
+                let summary = self
+                    .context_manager
+                    .save_state()
+                    .items
+                    .back()
+                    .and_then(|item| {
+                        if let super::context::ContextItem::Compaction { summary, .. } = item {
+                            Some(summary.clone())
+                        } else {
+                            None
+                        }
+                    });
+                let _ = tx.send(HarnessEvent::LlmCompaction {
+                    event: LlmCompactionEvent::OutputStarted,
+                });
+                if let Some(text) = summary {
+                    let _ = tx.send(HarnessEvent::LlmCompactionToken { text });
+                }
+            }
+            return Ok(committed);
+        }
+    }
+
+    fn emit_compaction_snapshot(
+        &self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) {
+        let _ = tx.send(super::events::HarnessEvent::ContextSnapshot {
+            context: self.context_manager.save_state(),
+        });
+    }
+
+    async fn run_parallel_maps(
+        &mut self,
+        requests: Vec<MapRequest>,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) -> Result<(), CompactionErr> {
+        use super::events::{HarnessEvent, LlmCompactionEvent, LlmCompactionPhase};
+
+        let (completed, total) = self.context_manager.map_progress();
+        let _ = tx.send(HarnessEvent::LlmCompaction {
+            event: LlmCompactionEvent::Progress {
+                phase: LlmCompactionPhase::Mapping,
+                completed,
+                total,
+            },
+        });
+
+        let mut requests = requests.into_iter();
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..MAP_CONCURRENCY {
+            let Some(request) = requests.next() else {
+                break;
+            };
+            self.spawn_parallel_map(&mut tasks, request, tx);
+        }
+
+        let mut generic_failure = false;
+        let mut overflow_windows = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok(ParallelMapResult {
+                    ordinal,
+                    result: Ok(summary),
+                }) => {
+                    if !self.context_manager.accept_map_summary(ordinal, &summary) {
+                        tasks.abort_all();
+                        return Err(CompactionErr::Other(
+                            "could not accept a parallel MapReduce segment summary".into(),
+                        ));
+                    }
+                    self.emit_compaction_snapshot(tx);
+                    let (completed, total) = self.context_manager.map_progress();
+                    let _ = tx.send(HarnessEvent::LlmCompaction {
+                        event: LlmCompactionEvent::Progress {
+                            phase: LlmCompactionPhase::Mapping,
+                            completed,
+                            total,
+                        },
+                    });
+                }
+                Ok(ParallelMapResult {
+                    result: Err(CompactionErr::Interrupted),
+                    ..
+                }) => {
+                    tasks.abort_all();
+                    return Err(CompactionErr::Interrupted);
+                }
+                Ok(ParallelMapResult {
+                    result: Err(CompactionErr::ContextWindow { window_tokens }),
+                    ..
+                }) => overflow_windows.push(window_tokens),
+                Ok(ParallelMapResult {
+                    result: Err(CompactionErr::Other(_)),
+                    ..
+                })
+                | Err(_) => generic_failure = true,
+            }
+
+            if !generic_failure
+                && overflow_windows.is_empty()
+                && let Some(request) = requests.next()
+            {
+                self.spawn_parallel_map(&mut tasks, request, tx);
+            }
+        }
+
+        if !overflow_windows.is_empty() {
+            let reported_window = overflow_windows.into_iter().flatten().min();
+            if !self
+                .context_manager
+                .repartition_incomplete_maps(reported_window)
+            {
+                return Err(CompactionErr::ContextWindow {
+                    window_tokens: reported_window,
+                });
+            }
+            if generic_failure {
+                self.context_manager.disable_parallel_mapping();
+            }
+            self.emit_compaction_snapshot(tx);
+            return Ok(());
+        }
+
+        if generic_failure {
+            self.context_manager.disable_parallel_mapping();
+            self.emit_compaction_snapshot(tx);
+            tokio::select! {
+                () = tokio::time::sleep(compaction_retry_backoff(1)) => {},
+                () = wait_for_stop_signal(self.stop_signal.clone()) => {
+                    return Err(CompactionErr::Interrupted);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn spawn_parallel_map(
+        &mut self,
+        tasks: &mut tokio::task::JoinSet<ParallelMapResult>,
+        request: MapRequest,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) {
+        let connector = self.connector.clone();
+        let stop_signal = self.stop_signal.clone();
+        let event_tx = tx.clone();
+        #[cfg(test)]
+        let mock_response = self.next_mock_chat();
+        #[cfg(test)]
+        let mock_delay = self.mock_map_delay_queue.pop_front().unwrap_or(0);
+        tasks.spawn(async move {
+            let ordinal = request.ordinal;
+            #[cfg(test)]
+            if let Some(response) = mock_response {
+                if mock_delay > 0 {
+                    tokio::select! {
+                        () = tokio::time::sleep(Duration::from_millis(mock_delay)) => {},
+                        () = wait_for_stop_signal(stop_signal.clone()) => {
+                            return ParallelMapResult { ordinal, result: Err(CompactionErr::Interrupted) };
+                        }
+                    }
+                }
+                let result = response
+                    .map_err(Self::classify_mock_compaction_error)
+                    .and_then(|summary| {
+                        (!summary.trim().is_empty())
+                            .then_some(summary)
+                            .ok_or_else(|| {
+                                CompactionErr::Other("summarizer returned an empty response".into())
+                            })
+                    });
+                return ParallelMapResult { ordinal, result };
+            }
+            let result = Self::summarize_map_with_connector(
+                connector,
+                request.system,
+                request.prompt,
+                stop_signal,
+                event_tx,
+            )
+            .await;
+            ParallelMapResult { ordinal, result }
+        });
+    }
+
+    async fn summarize_map_with_connector(
+        connector: Connector,
+        system: String,
+        prompt: String,
+        stop_signal: Option<Arc<AtomicBool>>,
+        event_tx: tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) -> Result<String, CompactionErr> {
+        use tokio_stream::StreamExt;
+
+        let mut stream = tokio::select! {
+            result = connector.stream_chat_with_system_no_tools(&prompt, &system) => {
+                result.map_err(|error| match error {
+                    ConnectorError::ContextWindowExceeded { window_tokens, .. } => {
+                        CompactionErr::ContextWindow { window_tokens }
+                    }
+                    other => CompactionErr::Other(other.to_string()),
+                })?
+            }
+            () = wait_for_stop_signal(stop_signal.clone()) => {
+                return Err(CompactionErr::Interrupted);
+            }
+        };
+        let mut summary = String::new();
+        loop {
+            let chunk = tokio::select! {
+                chunk = stream.next() => chunk,
+                () = wait_for_stop_signal(stop_signal.clone()) => {
+                    return Err(CompactionErr::Interrupted);
+                }
+            };
+            match chunk {
+                Some(Ok(chunk)) if chunk.is_reset() => summary.clear(),
+                Some(Ok(chunk)) => summary.push_str(chunk.token()),
+                Some(Err(ConnectorError::ContextWindowExceeded { window_tokens, .. })) => {
+                    return Err(CompactionErr::ContextWindow { window_tokens });
+                }
+                Some(Err(error)) => return Err(CompactionErr::Other(error.to_string())),
+                None => break,
+            }
+        }
+        if let Some(usage) = stream.usage().await {
+            let reported_cost = stream.reported_cost().await;
+            let _ = event_tx.send(super::events::HarnessEvent::Usage {
+                usage,
+                provider: connector.provider_name().unwrap_or("unknown").to_owned(),
+                model: connector.model().unwrap_or("").to_owned(),
+                reported_cost,
+            });
+        }
+        (!summary.trim().is_empty())
+            .then_some(summary)
+            .ok_or_else(|| CompactionErr::Other("summarizer returned an empty response".into()))
+    }
+
+    #[cfg(test)]
+    fn classify_mock_compaction_error(message: String) -> CompactionErr {
+        match message.as_str() {
+            INTERRUPTED_MARKER => CompactionErr::Interrupted,
+            CONTEXT_WINDOW_MARKER => CompactionErr::ContextWindow {
+                window_tokens: None,
+            },
+            other => other
+                .strip_prefix(CONTEXT_WINDOW_MARKER)
+                .and_then(|rest| rest.strip_prefix(':'))
+                .and_then(|window| window.parse::<usize>().ok())
+                .map_or_else(
+                    || CompactionErr::Other(message),
+                    |window_tokens| CompactionErr::ContextWindow {
+                        window_tokens: Some(window_tokens),
+                    },
+                ),
         }
     }
 
@@ -1377,23 +1737,48 @@ impl Harness {
         system: &str,
         prompt: &str,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+        stream_output: bool,
     ) -> Result<String, CompactionErr> {
         use super::events::HarnessEvent;
 
         let mut retries = 0usize;
         loop {
-            let mut summary = String::new();
-            match self
-                .stream_summarize_for_compaction(system, prompt, |chunk| {
-                    summary.push_str(chunk);
-                    let _ = tx.send(HarnessEvent::LlmCompactionToken {
-                        text: chunk.to_string(),
-                    });
-                })
+            #[cfg(test)]
+            let mock = self.next_mock_chat();
+            #[cfg(not(test))]
+            let mock: Option<Result<String, String>> = None;
+            let result = if let Some(response) = mock {
+                #[cfg(test)]
+                {
+                    response.map_err(Self::classify_mock_compaction_error)
+                }
+                #[cfg(not(test))]
+                {
+                    response.map_err(CompactionErr::Other)
+                }
+            } else {
+                Self::summarize_map_with_connector(
+                    self.connector.clone(),
+                    system.to_string(),
+                    prompt.to_string(),
+                    self.stop_signal.clone(),
+                    tx.clone(),
+                )
                 .await
-            {
-                Ok(()) if !summary.trim().is_empty() => return Ok(summary),
-                Ok(()) => {
+            };
+            match result {
+                Ok(summary) if !summary.trim().is_empty() => {
+                    if stream_output {
+                        let _ = tx.send(HarnessEvent::LlmCompaction {
+                            event: super::events::LlmCompactionEvent::OutputStarted,
+                        });
+                        let _ = tx.send(HarnessEvent::LlmCompactionToken {
+                            text: summary.clone(),
+                        });
+                    }
+                    return Ok(summary);
+                }
+                Ok(_) => {
                     return Err(CompactionErr::Other(
                         "summarizer returned an empty response".into(),
                     ));
@@ -1403,7 +1788,12 @@ impl Harness {
                     if retries >= MAX_COMPACTION_RETRIES {
                         return Err(CompactionErr::Other(error));
                     }
-                    tokio::time::sleep(compaction_retry_backoff(retries)).await;
+                    tokio::select! {
+                        () = tokio::time::sleep(compaction_retry_backoff(retries)) => {},
+                        () = wait_for_stop_signal(self.stop_signal.clone()) => {
+                            return Err(CompactionErr::Interrupted);
+                        }
+                    }
                 }
                 Err(error) => return Err(error),
             }
@@ -4039,6 +4429,7 @@ impl Harness {
             snapshot_interval: std::time::Duration::from_secs(10),
             mock_chat_response: None,
             mock_chat_queue: VecDeque::new(),
+            mock_map_delay_queue: VecDeque::new(),
             mock_stream_queue: VecDeque::new(),
             mock_stream_delay_ms: 0,
             mock_native_stream_queue: VecDeque::new(),
@@ -4086,6 +4477,14 @@ impl Harness {
             self.mock_chat_queue
                 .push_back(response.map(|s| s.to_string()).map_err(|s| s.to_string()));
         }
+        self
+    }
+
+    /// Delay each assigned parallel map response by the corresponding number
+    /// of milliseconds. This lets tests force completion order independently
+    /// from stable segment ordinals.
+    pub(crate) fn with_mock_map_delays(mut self, delays: &[u64]) -> Self {
+        self.mock_map_delay_queue.extend(delays.iter().copied());
         self
     }
 

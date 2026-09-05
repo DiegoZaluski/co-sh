@@ -934,7 +934,7 @@ impl App {
     /// instead of the session-start state. Mirrors the Done/Stopped save
     /// logic and skips sessions with no valid dialog yet.
     pub(super) fn persist_incrementally(&mut self, context: ContextManagerState) {
-        if self.state.status != SessionStatus::Working {
+        if self.state.status != SessionStatus::Working && !self.manual_compaction_active {
             return;
         }
         if let Some(id) = self.state.current_session_id.clone()

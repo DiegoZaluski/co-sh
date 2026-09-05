@@ -1164,8 +1164,8 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         })
         .collect();
     assert!(
-        streamed.contains("reactive map") && streamed.contains("reactive final"),
-        "map and reduce calls must stream; streamed={streamed:?}"
+        !streamed.contains("reactive map") && streamed.contains("reactive final"),
+        "independent maps must not interleave into the checkpoint body; streamed={streamed:?}"
     );
     assert!(
         events

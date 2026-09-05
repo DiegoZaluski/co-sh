@@ -207,9 +207,29 @@ pub enum ToastVariant {
 pub enum LlmCompactionEvent {
     /// The harness is about to call the model for the continuation summary.
     Started,
+    /// Progress through a MapReduce phase. Map outputs are deliberately not
+    /// streamed into the final-summary body, so parallel completion cannot
+    /// interleave misleading text in the TUI.
+    Progress {
+        phase: LlmCompactionPhase,
+        completed: usize,
+        total: usize,
+    },
+    /// The next streamed tokens are the candidate/final checkpoint rather
+    /// than phase status; the TUI clears the transient progress text first.
+    OutputStarted,
     /// The summary was produced and applied — the context was compacted.
     Finished,
     /// The summarization call failed or produced no output — the compaction
     /// is skipped this round and the context stays as it was.
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmCompactionPhase {
+    Mapping,
+    SequentialFallback,
+    Reducing,
+    Validating,
+    Correcting,
 }
