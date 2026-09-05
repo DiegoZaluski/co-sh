@@ -225,6 +225,10 @@ impl ContextManager {
                 state.window = window;
                 state.repartitions = 0;
                 state.parallel_disabled = false;
+                state.corrections = 0;
+                if state.level >= MAX_REDUCTION_LEVELS {
+                    state.level = 0;
+                }
             }
             state.model = Some(model.to_string());
         }
@@ -1243,6 +1247,7 @@ mod tests {
     fn repeated_failed_corrections_never_commit_and_are_bounded() {
         let mut manager = large_manager(2_000);
         assert!(manager.begin_map_reduce(2_000));
+        manager.prepare_map_reduce_model("small", 2_000);
         for request in manager.pending_map_requests() {
             assert!(manager.accept_map_summary(request.ordinal, "constraint: do not delete"));
         }
@@ -1260,12 +1265,22 @@ mod tests {
         }
         assert!(manager.correction_request().is_none());
         assert!(!manager.commit_map_reduce());
+        manager.prepare_map_reduce_model("small", 2_000);
+        assert!(manager.correction_request().is_none());
+        manager.prepare_map_reduce_model("larger", 8_000);
+        assert!(manager.correction_request().is_some());
+        assert!(manager.accept_correction("constraint: do not delete"));
+        while let Some(request) = manager.next_validation_request() {
+            assert!(manager.accept_validation(&request, "PASS"));
+        }
+        assert!(manager.commit_map_reduce());
     }
 
     #[test]
     fn reduction_limit_prevents_non_shrinking_model_output_loops() {
         let mut manager = large_manager(1_000);
         assert!(manager.begin_map_reduce(1_000));
+        manager.prepare_map_reduce_model("small", 1_000);
         for request in manager.pending_map_requests() {
             assert!(manager.accept_map_summary(request.ordinal, &"no compression ".repeat(300)));
         }
@@ -1280,6 +1295,10 @@ mod tests {
             MAX_REDUCTION_LEVELS
         );
         assert!(!manager.commit_map_reduce());
+        manager.prepare_map_reduce_model("small", 1_000);
+        assert!(manager.next_reduce_request().is_none());
+        manager.prepare_map_reduce_model("larger", 8_000);
+        assert!(manager.next_reduce_request().is_some());
     }
 
     #[test]

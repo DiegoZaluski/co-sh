@@ -305,7 +305,7 @@ async fn discovered_context_window(model: Option<&str>) -> Option<usize> {
 }
 
 /// The classified result of a single summarizer attempt, so [`Harness::llm_compact`]
-/// can decide between retrying (generic errors), driving the split
+/// can decide between retrying (generic errors), driving MapReduce
 /// (context-window overflow) or giving up.
 #[derive(Debug)]
 enum CompactionErr {
@@ -1173,7 +1173,7 @@ impl Harness {
             CompactionOutcome::Applied if !summary.trim().is_empty() => self
                 .context_manager
                 .apply_llm_summary(summary.trim().to_string()),
-            // The split resolved the overflow — a successful pass.
+            // The contingency resolved the overflow — a successful pass.
             CompactionOutcome::ResolvedByContingency => true,
             CompactionOutcome::Applied | CompactionOutcome::Failed => false,
         };

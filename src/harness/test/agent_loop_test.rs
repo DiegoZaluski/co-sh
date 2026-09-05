@@ -573,13 +573,13 @@ async fn input_with_output_before_cancel_is_kept() {
 // ── Context-window overflow recovery (provider rejects the prompt size) ──
 
 // When the summarizer call fails with a context-window overflow, the harness
-// drives the split-and-concatenate contingency. When the split itself cannot
+// drives the hierarchical MapReduce contingency. When the checkpoint itself cannot
 // fit the context into the window (the summarizer keeps overflowing), the
 // provider is marked stuck and the user is notified through a Toast — the
-// loop still completes normally. The split never drains items: the tool chains
+// loop still completes normally. The checkpoint never drains items: the tool chains
 // stay in the timeline.
 #[tokio::test]
-async fn run_agent_loop_marks_provider_stuck_when_split_cannot_fit() {
+async fn run_agent_loop_marks_provider_stuck_when_map_reduce_cannot_fit() {
     use crate::harness::context::ContextManager;
     use crate::harness::core::CONTEXT_WINDOW_MARKER;
     use crate::harness::events::{LlmCompactionEvent, ToastVariant};
@@ -595,7 +595,7 @@ async fn run_agent_loop_marks_provider_stuck_when_split_cannot_fit() {
         ("assistant".into(), "a ".repeat(1100)),
     ]);
     h.context_manager.close_loop();
-    // Two tool chains in the timeline (the split summarizes, never drains).
+    // Two tool chains in the timeline (the checkpoint summarizes, never drains).
     h.context_manager.add_tool_call("t0", "fs_read", "{}");
     h.context_manager.add_tool_result("t0", "contents A");
     h.context_manager.add_tool_call("t1", "fs_read", "{}");
@@ -676,7 +676,7 @@ async fn run_agent_loop_marks_provider_stuck_when_split_cannot_fit() {
             .any(|e| matches!(e, HarnessEvent::Done { .. })),
         "the loop completes after the overflow is handled"
     );
-    // The split never drains items — the tool chains stay in the timeline.
+    // The checkpoint never drains items — the tool chains stay in the timeline.
     assert!(
         items.iter().any(|it| {
             matches!(
@@ -684,12 +684,12 @@ async fn run_agent_loop_marks_provider_stuck_when_split_cannot_fit() {
                 ContextItem::ToolCall { .. } | ContextItem::ToolResult { .. }
             )
         }),
-        "the split summarizes, never drains — the tool chains remain"
+        "the checkpoint summarizes, never drains — the tool chains remain"
     );
     // The provider is recorded as stuck (the notification persists).
     assert!(
         stuck,
-        "the provider must be marked stuck when the split cannot fit the context"
+        "the provider must be marked stuck when the checkpoint cannot fit the context"
     );
 }
 
@@ -776,7 +776,7 @@ async fn run_agent_loop_retries_generic_compaction_failures_then_notifies() {
     );
 }
 
-// Once the provider is recorded as stuck (the split can no longer shrink the
+// Once the provider is recorded as stuck (the checkpoint can no longer shrink the
 // context into the window), the doomed summarizer call is SKIPPED — no
 // LlmCompaction lifecycle events — and the throttled warning toast is
 // re-surfaced instead.
@@ -859,23 +859,23 @@ async fn run_agent_loop_skips_the_doomed_summarizer_when_stuck() {
     );
 }
 
-// ── Split-and-concatenate (the known-window contingency) ────────────────
+// ── Hierarchical MapReduce (the known-window contingency) ────────────────
 //
 // When the ACTIVE model's window is KNOWN (discovery or a context-window
 // error that reported it) and the held context exceeds it — the
-// model-switch-to-a-smaller-window scenario — the harness drives the split
+// model-switch-to-a-smaller-window scenario — the harness drives the checkpoint
 // instead of the single-shot compaction: the timeline is summarized in
-// sequential chunks and committed ATOMICALLY as the new anchor. The split
-// shrinks the WHOLE timeline to fit the known window.
+// independent maps, globally reduced, validated, and committed ATOMICALLY as
+// a checkpoint. This tiny-window fixture folds its oversized raw prefix whole.
 #[tokio::test]
-async fn known_window_overflow_drives_split_and_commits_the_anchor() {
+async fn known_window_overflow_drives_map_reduce_and_commits_the_anchor() {
     use crate::harness::context::ContextManager;
     use crate::harness::events::LlmCompactionEvent;
 
     let mut h = Harness::new_test();
     // The ACTIVE model's window is KNOWN (discovery succeeded) and far below
     // the held context: the single-shot compaction transcript would overflow
-    // the provider, so the split path must fire instead.
+    // the provider, so the checkpoint path must fire instead.
     h = h.with_discovered_window(600);
     h.context_manager = ContextManager::new(2000); // trigger = 1600
     // A loaded user turn WITH an answer (promoted to a LoopClosure
@@ -953,7 +953,7 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
     let items = state.items;
     handle.abort();
 
-    // The split surfaced the SAME continuous "Summarizing" box to the TUI.
+    // The checkpoint surfaced the SAME continuous "Summarizing" box to the TUI.
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -961,7 +961,7 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
                 event: LlmCompactionEvent::Started
             }
         )),
-        "the split must emit LlmCompaction::Started; events={events:?}"
+        "the checkpoint must emit LlmCompaction::Started; events={events:?}"
     );
     assert!(
         events.iter().any(|e| matches!(
@@ -970,7 +970,7 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
                 event: LlmCompactionEvent::Finished
             }
         )),
-        "the split must emit LlmCompaction::Finished; events={events:?}"
+        "the checkpoint must emit LlmCompaction::Finished; events={events:?}"
     );
     // The chunk summaries streamed to the TUI as one continuous box.
     let streamed: String = events
@@ -988,11 +988,11 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
         events
             .iter()
             .any(|e| matches!(e, HarnessEvent::Done { .. })),
-        "the loop completes after the split; events={events:?}"
+        "the loop completes after the checkpoint; events={events:?}"
     );
 
-    // The split committed append-only: the buffer became ONE Compaction
-    // anchor appended after the (now hidden) pre-split timeline.
+    // The checkpoint committed append-only: the validated result became ONE Compaction
+    // anchor appended after the (now hidden) pre-checkpoint timeline.
     let anchor_idx = items
         .iter()
         .position(|it| {
@@ -1035,7 +1035,7 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
             .content
             .as_deref()
             .is_some_and(|content| content.starts_with("u "))),
-        "the pre-split history is hidden behind the boundary"
+        "the pre-checkpoint history is hidden behind the boundary"
     );
     // Early containment: the committed anchor fits the known window.
     assert!(
@@ -1045,12 +1045,12 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
 }
 
 // The REACTIVE fork: when the single-shot compaction transcript itself
-// overflows with a REPORTED window, `llm_compact` drives the split — the
-// split shrinks the whole timeline (every item included) into a fitting
+// overflows with a REPORTED window, `llm_compact` drives the checkpoint — the
+// checkpoint shrinks the whole timeline (every item included) into a fitting
 // anchor and the compaction resolves successfully
 // (Finished, never Failed; the provider is never marked stuck).
 #[tokio::test]
-async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() {
+async fn reactive_overflow_reports_window_and_drives_map_reduce_inside_llm_compact() {
     use crate::harness::context::ContextManager;
     use crate::harness::core::CONTEXT_WINDOW_MARKER;
     use crate::harness::events::{LlmCompactionEvent, ToastVariant};
@@ -1058,7 +1058,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
     let mut h = Harness::new_test();
     // NO discovered window: the loop-start PROACTIVE fork must NOT fire, so
     // `llm_compact` runs the single-shot compaction — whose transcript then
-    // overflows WITH a reported window, triggering the reactive split.
+    // overflows WITH a reported window, triggering the reactive checkpoint.
     h.context_manager = ContextManager::new(2000); // trigger = 1600
     // History over the trigger (~2200 ≥ 1600) and > 600 (the
     // window the error will report).
@@ -1136,7 +1136,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
     let items = state.items;
     handle.abort();
 
-    // The single-shot overflow escalated into the split, which SUCCEEDED.
+    // The single-shot overflow escalated into the checkpoint, which SUCCEEDED.
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -1144,7 +1144,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
                 event: LlmCompactionEvent::Finished
             }
         )),
-        "the reactive split must finish successfully; events={events:?}"
+        "the reactive checkpoint must finish successfully; events={events:?}"
     );
     assert!(
         !events.iter().any(|e| matches!(
@@ -1155,7 +1155,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         )),
         "the compaction must NOT be reported as failed; events={events:?}"
     );
-    // The split resolved without a persistent overflow warning toast.
+    // The checkpoint resolved without a persistent overflow warning toast.
     assert!(
         !events.iter().any(|e| matches!(
             e,
@@ -1164,9 +1164,9 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
                 ..
             }
         )),
-        "the split resolves the overflow without the stuck-provider warning; events={events:?}"
+        "the checkpoint resolves the overflow without the stuck-provider warning; events={events:?}"
     );
-    // Every MapReduce phase currently streams through the same compaction box.
+    // Intermediate maps never leak into the final compaction display.
     let streamed: String = events
         .iter()
         .filter_map(|e| match e {
@@ -1211,20 +1211,20 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
             .content
             .as_deref()
             .is_some_and(|content| content.starts_with("u "))),
-        "the pre-split history never reaches the model"
+        "the pre-checkpoint history never reaches the model"
     );
-    // The reactive split resolves without marking the provider stuck.
+    // The reactive checkpoint resolves without marking the provider stuck.
     assert!(
         !stuck,
-        "the reactive split must not mark the provider stuck"
+        "the reactive checkpoint must not mark the provider stuck"
     );
 }
 
 // All-or-nothing: an EMPTY chunk summary (the model returned nothing for a
-// chunk) is treated as a split failure — the split aborts and the timeline
+// chunk) is treated as a checkpoint failure — the checkpoint aborts and the timeline
 // stays exactly as it was. Nothing is silently dropped from the anchor.
 #[tokio::test]
-async fn split_aborts_on_an_empty_chunk_summary_and_keeps_the_context() {
+async fn map_reduce_aborts_on_an_empty_chunk_summary_and_keeps_the_context() {
     use crate::harness::context::ContextManager;
     use crate::harness::events::LlmCompactionEvent;
 
@@ -1283,7 +1283,7 @@ async fn split_aborts_on_an_empty_chunk_summary_and_keeps_the_context() {
         .unwrap_or_default();
     handle.abort();
 
-    // The split was attempted and ABORTED — surfaced as a failed compaction.
+    // The checkpoint was attempted and ABORTED — surfaced as a failed compaction.
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -1291,7 +1291,7 @@ async fn split_aborts_on_an_empty_chunk_summary_and_keeps_the_context() {
                 event: LlmCompactionEvent::Failed
             }
         )),
-        "the empty-summary split must report LlmCompaction::Failed; events={events:?}"
+        "the empty-summary checkpoint must report LlmCompaction::Failed; events={events:?}"
     );
     assert!(
         events

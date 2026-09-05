@@ -1,5 +1,5 @@
-//! Split-and-concatenate: the context-window contingency, driven by the
-//! harness.
+//! Legacy split-and-concatenate recovery for already-persisted staging.
+//! New context-window contingencies use hierarchical MapReduce instead.
 //!
 //! When the single-shot LLM compaction itself overflows the model window, the
 //! timeline is summarized in SEQUENTIAL CHUNKS: each chunk continues where the

@@ -1,5 +1,186 @@
 use super::*;
 use crate::harness::events::{HarnessEvent, LlmCompactionEvent, LlmCompactionPhase};
+use std::time::Instant;
+
+// This fixture tests orchestration and transport retention, not model quality.
+// Scripted replies are an oracle; no claim about a real model's recall follows.
+const TRACE_FACTS: [&str; 5] = [
+    "CONSTRAINT: never publish credentials",
+    "DECISION: use append-only history",
+    "VERIFIED: parser tests passed",
+    "INVALIDATION: old.rs changed; reread before editing",
+    "OPEN: verify migration on the child branch",
+];
+
+fn long_trace() -> ContextManager {
+    let mut manager = ContextManager::new(8_000);
+    manager.add_user(&TRACE_FACTS[..2].join("\n"));
+    manager.add_assistant("STALE_CONTENT: old.rs revision zero is current", false);
+    for turn in 0..24 {
+        match turn {
+            4 => manager.add_assistant(TRACE_FACTS[2], false),
+            12 => manager.add_user(TRACE_FACTS[3]),
+            20 => manager.add_user(TRACE_FACTS[4]),
+            _ => {}
+        }
+        let call = format!("read-{turn}");
+        manager.add_tool_call(&call, "fs_read", r#"{"path":"old.rs"}"#);
+        manager.add_tool_result(&call, &"historical file observation ".repeat(400));
+        manager.add_assistant(
+            &format!("Inspected revision {turn}; work remains open."),
+            false,
+        );
+    }
+    manager.add_user("Latest steering must remain verbatim.");
+    manager
+}
+
+fn trace_view(manager: &ContextManager) -> String {
+    manager
+        .build_messages("")
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn offline_long_trace_compares_five_compaction_paths_without_claiming_model_quality() {
+    let original = long_trace();
+    let original_state = original.save_state();
+    let original_items = serde_json::to_value(&original_state.items).unwrap();
+    let before = original.display_info().total_tokens;
+    let restore = || {
+        let mut manager = ContextManager::new(8_000);
+        manager.restore_state(&original_state);
+        manager
+    };
+    let oracle = format!(
+        "## Objective\nContinue safely\n## Important Details\n{}\n## Next Move\nReread old.rs",
+        TRACE_FACTS.join("\n")
+    );
+    let check_facts = |manager: &ContextManager| {
+        let view = trace_view(manager);
+        for fact in TRACE_FACTS {
+            assert!(view.contains(fact), "lost scripted fact: {fact}");
+        }
+    };
+    let assert_original_prefix = |manager: &ContextManager| {
+        let items = manager.save_state().items;
+        let prefix: Vec<_> = items.iter().take(original_state.items.len()).collect();
+        assert_eq!(serde_json::to_value(prefix).unwrap(), original_items);
+    };
+
+    let mut masking = restore();
+    masking.run();
+    check_facts(&masking);
+    assert_original_prefix(&masking);
+    assert!(masking.display_info().total_tokens < before);
+    println!(
+        "offline masking: before={before}, after={}, requests=0",
+        masking.display_info().total_tokens
+    );
+
+    let mut one_shot = restore();
+    let request = one_shot.llm_compaction_request().unwrap();
+    let encoding = crate::util::TokenEncoding::for_model(None);
+    let one_shot_input = encoding.estimate(&request.system) + encoding.estimate(&request.prompt);
+    assert!(one_shot.apply_llm_summary(oracle.clone()));
+    check_facts(&one_shot);
+    assert_original_prefix(&one_shot);
+    assert!(!trace_view(&one_shot).contains("STALE_CONTENT:"));
+    println!(
+        "offline one-shot oracle: input={one_shot_input}, fits_window={}, after={}, scripted_requests=1",
+        one_shot_input < 8_000,
+        one_shot.display_info().total_tokens
+    );
+
+    let mut legacy = restore();
+    legacy.begin_split(8_000);
+    let mut legacy_calls = 0;
+    let mut legacy_peak_input = 0;
+    while let Some(request) = legacy.split_next_chunk() {
+        legacy_peak_input = legacy_peak_input
+            .max(encoding.estimate(&request.system) + encoding.estimate(&request.prompt));
+        let summary = if legacy_calls == 0 {
+            oracle.as_str()
+        } else {
+            "Additional historical inspection completed."
+        };
+        legacy.advance_split(summary, request.chunk_end);
+        legacy_calls += 1;
+        assert!(legacy_calls < 100);
+    }
+    assert!(legacy.commit_split());
+    check_facts(&legacy);
+    assert_original_prefix(&legacy);
+    println!(
+        "offline legacy oracle: peak_input={legacy_peak_input}, after={}, scripted_requests={legacy_calls}",
+        legacy.display_info().total_tokens
+    );
+
+    let mut views = Vec::new();
+    for parallel in [false, true] {
+        let mut harness = Harness::new_test();
+        harness.context_manager = restore();
+        assert!(harness.context_manager.begin_map_reduce(8_000));
+        if !parallel {
+            harness.context_manager.disable_parallel_mapping();
+        }
+        let requests = harness.context_manager.pending_map_requests();
+        let maps = requests.len();
+        assert!(maps > MAP_CONCURRENCY);
+        let mut peak_input = 0;
+        let mut mapped_facts = Vec::new();
+        for request in requests {
+            peak_input = peak_input
+                .max(encoding.estimate(&request.system) + encoding.estimate(&request.prompt));
+            assert!(!request.prompt.contains("[Continuation context"));
+            let facts: Vec<_> = TRACE_FACTS
+                .iter()
+                .filter(|fact| request.prompt.contains(**fact))
+                .copied()
+                .collect();
+            mapped_facts.extend(facts.iter().copied());
+            let reply = if facts.is_empty() {
+                "Historical inspection; no new task decision.".into()
+            } else {
+                facts.join("\n")
+            };
+            harness.mock_chat_queue.push_back(Ok(reply));
+        }
+        for fact in TRACE_FACTS {
+            assert!(
+                mapped_facts.contains(&fact),
+                "scripted maps lost source fact: {fact}"
+            );
+        }
+        harness.mock_chat_queue.push_back(Ok(oracle.clone()));
+        harness.mock_chat_queue.push_back(Ok("PASS".into()));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let started = Instant::now();
+        assert!(harness.drive_map_reduce(&tx).await.unwrap());
+        let elapsed = started.elapsed();
+        assert!(harness.mock_chat_queue.is_empty());
+        check_facts(&harness.context_manager);
+        assert_original_prefix(&harness.context_manager);
+        let view = trace_view(&harness.context_manager);
+        assert!(view.contains("Latest steering must remain verbatim."));
+        assert!(!view.contains("STALE_CONTENT:"));
+        let snapshots = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| matches!(event, HarnessEvent::ContextSnapshot { .. }))
+            .count();
+        assert_eq!(snapshots, maps + 2);
+        println!(
+            "offline MapReduce parallel={parallel}: peak_map_input={peak_input}, after={}, scripted_requests={}, local_elapsed_us={}",
+            harness.context_manager.display_info().total_tokens,
+            maps + 2,
+            elapsed.as_micros()
+        );
+        views.push(view);
+    }
+    assert_eq!(views[0], views[1], "scheduling must not change the handoff");
+}
 
 fn staged_harness() -> Harness {
     let mut harness = Harness::new_test();
