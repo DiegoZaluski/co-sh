@@ -2471,6 +2471,96 @@ mod tests {
     }
 
     #[test]
+    fn map_reduce_progress_checkpoint_and_branches_replay_from_one_immutable_history() {
+        use cosh::harness::context::ContextManager;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let mut manager = ContextManager::new(2_000);
+        manager.add_user(&"immutable task state ".repeat(2_000));
+        manager.add_assistant("recent verified work", true);
+        let mut session = make_test_session(
+            "map-history",
+            "MapReduce history",
+            vec![
+                make_user_msg("msg-0", &"immutable task state ".repeat(2_000)),
+                make_assistant_msg("msg-1", "recent verified work"),
+            ],
+        );
+        let path = store.file_path(&session.id);
+        let mut prefix = Vec::new();
+        let mut persist = |manager: &ContextManager, session: &Session| {
+            let expected = manager.save_state();
+            store.save_session_with_context(session, &expected);
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(bytes.starts_with(&prefix));
+            prefix = bytes;
+            let replayed = store.load_context(&session.id).unwrap();
+            assert_eq!(
+                serde_json::to_value(replayed).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        };
+        persist(&manager, &session);
+        assert!(manager.begin_map_reduce(2_000));
+        persist(&manager, &session);
+        let requests = manager.pending_map_requests();
+        for request in requests.into_iter().rev() {
+            assert!(manager.accept_map_summary(request.ordinal, "task constraints and open work"));
+            persist(&manager, &session);
+            manager.restore_state(&store.load_context(&session.id).unwrap());
+        }
+        while let Some(request) = manager.next_reduce_request() {
+            assert!(
+                manager.accept_reduce_summary(&request, "checkpoint constraints and open work")
+            );
+            persist(&manager, &session);
+        }
+        while let Some(request) = manager.next_validation_request() {
+            assert!(manager.accept_validation(&request, "PASS"));
+            persist(&manager, &session);
+        }
+        assert!(manager.commit_map_reduce());
+        session.messages.push(make_assistant_msg(
+            "msg-checkpoint",
+            "checkpoint constraints and open work",
+        ));
+        persist(&manager, &session);
+        let checkpoint_state = store.load_context(&session.id).unwrap();
+        let before_fork = std::fs::read(&path).unwrap();
+        let mut forked = session.clone();
+        forked.id = "map-child".into();
+        assert!(store.fork_session(&session.id, "msg-checkpoint", &forked));
+        assert!(!store.file_path(&forked.id).exists());
+        assert!(std::fs::read(&path).unwrap().starts_with(&before_fork));
+        let before_revert = std::fs::read(&path).unwrap();
+        assert!(store.revert_session(&session.id, "msg-checkpoint"));
+        let after_revert = std::fs::read(&path).unwrap();
+        assert!(after_revert.starts_with(&before_revert));
+        assert!(
+            !store
+                .load_context(&session.id)
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| matches!(item, ContextItem::Compaction { .. }))
+        );
+        assert!(store.rollback_session(&session.id, "v1"));
+        assert!(std::fs::read(&path).unwrap().starts_with(&after_revert));
+        assert_eq!(
+            serde_json::to_value(store.load_context(&session.id).unwrap()).unwrap(),
+            serde_json::to_value(checkpoint_state).unwrap()
+        );
+        assert!(
+            store
+                .load_context(&forked.id)
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| matches!(item, ContextItem::Compaction { .. }))
+        );
+    }
+
+    #[test]
     fn fork_is_a_logical_branch_in_the_parent_history() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);

@@ -21,6 +21,15 @@ Output exactly the Markdown structure shown inside <template> and keep the secti
 ## Important Details
 - [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or \"(none)\"]
 
+### Constraints
+- [explicit user requirements and prohibitions, with source item IDs when available]
+
+### Decisions and Evidence
+- [current decision, rationale, source item IDs, and verification status]
+
+### Invalidated State
+- [superseded decisions, changed files, outdated observations, and the evidence that replaced them; or \"(none)\"]
+
 ## Work State
 ### Completed
 - [finished work, verified facts, or changes made; otherwise \"(none)\"]
@@ -44,6 +53,10 @@ Output exactly the Markdown structure shown inside <template> and keep the secti
 
 Rules:
 - Keep every section, even when empty.
+- Treat this as a handoff to a fresh agent: include the current objective, exact constraints, verified work, open work, blockers, and the next concrete action.
+- Cite source context item IDs when supplied. Never invent provenance or infer completion from an intention.
+- A later supported invalidation supersedes an older checkpoint. Keep changed-file references, but mark stale contents and require a fresh read before editing.
+- Preserve conflicts explicitly when the evidence does not establish the current state.
 - Use terse bullets, not prose paragraphs — except code, which is ALWAYS copied verbatim inside Markdown code fences.
 - Preserve exact file paths, hashline anchors (¶path#TAG), line numbers, symbols, commands, error strings, URLs, and identifiers when known.
 - Carry code VERBATIM: quote the important code blocks, function signatures and error messages exactly as they appear in the transcript. Never paraphrase code — a paraphrased block cannot be applied or edited.
@@ -86,10 +99,20 @@ pub(super) fn serialize_item(item: &ContextItem) -> String {
         // costlier re-read of the source.
         ContextItem::ToolResult { content, .. } => format!("[Tool result]: {content}"),
         ContextItem::Closure { content, .. } => format!("[Assistant]: {content}"),
-        // The previous summary stays in the timeline (index 0 after
-        // `apply_llm_summary`) — the update-mode instruction references it by
-        // this exact label instead of embedding a second copy in the prompt.
-        ContextItem::Compaction { summary, .. } => format!("[Previous summary]: {summary}"),
+        // Checkpoints are appended physically but composed first logically.
+        // Expose their coverage so a later reducer can reread original items.
+        ContextItem::Compaction {
+            summary,
+            covered_ranges,
+            ..
+        } => format!(
+            "[Previous summary]: {summary}\n[Covered source ranges]: {}",
+            covered_ranges
+                .iter()
+                .map(|range| format!("{}-{}", range.start_id, range.end_id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         // Unreachable (filtered above) but exhaustive for the compiler.
         ContextItem::Error { .. } => String::new(),
     }

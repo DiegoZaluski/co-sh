@@ -191,6 +191,7 @@ async fn real_map_stream_reports_usage_and_omits_tools() {
         }
         let request = String::from_utf8(bytes).unwrap();
         assert!(!request.contains("\"tools\":"));
+        assert!(request.contains("\"max_tokens\":1600"));
         let body = "data: {\"choices\":[{\"delta\":{\"content\":\"map result\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15,\"cost\":0.01}}\n\ndata: [DONE]\n\n";
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
     });
@@ -207,6 +208,7 @@ async fn real_map_stream_reports_usage_and_omits_tools() {
         "prompt".into(),
         None,
         tx,
+        16_000,
     )
     .await
     .unwrap();
@@ -215,4 +217,30 @@ async fn real_map_stream_reports_usage_and_omits_tools() {
     assert!(
         matches!(rx.recv().await, Some(HarnessEvent::Usage { reported_cost: Some(cost), .. }) if cost == 0.01)
     );
+}
+
+#[tokio::test]
+async fn undersized_window_is_rejected_before_contacting_provider() {
+    let connector = Connector::new("openrouter")
+        .unwrap()
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_api_key("test-only")
+        .with_model("test-model");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = Harness::summarize_map_with_connector(
+        connector,
+        "system instructions ".repeat(100),
+        "prompt".into(),
+        None,
+        tx,
+        100,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(CompactionErr::ContextWindow {
+            window_tokens: Some(100)
+        })
+    ));
+    assert!(rx.try_recv().is_err());
 }

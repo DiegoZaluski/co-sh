@@ -890,7 +890,18 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
     // the same summary (the driver advances the cursor with each one); the
     // mock STREAM is the loop's final answer.
     h = h
-        .with_mock_chat(Ok("## Objective\n- summarized chunk"))
+        .with_mock_chats(vec![
+            Ok("map"),
+            Ok("map"),
+            Ok("map"),
+            Ok("map"),
+            Ok("map"),
+            Ok("map"),
+            Ok("map"),
+            Ok("map"),
+            Ok("## Objective\n- summarized chunk"),
+            Ok("PASS"),
+        ])
         .with_mock_stream(Ok(vec!["final answer"]));
 
     // The harness (with its context manager) is moved into the task; the CM

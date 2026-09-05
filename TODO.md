@@ -104,22 +104,31 @@ conflict, and validate that decisions, constraints, and open work survived.
 - [x] Local HTTP fixture verified no-tools requests and provider usage/cost events.
 - [x] Strict Clippy, targeted formatting, and byte-whitespace checks passed.
 
-## Phase 4 — Structured handoff and lifecycle integration (current)
+## Phase 4 — Structured handoff and lifecycle integration (complete)
 
-- [ ] Bound reduction levels and correction attempts, revalidate corrected candidates, and reject malformed control replies instead of committing them.
-- [ ] Verify source identity on resume and commit, preserve logical checkpoint-first ordering, and prevent partial rereads from claiming complete range coverage.
-- [ ] Account for prompt overhead and output limits in checkpoint calls and make undersized-window failures explicit and bounded.
+- [x] Bound reduction levels and correction attempts, revalidate corrected candidates, and reject malformed control replies instead of committing them.
+- [x] Verify source identity on resume and commit, preserve logical checkpoint-first ordering, and prevent partial rereads from claiming complete range coverage.
+- [x] Allow conflict rereads through prior checkpoint references, reject unavailable raw ranges, and report exhausted reduction/correction stages explicitly.
+- [x] Account for prompt overhead and output limits in checkpoint calls and make undersized-window failures explicit and bounded.
 
-- [ ] Refine the checkpoint schema/prompt into protected task state: objective, constraints, decisions with provenance, file/artifact references, verified work, active work, blockers, and next action.
-- [ ] Ensure stale facts can be explicitly invalidated and do not survive merely because they appeared in an older checkpoint.
-- [ ] Use the composed checkpoint plus recent raw tail as a clean handoff after automatic, manual, reactive-overflow, and fallback-model compaction paths.
-- [ ] Ensure queued user input remains verbatim and is never consumed solely into a checkpoint.
-- [ ] Update overflow/stuck semantics so single-shot, map, reduce, validation, and main-request failures choose the correct recovery path without retry loops.
-- [ ] Update event names, UI copy, module/type documentation, and tests from split/concatenate terminology to checkpoint/MapReduce terminology.
-- [ ] Add end-to-end tests spanning repeated checkpoints, model changes, manual compaction, provider overflow, fallback models, stop/resume, rollback, revert, and fork.
-- [ ] Validate context, harness, session-store, and TUI suites; mark Phase 4 complete before starting Phase 5.
+- [x] Refine the checkpoint schema/prompt into protected task state: objective, constraints, decisions with provenance, file/artifact references, verified work, active work, blockers, and next action.
+- [x] Ensure stale facts can be explicitly invalidated and do not survive merely because they appeared in an older checkpoint.
+- [x] Use the composed checkpoint plus recent raw tail as a clean handoff after automatic, manual, reactive-overflow, and fallback-model compaction paths.
+- [x] Ensure queued user input remains verbatim and is never consumed solely into a checkpoint.
+- [x] Update overflow/stuck semantics so single-shot, map, reduce, validation, and main-request failures choose the correct recovery path without retry loops.
+- [x] Update event names, UI copy, module/type documentation, and tests from split/concatenate terminology to checkpoint/MapReduce terminology.
+- [x] Add end-to-end tests spanning repeated checkpoints, model changes, manual compaction, provider overflow, fallback models, stop/resume, rollback, revert, and fork.
+- [x] Validate context, harness, session-store, and TUI suites; mark Phase 4 complete before starting Phase 5.
 
-## Phase 5 — Final invariant and quality validation
+### Phase 4 validation record
+
+- [x] Library tests: 236 passed, 1 ignored; TUI tests: 418 passed, 16 ignored.
+- [x] Strict Clippy, targeted formatting, and `git diff --check` passed.
+- [x] The persisted lifecycle fixture proves byte-prefix preservation through partial maps, checkpoint commit, logical fork, revert, and rollback.
+- [x] Existing manual compaction retains its whole-responded-history behavior; unanswered/queued user messages remain raw. Automatic checkpointing retains the recent raw reserve.
+- [x] Structured Markdown and model audits improve handoff discipline but do not constitute a proof of factual recall; live-model quality remains a separate evaluation.
+
+## Phase 5 — Final invariant and quality validation (current)
 
 - [ ] Replay long immutable traces comparing the old greedy contingency, masking-only, one-shot checkpointing, sequential MapReduce, and parallel MapReduce.
 - [ ] Measure task-state retention, critical constraint/decision recall, stale-fact removal, open-work survival, token reduction, request count, latency, and recovery behavior.

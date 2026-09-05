@@ -321,7 +321,7 @@ enum CompactionErr {
 enum CompactionOutcome {
     /// A summary was produced and is ready to be applied.
     Applied,
-    /// A contingency (the split-and-concatenate path) brought the total down —
+    /// A contingency (the hierarchical MapReduce path) brought the total down —
     /// the compaction is no longer needed.
     ResolvedByContingency,
     /// The summarizer call failed or produced nothing.
@@ -501,14 +501,14 @@ pub struct Harness {
 
     /// Window size (tokens) parsed from the LAST context-window overflow
     /// error, stashed by [`Self::stream_chat_with_messages`] so the caller can
-    /// size the split-and-concatenate contingency against a known window.
+    /// size the hierarchical MapReduce contingency against a known window.
     /// Reset at the start of every stream.
     last_context_window: Option<usize>,
 
     /// Window size (tokens) of the ACTIVE model from the last successful
     /// context-window discovery. Together with [`Self::last_context_window`]
-    /// it forms the KNOWN window that drives the split-and-concatenate
-    /// contingency (see [`Self::known_split_window`]). Set at loop start and
+    /// it forms the KNOWN window that drives the hierarchical MapReduce
+    /// contingency (see [`Self::known_checkpoint_window`]). Set at loop start and
     /// on fallback switches; `None` when discovery failed (unknown window →
     /// the split is sized against the token budget).
     discovered_window: Option<usize>,
@@ -1082,6 +1082,9 @@ impl Harness {
             self.notify_context_overflow(tx);
             return false;
         }
+        if self.context_manager.compaction_staging_active() {
+            return self.checkpoint_context(tx).await;
+        }
         // Defensive — the harness only calls this after `NeedsLlmCompaction`,
         // so there is normally something to compact.
         let request = match self.context_manager.llm_compaction_request() {
@@ -1102,10 +1105,18 @@ impl Harness {
             summary.clear();
             match self
                 .stream_summarize_for_compaction(&request.system, &request.prompt, |chunk| {
-                    summary.push_str(chunk);
-                    let _ = tx.send(HarnessEvent::LlmCompactionToken {
-                        text: chunk.to_string(),
-                    });
+                    match chunk {
+                        StreamEvent::Reset => {
+                            summary.clear();
+                            let _ = tx.send(HarnessEvent::LlmCompaction {
+                                event: LlmCompactionEvent::OutputStarted,
+                            });
+                        }
+                        StreamEvent::Token(text) => {
+                            summary.push_str(&text);
+                            let _ = tx.send(HarnessEvent::LlmCompactionToken { text });
+                        }
+                    }
                 })
                 .await
             {
@@ -1117,7 +1128,7 @@ impl Harness {
                 Err(CompactionErr::ContextWindow { window_tokens }) => {
                     // The single-shot transcript overflowed the provider. When
                     // the provider reported its window, remember it; then drive
-                    // the split-and-concatenate contingency (sized against the
+                    // the hierarchical MapReduce contingency (sized against the
                     // known window or the current budget as a fallback) — it
                     // shrinks the WHOLE timeline (every item included).
                     if let Some(w) = window_tokens {
@@ -1131,14 +1142,12 @@ impl Harness {
                         self.compaction_generic_retries = 0;
                         break CompactionOutcome::ResolvedByContingency;
                     }
-                    if self.split_context(tx).await {
+                    if self.checkpoint_context(tx).await {
                         self.compaction_generic_retries = 0;
                         break CompactionOutcome::ResolvedByContingency;
                     }
-                    // The split could not fit the context into the window —
-                    // stuck.
-                    self.context_manager.mark_overflow(&model);
-                    self.notify_context_overflow(tx);
+                    // The contingency classifies its own failure. A generic
+                    // provider failure or cancellation is not a stuck window.
                     self.compaction_generic_retries = 0;
                     break CompactionOutcome::Failed;
                 }
@@ -1152,8 +1161,10 @@ impl Harness {
                         });
                         break CompactionOutcome::Failed;
                     }
-                    tokio::time::sleep(compaction_retry_backoff(self.compaction_generic_retries))
-                        .await;
+                    tokio::select! {
+                        () = wait_for_stop_signal(self.stop_signal.clone()) => break CompactionOutcome::Failed,
+                        () = tokio::time::sleep(compaction_retry_backoff(self.compaction_generic_retries)) => {},
+                    }
                     continue;
                 }
             }
@@ -1176,17 +1187,17 @@ impl Harness {
         ok
     }
 
-    /// The ACTIVE model's known context window for the split-and-concatenate
+    /// The ACTIVE model's known context window for the hierarchical MapReduce
     /// contingency: the window reported by the LAST context-window error (the
     /// most precise) or the last successful discovery. `None` = unknown — the
     /// split is sized against the current token budget instead.
-    fn known_split_window(&self) -> Option<usize> {
+    fn known_checkpoint_window(&self) -> Option<usize> {
         self.last_context_window.or(self.discovered_window)
     }
 
     /// Record a context window reported by a context-window overflow error.
     ///
-    /// The RAW window is stashed for the split-and-concatenate contingency; the
+    /// The RAW window is stashed for the hierarchical MapReduce contingency; the
     /// budget re-sizing (to the effective value) and the persistence to the
     /// provider-error catalog are delegated to the context manager, which owns
     /// that business logic.
@@ -1250,7 +1261,7 @@ impl Harness {
     /// Drive the active long-context contingency to completion. New work uses
     /// hierarchical MapReduce; persisted legacy split state keeps its original
     /// execution path so upgrades never strand an in-progress session.
-    async fn split_context(
+    async fn checkpoint_context(
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
@@ -1272,18 +1283,22 @@ impl Harness {
         use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
 
         let model = self.connector.effective_model().unwrap_or("?").to_string();
-        if !self.context_manager.map_reduce_active() {
-            let window = self
-                .known_split_window()
-                .unwrap_or_else(|| self.context_manager.max_tokens());
-            if !self.context_manager.begin_map_reduce(window) {
-                return false;
-            }
+        if self.context_manager.overflow_stuck(&model) {
+            self.notify_context_overflow(tx);
+            return false;
+        }
+        let window = self
+            .known_checkpoint_window()
+            .unwrap_or_else(|| self.context_manager.max_tokens());
+        if !self.context_manager.begin_map_reduce(window) {
+            return false;
         }
 
         let _ = tx.send(HarnessEvent::LlmCompaction {
             event: LlmCompactionEvent::Started,
         });
+        self.context_manager
+            .prepare_map_reduce_model(&model, window);
         let result = self.drive_map_reduce(tx).await;
         self.emit_compaction_snapshot(tx);
         self.compaction_generic_retries = 0;
@@ -1492,7 +1507,13 @@ impl Harness {
                     let _ = tx.send(HarnessEvent::LlmCompactionToken { text });
                 }
             }
-            return Ok(committed);
+            return if committed {
+                Ok(true)
+            } else {
+                Err(CompactionErr::Other(
+                    "checkpoint could not be committed: source changed, output exceeds the budget, or reduction/validation limits were exhausted; accepted progress is preserved".into(),
+                ))
+            };
         }
     }
 
@@ -1619,6 +1640,7 @@ impl Harness {
         let connector = self.connector.clone();
         let stop_signal = self.stop_signal.clone();
         let event_tx = tx.clone();
+        let window = self.context_manager.map_reduce_window();
         #[cfg(test)]
         let mock_response = self.next_mock_chat();
         #[cfg(test)]
@@ -1652,6 +1674,7 @@ impl Harness {
                 request.prompt,
                 stop_signal,
                 event_tx,
+                window,
             )
             .await;
             ParallelMapResult { ordinal, result }
@@ -1664,8 +1687,22 @@ impl Harness {
         prompt: String,
         stop_signal: Option<Arc<AtomicBool>>,
         event_tx: tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+        window: usize,
     ) -> Result<String, CompactionErr> {
         use tokio_stream::StreamExt;
+
+        let encoding = crate::util::TokenEncoding::for_model(connector.effective_model());
+        let input_tokens = encoding
+            .estimate(&system)
+            .saturating_add(encoding.estimate(&prompt))
+            .saturating_add(64);
+        let output_tokens = (window / 10).clamp(64, 2_000);
+        if input_tokens.saturating_add(output_tokens) >= window {
+            return Err(CompactionErr::ContextWindow {
+                window_tokens: Some(window),
+            });
+        }
+        let connector = connector.with_max_tokens(output_tokens as u32);
 
         let mut stream = tokio::select! {
             result = connector.stream_chat_with_system_no_tools(&prompt, &system) => {
@@ -1763,6 +1800,7 @@ impl Harness {
                     prompt.to_string(),
                     self.stop_signal.clone(),
                     tx.clone(),
+                    self.context_manager.map_reduce_window(),
                 )
                 .await
             };
@@ -1824,7 +1862,7 @@ impl Harness {
         // window is unknown.
         if !self.context_manager.split_active() {
             let window = self
-                .known_split_window()
+                .known_checkpoint_window()
                 .unwrap_or_else(|| self.context_manager.max_tokens());
             if self.context_manager.display_info().total_tokens <= window {
                 return false;
@@ -1845,10 +1883,18 @@ impl Harness {
             let mut summary = String::new();
             match self
                 .stream_summarize_for_compaction(&request.system, &request.prompt, |chunk| {
-                    summary.push_str(chunk);
-                    let _ = tx.send(HarnessEvent::LlmCompactionToken {
-                        text: chunk.to_string(),
-                    });
+                    match chunk {
+                        StreamEvent::Reset => {
+                            summary.clear();
+                            let _ = tx.send(HarnessEvent::LlmCompaction {
+                                event: LlmCompactionEvent::OutputStarted,
+                            });
+                        }
+                        StreamEvent::Token(text) => {
+                            summary.push_str(&text);
+                            let _ = tx.send(HarnessEvent::LlmCompactionToken { text });
+                        }
+                    }
                 })
                 .await
             {
@@ -1889,7 +1935,10 @@ impl Harness {
                         });
                         break false;
                     }
-                    tokio::time::sleep(compaction_retry_backoff(generic_retries)).await;
+                    tokio::select! {
+                        () = wait_for_stop_signal(self.stop_signal.clone()) => break false,
+                        () = tokio::time::sleep(compaction_retry_backoff(generic_retries)) => {},
+                    }
                     continue;
                 }
             }
@@ -1973,13 +2022,13 @@ impl Harness {
         &mut self,
         system: &str,
         prompt: &str,
-        mut on_token: impl FnMut(&str),
+        mut on_token: impl FnMut(StreamEvent),
     ) -> Result<(), CompactionErr> {
         #[cfg(test)]
         if let Some(response) = self.next_mock_chat() {
             match response {
                 Ok(text) => {
-                    on_token(&text);
+                    on_token(StreamEvent::Token(text));
                     return Ok(());
                 }
                 Err(msg) => {
@@ -2051,17 +2100,17 @@ impl Harness {
             // streams), so a stalled provider stays interruptible by the user.
             let chunk = {
                 let poll = tokio::select! {
-                    chunk = stream.next() => chunk.map(|c| c.map_err(|e| {
-                        log::debug!("stream_summarize STREAM_ERR={e}");
-                        e.to_string()
-                    })),
-                    () = tokio::time::sleep(Duration::from_millis(50)) => {
-                        continue;
+                    chunk = stream.next() => chunk,
+                    () = wait_for_stop_signal(self.stop_signal.clone()) => {
+                        return Err(CompactionErr::Interrupted);
                     }
                 };
                 match poll {
                     Some(Ok(c)) => c,
-                    Some(Err(e)) => return Err(CompactionErr::Other(e)),
+                    Some(Err(ConnectorError::ContextWindowExceeded { window_tokens, .. })) => {
+                        return Err(CompactionErr::ContextWindow { window_tokens });
+                    }
+                    Some(Err(e)) => return Err(CompactionErr::Other(e.to_string())),
                     None => break,
                 }
             };
@@ -2076,9 +2125,13 @@ impl Harness {
                 // the compaction this round (the context stays as it was).
                 return Err(CompactionErr::Interrupted);
             }
+            if chunk.is_reset() {
+                on_token(StreamEvent::Reset);
+                continue;
+            }
             let token = chunk.token();
             if !token.is_empty() {
-                on_token(token);
+                on_token(StreamEvent::Token(token.to_string()));
             }
         }
         self.emit_usage(&mut stream).await;
@@ -2884,8 +2937,8 @@ impl Harness {
         #[cfg(not(test))]
         {
             // Remember the discovery outcome: it is the KNOWN window that
-            // drives the split-and-concatenate contingency when the held
-            // context exceeds it (see `known_split_window`). A failed
+            // drives the hierarchical MapReduce contingency when the held
+            // context exceeds it (see `known_checkpoint_window`). A failed
             // discovery leaves it `None` — unknown window → the split is sized
             // against the current budget.
             self.discovered_window = None;
@@ -2897,7 +2950,7 @@ impl Harness {
                 // of what the model can actually reason over (the "sweet
                 // spot" sizing, see `effective_context_window`). The RAW
                 // window is kept above in `discovered_window`, where it still
-                // drives the split-and-concatenate contingency.
+                // drives the hierarchical MapReduce contingency.
                 self.context_manager
                     .set_max_tokens(effective_context_window(window));
             }
@@ -2933,21 +2986,23 @@ impl Harness {
         // Apply the 80% compaction before the first LLM request, so the
         // initial context is already within budget. When the useless-chain
         // sweep still leaves the total over the trigger, the LLM compaction
-        // (or the split-and-concatenate contingency) runs; the in-flight input
+        // (or the hierarchical MapReduce contingency) runs; the in-flight input
         // was folded into the summary, so it is re-added for the model to see
         // the task verbatim.
-        if matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction) {
+        if matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction)
+            || self.context_manager.compaction_staging_active()
+        {
             // Known-window contingency: when the ACTIVE model's window is
             // known and the remaining context still exceeds it, the
             // single-shot compaction transcript would itself overflow the
-            // provider — drive the split-and-concatenate path instead (a
+            // provider — drive the hierarchical MapReduce path instead (a
             // restored in-progress split is always resumed).
             if self.context_manager.compaction_staging_active()
                 || self
-                    .known_split_window()
+                    .known_checkpoint_window()
                     .is_some_and(|w| self.context_manager.display_info().total_tokens > w)
             {
-                self.split_context(&tx).await;
+                self.checkpoint_context(&tx).await;
             } else {
                 self.llm_compact(&tx).await;
             }
@@ -3017,12 +3072,14 @@ impl Harness {
             log::debug!("run_agent_loop PHASE1_START iteration={iteration}");
             let system_context = self.build_chat_context();
             let mut assistant_response = String::new();
+            let mut overflow_recoveries = 0usize;
             let result = loop {
                 // Attempt boundary: the TUI scopes its discard-on-reset to the
                 // message(s) opened after this point — a reset can then never
                 // eat the PREVIOUS iteration's transcript.
                 let _ = tx.send(HarnessEvent::BeginAssistant);
                 let messages = self.context_manager.build_messages(&current_input);
+                let tokens_before_attempt = self.context_manager.display_info().total_tokens;
                 let attempt = self
                     .stream_chat_with_messages(&system_context, &messages, |event| {
                         match event {
@@ -3043,21 +3100,23 @@ impl Harness {
                     .await;
                 if let Err(ref e) = attempt
                     && e == CONTEXT_WINDOW_MARKER
+                    && overflow_recoveries < 2
                 {
+                    overflow_recoveries += 1;
                     // Context-window contingency: drive the split — it shrinks
                     // the WHOLE timeline (every item included) into a fitting
                     // anchor. On success retry immediately; on failure
                     // the overflow is stuck — surface the (throttled) warning
                     // and fall through to the normal error handling with a
                     // HUMAN-readable message.
-                    if matches!(self.context_manager.run(), RunOutcome::Resolved) {
+                    if matches!(self.context_manager.run(), RunOutcome::Resolved)
+                        && self.context_manager.display_info().total_tokens < tokens_before_attempt
+                    {
                         continue;
                     }
-                    if self.split_context(&tx).await {
+                    if self.checkpoint_context(&tx).await {
                         continue;
                     }
-                    self.context_manager
-                        .mark_overflow(self.connector.effective_model().unwrap_or("?"));
                     self.notify_context_overflow(&tx);
                 }
                 break attempt;
@@ -3175,10 +3234,10 @@ impl Harness {
                     // request (an in-progress split is always resumed).
                     if self.context_manager.compaction_staging_active()
                         || self
-                            .known_split_window()
+                            .known_checkpoint_window()
                             .is_some_and(|w| self.context_manager.display_info().total_tokens > w)
                     {
-                        self.split_context(&tx).await;
+                        self.checkpoint_context(&tx).await;
                     }
                     continue;
                 }
@@ -4499,7 +4558,7 @@ impl Harness {
     }
 
     /// Set the KNOWN context window of the active model, as if discovery had
-    /// succeeded — lets tests drive the split-and-concatenate contingency (a
+    /// succeeded — lets tests drive the hierarchical MapReduce contingency (a
     /// known window with a held context that exceeds it).
     pub(crate) fn with_discovered_window(mut self, window: usize) -> Self {
         self.discovered_window = Some(window);

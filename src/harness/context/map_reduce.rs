@@ -18,6 +18,8 @@ const MAP_CALL_OVERHEAD: usize = 8_000;
 const REDUCE_CALL_OVERHEAD: usize = 6_000;
 const MAX_REREAD_RANGES: usize = 3;
 const MAX_REPARTITIONS: u8 = 3;
+const MAX_REDUCTION_LEVELS: usize = 8;
+const MAX_CORRECTIONS: u8 = 2;
 const MAP_REDUCE_VERSION: u8 = 1;
 
 const fn map_reduce_version() -> u8 {
@@ -63,7 +65,14 @@ pub struct MapReduceState {
     #[serde(default = "map_reduce_version")]
     pub version: u8,
     pub window: usize,
+    #[serde(default)]
+    pub model: Option<String>,
     pub source_item_ids: Vec<u64>,
+    /// Fingerprints of the frozen source projection. Item IDs can survive a
+    /// revert or an item replacement; stale staging must never cover changed
+    /// content under the same ID.
+    #[serde(default)]
+    pub source_fingerprints: Vec<(u64, u64)>,
     pub segments: Vec<MapSegment>,
     #[serde(default)]
     pub phase: MapReducePhase,
@@ -91,6 +100,8 @@ pub struct MapReduceState {
     /// finely. Persisting it prevents restart loops against a bad window.
     #[serde(default)]
     pub repartitions: u8,
+    #[serde(default)]
+    pub corrections: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -135,8 +146,13 @@ impl ContextManager {
     /// Freeze the currently planned checkpoint source into range-only map
     /// segments. Re-entering while active preserves all accepted work.
     pub fn begin_map_reduce(&mut self, window: usize) -> bool {
+        if self.map_reduce.is_some() && !self.map_reduce_source_valid() {
+            self.map_reduce = None;
+        }
         if let Some(state) = self.map_reduce.as_mut() {
-            state.window = window;
+            // A larger model can resume accepted work. Smaller windows keep
+            // their original segment references and repartition on overflow.
+            state.window = state.window.min(window);
             return true;
         }
         let source = self.checkpoint_source_indices_for(window);
@@ -144,6 +160,16 @@ impl ContextManager {
             return false;
         }
         let source_item_ids = source.iter().map(|&idx| self.items[idx].id()).collect();
+        let source_fingerprints = source
+            .iter()
+            .map(|&idx| {
+                let item = &self.items[idx];
+                (
+                    item.id(),
+                    xxhash_rust::xxh64::xxh64(serialize_item(item).as_bytes(), 0),
+                )
+            })
+            .collect();
         let segments = self.partition_map_segments(&source, window);
         if segments.is_empty() {
             return false;
@@ -151,7 +177,9 @@ impl ContextManager {
         self.map_reduce = Some(MapReduceState {
             version: MAP_REDUCE_VERSION,
             window,
+            model: None,
             source_item_ids,
+            source_fingerprints,
             segments,
             phase: MapReducePhase::Mapping,
             level: 0,
@@ -164,8 +192,49 @@ impl ContextManager {
             final_summary: None,
             parallel_disabled: false,
             repartitions: 0,
+            corrections: 0,
         });
         true
+    }
+
+    fn map_reduce_source_valid(&self) -> bool {
+        self.map_reduce.as_ref().is_some_and(|state| {
+            state.version == MAP_REDUCE_VERSION
+                && state.source_item_ids.iter().all(|id| {
+                    self.items
+                        .iter()
+                        .any(|item| item.id() == *id && !self.is_hidden(item))
+                })
+                && state.source_fingerprints.iter().all(|(id, hash)| {
+                    self.items.iter().any(|item| {
+                        item.id() == *id
+                            && xxhash_rust::xxh64::xxh64(serialize_item(item).as_bytes(), 0)
+                                == *hash
+                    })
+                })
+        })
+    }
+
+    pub fn prepare_map_reduce_model(&mut self, model: &str, window: usize) {
+        if let Some(state) = self.map_reduce.as_mut() {
+            if state
+                .model
+                .as_deref()
+                .is_some_and(|previous| previous != model)
+            {
+                state.window = window;
+                state.repartitions = 0;
+                state.parallel_disabled = false;
+            }
+            state.model = Some(model.to_string());
+        }
+    }
+
+    #[must_use]
+    pub fn map_reduce_window(&self) -> usize {
+        self.map_reduce
+            .as_ref()
+            .map_or(self.max_tokens, |state| state.window)
     }
 
     #[must_use]
@@ -337,7 +406,10 @@ impl ContextManager {
     #[must_use]
     pub fn next_reduce_request(&self) -> Option<ReduceRequest> {
         let state = self.map_reduce.as_ref()?;
-        if state.phase != MapReducePhase::Reducing || state.nodes.is_empty() {
+        if state.phase != MapReducePhase::Reducing
+            || state.nodes.is_empty()
+            || state.level >= MAX_REDUCTION_LEVELS
+        {
             return None;
         }
         let start = state.reduce_cursor;
@@ -417,16 +489,41 @@ impl ContextManager {
         let Some(state) = self.map_reduce.as_ref() else {
             return Vec::new();
         };
-        let source = coalesce_ranges(&state.source_item_ids);
-        spec.split(',')
-            .filter_map(parse_range)
-            .filter(|requested| {
+        let mut source = coalesce_ranges(&state.source_item_ids);
+        for item in &self.items {
+            if state.source_item_ids.contains(&item.id())
+                && let super::ContextItem::Compaction { covered_ranges, .. } = item
+            {
+                source.extend(covered_ranges.iter().copied());
+            }
+        }
+        // Follow checkpoint references only as far as the current branch's
+        // immutable raw items are available. A removed item must not be
+        // silently represented by its neighbor in a requested range.
+        let available: Vec<u64> = self
+            .items
+            .iter()
+            .filter_map(|item| {
+                source
+                    .iter()
+                    .any(|range| range.start_id <= item.id() && item.id() <= range.end_id)
+                    .then_some(item.id())
+            })
+            .collect();
+        let source = coalesce_ranges(&available);
+        let Some(ranges) = spec.split(',').map(parse_range).collect::<Option<Vec<_>>>() else {
+            return Vec::new();
+        };
+        if ranges.len() > MAX_REREAD_RANGES
+            || !ranges.iter().all(|requested| {
                 source.iter().any(|allowed| {
                     allowed.start_id <= requested.start_id && requested.end_id <= allowed.end_id
                 })
             })
-            .take(MAX_REREAD_RANGES)
-            .collect()
+        {
+            return Vec::new();
+        }
+        ranges
     }
 
     #[must_use]
@@ -441,8 +538,8 @@ impl ContextManager {
         let state = self.map_reduce.as_ref()?;
         let excerpts = ranges
             .iter()
-            .filter_map(|range| self.render_raw_range(*range, state.window))
-            .collect::<Vec<_>>()
+            .map(|range| self.render_raw_range(*range, state.window))
+            .collect::<Option<Vec<_>>>()?
             .join("\n\n");
         Some(LlmCompactionRequest {
             system: request.system.clone(),
@@ -527,7 +624,7 @@ impl ContextManager {
     #[must_use]
     pub fn correction_request(&self) -> Option<LlmCompactionRequest> {
         let state = self.map_reduce.as_ref()?;
-        if state.phase != MapReducePhase::Correcting {
+        if state.phase != MapReducePhase::Correcting || state.corrections >= MAX_CORRECTIONS {
             return None;
         }
         Some(LlmCompactionRequest {
@@ -541,15 +638,26 @@ impl ContextManager {
         let Some(state) = self.map_reduce.as_mut() else {
             return false;
         };
-        if state.phase != MapReducePhase::Correcting || summary.is_empty() {
+        if state.phase != MapReducePhase::Correcting
+            || summary.is_empty()
+            || summary.starts_with("REREAD:")
+            || state.corrections >= MAX_CORRECTIONS
+        {
             return false;
         }
-        state.final_summary = Some(summary.to_string());
-        state.phase = MapReducePhase::Ready;
+        state.candidate = Some(summary.to_string());
+        state.final_summary = None;
+        state.validation_cursor = 0;
+        state.audits.clear();
+        state.corrections += 1;
+        state.phase = MapReducePhase::Validating;
         true
     }
 
     pub fn commit_map_reduce(&mut self) -> bool {
+        if !self.map_reduce_source_valid() {
+            return false;
+        }
         let Some(state) = self.map_reduce.take() else {
             return false;
         };
@@ -570,7 +678,7 @@ impl ContextManager {
             || !self.apply_summary_to_source_with_trigger(
                 summary,
                 &source,
-                state.window.saturating_mul(COMPACT_PCT) / 100,
+                (state.window.saturating_mul(COMPACT_PCT) / 100).min(self.normal_trigger()),
             )
         {
             self.map_reduce = Some(state);
@@ -688,7 +796,7 @@ impl ContextManager {
     }
 
     fn render_raw_range(&self, range: ContextItemRange, window: usize) -> Option<String> {
-        let mut text = self
+        let text = self
             .items
             .iter()
             .filter(|item| range.start_id <= item.id() && item.id() <= range.end_id)
@@ -700,8 +808,12 @@ impl ContextManager {
             return None;
         }
         let budget = call_payload_budget(window, REDUCE_CALL_OVERHEAD) / MAX_REREAD_RANGES;
-        let end = prefix_end_for_budget(&text, 0, budget.max(1), self.encoding);
-        text.truncate(end);
+        if self.encoding.estimate(&text) > budget {
+            // A partial excerpt cannot establish which side of a conflict is
+            // correct. Reject the reread instead of presenting truncated text
+            // as if it covered the complete requested source range.
+            return None;
+        }
         Some(format!(
             "[Immutable source range #{}-#{}]\n{}",
             range.start_id, range.end_id, text
@@ -938,6 +1050,9 @@ mod tests {
     #[test]
     fn reducer_can_request_only_bounded_frozen_raw_ranges() {
         let mut manager = large_manager(2_000);
+        manager.add_user("small immutable evidence");
+        manager.add_assistant("acknowledged", true);
+        manager.begin_manual_compaction();
         assert!(manager.begin_map_reduce(2_000));
         let ordinals: Vec<usize> = manager
             .pending_map_requests()
@@ -948,17 +1063,55 @@ mod tests {
             assert!(manager.accept_map_summary(ordinal, "map fact"));
         }
         let request = manager.next_reduce_request().unwrap();
-        let source_id = manager.map_reduce.as_ref().unwrap().source_item_ids[0];
+        let source_id = 3;
         let parsed = manager.parse_reread_request(&format!(
             "REREAD: {source_id}-{source_id}, 99999-100000, {source_id}-{source_id}, {source_id}-{source_id}"
         ));
-        assert_eq!(parsed.len(), 3, "invalid and excess ranges are rejected");
+        assert!(
+            parsed.is_empty(),
+            "an invalid control reply is rejected atomically"
+        );
+        let parsed = manager.parse_reread_request("REREAD: 3-3");
         let conflict = manager
             .conflict_reduce_request(&request, &parsed[..1])
             .unwrap();
         assert!(conflict.prompt.contains("Immutable source range"));
-        assert!(conflict.prompt.contains("old immutable context"));
+        assert!(conflict.prompt.contains("small immutable evidence"));
         assert!(conflict.prompt.contains("do not request another reread"));
+        assert!(
+            manager
+                .conflict_reduce_request(
+                    &request,
+                    &[ContextItemRange {
+                        start_id: 1,
+                        end_id: 1
+                    }]
+                )
+                .is_none(),
+            "an oversized raw range cannot silently be truncated"
+        );
+    }
+
+    #[test]
+    fn reducer_can_reread_raw_evidence_behind_a_previous_checkpoint() {
+        let mut manager = ContextManager::new(8_000);
+        manager.add_user("Never publish secrets");
+        manager.add_assistant("Verified old state", true);
+        manager.begin_manual_compaction();
+        assert!(manager.apply_llm_summary("Prior checkpoint cites #1".into()));
+        manager.add_user("Continue with the updated file");
+        manager.add_assistant("File changed; old observation is stale", true);
+        assert!(manager.begin_map_reduce(8_000));
+        for request in manager.pending_map_requests() {
+            assert!(manager.accept_map_summary(request.ordinal, "Conflicting facts"));
+        }
+        let request = manager.next_reduce_request().unwrap();
+        let ranges = manager.parse_reread_request("REREAD: 1-1");
+        assert_eq!(ranges.len(), 1);
+        let reread = manager.conflict_reduce_request(&request, &ranges).unwrap();
+        assert!(reread.prompt.contains("Never publish secrets"));
+        manager.items.retain(|item| item.id() != 1);
+        assert!(manager.parse_reread_request("REREAD: 1-2").is_empty());
     }
 
     #[test]
@@ -1001,6 +1154,13 @@ mod tests {
         assert!(manager.accept_correction(
             "## Objective\n- preserve the user constraint\n\n## Work State\n### Active\n- finish the refactor"
         ));
+        assert!(
+            !manager.commit_map_reduce(),
+            "corrections must be audited again"
+        );
+        while let Some(validation) = manager.next_validation_request() {
+            assert!(manager.accept_validation(&validation, "PASS"));
+        }
         assert!(manager.commit_map_reduce());
         assert!(!manager.map_reduce_active());
         let ContextItem::Compaction {
@@ -1051,6 +1211,106 @@ mod tests {
                 .items
                 .iter()
                 .any(|item| matches!(item, ContextItem::Compaction { .. }))
+        );
+    }
+
+    #[test]
+    fn replaced_source_invalidates_staging_and_new_model_resets_recovery_limits() {
+        let mut manager = large_manager(2_000);
+        assert!(manager.begin_map_reduce(2_000));
+        manager.prepare_map_reduce_model("small", 2_000);
+        assert!(manager.accept_map_summary(0, "stale fact"));
+        let mut state = manager.save_state();
+        state.items[0] = ContextItem::User {
+            id: 1,
+            original: "changed source".repeat(2_000),
+        };
+        manager.restore_state(&state);
+        assert!(!manager.map_reduce_source_valid());
+        assert!(manager.begin_map_reduce(2_000));
+        assert_eq!(manager.map_progress().0, 0);
+        manager.prepare_map_reduce_model("small", 2_000);
+        manager.disable_parallel_mapping();
+        assert!(manager.repartition_incomplete_maps(Some(1_000)));
+        manager.prepare_map_reduce_model("larger", 8_000);
+        let state = manager.save_state().map_reduce.unwrap();
+        assert_eq!(state.window, 8_000);
+        assert_eq!(state.repartitions, 0);
+        assert!(!state.parallel_disabled);
+    }
+
+    #[test]
+    fn repeated_failed_corrections_never_commit_and_are_bounded() {
+        let mut manager = large_manager(2_000);
+        assert!(manager.begin_map_reduce(2_000));
+        for request in manager.pending_map_requests() {
+            assert!(manager.accept_map_summary(request.ordinal, "constraint: do not delete"));
+        }
+        let request = manager.next_reduce_request().unwrap();
+        assert!(manager.accept_reduce_summary(&request, "incomplete candidate"));
+        for _ in 0..MAX_CORRECTIONS {
+            while let Some(request) = manager.next_validation_request() {
+                assert!(manager.accept_validation(&request, "restore the constraint"));
+            }
+            assert!(manager.correction_request().is_some());
+            assert!(manager.accept_correction("still incomplete"));
+        }
+        while let Some(request) = manager.next_validation_request() {
+            assert!(manager.accept_validation(&request, "restore the constraint"));
+        }
+        assert!(manager.correction_request().is_none());
+        assert!(!manager.commit_map_reduce());
+    }
+
+    #[test]
+    fn reduction_limit_prevents_non_shrinking_model_output_loops() {
+        let mut manager = large_manager(1_000);
+        assert!(manager.begin_map_reduce(1_000));
+        for request in manager.pending_map_requests() {
+            assert!(manager.accept_map_summary(request.ordinal, &"no compression ".repeat(300)));
+        }
+        let mut calls = 0;
+        while let Some(request) = manager.next_reduce_request() {
+            assert!(manager.accept_reduce_summary(&request, &"no compression ".repeat(300)));
+            calls += 1;
+            assert!(calls < 1_000);
+        }
+        assert_eq!(
+            manager.map_reduce.as_ref().unwrap().level,
+            MAX_REDUCTION_LEVELS
+        );
+        assert!(!manager.commit_map_reduce());
+    }
+
+    #[test]
+    fn manual_checkpoint_leaves_unanswered_queued_inputs_verbatim() {
+        let mut manager = ContextManager::new(8_000);
+        manager.add_user("original task");
+        manager.add_assistant("work completed so far", true);
+        manager.add_user("queued constraint: preserve the API");
+        manager.add_user("queued next action: run tests");
+        manager.begin_manual_compaction();
+        assert!(manager.begin_map_reduce(8_000));
+        let state = manager.save_state().map_reduce.unwrap();
+        assert_eq!(state.source_item_ids, vec![1, 2]);
+        for request in manager.pending_map_requests() {
+            assert!(!request.prompt.contains("queued constraint"));
+            assert!(manager.accept_map_summary(request.ordinal, "completed work"));
+        }
+        let request = manager.next_reduce_request().unwrap();
+        assert!(manager.accept_reduce_summary(&request, "checkpoint"));
+        while let Some(request) = manager.next_validation_request() {
+            assert!(manager.accept_validation(&request, "PASS"));
+        }
+        assert!(manager.commit_map_reduce());
+        let messages = manager.build_messages("");
+        assert!(messages.iter().any(
+            |message| message.content.as_deref() == Some("queued constraint: preserve the API")
+        ));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.content.as_deref() == Some("queued next action: run tests"))
         );
     }
 }

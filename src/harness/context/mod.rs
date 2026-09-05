@@ -390,8 +390,11 @@ fn masked_tool_result(id: u64) -> String {
 }
 
 pub(super) fn coalesce_ranges(ids: &[u64]) -> Vec<ContextItemRange> {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
     let mut ranges: Vec<ContextItemRange> = Vec::new();
-    for &id in ids {
+    for id in ids {
         match ranges.last_mut() {
             Some(last) if last.end_id.checked_add(1) == Some(id) => last.end_id = id,
             _ => ranges.push(ContextItemRange {
@@ -991,6 +994,36 @@ impl ContextManager {
 
     fn checkpoint_source_indices_for(&self, max_tokens: usize) -> Vec<usize> {
         let mut visible = self.all_visible_source_indices();
+        // A checkpoint is the base state, even though it was appended after
+        // the raw tail it precedes in the model view.
+        visible.sort_by_key(|&idx| {
+            (
+                !matches!(self.items[idx], ContextItem::Compaction { .. }),
+                idx,
+            )
+        });
+        // Inputs awaiting the next model response remain verbatim, including
+        // queued steering that arrived after the most recent tool result.
+        let pending_inputs: HashSet<u64> = self
+            .items
+            .iter()
+            .rev()
+            .filter(|item| {
+                !self.is_hidden(item)
+                    && !matches!(
+                        item,
+                        ContextItem::Compaction { .. } | ContextItem::Error { .. }
+                    )
+            })
+            .take_while(|item| matches!(item, ContextItem::User { .. }))
+            .map(ContextItem::id)
+            .collect();
+        let has_prior_work = visible
+            .iter()
+            .any(|&idx| !matches!(self.items[idx], ContextItem::User { .. }));
+        if has_prior_work {
+            visible.retain(|&idx| !pending_inputs.contains(&self.items[idx].id()));
+        }
         if self.manual_compaction {
             return visible;
         }
@@ -1067,7 +1100,7 @@ impl ContextManager {
         let context = source
             .iter()
             .map(|&idx| &self.items[idx])
-            .map(serialize_item)
+            .map(|item| format!("[Context item #{}]\n{}", item.id(), serialize_item(item)))
             .filter(|line| !line.is_empty())
             .collect::<Vec<String>>()
             .join("\n\n");
