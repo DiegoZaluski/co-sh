@@ -13,7 +13,10 @@ impl App {
                     DialogType::ApiKeyInput { .. }
                         | DialogType::LocalUrlInput { .. }
                         | DialogType::CacheTtlInput { .. }
-                        | DialogType::RenameSession { .. },
+                        | DialogType::RenameSession { .. }
+                        | DialogType::McpNameInput { .. }
+                        | DialogType::McpEndpointInput { .. }
+                        | DialogType::McpTimeoutInput { .. },
                 )
             )
     }
@@ -42,7 +45,10 @@ impl App {
                     && let DialogType::ApiKeyInput { cursor_pos, .. }
                     | DialogType::LocalUrlInput { cursor_pos, .. }
                     | DialogType::CacheTtlInput { cursor_pos, .. }
-                    | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
+                    | DialogType::RenameSession { cursor_pos, .. }
+                    | DialogType::McpNameInput { cursor_pos, .. }
+                    | DialogType::McpEndpointInput { cursor_pos, .. }
+                    | DialogType::McpTimeoutInput { cursor_pos, .. } = &mut d.dialog_type
                     && *cursor_pos > 0
                 {
                     *cursor_pos -= 1;
@@ -62,6 +68,15 @@ impl App {
                     }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
+                    }
+                    | DialogType::McpNameInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpEndpointInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpTimeoutInput {
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos < input.len()
                 {
@@ -74,7 +89,10 @@ impl App {
                     && let DialogType::ApiKeyInput { cursor_pos, .. }
                     | DialogType::LocalUrlInput { cursor_pos, .. }
                     | DialogType::CacheTtlInput { cursor_pos, .. }
-                    | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
+                    | DialogType::RenameSession { cursor_pos, .. }
+                    | DialogType::McpNameInput { cursor_pos, .. }
+                    | DialogType::McpEndpointInput { cursor_pos, .. }
+                    | DialogType::McpTimeoutInput { cursor_pos, .. } = &mut d.dialog_type
                 {
                     *cursor_pos = 0;
                 }
@@ -92,6 +110,15 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::RenameSession {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpNameInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpEndpointInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpTimeoutInput {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                 {
@@ -111,6 +138,15 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::RenameSession {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpNameInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpEndpointInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpTimeoutInput {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos < input.len()
@@ -133,6 +169,15 @@ impl App {
                     }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
+                    }
+                    | DialogType::McpNameInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpEndpointInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpTimeoutInput {
+                        input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos > 0
                 {
@@ -154,6 +199,15 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::RenameSession {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpNameInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpEndpointInput {
+                        input, cursor_pos, ..
+                    }
+                    | DialogType::McpTimeoutInput {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                 {
@@ -615,7 +669,105 @@ impl App {
                 }
             }
             DialogType::HookInput { .. } => self.save_hook_input_dialog(),
+            DialogType::McpNameInput { input, .. } => {
+                // Wizard step 1 → 2: a name is required before asking for
+                // the endpoint; uniqueness is checked at the final save.
+                if input.trim().is_empty() {
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Server not saved".into()),
+                        message: "Server name is required.".to_string(),
+                        variant: ToastVariant::Error,
+                        duration_ms: 6000,
+                    });
+                    return false;
+                }
+                let name = input.trim().to_string();
+                // Advance the wizard: swap instead of pushing, and report
+                // "not done" so the Enter handler does not pop the new step.
+                self.dialog.replace(DialogType::McpEndpointInput {
+                    name,
+                    input: String::new(),
+                    cursor_pos: 0,
+                });
+                false
+            }
+            DialogType::McpEndpointInput { name, input, .. } => {
+                // Wizard step 2 → 3: fail fast on an unparsable endpoint so
+                // the user fixes it before typing the timeout.
+                if cosh::mcp::parse_mcp_endpoint(input).is_err() {
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Server not saved".into()),
+                        message: "Endpoint must be `command args...` or `http(s)://url`."
+                            .to_string(),
+                        variant: ToastVariant::Error,
+                        duration_ms: 6000,
+                    });
+                    return false;
+                }
+                let name = name.clone();
+                let endpoint = input.trim().to_string();
+                self.dialog.replace(DialogType::McpTimeoutInput {
+                    name,
+                    endpoint,
+                    input: String::new(),
+                    cursor_pos: 0,
+                });
+                false
+            }
+            DialogType::McpTimeoutInput {
+                name,
+                endpoint,
+                input,
+                ..
+            } => match cosh::mcp::build_mcp_entry(name, endpoint, input) {
+                Ok(entry) => {
+                    if self.setup.mcp.servers.iter().any(|s| s.name == entry.name) {
+                        use crate::ui::toast::{ToastOptions, ToastVariant};
+                        self.toast_state.show(ToastOptions {
+                            title: Some("Server not saved".into()),
+                            message: format!(
+                                "A server named “{}” is already registered.",
+                                entry.name
+                            ),
+                            variant: ToastVariant::Error,
+                            duration_ms: 6000,
+                        });
+                        return false;
+                    }
+                    let name = entry.name.clone();
+                    self.setup.mcp.servers.push(entry);
+                    self.setup.save();
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    self.toast_state.show(ToastOptions {
+                        title: Some("MCP server added".into()),
+                        message: format!("“{name}” connects on the next agent loop."),
+                        variant: ToastVariant::Success,
+                        duration_ms: 4000,
+                    });
+                    true
+                }
+                Err(message) => {
+                    use crate::ui::toast::{ToastOptions, ToastVariant};
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Server not saved".into()),
+                        message,
+                        variant: ToastVariant::Error,
+                        duration_ms: 6000,
+                    });
+                    false
+                }
+            },
             _ => false,
         }
+    }
+
+    /// Open the MCP registration wizard at step 1 (server name).
+    pub(in crate::app) fn open_mcp_name_input(&mut self) {
+        self.dialog.show(DialogType::McpNameInput {
+            input: String::new(),
+            cursor_pos: 0,
+        });
     }
 }

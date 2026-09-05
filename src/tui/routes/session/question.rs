@@ -5,9 +5,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use cosh_tools::question::types::{
-    AnswerItem, CUSTOM_RESPONSE_LABEL, QuestionItem, QuestionType,
-};
+use cosh_tools::question::types::{AnswerItem, CUSTOM_RESPONSE_LABEL, QuestionItem, QuestionType};
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;

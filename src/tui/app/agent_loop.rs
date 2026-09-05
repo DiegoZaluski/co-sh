@@ -259,6 +259,11 @@ impl App {
 
         let mut disabled_tools = self.internal_tools_view.disabled.clone();
 
+        // Registered MCP servers (Settings screen → setup.json). Cloned
+        // into the agent thread; the boot `connect_all` isolates
+        // per-server failures, so one bad server never blocks the turn.
+        let mcp_config = self.setup.mcp.clone();
+
         // RAG recall context
         // 1) Description suffix (what the model sees in the tool doc)
         #[cfg(feature = "embed")]
@@ -433,7 +438,18 @@ impl App {
                     let mut harness = Harness::new(connector, &cwd, disabled_tools)
                         .with_mode(mode)
                         .with_fallbacks(remaining)
-                        .with_local_base_urls(local_base_urls);
+                        .with_local_base_urls(local_base_urls)
+                        .with_mcp_config(mcp_config);
+
+                    // Connect MCP servers before the header snapshot: the
+                    // first extractor/native-tools view must see them.
+                    if let Err(err) = harness.connect_mcp().await {
+                        use cosh::harness::events::{HarnessEvent, ToastVariant};
+                        let _ = event_tx.send(HarnessEvent::Toast {
+                            message: format!("MCP config invalid: {err}"),
+                            variant: ToastVariant::Warning,
+                        });
+                    }
 
                     // Restore the authoritative context from the session
                     // file's context records. No context — no history; the

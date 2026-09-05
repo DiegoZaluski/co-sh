@@ -515,6 +515,12 @@ impl App {
                             }) => {
                                 self.open_cache_ttl_input(setting);
                             }
+                            Some(crate::routes::settings::SettingsAction::McpToggled) => {
+                                self.setup.save();
+                            }
+                            Some(crate::routes::settings::SettingsAction::OpenMcpForm) => {
+                                self.open_mcp_name_input();
+                            }
                             None => {}
                         }
                         return Ok(false);

@@ -1,13 +1,14 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::super::core::{Harness, ServerSession};
+use super::super::core::Harness;
 use cosh_sdk::extract_action::ToolCallData;
 use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
-    ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{MaybeSendFuture, RequestContext, RoleServer};
 use serde_json::json;
@@ -33,11 +34,11 @@ impl ServerHandler for IntegrityChecker {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let expected = self.expected_args.clone();
         let received = serde_json::to_value(&request.arguments).unwrap_or_default();
         if received == expected {
-            Ok(CallToolResult::success(vec![Content::text("ok")]))
+            Ok(CallToolResult::success(vec![ContentBlock::text("ok")]).into())
         } else {
             Err(McpError::internal_error("argument mismatch", None))
         }
@@ -78,7 +79,7 @@ impl ServerHandler for CrashOnCall {
         &self,
         _request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         Err(McpError::internal_error("server crashed", None))
     }
 
@@ -104,34 +105,33 @@ impl ServerHandler for CrashOnCall {
 
 // ── Session Helpers ───────────────────────────────────────────────
 
-/// Create a session from any `ServerHandler`.
-async fn session_from_handler(
+/// Attach any `ServerHandler` to a harness over an in-memory duplex pair.
+/// Returns the server task handle; tools come from the live handshake.
+async fn attach_handler(
+    harness: &mut Harness,
     server_name: &str,
     handler: impl ServerHandler + Clone + 'static,
-) -> (ServerSession, tokio::task::JoinHandle<()>) {
+) -> tokio::task::JoinHandle<()> {
     let (server_io, client_io) = tokio::io::duplex(4096);
 
     let handle = tokio::spawn(async move {
         let _ = handler.serve(server_io).await.unwrap().waiting().await;
     });
 
-    let client = ().serve(client_io).await.unwrap();
-    let tools = client.list_all_tools().await.unwrap();
+    harness
+        .attach_test_transport(server_name, client_io)
+        .await
+        .unwrap();
 
-    let session = ServerSession {
-        name_server: server_name.to_string(),
-        tools,
-        client,
-    };
-
-    (session, handle)
+    handle
 }
 
-/// Create a session with a basic ok-responding server.
-async fn ok_session(
+/// Attach a basic ok-responding server to a harness.
+async fn attach_ok(
+    harness: &mut Harness,
     server_name: &str,
     tool_name: &str,
-) -> (ServerSession, tokio::task::JoinHandle<()>) {
+) -> tokio::task::JoinHandle<()> {
     use rmcp::handler::server::ServerHandler;
 
     #[derive(Clone)]
@@ -148,8 +148,8 @@ async fn ok_session(
             &self,
             _request: CallToolRequestParams,
             _context: RequestContext<RoleServer>,
-        ) -> Result<CallToolResult, McpError> {
-            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        ) -> Result<CallToolResponse, McpError> {
+            Ok(CallToolResult::success(vec![ContentBlock::text("ok")]).into())
         }
 
         fn list_tools(
@@ -172,7 +172,8 @@ async fn ok_session(
         }
     }
 
-    session_from_handler(
+    attach_handler(
+        harness,
         server_name,
         OkServer {
             name: tool_name.into(),
@@ -183,6 +184,77 @@ async fn ok_session(
 
 // ── Tests ─────────────────────────────────────────────────────────
 
+/// `run_agent_loop` must release every MCP client when it ends (explicit
+/// shutdown, no async `Drop`): the in-memory server task terminates while
+/// the harness is still alive, not only after `drop(h)`.
+#[tokio::test]
+async fn agent_loop_end_drains_mcp_clients() {
+    use std::sync::atomic::AtomicBool;
+
+    let mut h = make_harness().with_mock_stream(Ok(vec!["done"]));
+    let server_handle = attach_ok(&mut h, "s", "loop.tool").await;
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), server_handle)
+        .await
+        .expect("MCP client must be disconnected at agent-loop end")
+        .expect("server task must not panic");
+}
+
+#[tokio::test]
+async fn dispatch_next_rejects_disabled_mcp_tool() {
+    use cosh_sdk::connector::Connector;
+
+    let mut disabled = HashSet::new();
+    disabled.insert("off.tool".to_string());
+    let mut h = Harness::new(Connector::new("openai").unwrap(), ".", disabled);
+    let server_handle = attach_ok(&mut h, "s", "off.tool").await;
+
+    // Hidden from the header/extractor, and refused at dispatch even when
+    // the name reaches the queue.
+    assert!(!h.format_header_context().contains("off.tool"));
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "off.tool".into(),
+        arguments: json!({}),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(err.contains("is disabled"), "got: {err}");
+
+    drop(h);
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn dispatch_next_hides_mcp_tools_in_ask_mode() {
+    use cosh_sdk::connector::Connector;
+
+    let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new())
+        .with_mode(super::super::core::Mode::Ask);
+    let server_handle = attach_ok(&mut h, "s", "ask.tool").await;
+
+    assert!(!h.format_header_context().contains("ask.tool"));
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "ask.tool".into(),
+        arguments: json!({}),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(err.contains("no server found"), "got: {err}");
+
+    drop(h);
+    let _ = server_handle.await;
+}
+
 #[tokio::test]
 async fn dispatch_next_errors_on_empty_queue() {
     let mut h = make_harness();
@@ -192,10 +264,8 @@ async fn dispatch_next_errors_on_empty_queue() {
 
 #[tokio::test]
 async fn dispatch_next_errors_on_unknown_tool() {
-    let (session, server_handle) = ok_session("test-server", "known.tool").await;
-
     let mut h = make_harness();
-    h.push_session(session);
+    let server_handle = attach_ok(&mut h, "test-server", "known.tool").await;
 
     h.push_tool_call(ToolCallData {
         id: String::new(),
@@ -213,10 +283,8 @@ async fn dispatch_next_errors_on_unknown_tool() {
 
 #[tokio::test]
 async fn dispatch_next_errors_on_non_object_args() {
-    let (session, server_handle) = ok_session("s", "some.tool").await;
-
     let mut h = make_harness();
-    h.push_session(session);
+    let server_handle = attach_ok(&mut h, "s", "some.tool").await;
 
     h.push_tool_call(ToolCallData {
         id: String::new(),
@@ -234,10 +302,8 @@ async fn dispatch_next_errors_on_non_object_args() {
 
 #[tokio::test]
 async fn dispatch_next_success_removes_from_queue() {
-    let (session, server_handle) = ok_session("s", "ok.tool").await;
-
     let mut h = make_harness();
-    h.push_session(session);
+    let server_handle = attach_ok(&mut h, "s", "ok.tool").await;
     h.push_tool_call(ToolCallData {
         id: String::new(),
         name: "ok.tool".into(),
@@ -257,7 +323,9 @@ async fn dispatch_next_success_removes_from_queue() {
 
 #[tokio::test]
 async fn dispatch_next_preserves_item_on_server_error() {
-    let (session, server_handle) = session_from_handler(
+    let mut h = make_harness();
+    let server_handle = attach_handler(
+        &mut h,
         "crash-server",
         CrashOnCall {
             tool_name: "crash.tool".into(),
@@ -265,8 +333,6 @@ async fn dispatch_next_preserves_item_on_server_error() {
     )
     .await;
 
-    let mut h = make_harness();
-    h.push_session(session);
     h.push_tool_call(ToolCallData {
         id: String::new(),
         name: "crash.tool".into(),
@@ -301,10 +367,8 @@ async fn dispatch_next_passes_correct_arguments() {
         expected_args: json!({"msg": "hello", "count": 42}),
     };
 
-    let (session, server_handle) = session_from_handler("integrity-server", checker).await;
-
     let mut h = make_harness();
-    h.push_session(session);
+    let server_handle = attach_handler(&mut h, "integrity-server", checker).await;
     h.push_tool_call(ToolCallData {
         id: String::new(),
         name: "echo.tool".into(),
@@ -321,12 +385,9 @@ async fn dispatch_next_passes_correct_arguments() {
 
 #[tokio::test]
 async fn dispatch_next_respects_order() {
-    let (session_a, handle_a) = ok_session("server-a", "alpha.read").await;
-    let (session_b, handle_b) = ok_session("server-b", "beta.write").await;
-
     let mut h = make_harness();
-    h.push_session(session_a);
-    h.push_session(session_b);
+    let handle_a = attach_ok(&mut h, "server-a", "alpha.read").await;
+    let handle_b = attach_ok(&mut h, "server-b", "beta.write").await;
 
     h.push_tool_call(ToolCallData {
         id: String::new(),
@@ -354,10 +415,8 @@ async fn dispatch_next_respects_order() {
 
 #[tokio::test]
 async fn dispatch_next_multiple_calls_sequential() {
-    let (session, server_handle) = ok_session("seq-server", "seq.tool").await;
-
     let mut h = make_harness();
-    h.push_session(session);
+    let server_handle = attach_ok(&mut h, "seq-server", "seq.tool").await;
 
     for i in 0..5 {
         h.push_tool_call(ToolCallData {

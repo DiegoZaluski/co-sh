@@ -247,6 +247,27 @@ pub enum DialogType {
         input: String,
         cursor_pos: usize,
     },
+    /// MCP registration wizard, one single-field step at a time (same
+    /// mechanics as the API-key / server-URL inputs): name → endpoint →
+    /// timeout. The draft travels inside the variants; the final step
+    /// validates via `cosh::mcp::build_mcp_entry` and appends to setup.json.
+    McpNameInput {
+        input: String,
+        cursor_pos: usize,
+    },
+    /// Wizard step 2: `command args...` (stdio) or `https://host/mcp`.
+    McpEndpointInput {
+        name: String,
+        input: String,
+        cursor_pos: usize,
+    },
+    /// Wizard step 3: timeout in seconds, blank for the default.
+    McpTimeoutInput {
+        name: String,
+        endpoint: String,
+        input: String,
+        cursor_pos: usize,
+    },
     /// Rename the current session: a text prompt prefilled with the current
     /// title, Enter applies, Esc cancels.
     RenameSession {
@@ -713,7 +734,10 @@ impl DialogState {
             }
             DialogType::ApiKeyInput { .. }
             | DialogType::LocalUrlInput { .. }
-            | DialogType::CacheTtlInput { .. } => {
+            | DialogType::CacheTtlInput { .. }
+            | DialogType::McpNameInput { .. }
+            | DialogType::McpEndpointInput { .. }
+            | DialogType::McpTimeoutInput { .. } => {
                 // Click outside the dialog box → dismiss
                 let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
                 let dialog_h = 7;
@@ -1560,6 +1584,52 @@ impl DialogState {
                     theme,
                     now,
                     &instance.cursor,
+                    input,
+                    *cursor_pos,
+                );
+            }
+            DialogType::McpNameInput { input, cursor_pos } => {
+                render_text_input_dialog(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    "MCP server name",
+                    "A short unique name, e.g. docs",
+                    false,
+                    input,
+                    *cursor_pos,
+                );
+            }
+            DialogType::McpEndpointInput {
+                input, cursor_pos, ..
+            } => {
+                render_text_input_dialog(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    "MCP endpoint",
+                    "npx -y package  ·  or  https://host/mcp",
+                    false,
+                    input,
+                    *cursor_pos,
+                );
+            }
+            DialogType::McpTimeoutInput {
+                input, cursor_pos, ..
+            } => {
+                render_text_input_dialog(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    "MCP timeout",
+                    "Seconds per tool call — blank for default",
+                    false,
                     input,
                     *cursor_pos,
                 );

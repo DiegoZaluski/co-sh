@@ -512,7 +512,7 @@ impl AppState {
         self.connected = true;
         self.lsp_available = true;
         self.lsp_servers = vec!["rust-analyzer".to_string(), "gopls".to_string()];
-        self.mcp_count = 3;
+        self.mcp_count = 0;
         self.mcp_errors = 0;
         self.permission_count = 1;
     }

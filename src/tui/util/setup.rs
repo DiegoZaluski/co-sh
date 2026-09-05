@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use cosh::mcp::McpConfig;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,9 @@ pub struct Setup {
     pub cache: Cache,
     /// Master switch for the LSP engine (kept flat: it has no sub-options).
     pub lsp: bool,
+    /// Registered MCP servers (empty when the user never added one, so
+    /// legacy files without the section keep loading unchanged).
+    pub mcp: McpConfig,
 }
 
 impl Default for Setup {
@@ -39,6 +43,7 @@ impl Default for Setup {
             model: Model::default(),
             cache: Cache::default(),
             lsp: true,
+            mcp: McpConfig::default(),
         }
     }
 }
@@ -506,6 +511,29 @@ mod tests {
             loaded.local_base_url("llamacpp"),
             Some("http://127.0.0.1:9999")
         );
+    }
+
+    #[test]
+    fn mcp_section_defaults_empty_and_roundtrips() {
+        // Legacy files without the section load as "no servers".
+        let legacy: Setup = serde_json::from_str("{}").unwrap();
+        assert!(legacy.mcp.servers.is_empty());
+
+        let mut setup = Setup::default();
+        setup.mcp.servers.push(cosh::mcp::McpServerEntry {
+            name: "docs".to_string(),
+            transport: cosh::mcp::McpTransport::Http(cosh::mcp::HttpTransport {
+                url: "https://example.com/mcp".to_string(),
+                headers: Default::default(),
+                timeout_ms: 1000,
+            }),
+            enabled: false,
+        });
+        let json = serde_json::to_string_pretty(&setup).unwrap();
+        let loaded: Setup = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.mcp.servers.len(), 1);
+        assert_eq!(loaded.mcp.servers[0].name, "docs");
+        assert!(!loaded.mcp.servers[0].enabled);
     }
 
     #[test]

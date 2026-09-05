@@ -167,3 +167,74 @@ async fn hook_input_click_positions_cursor() {
         "click must park the cursor on char index 2"
     );
 }
+
+/// The MCP wizard walks name → endpoint → timeout, persisting only on the
+/// final valid save; each step validates before advancing.
+#[tokio::test]
+async fn mcp_wizard_registers_server_end_to_end() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.dialog.show(DialogType::McpNameInput {
+        input: String::new(),
+        cursor_pos: 0,
+    });
+
+    // Blank name keeps step 1 open.
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(app.dialog.visible(), "blank name stays on step 1");
+
+    for ch in "docs".chars() {
+        assert!(app.handle_text_input_dialog_key(KeyCode::Char(ch)));
+    }
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::McpEndpointInput { .. })
+        ),
+        "valid name advances to step 2"
+    );
+
+    // Garbage endpoint is rejected without advancing.
+    for ch in "   ".chars() {
+        assert!(app.handle_text_input_dialog_key(KeyCode::Char(ch)));
+    }
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::McpEndpointInput { .. })
+        ),
+        "blank endpoint stays on step 2"
+    );
+    for _ in 0..3 {
+        app.handle_text_input_dialog_key(KeyCode::Backspace);
+    }
+    for ch in "https://example.com/mcp".chars() {
+        assert!(app.handle_text_input_dialog_key(KeyCode::Char(ch)));
+    }
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::McpTimeoutInput { .. })
+        ),
+        "valid endpoint advances to step 3"
+    );
+
+    // Bad timeout stays; blank means default and closes with a persist.
+    for ch in "abc".chars() {
+        assert!(app.handle_text_input_dialog_key(KeyCode::Char(ch)));
+    }
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(app.dialog.visible(), "bad timeout stays on step 3");
+    for _ in 0..3 {
+        app.handle_text_input_dialog_key(KeyCode::Backspace);
+    }
+    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+    assert!(!app.dialog.visible(), "default timeout closes the wizard");
+    assert_eq!(app.setup.mcp.servers.len(), 1);
+    assert_eq!(app.setup.mcp.servers[0].name, "docs");
+    assert!(app.setup.mcp.servers[0].enabled);
+}

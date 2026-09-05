@@ -74,6 +74,18 @@ impl App {
                         }
                         | DialogType::CacheTtlInput {
                             input, cursor_pos, ..
+                        }
+                        | DialogType::RenameSession {
+                            input, cursor_pos, ..
+                        }
+                        | DialogType::McpNameInput {
+                            input, cursor_pos, ..
+                        }
+                        | DialogType::McpEndpointInput {
+                            input, cursor_pos, ..
+                        }
+                        | DialogType::McpTimeoutInput {
+                            input, cursor_pos, ..
                         } = &mut d.dialog_type
                     {
                         let cleaned: String =
@@ -708,6 +720,13 @@ impl App {
                     // lifecycle events.
                     self.state.lsp_available = available;
                     self.state.lsp_servers = servers;
+                }
+
+                HarnessEvent::McpStatus { servers } => {
+                    // Same session-scoped model as LSP: the footer counts
+                    // persist across turns until a newer snapshot arrives.
+                    self.state.mcp_count = cosh::mcp::ready_count(&servers);
+                    self.state.mcp_errors = cosh::mcp::failed_count(&servers);
                 }
 
                 HarnessEvent::ContextSnapshot { context } => {

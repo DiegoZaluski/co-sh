@@ -58,6 +58,12 @@ chrono = "0.4"
 log = { version = "0.4", features = ["std"] }
 dotenvy = "0.15.7"
 anyhow = "1"
+# Reused workspace-wide at these exact versions (see crates/cosh-sdk,
+# crates/cosh-tools, crates/cosh-recall): error enums, header maps, URL
+# parsing for the MCP client. Not new crates, just newly direct.
+thiserror = "2"
+http = "1"
+url = "2"
 schemars = "1"
 crossterm = { version = "0.29", features = ["bracketed-paste"] }
 directories = "6.0.0"
@@ -86,7 +92,7 @@ version = "1"
 features = ["derive"]
 
 [dependencies.rmcp]
-version = "1.8.0"
+version = "3.2.0"
 features = [
   "client",
   "server",

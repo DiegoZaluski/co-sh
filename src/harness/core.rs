@@ -3,6 +3,7 @@ use super::context::error_catalog_window;
 use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools};
+use crate::mcp::{McpConfig, McpManager};
 use cosh_sdk::connector::{
     ChatMessage, ChatStream, ClaudeThinkingBlock, Connector, ConnectorError, ToolCallMode,
     ToolDefinition, resolve_reasoning_effort,
@@ -14,10 +15,6 @@ use cosh_sdk::extract_action::{
 };
 use cosh_tools::TOOL_FORMAT;
 use cosh_tools::lsp::Lsp;
-use rmcp::ServiceExt;
-use rmcp::model::{CallToolRequestParams, Tool};
-use rmcp::service::{RoleClient, RunningService};
-use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 #[cfg(not(test))]
 use std::collections::HashMap;
 use std::collections::{HashSet, VecDeque};
@@ -61,12 +58,6 @@ pub enum ManualCompactionOutcome {
     NothingToCompact,
     /// The summarizer call failed (the automatic path already toasted).
     Failed,
-}
-
-pub struct ServerSession {
-    pub name_server: String,
-    pub tools: Vec<Tool>,
-    pub client: RunningService<RoleClient, ()>,
 }
 
 pub const INSTRUCTIONS_BUILD: &str = concat!(
@@ -407,8 +398,14 @@ fn default_harness_tools() -> Vec<HarnessTool> {
 #[allow(clippy::struct_field_names)]
 pub struct Harness {
     connector: Connector,
-    sessions: Vec<ServerSession>,
-    protocol: Option<String>,
+    /// MCP connections of this session. Owns every client; a failing server
+    /// degrades to a `Failed` snapshot and never aborts the others. Not
+    /// `Send` (like the prototype's clients), so the harness stays on the
+    /// agent thread (`std::thread::spawn` + `block_on` in the TUI).
+    mcp: McpManager,
+    /// Registered MCP servers to connect. Populated via
+    /// [`Self::with_mcp_config`] from the TUI's `Setup.mcp`.
+    mcp_config: McpConfig,
     header_context: String,
     system_prompts: Vec<PromptSystem>,
     harness_tools: Vec<HarnessTool>,
@@ -594,8 +591,8 @@ impl Harness {
         cosh_tools.set_subagent_note(SUBAGENT_INTERNAL_NOTE);
         Self {
             connector,
-            sessions: Vec::new(),
-            protocol: None,
+            mcp: McpManager::new(),
+            mcp_config: McpConfig::default(),
             header_context: String::new(),
             system_prompts: Vec::new(),
             harness_tools: default_harness_tools(),
@@ -699,49 +696,60 @@ impl Harness {
         self
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the transport cannot be created,
-    /// the MCP handshake fails, or the protocol is unsupported.
-    pub async fn connect(
-        &mut self,
-        server: &str,
-        protocol: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let client = match protocol {
-            "stdio" => {
-                let mut cmd = tokio::process::Command::new("npx");
-                cmd.arg("-y").arg(server);
-                let transport = TokioChildProcess::new(cmd)?;
-                ().serve(transport).await?
-            }
-
-            "http" => {
-                let transport = StreamableHttpClientTransport::from_uri(server);
-                ().serve(transport).await?
-            }
-
-            other => return Err(format!("unsupported protocol: {other}").into()),
-        };
-
-        let name_server = client
-            .peer_info()
-            .map(|i| i.server_info.name.clone())
-            .unwrap_or_default();
-
-        let tools = client.list_all_tools().await?;
-
-        self.sessions.push(ServerSession {
-            name_server,
-            tools,
-            client,
-        });
-        Ok(())
+    /// Registered MCP servers to connect, populated from `Setup.mcp` by the
+    /// TUI (see [`Self::with_mcp_config`]) and booted via
+    /// [`Self::connect_mcp`].
+    #[must_use]
+    pub fn with_mcp_config(mut self, config: McpConfig) -> Self {
+        self.mcp_config = config;
+        self
     }
 
-    pub fn set_protocol(&mut self, protocol: impl Into<Option<String>>) -> &mut Self {
-        self.protocol = protocol.into();
-        self
+    /// Connect every enabled server from [`Self::with_mcp_config`].
+    /// Per-server failures are isolated by the manager and never abort the
+    /// loop; the TUI reads them back via status snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the whole section is invalid (e.g.
+    /// duplicate server names).
+    pub async fn connect_mcp(&mut self) -> Result<(), crate::mcp::McpError> {
+        let config = std::mem::take(&mut self.mcp_config);
+        let outcome = self.mcp.connect_all(&config).await;
+        self.mcp_config = config;
+        outcome
+    }
+
+    /// Attach an in-memory MCP transport for tests (duplex servers built by
+    /// `harness::test`). Production code connects via [`Self::connect_mcp`].
+    #[cfg(test)]
+    pub(crate) async fn attach_test_transport<T, E, A>(
+        &mut self,
+        name: &str,
+        transport: T,
+    ) -> Result<(), String>
+    where
+        T: rmcp::transport::IntoTransport<rmcp::service::RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        use crate::mcp::{McpServerEntry, McpTransport, StdioTransport};
+        // Mirror `connect_one` hygiene: drop a stale client before the new
+        // handshake so re-attaching a name never leaks the old service.
+        self.mcp.disconnect(name).await;
+        self.mcp.insert_test_entry(McpServerEntry {
+            name: name.to_string(),
+            transport: McpTransport::Stdio(StdioTransport {
+                command: "test".to_string(),
+                args: Vec::new(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+            }),
+            enabled: true,
+        });
+        self.mcp
+            .register(name, transport, std::time::Duration::from_millis(200))
+            .await
+            .map_err(|err| err.to_string())
     }
 
     #[must_use]
@@ -888,20 +896,31 @@ impl Harness {
             }
         }
 
-        for session in &self.sessions {
-            let _ = write!(out, "### MCP Server: {}\n\n", session.name_server);
-            for tool in &session.tools {
-                let desc = tool.description.as_deref().unwrap_or_default();
-                if include_inline_schemas {
-                    let schema =
-                        serde_json::to_string_pretty(&*tool.input_schema).unwrap_or_default();
-                    let _ = write!(
-                        out,
-                        "- **{name}**: {desc}\n  Schema: {schema}\n",
-                        name = tool.name
-                    );
-                } else {
-                    let _ = writeln!(out, "- **{name}**: {desc}", name = tool.name);
+        // MCP tools stay hidden in Ask mode: the read-only planning agent
+        // must not see tools whose safety is unknown.
+        if !matches!(self.mode, Mode::Ask) {
+            for (server, tools) in self.mcp.tools_by_server() {
+                let visible: Vec<_> = tools
+                    .into_iter()
+                    .filter(|tool| !self.disabled_tools.contains(tool.name.as_ref()))
+                    .collect();
+                if visible.is_empty() {
+                    continue;
+                }
+                let _ = write!(out, "### MCP Server: {server}\n\n");
+                for tool in visible {
+                    let desc = tool.description.as_deref().unwrap_or_default();
+                    if include_inline_schemas {
+                        let schema =
+                            serde_json::to_string_pretty(&*tool.input_schema).unwrap_or_default();
+                        let _ = write!(
+                            out,
+                            "- **{name}**: {desc}\n  Schema: {schema}\n",
+                            name = tool.name
+                        );
+                    } else {
+                        let _ = writeln!(out, "- **{name}**: {desc}", name = tool.name);
+                    }
                 }
             }
         }
@@ -912,14 +931,16 @@ impl Harness {
 
     /// Build an extractor with all registered MCP, cosh, and internal tools.
     fn build_extractor(&self) -> ExtractAction {
-        log::debug!("build_extractor: sessions={}", self.sessions.len());
+        use crate::mcp::tool_to_schema;
+
+        log::debug!("build_extractor: mcp_tools={}", self.mcp.all_tools().len());
         let mut extractor = ExtractAction::new();
-        for session in &self.sessions {
-            for tool in &session.tools {
-                extractor.add_tool(ToolSchema {
-                    name: tool.name.to_string(),
-                    input_schema: serde_json::Value::Object((*tool.input_schema).clone()),
-                });
+        if !matches!(self.mode, Mode::Ask) {
+            for tool in self.mcp.all_tools() {
+                if self.disabled_tools.contains(tool.name.as_ref()) {
+                    continue;
+                }
+                extractor.add_tool(tool_to_schema(tool));
             }
         }
         if let Some(ref cosh) = self.cosh_tools {
@@ -2659,20 +2680,13 @@ impl Harness {
             }
         }
 
-        // MCP server tools
-        for session in &self.sessions {
-            for tool in &session.tools {
-                let name: &str = tool.name.as_ref();
-                if self.disabled_tools.contains(name) {
+        // MCP server tools (hidden in Ask mode, like the header).
+        if !matches!(self.mode, Mode::Ask) {
+            for tool in self.mcp.all_tools() {
+                if self.disabled_tools.contains(tool.name.as_ref()) {
                     continue;
                 }
-                let description = tool.description.as_deref().unwrap_or_default();
-                let input_schema = (*tool.input_schema).clone();
-                defs.push(ToolDefinition::new(
-                    TFunc::new(name)
-                        .with_description(description)
-                        .with_parameters(serde_json::Value::Object(input_schema)),
-                ));
+                defs.push(crate::mcp::tool_to_definition(tool));
             }
         }
 
@@ -2802,6 +2816,18 @@ impl Harness {
         }
     }
 
+    /// Current MCP snapshots for the TUI's prompt footer.
+    pub fn mcp_snapshots(&self) -> Vec<crate::mcp::ServerSnapshot> {
+        self.mcp.status_snapshots()
+    }
+
+    /// Snapshot of the current MCP state for the TUI's footer.
+    fn mcp_snapshot_event(&self) -> super::events::HarnessEvent {
+        super::events::HarnessEvent::McpStatus {
+            servers: self.mcp_snapshots(),
+        }
+    }
+
     /// Run the full agent loop: stream LLM response, dispatch tool calls,
     /// feed results back to the LLM, and repeat — until the model finishes
     /// without requesting tools, stop is called,
@@ -2835,6 +2861,7 @@ impl Harness {
         let (_never, queued_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         self.run_agent_loop_inner(input, tx, answer_rx, perm_rx, stop_signal, queued_rx)
             .await;
+        self.drain_mcp().await;
     }
 
     /// Like [`run_agent_loop`](Self::run_agent_loop) but with an additional
@@ -2856,6 +2883,17 @@ impl Harness {
     ) {
         self.run_agent_loop_inner(input, tx, answer_rx, perm_rx, stop_signal, queued_input_rx)
             .await;
+        self.drain_mcp().await;
+    }
+
+    /// Explicit MCP shutdown at agent-loop end (`disconnect_all` with a
+    /// bounded cancel per client): there is no async `Drop`, so a stdio
+    /// child or HTTP session would otherwise outlive the turn. The TUI
+    /// builds a fresh harness per turn; reusing a harness for another loop
+    /// would need `connect_mcp` again. A panic in the loop skips this (the
+    /// client then dies with the harness on unwind).
+    async fn drain_mcp(&mut self) {
+        self.mcp.disconnect_all().await;
     }
 
     /// Shared implementation of [`run_agent_loop`](Self::run_agent_loop) and
@@ -2888,6 +2926,10 @@ impl Harness {
         // engine state from the first moment of the turn, not only after the
         // first full cycle completes.
         let _ = tx.send(self.lsp_snapshot_event());
+
+        // Same for MCP: the boot `connect_all` already ran, so the first
+        // footer view reflects the connections.
+        let _ = tx.send(self.mcp_snapshot_event());
 
         // Crush-style loop detection: watch the last N tool-calling
         // iterations for an identical tool+input+result signature. A
@@ -4236,35 +4278,25 @@ impl Harness {
             return Ok(result);
         }
 
-        // Tier 2: MCP sessions
-        let idx = self
-            .sessions
-            .iter()
-            .position(|s| s.tools.iter().any(|t| t.name == tool_name));
-
-        let Some(idx) = idx else {
+        // Tier 2: MCP servers (managed). Hidden in Ask mode, like the
+        // header: the planning agent must not reach tools of unknown safety.
+        // The harness-level "no server found" message is kept stable.
+        if !matches!(self.mode, Mode::Ask) && self.mcp.owner_of(&tool_name).is_some() {
             self.tool_issuer.pop_front();
-            return Err(format!("no server found for tool '{tool_name}'"));
-        };
+            if self.disabled_tools.contains(&tool_name) {
+                return Err(format!("tool '{tool_name}' is disabled"));
+            }
+            return match self.mcp.call_tool(&tool_name, args_map).await {
+                Ok(result) => Ok(crate::mcp::result_to_text(&result)),
+                Err(crate::mcp::McpError::UnknownTool(_)) => {
+                    Err(format!("no server found for tool '{tool_name}'"))
+                }
+                Err(err) => Err(err.to_string()),
+            };
+        }
 
         self.tool_issuer.pop_front();
-        let params = CallToolRequestParams::new(tool_name).with_arguments(args_map);
-
-        let result = self.sessions[idx]
-            .client
-            .call_tool(params)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let text: Vec<String> = result
-            .content
-            .iter()
-            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
-            .collect();
-
-        let text = text.join("\n");
-
-        Ok(text)
+        Err(format!("no server found for tool '{tool_name}'"))
     }
 
     /// Run the INTERNAL sub-agent path of the merged `subagent_call` tool:
@@ -4275,7 +4307,7 @@ impl Harness {
     /// current-thread runtime (the same pattern the TUI uses): a nested
     /// harness is itself a full agent loop, and awaiting it inline would
     /// make `run_agent_loop`'s future recursive (an infinitely sized type),
-    /// while the harness type is not `Send` (it owns the MCP client). Its
+    /// while the harness type is not `Send` (it owns the MCP manager). Its
     /// events are bridged to the TUI as a plain `ToolOutput` stream — the
     /// tools it calls and any snapshot/summary events are dropped, so the
     /// main agent never sees its intermediate work and nothing is written
@@ -4454,8 +4486,8 @@ impl Harness {
             .with_tool_call_mode(ToolCallMode::Inline);
         Self {
             connector,
-            sessions: Vec::new(),
-            protocol: None,
+            mcp: McpManager::new(),
+            mcp_config: McpConfig::default(),
             header_context: String::new(),
             system_prompts: Vec::new(),
             harness_tools: default_harness_tools(),
@@ -4671,10 +4703,6 @@ impl Harness {
     /// Provider name of the currently-active connector (test accessor).
     pub(crate) fn connector_provider(&self) -> Option<&'static str> {
         self.connector.provider_name()
-    }
-
-    pub(crate) fn push_session(&mut self, session: ServerSession) {
-        self.sessions.push(session);
     }
 
     pub(crate) fn push_tool_call(&mut self, tc: ToolCallData) {

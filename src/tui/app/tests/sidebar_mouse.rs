@@ -1,5 +1,5 @@
-use super::{App, HOME_LOCK, SIDEBAR_WIDTH, isolate_home};
 use super::super::LeftPanelMode;
+use super::{App, HOME_LOCK, SIDEBAR_WIDTH, isolate_home};
 use crate::session_store::generate_session_id;
 use crate::types::{Message, MessageRole, Part, TextPart};
 use crossterm::event::{
@@ -23,16 +23,24 @@ fn mouse(kind: CKind, x: u16, y: u16) -> CMouse {
 fn build_many() -> App {
     let mut app = App::new("/tmp".to_string());
     let cur = generate_session_id();
-    app.state.add_empty_session(cur.clone(), "current".into(), 0);
+    app.state
+        .add_empty_session(cur.clone(), "current".into(), 0);
     app.state.current_session_id = Some(cur);
     if let Some(s) = app.state.current_session_mut() {
         let mut msgs = Vec::new();
         for i in 0..8 {
             msgs.push(Message {
                 id: format!("msg-{i}"),
-                role: if i % 2 == 0 { MessageRole::User } else { MessageRole::Assistant },
+                role: if i % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Assistant
+                },
                 parts: vec![Part::Text(TextPart {
-                    text: format!("user msg number {i}: {}", "lorem ipsum dolor sit amet ".repeat(4 + i)),
+                    text: format!(
+                        "user msg number {i}: {}",
+                        "lorem ipsum dolor sit amet ".repeat(4 + i)
+                    ),
                     synthetic: false,
                 })],
                 created_at: 0,
@@ -48,15 +56,17 @@ fn build_many() -> App {
     app.left_panel = LeftPanelMode::History;
     app.state.session_summaries.clear();
     for i in 0..40 {
-        app.state.session_summaries.push(crate::session_store::SessionSummary {
-            session_id: format!("history-{i}"),
-            title: format!("session {i}"),
-            created_at: i as u64,
-            message_count: 0,
-            cwd: String::new(),
-            model: None,
-            title_generated: false,
-        });
+        app.state
+            .session_summaries
+            .push(crate::session_store::SessionSummary {
+                session_id: format!("history-{i}"),
+                title: format!("session {i}"),
+                created_at: i as u64,
+                message_count: 0,
+                cwd: String::new(),
+                model: None,
+                title_generated: false,
+            });
     }
     render_session(&mut app);
     app
@@ -67,7 +77,8 @@ fn build_many() -> App {
 fn build_small() -> App {
     let mut app = App::new("/tmp".to_string());
     let cur = generate_session_id();
-    app.state.add_empty_session(cur.clone(), "current".into(), 0);
+    app.state
+        .add_empty_session(cur.clone(), "current".into(), 0);
     app.state.current_session_id = Some(cur);
     if let Some(s) = app.state.current_session_mut() {
         s.messages.push(Message {
@@ -86,15 +97,17 @@ fn build_small() -> App {
     app.left_panel = LeftPanelMode::History;
     app.state.session_summaries.clear();
     for i in 0..3 {
-        app.state.session_summaries.push(crate::session_store::SessionSummary {
-            session_id: format!("history-{i}"),
-            title: format!("session {i}"),
-            created_at: i as u64,
-            message_count: 0,
-            cwd: String::new(),
-            model: None,
-            title_generated: false,
-        });
+        app.state
+            .session_summaries
+            .push(crate::session_store::SessionSummary {
+                session_id: format!("history-{i}"),
+                title: format!("session {i}"),
+                created_at: i as u64,
+                message_count: 0,
+                cwd: String::new(),
+                model: None,
+                title_generated: false,
+            });
     }
     render_session(&mut app);
     app
@@ -103,8 +116,14 @@ fn build_small() -> App {
 fn render_session(app: &mut App) {
     let session_area = app.session_viewport_area();
     let mut buf = Buffer::empty(Rect::new(0, 0, 140, 40));
-    app.session_view
-        .render(&mut buf, session_area, &app.state, &app.theme, &app.config, 0.0);
+    app.session_view.render(
+        &mut buf,
+        session_area,
+        &app.state,
+        &app.theme,
+        &app.config,
+        0.0,
+    );
 }
 
 fn assert_no_dialog_or_focus(app: &App) {
@@ -124,12 +143,16 @@ async fn sidebar_click_on_prompt_row_switches_session() {
     let guard = app.state.current_session_id.clone();
     let prompt_area = app.compute_prompt_area().unwrap();
 
-        // A row that sits inside the prompt (chat) geometry AND maps to a valid
+    // A row that sits inside the prompt (chat) geometry AND maps to a valid
     // sidebar session (row y -> summary index scroll_offset + (y-2)).
     let y = prompt_area.y + 1;
     assert!(y >= 2, "row must reference a sidebar session");
-    let _ = app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), 5, y)).unwrap();
-    let _ = app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), 5, y)).unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), 5, y))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), 5, y))
+        .unwrap();
 
     let cur = app.state.current_session_id.clone();
     assert_ne!(cur, guard, "sidebar click must open a different session");
@@ -150,8 +173,12 @@ async fn sidebar_tiny_drag_switches_session() {
 
     // A drag released one cell away — previously this entered the chat
     // text-region extraction path instead of switching sessions.
-    let _ = app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), 5, 10)).unwrap();
-    let _ = app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), 6, 11)).unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), 5, 10))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), 6, 11))
+        .unwrap();
 
     let cur = app.state.current_session_id.clone();
     assert_ne!(cur, guard, "sidebar drag must open a different session");
@@ -180,9 +207,15 @@ async fn prompt_drag_released_over_sidebar_blurs_prompt() {
     let up_x = 5; // over the sidebar
     let up_y = 10; // a sidebar session row
 
-    let _ = app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), down_x, down_y)).unwrap();
-    let _ = app.handle_mouse_event(mouse(CKind::Drag(CBtn::Left), mid_x, down_y)).unwrap();
-    let _ = app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), up_x, up_y)).unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), down_x, down_y))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Drag(CBtn::Left), mid_x, down_y))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), up_x, up_y))
+        .unwrap();
 
     assert!(
         !app.prompt_view.is_focused,
@@ -202,8 +235,12 @@ async fn sidebar_drag_started_in_chat_keeps_selecting_text() {
 
     // Drag from inside the chat (x=30) into the sidebar region: this must
     // NOT be routed to the sidebar (the click did not start on a session).
-    let _ = app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), 30, 4)).unwrap();
-    let _ = app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), 10, 5)).unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), 30, 4))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), 10, 5))
+        .unwrap();
 
     // It is a text-selection drag; it must not switch sessions.
     assert_eq!(app.state.current_session_id, guard);
@@ -221,8 +258,12 @@ async fn sidebar_click_below_list_does_nothing() {
 
     // Row inside the prompt geometry but beyond the 3 sidebar sessions.
     let y = 12u16.max(prompt_area.y + 1);
-    let _ = app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), 5, y)).unwrap();
-    let _ = app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), 5, y)).unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), 5, y))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), 5, y))
+        .unwrap();
 
     assert_eq!(app.state.current_session_id, guard);
     assert_no_dialog_or_focus(&app);
@@ -236,15 +277,22 @@ async fn chat_message_click_still_opens_message_actions() {
 
     // Click the user message at the top of the chat (x inside the session
     // view, y at the first content row). Must still open Message actions.
-    let _ = app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), SIDEBAR_WIDTH + 4, 1)).unwrap();
-    let _ = app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), SIDEBAR_WIDTH + 4, 1)).unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), SIDEBAR_WIDTH + 4, 1))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), SIDEBAR_WIDTH + 4, 1))
+        .unwrap();
 
     assert!(
         app.dialog.visible() && app.dialog.current().is_some(),
         "clicking a user message must open Message actions"
     );
     let d = app.dialog.current().unwrap();
-    assert!(matches!(d.dialog_type, crate::ui::dialogs::DialogType::MessageActions { .. }));
+    assert!(matches!(
+        d.dialog_type,
+        crate::ui::dialogs::DialogType::MessageActions { .. }
+    ));
 }
 
 #[tokio::test]
@@ -255,10 +303,25 @@ async fn chat_prompt_click_still_focuses() {
     let prompt_area = app.compute_prompt_area().unwrap();
 
     // Click inside the prompt box (x clear of the sidebar): must focus.
-    let _ = app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), prompt_area.x + 4, prompt_area.y)).unwrap();
-    let _ = app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), prompt_area.x + 4, prompt_area.y)).unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(
+            CKind::Down(CBtn::Left),
+            prompt_area.x + 4,
+            prompt_area.y,
+        ))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(
+            CKind::Up(CBtn::Left),
+            prompt_area.x + 4,
+            prompt_area.y,
+        ))
+        .unwrap();
 
-    assert!(app.prompt_view.is_focused, "clicking the prompt must focus it");
+    assert!(
+        app.prompt_view.is_focused,
+        "clicking the prompt must focus it"
+    );
 }
 
 #[tokio::test]

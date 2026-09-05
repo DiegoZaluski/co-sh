@@ -231,7 +231,9 @@ mod tests {
                 item("task-2", TodoStatus::Pending),
             ],
         )]));
-        let text = tc.text().expect("a single pending task keeps the block alive");
+        let text = tc
+            .text()
+            .expect("a single pending task keeps the block alive");
         assert!(
             text.contains("- [x] do task-1"),
             "completed tasks remain visible, crossed off"

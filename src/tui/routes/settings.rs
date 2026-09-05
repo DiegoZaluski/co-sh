@@ -182,6 +182,10 @@ pub enum SettingsRow {
     Hook { event: &'static str, index: usize },
     /// Create a new hook for one event.
     AddHook { event: &'static str },
+    /// Registered MCP server (index into `setup.mcp.servers`).
+    McpServer(usize),
+    /// Register a new MCP server.
+    AddMcpServer,
 }
 
 /// Every rendered line with its vertical offset from the content top.
@@ -208,6 +212,10 @@ enum Line {
     AddHook {
         event: &'static str,
     },
+    McpServer {
+        index: usize,
+    },
+    AddMcpServer,
 }
 
 impl Line {
@@ -220,13 +228,21 @@ impl Line {
                 index: *hook,
             }),
             Line::AddHook { event } => Some(SettingsRow::AddHook { event }),
-            _ => None,
+            Line::McpServer { index } => Some(SettingsRow::McpServer(*index)),
+            Line::AddMcpServer => Some(SettingsRow::AddMcpServer),
+            Line::Title | Line::Blank | Line::Description(_) | Line::Link(_) => None,
         }
     }
 }
 
 /// Terms shown under the Zen free-gateway description.
 const ZEN_TERMS_LINK: &str = "https://opencode.ai/legal/terms-of-service";
+
+/// Description of the trailing MCP section. Servers are registered through
+/// the Add box (name + `command args...` or `http(s)://` endpoint); removal
+/// of a misconfigured entry is a setup.json edit, disabling covers runtime.
+const MCP_SECTION_DESCRIPTION: &str =
+    "Connect external MCP servers for extra model tools (stdio or HTTP)";
 
 fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
     let mut lines = Vec::new();
@@ -296,7 +312,46 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
             y += 1;
         }
     }
+    // Trailing MCP section (always visible, like an enabled hook list):
+    // one toggle row per registered server plus the Add action. Separated
+    // from the last category by the same breathing room sections enjoy.
+    lines.push(LayoutLine {
+        y,
+        line: Line::Blank,
+    });
+    y += 1;
+    lines.push(LayoutLine {
+        y,
+        line: Line::Description(MCP_SECTION_DESCRIPTION),
+    });
+    y += 1;
+    for index in 0..setup.mcp.servers.len() {
+        lines.push(LayoutLine {
+            y,
+            line: Line::McpServer { index },
+        });
+        y += 1;
+    }
+    lines.push(LayoutLine {
+        y,
+        line: Line::AddMcpServer,
+    });
     lines
+}
+
+/// One-line target preview for an MCP server row: `command args...` for
+/// stdio, the URL for HTTP.
+fn mcp_server_preview(entry: &cosh::mcp::McpServerEntry) -> String {
+    use cosh::mcp::McpTransport;
+    let target = match &entry.transport {
+        McpTransport::Stdio(stdio) => {
+            let mut parts = vec![stdio.command.clone()];
+            parts.extend(stdio.args.iter().cloned());
+            parts.join(" ")
+        }
+        McpTransport::Http(http) => http.url.clone(),
+    };
+    truncate(&target, COMMAND_PREVIEW_LEN)
 }
 
 fn selectable_rows(setup: &Setup) -> Vec<SettingsRow> {
@@ -328,6 +383,11 @@ pub enum SettingsAction {
         event: &'static str,
         index: Option<usize>,
     },
+    /// An MCP server was enabled/disabled; caller must `setup.save()`.
+    /// Takes effect on the next agent loop (the manager connects at boot).
+    McpToggled,
+    /// Open the MCP registration wizard (name → endpoint → timeout).
+    OpenMcpForm,
     /// Open the cache-duration input box for `setting` (a Settings-item id:
     /// "anthropic_cache_ttl" / "openai_cache_retention").
     OpenCacheInput { setting: &'static str },
@@ -405,6 +465,14 @@ impl SettingsView {
             SettingsRow::AddHook { event } => {
                 Some(SettingsAction::OpenHookForm { event, index: None })
             }
+            SettingsRow::McpServer(index) => {
+                if let Some(server) = setup.mcp.servers.get_mut(*index) {
+                    server.enabled = !server.enabled;
+                }
+                self.selection.clamp(selectable_rows(setup).len());
+                Some(SettingsAction::McpToggled)
+            }
+            SettingsRow::AddMcpServer => Some(SettingsAction::OpenMcpForm),
         }
     }
 
@@ -548,6 +616,60 @@ impl SettingsView {
                         Style::default().fg(if is_selected { primary } else { muted }),
                     );
                 }
+                Line::McpServer { index } => {
+                    let idx = rows
+                        .iter()
+                        .position(|r| matches!(r, SettingsRow::McpServer(i) if i == index));
+                    let is_selected = idx == Some(selected_idx);
+                    if !in_window(idx, visible, self.selection.scroll_offset) {
+                        continue;
+                    }
+                    let Some(entry) = setup.mcp.servers.get(*index) else {
+                        continue;
+                    };
+                    let symbol = if entry.enabled { "✔" } else { "✗" };
+                    let sym_color = if entry.enabled {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    };
+                    draw_text(
+                        buf,
+                        symbol,
+                        row_x + 2,
+                        y,
+                        area,
+                        Style::default().fg(sym_color),
+                    );
+                    draw_text(
+                        buf,
+                        &entry.name,
+                        row_x + 4,
+                        y,
+                        area,
+                        Style::default().fg(if is_selected { primary } else { fg }),
+                    );
+                    let preview = format!(" — {}", mcp_server_preview(entry));
+                    let name_x = (row_x + 4).saturating_add(entry.name.chars().count() as u16);
+                    draw_text(buf, &preview, name_x, y, area, Style::default().fg(muted));
+                }
+                Line::AddMcpServer => {
+                    let idx = rows
+                        .iter()
+                        .position(|r| matches!(r, SettingsRow::AddMcpServer));
+                    let is_selected = idx == Some(selected_idx);
+                    if !in_window(idx, visible, self.selection.scroll_offset) {
+                        continue;
+                    }
+                    draw_text(
+                        buf,
+                        "+ Add server",
+                        row_x + 4,
+                        y,
+                        area,
+                        Style::default().fg(if is_selected { primary } else { muted }),
+                    );
+                }
             }
         }
     }
@@ -597,6 +719,16 @@ fn max_row_width(setup: &Setup) -> usize {
         }
         width = width.max(4 + "+ Add hook".len());
     }
+    // MCP section: description plus one toggle row per server and the Add
+    // action (indented like hook sub-rows).
+    width = width.max(MCP_SECTION_DESCRIPTION.len());
+    for entry in &setup.mcp.servers {
+        // Full drawn line: indent + "✔ " + name + " — target…".
+        let len =
+            4 + 1 + entry.name.chars().count() + 3 + mcp_server_preview(entry).chars().count();
+        width = width.max(len);
+    }
+    width = width.max(4 + "+ Add server".len());
     width
 }
 
@@ -693,6 +825,7 @@ mod tests {
                 SettingsRow::Category(3),
                 SettingsRow::Category(4),
                 SettingsRow::Category(5),
+                SettingsRow::AddMcpServer,
             ]
         );
 
@@ -720,7 +853,56 @@ mod tests {
                 SettingsRow::Category(3),
                 SettingsRow::Category(4),
                 SettingsRow::Category(5),
+                SettingsRow::AddMcpServer,
             ]
+        );
+    }
+
+    fn setup_with_mcp_server(name: &str, enabled: bool) -> Setup {
+        let mut setup = Setup::default();
+        setup.mcp.servers.push(cosh::mcp::McpServerEntry {
+            name: name.to_string(),
+            transport: cosh::mcp::McpTransport::Stdio(cosh::mcp::StdioTransport {
+                command: "srv".to_string(),
+                args: vec![],
+                env: Default::default(),
+                cwd: None,
+            }),
+            enabled,
+        });
+        setup
+    }
+
+    /// The MCP section appends server toggles plus the Add action after
+    /// every category; toggling flips only the server's own switch.
+    #[test]
+    fn mcp_rows_toggle_and_open_the_wizard() {
+        let setup = setup_with_mcp_server("docs", true);
+        assert_eq!(
+            selectable_rows(&setup).last(),
+            Some(&SettingsRow::AddMcpServer)
+        );
+        assert!(selectable_rows(&setup).contains(&SettingsRow::McpServer(0)));
+
+        let mut setup = setup;
+        let mut view = SettingsView::new();
+        view.selection.selected_index = selectable_rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::McpServer(0)))
+            .unwrap();
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::McpToggled)
+        );
+        assert!(!setup.mcp.servers[0].enabled);
+
+        view.selection.selected_index = selectable_rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::AddMcpServer))
+            .unwrap();
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::OpenMcpForm)
         );
     }
 
@@ -939,6 +1121,7 @@ mod tests {
         let setups = [
             Setup::default(),
             setup_with_hooks(true, &[("block rm", "exit 2"), ("b", "cmd b")]),
+            setup_with_mcp_server("docs", true),
         ];
         for setup in &setups {
             let layout = build_layout(setup);

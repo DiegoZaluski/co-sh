@@ -548,23 +548,22 @@ impl App {
                     self.session_view
                         .update_hover(y, session_area, &self.state, &self.config);
                     // Hover tracking for the pending queued rows above the prompt.
-                    self.hovered_queue_row = if self.state.status
-                        == crate::types::SessionStatus::Idle
-                    {
-                        match self.compute_pending_queues_area() {
-                            Some(area)
-                                if x >= area.x
-                                    && x < area.right()
-                                    && y >= area.y
-                                    && y < area.bottom() =>
-                            {
-                                Some((y - area.y) as usize)
+                    self.hovered_queue_row =
+                        if self.state.status == crate::types::SessionStatus::Idle {
+                            match self.compute_pending_queues_area() {
+                                Some(area)
+                                    if x >= area.x
+                                        && x < area.right()
+                                        && y >= area.y
+                                        && y < area.bottom() =>
+                                {
+                                    Some((y - area.y) as usize)
+                                }
+                                _ => None,
                             }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
+                        } else {
+                            None
+                        };
                 }
             }
             return Ok(true);
@@ -1128,6 +1127,12 @@ impl App {
                     Some(crate::routes::settings::SettingsAction::OpenCacheInput { setting }) => {
                         self.open_cache_ttl_input(setting);
                     }
+                    Some(crate::routes::settings::SettingsAction::McpToggled) => {
+                        self.setup.save();
+                    }
+                    Some(crate::routes::settings::SettingsAction::OpenMcpForm) => {
+                        self.open_mcp_name_input();
+                    }
                     None => {}
                 }
                 return Ok(true);
@@ -1263,7 +1268,13 @@ impl App {
 
     /// Route a left-click to the sidebar if it landed on a session.
     /// Returns `true` when the click was consumed by the sidebar.
-    fn dispatch_sidebar_up(&mut self, button: MouseButton, x: u16, y: u16, modifiers: MouseModifiers) -> bool {
+    fn dispatch_sidebar_up(
+        &mut self,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        modifiers: MouseModifiers,
+    ) -> bool {
         if !self.is_over_open_sidebar(x) {
             return false;
         }
@@ -1284,7 +1295,8 @@ impl App {
                 self.state.right_panel =
                     crate::routes::session::right_panel::types::RightPanelState::new();
                 self.finalize_stale_compaction_lines();
-                self.state.switch_to_session(session_id, &self.session_store);
+                self.state
+                    .switch_to_session(session_id, &self.session_store);
                 // Returning to a session restores the last model used there.
                 self.restore_current_session_model();
                 self.session_view.hovered_msg_idx = None;

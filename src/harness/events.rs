@@ -2,6 +2,8 @@ use cosh_sdk::connector::TokenUsage;
 use cosh_tools::question::types::QuestionItem;
 use serde_json::Value;
 
+use crate::mcp::ServerSnapshot;
+
 use super::context::ContextManagerState;
 
 /// Represents a model entry with its provider
@@ -50,6 +52,14 @@ pub enum HarnessEvent {
         /// Catalog server names currently alive (e.g. `rust-analyzer`),
         /// deduplicated and unsorted.
         servers: Vec<String>,
+    },
+    /// Snapshot of the MCP servers for the TUI's prompt footer. Emitted at
+    /// agent-loop start (after the boot `connect_all`, so the first view
+    /// already reflects the connections). The TUI reduces it to
+    /// ready/failed counts; per-server detail stays available for panels.
+    McpStatus {
+        /// One snapshot per registered server, in config order.
+        servers: Vec<ServerSnapshot>,
     },
     /// The agent loop finished normally (no more tool calls).
     Done {
